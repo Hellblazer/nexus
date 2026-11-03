@@ -259,6 +259,7 @@ from nexus._log_safe_url import (
 )
 from nexus._winsec import make_user_dir, open_private
 from nexus.db import gateway_hold
+from nexus.db.request_gate import before_request
 from nexus.db.engine_reasons import error_reason
 from nexus.rate_brake import parse_retry_after
 
@@ -1074,6 +1075,7 @@ def _default_poster(
         headers={**headers, "Content-Type": "application/json"},
         method="POST",
     )
+    before_request()  # nexus-ldf2s: a mint is a request like any other
     try:
         with urllib.request.urlopen(req, timeout=_MINT_TIMEOUT_S) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
             raw = resp.read()

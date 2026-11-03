@@ -67,7 +67,7 @@ import os
 import signal
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -77,12 +77,17 @@ import structlog
 from nexus.catalog.indexed_meta import SOURCE_FORMAT_KEY, backfill_tags_category, catalog_source_format, is_unset
 from nexus.catalog.note_ttl import PUT_SKEW, parse_iso, note_ttl_days, row_may_give_tags, row_written_by
 from nexus.catalog.store_hook import NOTE_META_KEYS, split_note_tags
+from nexus.db import request_gate
 from nexus.ttl import MAX_TTL_DAYS
 
 _log = structlog.get_logger(__name__)
 
 #: Statuses a key can end in (a residue carries its reason: ``residue:<reason>``).
 STAMPED, PRESENT, SHARED = "stamped", "present", "shared"
+
+#: Why a run stopped before its last batch: asked to (Ctrl-C, SIGTERM; or cut by a second one), or too many
+#: rounds in a row with a failed lookup or write.
+STOP_SIGNAL, STOP_FAILED_ROUNDS = "signal", "failed_rounds"
 
 #: The keys each kind of document is judged on, in report order.
 NOTE_KEYS: tuple[str, ...] = ("put_at", "ttl_days", "tags", "category", "source_agent")
@@ -102,6 +107,10 @@ _BATCH = 50
 
 class VacuousRunError(RuntimeError):
     """The run examined no document: a sweep that found nothing to check is a failure, not a pass."""
+
+
+class ResumePointError(ValueError):
+    """``--start-after`` names a tumbler the catalog does not list: there is no place to resume from."""
 
 
 @dataclass
@@ -411,6 +420,10 @@ class Report:
     interrupted: bool = False       # stopped before the last batch; only finished batches are counted
     batches_done: int = 0
     batches_total: int = 0
+    stop_reason: str = ""           # STOP_SIGNAL (asked to stop, or a second interrupt) or STOP_FAILED_ROUNDS
+    last_tumbler: str = ""          # the last document of the last finished batch (the --start-after, before one): where a rerun resumes after
+    cut_batch: int = 0              # the batch a second interrupt cut (0: none); its writes may have landed
+    started_after: str = ""         # the --start-after tumbler this run skipped up to
 
     def stats(self, kind: str, key: str) -> KeyStats:
         return self.keys.setdefault(f"{kind}.{key}", KeyStats())
@@ -425,8 +438,15 @@ class Report:
             "tags_legacy_strings_left_for_the_array_rung": self.tags_legacy_strings_left,
             "keys": {k: v.as_dict() for k, v in sorted(self.keys.items())},
         }
+        if self.started_after:
+            out["started_after"] = self.started_after
         if self.interrupted:  # absent from a finished run, so its JSON is what it always was
-            out.update(interrupted=True, batches_done=self.batches_done, batches_total=self.batches_total)
+            out.update(
+                interrupted=True, batches_done=self.batches_done, batches_total=self.batches_total,
+                stop_reason=self.stop_reason, resume_after=self.last_tumbler,
+            )
+            if self.cut_batch:
+                out["cut_batch_may_have_written"] = self.cut_batch
         return out
 
 
@@ -463,77 +483,112 @@ def _chunk_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]
         return {}
 
 
-#: store-get ids per request; ``HttpVectorClient._store_get_pages`` pages at this, and the progress line's
-#: request count (``test_the_store_get_count_is_the_requests_the_client_sends``) is held to it.
-STORE_GET_PAGE = 300
-
 #: A run prints at most about this many progress lines, however many batches it has.
 PROGRESS_LINES = 300
 
-
-@dataclass
-class Work:
-    """The requests a run has issued so far. ``catalog_reads`` counts calls to the catalog reader
-    (manifests, owners); a call may page inside the client, so it is a floor."""
-
-    store_gets: int = 0
-    catalog_reads: int = 0
-    writes: int = 0
-
-    @property
-    def requests(self) -> int:
-        return self.store_gets + self.catalog_reads + self.writes
+#: The "recent" request rate of a progress line is taken over this many finished rounds.
+RECENT_ROUNDS = 10
 
 
 @dataclass(frozen=True)
 class Progress:
-    """One progress report: where the run is after a finished batch, and how fast it is going."""
+    """One progress report: where the run is after a finished batch, and how fast it is going.
+
+    *requests* is the number of HTTP requests the process has sent (the request gate's count: every page,
+    retry and fallback request, nexus-ldf2s), not a count of calls. The rate is given twice: since the start
+    of the run and over the last *recent_rounds* rounds."""
 
     batch: int
     batches: int
     documents: int
     documents_total: int
-    work: Work
+    requests: int
     elapsed: float
+    recent_requests: int
+    recent_elapsed: float
+    recent_rounds: int
+    lookups_failed: int
+    writes_failed: int
+    last_tumbler: str = ""
+
+    @staticmethod
+    def _rate(n: int, seconds: float) -> float:
+        return n / seconds if seconds > 0 else 0.0
+
+    @property
+    def rate_since_start(self) -> float:
+        return self._rate(self.requests, self.elapsed)
+
+    @property
+    def rate_recent(self) -> float:
+        return self._rate(self.recent_requests, self.recent_elapsed)
 
     def line(self) -> str:
-        rate = (lambda n: n / self.elapsed) if self.elapsed > 0 else (lambda n: 0.0)
         return (
             f"backfill-meta: batch {self.batch}/{self.batches}, {self.documents}/{self.documents_total} documents, "
-            f"{self.work.store_gets} store-gets, {self.work.catalog_reads} catalog reads, {self.work.writes} writes, "
-            f"{self.elapsed:.1f}s, {rate(self.documents):.1f} docs/s, {rate(self.work.requests):.1f} requests/s"
+            f"{self.requests} requests ({self.rate_since_start:.2f}/s since start, {self.rate_recent:.2f}/s over the last "
+            f"{self.recent_rounds} round{'s' if self.recent_rounds != 1 else ''}), "
+            f"{self.lookups_failed} lookups failed, {self.writes_failed} writes failed, "
+            f"{self.elapsed:.1f}s, {self._rate(self.documents, self.elapsed):.1f} docs/s, at {self.last_tumbler or '-'}"
         )
 
 
+class StopRequest:
+    """The "stop asked" test :func:`stop_after_current_batch` yields: call it, and read :attr:`signum` for
+    the signal that asked (0: none yet)."""
+
+    def __init__(self) -> None:
+        self._asked = threading.Event()
+        self.signum = 0
+
+    def __call__(self) -> bool:
+        return self._asked.is_set()
+
+    def ask(self, signum: int) -> None:
+        if not self._asked.is_set():
+            self.signum = signum
+            self._asked.set()
+
+
 @contextlib.contextmanager
-def stop_after_current_batch() -> Iterator[Callable[[], bool]]:
-    """While active, the first Ctrl-C only asks the run to stop after the batch it is in; the second takes
-    the previous disposition (a :class:`KeyboardInterrupt`, which :func:`backfill_meta` also survives, but
-    mid-batch). Yields the "stop asked" test. Off the main thread no handler can be installed and the test
-    never fires."""
-    asked = threading.Event()
+def stop_after_current_batch() -> Iterator[StopRequest]:
+    """While active, the first SIGINT (Ctrl-C) or SIGTERM only asks the run to stop after the batch it is in;
+    a second one takes the previous disposition (for SIGINT a :class:`KeyboardInterrupt`, which
+    :func:`backfill_meta` also survives, but mid-batch; for SIGTERM the default, which ends the process).
+    Yields the "stop asked" test. Off the main thread no handler can be installed and the test never fires."""
+    stop = StopRequest()
     if threading.current_thread() is not threading.main_thread():
-        yield asked.is_set
+        yield stop
         return
-    previous = signal.getsignal(signal.SIGINT)
-    restore = previous if previous is not None else signal.default_int_handler
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    restore = {
+        sig: (prev if prev is not None else (signal.default_int_handler if sig == signal.SIGINT else signal.SIG_DFL))
+        for sig, prev in previous.items()
+    }
 
-    def _handler(_signum: int, _frame: Any) -> None:
-        asked.set()
-        signal.signal(signal.SIGINT, restore)  # the second Ctrl-C is the previous one's
-        os.write(2, b"backfill-meta: interrupt received, stopping after the current batch (Ctrl-C again aborts it).\n")
+    def _handler(signum: int, _frame: Any) -> None:
+        stop.ask(signum)
+        for sig, prior in restore.items():
+            signal.signal(sig, prior)  # the second signal is the previous disposition's
+        os.write(
+            2, f"backfill-meta: {signal.Signals(signum).name} received, stopping after the current batch "
+               f"(send it again to abort the batch at once).\n".encode(),
+        )
 
-    signal.signal(signal.SIGINT, _handler)
+    for sig in restore:
+        signal.signal(sig, _handler)
     try:
-        yield asked.is_set
+        yield stop
     finally:
-        signal.signal(signal.SIGINT, restore)
+        for sig, prior in restore.items():
+            signal.signal(sig, prior)
 
 
 def backfill_meta(
     reader: Any, t3: Any, writer: Any | None, *, apply: bool, batch: int = _BATCH, pause_ms: int = 0,
     progress: Callable[[Progress], None] | None = None, should_stop: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] | None = None, clock: Callable[[], float] = time.monotonic,
+    requests: Callable[[], int] | None = None, stop_after_failed_rounds: int = 0, start_after: str = "",
 ) -> Report:
     """Examine every live document and stamp (``apply``) or count (dry run) what :func:`plan_note` and
     :func:`plan_indexed_rows` allow. Raises :class:`VacuousRunError` when the
@@ -541,47 +596,87 @@ def backfill_meta(
 
     *batch* documents are examined per round; a batch reads each collection it needs once (nexus-ldf2s).
     *pause_ms* is slept after a batch's reads and again after its write. *progress* gets a report after
-    about every ``batches / PROGRESS_LINES``-th batch and the last. The run stops, with
-    ``Report.interrupted`` set and only finished batches counted, when *should_stop* says so after a batch
-    or a :class:`KeyboardInterrupt` ends one; it is fill-only, so a rerun carries on."""
+    about every ``batches / PROGRESS_LINES``-th batch and the last; its request figures come from *requests*
+    (the request gate's count; default: the installed gate's). The run stops, with ``Report.interrupted``
+    set, ``stop_reason`` saying why and only finished batches counted, when *should_stop* says so after a
+    batch, a :class:`KeyboardInterrupt` ends one, or *stop_after_failed_rounds* (0: never) batches in a row
+    each had a failed lookup or write; it is fill-only, so a rerun carries on. ``Report.last_tumbler`` is
+    the last document of the last finished batch.
+
+    *start_after* skips the listing up to and including that tumbler. The listing's order is the catalog's
+    (``ORDER BY tumbler`` in the database's collation, so not a numeric order: ``1.10`` can sort before
+    ``1.2``), so the skip is by position in that listing, never by comparing tumblers. A tumbler the listing
+    does not hold raises :class:`ResumePointError`. The skipped documents still count as owners of their
+    chunks."""
     if batch < 1:
         raise ValueError(f"batch must be at least 1, got {batch}")
     if pause_ms < 0:
         raise ValueError(f"pause_ms must be at least 0, got {pause_ms}")
-    entries = [e for e in reader.all_documents() if not getattr(e, "alias_of", "")]
-    if not entries:
+    if stop_after_failed_rounds < 0:
+        raise ValueError(f"stop_after_failed_rounds must be at least 0, got {stop_after_failed_rounds}")
+    count_requests = requests if requests is not None else request_gate.requests_so_far
+    started = clock()       # before the listing: its pages are requests of the run
+    base = count_requests()
+    history: deque[tuple[float, int]] = deque([(started, base)], maxlen=RECENT_ROUNDS + 1)
+    listing = list(reader.all_documents())
+    live_entries = [e for e in listing if not getattr(e, "alias_of", "")]
+    if not live_entries:
         raise VacuousRunError("examined 0 documents: an empty catalog is a failed sweep, not a clean one")
-    live = {str(e.tumbler): e for e in entries}
-    report = Report(applied=apply)
+    live = {str(e.tumbler): e for e in live_entries}    # every owner counts, the skipped ones too
+    report = Report(applied=apply, started_after=start_after, last_tumbler=start_after)
+    if start_after:
+        at = next((i for i, e in enumerate(listing) if str(e.tumbler) == start_after), None)
+        if at is None:
+            raise ResumePointError(f"--start-after {start_after}: the catalog lists no such document")
+        listing = listing[at + 1:]
+    entries = [e for e in listing if not getattr(e, "alias_of", "")]
     batches = math.ceil(len(entries) / batch)
     every = max(1, math.ceil(batches / PROGRESS_LINES))
     report.batches_total = batches
-    work = Work()
-    started = clock()
     naps = sleep or time.sleep
     pause: Callable[[], None] = (lambda: naps(pause_ms / 1000)) if pause_ms else (lambda: None)
+    failed_streak = 0
     for index, start in enumerate(range(0, len(entries), batch), 1):
+        chunk = entries[start:start + batch]
         before = copy.deepcopy(report)
         try:
-            _run_batch(reader, t3, writer, entries[start:start + batch], live, apply, report, work, pause,
-                       pause_after_write=index < batches)
+            _run_batch(reader, t3, writer, chunk, live, apply, report, pause, pause_after_write=index < batches)
         except KeyboardInterrupt:
             report = before  # the interrupted batch counts for nothing; a rerun redoes it
             report.interrupted = True
+            report.stop_reason = STOP_SIGNAL
+            report.cut_batch = index    # its update_many may have gone through before the interrupt
             _log.warning("meta_backfill_interrupted", batch=index, batches=batches)
             break
         report.batches_done = index
-        if progress is not None and (index % every == 0 or index == batches):
-            snapshot = Progress(index, batches, report.documents_examined, len(entries), copy.copy(work), clock() - started)
+        report.last_tumbler = str(chunk[-1].tumbler)
+        trouble = (report.lookups_failed - before.lookups_failed) + (report.writes_failed - before.writes_failed)
+        failed_streak = failed_streak + 1 if trouble else 0
+        history.append((clock(), count_requests()))
+        stop_reason = ""
+        if index < batches:
+            if stop_after_failed_rounds and failed_streak >= stop_after_failed_rounds:
+                stop_reason = STOP_FAILED_ROUNDS
+            elif should_stop is not None and should_stop():
+                stop_reason = STOP_SIGNAL
+        if progress is not None and (index % every == 0 or index == batches or stop_reason):
+            now, total = history[-1]
+            then, was = history[0]
+            snapshot = Progress(
+                index, batches, report.documents_examined, len(entries), total - base,
+                now - started, total - was, now - then, len(history) - 1,
+                report.lookups_failed, report.writes_failed, report.last_tumbler,
+            )
             _log.info(
                 "meta_backfill_progress", batch=index, batches=batches, documents=snapshot.documents,
-                store_gets=work.store_gets, catalog_reads=work.catalog_reads, writes=work.writes,
-                elapsed=round(snapshot.elapsed, 1),
+                requests=snapshot.requests, lookups_failed=snapshot.lookups_failed,
+                writes_failed=snapshot.writes_failed, elapsed=round(snapshot.elapsed, 1),
             )
             progress(snapshot)
-        if index < batches and should_stop is not None and should_stop():
+        if stop_reason:
             report.interrupted = True
-            _log.warning("meta_backfill_stopped", batch=index, batches=batches)
+            report.stop_reason = stop_reason
+            _log.warning("meta_backfill_stopped", batch=index, batches=batches, reason=stop_reason)
             break
     return report
 
@@ -594,7 +689,7 @@ def _record(report: Report, kind: str, plan: Plan) -> None:
         report.stats(kind, key).add(status)
 
 
-def _fetch_rows(t3: Any, wants: dict[str, list[str]], work: Work) -> tuple[dict[str, dict[str, dict]], dict[str, Exception]]:
+def _fetch_rows(t3: Any, wants: dict[str, list[str]]) -> tuple[dict[str, dict[str, dict]], dict[str, Exception]]:
     """One :func:`_chunk_rows` per collection in *wants* (its chashes, de-duplicated): ``(rows, errors)``,
     each keyed by collection. A collection whose read raised is in ``errors`` and not in ``rows``, so the
     documents that needed it can be withheld one by one."""
@@ -602,7 +697,6 @@ def _fetch_rows(t3: Any, wants: dict[str, list[str]], work: Work) -> tuple[dict[
     errors: dict[str, Exception] = {}
     for coll, hashes in wants.items():
         unique = list(dict.fromkeys(hashes))
-        work.store_gets += math.ceil(len(unique) / STORE_GET_PAGE)
         try:
             rows[coll] = _chunk_rows(t3, coll, unique)
         except Exception as exc:  # noqa: BLE001 — the documents that needed this collection are withheld and counted
@@ -613,7 +707,7 @@ def _fetch_rows(t3: Any, wants: dict[str, list[str]], work: Work) -> tuple[dict[
 
 def _run_batch(
     reader: Any, t3: Any, writer: Any | None, entries: list[Any], live: dict[str, Any], apply: bool, report: Report,
-    work: Work, pause: Callable[[], None], *, pause_after_write: bool = True,
+    pause: Callable[[], None], *, pause_after_write: bool = True,
 ) -> None:
     notes = [e for e in entries if getattr(e, "content_type", "") == "knowledge"]
     docs = [e for e in entries if getattr(e, "content_type", "") != "knowledge"]
@@ -628,7 +722,6 @@ def _run_batch(
     manifests: dict[str, list[Any]] = {}
     want_manifest = [str(e.tumbler) for e in needs_rows_docs + needs_rows_notes]
     if want_manifest:
-        work.catalog_reads += 1
         try:
             manifests = reader.get_manifests(want_manifest) or {}
         except Exception as exc:  # noqa: BLE001 — a failed read withholds the batch's row-sourced keys and counts it
@@ -649,8 +742,6 @@ def _run_batch(
     docs_ok = True
     if needs_rows_docs:
         want = {m.chash for e in needs_rows_docs if str(e.tumbler) not in failed for m in manifests.get(str(e.tumbler), [])}
-        if want:
-            work.catalog_reads += 1
         try:
             doc_owners = _owners_of(reader, sorted(want))
         except Exception as exc:  # noqa: BLE001 — withhold the batch's row-sourced keys, count the documents
@@ -689,7 +780,7 @@ def _run_batch(
             for c, hs in by_coll.items():
                 wants.setdefault(c, []).extend(hs)
 
-    fetched, errors = _fetch_rows(t3, wants, work)
+    fetched, errors = _fetch_rows(t3, wants)
 
     # notes first: rows of every piece, then ownership only for a note no written row decides
     note_pieces: dict[str, list[tuple[str, dict | None]]] = {}
@@ -707,7 +798,6 @@ def _run_batch(
     owners: dict[str, set[str]] = {}
     owners_ok = True
     if want_owner:
-        work.catalog_reads += 1
         try:
             owners = _owners_of(reader, sorted(want_owner))
         except Exception as exc:  # noqa: BLE001 — the lookup only adds sole-owner keys; its loss is counted per note
@@ -782,7 +872,6 @@ def _run_batch(
             report.documents_complete += 1
 
     if apply and payloads:
-        work.writes += 1
         counts = writer.update_many(payloads)
         for payload, count in zip(payloads, counts):
             if count:

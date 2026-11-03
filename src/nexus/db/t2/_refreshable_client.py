@@ -70,6 +70,7 @@ from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
 from nexus.db import gateway_hold
+from nexus.db.request_gate import before_request
 from nexus.db.gateway_backoff import (
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
     _GATEWAY_RETRY_CODES,
@@ -1415,6 +1416,7 @@ class RefreshableHttpStoreMixin:
         nexus-bikit.4, when ``merge_memories`` was routed through ``_post``).
         """
         url = self._base_url + path
+        before_request()  # nexus-ldf2s: every attempt, retries included, passes the request gate
         resp = self._client.request(method, url, headers=self._auth_headers(), **kwargs)
         self._note_data_token_response(resp)
         self._raise_for_status(resp, path)

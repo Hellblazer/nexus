@@ -9,8 +9,10 @@ collections a round needs, and cover ``--batch-size``, ``--pause-ms``, the progr
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import random
+import shlex
 import signal
 import threading
 from dataclasses import dataclass, field
@@ -20,6 +22,7 @@ from click.testing import CliRunner
 
 from nexus.catalog import meta_backfill as mb
 from nexus.cli import main
+from nexus.db import request_gate
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._legacy_meta_backfill import legacy_backfill_meta
 from tests.test_6pfgb10_meta_backfill import MINE, PUT, _entry, _invoke, _Manifest, _row, _World, _world_with_one_of_each
@@ -177,9 +180,8 @@ def wire(monkeypatch):
     return posts, rows
 
 
-def test_the_store_get_count_is_the_requests_the_client_sends(wire):
-    """The progress line's store-get figure is the HTTP requests of ``HttpVectorClient``: 300 ids a page, and
-    old against new on the same catalog, through the real client."""
+def test_the_grouped_reader_sends_fewer_store_get_requests_than_the_old_one_through_the_real_client(wire):
+    """Old against new on the same catalog, through the real ``HttpVectorClient``: 300 ids a page."""
     posts, rows = wire
     new = _catalog()
     big = _entry({}, title="big", tumbler="1.700", collection=K)
@@ -196,14 +198,12 @@ def test_the_store_get_count_is_the_requests_the_client_sends(wire):
     old.owners.update(new.owners)
 
     client = HttpVectorClient.__new__(HttpVectorClient)
-    seen: list[mb.Progress] = []
-    new_report = mb.backfill_meta(new, client, None, apply=False, batch=50, progress=seen.append)
+    new_report = mb.backfill_meta(new, client, None, apply=False, batch=50)
     new_posts = list(posts)
     posts.clear()
     old_report = legacy_backfill_meta(old, client, None, apply=False, batch=50)
 
     assert new_report.as_dict() == old_report.as_dict()
-    assert seen[-1].work.store_gets == len(new_posts), "the counter is the number of POSTs the client made"
     assert max(len(p["ids"]) for p in new_posts) == 300, "paged at 300 ids, and the 650-chunk note needed three pages"
     assert len(posts) > 5 * len(new_posts), f"old {len(posts)} store-gets, new {len(new_posts)}"
     by_collection = sorted({p["collection"] for p in new_posts})
@@ -284,16 +284,56 @@ def test_the_defaults_are_a_round_of_fifty_and_no_pause(monkeypatch):
 def test_a_progress_report_follows_every_round_of_a_short_run_and_the_line_says_where_it_is():
     w = _catalog()
     ticks = iter(range(0, 1000, 10))
+    asked = iter(range(0, 1000, 7))     # the request counter: 7 more requests every time it is read
     seen: list[mb.Progress] = []
-    mb.backfill_meta(w, w, None, apply=False, batch=50, progress=seen.append, clock=lambda: next(ticks))
+    mb.backfill_meta(w, w, None, apply=False, batch=50, progress=seen.append, clock=lambda: next(ticks), requests=lambda: next(asked))
     assert [(p.batch, p.batches, p.documents, p.documents_total) for p in seen] == [(1, 3, 50, 150), (2, 3, 100, 150), (3, 3, 150, 150)]
-    assert [p.elapsed for p in seen] == [10, 20, 30]
-    first = seen[0]
-    first_round = w.events[:next(i for i, e in enumerate(w.events) if e[0] == "manifests" and i > 0)]
-    assert first.work.store_gets == len([e for e in first_round if e[0] == "rows"]) > 0, "one store-get per collection call here"
-    assert first.work.catalog_reads == len([e for e in first_round if e[0] in ("manifests", "owners")])
-    assert first.line().startswith("backfill-meta: batch 1/3, 50/150 documents, ")
-    assert first.line().endswith(f"{first.work.writes} writes, 10.0s, 5.0 docs/s, {first.work.requests / 10:.1f} requests/s")
+    # the clock is read at the start (0) and after each round (10, 20, 30); the counter likewise (0, 7, 14, 21), so a round is 7 requests
+    assert [p.elapsed for p in seen] == [10, 20, 30] and [p.requests for p in seen] == [7, 14, 21]
+    first, last = seen[0], seen[-1]
+    assert first.rate_since_start == pytest.approx(0.7) and last.rate_since_start == pytest.approx(0.7)
+    assert first.line().startswith("backfill-meta: batch 1/3, 50/150 documents, 7 requests (0.70/s since start, 0.70/s over the last 1 round), ")
+    assert last.line().endswith(", 0 lookups failed, 0 writes failed, 30.0s, 5.0 docs/s, at " + last.last_tumbler)
+    assert "over the last 3 rounds" in last.line() and last.last_tumbler
+
+
+def test_the_recent_rate_is_taken_over_the_last_ten_rounds_and_differs_from_the_rate_since_the_start():
+    w = _catalog(n_docs=290, n_notes=10)         # 300 entries, 30 rounds of 10
+    clock_ticks = iter(range(0, 10_000))
+    now = {"t": 0.0}
+    reads = {"n": 0}
+
+    def clock() -> float:
+        now["t"] = float(next(clock_ticks))
+        return now["t"]
+
+    def requests() -> int:
+        # one tick a read; the run's first 10 rounds send 1 request a round, the later ones 5 a round
+        reads["n"] += 1
+        return reads["n"] if reads["n"] <= 11 else 11 + 5 * (reads["n"] - 11)
+
+    seen: list[mb.Progress] = []
+    mb.backfill_meta(w, w, None, apply=False, batch=10, progress=seen.append, clock=clock, requests=requests)
+    last = seen[-1]
+    assert last.recent_rounds == mb.RECENT_ROUNDS == 10
+    assert last.recent_requests == 50 and last.recent_elapsed == 10 and last.rate_recent == pytest.approx(5.0)
+    assert last.rate_since_start == pytest.approx(110 / 30) and last.rate_recent > last.rate_since_start, "the last ten rounds are the busy ones"
+
+
+def test_progress_shows_the_lookups_and_writes_that_failed():
+    w = _catalog()
+    w.fail_rows_for = {B}
+
+    def update_many(payloads):
+        w.updates.extend(payloads)
+        return [0 if p["tumbler"].endswith("3") else 1 for p in payloads]
+
+    w.update_many = update_many     # type: ignore[method-assign]
+    seen: list[mb.Progress] = []
+    report = mb.backfill_meta(w, w, w, apply=True, batch=50, progress=seen.append)
+    assert report.lookups_failed > 0 and report.writes_failed > 0
+    assert (seen[-1].lookups_failed, seen[-1].writes_failed) == (report.lookups_failed, report.writes_failed)
+    assert f"{report.lookups_failed} lookups failed, {report.writes_failed} writes failed" in seen[-1].line()
 
 
 def test_a_long_run_prints_about_three_hundred_lines_and_always_the_last(monkeypatch):
@@ -305,14 +345,27 @@ def test_a_long_run_prints_about_three_hundred_lines_and_always_the_last(monkeyp
     assert seen[-1].documents == 150
 
 
-def test_progress_requests_count_the_apply_writes():
-    w = _catalog()
-    dry: list[mb.Progress] = []
-    mb.backfill_meta(w, w, None, apply=False, batch=50, progress=dry.append)
-    applied: list[mb.Progress] = []
-    mb.backfill_meta(w, w, w, apply=True, batch=50, progress=applied.append)
-    assert dry[-1].work.writes == 0 and applied[-1].work.writes == 3
-    assert applied[-1].work.store_gets == dry[-1].work.store_gets
+def test_the_command_counts_requests_through_the_gate_and_prints_them(monkeypatch):
+    """A world whose every read and write passes the gate as a transport would: the progress lines carry the count."""
+    class _Gated(_Counting):
+        def get_manifests(self, ids):
+            request_gate.before_request()
+            return super().get_manifests(ids)
+
+        def chunk_rows(self, collection, chashes):
+            request_gate.before_request()
+            return super().chunk_rows(collection, chashes)
+
+        def update_many(self, payloads):
+            request_gate.before_request()
+            return super().update_many(payloads)
+
+    w = _catalog(world=_Gated)
+    result, _ = _invoke(monkeypatch, w, "--apply", "--max-rps", "100000")
+    assert result.exit_code == 0, result.output
+    last = [line for line in result.stderr.splitlines() if line.startswith("backfill-meta: batch 3/3")][0]
+    sent = len([e for e in w.events if e[0] in ("manifests", "rows", "write")])
+    assert f", {sent} requests (" in last and sent > 6
 
 
 def test_progress_goes_to_stderr_and_stdout_keeps_the_json_it_always_had(monkeypatch):
@@ -356,7 +409,9 @@ def test_a_keyboard_interrupt_mid_round_ends_the_run_with_the_finished_rounds_co
     w.stop_at_call = 6
     report = mb.backfill_meta(w, w, w, apply=True, batch=50)
     assert report.interrupted and report.batches_done == 1 and report.batches_total == 3
-    assert report.as_dict() == _first_round_only(), "the cut round leaves no count behind, though it had begun"
+    cut = report.as_dict()
+    assert cut.pop("cut_batch_may_have_written") == 2, "the report says which batch was cut, and that its write may have landed"
+    assert cut == _first_round_only(), "the cut round leaves no count behind, though it had begun"
     assert report.documents_examined == 50
     assert len(w.updates) == report.documents_to_stamp, "no write of the cut round"
 
@@ -386,8 +441,9 @@ def test_the_command_prints_the_partial_report_and_exits_130(monkeypatch):
     report = json.loads(result.stdout)
     assert report["interrupted"] is True and report["batches_done"] == 1 and report["batches_total"] == 3
     assert report["documents_examined"] == 50 and closed == [True], "the writer is closed on the way out"
-    assert "Interrupted after 1 of 3 batches (50 documents examined)" in result.stderr
-    assert "run it again to carry on" in result.stderr
+    assert "Interrupted by SIGINT after 1 of 3 batches (50 documents examined)" in result.stderr
+    assert "Batch 2 was cut by a second interrupt: it is NOT in the report above, and its writes may already have landed" in result.stderr
+    assert "Resume with: nx catalog backfill-meta --apply --json --batch-size 50 --pause-ms 0 --stop-after-failed-rounds 3 --start-after " in result.stderr
 
 
 def test_the_command_text_report_covers_the_finished_rounds(monkeypatch):
@@ -470,3 +526,291 @@ def test_a_chunk_two_documents_hold_in_one_collection_is_asked_for_once_in_a_rou
     calls = w.rows_calls()
     assert len(calls) == 1 and calls[0][0] == K
     assert sorted(calls[0][1]) == sorted(["same", "own1.0", "own1.1", "own1.2"])
+
+
+# ── L3: stop after K failed rounds ─────────────────────────────────────────────────────────────────
+
+class _FailingRounds(_Counting):
+    """A lookup fails in the rounds named (1-based): the chunk-row read of every collection raises."""
+
+    bad_rounds: frozenset = frozenset()
+
+    def chunk_rows(self, collection, chashes):
+        round_ = len([e for e in self.events if e[0] == "manifests"])
+        if round_ in self.bad_rounds:
+            self.events.append(("rows", collection, tuple(chashes)))
+            raise RuntimeError("store-get down")
+        return super().chunk_rows(collection, chashes)
+
+
+def _failing(rounds: set[int]) -> _FailingRounds:
+    w = _catalog(world=_FailingRounds)
+    w.bad_rounds = frozenset(rounds)
+    return w
+
+
+def test_k_failed_rounds_in_a_row_stop_the_run_cleanly_and_leave_it_resumable():
+    w = _failing({1, 2, 3})
+    report = mb.backfill_meta(w, w, w, apply=True, batch=10, stop_after_failed_rounds=2)
+    assert report.interrupted and report.stop_reason == mb.STOP_FAILED_ROUNDS
+    assert report.batches_done == 2 and report.documents_examined == 20 and report.lookups_failed > 0
+    assert report.last_tumbler and report.as_dict()["resume_after"] == report.last_tumbler
+    assert len([e for e in w.events if e[0] == "manifests"]) == 2, "no third round was started"
+
+
+def test_a_good_round_resets_the_count_of_failed_rounds():
+    w = _failing({1, 3})     # fail, ok, fail, ok ...: never two in a row
+    report = mb.backfill_meta(w, w, None, apply=False, batch=10, stop_after_failed_rounds=2)
+    assert not report.interrupted and report.batches_done == report.batches_total == 15
+
+
+def test_a_write_that_fails_is_a_failed_round_too():
+    w = _catalog()
+    w.update_many = lambda payloads: [0] * len(payloads)      # type: ignore[method-assign]
+    report = mb.backfill_meta(w, w, w, apply=True, batch=10, stop_after_failed_rounds=3)
+    assert report.interrupted and report.stop_reason == mb.STOP_FAILED_ROUNDS and report.batches_done == 3
+    assert report.writes_failed == report.documents_to_stamp == 25 and report.writes_failed > 0
+
+
+def test_zero_never_stops_and_the_last_round_has_nothing_to_stop():
+    w = _failing(set(range(1, 100)))
+    assert not mb.backfill_meta(w, w, None, apply=False, batch=10, stop_after_failed_rounds=0).interrupted
+    last = _failing({1})
+    done = mb.backfill_meta(last, last, None, apply=False, batch=150, stop_after_failed_rounds=1)
+    assert not done.interrupted, "one round, failed: it was also the last, so the run finished"
+
+
+def test_the_command_stops_after_three_failed_rounds_by_default_and_exits_1(monkeypatch):
+    w = _failing({1, 2, 3, 4, 5})
+    result, _ = _invoke(monkeypatch, w, "--batch-size", "10", "--json")
+    assert result.exit_code == 1, result.output
+    report = json.loads(result.stdout)
+    assert report["batches_done"] == 3 and report["stop_reason"] == "failed_rounds" and report["interrupted"] is True
+    assert "Stopped after 3 of 15 batches: 3 rounds in a row had a failed lookup or write" in result.stderr
+    assert "Resume with: nx catalog backfill-meta --json --batch-size 10 --pause-ms 0 --stop-after-failed-rounds 3 --start-after " in result.stderr
+
+
+def test_the_command_option_can_raise_or_disable_the_guard(monkeypatch):
+    w = _failing(set(range(1, 100)))
+    result, _ = _invoke(monkeypatch, w, "--batch-size", "10", "--stop-after-failed-rounds", "5", "--json")
+    assert result.exit_code == 1 and json.loads(result.stdout)["batches_done"] == 5
+    w = _failing(set(range(1, 100)))
+    result, _ = _invoke(monkeypatch, w, "--batch-size", "10", "--stop-after-failed-rounds", "0", "--json")
+    assert result.exit_code == 0 and json.loads(result.stdout)["lookups_failed"] > 0 and "interrupted" not in json.loads(result.stdout)
+
+
+# ── L4: resume with --start-after ──────────────────────────────────────────────────────────────────
+
+def test_start_after_skips_the_listing_by_position_and_the_two_halves_make_the_whole():
+    whole = _catalog()
+    full = mb.backfill_meta(whole, whole, whole, apply=True, batch=50)
+    first_half = _catalog()
+    stopped = mb.backfill_meta(first_half, first_half, first_half, apply=True, batch=50, should_stop=lambda: True)
+    assert stopped.interrupted and stopped.last_tumbler == str(first_half.entries[49].tumbler)
+    rest = _catalog()
+    second = mb.backfill_meta(rest, rest, rest, apply=True, batch=50, start_after=stopped.last_tumbler)
+    assert second.documents_examined == 100 and second.started_after == stopped.last_tumbler
+    assert first_half.updates + rest.updates == whole.updates, "the same writes, in the same order, as one uninterrupted pass"
+    assert stopped.documents_to_stamp + second.documents_to_stamp == full.documents_to_stamp
+    assert stopped.documents_examined + second.documents_examined == full.documents_examined == 150
+    seen = {str(u["tumbler"]) for u in rest.updates}
+    assert not seen & {str(e.tumbler) for e in rest.entries[:50]}, "nothing at or before the resume point was read or written"
+
+
+def test_the_skipped_documents_still_count_as_owners_of_their_chunks():
+    """X (skipped) and Y (read) hold one chunk, in different collections: each is the sole owner in its own, so
+    Y takes the row, exactly as in an uninterrupted pass. Y's judgment needs X in the owner map."""
+    def world() -> _World:
+        w = _Counting()
+        x = _entry({}, title="x", tumbler="2.1", content_type="paper", file_path="x.pdf", collection=A)
+        y = _entry({}, title="y", tumbler="2.2", content_type="paper", file_path="y.pdf", collection=B)
+        w.entries = [x, y]
+        w.manifests = {"2.1": [_Manifest("shared")], "2.2": [_Manifest("shared")]}
+        w.owners = {"shared": ["2.1", "2.2"]}
+        w.rows[(B, "shared")] = _row(extraction_method="mineru")
+        return w
+
+    whole = world()
+    mb.backfill_meta(whole, whole, whole, apply=True)
+    assert [u["tumbler"] for u in whole.updates if "extraction_method" in u["meta"]] == ["2.2"], "control: Y takes the row"
+    resumed = world()
+    mb.backfill_meta(resumed, resumed, resumed, apply=True, start_after="2.1")
+    assert [u["tumbler"] for u in resumed.updates] == ["2.2"] and "extraction_method" in resumed.updates[0]["meta"]
+    assert resumed.updates[0] == next(u for u in whole.updates if u["tumbler"] == "2.2")
+
+
+def test_start_after_is_a_position_in_the_listing_and_never_a_comparison_of_tumblers():
+    """The catalog sorts tumblers as strings in the database's collation: 1.10 comes before 1.2. The skip follows the listing."""
+    w = _catalog(n_docs=0, n_notes=0)
+    w.entries = [_entry({}, title=t, tumbler=t, collection=K) for t in ("1.1", "1.10", "1.2", "1.3")]
+    for e in w.entries:
+        w.manifests[str(e.tumbler)] = [_Manifest(f"c{e.tumbler}")]
+        w.owners[f"c{e.tumbler}"] = [str(e.tumbler)]
+    seen: list[str] = []
+    w.get_manifests = lambda ids: (seen.extend(ids), {})[1]       # type: ignore[method-assign]
+    mb.backfill_meta(w, w, None, apply=False, batch=10, start_after="1.10")
+    assert seen == ["1.2", "1.3"], "after 1.10 in the listing, whatever 1.2 and 1.10 compare as"
+
+
+def test_a_tumbler_the_listing_does_not_hold_is_refused_before_anything_is_read():
+    w = _catalog()
+    with pytest.raises(mb.ResumePointError, match="no such document"):
+        mb.backfill_meta(w, w, None, apply=False, start_after="9.9.9")
+    assert w.events == []
+
+
+def test_resuming_after_the_last_document_is_a_finished_run_not_a_vacuous_one():
+    w = _catalog()
+    report = mb.backfill_meta(w, w, None, apply=False, start_after=str(w.entries[-1].tumbler))
+    assert report.documents_examined == 0 and report.batches_total == 0 and not report.interrupted and w.events == []
+
+
+def test_the_command_prints_a_resume_command_that_resumes(monkeypatch):
+    # stop it after the first round by the polite route, through the command
+    stopper = _catalog()
+    monkeypatch.setattr(mb, "stop_after_current_batch", _always_stop)
+    result, _ = _invoke(monkeypatch, stopper, "--apply", "--batch-size", "40", "--pause-ms", "5", "--max-rps", "250.5", "--json")
+    assert result.exit_code == 130, result.output
+    line = [x for x in result.stderr.splitlines() if x.startswith("Resume with: ")][0]
+    cmd = line.removeprefix("Resume with: ")
+    last = json.loads(result.stdout)["resume_after"]
+    assert cmd == f"nx catalog backfill-meta --apply --json --batch-size 40 --pause-ms 5 --max-rps 250.5 --stop-after-failed-rounds 3 --start-after {last}"
+    # run exactly that command
+    monkeypatch.undo()
+    rest = _catalog()
+    result, _ = _invoke(monkeypatch, rest, *shlex.split(cmd)[3:])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["started_after"] == last and report["documents_examined"] == 110
+    assert rest.updates and str(rest.entries[39].tumbler) not in {u["tumbler"] for u in rest.updates}
+
+
+def test_the_command_refuses_an_unknown_start_after_and_says_when_there_is_nothing_after_it(monkeypatch):
+    w = _catalog()
+    result, _ = _invoke(monkeypatch, w, "--start-after", "9.9.9")
+    assert result.exit_code == 1 and "the catalog lists no such document" in result.output
+    w = _catalog()
+    result, _ = _invoke(monkeypatch, w, "--start-after", str(w.entries[-1].tumbler))
+    assert result.exit_code == 0 and "Nothing after" in result.stderr
+
+
+# ── L5: exit codes and signals ─────────────────────────────────────────────────────────────────────
+
+class _StopAfterFirst:
+    """Stands in for ``stop_after_current_batch``: the polite stop is asked after the first round."""
+
+    signum = 0
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        return True
+
+
+@pytest.fixture
+def _stop_polite(monkeypatch):
+    @contextlib.contextmanager
+    def cm():
+        yield _StopAfterFirst()
+
+    monkeypatch.setattr(mb, "stop_after_current_batch", cm)
+
+
+def _always_stop():
+    @contextlib.contextmanager
+    def cm():
+        yield _StopAfterFirst()
+
+    return cm()
+
+
+def test_a_write_that_failed_outranks_the_interrupt_in_the_exit_code(monkeypatch, _stop_polite):
+    w = _catalog()
+    w.update_many = lambda payloads: [0] * len(payloads)       # type: ignore[method-assign]
+    result, _ = _invoke(monkeypatch, w, "--apply", "--json", "--stop-after-failed-rounds", "0")
+    assert result.exit_code == 1, "130 must not hide a failed write"
+    report = json.loads(result.stdout)
+    assert report["interrupted"] is True and report["writes_failed"] > 0
+    assert f"{report['writes_failed']} writes failed in the finished batches: exit 1" in result.stderr
+    assert "Resume with:" in result.stderr
+
+
+def test_an_interrupt_with_nothing_failed_is_130(monkeypatch, _stop_polite):
+    w = _catalog()
+    result, _ = _invoke(monkeypatch, w, "--apply")
+    assert result.exit_code == 130 and "Interrupted by SIGINT" in result.stderr
+
+
+@pytest.mark.skipif(threading.current_thread() is not threading.main_thread(), reason="a signal handler needs the main thread")
+def test_sigterm_is_the_first_sigint_a_polite_stop_and_the_previous_disposition_comes_back():
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+    class _Term(_Counting):
+        sent = False
+
+        def chunk_rows(self, collection, chashes):
+            if not self.sent:
+                self.sent = True
+                signal.raise_signal(signal.SIGTERM)
+            return super().chunk_rows(collection, chashes)
+
+    try:
+        w = _catalog(world=_Term)
+        with mb.stop_after_current_batch() as stop:
+            assert stop() is False and stop.signum == 0
+            assert signal.getsignal(signal.SIGTERM) not in (before[signal.SIGTERM], signal.SIG_DFL)
+            report = mb.backfill_meta(w, w, w, apply=True, batch=50, should_stop=stop)
+            assert signal.getsignal(signal.SIGTERM) == before[signal.SIGTERM], "after the first signal the previous disposition is back, so a second SIGTERM ends the process as it would have"
+        assert stop.signum == signal.SIGTERM
+        assert report.interrupted and report.batches_done == 1 and report.documents_examined == 50 and len(w.updates) == report.documents_to_stamp
+        assert {s: signal.getsignal(s) for s in before} == before
+    finally:
+        for s, h in before.items():
+            signal.signal(s, h)
+
+
+@pytest.mark.skipif(threading.current_thread() is not threading.main_thread(), reason="a signal handler needs the main thread")
+def test_the_command_exits_143_after_a_sigterm(monkeypatch):
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+    class _Term(_Counting):
+        sent = False
+
+        def chunk_rows(self, collection, chashes):
+            if not self.sent:
+                self.sent = True
+                signal.raise_signal(signal.SIGTERM)
+            return super().chunk_rows(collection, chashes)
+
+    try:
+        w = _catalog(world=_Term)
+        result, closed = _invoke(monkeypatch, w, "--apply")
+    finally:
+        for s, h in before.items():
+            signal.signal(s, h)
+    assert result.exit_code == 143, result.output
+    assert "Interrupted by SIGTERM after 1 of 3 batches" in result.stderr and closed == [True]
+
+
+# ── the new options ────────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("flags", [
+    ["--max-rps", "0"], ["--max-rps", "-2"], ["--max-rps", "fast"], ["--stop-after-failed-rounds", "-1"],
+])
+def test_the_command_refuses_a_bad_rate_or_guard(monkeypatch, flags):
+    w = _catalog()
+    result, _ = _invoke(monkeypatch, w, *flags)
+    assert result.exit_code == 2, result.output
+    assert w.events == []
+
+
+def test_the_help_names_the_guard_and_the_runbook_note():
+    result = CliRunner().invoke(main, ["catalog", "backfill-meta", "--help"])
+    assert result.exit_code == 0
+    text = " ".join(result.output.split())
+    for needle in ("--max-rps", "--start-after", "--stop-after-failed-rounds", "Keep the catalog's other writers", "for the whole of every pass",
+                   "re-reads", "Exit codes:"):
+        assert needle in text or needle.replace("re-reads", "reads the chunk rows of most documents again") in text, needle
+    assert "a few requests per round" not in text and "2.5 requests/s" not in text

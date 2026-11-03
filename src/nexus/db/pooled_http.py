@@ -55,6 +55,8 @@ from typing import Any
 
 import structlog
 
+from nexus.db.request_gate import before_request
+
 _log = structlog.get_logger(__name__)
 
 #: Idle connections kept per endpoint. Search fans out on 8 threads; the cap
@@ -487,6 +489,8 @@ def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
                 error=type(err).__name__,
             )
         while True:
+            # nexus-ldf2s: every wire attempt, a stale-connection replay included, passes the request gate
+            before_request()
             conn = _POOL.take(key) if allow_reuse else None
             reused = conn is not None
             if conn is None:
