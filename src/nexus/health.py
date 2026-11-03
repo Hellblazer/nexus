@@ -9577,7 +9577,11 @@ def _check_pending_rungs() -> list[HealthResult]:
     engine state (``rdr192-manifest-backfill`` reads its record and the
     residual note), so this row needs a reachable engine to be exact; an
     unreachable one degrades to a pending row that says why. Pending rungs are a
-    soft warning with `nx upgrade` (the single trigger) as the remedy.
+    soft warning with `nx upgrade` (the single trigger) as the remedy, except
+    a pending rung that deferred on ``ESCALATE_AFTER`` consecutive runs
+    (``upgrade_ladder.deferral_log``, nexus-0sm1t): that row is a full
+    warning (exit code 1) naming the rung, the count, since when and the
+    last detail. A log read failure leaves the row soft, as it was.
     Crash-proof: any failure ABOVE the per-rung loop (deferred imports,
     ``default_registry()`` construction) degrades to a SOFT WARNING, never a
     silent ``ok=True`` — a check that could not even enumerate the ladder
@@ -9633,12 +9637,23 @@ def _check_pending_rungs() -> list[HealthResult]:
         )]
     parts: list[str] = []
     fixes: list[str] = []
+    stuck: list[str] = []
     if pending:
         names = "; ".join(
             f"{name}: {status.pending_detail or 'pending'}" for name, status in pending[:6]
         )
         parts.append(f"{len(pending)} pending upgrade rung(s) — {names}")
         fixes.append("Run: nx upgrade")
+        # nexus-0sm1t: a pending rung that deferred on every one of the last runs is not waiting its turn, it is
+        # stuck, and `nx upgrade --auto` says nothing about it. The log is read guarded: a read failure leaves
+        # the row as it was.
+        from nexus.upgrade_ladder.census_progress import guarded  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.deferral_log import t2_deferral_log  # noqa: PLC0415 — deferred to avoid module-load cost
+
+        escalated = guarded("deferral_log_read", lambda: t2_deferral_log().escalated(), {})
+        stuck = [escalated[name].describe() for name, _status in pending if name in escalated]
+        if stuck:
+            parts.insert(0, "STUCK: " + "; ".join(stuck))
     else:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:
@@ -9656,6 +9671,8 @@ def _check_pending_rungs() -> list[HealthResult]:
     return [HealthResult(
         label="Upgrade ladder",
         ok=False,
+        # A stuck rung is named up front ("STUCK:") but stays a warning: a deferral is non-fatal by design, and
+        # `nx doctor`'s exit code is read by scripts and gates that a slow census must not fail.
         warn=True,
         detail="; ".join(parts),
         fix_suggestions=fixes,

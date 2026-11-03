@@ -282,6 +282,7 @@ class TestCommandWiring:
         assert result.exit_code == 0, result.output
         assert seen == [None]
 
+    @pytest.mark.t2_tenant
     def test_auto_run_stops_at_the_boundary_and_still_exits_zero(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

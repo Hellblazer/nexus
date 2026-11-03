@@ -405,6 +405,15 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
         click.echo(f"VC++ runtime [client extension modules] pending: {result.detail}")
 
 
+def _record_deferrals(report: "LadderRunReport") -> None:  # noqa: F821 — lazy imports (module keeps cold-start cheap)
+    """Fold one finished ladder walk into the per-rung deferral log (nexus-0sm1t). Whatever goes wrong is a
+    logged warning: the log only informs `nx doctor`, it must never change the upgrade's outcome or exit code."""
+    from nexus.upgrade_ladder.census_progress import guarded  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.deferral_log import t2_deferral_log  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+    guarded("deferral_log_record", lambda: t2_deferral_log().record(report), None)
+
+
 def _run_ladder(
     *,
     dry_run: bool,
@@ -488,6 +497,10 @@ def _run_ladder(
         close = getattr(ledger, "close", None)
         if callable(close):
             close()
+
+    # nexus-0sm1t: count each rung's consecutive deferrals so `nx doctor` can name one that defers on every run,
+    # which --auto otherwise leaves silent. Interactive and --auto alike; a log failure never changes the outcome.
+    _record_deferrals(report)
 
     for run in report.runs:
         if run.outcome is RungOutcome.RECORDED and not auto_mode:
