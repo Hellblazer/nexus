@@ -153,6 +153,11 @@ PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" 
 OPERATOR_HOME = Path.home()
 SANDBOX_PY = Path(__file__).resolve()
 SCENARIOS = ("roll", "variant", "abort", "gate")
+#: A fresh session is settled at its prompt when idle, or in ``shell``: a session launched without the
+#: channel is told by its SessionStart guidance to wait for mail with ``nx tuple wait`` in the
+#: background, and one that does so sits at its prompt in ``shell`` (the 2026-11-02 measuring roll:
+#: rs_nochan, reading its handoff, did exactly that and the idle-only wait timed out at 300 s).
+SETTLED = frozenset({"idle", "shell"})
 #: A file bump_market writes into each published plugin tree: which release a cache folder's content is.
 RELEASE_MARK = ".sandbox-release"
 #: The typed re-asks after a mail ask name no failure word of their own, so they are banned by phrase.
@@ -647,6 +652,10 @@ class Sandbox:
                   "bash --noprofile --norc", check=True)
         self.watch.start()
 
+    def socket_path(self) -> Path:
+        """The private tmux server's socket file. kill-server leaves it behind (measured 2026-11-02)."""
+        return Path(self.env.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}" / self.sock
+
     def server_pids(self) -> list[int]:
         """The private tmux server's pid ([] when it is not running): every session runs below it."""
         try:
@@ -850,7 +859,7 @@ class Sandbox:
         2026-11-02 roll: "THAT'S THE HANDOFF..." for a session that then answered HELIOTROPE).
         The reply is the turn's last text after the user entry carrying *text* (reply_after).
         """
-        d0 = self.wait_status(name, {"idle"}, 120)
+        d0 = self.wait_status(name, set(done), 120)
         sid = str(d0.get("sessionId", ""))
         self.tmux("send-keys", "-t", self.pane_of(name), "-l", text, check=True)
         time.sleep(1)
@@ -1039,7 +1048,7 @@ def check_fresh(sb: Sandbox, before: dict[str, dict], handoffs: dict[str, str], 
         if any(w in body for w in others):
             failures.append(f"{name}: its handoff carries another session's word")
         try:
-            d = sb.wait_status(name, {"idle"}, 300, not_sid=old)
+            d = sb.wait_status(name, set(SETTLED), 300, not_sid=old)
         except TimeoutError as exc:
             failures.append(str(exc))
             continue
@@ -1071,7 +1080,7 @@ def check_fresh(sb: Sandbox, before: dict[str, dict], handoffs: dict[str, str], 
             else:
                 notes.append("rs_draft: the fresh session read its saved draft with its handoff")
         try:
-            reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
+            reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.", done=SETTLED).upper()
         except TimeoutError as exc:
             failures.append(str(exc))
             continue
@@ -1575,7 +1584,14 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
             notes.append(f"the nx shim refused {len(refused)} nx upgrade call(s): {refused[:5]}")
     except OSError as exc:
         notes.append(f"nx refusals not read: {exc}")
+    try:
+        if sb.socket_path().is_socket() and not sb.server_pids():
+            sb.socket_path().unlink()
+    except OSError as exc:
+        notes.append(f"tmux socket not removed: {exc}")
     dirty = []
+    if sb.socket_path().exists():
+        dirty.append(f"tmux socket {sb.socket_path()} still there")
     if sb.before and not watched:
         dirty.append("the process watch recorded nothing below the tmux server although sessions ran")
     try:
@@ -1630,6 +1646,26 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
             else:
                 sb.watch.stop()
         sb.close_servers()
+        if ok and not a.keep:
+            for sid in filter(None, sids):  # the script's /tmp files for these sessions
+                for f in Path("/tmp").glob(f"rh-{sid}.*"):
+                    f.unlink(missing_ok=True)
+                for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
+                    f.unlink(missing_ok=True)
+        if not a.keep:
+            # What the scenario left outside its HOME fails it, except what it leaves on purpose.
+            try:
+                left = footprint_after(fp_before, sb, full, sb.real_nx, kept=not ok)
+            except Exception as exc:  # noqa: BLE001 -- a check that could not run is a failure, not a pass
+                left = {"footprint": [f"not taken: {type(exc).__name__}: {exc}"]}
+            for place, items in left.items():
+                if place in EXPECTED_PLACES:
+                    notes.append(f"left on purpose: {place}: {items}")
+                else:
+                    failures.append(f"left outside the HOME: {place}: {items}")
+                    ok = False
+            if not any(p not in EXPECTED_PLACES for p in left):
+                notes.append("footprint: nothing left outside the HOME but what is left on purpose")
         for n in notes:
             say(f"[sandbox:{name}] {n}")
         for f in failures:
@@ -1639,25 +1675,11 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
             say(f"[sandbox:{name}] --keep: the sessions still run on a copy of your nexus config at "
                 f"{sb.nexus_config}/config.yml; delete it when done; tmux -L {sb.sock} kill-server")
         if ok and not a.keep:
-            for sid in filter(None, sids):  # the script's /tmp files for these sessions
-                for f in Path("/tmp").glob(f"rh-{sid}.*"):
-                    f.unlink(missing_ok=True)
-                for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
-                    f.unlink(missing_ok=True)
             shutil.rmtree(home, ignore_errors=True)
             if home.exists():
                 say(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)")
         else:
             say(f"[sandbox:{name}] kept {home} (transcripts, restart log, handoffs under /tmp)")
-        if not a.keep:
-            try:  # report only, for now: what this scenario left outside its HOME
-                left = footprint_after(fp_before, sb, full, sb.real_nx)
-                for place, items in left.items():
-                    say(f"[sandbox:{name}] footprint: {place}: {items}")
-                if not left:
-                    say(f"[sandbox:{name}] footprint: nothing left outside the HOME")
-            except Exception as exc:  # noqa: BLE001 -- a report, never at the cost of the verdict
-                say(f"[sandbox:{name}] footprint not taken: {type(exc).__name__}: {exc}")
         raise_deferred(pending)
     return ok, failures, notes
 
@@ -1692,25 +1714,36 @@ def footprint_before() -> dict:
             "log": _lines(claude / "restart-sessions.log")}
 
 
-def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str) -> dict[str, list[str]]:
+#: Left on purpose, so not a failure: a sandbox session's RDR-208 directory lease on the operator's
+#: service (``directory/<rs name>``). It lapses on its own, minutes after the session dies; a
+#: session killed with its tmux server does not release it (nexus-xwijj Phase 3: nx-mcp handles
+#: SIGHUP like SIGTERM). Reported as a note.
+EXPECTED_PLACES = ("directory lease",)
+
+
+def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str, kept: bool = False) -> dict[str, list[str]]:
     """What the scenario left outside its scratch HOME, by place: new entries in a shared place
     that name one of its sessions' ids, its tmux socket or its HOME; the tmux
     socket file; new lines in the operator's restart log about an rs_ session; and rows still in
-    a sandbox session's mailbox or directory entry on the operator's service. Entries another
-    session on the box wrote meanwhile name none of these and are not counted."""
+    a sandbox session's mailbox, and a directory lease one of its sessions holds, on the operator's
+    service. Entries another session on the box wrote meanwhile name none of these and are not
+    counted. *kept*: the scenario failed and keeps its HOME and its handoffs under /tmp on purpose,
+    so those are not counted."""
     marks = {sid[:8] for sid in sids if sid} | {sb.sock, sb.home.name}
     out: dict[str, list[str]] = {}
 
     def ours(name: str) -> bool:
         return any(m and m in name for m in marks)
 
+    def on_purpose(n: str) -> bool:
+        return kept and (n == sb.home.name or n.startswith(("nexus-continuation-restart-rs_", "rh-")))
+
     for d, names in before["temp"].items():
-        new = sorted(n for n in _names(Path(d)) - names if ours(n))
+        new = sorted(n for n in _names(Path(d)) - names if ours(n) and not on_purpose(n))
         if new:
             out[f"temp {d}"] = new
-    sock_dir = Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}"
-    if (sock_dir / sb.sock).exists():
-        out["tmux socket"] = [str(sock_dir / sb.sock)]
+    if sb.socket_path().exists():
+        out["tmux socket"] = [str(sb.socket_path())]
     claude = OPERATOR_HOME / ".claude"
     new = sorted(n for n in _names(claude / "sessions") - before["sessions"])
     mine = []
@@ -1745,15 +1778,19 @@ def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str) -> dict[
             live = {k: st.get(k, 0) for k in ("available", "claimed", "lapsed", "dead")}
             if any(live.values()):
                 rows.append(f"mailbox/{sid[:8]} {live}")
-        for name in sb.spec.sessions:
+        leases = []
+        for name in sorted({*sb.spec.sessions, "rs_blank"}):
             try:
                 r = subprocess.run([nx, "tuple", "directory", name], capture_output=True, text=True, timeout=30)
             except (OSError, subprocess.TimeoutExpired):
+                rows.append(f"directory/{name}: not read")
                 continue
-            if r.returncode == 0 and "No live directory entry" not in r.stdout:
-                rows.append(f"directory/{name}: {r.stdout.strip().splitlines()[0][:120] if r.stdout.strip() else '?'}")
+            held = set(re.findall(r"session_id:\s*(\S+)", r.stdout)) & sids
+            leases += [f"directory/{name} ({sid[:8]})" for sid in sorted(held)]
         if rows:
             out["operator service"] = rows
+        if leases:
+            out["directory lease"] = leases
     return out
 
 

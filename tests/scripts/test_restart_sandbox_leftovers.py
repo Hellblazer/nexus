@@ -9,6 +9,8 @@ left in shared places, counting only entries that name the scenario.
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import socket
 import json
 import subprocess
 import sys
@@ -99,3 +101,56 @@ def test_footprint_is_empty_when_nothing_was_left(run, tmp_path, monkeypatch) ->
     before = run.footprint_before()
     (temp / "unrelated").write_text("x", encoding="utf-8")
     assert run.footprint_after(before, sb, {"1234abcd-x"}, "") == {}
+
+
+def test_a_failed_scenario_s_kept_files_are_not_counted(run, tmp_path, monkeypatch) -> None:
+    temp = tmp_path / "shared-tmp"
+    temp.mkdir()
+    monkeypatch.setattr(run, "TEMP_DIRS", (temp,))
+    monkeypatch.setattr(run, "OPERATOR_HOME", tmp_path / "operator")
+    sb = _sandbox(run, temp / "nx-restart-sandbox-roll-abc")
+    before = run.footprint_before()
+    sb.home.mkdir()
+    for n in ("nexus-continuation-restart-rs_alpha-1234abcd-x.md", "rh-1234abcd.txt", "other-1234abcd.log"):
+        (temp / n).write_text("x", encoding="utf-8")
+    assert run.footprint_after(before, sb, {"1234abcd-y"}, "", kept=True) == {f"temp {temp}": ["other-1234abcd.log"]}
+    assert run.footprint_after(before, sb, {"1234abcd-y"}, "", kept=False)[f"temp {temp}"] == [
+        "nexus-continuation-restart-rs_alpha-1234abcd-x.md", "nx-restart-sandbox-roll-abc", "other-1234abcd.log",
+        "rh-1234abcd.txt"]
+
+
+def test_directory_leases_count_only_this_scenario_s_sessions(run, tmp_path, monkeypatch) -> None:
+    """A lease another scenario's rs_alpha still holds is not this one's."""
+    monkeypatch.setattr(run, "TEMP_DIRS", ())
+    monkeypatch.setattr(run, "OPERATOR_HOME", tmp_path / "operator")
+    nx = tmp_path / "nx"
+    nx.write_text('#!/bin/sh\ncase "$3" in\n'
+                  '  rs_alpha) echo "session_id: aaaa1111-x  created_at: t  expires_at: t" ;;\n'
+                  '  *) echo "No live directory entry for \'$3\'." ;;\nesac\n', encoding="utf-8")
+    nx.chmod(0o755)
+    sb = _sandbox(run, tmp_path / "home")
+    before = run.footprint_before()
+    assert run.footprint_after(before, sb, {"aaaa1111-x"}, str(nx)) == {"directory lease": ["directory/rs_alpha (aaaa1111)"]}
+    assert run.footprint_after(before, sb, {"bbbb2222-y"}, str(nx)) == {}
+    assert "directory lease" in run.EXPECTED_PLACES
+
+
+def test_cleanup_removes_the_tmux_socket(run, tmp_path, monkeypatch) -> None:
+    sb = _sandbox(run, tmp_path / "home")
+    sb.nexus_config.mkdir(parents=True)
+    sock_dir = Path(tempfile.mkdtemp(prefix="rs", dir="/tmp"))  # a socket path must fit in ~104 bytes
+    try:
+        sb.env["TMUX_TMPDIR"] = str(sock_dir)
+        sb.socket_path().parent.mkdir(parents=True)
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(str(sb.socket_path()))
+        srv.close()  # a socket file nobody serves, as kill-server leaves it
+        assert sb.socket_path().is_socket()
+        sb.tmux = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "")
+        sb.watch = type("W", (), {"poll": lambda s: None, "stop": lambda s: None, "seen": lambda s: [(2, "x")],
+                                  "still_running": lambda s: []})()
+        dirty = run.cleanup(sb, [])
+        assert not sb.socket_path().exists()
+        assert dirty == []
+    finally:
+        shutil.rmtree(sock_dir, ignore_errors=True)
