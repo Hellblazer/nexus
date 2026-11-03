@@ -369,6 +369,9 @@ class AspectExtractionWorker:
         self._batch_size = batch_size
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # Threads a stop() asked to exit and has not yet seen exit (nexus-8sqfs): a repeated stop re-joins them and
+        # reports the truth instead of finding ``_thread`` already cleared and answering True.
+        self._stopping: list[threading.Thread] = []
         self._lock = threading.Lock()
         # nexus-yg70j: the host's stand-down hook. A worker running loose in an
         # nx-mcp process has no host and simply stops claiming; a worker hosted
@@ -504,22 +507,32 @@ class AspectExtractionWorker:
         process exit since the thread is a daemon). Returns ``True``
         when no thread is left running, ``False`` when the join timed out
         (nexus-8sqfs: a test fixture must not wipe a tenant under a worker
-        that is still writing).
+        that is still writing). A thread that outlived one stop stays on
+        record, so a repeated stop re-joins it and answers ``False`` until
+        it has actually exited.
         """
         with self._lock:
-            thread = self._thread
-            self._thread = None
-        if thread is None:
+            if self._thread is not None:
+                self._stopping.append(self._thread)
+                self._thread = None
+            threads = list(self._stopping)
+        if not threads:
             return True
         self._stop_event.set()
-        thread.join(timeout=timeout)
-        if thread.is_alive() and self._tuple_side.parked:
+        for thread in threads:
+            thread.join(timeout=timeout)
+        alive = [t for t in threads if t.is_alive()]
+        if alive and self._tuple_side.parked:
             # RDR-235: slot 0's parked ``in`` cannot be cancelled, and a claim it
             # returns after this process is gone would sit live until its lease
             # lapsed (an attempt counted). Wait out the park: the loop releases
             # what the park returns once it sees the stop.
-            thread.join(timeout=self._tuple_side._park_timeout_s + 5.0)
-        if thread.is_alive():
+            for thread in alive:
+                thread.join(timeout=self._tuple_side._park_timeout_s + 5.0)
+            alive = [t for t in threads if t.is_alive()]
+        with self._lock:
+            self._stopping = [t for t in self._stopping if t.is_alive()]
+        if alive:
             _log.warning(
                 "aspect_worker_stop_timeout",
                 timeout=timeout,
@@ -1392,14 +1405,14 @@ def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> bool:
     return stopped
 
 
-def reset_worker_for_tests() -> bool:
+def reset_worker_for_tests(timeout: float = 5.0) -> bool:
     """Test helper: tear down the worker singleton so the next
     ``ensure_worker_started`` call rebuilds with fresh state. Returns
     ``False`` when the old worker's thread was still running after the stop
     (the singleton is dropped regardless).
     """
     global _worker
-    stopped = stop_worker(timeout=5.0)
+    stopped = stop_worker(timeout=timeout)
     with _worker_lock:
         _worker = None
     return stopped

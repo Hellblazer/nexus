@@ -430,9 +430,10 @@ def test_a_search_telemetry_write_still_running_at_the_bound_fails_the_lease(
     monkeypatch.setattr(_tenant_pool, "TELEMETRY_DRAIN_SECONDS", 0.2)
     pool = make_pool()
     try:
-        with pytest.raises(TenantLeakError, match="aspect worker was still writing"):
+        with pytest.raises(TenantLeakError, match="the MCP search telemetry worker still writing") as excinfo:
             with pool.lease():
                 mcp_infra.search_telemetry_sink().log_search_batch([("ts", "q", "c", 1, 1, 0.1, 0.5)])
+        assert "aspect worker" not in str(excinfo.value), "the message names the worker that failed, not both"
         assert pool.retired == 1 and pool.tenant is None
     finally:
         release.set()
@@ -537,9 +538,14 @@ class _OrderedPool(TenantPool):
         return _Resp()
 
 
-def _ordered_lease(monkeypatch: pytest.MonkeyPatch, aspect_stop: Callable[[], bool | None]) -> list[str]:
-    """Run one lease with the aspect worker's reset replaced by *aspect_stop*; return the events in order."""
-    order: list[str] = []
+def _ordered_lease(
+    monkeypatch: pytest.MonkeyPatch, aspect_stop: Callable[[], bool | None],
+    order: list[str] | None = None, pool: _OrderedPool | None = None,
+) -> list[str]:
+    """Run one lease with the aspect worker's reset replaced by *aspect_stop*; return the events in order. A test
+    that expects the lease to raise passes its own *order* (and *pool*) to read them afterwards."""
+    order = [] if order is None else order
+    pool = _OrderedPool(order) if pool is None else pool
 
     class _Proc:
         returncode, stdout, stderr = 0, "", ""
@@ -554,7 +560,7 @@ def _ordered_lease(monkeypatch: pytest.MonkeyPatch, aspect_stop: Callable[[], bo
 
     monkeypatch.setattr(_tenant_pool, "psql", fake_psql)
     monkeypatch.setattr(aspect_worker, "reset_worker_for_tests", stop)
-    with _OrderedPool(order).lease():
+    with pool.lease():
         order.append("body")
     return order
 
@@ -575,8 +581,24 @@ def test_the_aspect_worker_is_stopped_before_the_lease_wipes(monkeypatch: pytest
 def test_an_aspect_worker_that_outlives_its_stop_fails_the_lease(monkeypatch: pytest.MonkeyPatch) -> None:
     """The stop's verdict is read (nexus-8sqfs): a thread still running after the join would write after the census,
     so the lease errors naming it, as a telemetry write past its bound does."""
-    with pytest.raises(TenantLeakError, match="aspect worker was still writing"):
+    with pytest.raises(TenantLeakError, match="the aspect worker still writing") as excinfo:
         _ordered_lease(monkeypatch, lambda: False)
+    assert "telemetry" not in str(excinfo.value).split("(telemetry drain bound")[0], "it names the aspect worker alone"
+
+
+def test_an_aspect_worker_that_outlives_its_stop_as_the_lease_starts_fails_the_setup_and_retires_the_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lease-start drain's verdict is read too (nexus-8sqfs round 1): a worker an earlier test left running past
+    its stop would write into this tenant under the test. The setup errors before the body runs, and the tenant is
+    retired. With the read removed the body runs and no error is raised."""
+    order: list[str] = []
+    pool = _OrderedPool(order)
+    stops = iter([False, True, True, True])
+    with pytest.raises(TenantLeakError, match="the aspect worker still writing after the lease-start drain"):
+        _ordered_lease(monkeypatch, lambda: next(stops), order, pool)
+    assert "body" not in order, "the test body never ran"
+    assert pool.retired == 1 and pool.tenant is None
 
 
 def test_a_stub_that_returns_none_is_not_a_failed_stop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -584,21 +606,148 @@ def test_a_stub_that_returns_none_is_not_a_failed_stop(monkeypatch: pytest.Monke
     assert "wipe" in _ordered_lease(monkeypatch, lambda: None)
 
 
-def test_aspect_worker_stop_reports_a_thread_that_outlived_the_join() -> None:
-    """The verdict the lease reads: ``stop`` is True when nothing is left running and False when the join timed out."""
+def _worker_with_a_thread_blocked_on(release: threading.Event) -> tuple[aspect_worker.AspectExtractionWorker, threading.Thread]:
+    """A worker whose thread is alive until *release* is set: a deterministic stand-in for one stuck in a slow
+    extraction. No sleeps decide the outcome; the join times out because the event is unset."""
     worker = aspect_worker.AspectExtractionWorker()
-    assert worker.stop(timeout=0.01) is True, "never started"
-    release = threading.Event()
-    thread = threading.Thread(target=release.wait, args=(30,), daemon=True)
+    thread = threading.Thread(target=release.wait, args=(30,), daemon=True, name="aspect-extraction-worker")
     thread.start()
     worker._thread = thread
+    return worker, thread
+
+
+def test_aspect_worker_stop_reports_a_thread_that_outlived_the_join() -> None:
+    """The verdict the lease reads: ``stop`` is True when nothing is left running and False when the join timed out."""
+    assert aspect_worker.AspectExtractionWorker().stop(timeout=0.01) is True, "never started"
+    release = threading.Event()
+    worker, thread = _worker_with_a_thread_blocked_on(release)
     try:
         assert worker.stop(timeout=0.01) is False
     finally:
         release.set()
         thread.join(5)
-    worker._thread = thread
     assert worker.stop(timeout=1.0) is True, "once the thread has exited the stop is clean"
+
+
+def test_a_repeated_stop_still_reports_a_thread_that_has_not_exited() -> None:
+    """nexus-8sqfs round 1 (C3): ``stop`` used to clear ``_thread`` before the join, so the second stop after a timeout
+    found nothing and answered True with the thread alive. The second answer is False until the thread exits, and the
+    worker does not report itself running."""
+    release = threading.Event()
+    worker, thread = _worker_with_a_thread_blocked_on(release)
+    try:
+        assert worker.stop(timeout=0.01) is False
+        assert worker.stop(timeout=0.01) is False, "the thread is still alive, so a repeated stop says so"
+        assert worker.is_running() is False, "a stop was asked of it; is_running describes the worker, not the straggler"
+    finally:
+        release.set()
+        thread.join(5)
+    assert worker.stop(timeout=1.0) is True, "control: after the thread exits the same call is True"
+    assert worker._stopping == [], "and the record of the straggler is gone"
+
+
+def test_stop_worker_reports_a_singleton_thread_that_outlived_the_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The singleton path the lease reads (nexus-8sqfs round 1, C1): ``stop_worker`` returns the worker's verdict. A
+    ``stop_worker`` that returned True unconditionally would leave the leak check unable to ever fire."""
+    release = threading.Event()
+    worker, thread = _worker_with_a_thread_blocked_on(release)
+    monkeypatch.setattr(aspect_worker, "_worker", worker)
+    try:
+        assert aspect_worker.stop_worker(timeout=0.01, _locks_dir=tmp_path) is False
+    finally:
+        release.set()
+        thread.join(5)
+    assert aspect_worker.stop_worker(timeout=1.0, _locks_dir=tmp_path) is True, "control: once the thread exited"
+
+
+def test_reset_worker_for_tests_reports_a_singleton_thread_that_outlived_the_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``reset_worker_for_tests`` is what ``reset_client_caches`` calls. It returns the stop's verdict, and drops the
+    singleton regardless. Dropping ``return stopped`` makes it return None, which the lease's ``is False`` read takes
+    as a clean stop."""
+    release = threading.Event()
+    worker, thread = _worker_with_a_thread_blocked_on(release)
+    monkeypatch.setattr(aspect_worker, "_worker", worker)
+    try:
+        assert aspect_worker.reset_worker_for_tests(timeout=0.01) is False
+        assert aspect_worker._worker is None, "the singleton is dropped even when the thread outlived the stop"
+    finally:
+        release.set()
+        thread.join(5)
+
+
+def test_reset_client_caches_names_the_aspect_worker_that_outlived_its_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real ``reset_client_caches`` over the real ``reset_worker_for_tests``: a worker thread that outlives the stop
+    makes it return False and name the aspect worker. Chains the two pieces the lease depends on."""
+    release = threading.Event()
+    worker, thread = _worker_with_a_thread_blocked_on(release)
+    monkeypatch.setattr(aspect_worker, "_worker", worker)
+    real_reset = aspect_worker.reset_worker_for_tests
+    monkeypatch.setattr(aspect_worker, "reset_worker_for_tests", lambda: real_reset(timeout=0.01))
+    try:
+        assert _tenant_pool.reset_client_caches() is False
+        assert _tenant_pool._last_undrained == ["the aspect worker"]
+    finally:
+        release.set()
+        thread.join(5)
+
+
+def _minted(monkeypatch: pytest.MonkeyPatch, events: list[str], reset: Callable[[], bool | None]) -> None:
+    @contextlib.contextmanager
+    def mint(_s: Any) -> Iterator[str]:
+        events.append("mint")
+        try:
+            yield "MINT"
+        finally:
+            events.append("drop")
+
+    monkeypatch.setattr(_engine_substrate, "minted_test_tenant", mint)
+    monkeypatch.setattr(_tenant_pool, "reset_client_caches", reset)
+    monkeypatch.setenv(_tenant_pool.ENV_FLAG, "0")
+
+
+def test_a_minted_tenant_whose_worker_outlives_the_drain_fails_the_test_before_the_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fresh-tenant path fails like a pooled lease (nexus-8sqfs round 1): a worker that outlives the drain would
+    write under a tenant the mint is about to drop. The error is raised inside the mint block, so the drop still runs
+    after it."""
+    events: list[str] = []
+    resets = iter([True, False])
+    _minted(monkeypatch, events, lambda: next(resets))
+    with pytest.raises(TenantLeakError, match="fresh tenant: a client-side worker still writing"):
+        with _tenant_pool.tenant_lease({}, _Req({"fresh_tenant"})):
+            events.append("body")
+    assert events == ["mint", "body", "drop"], "the leak is raised in the mint block and the tenant is still dropped"
+
+
+def test_a_minted_tenant_whose_body_raised_keeps_the_body_exception_and_logs_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the body already failed, a raise from the drain would replace its exception: the test's own error wins and
+    the worker that outlived the drain is logged."""
+    events: list[str] = []
+    resets = iter([True, False])
+    _minted(monkeypatch, events, lambda: next(resets))
+    with capture_logs() as logs:
+        with pytest.raises(ZeroDivisionError):
+            with _tenant_pool.tenant_lease({}, _Req({"fresh_tenant"})):
+                1 / 0  # noqa: B018
+    assert events == ["mint", "drop"]
+    assert any(e["event"] == "tenant_pool_minted_tenant_worker_not_drained" for e in logs), logs
+
+
+def test_a_minted_tenant_is_not_minted_when_a_worker_outlived_the_drain_before_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The start-of-mint drain is read as well: no tenant is minted under a worker an earlier test left running."""
+    events: list[str] = []
+    _minted(monkeypatch, events, lambda: False)
+    with pytest.raises(TenantLeakError, match="before the tenant was minted"):
+        with _tenant_pool.tenant_lease({}, _Req({"fresh_tenant"})):
+            events.append("body")
+    assert events == [], "nothing minted, no body"
 
 
 def test_the_end_of_session_report_fails_a_dirty_pool_tenant_and_a_vacuous_run(

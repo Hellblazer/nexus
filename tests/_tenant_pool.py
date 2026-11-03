@@ -261,22 +261,41 @@ def census(state: Mapping[str, Any], tenant: str, *, allow_token: str = "") -> N
         raise TenantLeakError(f"tenant {tenant}: census failed: {_verdict_of(proc)}")
 
 
+#: The workers the latest :func:`reset_client_caches` could not drain, by name; empty when it drained them all.
+#: ``reset_client_caches`` keeps its bool return (test stubs return None or a bool), and :func:`_drain_or_leak` reads
+#: this to name the worker in the error it raises.
+_last_undrained: list[str] = []
+
+
+def _drain_or_leak(subject: str, when: str) -> None:
+    """Run :func:`reset_client_caches`; raise :class:`TenantLeakError` naming the worker that outlived its drain. Only
+    an explicit False fails: a test stub of ``reset_client_caches`` returns None."""
+    _last_undrained.clear()
+    if reset_client_caches() is False:
+        named = " and ".join(_last_undrained) or "a client-side worker"
+        raise TenantLeakError(
+            f"{subject}: {named} still writing {when} (telemetry drain bound {TELEMETRY_DRAIN_SECONDS} s); "
+            f"its row would land after the reset's census")
+
+
 def reset_client_caches() -> bool:
     """Drop the Python caches that outlive a test and are not keyed by the per-lease bearer, and drain the MCP search
     telemetry worker first. Returns False when that worker was still writing at :data:`TELEMETRY_DRAIN_SECONDS`, or the aspect worker
-    outlived its stop.
+    outlived its stop; ``_last_undrained`` then names which.
 
     Looked up in ``sys.modules`` so a worker that never loaded a module imports nothing: an unloaded module holds
     no cache. ``corpus._REGISTERED_COLLECTIONS`` is already cleared per test by ``tests/conftest.py``.
     """
     mods = sys.modules
+    undrained: list[str] = []
     # MCP search and query queue a ``search_telemetry`` batch on a process-wide daemon worker and return; the worker
     # POSTs it later with this lease's bearer. The autouse ``_isolate_search_telemetry_sink`` closes the worker, but it
     # sets up before ``_pin_t2_substrate`` (or a test parameter) pulls in the tenant, so it tears down AFTER the
     # lease's wipe and census: a batch committed in that gap failed the census with ``nexus.search_telemetry=1``
     # (develop CI run 41312781094, tests/test_query_taxonomy_requests.py). Drain it here, before the wipe.
     infra = mods.get("nexus.mcp_infra")
-    drained = infra is None or infra.reset_search_telemetry_sink(TELEMETRY_DRAIN_SECONDS)
+    if infra is not None and not infra.reset_search_telemetry_sink(TELEMETRY_DRAIN_SECONDS):
+        undrained.append("the MCP search telemetry worker")
     # The aspect worker is the same kind of writer (nexus-8sqfs): a test that started it (``ensure_worker_started``,
     # or the enqueue hook with NX_ASPECT_WORKER_AUTOSTART=1) leaves it claiming tuple tasks and persisting through
     # ``t2_index_write`` with this lease's bearer, and the autouse ``_reset_aspect_worker_singleton`` stops it only
@@ -284,7 +303,7 @@ def reset_client_caches() -> bool:
     # fails the lease like a telemetry write that outlives its bound.
     aw = mods.get("nexus.aspect_worker")
     if aw is not None and aw.reset_worker_for_tests() is False:
-        drained = False
+        undrained.append("the aspect worker")
     hvc = mods.get("nexus.db.http_vector_client")
     if hvc is not None:
         hvc._invalidate_endpoint()
@@ -303,7 +322,8 @@ def reset_client_caches() -> bool:
     pcr = mods.get("nexus.mcp.plan_cache_registry")
     if pcr is not None:
         pcr.reset_plan_cache_registry_for_tests()
-    return drained
+    _last_undrained[:] = undrained
+    return not undrained
 
 
 class TenantLeaseBusyError(RuntimeError):
@@ -434,8 +454,14 @@ class TenantPool:
                 self._leased = False
                 raise
         try:
-            with self._timed("caches"):
-                reset_client_caches()
+            try:
+                with self._timed("caches"):
+                    _drain_or_leak(f"tenant {tenant}", "after the lease-start drain, before the test body ran")
+            except TenantLeakError as exc:
+                # A writer left by an earlier test would write into this tenant under the test: retire it, as a
+                # start census that finds rows does.
+                self.retire(f"lease-start drain: {exc}")
+                raise
             self._census_at_start(tenant, token, owner)
             completed = False
             try:
@@ -444,12 +470,7 @@ class TenantPool:
             finally:
                 try:
                     with self._timed("caches"):
-                        # ``is False``: a test stub of reset_client_caches returns None.
-                        if reset_client_caches() is False:
-                            raise TenantLeakError(
-                                f"tenant {tenant}: the MCP search telemetry worker or the aspect worker was still "
-                                f"writing after the drain ({TELEMETRY_DRAIN_SECONDS} s for telemetry); its row would "
-                                f"land after the reset's census")
+                        _drain_or_leak(f"tenant {tenant}", "after the drain")
                     self.token = self.reset(tenant)
                 except BaseException as exc:
                     self.retire(f"{type(exc).__name__}: {exc}")
@@ -545,15 +566,23 @@ def tenant_lease(state: Mapping[str, Any], request: pytest.FixtureRequest | None
 def _minted_with_clean_caches(mint: Callable[[Any], Any], state: Mapping[str, Any]) -> Iterator[Any]:
     """A minted tenant is as new as a wiped lease (its plans get new ids), so it starts and ends with the client
     caches emptied too. Only here, not inside ``minted_test_tenant``: tests nest that one inside a running test."""
-    reset_client_caches()
+    _drain_or_leak("fresh tenant", "after the drain, before the tenant was minted")
     with mint(state) as lease:
+        completed = False
         try:
             yield lease
+            completed = True
         finally:
             # Inside the mint block (nexus-8sqfs): the drain stops the aspect worker and the telemetry worker, which
-            # write with this tenant's bearer, so it has to run before the mint's exit drops the tenant.
-            if reset_client_caches() is False:
-                _log.warning("tenant_pool_minted_tenant_worker_not_drained")
+            # write with this tenant's bearer, so it has to run before the mint's exit drops the tenant. A worker
+            # that outlives it fails the test like a pooled lease does, but only when the body itself succeeded: a
+            # raise from this ``finally`` would replace the body's own exception, so then it is logged instead.
+            try:
+                _drain_or_leak("fresh tenant", "after the drain, before the tenant is dropped")
+            except TenantLeakError as exc:
+                if completed:
+                    raise
+                _log.warning("tenant_pool_minted_tenant_worker_not_drained", error=str(exc))
 
 
 def _reset_for_tests() -> None:
