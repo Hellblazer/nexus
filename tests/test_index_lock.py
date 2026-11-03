@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -237,23 +238,27 @@ def test_on_locked_wait_blocks_then_runs(tmp_path: Path, registry, lock_home: Pa
         return {}
 
     def run_indexer():
-        with patch("nexus.indexer._run_index", side_effect=_fake_run):
-            with patch("nexus.indexer._current_head", return_value="aaa"):
-                index_repository(tmp_path, registry, on_locked="wait")
+        index_repository(tmp_path, registry, on_locked="wait")
 
-    # Hold the lock, start indexer in background, verify it blocks, then release
-    with open(lock_path, "w") as holder:
-        fcntl.flock(holder, fcntl.LOCK_EX)
+    # The patches are entered and left on THIS thread, around the worker's whole life: a patch
+    # entered in the worker would stay installed for the rest of the xdist worker if the join timed
+    # out (nexus-9tmvy).
+    with patch("nexus.indexer._run_index", side_effect=_fake_run), \
+            patch("nexus.indexer._current_head", return_value="aaa"):
+        # Hold the lock, start indexer in background, verify it blocks, then release
+        with open(lock_path, "w") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
 
-        t = threading.Thread(target=run_indexer, daemon=True)
-        t.start()
+            t = threading.Thread(target=run_indexer, daemon=True)
+            t.start()
 
-        # Should still be blocked after 200 ms
-        assert not ran_event.wait(timeout=0.3), "Indexer should be blocked while lock is held"
+            # Should still be blocked after 200 ms
+            assert not ran_event.wait(timeout=0.3), "Indexer should be blocked while lock is held"
 
-    # Lock released by exiting `with` block — indexer should now run
-    assert ran_event.wait(timeout=5.0), "Indexer should run after lock is released"
-    t.join(timeout=5.0)
+        # Lock released by exiting `with` block — indexer should now run
+        assert ran_event.wait(timeout=5.0), "Indexer should run after lock is released"
+        t.join(timeout=5.0)
+        assert not t.is_alive(), "the indexer thread outlived the test"
 
 
 # ── frecency_only bypasses lock ───────────────────────────────────────────────
@@ -503,13 +508,18 @@ def test_skip_contender_does_not_corrupt_or_unlock_live_holder(
         return {}
 
     def run_a():
-        with patch("nexus.indexer._run_index", side_effect=_fake_run_index_a):
-            with patch("nexus.indexer._current_head", return_value="a"):
-                index_repository(tmp_path, registry, on_locked="wait")
+        index_repository(tmp_path, registry, on_locked="wait")
 
-    t = threading.Thread(target=run_a, daemon=True)
-    t.start()
+    # A's fakes are entered on THIS thread and left after A is joined (nexus-9tmvy): entered in A's
+    # thread, a join that timed out would leave them installed for the rest of the xdist worker.
+    # The main thread's own ``_run_index`` fakes below nest inside them and unwind first.
+    fakes = ExitStack()
+    t: threading.Thread | None = None
     try:
+        fakes.enter_context(patch("nexus.indexer._run_index", side_effect=_fake_run_index_a))
+        fakes.enter_context(patch("nexus.indexer._current_head", return_value="a"))
+        t = threading.Thread(target=run_a, daemon=True)
+        t.start()
         assert a_running.wait(timeout=5.0), "A never entered its critical section"
 
         a_inode = lock_path.stat().st_ino
@@ -544,7 +554,12 @@ def test_skip_contender_does_not_corrupt_or_unlock_live_holder(
         )
     finally:
         release_a.set()
-        t.join(timeout=5.0)
+        try:
+            if t is not None:
+                t.join(timeout=5.0)
+                assert not t.is_alive(), "the A indexer thread outlived the test"
+        finally:
+            fakes.close()
 
 
 # ── CLI --on-locked option ────────────────────────────────────────────────────

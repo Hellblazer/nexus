@@ -924,28 +924,31 @@ def test_multi_batch_incremental_explicit_complete_round_trip(
 
     def _run() -> None:
         try:
-            with patch.object(HttpCatalogClient, "_post", _pausing_post):
-                result_holder["total"] = _index_pdf_incremental(
-                    pdf_path, corpus, prepared, content_hash, _INCR_COLLECTION, t3,
-                    doc_id=doc_id,
-                )
+            result_holder["total"] = _index_pdf_incremental(
+                pdf_path, corpus, prepared, content_hash, _INCR_COLLECTION, t3,
+                doc_id=doc_id,
+            )
         except BaseException as exc:  # noqa: BLE001 — surfaced to the main thread below
             error_holder["exc"] = exc
 
-    th = threading.Thread(target=_run, daemon=True)
-    th.start()
-    try:
-        assert batch1_landed.wait(timeout=15), "batch 1 never landed"
-        entry_mid = make_catalog_reader().resolve(doc_id)
-        assert entry_mid is not None
-        assert entry_mid.index_state == "indexing", (
-            "expected 'indexing' visible mid-run (begin precedes every "
-            f"batch); got {entry_mid.index_state!r}"
-        )
-    finally:
-        proceed.set()
-    th.join(timeout=30)
-    assert not th.is_alive(), "incremental indexer thread did not finish"
+    # The ``_post`` fake is entered and left on THIS thread, around the indexer thread's whole
+    # life (nexus-9tmvy): entered in the indexer thread, a join that timed out left it installed
+    # for the rest of the xdist worker, and the main thread's own reads went through it meanwhile.
+    with patch.object(HttpCatalogClient, "_post", _pausing_post):
+        th = threading.Thread(target=_run, daemon=True)
+        th.start()
+        try:
+            assert batch1_landed.wait(timeout=15), "batch 1 never landed"
+            entry_mid = make_catalog_reader().resolve(doc_id)
+            assert entry_mid is not None
+            assert entry_mid.index_state == "indexing", (
+                "expected 'indexing' visible mid-run (begin precedes every "
+                f"batch); got {entry_mid.index_state!r}"
+            )
+        finally:
+            proceed.set()
+            th.join(timeout=30)
+        assert not th.is_alive(), "incremental indexer thread did not finish"
     if "exc" in error_holder:
         raise error_holder["exc"]
 

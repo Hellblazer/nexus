@@ -112,28 +112,31 @@ def _run(
     result: dict = {}
 
     def _go() -> None:
-        # ``patch_here=False``: the caller holds the extractor and chunker patches. Two threads that
-        # each enter ``patch`` on the same module global restore it out of order, and the later
-        # exit puts the other thread's mock back for the rest of the worker (it broke the RDR-237
-        # pymupdf resume tests on the 7.88.0 release suite).
-        with (patch(_P_EXT) if patch_here else contextlib.nullcontext()) as ME, \
-                (patch(_P_CHK) if patch_here else contextlib.nullcontext()) as MC:
-            if patch_here:
-                ME.return_value.extract.side_effect = _fx(2, _er(2))
-                MC.return_value.chunk.return_value = fc
-            result["total"] = pipeline_index_pdf(
-                Path(pdf_path), _HASH, collection, t3,
-                db=_client_for(engine), embed_fn=_embed, corpus="test",
-                doc_id=doc_id, hooks=hooks, force=force,
-            )
+        result["total"] = pipeline_index_pdf(
+            Path(pdf_path), _HASH, collection, t3,
+            db=_client_for(engine), embed_fn=_embed, corpus="test",
+            doc_id=doc_id, hooks=hooks, force=force,
+        )
 
-    # An untimed wait() inside pipeline_index_pdf is the parked attempt's
-    # failure mode; run on a thread so a hang is a failed assertion, not a
-    # hung suite.
-    worker = threading.Thread(target=_go, daemon=True)
-    worker.start()
-    worker.join(timeout=30)
-    assert not worker.is_alive(), "pipeline_index_pdf hung (the sibling-seeded counter deadlock)"
+    # ``patch_here=False``: the caller holds the extractor and chunker patches. Two threads that
+    # each enter ``patch`` on the same module global restore it out of order, and the later exit
+    # puts the other thread's mock back for the rest of the worker (it broke the RDR-237 pymupdf
+    # resume tests on the 7.88.0 release suite). With ``patch_here`` they are entered on the
+    # calling thread, around the worker's whole life, so a worker that outlives its join cannot
+    # leave them installed either (nexus-9tmvy).
+    with contextlib.ExitStack() as patches:
+        if patch_here:
+            ME = patches.enter_context(patch(_P_EXT))
+            MC = patches.enter_context(patch(_P_CHK))
+            ME.return_value.extract.side_effect = _fx(2, _er(2))
+            MC.return_value.chunk.return_value = fc
+        # An untimed wait() inside pipeline_index_pdf is the parked attempt's
+        # failure mode; run on a thread so a hang is a failed assertion, not a
+        # hung suite.
+        worker = threading.Thread(target=_go, daemon=True)
+        worker.start()
+        worker.join(timeout=30)
+        assert not worker.is_alive(), "pipeline_index_pdf hung (the sibling-seeded counter deadlock)"
     return result["total"], t3, hooks
 
 
