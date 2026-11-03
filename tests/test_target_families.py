@@ -25,9 +25,11 @@ from nexus.plans.target_families import (
     FamilyError,
     SlotObligation,
     activate,
+    default_registry,
     interpret_run,
     load_registry,
 )
+from nexus.plans.target_families import _REQUIRED
 
 FIXTURES = Path(__file__).parent / "fixtures" / "target_families"
 REGISTRY = FIXTURES / "registry"
@@ -48,6 +50,10 @@ REQUIRED_FIELDS = (
     "observed_refs",
     "environment_capabilities",
 )
+
+
+def test_the_required_field_list_here_is_the_loaders() -> None:
+    assert set(REQUIRED_FIELDS) == set(_REQUIRED)
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +189,18 @@ def test_invalid_field_values_are_refused(tmp_path: Path, field: str, bad: objec
     assert err.value.field == field
 
 
+def test_slot_kind_and_witness_on_missing_are_optional(tmp_path: Path) -> None:
+    data = copy.deepcopy(_lineage_v1())
+    del data["required_slots"][0]["kind"]
+    del data["witness_obligations"][0]["on_missing"]
+
+    declaration = _load_one(tmp_path, data).get(LINEAGE, 1)
+
+    assert declaration.required_slots[0] == SlotObligation(name="decision", kind=None)
+    assert declaration.required_slots[1].kind == "text"
+    assert declaration.witness_obligations[0].on_missing is None
+
+
 # --------------------------------------------------------------------------
 # 2. no recorded approval, no activation
 
@@ -224,6 +242,22 @@ def test_activating_a_non_candidate_is_refused(family: str, version: int) -> Non
 def test_activating_an_unknown_version_is_refused() -> None:
     with pytest.raises(FamilyError):
         activate(load_registry(REGISTRY), LINEAGE, 99)
+
+
+def test_activating_a_version_below_the_active_one_is_refused_as_a_rollback(tmp_path: Path) -> None:
+    older_candidate = _base(LINEAGE, "v2.toml")
+    older_candidate["family_version"] = 1  # a reviewed candidate numbered below the active v2
+    active_v2 = _lineage_v1()
+    active_v2["family_version"] = 2
+    root = _write_tree(tmp_path / "reg", {(LINEAGE, "v1.toml"): older_candidate, (LINEAGE, "v2.toml"): active_v2})
+    registry = load_registry(root)
+
+    with pytest.raises(ActivationRefused) as err:
+        activate(registry, LINEAGE, 1)
+
+    assert err.value.reason == "rollback-not-designed"
+    assert "rollback" in str(err.value)
+    assert registry.active(LINEAGE).family_version == 2
 
 
 # --------------------------------------------------------------------------
@@ -311,6 +345,8 @@ def test_a_run_reference_must_carry_a_positive_int_contract_version(bad: object)
         (lambda d: d["witness_obligations"][0].update(on_missing="preserved"), "witness_obligations[0].on_missing"),
         (lambda d: d["witness_obligations"][0].update(slot="not-a-slot"), "witness_obligations[0].slot"),
         (lambda d: d["required_slots"].append({"name": "decision", "kind": "text"}), "required_slots[2].name"),
+        (lambda d: d["witness_obligations"].append(dict(d["witness_obligations"][0])), "witness_obligations[1].kind"),
+        (lambda d: d["treatment_constraints"].append(dict(d["treatment_constraints"][0])), "treatment_constraints[1].name"),
         (lambda d: d.update(requird_slots=[]), "requird_slots"),
         (lambda d: d["required_slots"][0].update(extra="x"), "required_slots[0].extra"),
         (lambda d: d["approval"].pop("reviewer"), "approval.reviewer"),
@@ -354,7 +390,9 @@ def test_a_directory_name_that_disagrees_with_the_family_id_is_refused(tmp_path:
     assert err.value.field == "family_id"
 
 
-def test_a_duplicate_id_and_version_pair_is_refused(tmp_path: Path) -> None:
+def test_a_second_spelling_of_one_version_is_refused_as_a_stray_file(tmp_path: Path) -> None:
+    """A duplicate (id, version) pair cannot arise: the directory fixes the id, the filename
+    the version, and v01.toml is not a valid filename, so it never reaches a pair comparison."""
     root = _write_tree(
         tmp_path / "reg",
         {(LINEAGE, "v1.toml"): _lineage_v1(), (LINEAGE, "v01.toml"): _lineage_v1()},
@@ -363,8 +401,8 @@ def test_a_duplicate_id_and_version_pair_is_refused(tmp_path: Path) -> None:
     with pytest.raises(FamilyDeclarationError) as err:
         load_registry(root)
 
-    assert "duplicate" in str(err.value)
-    assert "v1.toml" in str(err.value) and "v01.toml" in str(err.value)
+    assert err.value.path.name == "v01.toml"
+    assert err.value.field == "<file>"
 
 
 def test_two_active_versions_of_one_family_are_refused(tmp_path: Path) -> None:
@@ -405,6 +443,28 @@ def test_a_stray_file_in_a_family_directory_is_refused_not_skipped(tmp_path: Pat
     assert err.value.path.name == stray
 
 
+def test_dotfiles_are_ignored_at_the_root_and_in_family_directories(tmp_path: Path) -> None:
+    root = _write_tree(tmp_path / "reg", {(LINEAGE, "v1.toml"): _lineage_v1()})
+    (root / ".DS_Store").write_bytes(b"\x00")
+    (root / LINEAGE / ".DS_Store").write_bytes(b"\x00")
+
+    assert load_registry(root).family_ids() == (LINEAGE,)
+
+
+@pytest.mark.parametrize("dotfile", [None, ".DS_Store"])
+def test_a_family_directory_without_declarations_is_refused(tmp_path: Path, dotfile: str | None) -> None:
+    root = _write_tree(tmp_path / "reg", {(LINEAGE, "v1.toml"): _lineage_v1()})
+    (root / "empty-family").mkdir()
+    if dotfile:
+        (root / "empty-family" / dotfile).write_bytes(b"\x00")
+
+    with pytest.raises(FamilyDeclarationError) as err:
+        load_registry(root)
+
+    assert err.value.path.name == "empty-family"
+    assert err.value.field == "<dir>"
+
+
 def test_a_missing_registry_root_is_refused(tmp_path: Path) -> None:
     with pytest.raises(FamilyDeclarationError):
         load_registry(tmp_path / "does-not-exist")
@@ -417,3 +477,7 @@ def test_the_packaged_registry_tree_loads() -> None:
 
     for family_id in registry.family_ids():
         assert registry.versions(family_id)
+    assert default_registry() == registry
+    # non-vacuity: the packaged tree is empty until nexus-z1d0l.2.5, so the loop above
+    # proves nothing by itself; this proves the same loader reads a non-empty tree.
+    assert load_registry(REGISTRY).declarations

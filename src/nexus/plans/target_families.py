@@ -13,8 +13,9 @@ generic route with no one told.)
 
 Invariants this module enforces, each pinned by ``tests/test_target_families.py``:
 
-* a declaration carries every field below, a positive non-bool ``family_version``
-  and every vocabulary literal inside the checked tables of
+* a declaration carries every required field, a positive non-bool ``family_version``
+  and every vocabulary literal it does state (a slot's ``kind`` and a witness
+  obligation's ``on_missing`` are optional) inside the checked tables of
   :mod:`nexus.tables.target_family_vocab`;
 * a declaration whose status is ``active`` or ``retired`` carries a recorded
   approval, and :func:`activate` refuses a candidate without one (both read the
@@ -65,7 +66,7 @@ __all__ = [
 _ID_RE: Final = re.compile(r"[a-z][a-z0-9_-]*")
 #: An immutable revision reference: a full git object id (SHA-1 or SHA-256).
 _REVISION_RE: Final = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-_FILENAME_RE: Final = re.compile(r"v(\d+)\.toml")
+_FILENAME_RE: Final = re.compile(r"v([1-9][0-9]*)\.toml")
 
 _REQUIRED: Final[tuple[str, ...]] = (
     "family_id",
@@ -102,23 +103,25 @@ class FamilyDeclarationError(FamilyError):
 class ActivationRefused(FamilyError):
     """The lifecycle table refused an activation; ``reason`` is its refusal code."""
 
-    def __init__(self, family_id: str, family_version: int, reason: str) -> None:
-        super().__init__(f"cannot activate {family_id} v{family_version}: {reason}")
+    def __init__(self, family_id: str, family_version: int, reason: str, detail: str = "") -> None:
+        super().__init__(f"cannot activate {family_id} v{family_version}: {reason}" + (f" ({detail})" if detail else ""))
         self.reason = reason
 
 
 @dataclass(frozen=True)
 class SlotObligation:
     name: str
-    kind: str
+    #: One of the slot-kinds table, or None: the RDR fixes no slot taxonomy, so a family may omit it.
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
 class WitnessObligation:
     slot: str
     kind: str
-    #: The obligation state a missing witness degrades to (never ``preserved``).
-    on_missing: str
+    #: The obligation state a missing witness degrades to (never ``preserved``), or None:
+    #: RDR-189 P4 picks the state by cause, so a family may leave it undeclared.
+    on_missing: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,8 +221,10 @@ def _strings(value: object, path: Path, field: str) -> tuple[str, ...]:
     return tuple(_text(item, path, f"{field}[{i}]") for i, item in enumerate(value))
 
 
-def _entries(value: object, keys: tuple[str, ...], path: Path, field: str) -> list[dict[str, Any]]:
-    """A list of tables each carrying exactly *keys*."""
+def _entries(
+    value: object, keys: tuple[str, ...], path: Path, field: str, optional: tuple[str, ...] = ()
+) -> list[dict[str, Any]]:
+    """A list of tables each carrying every key of *keys* and, optionally, those of *optional*."""
     if not isinstance(value, list):
         raise FamilyDeclarationError(path, field, f"must be a list of tables, got {type(value).__name__}")
     out: list[dict[str, Any]] = []
@@ -231,8 +236,10 @@ def _entries(value: object, keys: tuple[str, ...], path: Path, field: str) -> li
             if key not in item:
                 raise FamilyDeclarationError(path, f"{here}.{key}", "missing required field")
         for key in item:
-            if key not in keys:
-                raise FamilyDeclarationError(path, f"{here}.{key}", f"unknown field (allowed: {list(keys)})")
+            if key not in keys and key not in optional:
+                raise FamilyDeclarationError(
+                    path, f"{here}.{key}", f"unknown field (allowed: {list(keys) + list(optional)})"
+                )
         out.append(item)
     return out
 
@@ -282,31 +289,40 @@ def _parse_declaration(data: Mapping[str, Any], path: Path) -> FamilyDeclaration
         raise FamilyDeclarationError(path, "revision", f"must be a full lowercase git object id, got {revision!r}")
 
     slots: list[SlotObligation] = []
-    for i, entry in enumerate(_entries(data["required_slots"], ("name", "kind"), path, "required_slots")):
+    for i, entry in enumerate(_entries(data["required_slots"], ("name",), path, "required_slots", ("kind",))):
         name = _text(entry["name"], path, f"required_slots[{i}].name")
         if any(s.name == name for s in slots):
             raise FamilyDeclarationError(path, f"required_slots[{i}].name", f"duplicate slot {name!r}")
-        slots.append(SlotObligation(name, _one_of(entry["kind"], vocab.SLOT_KINDS, path, f"required_slots[{i}].kind")))
+        kind = _one_of(entry["kind"], vocab.SLOT_KINDS, path, f"required_slots[{i}].kind") if "kind" in entry else None
+        slots.append(SlotObligation(name, kind))
     if not slots:
         raise FamilyDeclarationError(path, "required_slots", "must declare at least one slot")
 
-    witnesses = tuple(
-        WitnessObligation(
-            slot=_one_of(e["slot"], tuple(s.name for s in slots), path, f"witness_obligations[{i}].slot"),
-            kind=_one_of(e["kind"], vocab.WITNESS_KINDS, path, f"witness_obligations[{i}].kind"),
-            on_missing=_one_of(e["on_missing"], vocab.MISSING_WITNESS_STATES, path, f"witness_obligations[{i}].on_missing"),
+    witnesses: list[WitnessObligation] = []
+    for i, e in enumerate(
+        _entries(data["witness_obligations"], ("slot", "kind"), path, "witness_obligations", ("on_missing",))
+    ):
+        here = f"witness_obligations[{i}]"
+        witness = WitnessObligation(
+            slot=_one_of(e["slot"], tuple(s.name for s in slots), path, f"{here}.slot"),
+            kind=_one_of(e["kind"], vocab.WITNESS_KINDS, path, f"{here}.kind"),
+            on_missing=(
+                _one_of(e["on_missing"], vocab.MISSING_WITNESS_STATES, path, f"{here}.on_missing")
+                if "on_missing" in e
+                else None
+            ),
         )
-        for i, e in enumerate(
-            _entries(data["witness_obligations"], ("slot", "kind", "on_missing"), path, "witness_obligations")
-        )
-    )
-    constraints = tuple(
-        Constraint(
-            name=_text(e["name"], path, f"treatment_constraints[{i}].name"),
-            rule=_text(e["rule"], path, f"treatment_constraints[{i}].rule"),
-        )
-        for i, e in enumerate(_entries(data["treatment_constraints"], ("name", "rule"), path, "treatment_constraints"))
-    )
+        if any((w.slot, w.kind) == (witness.slot, witness.kind) for w in witnesses):
+            raise FamilyDeclarationError(
+                path, f"{here}.kind", f"duplicate witness obligation ({witness.slot!r}, {witness.kind!r})"
+            )
+        witnesses.append(witness)
+    constraints: list[Constraint] = []
+    for i, e in enumerate(_entries(data["treatment_constraints"], ("name", "rule"), path, "treatment_constraints")):
+        name = _text(e["name"], path, f"treatment_constraints[{i}].name")
+        if any(c.name == name for c in constraints):
+            raise FamilyDeclarationError(path, f"treatment_constraints[{i}].name", f"duplicate constraint {name!r}")
+        constraints.append(Constraint(name, _text(e["rule"], path, f"treatment_constraints[{i}].rule")))
     approval = _parse_approval(data["approval"], path) if "approval" in data else None
 
     declaration = FamilyDeclaration(
@@ -316,8 +332,8 @@ def _parse_declaration(data: Mapping[str, Any], path: Path) -> FamilyDeclaration
         revision=revision,
         required_slots=tuple(slots),
         facets=_strings(data["facets"], path, "facets"),
-        treatment_constraints=constraints,
-        witness_obligations=witnesses,
+        treatment_constraints=tuple(constraints),
+        witness_obligations=tuple(witnesses),
         exemplars=_annotations(data["exemplars"], path, "exemplars"),
         counterexamples=_annotations(data["counterexamples"], path, "counterexamples"),
         disagreements=_annotations(data["disagreements"], path, "disagreements"),
@@ -359,26 +375,26 @@ def _load_file(path: Path) -> FamilyDeclaration:
 def _load_tree(root: Path) -> FamilyRegistry:
     if not root.is_dir():
         raise FamilyDeclarationError(root, "<root>", "registry directory does not exist")
-    seen: dict[tuple[str, int], Path] = {}
     declarations: list[FamilyDeclaration] = []
     paths: dict[tuple[str, int], Path] = {}
-    for entry in sorted(root.iterdir()):
+    # Dotfiles (.DS_Store and the like) are ignored everywhere. Everything else must be a
+    # family directory, README.md at the root, or v<N>.toml inside a family directory. A
+    # duplicate (family_id, family_version) cannot arise: the directory fixes the id and the
+    # filename the version, and a second spelling such as v01.toml is refused as a stray file.
+    for entry in sorted(p for p in root.iterdir() if not p.name.startswith(".")):
         if entry.is_file():
             if entry.name != "README.md":
                 raise FamilyDeclarationError(entry, "<file>", "only family directories (and README.md) belong at the registry root")
             continue
-        for path in sorted(entry.iterdir()):
+        files_here = sorted(p for p in entry.iterdir() if not p.name.startswith("."))
+        if not files_here:
+            raise FamilyDeclarationError(entry, "<dir>", "a family directory holds no declarations")
+        for path in files_here:
             if not path.is_file() or not _FILENAME_RE.fullmatch(path.name):
                 raise FamilyDeclarationError(path, "<file>", "a family directory holds only v<N>.toml declarations")
             declaration = _load_file(path)
-            key = (declaration.family_id, declaration.family_version)
-            if key in seen:
-                raise FamilyDeclarationError(
-                    path, "family_version", f"duplicate {key!r}, already declared in {seen[key].name}"
-                )
-            seen[key] = path
             declarations.append(declaration)
-            paths[key] = path
+            paths[(declaration.family_id, declaration.family_version)] = path
     for family_id in sorted({d.family_id for d in declarations}):
         active = [d for d in declarations if d.family_id == family_id and d.status == "active"]
         if len(active) > 1:
@@ -417,7 +433,8 @@ def activate(registry: FamilyRegistry, family_id: str, family_version: int) -> F
     active version of that family retired.
 
     The lifecycle table decides: a candidate without a recorded approval, or any
-    non-candidate, raises :class:`ActivationRefused` and changes nothing. The
+    non-candidate, raises :class:`ActivationRefused` and changes nothing; so does a
+    version below the currently active one (rollback is not designed). The
     retired version stays in the registry, unchanged but for its status, so a
     run that recorded it still reads its original obligations.
     """
@@ -426,6 +443,13 @@ def activate(registry: FamilyRegistry, family_id: str, family_version: int) -> F
     if kind == "refuse":
         raise ActivationRefused(family_id, family_version, outcome)
     previous = registry.active(family_id)
+    if previous is not None and family_version < previous.family_version:
+        raise ActivationRefused(
+            family_id,
+            family_version,
+            "rollback-not-designed",
+            f"v{previous.family_version} is active; activating an older version is a rollback, which is not designed",
+        )
     changed: dict[int, FamilyDeclaration] = {family_version: replace(target, status=outcome)}
     if previous is not None:
         retire_kind, retired = vocab.transition(previous.status, "retire", previous.approval_state)
@@ -445,6 +469,8 @@ def interpret_run(registry: FamilyRegistry, run: Mapping[str, Any]) -> FamilyDec
 
     Never reroutes to the latest or the active version. *run* must carry
     ``family_id``, ``family_version`` and a positive non-bool ``contract_version``.
+    ``contract_version`` is validated but not yet used to select a declaration:
+    declarations carry none, and P3 decides where it lives.
     """
     family_id = run.get("family_id")
     if not isinstance(family_id, str) or not family_id:

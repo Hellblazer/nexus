@@ -1,7 +1,8 @@
 # RDR-189 P2 (nexus-z1d0l.2.3): the per-obligation states of RDR-189 P4, one
 # row each, in the RDR's order. A witness obligation in a family declaration
-# names the state a missing witness degrades to (`on_missing`); this table
-# says which states may be named. RDR-189: "no unsupported obligation may
+# may name the state a missing witness degrades to (`on_missing`, optional:
+# P4 picks the state by cause when it is omitted); this table says which
+# states may be named. RDR-189: "no unsupported obligation may
 # become `preserved`", so a missing witness can never be declared to leave an
 # obligation pending, preserved or approximated.
 #

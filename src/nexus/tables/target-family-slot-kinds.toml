@@ -1,9 +1,10 @@
 # RDR-189 P2 (nexus-z1d0l.2.3): the kinds of value a family's required slot
 # holds. Load it through nexus.tables.target_family_vocab. A family
-# declaration's `required_slots[].kind` must be one of these rows; the loader
-# refuses any other literal. The set is deliberately small: the RDR derives the
-# families from observed evidence and does not fix a slot taxonomy, so a new
-# kind is a reviewed change to this table, never a free string in a declaration.
+# declaration's `required_slots[].kind` is OPTIONAL (the RDR fixes no slot
+# taxonomy); when present it must be one of these rows and the loader refuses
+# any other literal. THIS SET IS A SEED, not a decision: P2.4 revises it once
+# real families exist. Until then a new kind is a reviewed change to this
+# table, never a free string in a declaration.
 #
 #   text       free prose the answer states
 #   entity     a named thing (a module, an RDR, a person, a collection)
