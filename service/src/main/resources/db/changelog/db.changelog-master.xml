@@ -2004,6 +2004,14 @@
     <include file="db/changelog/vectors-048-route-b-manifest-prefilter.xml"/>
 
     <!--
+        Bead nexus-qpt52 (RDR-236 Phase 3, engine; follow-up of nexus-6pfgb.41): the per-occurrence object of the thirteen functions
+        that carry it gains bib_year, bib_authors, bib_venue, bib_citation_count, indexed_at and content_type_shown, so route (b)
+        answers every key ManifestLabelStage answers, positive and negative, in SQL. Thirteen CREATE OR REPLACE FUNCTION, signatures
+        and grants kept, no DATA EFFECT. After vectors-048 (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-049-route-b-exact-keys.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

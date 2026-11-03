@@ -12,8 +12,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * nexus-6pfgb.41: how a route (b) {@code where} is split between the chunk-row containment ({@code p_where}) and the
- * manifest predicate ({@code p_manifest_where} / {@code p_manifest_path}) of the nine route (b) functions.
+ * nexus-6pfgb.41 and nexus-qpt52: how a route (b) {@code where} is split between the chunk-row containment ({@code
+ * p_where}) and the manifest predicate ({@code p_manifest_where} / {@code p_manifest_path}) of the nine route (b)
+ * functions. Every key {@link ManifestLabelStage} answers leaves the containment, whatever its operator; only a key
+ * the stage does not answer (a chunk-row key) stays in it.
  */
 class RouteBWhereTest {
 
@@ -48,8 +50,9 @@ class RouteBWhereTest {
 
         assertThat(rb.containment()).isNull();
         assertThat(rb.hasManifest()).isTrue();
-        assertThat(rb.manifestContainment().data()).isEqualTo("{\"source_author\":\"Alice\"}");
-        assertThat(rb.manifestPath()).isNull();
+        // nexus-qpt52: the exact form is a jsonpath only (a containment is type-strict, the stage is not)
+        assertThat(rb.manifestContainment()).isNull();
+        assertThat(rb.manifestPath()).isEqualTo("exists($.\"source_author\" ? (@.string() == \"Alice\"))");
     }
 
     @Test
@@ -57,7 +60,7 @@ class RouteBWhereTest {
         var rb = PgVectorRepository.routeBWhere(where("lang", "en", "section_type", "body", "title", "T"));
 
         assertThat(rb.containment().data()).isEqualTo("{\"lang\":\"en\"}");
-        assertThat(rb.manifestContainment().data()).contains("\"section_type\":\"body\"").contains("\"title\":\"T\"");
+        assertThat(rb.manifestPath()).contains("\"section_type\"").contains("\"title\"");
     }
 
     @Test
@@ -70,16 +73,43 @@ class RouteBWhereTest {
     }
 
     @Test
-    void aKeyThatHasNoSqlForm_staysInTheContainment_neverDropped() {
-        // $ne is not compiled (negative operators stay with the stage, and route (b) has no stage), bib_year is not
-        // a compiled key at all. Both keep the retired meaning: a containment.
-        var rb = PgVectorRepository.routeBWhere(where("section_type", where("$ne", "body")));
-        assertThat(rb.hasManifest()).isFalse();
-        assertThat(rb.containment().data()).isEqualTo("{\"section_type\":{\"$ne\":\"body\"}}");
+    void aNegativeOperatorOrAKeyRoute_bDidNotAnswerBefore_nowLeavesTheContainmentToo() {
+        // nexus-qpt52. These stayed in the containment before: an operator map is never contained in a chunk row, so
+        // $ne matched nothing, and bib_year matched the last writer's row.
+        var ne = PgVectorRepository.routeBWhere(where("section_type", where("$ne", "body")));
+        assertThat(ne.containment()).isNull();
+        assertThat(ne.manifestPath()).isEqualTo("!exists($.\"section_type\" ? (@.string() == \"body\"))");
 
-        var mixed = PgVectorRepository.routeBWhere(where("bib_year", 2020, "source_author", "Alice"));
-        assertThat(mixed.containment().data()).isEqualTo("{\"bib_year\":2020}");
-        assertThat(mixed.manifestContainment().data()).isEqualTo("{\"source_author\":\"Alice\"}");
+        var mixed = PgVectorRepository.routeBWhere(where("bib_year", 2020, "source_author", "Alice", "lang", "en"));
+        assertThat(mixed.containment().data()).isEqualTo("{\"lang\":\"en\"}");
+        assertThat(mixed.manifestPath()).contains("\"bib_year\"").contains("\"source_author\"").contains(" && ");
+
+        for (String key : ManifestLabelStage.ANSWERED_KEYS) {
+            for (String operator : List.of("$eq", "$ne", "$gte", "$lt")) {
+                var rb = PgVectorRepository.routeBWhere(where(key, where(operator, "x")));
+                assertThat(rb.containment()).as("%s %s", key, operator).isNull();
+                assertThat(rb.hasManifest()).as("%s %s", key, operator).isTrue();
+            }
+        }
+    }
+
+    @Test
+    void theBoundedCount_isSkippedOnlyForANegativeOperatorOnContentType() {
+        // route (a)'s content_type array, which manifest_qualifying_hits builds, lists more words than route (b)'s, so a
+        // negation over it admits fewer occurrences than route (b) returns and the count could fall below the page.
+        assertThat(PgVectorRepository.routeBWhere(where("content_type", where("$ne", "pdf"))).countable()).isFalse();
+        assertThat(PgVectorRepository.routeBWhere(where("content_type", where("$nin", List.of("pdf")))).countable()).isFalse();
+        assertThat(PgVectorRepository.routeBWhere(where("content_type", "pdf")).countable()).isTrue();
+        assertThat(PgVectorRepository.routeBWhere(where("section_type", where("$ne", "x"))).countable()).isTrue();
+        assertThat(PgVectorRepository.routeBWhere(null).countable()).isTrue();
+    }
+
+    @Test
+    void aChunkRowKey_staysInTheContainment_neverDropped() {
+        // lang is not a key the stage answers: an operator on it is a containment as before.
+        var rb = PgVectorRepository.routeBWhere(where("lang", where("$ne", "en")));
+        assertThat(rb.hasManifest()).isFalse();
+        assertThat(rb.containment().data()).isEqualTo("{\"lang\":{\"$ne\":\"en\"}}");
     }
 
     @Test

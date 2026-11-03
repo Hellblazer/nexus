@@ -4275,11 +4275,11 @@ public final class PgVectorRepository {
      * @param corpus      catalog corpus filter; null = no filter
      * @param subtree     tumbler-prefix scope — DESCENDANTS only (root-exclusive, matching
      *                    {@code cat.descendants()}); also filters alias rows; null = no filter
-     * @param where       equality predicates; null/empty = no filter. A document key or a label key
-     *                    ({@code source_author}, {@code title}, {@code section_type} and the rest
-     *                    {@link ManifestPushdown} compiles) is answered per OWNING DOCUMENT from the catalog
-     *                    manifest (nexus-6pfgb.41, {@link #routeBWhere}); every other key is JSONB containment on
-     *                    the chunk row, as before
+     * @param where       predicates; null/empty = no filter. Every key {@link ManifestLabelStage} answers (a
+     *                    document key or a label key: {@code source_author}, {@code title}, {@code section_type},
+     *                    {@code bib_year}, {@code indexed_at} and the rest), with any operator, is answered per
+     *                    OWNING DOCUMENT from the catalog manifest (nexus-6pfgb.41, nexus-qpt52, {@link
+     *                    #routeBWhere}); every other key is JSONB containment on the chunk row, as before
      */
     /** 8-arg back-compat (nexus-889ff): delegates with null subtree/where; discards tokens. */
     public List<Map<String, Object>> searchMetadataScoped(
@@ -4821,7 +4821,9 @@ public final class PgVectorRepository {
      * @param colls the collection names, which also name the statement in the re-run's log line
      * @param model the collections' embedding model, for the count
      * @param countable whether {@code fn} returns at most one row per (manifest occurrence, chunk row), so the
-     *        bounded count may skip the re-run
+     *        bounded count may skip the re-run; also false, through {@link RouteBWhere#countable}, for a predicate
+     *        whose count could fall below the rows (a negative operator on {@code content_type}, see
+     *        {@link #routeBWhere})
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
             String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, String[] colls, String model,
@@ -4842,7 +4844,7 @@ public final class PgVectorRepository {
             PgSession.setSearchPlanCacheMode(ctx);
             return manifestPredicate
                 ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", colls),
-                                  countable
+                                  countable && rb.countable()
                                       ? manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null,
                                                                                      rb.manifest()), model, tenant)
                                       : null)
@@ -8143,7 +8145,11 @@ FROM scope s
      * bound as {@code p_manifest_where} / {@code p_manifest_path} and tested on the joined row's per-occurrence
      * object ({@code vectors-048}, the object {@code manifest_search_<dim>} builds).
      */
-    record RouteBWhere(JSONB containment, ManifestPushdown.Plan manifest) {
+    record RouteBWhere(JSONB containment, ManifestPushdown.Plan manifest, boolean countable) {
+
+        RouteBWhere(JSONB containment, ManifestPushdown.Plan manifest) {
+            this(containment, manifest, true);
+        }
 
         boolean hasManifest() {
             return manifest != null;
@@ -8159,11 +8165,20 @@ FROM scope s
     }
 
     /**
-     * Split a route (b) {@code where} (nexus-6pfgb.41). The label and document keys {@link ManifestPushdown} can run in
-     * SQL ({@link ManifestPushdown#pushable}) leave the containment and become the manifest plan; every other key
-     * stays in the containment exactly as before, so a key route (b) never answered per occurrence (a negative
-     * operator, a key outside the answered set) is neither dropped nor widened. Route (b) has no stage after the
-     * search that could judge such a key, which is why unlike route (a) it cannot hand them off.
+     * Split a route (b) {@code where} (nexus-6pfgb.41, completed by nexus-qpt52). Every key {@link ManifestLabelStage}
+     * answers leaves the containment and becomes the manifest plan, EXACTLY: {@link ManifestPushdown#ofExact} compiles
+     * each predicate, a negative operator and a range on any answered key included, to the jsonpath that is true on an
+     * occurrence's object when {@link ManifestLabelStage#testValue} is. Route (b) has no stage after the search that
+     * could judge a key, which is why it cannot hand one off the way route (a) does; before nexus-qpt52 a key the SQL
+     * did not compile (a negative operator, {@code indexed_at}, {@code bib_year}, {@code bib_venue}, {@code
+     * bib_authors}, {@code bib_citation_count}) stayed in the containment, where it matched the last writer's chunk row
+     * or, as an operator map, nothing at all. A key outside the answered set (a chunk-row key) stays in the
+     * containment, as before.
+     *
+     * <p>{@code countable} is false when the bounded count of {@code manifest_qualifying_hits} could fall below the
+     * rows the function returns: the count builds route (a)'s {@code content_type} array, which lists more words than
+     * route (b)'s, so a negative operator on {@code content_type} admits fewer occurrences there than here (an
+     * under-count would skip a re-run a starved page needs).
      *
      * <p>The split reads the where as route (a) does ({@link ManifestLabelStage#split}), so an operator the stage
      * refuses is refused here with the same {@link IllegalArgumentException}.
@@ -8173,23 +8188,18 @@ FROM scope s
             return new RouteBWhere(null, null);
         }
         var split = ManifestLabelStage.split(where);
-        ManifestPushdown.Plan plan = split.active() ? ManifestPushdown.of(split.labels()) : null;
-        if (plan == null) {
+        if (!split.active()) {
             return new RouteBWhere(JSONB.jsonb(toJson(where)), null);
         }
-        Set<String> pushed = new HashSet<>();
-        for (ManifestLabelStage.Predicate p : split.labels()) {
-            if (ManifestPushdown.pushable(p)) {
-                pushed.add(p.key());
-            }
-        }
+        ManifestPushdown.Plan plan = ManifestPushdown.ofExact(split.labels());
         Map<String, Object> rest = new LinkedHashMap<>();
         for (Map.Entry<String, Object> e : where.entrySet()) {
-            if (!pushed.contains(e.getKey())) {
+            if (!ManifestLabelStage.ANSWERED_KEYS.contains(e.getKey())) {
                 rest.put(e.getKey(), e.getValue());
             }
         }
-        return new RouteBWhere(rest.isEmpty() ? null : JSONB.jsonb(toJson(rest)), plan);
+        return new RouteBWhere(rest.isEmpty() ? null : JSONB.jsonb(toJson(rest)), plan,
+            !ManifestPushdown.negatesContentType(split.labels()));
     }
 
     /**

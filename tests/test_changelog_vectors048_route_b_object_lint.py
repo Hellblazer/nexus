@@ -20,6 +20,10 @@ and allows exactly one difference: route (b)'s ``content_type`` key is the stage
 because its stage judges the key afterwards.
 
 Kill-controls mutate a copy of one body and require the comparison to go red.
+
+nexus-qpt52: vectors-049-1 replaces all thirteen bodies (the nine below included) with the object plus six keys
+(bib_year, bib_authors, bib_venue, bib_citation_count, indexed_at, content_type_shown). The signature and post-condition
+tests keep reading vectors-048-1, which still owns them; the object tests read vectors-049-1, the live definitions.
 """
 from __future__ import annotations
 
@@ -68,9 +72,20 @@ def _route_b_sql() -> str:
     return _changeset_sql(CHANGELOG_DIR / "vectors-048-route-b-manifest-prefilter.xml", "vectors-048-1")
 
 
+def _object_sql() -> str:
+    """The nine bodies as they are live: vectors-049-1 (nexus-qpt52) replaced vectors-048-1's."""
+    return _changeset_sql(CHANGELOG_DIR / "vectors-049-route-b-exact-keys.xml", "vectors-049-1")
+
+
 def _reference_object() -> str:
     """The first body's object: the nine are held to each other, the live comparison is ManifestObjectParityTest."""
-    return _object(_function(_route_b_sql(), _NINE[0]))
+    return _object(_function(_object_sql(), _NINE[0]))
+
+
+def _content_type_key(obj: str) -> str:
+    """The content_type key of an object: from its own start to the tags key."""
+    start = obj.index("'content_type', CASE")
+    return obj[start:obj.index("'tags', CASE")]
 
 
 _OTHER_DIM_TOKEN = {
@@ -112,9 +127,13 @@ def drift(sql: str, reference: str) -> dict[str, list[str]]:
 
 
 def test_the_reference_object_is_the_full_key_list():
-    # A reference that lost keys would make every copy "agree" with it; pin its width (17 keys, vectors-044 and -045).
+    # A reference that lost keys would make every copy "agree" with it; pin its width (17 keys, vectors-044 and -045,
+    # and the six of nexus-qpt52: bib_year, bib_authors, bib_venue, bib_citation_count, indexed_at, content_type_shown).
     ref = _reference_object()
-    assert ref.count("nexus.manifest_names_key(") == 17
+    # 17 in the first object, 6 in the second, and one for each of the six in the CASE that guards the second.
+    assert ref.count("nexus.manifest_names_key(") == 29
+    for key in ("bib_year", "bib_authors", "bib_venue", "bib_citation_count", "indexed_at", "content_type_shown"):
+        assert f"'{key}', CASE" in ref, key
 
 
 def test_the_reference_content_type_is_the_stages_exact_rule_not_the_over_admitting_array():
@@ -122,15 +141,17 @@ def test_the_reference_content_type_is_the_stages_exact_rule_not_the_over_admitt
     # stage judges the key afterwards). Route (b) has no stage, so its array must be the exact words: the format words
     # pdf and markdown come from the derived format, every other word from the catalog type, each falling back to the
     # chunk row only where the catalog gives none.
-    ref = _reference_object()
+    ref = _content_type_key(_reference_object())
     assert "f.fmt IN ('pdf', 'markdown')" in ref
     assert "d.content_type NOT IN ('pdf', 'markdown')" in ref
     assert "f.fmt," not in ref, "the over-admitting array of manifest_search_<dim> is back"
     assert "COALESCE(c.metadata ->> 'content_type', '')" not in ref
+    # nexus-qpt52: a document with no type, no format and no row value answers "" (the stage's unlabelled value).
+    assert "CASE WHEN f.fmt IS NULL THEN '' END" in ref
 
 
 def test_all_nine_bodies_repeat_the_manifest_search_object():
-    assert drift(_route_b_sql(), _reference_object()) == {}
+    assert drift(_object_sql(), _reference_object()) == {}
 
 
 def test_each_function_has_exactly_one_signature_after_the_drops():
@@ -157,7 +178,7 @@ def test_the_post_condition_counts_the_nine():
 
 
 def test_kill_control_a_missing_key_in_one_body_is_caught():
-    sql = _route_b_sql()
+    sql = _object_sql()
     body = _function(sql, "search_graph_hop_768")
     mutated_body = re.sub(r"'frecency_score', CASE.*?END END\s*", "", body, count=1, flags=re.DOTALL)
     # the removed key was the last one, so the trailing comma before it has to go for the SQL to stay well formed;
@@ -168,7 +189,7 @@ def test_kill_control_a_missing_key_in_one_body_is_caught():
 
 
 def test_kill_control_a_missing_conjunct_is_caught():
-    sql = _route_b_sql()
+    sql = _object_sql()
     body = _function(sql, "search_aspect_scoped_1024")
     mutated = body.replace("       AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)\n", "")
     assert mutated != body
@@ -178,7 +199,7 @@ def test_kill_control_a_missing_conjunct_is_caught():
 
 
 def test_kill_control_another_dimension_in_one_body_is_caught():
-    sql = _route_b_sql()
+    sql = _object_sql()
     body = _function(sql, "search_metadata_scoped_384")
     mutated = body.replace("c.embedding_384", "c.embedding_768")
     assert mutated != body
@@ -188,7 +209,7 @@ def test_kill_control_another_dimension_in_one_body_is_caught():
 
 
 def test_kill_control_a_content_type_that_drifts_in_one_body_is_caught():
-    sql = _route_b_sql()
+    sql = _object_sql()
     body = _function(sql, "search_graph_hop_1024")
     mutated = body.replace("d.content_type NOT IN ('pdf', 'markdown')", "d.content_type IN ('pdf', 'markdown')")
     assert mutated != body
@@ -198,7 +219,7 @@ def test_kill_control_a_content_type_that_drifts_in_one_body_is_caught():
 
 def test_every_body_names_only_its_own_dimension():
     # The live self-consistency check: nine bodies, three dims, no cross-dimension token in any.
-    sql = _route_b_sql()
+    sql = _object_sql()
     for name in _NINE:
         dim = int(name.rsplit("_", 1)[1])
         assert _OTHER_DIM_TOKEN[dim].search(_function(sql, name)) is None, name

@@ -362,6 +362,15 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheRouteBManifestKeysCapability() throws Exception {
+        // nexus-qpt52: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
+        // handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("route_b_manifest_keys_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void version_throughTheRealHandler_advertisesTheChashAllowCapability() throws Exception {
         // nexus-jypmj: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
         // handler's body actually calls it.

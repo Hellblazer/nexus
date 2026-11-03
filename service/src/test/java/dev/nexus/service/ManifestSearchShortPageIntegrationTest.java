@@ -227,17 +227,34 @@ class ManifestSearchShortPageIntegrationTest {
         return rows.stream().map(r -> (String) r.get("id")).collect(Collectors.toList());
     }
 
-    /** Five timed searches; prints the rows of the last and the median and minimum milliseconds, for the bead. */
+    /**
+     * Timed searches after a warm-up; prints the rows of the last and the median and minimum milliseconds (to the
+     * tenth), for the bead. nexus-qpt52 raised the sample from 5 to 31 and made the clock read fractional: the common
+     * label is an 18 ms measurement and a plan-time cost of a millisecond or two is what it is looking for.
+     */
     private List<Map<String, Object>> timed(String label, Map<String, Object> where) {
-        long[] ms = new long[5];
-        List<Map<String, Object>> rows = null;
-        for (int i = 0; i < ms.length; i++) {
-            long start = System.nanoTime();
-            rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where);
-            ms[i] = (System.nanoTime() - start) / 1_000_000;
+        return timedCall(label, () -> vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where));
+    }
+
+    /** The same, over a route (b) family (nexus-qpt52: its object grew by six keys, paid per call in plan time). */
+    private List<Map<String, Object>> timedB(String label, String family, Map<String, Object> where) {
+        return timedCall(label, () -> routeB(vec, family, where));
+    }
+
+    private List<Map<String, Object>> timedCall(String label, java.util.function.Supplier<List<Map<String, Object>>> call) {
+        for (int i = 0; i < 3; i++) {
+            call.get();
         }
-        java.util.Arrays.sort(ms);
-        System.out.println("A8-SPIKE " + label + ": rows=" + rows.size() + " median_ms=" + ms[2] + " min_ms=" + ms[0]
+        long[] ns = new long[31];
+        List<Map<String, Object>> rows = null;
+        for (int i = 0; i < ns.length; i++) {
+            long start = System.nanoTime();
+            rows = call.get();
+            ns[i] = System.nanoTime() - start;
+        }
+        java.util.Arrays.sort(ns);
+        System.out.println("A8-SPIKE " + label + ": rows=" + rows.size()
+            + String.format(java.util.Locale.ROOT, " median_ms=%.1f min_ms=%.1f", ns[ns.length / 2] / 1e6, ns[0] / 1e6)
             + " exactFallbacks=" + PgVectorRepository.exactFallbackCount() + " shortPageReruns="
             + PgVectorRepository.shortPageRerunCount());
         return rows;
@@ -263,6 +280,18 @@ class ManifestSearchShortPageIntegrationTest {
         timed("chunk-row predicate lang=rare (the in-index filter before the EXISTS), default budget", lang);
         PgSession.overrideScanBudgetForTests(1000, 100);
         timed("chunk-row predicate lang=rare, scan cap 1000 tuples", lang);
+        PgSession.resetScanBudgetForTests();
+        // nexus-qpt52: route (b) on the same fixture. The common label is the plan-time probe: the object grew by six
+        // keys, each folded away by manifest_names_key, and the engine inlines the body on every call.
+        for (String family : List.of("metadata", "aspect", "graph")) {
+            timedB("route (b) " + family + ": common label (body)", family, body);
+        }
+        Map<String, Object> notBody = new LinkedHashMap<>();
+        notBody.put("section_type", Map.of("$ne", "appendix-x"));
+        timedB("route (b) metadata: common label negated (section_type != appendix-x)", "metadata", notBody);
+        Map<String, Object> year = new LinkedHashMap<>();
+        year.put("bib_year", Map.of("$gte", 2000));
+        timedB("route (b) metadata: bib_year >= 2000 (no document is enriched, so none qualifies)", "metadata", year);
     }
 
     private static long reruns() {

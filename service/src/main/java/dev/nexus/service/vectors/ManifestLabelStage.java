@@ -139,9 +139,16 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *
  * <p><b>Known cost.</b> The search is cut at {@link #OVERFETCH} times the limit before this stage
  * filters. A positive predicate {@link ManifestPushdown} carries into the search no longer starves on it (the
- * nexus-p89h4 fix). A predicate it does not carry (a negative operator, {@code indexed_at}, {@code bib_year},
- * {@code bib_venue}, {@code bib_authors}, {@code bib_citation_count}) still depends on the cut: a filter that
- * rejects most of the neighbourhood returns fewer rows than the limit. The negative filter that matters in
+ * nexus-p89h4 fix; since nexus-qpt52 that includes {@code indexed_at}, {@code bib_year}, {@code bib_venue}, {@code
+ * bib_authors} and {@code bib_citation_count}). A predicate it does not carry on route (a) (a negative operator, a
+ * range over a string label) still depends on the cut: a filter that rejects most of the neighbourhood returns fewer
+ * rows than the limit.
+ *
+ * <p><b>Route (b) (nexus-qpt52).</b> The three route (b) searches have no stage after the search, so the SQL is the
+ * answer: {@link ManifestPushdown#ofExact} compiles every predicate of this stage, every operator on every answered
+ * key, and {@code ManifestRouteBDifferentialTest} holds it to {@link #apply} over a matrix. Changing a rule here
+ * (an operator, the unlabelled rule, a fallback) means changing the SQL object (vectors-049 and its copies) and that
+ * test's fixture in the same commit. The negative filter that matters in
  * practice ({@code section_type!=references}) rejects a small fraction.
  */
 final class ManifestLabelStage {
@@ -500,7 +507,7 @@ final class ManifestLabelStage {
         return String.valueOf(label).compareTo(String.valueOf(operand));
     }
 
-    private static BigDecimal asNumber(Object o) {
+    static BigDecimal asNumber(Object o) {
         if (o instanceof Number n) {
             try {
                 return new BigDecimal(n.toString());

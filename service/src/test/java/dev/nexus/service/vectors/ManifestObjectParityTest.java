@@ -67,8 +67,13 @@ class ManifestObjectParityTest {
     private static final String TAGS_START = "'tags', CASE WHEN nexus.manifest_names_key(";
     private static final String CONTENT_TYPE_MARK = "<content_type>";
 
-    /** The keys the object builds; a block that names fewer than this has been cut in the wrong place. */
-    private static final int MIN_NAMED_KEYS = 17;
+    /**
+     * The {@code manifest_names_key} calls of the object: one per key, 17 until nexus-qpt52; then six more keys
+     * (bib_year, bib_authors, bib_venue, bib_citation_count, indexed_at and content_type_shown) in a second object, each
+     * named once inside it and once more in the CASE that builds the second object only when one of them is named, 17 +
+     * 6 + 6. A block that names fewer than this has been cut in the wrong place.
+     */
+    private static final int MIN_NAMED_KEYS = 29;
 
     private static final Pattern LINE_COMMENT = Pattern.compile("--[^\n]*");
     private static final Pattern BLOCK_COMMENT = Pattern.compile("/\\*.*?\\*/", Pattern.DOTALL);
@@ -81,7 +86,8 @@ class ManifestObjectParityTest {
      * The route (b) {@code content_type} key, normalised: the words the document answers to under {@code
      * ManifestLabelStage#matches}. The operands {@code pdf} and {@code markdown} read the derived format when there is
      * one, else the chunk row's value; every other operand reads the catalog content type when it is not blank, else
-     * the chunk row's value. This is the one place the route (b) object is allowed to differ from {@code
+     * the chunk row's value, which is the empty string for a document that has no format either (nexus-qpt52: the stage
+     * reads an unlabelled value there, and {@code content_type=""} names it). This is the one place the route (b) object is allowed to differ from {@code
      * manifest_search}'s, and the text is pinned here so that a change to it is a change to this test.
      */
     static final String ROUTE_B_CONTENT_TYPE = normalise(
@@ -92,7 +98,8 @@ class ManifestObjectParityTest {
             + "ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END, "
             + "CASE WHEN d.content_type ~ '\\S' "
             + "THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END "
-            + "ELSE CASE WHEN c.metadata ->> 'content_type' NOT IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END "
+            + "ELSE CASE WHEN COALESCE(c.metadata ->> 'content_type', CASE WHEN f.fmt IS NULL THEN '' END) NOT IN ('pdf', 'markdown') "
+            + "THEN COALESCE(c.metadata ->> 'content_type', CASE WHEN f.fmt IS NULL THEN '' END) END END "
             + "], NULL)) END,");
 
     /** Comments removed and whitespace collapsed to single spaces, so layout differences are not differences. */

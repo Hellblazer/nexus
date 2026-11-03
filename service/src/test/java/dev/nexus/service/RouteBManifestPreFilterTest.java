@@ -130,6 +130,15 @@ class RouteBManifestPreFilterTest {
             seedDocument(seed, TENANT, COLLECTION, DOC_B, "Document B", "Bob");
             seedAspect(seed, TENANT, COLLECTION, DOC_A);
             seedAspect(seed, TENANT, COLLECTION, DOC_B);
+            // nexus-qpt52: A is enriched and indexed, B is neither (its bib is unrecorded, its indexed_at NULL).
+            seed.update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.BIB_YEAR, 2020)
+                .set(CATALOG_DOCUMENTS.BIB_VENUE, "NeurIPS")
+                .set(CATALOG_DOCUMENTS.BIB_CITATION_COUNT, 0)
+                .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT, OffsetDateTime.parse("2026-02-01T00:00:00Z"))
+                .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2026-01-15T10:00:00.123456Z"))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(DOC_A)))
+                .execute();
         }
         vec.upsertChunks(TENANT, COLLECTION, List.of(S, P, Q), List.of(TEXT_S, TEXT_P, TEXT_Q), List.of(
             row("source_author", "Alice", "section_type", "tail"),
@@ -296,20 +305,46 @@ class RouteBManifestPreFilterTest {
     }
 
     /**
-     * PINS RETIRED BEHAVIOUR, ON PURPOSE (nexus-qpt52). A negative operator is not pushable, so on these routes it
-     * stays in the chunk-row containment, where an operator map is never contained: nothing matches. That is what
-     * these routes did before nexus-6pfgb.41 and it is NOT the design of record (RDR-236 wants {@code !=} and the
-     * keys with no in-search form answered per owning document). nexus-qpt52 answers them and inverts this test:
-     * {@code section_type != body} then returns the rows whose owner's label is not body. Until then the case guards
-     * only that the key is neither dropped (all four rows) nor widened.
+     * nexus-qpt52 (this test pinned the retired behaviour until it landed). A negative operator is answered per owning
+     * document, from the manifest row of the owner: {@code section_type != body} returns the rows whose owner's label is
+     * not body, S@B (appendix) and Q@B (tail). The retired containment matched nothing for any operator map, and S's
+     * chunk row (which says tail) would have been the only label consulted.
      */
     @ParameterizedTest
     @ValueSource(strings = {"metadata", "aspect", "graph"})
-    void aKeyTheSqlDoesNotCompile_staysARowContainment_neitherDroppedNorWidened(String family) {
-        // $ne on a label key is not pushable (ManifestPushdown compiles positive operators only). Route (b) has no
-        // stage after the search, so the key stays in the containment as before: an operator map is never contained
-        // in a chunk row, so nothing matches. It must not be silently dropped (which would return all four rows).
-        assertThat(names(run(family, where("section_type", op("$ne", "body"))))).isEmpty();
+    void aNegativeOperator_isAnsweredPerOwningDocument(String family) {
+        assertThat(names(run(family, where("section_type", op("$ne", "body"))))).containsExactly("Q@B", "S@B");
+        assertThat(names(run(family, where("section_type", op("$nin", List.of("body", "tail")))))).containsExactly("S@B");
+        assertThat(names(run(family, where("section_type", op("$ne", "no-such-label")))))
+            .containsExactly("P@A", "Q@B", "S@A", "S@B");
+        // a document key: A's author is Alice, so != Alice keeps B's rows, and S@A is excluded though S's chunk row says Alice
+        assertThat(names(run(family, where("source_author", op("$ne", "Alice"))))).containsExactly("Q@B", "S@B");
+        // a negative operator composes with a chunk-row key (Q's row only says lang=en) on the same row
+        assertThat(names(run(family, where("lang", "en", "section_type", op("$ne", "body"))))).containsExactly("Q@B");
+    }
+
+    /**
+     * nexus-qpt52: the keys route (b) answered from the chunk row only (the last writer's) are now the owner's. A is
+     * enriched (year 2020, venue NeurIPS, a citation count of 0 that is a count) and indexed; B is neither, so its bib
+     * is unrecorded (unlabelled: it matches {@code ""} and {@code !=} anything) and its indexed_at is NULL.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"metadata", "aspect", "graph"})
+    void bibAndIndexedAt_areAnsweredFromTheOwningDocument(String family) {
+        assertThat(names(run(family, where("bib_year", 2020)))).containsExactly("P@A", "S@A");
+        assertThat(names(run(family, where("bib_year", "2020")))).containsExactly("P@A", "S@A");
+        assertThat(names(run(family, where("bib_year", op("$ne", 2020))))).containsExactly("Q@B", "S@B");
+        assertThat(names(run(family, where("bib_year", op("$gte", 2000))))).containsExactly("P@A", "S@A");
+        assertThat(names(run(family, where("bib_year", "")))).containsExactly("Q@B", "S@B");
+        assertThat(names(run(family, where("bib_venue", "NeurIPS")))).containsExactly("P@A", "S@A");
+        assertThat(names(run(family, where("bib_citation_count", 0)))).containsExactly("P@A", "S@A");
+        assertThat(names(run(family, where("bib_citation_count", "")))).containsExactly("Q@B", "S@B");
+        assertThat(names(run(family, where("indexed_at", op("$gte", "2026-01-01"))))).containsExactly("P@A", "S@A");
+        assertThat(names(run(family, where("indexed_at", op("$lt", "2026-01-01"))))).isEmpty();
+        assertThat(names(run(family, where("indexed_at", op("$ne", "2026-01-15T10:00:00.123456+00:00")))))
+            .containsExactly("Q@B", "S@B");
+        assertThat(names(run(family, where("indexed_at", "2026-01-15T10:00:00.123456+00:00"))))
+            .containsExactly("P@A", "S@A");
     }
 
     // ── content_type and tags: the stage's exact rule, on a route with no stage ────────────────────────────────────────
@@ -429,6 +464,43 @@ class RouteBManifestPreFilterTest {
         assertThat(ctNames(runCt(family, where("tags", "decision")))).containsExactly("X@N", "X@P");
         assertThat(ctNames(runCt(family, where("tags", op("$in", List.of("arch", "nothing")))))).containsExactly("X@N");
         assertThat(ctNames(runCt(family, where("tags", "nothing")))).isEmpty();
+    }
+
+    /**
+     * nexus-qpt52: the negative operators on {@code content_type} and {@code tags}. {@code content_type != prose} is the
+     * exact complement of {@code content_type = prose}: only the note (catalog type {@code knowledge}); and {@code tags !=
+     * arch} keeps every owner whose tag set lacks arch, an empty or missing set included.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"metadata", "aspect", "graph"})
+    void negativeOperatorsOnContentTypeAndTags_areTheComplementOfThePositiveOnes(String family) {
+        assertThat(ctNames(runCt(family, where("content_type", op("$ne", "prose"))))).containsExactly("X@N");
+        assertThat(ctNames(runCt(family, where("content_type", op("$nin", List.of("prose", "knowledge")))))).isEmpty();
+        assertThat(ctNames(runCt(family, where("tags", op("$ne", "arch"))))).containsExactly("X@P", "Y@M", "Z@D");
+        assertThat(ctNames(runCt(family, where("tags", op("$nin", List.of("arch", "decision")))))).containsExactly("Y@M", "Z@D");
+    }
+
+    /**
+     * nexus-qpt52. A short page whose bounded manifest count shows it complete is not re-run (nexus-8ptg4). The count
+     * builds route (a)'s {@code content_type} array, which lists the chunk row's value beside a catalog type that is not
+     * blank (N, catalog type {@code knowledge} under a row that says {@code prose}, answers to both words there and to
+     * {@code knowledge} alone on route (b)). A NEGATIVE operator over the wider array admits less than route (b)
+     * returns: here the count is 0 for {@code content_type != prose} while route (b) returns X@N, and a count below the
+     * page would skip a re-run a starved page needs. So a negative operator on {@code content_type} is never counted and
+     * its short page is always re-run; a positive form whose count shows the page complete ({@code knowledge}) is skipped.
+     */
+    @Test
+    void aNegativeOperatorOnContentType_isNotCounted_soItsShortPageIsReRun() {
+        long reruns = PgVectorRepository.shortPageRerunCount();
+        long skips = PgVectorRepository.shortPageSkipCount();
+
+        assertThat(ctNames(runCt("metadata", where("content_type", op("$ne", "prose"))))).containsExactly("X@N");
+        assertThat(PgVectorRepository.shortPageRerunCount() - reruns).as("re-runs of the negative form").isEqualTo(1);
+        assertThat(PgVectorRepository.shortPageSkipCount() - skips).as("skips of the negative form").isZero();
+
+        assertThat(ctNames(runCt("metadata", where("content_type", "knowledge")))).containsExactly("X@N");
+        assertThat(PgVectorRepository.shortPageRerunCount() - reruns).as("the positive form is counted, not re-run").isEqualTo(1);
+        assertThat(PgVectorRepository.shortPageSkipCount() - skips).as("skips after the positive form").isEqualTo(1);
     }
 
     // ── the other dims, at the function ──────────────────────────────────────

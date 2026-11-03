@@ -216,6 +216,15 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"search_row_owner_span_supported\":true");
     }
 
+    // ── nexus-qpt52: route (b) answers every stage-answered key per owning document ──
+
+    @Test
+    void versionAdvertisesTheRouteBManifestKeysAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendRouteBManifestKeysCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"route_b_manifest_keys_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test

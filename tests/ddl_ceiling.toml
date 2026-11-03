@@ -142,7 +142,12 @@ migration_wal_bytes_per_worker = 11038000
 # parameters) and 1 GRANT EXECUTE (a new signature is not granted by the old one); the post-condition DO block is not DDL.
 # Counted from the changeset's statements (27) and measured: chas, 2026-11-03, lab-m, scoped substrate run of tests/test_scenario_journeys.py, one worker,
 # ddl: migration=2226 (14 passed) on the tree before vectors-047; 2201 + 27 = 2228 on top of it.
-migration_ddl_per_worker = 2228
+# 2228 -> 2241 (2026-11-03, after vectors-048 above): vectors-049-1 (nexus-qpt52, route (b) answers every stage-answered key) adds 13 DDL
+# statements to a fresh migration: 13 CREATE OR REPLACE FUNCTION (manifest_search_384, 768 and 1024, manifest_qualifying_hits, and the nine route (b)
+# functions), each a replacement of an existing function so no GRANT EXECUTE follows; the post-condition DO block is not DDL. Counted from the
+# changeset's statements (13) and measured: macOS laptop, 2026-11-03, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2241.
+migration_ddl_per_worker = 2241
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

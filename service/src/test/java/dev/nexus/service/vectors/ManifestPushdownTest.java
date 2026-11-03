@@ -13,7 +13,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * nexus-p89h4: which predicates of a label or document-key {@code where} run inside the search, and what they
  * compile to. The rule is that the in-SQL form may admit more than {@link ManifestLabelStage} keeps and never
- * less, so only the POSITIVE operators are compiled; everything else is left to the stage alone.
+ * less, so route (a) compiles only the POSITIVE operators ({@link ManifestPushdown#of}); everything else is left to the
+ * stage alone. Route (b) has no stage, so {@link ManifestPushdown#ofExact} compiles every operator exactly
+ * (nexus-qpt52); {@code ManifestRouteBDifferentialTest} holds that form to the stage over a matrix.
  */
 class ManifestPushdownTest {
 
@@ -62,11 +64,11 @@ class ManifestPushdownTest {
     }
 
     @Test
-    void aStringOperandOnAPageRange_keepsTheStrictStringComparison_asTheStageComparesItLexically() {
-        // The stage treats a string operand as a lexical comparison against a string label and a number as not
-        // comparable, which is what the strict jsonpath comparison does; only a NUMERIC operand reads text as a number.
+    void aStringOperandOnAPageRange_comparesLexicallyAStringLabelThatIsNotBlank_asTheStageDoes() {
+        // The stage compares a string operand lexically against a label that is not a number and not unlabelled, and
+        // treats a numeric label as not comparable; only a NUMERIC operand reads text as a number.
         assertThat(ManifestPushdown.of(predicates(where("page_number", op("$gte", "3")))).jsonPath())
-            .isEqualTo("$.\"page_number\" >= \"3\"");
+            .isEqualTo("exists($.\"page_number\" ? (@.type() != \"number\" && @.string() != \"\" && @.string() >= \"3\"))");
     }
 
     @Test
@@ -91,12 +93,38 @@ class ManifestPushdownTest {
     }
 
     @Test
-    void aKeyWithNoInSqlForm_isNotCompiled() {
-        assertThat(ManifestPushdown.of(predicates(where("indexed_at", op("$gte", "2026-01-01"))))).isNull();
-        assertThat(ManifestPushdown.of(predicates(where("bib_year", op("$gte", 2020))))).isNull();
-        assertThat(ManifestPushdown.of(predicates(where("bib_venue", "NeurIPS")))).isNull();
-        // A range over a string label is not compiled either: the stage compares in Java's order, not the database's.
+    void aRangeOverAStringLabel_isNotPushedOnRouteA() {
+        // The stage compares in Java's order, not the database's; route (a) leaves it to the stage (route (b) compiles it).
         assertThat(ManifestPushdown.of(predicates(where("section_type", op("$gte", "a"))))).isNull();
+    }
+
+    @Test
+    void everyNumericKeyOfTheStage_isPushedOnRouteAInTheExactNumericForm() {
+        // EXACT_KEYS is a literal (the tenant-keyed-state gate exempts only literal constants), so it must be held to
+        // the stage's own list of numeric keys: a numeric key added there and not here would fall back to the planner's
+        // two literal forms, which miss a stored "7.0" or an operand " 7 ".
+        assertThat(ManifestLabelStage.NUMERIC_KEYS).hasSize(5);
+        for (String key : ManifestLabelStage.NUMERIC_KEYS) {
+            assertThat(ManifestPushdown.of(predicates(where(key, 7))).jsonPath()).as(key)
+                .isEqualTo("exists($.\"" + key + "\" ? (@.number() == 7))");
+        }
+    }
+
+    @Test
+    void theKeysOfQpt52_arePushedOnRouteAInTheirExactForm() {
+        assertThat(ManifestPushdown.of(predicates(where("indexed_at", op("$gte", "2026-01-01")))).jsonPath())
+            .isEqualTo("exists($.\"indexed_at\" ? (@.type() != \"number\" && @.string() != \"\" && @.string() >= \"2026-01-01\"))");
+        assertThat(ManifestPushdown.of(predicates(where("bib_year", op("$gte", 2020)))).jsonPath())
+            .isEqualTo("exists($.\"bib_year\" ? (@.number() >= 2020))");
+        assertThat(ManifestPushdown.of(predicates(where("bib_venue", "NeurIPS"))).jsonPath())
+            .isEqualTo("exists($.\"bib_venue\" ? (@.string() == \"NeurIPS\"))");
+        assertThat(ManifestPushdown.of(predicates(where("bib_citation_count", 0))).jsonPath())
+            .isEqualTo("exists($.\"bib_citation_count\" ? (@.number() == 0))");
+        assertThat(ManifestPushdown.of(predicates(where("bib_authors", op("$in", List.of("A", "B"))))).jsonPath())
+            .isEqualTo("(exists($.\"bib_authors\" ? (@.string() == \"A\")) || exists($.\"bib_authors\" ? (@.string() == \"B\")))");
+        // a negative operator is route (b)'s alone
+        assertThat(ManifestPushdown.of(predicates(where("bib_year", op("$ne", 2020))))).isNull();
+        assertThat(ManifestPushdown.of(predicates(where("indexed_at", op("$nin", List.of("x")))))).isNull();
     }
 
     @Test
@@ -105,7 +133,7 @@ class ManifestPushdownTest {
             "section_type", "appendix-x", "bib_year", op("$gte", 2020), "section_title", op("$ne", "x"))));
 
         assertThat(plan.containment().data()).isEqualTo("{\"section_type\":\"appendix-x\"}");
-        assertThat(plan.jsonPath()).isNull();
+        assertThat(plan.jsonPath()).isEqualTo("exists($.\"bib_year\" ? (@.number() >= 2020))");
     }
 
     @Test
@@ -178,8 +206,10 @@ class ManifestPushdownTest {
 
     @Test
     void ttlDaysAndFrecencyScore_takeEqualityLikeAPage_andRangesAsNumbers() {
+        // nexus-qpt52: a numeric key compares as numbers whichever form is stored ("7", 7.0), which the planner's two
+        // literal forms (7 or "7") missed.
         assertThat(ManifestPushdown.of(predicates(where("ttl_days", 7))).jsonPath()).isEqualTo(
-            "(exists($.\"ttl_days\" ? (@ == 7)) || exists($.\"ttl_days\" ? (@ == \"7\")))");
+            "exists($.\"ttl_days\" ? (@.number() == 7))");
         assertThat(ManifestPushdown.of(predicates(where("frecency_score", op("$gte", 0.5)))).jsonPath())
             .isEqualTo("exists($.\"frecency_score\" ? (@.number() >= 0.5))");
         assertThat(ManifestPushdown.of(predicates(where("ttl_days", op("$lt", 30)))).jsonPath())
@@ -199,5 +229,69 @@ class ManifestPushdownTest {
         assertThat(ManifestPushdown.of(predicates(where("tags", op("$in", List.of())))).jsonPath()).isEqualTo("(1 == 2)");
         assertThat(ManifestPushdown.of(predicates(where("tags", op("$ne", "arch"))))).isNull();
         assertThat(ManifestPushdown.of(predicates(where("tags", op("$nin", List.of("arch")))))).isNull();
+    }
+
+    // ── nexus-qpt52: the exact form route (b) runs ──────────────────────────
+
+    private static String exact(Map<String, Object> where) {
+        return ManifestPushdown.ofExact(predicates(where)).jsonPath();
+    }
+
+    @Test
+    void theExactForm_compilesEveryOperatorOnEveryKind_withNoContainment() {
+        // string key
+        assertThat(exact(where("section_type", "body"))).isEqualTo("exists($.\"section_type\" ? (@.string() == \"body\"))");
+        assertThat(exact(where("section_type", op("$ne", "body")))).isEqualTo("!exists($.\"section_type\" ? (@.string() == \"body\"))");
+        assertThat(exact(where("section_type", op("$nin", List.of("a", "b"))))).isEqualTo(
+            "!(exists($.\"section_type\" ? (@.string() == \"a\")) || exists($.\"section_type\" ? (@.string() == \"b\")))");
+        assertThat(exact(where("section_type", op("$in", List.of())))).isEqualTo("(1 == 2)");
+        assertThat(exact(where("section_type", op("$nin", List.of())))).isEqualTo("!(1 == 2)");
+        // numeric key: numbers compare as numbers, an empty operand names the unlabelled value, the rest compares as text
+        assertThat(exact(where("bib_year", 2020))).isEqualTo("exists($.\"bib_year\" ? (@.number() == 2020))");
+        assertThat(exact(where("bib_year", "2020.0"))).isEqualTo("exists($.\"bib_year\" ? (@.number() == 2020.0))");
+        assertThat(exact(where("bib_year", ""))).isEqualTo("exists($.\"bib_year\" ? (@ == \"\"))");
+        assertThat(exact(where("bib_year", "abc"))).isEqualTo("exists($.\"bib_year\" ? (@.string() == \"abc\"))");
+        assertThat(exact(where("bib_year", op("$ne", 5)))).isEqualTo("!exists($.\"bib_year\" ? (@.number() == 5))");
+        // set keys: membership of the array
+        assertThat(exact(where("tags", op("$ne", "arch")))).isEqualTo("!exists($.\"tags\"[*] ? (@ == \"arch\"))");
+        assertThat(exact(where("content_type", op("$nin", List.of("pdf"))))).isEqualTo(
+            "!(exists($.\"content_type\"[*] ? (@ == \"pdf\")))");
+        // predicates are ANDed, none is skipped, and no containment is produced
+        var plan = ManifestPushdown.ofExact(predicates(where("section_type", "body", "bib_venue", op("$ne", "x"))));
+        assertThat(plan.containment()).isNull();
+        assertThat(plan.jsonPath()).isEqualTo(
+            "exists($.\"section_type\" ? (@.string() == \"body\")) && !exists($.\"bib_venue\" ? (@.string() == \"x\"))");
+        assertThat(ManifestPushdown.ofExact(List.of())).isNull();
+    }
+
+    @Test
+    void theExactForm_rangesFollowTheStagesComparableRule() {
+        // a numeric operand compares on a numeric key only; on a string key or a set it never matches
+        assertThat(exact(where("page_number", op("$gt", 3)))).isEqualTo("exists($.\"page_number\" ? (@.number() > 3))");
+        assertThat(exact(where("section_type", op("$gt", 3)))).isEqualTo("(1 == 2)");
+        assertThat(exact(where("tags", op("$gt", "a")))).isEqualTo("(1 == 2)");
+        assertThat(exact(where("tags", op("$gt", 3)))).isEqualTo("(1 == 2)");
+        // a string operand compares lexically, and not against an unlabelled value or a number
+        assertThat(exact(where("indexed_at", op("$lt", "2026-01-01")))).isEqualTo(
+            "exists($.\"indexed_at\" ? (@.type() != \"number\" && @.string() != \"\" && @.string() < \"2026-01-01\"))");
+        // content_type reads the text the row would show, a separate object key
+        assertThat(exact(where("content_type", op("$gte", "m")))).isEqualTo(
+            "exists($.\"content_type_shown\" ? (@.type() != \"number\" && @.string() != \"\" && @.string() >= \"m\"))");
+    }
+
+    @Test
+    void theExactForm_refusesANumberTooLongToRender() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> exact(where("bib_year", new java.math.BigDecimal("1E+999999999"))))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("out of range");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> exact(where("bib_year", op("$gte", new java.math.BigDecimal("1E+5000")))))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("out of range");
+    }
+
+    @Test
+    void aNegativeOperatorOnContentType_isTheOnlyOneThatDisablesTheBoundedCount() {
+        assertThat(ManifestPushdown.negatesContentType(predicates(where("content_type", op("$ne", "pdf"))))).isTrue();
+        assertThat(ManifestPushdown.negatesContentType(predicates(where("content_type", op("$nin", List.of("pdf")))))).isTrue();
+        assertThat(ManifestPushdown.negatesContentType(predicates(where("content_type", "pdf")))).isFalse();
+        assertThat(ManifestPushdown.negatesContentType(predicates(where("section_type", op("$ne", "x"))))).isFalse();
     }
 }

@@ -41,6 +41,7 @@ import java.util.function.Supplier;
  *  "nx_answer_out_of_step_cost_supported":true,
  *  "search_row_owner_span_supported":true,
  *  "vector_search_chash_allow_supported":true,
+ *  "route_b_manifest_keys_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -453,6 +454,26 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-qpt52 capability advertisement (RDR-236 Phase 3, the route (b) dispatch the Phase 4 sweep precondition
+     * reads, RDR-236 line 1760): does every route (b) search ({@code POST /v1/vectors/search-metadata-scoped},
+     * {@code /search-aspect-scoped}, {@code /search-graph-hop}) answer a {@code where} on EVERY key {@code
+     * ManifestLabelStage} answers (the labels, {@code source_author}, {@code title}, {@code content_type}, {@code tags},
+     * the {@code bib_*} keys, {@code indexed_at} and the catalog-meta keys), with any operator including {@code $ne},
+     * {@code $nin} and the ranges, per OWNING DOCUMENT from the catalog (Liquibase {@code vectors-049-1}), where an
+     * engine without it answers {@code bib_year}, {@code bib_venue}, {@code bib_authors}, {@code bib_citation_count},
+     * {@code indexed_at} and every negative operator from the shared chunk row's last writer?
+     *
+     * <p>An independent flag, and the only evidence: both engines answer the same request with HTTP 200 and the same
+     * envelope, so a client or an operator step that depends on the documents' own answers (the sweep that stops the
+     * writers stamping those keys on the row) must read this flag first. Always present, always {@code true} on an
+     * engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the {@code
+     * nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendRouteBManifestKeysCapabilityField(StringBuilder body) {
+        body.append(",\"route_b_manifest_keys_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -646,6 +667,8 @@ public final class VersionHandler implements HttpHandler {
         appendSearchRowOwnerSpanCapabilityField(body);
         // nexus-jypmj (RDR-232): the chash_allow restriction on the four vector search routes.
         appendVectorSearchChashAllowCapabilityField(body);
+        // nexus-qpt52: route (b) answers every stage-answered key and operator per owning document.
+        appendRouteBManifestKeysCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {
