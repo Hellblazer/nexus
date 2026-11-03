@@ -289,7 +289,21 @@ T2 and T3 both route through the single native `nexus-service` (`nx daemon servi
 
 The Java storage service (RDR-152/RDR-155) applies its Liquibase changelog at
 startup using the `NX_DB_ADMIN_*` credentials (falling back to `NX_DB_*` in
-single-role development setups). When you bring your own Postgres, two
+single-role development setups).
+
+**Server version floor: PostgreSQL 17** (nexus-3s5r1). The engine reads
+`server_version_num` at boot, before the singleton lock and the schema
+migration, and refuses to start below `170000` (PostgreSQL 17.0), logging
+`event=pg_version_below_floor` with the version it found and the floor, then
+exiting 1. Older servers lack the jsonpath `.number()` method the manifest
+pushdown uses and fail at the first query that needs it, so the refusal
+replaces a late, cryptic error with an early one. Every supported deployment
+runs PostgreSQL 17 (the bundled cluster, the managed cloud, the test image).
+If you restore a backup or fork a point-in-time copy to bring up a second
+engine, check `SELECT version()` on the target first. A version that cannot
+be read also refuses.
+
+When you bring your own Postgres, two
 prerequisites must be satisfied by a DBA (superuser) before the first migration
 run:
 
@@ -299,7 +313,14 @@ run:
    `vectors-001-1` fails without this pre-step. Once the extensions exist the
    changeset is an idempotent no-op.
 2. **Roles.** Create `nexus_admin` (schema owner, NOSUPERUSER) and `nexus_svc`
-   (NOSUPERUSER NOBYPASSRLS NOINHERIT LOGIN data role). `NOINHERIT` is
+   (NOSUPERUSER NOBYPASSRLS NOINHERIT LOGIN data role). The engine refuses
+   to boot (`event=service_role_bypassrls_refused`, exit 1) when the role it
+   connects as (`NX_DB_USER`) has `BYPASSRLS` and is not a superuser
+   (nexus-b1adx): the changelog's `partition_copy_access` skips `BYPASSRLS`
+   grantees, so a `BYPASSRLS` service role would get no DML grant on any
+   tenant leaf or model partition created afterwards, and row-level security
+   would not bind it. The message names the fix, `ALTER ROLE <role>
+   NOBYPASSRLS`. A superuser passes (single-role development setups). `NOINHERIT` is
    REQUIRED, not optional decoration — a bring-your-own-Postgres cluster has
    no `bootstrap_superuser` to self-heal it later (unlike the local bundle's
    `_backfill_svc_noinherit`), so a DBA who leaves it off here bakes in the
