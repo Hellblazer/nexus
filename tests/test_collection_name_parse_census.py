@@ -443,6 +443,12 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # origin's row on first insert, and the client's row was the
     # nexus-syfes drift the shakeout's Phase E caught (3 -> 2).
     "src/nexus/catalog/chunk_quarantine.py": 2,
+    # class (a) mint/candidate-time (nexus-ucagi): rename_collection_cascade
+    # sends the NEW name's model token so the engine can refuse a rename whose
+    # target names another model than the source row. The target has no row
+    # yet, so its name is the only place that token lives; the source's model
+    # is read from its row on the engine side.
+    "src/nexus/catalog/http_catalog_client.py": 1,
     # class (d): _content_type_for_collection synthesizes a row for the
     # orphan GC backfill -- the collection being registered has no row by
     # construction.
@@ -1030,8 +1036,10 @@ def test_pin_matches_documented_total() -> None:
     and its class-(a) split, were deleted, nexus-kk4ut; then 52 -- 46 on
     2026-10-01 when db/embed_migrate.py (4 sites) and db/reconcile.py's
     two parse helpers were deleted as dead code, nexus-z0o2p.25; then 46 -- 45
-    on 2026-10-21 when HttpVectorClient.put was retired, nexus-nt76j) is derived from the same dict the guards above check
+    on 2026-10-21 when HttpVectorClient.put was retired, nexus-nt76j; then 45 -- 46
+    on 2026-11-03 for the rename's class-(a) target-model token in
+    HttpCatalogClient.rename_collection_cascade, nexus-ucagi) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 45
+    assert PARSE_SITE_PIN == 46

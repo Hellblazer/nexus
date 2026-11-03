@@ -855,20 +855,21 @@ def _is_note_entry(entry: Any) -> bool:
     - ``nx-note://`` in a collection that is not file-routed; the legacy ``chroma://`` spelling counts
       (:func:`~nexus.aspect_readers.canonical_note_uri`), and a copy registered under
       ``nxexp://<target>/<original uri>`` (see :func:`_resolve_owner_document`) is a note when the original is;
-    - or NO URI on a ``knowledge__`` entry with no file path: a knowledge document's identity is its
-      ``source_uri`` and falls back to the title for an MCP-stored note, which has no URI.
+    - or NO URI and no file path in a collection that is not file-routed (a ``knowledge__`` one today): a
+      knowledge document's identity is its ``source_uri`` and falls back to the title for an MCP-stored
+      note, which has no URI. That leg is :func:`~nexus.catalog.recovery_bundle.classify_store_put_origin`'s
+      ``knowledge_no_path``, so the collection-name rule lives in one place (RDR-204 parse census).
 
     Anything else is not a note: ``https://`` and other schemes, a file-backed entry, an entry with no URI
-    in any other collection."""
+    in a file-routed collection."""
     uri = getattr(entry, "source_uri", "") or ""
     if uri.startswith("nxexp://"):
         uri = uri.split("/", 3)[3] if uri.count("/") >= 3 else ""
     if uri:
         return is_note_uri(canonical_note_uri(uri))
-    return (
-        not (getattr(entry, "file_path", "") or "")
-        and (getattr(entry, "physical_collection", "") or "").startswith("knowledge__")
-    )
+    from nexus.catalog.recovery_bundle import classify_store_put_origin  # noqa: PLC0415 — deferred, as the module's other catalog imports
+
+    return classify_store_put_origin(entry) == "knowledge_no_path"
 
 
 @dataclass
