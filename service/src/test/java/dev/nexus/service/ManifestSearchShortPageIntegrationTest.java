@@ -22,6 +22,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -32,6 +33,7 @@ import java.util.stream.Collectors;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -63,6 +65,8 @@ class ManifestSearchShortPageIntegrationTest {
 
     private static final String SVC_ROLE = "svc_short_page";
     private static final String SVC_PASS = "svc_short_page_pass";
+    /** nexus-6pfgb.41: the same grants as {@link #SVC_ROLE}, with the planner held to the HNSW index; see {@link #hnswDs}. */
+    private static final String SVC_ROLE_HNSW = "svc_short_page_hnsw";
 
     private static final String TENANT = "short-page";
     private static final String COLLECTION = "docs__short-page__minilm-l6-v2-384__v1";
@@ -83,6 +87,15 @@ class ManifestSearchShortPageIntegrationTest {
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     PgVectorRepository vec;
+    /**
+     * nexus-6pfgb.41: a service role of the same grants whose connections keep the planner on the HNSW index (the sequential
+     * scan, bitmap scan, hash join and sort are costed out, as {@code PgVectorRepositoryRawSqlPlanShapeTest} does to
+     * prove reachability). Route (b) has no cardinality router, so which plan it runs on 21,000 rows is the planner's
+     * choice, and on the natural one it does not walk the capped index. This repository is the one on which a route (b)
+     * page can be truncated by the scan cap, which is what the repair exists for.
+     */
+    HikariDataSource hnswDs;
+    PgVectorRepository vecHnsw;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -109,6 +122,21 @@ class ManifestSearchShortPageIntegrationTest {
             embedder.register(text(g), (float) Math.cos(theta), (float) Math.sin(theta));
         }
         vec = new PgVectorRepository(tenantScope, embedder, embedder);
+        // The role-level planner settings reach only connections opened after them, so they are set before the pool.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE_HNSW, SVC_PASS);
+            for (String guc : List.of("enable_seqscan", "enable_bitmapscan", "enable_sort", "enable_hashjoin")) {
+                PgContainerHelper.setRolePlannerGuc(su, SVC_ROLE_HNSW, guc, "off");
+            }
+        }
+        var hnswCfg = new HikariConfig();
+        hnswCfg.setJdbcUrl(pg.getJdbcUrl());
+        hnswCfg.setUsername(SVC_ROLE_HNSW);
+        hnswCfg.setPassword(SVC_PASS);
+        hnswCfg.setMaximumPoolSize(2);
+        hnswCfg.setAutoCommit(true);
+        hnswDs = new HikariDataSource(hnswCfg);
+        vecHnsw = new PgVectorRepository(new TenantScope(hnswDs), embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -120,6 +148,19 @@ class ManifestSearchShortPageIntegrationTest {
                 .set(CATALOG_DOCUMENTS.TITLE, "short-page.md")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///short-page.md")
+                .execute();
+            // nexus-6pfgb.41: the aspect-scoped route (b) function joins document_aspects.
+            seed.insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT)
+                .set(DOCUMENT_ASPECTS.COLLECTION, COLLECTION)
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "short-page.md")
+                .set(DOCUMENT_ASPECTS.PROPOSED_METHOD, "gradient descent")
+                .set(DOCUMENT_ASPECTS.CONFIDENCE, 0.9)
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.parse("2026-03-01T00:00:00Z"))
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "sp-test-model")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "sp-test-extractor")
+                .set(DOCUMENT_ASPECTS.DOC_ID, DOC)
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///short-page.md")
                 .execute();
         }
         // The chunk at index g sits at angle (pi/2) * g / (N - 1), so the query (1, 0) ranks them in index order. The
@@ -161,6 +202,7 @@ class ManifestSearchShortPageIntegrationTest {
 
     @AfterAll
     void stopAll() {
+        if (hnswDs != null) hnswDs.close();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }
@@ -354,5 +396,59 @@ class ManifestSearchShortPageIntegrationTest {
         assertThat(result.perCollection()).hasSize(1);
         assertThat(result.perCollection().get(0).errorKind()).isEqualTo(ArmErrorKind.STATEMENT_TIMEOUT);
         assertThat(result.rows()).as("no short page is served as the arm's answer").isEmpty();
+    }
+
+    // ── nexus-6pfgb.41: the route (b) functions carry the same manifest predicate and the same repair ────────────────
+
+    /** One route (b) search per family over the fixture collection, for the label filter {@code where}. */
+    private List<Map<String, Object>> routeB(String family, Map<String, Object> where) {
+        return routeB(vec, family, where);
+    }
+
+    private List<Map<String, Object>> routeB(PgVectorRepository vec, String family, Map<String, Object> where) {
+        return switch (family) {
+            case "metadata" -> vec.searchMetadataScoped(TENANT, QUERY, List.of(COLLECTION), null, null, null, null,
+                null, where, 10);
+            case "aspect" -> vec.searchAspectScopedWithTokens(TENANT, QUERY, List.of(COLLECTION), null, null, null,
+                where, 10).value();
+            case "graph" -> vec.searchGraphHop(TENANT, QUERY, List.of(DOC), List.of(COLLECTION), null, 1, "both",
+                where, 10);
+            default -> throw new IllegalArgumentException(family);
+        };
+    }
+
+    private static List<String> chashes(List<Map<String, Object>> rows) {
+        return rows.stream().map(r -> (String) r.get("chash")).collect(Collectors.toList());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"metadata", "aspect", "graph"})
+    void routeB_aRareLabelPastTheScanCap_isRepairedByOneExactRerun(String family) {
+        PgSession.overrideScanBudgetForTests(1000, 100);
+        long before = reruns();
+
+        var rows = routeB(vecHnsw, family, rare());
+
+        // Without the re-run this page holds the rank-5 chunk alone: the walk stops at the 1,000-tuple cap.
+        assertThat(chashes(rows)).containsExactlyElementsOf(rareChashes());
+        assertThat(reruns() - before).isEqualTo(1);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"metadata", "aspect", "graph"})
+    void routeB_aPageTheScanFills_orAChunkRowFilter_isNotRerun(String family) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("section_type", "body");
+        Map<String, Object> lang = new LinkedHashMap<>();
+        lang.put("lang", "rare");
+        PgSession.overrideScanBudgetForTests(1000, 100);
+        long before = reruns();
+
+        assertThat(routeB(family, body)).hasSize(10);
+        assertThat(routeB(family, null)).hasSize(10);
+        // A chunk-row predicate carries no manifest predicate: route (b) ran it once before and still does.
+        routeB(family, lang);
+
+        assertThat(reruns() - before).isZero();
     }
 }

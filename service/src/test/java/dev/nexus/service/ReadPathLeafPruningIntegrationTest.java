@@ -537,19 +537,19 @@ class ReadPathLeafPruningIntegrationTest {
                 default -> TEXT_GATED_SEARCH_ALLOWED_1024.call(q, COMMON, raw, colls, null, null, 10, model, t);
             };
             case "search_metadata_scoped" -> switch (dim) {
-                case 384 -> SEARCH_METADATA_SCOPED_384.call(q, colls, null, null, null, null, null, null, 10, model, t);
-                case 768 -> SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, 10, model, t);
-                default -> SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, 10, model, t);
+                case 384 -> SEARCH_METADATA_SCOPED_384.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t);
+                case 768 -> SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t);
+                default -> SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, null, null, 10, model, t);
             };
             case "search_aspect_scoped" -> switch (dim) {
-                case 384 -> SEARCH_ASPECT_SCOPED_384.call(q, colls, null, null, null, null, 10, model, t);
-                case 768 -> SEARCH_ASPECT_SCOPED_768.call(q, colls, null, null, null, null, 10, model, t);
-                default -> SEARCH_ASPECT_SCOPED_1024.call(q, colls, null, null, null, null, 10, model, t);
+                case 384 -> SEARCH_ASPECT_SCOPED_384.call(q, colls, null, null, null, null, null, null, 10, model, t);
+                case 768 -> SEARCH_ASPECT_SCOPED_768.call(q, colls, null, null, null, null, null, null, 10, model, t);
+                default -> SEARCH_ASPECT_SCOPED_1024.call(q, colls, null, null, null, null, null, null, 10, model, t);
             };
             case "search_graph_hop" -> switch (dim) {
-                case 384 -> SEARCH_GRAPH_HOP_384.call(q, seeds, colls, null, 1, "both", null, 10, model, t);
-                case 768 -> SEARCH_GRAPH_HOP_768.call(q, seeds, colls, null, 1, "both", null, 10, model, t);
-                default -> SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, null, 1, "both", null, 10, model, t);
+                case 384 -> SEARCH_GRAPH_HOP_384.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t);
+                case 768 -> SEARCH_GRAPH_HOP_768.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t);
+                default -> SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, null, 1, "both", null, null, null, 10, model, t);
             };
             case "search_topic_scoped" -> switch (dim) {
                 case 384 -> SEARCH_TOPIC_SCOPED_384.call(q, TOPIC, coll, 10, model, t);

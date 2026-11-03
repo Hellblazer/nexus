@@ -136,7 +136,13 @@ migration_wal_bytes_per_worker = 11038000
 # 1 CREATE OR REPLACE FUNCTION and 1 GRANT EXECUTE (the DO post-check is not counted, as in vectors-045). Measured on this tree by a
 # scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker, macOS; the count is
 # identical on Linux): ddl: migration=2201.
-migration_ddl_per_worker = 2201
+# 2201 -> 2228 (2026-11-03, after vectors-047 above): vectors-048-1 (nexus-6pfgb.41, the route (b) catalog pre-filter) adds 27 DDL statements to a fresh migration: for
+# each of the nine route (b) functions (search_metadata_scoped, search_aspect_scoped, search_graph_hop, at 384, 768 and 1024) 1 DROP FUNCTION
+# (the old signature, which a surviving overload would keep beside the new one), 1 CREATE OR REPLACE FUNCTION (the new signature, two more
+# parameters) and 1 GRANT EXECUTE (a new signature is not granted by the old one); the post-condition DO block is not DDL.
+# Counted from the changeset's statements (27) and measured: chas, 2026-11-03, lab-m, scoped substrate run of tests/test_scenario_journeys.py, one worker,
+# ddl: migration=2226 (14 passed) on the tree before vectors-047; 2201 + 27 = 2228 on top of it.
+migration_ddl_per_worker = 2228
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

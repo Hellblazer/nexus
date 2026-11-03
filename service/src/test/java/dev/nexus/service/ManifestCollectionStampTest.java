@@ -212,7 +212,7 @@ class ManifestCollectionStampTest {
         try (Connection su = pg.createConnection("")) {
             return DSL.using(su, SQLDialect.POSTGRES).fetchCount(SEARCH_METADATA_SCOPED_1024.call(
                 VectorSeeds.vec(1024, 0.1f), new String[] {collection},
-                null, null, null, null, null, null, 10, "voyage-context-3", TENANT));
+                null, null, null, null, null, null, null, null, 10, "voyage-context-3", TENANT));
         }
     }
 

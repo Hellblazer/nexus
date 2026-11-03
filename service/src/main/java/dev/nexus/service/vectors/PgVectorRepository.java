@@ -4275,8 +4275,11 @@ public final class PgVectorRepository {
      * @param corpus      catalog corpus filter; null = no filter
      * @param subtree     tumbler-prefix scope — DESCENDANTS only (root-exclusive, matching
      *                    {@code cat.descendants()}); also filters alias rows; null = no filter
-     * @param where       chunk-metadata equality predicates (JSONB containment); null/empty
-     *                    = no filter
+     * @param where       equality predicates; null/empty = no filter. A document key or a label key
+     *                    ({@code source_author}, {@code title}, {@code section_type} and the rest
+     *                    {@link ManifestPushdown} compiles) is answered per OWNING DOCUMENT from the catalog
+     *                    manifest (nexus-6pfgb.41, {@link #routeBWhere}); every other key is JSONB containment on
+     *                    the chunk row, as before
      */
     /** 8-arg back-compat (nexus-889ff): delegates with null subtree/where; discards tokens. */
     public List<Map<String, Object>> searchMetadataScoped(
@@ -4319,19 +4322,26 @@ public final class PgVectorRepository {
         String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
-        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        RouteBWhere rb = routeBWhere(where);
+        JSONB whereJsonb = rb.containment();
+        JSONB manifestWhere = rb.manifestContainment();
+        String manifestPath = rb.manifestPath();
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_METADATA_SCOPED_384.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 768  -> SEARCH_METADATA_SCOPED_768.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb.hasManifest(), colls),
+                             embed.tokens(), skippedCollections);
     }
 
     /**
@@ -4391,8 +4401,8 @@ public final class PgVectorRepository {
      * @param pattern       substring to match (ILIKE) within {@code field}; ignored
      *                      when {@code field} is null
      * @param minConfidence aspects confidence floor (inclusive); null = no floor
-     * @param where         chunk-metadata equality predicates (JSONB containment);
-     *                      null/empty = no filter
+     * @param where         equality predicates, split as in {@link #searchMetadataScoped}
+     *                      (nexus-6pfgb.41); null/empty = no filter
      */
     public Tokened<List<Map<String, Object>>> searchAspectScopedWithTokens(
             String tenant, String queryText, List<String> collectionNames,
@@ -4419,19 +4429,26 @@ public final class PgVectorRepository {
         String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
-        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        RouteBWhere rb = routeBWhere(where);
+        JSONB whereJsonb = rb.containment();
+        JSONB manifestWhere = rb.manifestContainment();
+        String manifestPath = rb.manifestPath();
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_ASPECT_SCOPED_384.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 768  -> SEARCH_ASPECT_SCOPED_768.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb.hasManifest(), colls),
+                             embed.tokens(), skippedCollections);
     }
 
     /**
@@ -4528,9 +4545,10 @@ public final class PgVectorRepository {
     /**
      * Token-aware sibling of {@link #searchGraphHop} (bead nexus-ehc4q).
      *
-     * <p>{@code where} (bead nexus-7ndh3, RDR-156 H2 residual) is a chunk-metadata
-     * equality map applied as JSONB containment ({@code c.metadata @> p_where}) in the
-     * post-BFS rank — byte-for-byte the {@link #searchMetadataScoped} semantics. Null or
+     * <p>{@code where} (bead nexus-7ndh3, RDR-156 H2 residual) is an equality map applied
+     * in the post-BFS rank — the {@link #searchMetadataScoped} semantics: document and label
+     * keys per owning document from the catalog (nexus-6pfgb.41), the rest as JSONB
+     * containment ({@code c.metadata @> p_where}). Null or
      * empty means no filter. This retires the {@code query} tool's follow_links+where
      * app-side fallback (the {@code _skip_service} arm).
      */
@@ -4560,20 +4578,27 @@ public final class PgVectorRepository {
         String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
-        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        RouteBWhere rb = routeBWhere(where);
+        JSONB whereJsonb = rb.containment();
+        JSONB manifestWhere = rb.manifestContainment();
+        String manifestPath = rb.manifestPath();
         String[] seedArr = seeds.toArray(String[]::new);
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_GRAPH_HOP_384.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 768  -> SEARCH_GRAPH_HOP_768.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 1024 -> SEARCH_GRAPH_HOP_1024.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb.hasManifest(), colls),
+                             embed.tokens(), skippedCollections);
     }
 
     /**
@@ -4776,6 +4801,21 @@ public final class PgVectorRepository {
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
             String tenant, org.jooq.Table<?> fn, int nResults) {
+        return runCombinedQueryWithChash(tenant, fn, nResults, false, null);
+    }
+
+    /**
+     * As above; {@code manifestPredicate} (nexus-6pfgb.41) is true when {@code fn} carries a manifest predicate
+     * ({@link RouteBWhere#hasManifest}): the predicate runs on the joined row inside the HNSW scan, which stops at
+     * {@code hnsw.max_scan_tuples}, so a rare document or label key whose rows rank past the cap yields a SHORT page.
+     * Such a statement is wrapped in {@link #exactOnUnderReturn} with {@code rerunWhenShort}, the repair route (a)
+     * applies to {@code manifest_search_<dim>} (nexus-6pfgb.61); a statement without a manifest predicate runs
+     * once, as it always did.
+     *
+     * @param colls the collection names, used only to name the statement in the re-run's log line (may be null)
+     */
+    private List<Map<String, Object>> runCombinedQueryWithChash(
+            String tenant, org.jooq.Table<?> fn, int nResults, boolean manifestPredicate, String[] colls) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement first (see runCombinedQuery), so the GUC round
             // trips below run under its network bound too (nexus-u9zkn).
@@ -4789,7 +4829,9 @@ public final class PgVectorRepository {
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            return ctx.selectFrom(fn).fetch();
+            return manifestPredicate
+                ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, colls == null ? null : String.join(",", colls))
+                : ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -8076,6 +8118,61 @@ FROM scope s
             throw new IllegalArgumentException(
                 operator + " for field '" + key + "' got a non-finite numeric operand: " + n);
         }
+    }
+
+    /**
+     * nexus-6pfgb.41: a route (b) {@code where} split into the part the chunk row answers and the part the catalog
+     * answers. {@code containment} is bound as {@code p_where} ({@code c.metadata @> p_where}); {@code manifest} is
+     * bound as {@code p_manifest_where} / {@code p_manifest_path} and tested on the joined row's per-occurrence
+     * object ({@code vectors-048}, the object {@code manifest_search_<dim>} builds).
+     */
+    record RouteBWhere(JSONB containment, ManifestPushdown.Plan manifest) {
+
+        boolean hasManifest() {
+            return manifest != null;
+        }
+
+        JSONB manifestContainment() {
+            return manifest == null ? null : manifest.containment();
+        }
+
+        String manifestPath() {
+            return manifest == null ? null : manifest.jsonPath();
+        }
+    }
+
+    /**
+     * Split a route (b) {@code where} (nexus-6pfgb.41). The label and document keys {@link ManifestPushdown} can run in
+     * SQL ({@link ManifestPushdown#pushable}) leave the containment and become the manifest plan; every other key
+     * stays in the containment exactly as before, so a key route (b) never answered per occurrence (a negative
+     * operator, a key outside the answered set) is neither dropped nor widened. Route (b) has no stage after the
+     * search that could judge such a key, which is why unlike route (a) it cannot hand them off.
+     *
+     * <p>The split reads the where as route (a) does ({@link ManifestLabelStage#split}), so an operator the stage
+     * refuses is refused here with the same {@link IllegalArgumentException}.
+     */
+    static RouteBWhere routeBWhere(Map<String, Object> where) {
+        if (where == null || where.isEmpty()) {
+            return new RouteBWhere(null, null);
+        }
+        var split = ManifestLabelStage.split(where);
+        ManifestPushdown.Plan plan = split.active() ? ManifestPushdown.of(split.labels()) : null;
+        if (plan == null) {
+            return new RouteBWhere(JSONB.jsonb(toJson(where)), null);
+        }
+        Set<String> pushed = new HashSet<>();
+        for (ManifestLabelStage.Predicate p : split.labels()) {
+            if (ManifestPushdown.pushable(p)) {
+                pushed.add(p.key());
+            }
+        }
+        Map<String, Object> rest = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : where.entrySet()) {
+            if (!pushed.contains(e.getKey())) {
+                rest.put(e.getKey(), e.getValue());
+            }
+        }
+        return new RouteBWhere(rest.isEmpty() ? null : JSONB.jsonb(toJson(rest)), plan);
     }
 
     /**
