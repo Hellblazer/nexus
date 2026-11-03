@@ -2,7 +2,8 @@
 title: "Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs"
 id: RDR-193
 type: Architecture
-status: deferred
+status: draft
+resumed_date: 2026-11-03
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -646,3 +647,11 @@ addressed server-side by RDR-191 Phase 6).
   since been taken (changelogs run to catalog-037 and taxonomy-017);
   renumber at reopen. Reopen trigger: an index wall-time or catalog-phase
   cost regression.
+- 2026-11-03 — reopened (Sam), status deferred -> draft. Context: RDR-241
+  (no client walks of the managed catalog) left the index-time link-generation
+  walk to this RDR. The reopen check found no recorded baseline to call a
+  regression against; today's per-run index-time walk costs (whole-catalog reads
+  1-5 s, RDR-dependency linking 4-6 s when an RDR changes) are recorded as the
+  baseline in T2 `nexus/rdr193-reopen-measurement-2026-11-03`. The design needs
+  a revision before its re-gate: renumber its changesets, and re-read it against
+  the PG engine and RDR-236.

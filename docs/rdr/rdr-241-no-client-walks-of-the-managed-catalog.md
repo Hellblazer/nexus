@@ -290,7 +290,7 @@ has it. A ratchet failure names the new call site and its file:line.
 ### Prerequisites
 
 - [ ] Critical Assumptions verified
-- [ ] RDR-193 reopened or not; the HOT PATH row follows that decision
+- [x] RDR-193 reopened (Sam, 2026-11-03); the HOT PATH row stays with RDR-193
 
 ### Minimum Viable Validation
 
