@@ -1311,3 +1311,24 @@ def test_the_lookup_narrowing_runs_in_shadow_like_the_matrix() -> None:
 
 def test_the_lookup_narrowing_reason_is_in_the_closed_vocabulary() -> None:
     assert "grown_route_not_lookup" in el.REASONS
+
+
+def test_a_grown_declaration_with_no_route_records_no_kind_and_still_serves_a_lookup() -> None:
+    row = _row(907, "grown-routeless", tags="ad-hoc,grown", verb="lookup")
+    row["plan_json"] = json.dumps(
+        {"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "synthesis", "provenance": "grown"}},
+    )
+    assert el.classify_plan(row["tags"], row["plan_json"]).recorded_kind is None
+    out, _ = _match([row], [(907, 0.05)], L)
+    assert _ids(out) == [907]
+
+
+def test_a_trusted_route_is_judged_by_the_matrix_not_the_lookup_narrowing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once a route is trusted the recorded kind IS the plan's kind, so a synthesis plan is refused for a lookup by
+    the matrix (``kind_mismatch``), and the narrowing, which reads only discounted kinds, never fires."""
+    monkeypatch.setattr(el, "TRUSTED_ROUTES", frozenset({"model-assisted"}))
+    standing = el.classify_plan(GROWN_SYNTHESIS["tags"], GROWN_SYNTHESIS["plan_json"])
+    assert (standing.kind, standing.recorded_kind) == (S, None)
+    out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}

@@ -5998,7 +5998,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `unknown_request_untrusted_plan`, `unknown_request_narrow_plan`,
   `untrusted_unknown_plan`, `undeclared_builtin` (a builtin seeded before
   nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
-  `untrusted_curated_claim`, `unreviewed_route` (a grown plan whose recorded kind is discounted:
+  `untrusted_curated_claim`, `single_source_synthesis` (a request naming one source refusing
+  citation-traversal), `unreviewed_route` (a grown plan whose recorded kind is discounted:
   `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
   names a route, so every grown plan reads as unknown-kind), `grown_route_not_lookup`
   (a lookup request refusing a grown plan whose discounted recorded kind is not lookup: the

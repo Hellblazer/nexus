@@ -62,9 +62,11 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   ``grown_route_not_lookup``): a grown plan that recorded any kind other than lookup was grown by a request
   that was not a lookup, so its steps were planned for something else, the H09 cost shape the lookup row
   exists to keep out (nexus-jypmj.11). A grown plan that recorded lookup, or no kind, still serves lookups,
-  and ``discovery/listing`` requests are unchanged. Measured on the live library on 2026-11-03 (77 lookup
-  runs since the gate was enabled, replayed offline): no current selection changes; the rule guards the
-  library as growth adds plans;
+  and ``discovery/listing`` requests are unchanged. This is a guard, not a measured effect: replaying the 77
+  lookup runs since the gate was enabled against the live library (2026-11-03) changed no selection only
+  because none of its 5 grown plans matched a lookup; the one live case (run 775 took grown plan 584, a
+  non-answer) cannot be replayed, the row being deleted. Grown plans that recorded no kind still serve
+  lookups; that path and discovery requests are open in nexus-a4g2a;
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``,
   and it is treated like any other untrusted unknown plan. A builtin seeded before nexus-jypmj.2.1 is
   this until ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is
