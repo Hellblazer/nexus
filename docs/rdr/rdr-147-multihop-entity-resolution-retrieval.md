@@ -1,5 +1,5 @@
 ---
-title: "Multi-hop entity-resolution retrieval: ingest-time entity-linker + traverse resolution hop, gated by a query-time type-mismatch trigger"
+title: "Multi-hop entity-resolution retrieval: an exact-key resolve step and a resolution repair inside the coverage boundary"
 id: RDR-147
 type: Architecture
 status: deferred
@@ -13,535 +13,801 @@ deferred_reason: "All 11 tracking beads, including epic nexus-bwct4, are DEFERRE
 related_issues: []
 ---
 
-# RDR-147: Multi-hop entity-resolution retrieval (Mechanism A + B)
+# RDR-147: Multi-hop entity-resolution retrieval
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 
+## Revision note (2026-11-03, nexus-t9npq)
+
+This revision replaces the June 2026 design. It is a redesign, not an anchor
+refresh, and it needs a new gate before any implementation bead starts. The
+status stays `deferred`; Sam moves every lifecycle step.
+
+What changed, and why:
+
+- **The June numbers were measured with a broken harness.** The benchmark read
+  search hits with `nx search -c`, which cuts every hit at 200 characters. In 25
+  of the 37 Slack messages that carry a customer id, the first id starts at
+  character 190 or later (median 219), so "company recall 0.000" and "hop 1 surfaces
+  the wrong customers" were not findings about nexus. Step 0 (nexus-3lu23,
+  merged 2026-11-02 as assetops-kg PR #3, merge commit
+  https://github.com/Hellblazer/assetops-kg/commit/3997c6a) rebuilt the harness and measured
+  again. Its numbers replace the June ones everywhere in this record.
+- **The June end-to-end score was a hand-written script, not nexus.** With the
+  harness fixed, that script already scores above the old bar ("recall > 0")
+  with no nexus change. The new bar measures `nx_answer` itself, against the
+  fixed script's score.
+- **The headline is new.** Today `nx_answer` declines all 7 company questions
+  with `[non-answer: uncovered]`, while the evidence it retrieved holds the
+  customer ids. The mechanism that addresses that is a *resolution repair*
+  inside RDR-232's coverage boundary (defined in §Proposed Solution), not a new
+  planner trigger. Whether that repair can enter on these questions is not yet
+  known (Critical Assumption #5).
+- **Mechanism B's June seam is gone.** (Mechanism B was June's planner-side
+  type-mismatch trigger; Mechanism A was the ingest-time entity linker.) The inline planner is one-shot, cannot
+  emit a `filter` step, and the dimension and shape names June proposed collide
+  with RDR-232's vocabulary. The trigger moves to the one place that already
+  inspects evidence after retrieval and adds work.
+- **Exact-key lookup mostly exists now.** `find_by_title_exact` and RDR-236's
+  catalog-answered `where title=` give a deterministic single-key lookup. What is
+  missing is a plan step that takes a list of keys.
+- **The entity-linker (Mechanism A) is off the critical path.** On HERB, company
+  names live inside the customer records' own text, so resolving a customer id
+  to its record is enough. The linker stays in this record as a conditional step.
+- **The two aggregation questions are out of the bar.** "Which company has the
+  most resolved/unresolved bugs" needs counting, not lookup. Sam (2026-11-03):
+  report them separately, keep them out of the Minimum Viable Validation
+  (MVV, the one end-to-end check that says this RDR worked), and add no planner
+  aggregation step in this revision.
+
+The design of record for these changes is the re-plan memo, T2
+`nexus/plan-rdr147-replan-2026-11-02`; the measured numbers are T2
+`nexus/rdr147-step0-baselines-2026-11-02` and assetops-kg
+`results/herb/step0-baselines.json` at that merge. Every code anchor below was
+checked against nexus `develop` at `b7c423ea8`.
+
 ## Problem Statement
 
-nexus cannot answer questions whose answer entity type is *referenced* in the
-evidence but not *present* in it — the canonical "deep search" multi-hop join.
-Concretely (HERB SearchFlow, see `assetops-kg` benchmark): "which companies were
-affected by issue X?" retrieves issue/chat artifacts that name **customer IDs**
-(`CUST-0018`), but the answer requires **company names** (`FusionTech`). The
-resolution `CUST-0018 → FusionTech` lives in a separate customer record. nexus's
-single-pass retrieve-then-synthesize plan never performs the dependent second
-retrieval, so it emits raw IDs or hallucinates. Company recall measured 0.000.
+Some questions name one kind of thing but are answered by another kind that the
+evidence only *refers to*. HERB (a benchmark of enterprise search over Slack
+messages, documents, pull requests and records, from Salesforce AI Research,
+arXiv 2506.23139) has a clean case. In its SearchFlow product, "which companies
+were affected by issue X?" retrieves Slack messages that name **customer ids**
+(`CUST-0018`). The answer needs **company names** (`FusionTech`). The link
+`CUST-0018 → FusionTech` lives in a separate customer record, one short record
+per customer. Answering takes two retrievals in sequence: find the messages,
+then look up each customer id they name. This is a *multi-hop join*, and the
+second hop is an *entity resolution*: turning an identifier into the record it
+names.
 
-The failure decomposes into a discovery problem and an execution problem, and
-both are unsolved in nexus today.
+**Measured (Step 0, 2026-11-02; conditions in §Step 0 measurements):**
+`nx_answer` (nexus's plan-then-execute answer tool) answers none of the 7 SearchFlow company questions. All 7 end as
+`[non-answer: uncovered]`: RDR-232's coverage check found that no part of the
+question was supported, and skipped generating an answer. Yet the evidence each
+run retrieved (20 to 80 chunks) names 2 to 10 customer ids per question. The ids
+are in hand, and nothing turns them into companies. The coverage check's one
+repair (a second retrieval) did not run either; why is Critical Assumption #5.
 
 ### Enumerated gaps to close
 
-#### Gap 1: No ingest-time entity linking — the join graph is never built
+#### Gap 1: No ingest-time entity linking
 
-Entity records whose key (e.g. a customer record titled `CUST-0018`) appears
-verbatim as a token inside other artifacts imply a foreign-key-like reference.
-nexus indexes both the entity records and the referencing artifacts but creates
-**no catalog edge** between them. With no `artifact --mentions--> entity-record`
-link, `traverse` has nothing to walk, so the resolution hop cannot be executed
-as a deterministic graph step. The referential structure is discoverable at
-index time and is currently discarded.
+An entity record whose key (a customer record titled `CUST-0018`) appears
+verbatim inside other artifacts implies a foreign-key reference. nexus indexes
+both and creates no catalog link between them, so `traverse` (the catalog graph
+walk) has nothing to follow. **Revised standing:** on HERB this gap is not on the
+path to an answer, because the company name is inside the customer record and
+resolving the id (Gap 2) is enough. It stays a gap for corpora where the answer
+sits one link further out. See §Technical Design, Step 2.
 
-#### Gap 2: Fuzzy retrieval cannot execute the resolution hop — embedding collision
+#### Gap 2: No plan step resolves a list of keys exactly
 
-Even with the entity records indexed and retrievable, a semantic re-query for an
-exact key fails: the 120 SearchFlow customer records are near-identical sentences
-(`Customer CUST-xxxx: contact N, R at company C`), so they collide in embedding
-space. **Verified**: `search("CUST-0035")` returns `CUST-0097`, `CUST-0046`,
-`CUST-0079` — never `CUST-0035`. `store_get`-by-title also failed. Only a
-metadata exact-filter (`search --where title=CUST-0035`) resolves deterministically.
-nexus has no first-class deterministic key-resolution retrieval operator that a
-plan can target; the only working path is an undocumented `where=title` filter.
+Dense retrieval cannot find an exact key among near-identical records. The 120
+SearchFlow customer records are near-identical sentences (`Customer CUST-xxxx:
+contact N, R at company C`), so their embeddings collide. **Verified (June):**
+`search("CUST-0035")` returns `CUST-0097`, `CUST-0046`, `CUST-0079`, never
+`CUST-0035`.
 
-#### Gap 3: No type-mismatch trigger — the planner cannot discover the resolution hop
+**Revised standing:** single-key exact lookup now exists. The catalog's
+`find_by_title_exact` returns every live document whose title equals a string
+exactly, across collections (details in §Technical Environment). RDR-236 also
+answers `where title=` from the catalog document's own title. What is missing is
+a step a plan can run over a *list* of keys, that reports keys it could not
+resolve and keys that matched more than one document.
 
-The signal that a resolution hop is needed — "the answer entity type is
-referenced-but-not-present in hop-1 evidence" — is internal and available a
-priori from `(question, hop-1 result)`. **Verified**: with `force_dynamic` and a
-structural-rule context, the inline planner *correctly states* "these are
-customer accounts referenced only by ID, not company names" — discovery fires —
-but there is no standing mechanism that types `answer_shape` vs `evidence_shape`
-and inserts the resolve hop. The capability exists only when hand-prompted.
+#### Gap 3: Nothing acts on "the evidence holds identifiers, not answers"
 
-#### Gap 4: No gating — blanket iteration harms simple questions
+The signal that a resolution hop is needed is that the evidence names the
+answer's entities only by identifier. **Verified (June):** with a hand-written
+rule in its context, the inline planner (the `claude -p` call that writes a plan
+when no saved plan matches) stated "these are customer accounts referenced only
+by ID, not company names". Nothing acts on that signal without the hand prompt.
 
-Literature (Beyond Static Retrieval, arXiv 2509.25530; **Documented**) shows
-iterative/multi-hop retrieval *harms* single-hop and simple-comparison questions
-(added documents dilute precision; gold "bridge" docs get buried beyond leading
-positions). A resolution hop must fire only on the type-mismatch signal, never
-unconditionally.
+**Revised standing:** the place that already inspects evidence after retrieval
+and can add one round of retrieval is RDR-232's coverage boundary (the runner
+step that checks whether the evidence supports each part of the question, called
+a *facet*, before the final answer is generated). Its one *repair* (a second,
+targeted retrieval for unsupported facets) runs semantic queries on the facet's
+text. For an exact-key join that repeats the embedding collision of Gap 2. The
+gap is that the repair has no exact-key path.
+
+#### Gap 4: No gating; blanket iteration harms simple questions
+
+Iterative retrieval hurts single-hop and simple comparison questions: added
+documents dilute precision and bury the gold documents (Beyond Static Retrieval,
+arXiv 2509.25530; **Documented**). A resolution hop must fire only on its signal,
+never on every question.
 
 ## Context
 
 ### Background
 
-Discovered while benchmarking nexus retrieval against the HERB benchmark
-(Salesforce AI Research, "Benchmarking Deep Search over Heterogeneous Enterprise
-Data", arXiv 2506.23139) in an isolated local sandbox. nexus's composed
-`nx_answer` arm matched GPT-4o agentic ReAct on People search (~34 vs ~32, local
-bge-768, zero metered API) but scored 0 on Customer/company. Root-causing that
-single number produced the finding chain in T2/T3
+Found while benchmarking nexus on HERB in an isolated local sandbox. nexus's
+composed `nx_answer` arm matched GPT-4o agentic ReAct on People search (about 34
+against about 32, with bge-768, a local embedding model, and no metered API)
+but scored 0 on the company questions. Step 0 reproduced that 0 for `nx_answer`,
+for a different reason than June diagnosed (see the revision note). Root-causing that number produced the findings in T2/T3
 (`herb-nexus-comparison-results`, `discovering-multihop-query-plans-from-structure`,
-`multihop-retrieval-literature-map-for-nexus`). The design here is deliberately
-derived from the *structure* of the task and corpus, not reverse-engineered from
-a higher-scoring competitor.
+`multihop-retrieval-literature-map-for-nexus`). The design is derived from the
+structure of the task and corpus, not copied from a higher-scoring system.
 
 The literature (StepChain GraphRAG 2510.02827; ByoKG-RAG 2507.04127; PRISM
 2510.14278; PAR-RAG 2504.16787; Self-RAG 2310.11511; all indexed in T3
-`knowledge`, DT-sourced) independently confirms the approach: the GraphRAG family
-exists *precisely because* dense retrieval cannot do structured exact-key joins
-(PRISM, citing Weller 2025: "no single embedding can represent all query–document
-relevance patterns as candidate sets grow combinatorially"). StepChain's
-`Extract(chunk)` + `Link(entity_a, entity_b, chunk)` + deterministic BFS is this
-RDR's Mechanism A under a different name.
+`knowledge`) agrees on the approach: graph-augmented retrieval exists because
+dense retrieval cannot do exact-key joins (PRISM, citing Weller 2025: "no single
+embedding can represent all query–document relevance patterns as candidate sets
+grow combinatorially"). StepChain's `Extract(chunk)` + `Link(entity_a, entity_b,
+chunk)` + deterministic graph walk is this RDR's Mechanism A under another name.
+
+Since June, two RDRs changed what this one has to build. RDR-232 (closed) added
+the coverage boundary and the request *answer kind* (what sort of answer a
+question asks for: lookup, listing, synthesis and so on). RDR-236 (chunk-row
+metadata normalization) moved document fields such as `title` onto the catalog
+document, so a `where title=` filter is answered from the catalog per owning
+document.
 
 ### Technical Environment
 
-- nexus package: `src/nexus/` (repo `git/nexus`). Catalog behind the T2/T3
-  daemons.
-- Catalog graph: `src/nexus/catalog/catalog_links.py` (`link` 293,
-  `link_if_absent` 317, `links_from` 514, `links_to` 537, `link_query` 560);
-  `src/nexus/catalog/catalog.py` (`link` 1870). `traverse` exposed as an MCP tool
-  (catalog BFS with depth cap, direction, link-type / purpose filter, cycle
-  detection).
-- Plan runner: `src/nexus/plans/runner.py` — operator registry `_OPERATOR_TOOL_MAP`
-  (680), step-ref resolution (`$stepN.<field>` → ids/contents/extractions/...),
-  auto-hydration of `ids`, `_OPERATOR_MAX_INPUTS=100` cap (695).
-- Ingest seam: `src/nexus/hook_registry.py` — `HookRegistry`
-  (`register_single`/`register_batch`/`register_document`, `fire_store_chains`
-  271) and `install_default_hooks` (320), where post-store chains (chash index,
-  taxonomy, aspect queue) are wired. This is where an entity-linker hook attaches.
-- Planner: `src/nexus/mcp/core.py` `nx_answer` (plan-match-first; inline `claude -p`
-  planner on miss); `src/nexus/plans/match.py` / `matcher.py` (plan_match).
-- Deterministic primitive: `search --where KEY=VALUE` metadata exact-filter.
+All anchors are nexus `develop` at `b7c423ea8`. There is no daemon, Chroma or
+SQLite path in this design: the catalog and T3 (the permanent vector store) are
+the engine service's Postgres tables, reached over HTTP. A *tumbler* is a
+catalog document's hierarchical address (`1.2.5`); a *chash* is the SHA-256 of a
+chunk's text, which serves as the chunk's identity; a document's *manifest* is
+its ordered list of chunk chashes.
+
+- **Exact title lookup.** `HttpCatalogClient.find_by_title_exact(title, *,
+  content_type=, owner=, chunk_count=)` (`src/nexus/catalog/http_catalog_client.py:2110`)
+  calls `GET /v1/catalog/by_title` (`CatalogHandler.java:48`, routed at `:167`),
+  which runs `CatalogRepository.documentsByTitle` (`CatalogRepository.java:3380`).
+  Exact and case-sensitive, live documents only, every collection, returns a
+  list because titles are not unique. `resolve_many(doc_ids)` (`:2376`) and the
+  MCP `store_get_many` (`src/nexus/mcp/core.py:6700`) turn results into records.
+- **Catalog-answered `where`.** RDR-236's manifest stage answers document keys
+  from the catalog document. Its catalog-meta key allowlist is
+  `ManifestLabelStage.META_KEYS` (`ManifestLabelStage.java:195-196`: tags,
+  category, ttl_days, source_agent, extraction_method, quality_gate_overridden,
+  extraction_source, frecency_score), plus the document fields (title,
+  content_type and the bibliographic keys). The engine compiles `$eq` and `$in`
+  on those keys (`ManifestPushdown.java:114`, `:157`, `:263`). The Python
+  `where=` string grammar has no `$in`: it accepts only `KEY op VALUE` with
+  `op` in `>=, <=, !=, >, <, =` (`src/nexus/filters.py:15-19`).
+- **Plan runner.** `src/nexus/plans/runner.py`: `_NON_EMBEDDING_TOOLS` (`:603`,
+  holds `traverse`), step references `$stepN.<field>` (`_STEPREF_RE` `:704`,
+  `_resolve_value` `:946`), the operator map `_OPERATOR_TOOL_MAP` (`:1982-1993`,
+  which includes `filter`, `groupby` and `aggregate`), `_OPERATOR_MAX_INPUTS =
+  100` (`:1997`). The runner hands `operator_filter` the hydrated texts as
+  `items` (`:3011-3014`).
+- **Inline planner.** `_nx_answer_plan_miss` (`src/nexus/mcp/core.py:12173`) is
+  one-shot; its retries only repair malformed plans. Its tool allowlist
+  `_ALLOWED_TOOLS` (`:12332-12336`) is search, query, traverse, store_get_many,
+  extract, rank, compare, summarize, generate, check and verify: no `filter`, no
+  `groupby`, no `aggregate`. MCP `plan_save` (`:7930`) takes `verb`, `scope_tags`
+  and tags but no free dimensions; the dimension registry
+  (`conexus/plans/dimensions.yml`) holds verb, scope, strategy, object and domain,
+  and unregistered keys fail strict validation (`src/nexus/plans/loader.py:254-324`).
+- **RDR-232 vocabulary.** `AnswerShape` (`src/nexus/plans/answer_shape.py:46`)
+  classifies the terminal text; the request kind is `PlanAnswerKind`
+  (`src/nexus/plans/answer_kind.py:105`). Plan eligibility by kind is the table in
+  `src/nexus/plans/eligibility.py:12-24`. A question with a plural head after
+  "which/what" goes through `_plural_head` (`src/nexus/plans/request_coverage.py:803`)
+  and `_infer_kind` (`:877`).
+- **Coverage boundary.** `CoverageBoundary` (`src/nexus/plans/coverage_ledger.py:875`);
+  `run` (`:1073-1091`) is `evaluate` plus at most one repair. The repair enters
+  only for facets in `repair_target_ids` (`:564-566`): facets `unsupported` with
+  reason `no_supporting_evidence` (`REPAIRABLE_REASON`, `:251`), plus covered
+  facets whose anchors were mostly unread. A facet decided by a missing named
+  source gets reason `source_missing` (`_blocked`, `:951-970`) and is not a repair
+  target. `state_for` returns `unavailable`/`uncovered` and skips generation when
+  every facet is unsupported and none is unassessed (`:842-843`). The ledger's
+  *anchors* are the evidence items it assesses each facet against. The repair's
+  queries are the facet's own text (`src/nexus/plans/coverage_repair.py:11-13`).
+  `nx_answer` builds the boundary at `core.py:14590` whenever `NX_ANSWER_COVERAGE`
+  is on (the default); nothing in `src/` sets `max_repair_queries` to 0.
+- **Catalog links.** `link_if_absent` (`http_catalog_client.py:2810`) checks then
+  POSTs; the engine upserts (`CatalogRepository.upsertLink`, `:4270`), so it is
+  idempotent. There is no bulk link create. `link_type` is open `TEXT`
+  (`catalog-001-baseline.xml:132`). `mentions` is not in
+  `DEFAULT_GRAPH_LINK_TYPES` (`CatalogRepository.java:4517-4520`) nor in
+  `_KNOWN_LINK_TYPES` (`src/nexus/plans/purposes.py:77`), so a `traverse` over it
+  must name it.
+- **Deletion and links.** Hard delete cascades to links through foreign keys
+  (`catalog-032-links-tumbler-fk.xml:137-155`, `ON DELETE CASCADE`; reached by
+  `purgeTrash` `CatalogRepository.java:2786`). Delete to trash is a tombstone
+  (`deleteDocument` `:2387`, `restoreDocument` `:2472`) and links survive it.
+  `graphBFS` joins both endpoints to live documents (`:4658-4668`), so `traverse`
+  never walks a tombstone; `linksFrom` (`:4406`) and `linksTo` (`:4419`) do not
+  filter tombstoned endpoints.
+- **Ingest hooks.** `install_default_hooks` (`src/nexus/hook_registry.py:526`),
+  `register_batch` (`:169`, records whether the hook takes `catalog_doc_id`,
+  `:182`), `fire_batch` (`:214`, passes `catalog_doc_id` at `:307`, filters by
+  `batch_grain` at `:298`). In `store_put` the order is `put_note`
+  (`core.py:5951`) → `_catalog_auto_link` (`:5996`) → `fire_note_chains`
+  (`:6021`, with the tumbler) → `stamp_note` (`:6026`). Post-hoc link generators
+  live in `src/nexus/catalog/link_generator.py` (for example
+  `generate_rdr_filepath_links` `:240`, `generate_prose_filepath_links` `:706`;
+  `DryRunLinkWriter` `:1069`).
+- **No entity key exists.** Nothing in `src/` names `entity_key` or classifies
+  entity records. Catalog document meta accepts any key (merged with
+  `jsonb_concat`, `CatalogRepository.java:2195-2197`), but a `where` on a new meta
+  key needs it added to `META_KEYS` and the pushdown. Per-collection
+  configuration precedents are `config.py` `_DEFAULTS` (`src/nexus/config.py:1357`)
+  and the per-repo `.nexus.yml` reader (`:1795`).
+- **CLI read.** `nx search -c` truncates each hit at `_CONTENT_MAX_CHARS = 200`
+  (`src/nexus/commands/search_cmd.py:49`, applied `:779`); `--json` returns full
+  chunk text.
 
 ## Research Findings
 
 ### Investigation
 
-Benchmarked nexus on HERB SearchFlow (1559 artifacts incl. customer/employee
-entity records, bge-768 local, isolated sandbox). Implemented and ran a
-deterministic multi-hop resolver (`assetops-kg benchmark/multihop_resolve.py`).
-Probed the inline planner with a structural-rule context + `force_dynamic`.
-Surveyed the 2024–2025 multi-hop / GraphRAG literature (6 papers indexed in T3).
+June 2026: benchmarked nexus on HERB SearchFlow in a local sandbox, wrote a
+deterministic multi-hop resolver (assetops-kg `benchmark/multihop_resolve.py`),
+probed the inline planner with a structural rule and `force_dynamic`, and
+surveyed six multi-hop and GraphRAG papers (indexed in T3).
+
+November 2026: a read-only re-plan survey against nexus `develop` (T2
+`nexus/plan-rdr147-replan-2026-11-02`) found the harness defects below. Step 0
+(nexus-3lu23) then rebuilt the benchmark on the PG engine and measured again
+(§Step 0 measurements).
 
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| `nexus.catalog.catalog_links` | Yes | `link`/`link_if_absent` create typed edges between tumblers; BFS via `links_from`/`links_to`; `traverse` MCP tool already does depth-capped, link-type-filtered, cycle-safe walks. |
-| `nexus.plans.runner` | Yes | Operators dispatched via `_OPERATOR_TOOL_MAP`; steps reference prior outputs `$stepN.ids/.contents/...`; ids auto-hydrated; 100-input cap. No `resolve`/exact-key operator exists. |
-| `nexus.hook_registry` | Yes | `install_default_hooks` is the single wiring point for post-store chains; `register_batch` accepts `fn(doc_ids, collection, contents, ...)` — the correct seam for an entity-linker. |
-| `search --where` | Yes (spike) | Metadata exact-filter returns the exact-title record where semantic search and `store_get`-by-title both fail. |
+| `HttpCatalogClient.find_by_title_exact` / `GET /v1/catalog/by_title` | Yes (b7c423ea8) | Exact, case-sensitive, live documents only, all collections, returns a list; optional owner, content_type and chunk_count narrowing. The single-key lookup Gap 2 needs. |
+| RDR-236 manifest stage (`ManifestLabelStage`, `ManifestPushdown`) | Yes (b7c423ea8) | `where title=` is answered from the catalog document title. The engine compiles `$in`; the Python `where=` grammar lacks it. A new meta key needs an allowlist and pushdown change. |
+| `nexus.plans.runner` | Yes (b7c423ea8) | No `resolve` step. `traverse` already runs as a `$ref`-seeded step. `filter`, `groupby`, `aggregate` are in the operator map but not in the inline planner's allowlist. |
+| `nexus.plans.coverage_ledger` / `coverage_repair` | Yes (b7c423ea8) | The one place evidence is inspected after retrieval and one more retrieval may run. The repair is semantic, on facet text, and enters only for `no_supporting_evidence` facets. |
+| `nexus.hook_registry` | Yes (b7c423ea8) | `register_batch` hooks get `(doc_ids, collection, contents, embeddings, metadatas)` and, if declared, `catalog_doc_id`. The seam for a linker's forward pass. |
+| Catalog links (`link_if_absent`, `upsertLink`, `graphBFS`) | Yes (b7c423ea8) | Idempotent typed links; no bulk create; `mentions` must be named in `traverse`; hard-delete cascade exists; `traverse` filters tombstones, `links_from`/`links_to` do not. |
+| Exact-token enumeration (FTS) | Yes (re-plan survey) | Does not exist. The `lexical` search leg (`search_engine.py:1704`) is ranked, capped at `n_results`, and fuzzy on its trigram arm. No route returns every chunk containing a token. |
 
 ### Key Discoveries
 
-- **Verified** — Embedding collision: `search("CUST-0035")` returns other CUST
-  records, never the exact one; dense retrieval cannot do exact-key resolution.
-- **Verified** — `search --where title=<id>` resolves the exact record
-  deterministically; this is the only working key-resolution primitive today.
-- **Verified** — The inline planner, when prompted with the structural rule,
-  correctly *detects* the type mismatch ("ids, not names") — discovery is feasible.
-- **Verified** — Even with a working resolution hop wired, company recall stayed
-  0 because hop-1 surfaced the wrong customers: the bottleneck **recurses** to
-  `question → affected-issue → affected-customer`. Resolution is necessary, not
-  sufficient.
-- **Documented** — StepChain/ByoKG/HippoRAG2/LEGO-GraphRAG build explicit entity
-  graphs for exactly this join; PRISM/PAR-RAG decompose with precision filtering;
-  Self-RAG/FLARE gate retrieval reflectively; Beyond-Static documents that
-  blanket iteration hurts simple questions.
+- **Verified** — Embedding collision: `search("CUST-0035")` returns other
+  customer records, never the exact one (June).
+- **Verified** — Exact title lookup resolves every customer id: P2 resolution
+  accuracy is 1.000 on the 29 SearchFlow member customers (Step 0).
+- **Verified** — The inline planner, hand-prompted with the structural rule,
+  detects "ids, not names" (June).
+- **Verified (re-plan survey)** — The June harness read hits with `nx search -c`,
+  which cuts each hit at 200 characters. In SearchFlow, 37 Slack messages carry a
+  customer id; in 25 of them the first id starts at character 190 or later
+  (median 219). The harness also returned `""` on any `nx` error, so a broken
+  sandbox read as recall 0. Both are fixed in Step 0 (`--json`, and errors raise).
+- **Verified (re-plan survey)** — The June end-to-end rung scored
+  `answer_company()`, a hand-written script, not `nx_answer`. With the harness
+  fixed it scores above the June bar with no nexus change (Step 0: issue
+  questions recall 0.667).
+- **Refuted by Step 0** — June's "even with resolution wired, recall stayed 0
+  because hop 1 surfaced the wrong customers" was a truncation artifact. On the 5
+  issue questions, hop-1 precision at k=20 is 0.967. Hop 1's limit is recall: it
+  surfaces 4 to 6 of the 10 to 12 ids the cited artifacts name.
+- **Measured (Step 0)** — `nx_answer` declines all 7 company questions as
+  `[non-answer: uncovered]` while holding the ids, and its coverage repair did not
+  run (probe: `repair_entered=False`, outcome `not_attempted`).
+- **Inferred from code, not measured** — Why the repair did not run. On
+  `b7c423ea8`, an `unavailable`/`uncovered` ledger with evidence present enters
+  no repair only when no facet carries `no_supporting_evidence`, and the other
+  reason an unsupported facet can carry when evidence is present is
+  `source_missing` (a source named in the question judged absent). Step 0 did not
+  record facet reasons, and it ran nx 7.94.0, not this commit. Critical
+  Assumption #5 carries this.
+- **Documented** — StepChain, ByoKG, HippoRAG2 and LEGO-GraphRAG build explicit
+  entity graphs for this join; PRISM and PAR-RAG decompose with precision
+  filtering; Self-RAG and FLARE gate retrieval reflectively; Beyond-Static
+  documents that blanket iteration hurts simple questions.
+
+### Step 0 measurements
+
+Conditions for every number in this section and wherever this record quotes
+Step 0: nx 7.94.0, engine service 0.1.175, embedding `bge-768` (BAAI
+bge-base-en-v1.5, 768 dimensions, local ONNX), an isolated PG sandbox (own HOME,
+loopback ports, no credentials), 1559 HERB SearchFlow artifacts ingested through
+the `store_put` note path (1559 catalog documents, 1578 chunks), hop-1 depth
+`k=20` (the first search returns 20 hits). Recorded 2026-11-02 in assetops-kg
+`results/herb/step0-baselines.json` at the Step 0 merge (assetops-kg PR #3).
+
+The 7 company questions split into 5 *issue* lookups ("companies affected by
+issue X", **issue5**) and 2 *aggregation* questions ("company with the maximum
+number of resolved/unresolved bugs", **agg2**). Company scores are means over
+questions of per-question recall, precision and F1 (the harmonic mean of the
+two). The table holds the recorded values; prose elsewhere in this record
+rounds them to three places. The *script* is the fixed hand-written pipeline: search the question,
+read customer ids from the hits' full text, look each up by exact title, read
+the company from the record. The *oracle* replaces hop 1 with the artifacts HERB
+cites for the question.
+
+| Baseline | issue5 recall | issue5 precision | issue5 F1 | agg2 F1 | all7 F1 |
+| --- | --- | --- | --- | --- | --- |
+| Fixed script | 0.6666666666666667 | 0.9666666666666666 | **0.7642857142857142** | 0.0 | 0.5459183673469388 |
+| `nx_answer` (today) | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| Oracle: cited artifacts as hop 1 | 1.0 | 0.6154761904761905 | 0.7593006993006993 | 0.18181818181818182 | 0.5943056943056942 |
+| Oracle: k=300 retrieval, kept only if cited | 1.0 | 0.6521428571428571 | 0.7873959373959374 | 0.26785714285714285 | 0.6389562818134247 |
+
+Ladder rungs: P2 resolution accuracy 1.0 on 29 members. P3 hop-1 precision
+0.6904761904761905 over all 7 (issue5 0.9666666666666666, mean 4.8 ids surfaced;
+agg2 0.0, mean 0.5 ids surfaced).
+
+`nx_answer` detail: all 7 rows `coverage_state=unavailable`,
+`coverage_reason=uncovered`; 20 to 80 evidence chunks per question; 2 to 10
+distinct customer ids in the hydrated evidence (the retrieved chunks fetched
+as full text) per question. The path varied and
+the outcome did not: plan 9 matched on 3 of 7 questions in runs 1 and 3, and the
+inline planner ran in run 2. Spend 0.6607 USD over 3 runs and 1 probe (ledger
+`results/herb/step0-nx-answer-costs.jsonl`).
+
+The re-plan memo predicted these before measuring (§4 of the memo): script
+recall 0.40 over all 7 (measured 0.476), 0.52 on issue5 (0.667), 0.10 on agg2
+(0.0); P3 0.55 (0.690); P2 1.000 (1.000); `nx_answer` recall 0.10 (0.0) and
+precision below 0.30 (0.0); oracle recall 1.00 (1.0) and issue5 precision 0.61
+(0.615). The predictions erred low on the script and high on `nx_answer`.
+
+**Derived, not measured:** if `nx_answer` named every company that the customer
+ids in its recorded evidence resolve to, its issue5 F1 would be 0.823 (recall
+0.867, precision 0.835), computed from the same file's `evidence_companies`
+rows. That is above the script's 0.764, so the bar can be cleared without any
+change to retrieval, if the ids already held are resolved and the answer names
+them.
+
+**Reading.** On the issue lookups, hop-1 precision is not the problem (0.967).
+The problem is that `nx_answer` never turns held ids into names. Hop-1 recall at
+k=20 is the next limit (0.667 against the oracle's 1.0), and it is out of scope
+here (§Risks). The cited-artifact oracle has perfect recall but a lower F1 than
+the script, so recall alone does not clear the bar.
 
 ### Critical Assumptions
 
-- [x] Entity records are identifiable at ingest by a stable key that appears as a
-  token in referencing artifacts (title == key for store_put'd entities) —
-  **Status**: Verified (HERB) / Refuted (general corpora) — **Method**: Spike +
-  Source Search (2026-06-05). Codebase mechanism confirmed: `store_put` stores
-  `title` verbatim in T3 chunk metadata (`metadata_schema.normalize()` applies no
-  transformation; title is in `ALLOWED_TOP_LEVEL`), and `where=title=<key>`
-  exact-matches via ChromaDB equality (`filters._OP_MAP`, `t3.find_ids_by_title`).
-  BUT title==key holds **only** on the MCP/CLI `store_put(title=<token>)` path,
-  where the caller explicitly chose the token. Every batch-index path mangles or
-  reshapes the key: `indexer_utils.derive_title()` title-cases filename tokens
-  (`cust-0035.md` → "Cust 0035"); code chunks title is `rel_path:Lstart-Lend`
-  (never a key); PDF/markdown titles are human-readable. For general corpora
-  there is **no stable entity-key field at all** — the assumption is structurally
-  inapplicable, not merely untested, unless the corpus was purpose-built with the
-  `store_put(title=<token>)` pattern (as HERB's 120 CUST records were). Additional
-  preconditions baked in: entity records must be single-chunk (multi-chunk →
-  ambiguous `find_ids_by_title`), and the target collection must be known a priori
-  (resolution is per-collection).
-- [x] Catalog `link_if_absent` can be called from within a post-store batch hook
-  without deadlocking the catalog-behind-daemon path — **Status**: Verified —
-  **Method**: Source Search (2026-06-05). `fire_batch` fires LAST in `store_put`
-  (`mcp/core.py`), after `catalog_store_hook`, `t3.put` (ChromaDB-only, no catalog
-  lock), and `_catalog_auto_link` have all unwound and closed their `CatalogWriter`
-  s in `finally`. The hook gets a fresh `CatalogWriter`/socket. Daemon serializes
-  catalog writes with a cooperative `asyncio.Lock` (`daemon/t2_daemon._dispatch`),
-  not an OS mutex — no blocking across RPCs. The directory `fcntl.flock`
-  (`catalog_links.link_if_absent → _acquire_lock`) is acquired/released atomically
-  INSIDE the daemon process per op. **Live precedent**: `manifest_write_batch_hook`
-  (`mcp_infra.py`) already calls `get_catalog_writer()` → daemon RPC (multi-step
-  manifest writes) from inside `fire_batch` on every store_put in production
-  without deadlock. Residual: throughput/latency at high concurrent ingest (one
-  more RPC in the serialization queue), not a correctness concern.
-- [x] `traverse` can be used as a plan step with `seeds=$stepN.tumblers` and a
-  link-type filter, returning the resolution-target records — **Status**: Verified
-  (with precondition) — **Method**: Source Search + Spike (2026-06-05). `traverse`
-  is a first-class non-embedding plan-runner step (`runner._NON_EMBEDDING_TOOLS`,
-  isolated-step path via `bundle.py`), returns the standard
-  `{tumblers, ids, collections}` retrieval contract. `$stepN.tumblers` resolves via
-  `runner._resolve_value` (`_STEPREF_RE`, list-flatten); `search`/`query` emit
-  `tumblers` in structured mode. Three production builtin plans already chain this
-  (`citation-traversal.yml`, `hybrid-factual-lookup.yml`, `traverse-then-generate.yml`)
-  plus dedicated coverage in `tests/test_traverse_step.py`. **Precondition**: the
-  seed step's `tumblers` are populated from chunk metadata field `tumbler`, which is
-  non-empty only for catalog-registered documents; unparseable seeds are silently
-  dropped (`Tumbler.parse` try/except). For RDR-147's ingest-of-entity-records
-  scenario this is the intended baseline, but it COMPOUNDS assumption #1's boundary:
-  resolution needs entity records both store_put-titled AND catalog-registered with
-  a tumbler.
-- [ ] A `where=`-backed exact-filter retrieval can be expressed as a plan operator
-  fed by an extract step's output list — **Status**: REFUTED — **Method**: Source
-  Search + Spike (2026-06-05). Not expressible with today's runner; needs new
-  infrastructure. Three independent gaps, each sufficient to block: (A) **No
-  `resolve` operator** — `_OPERATOR_TOOL_MAP` (`runner.py`) has no `resolve`/exact-
-  key entry; the RDR's own §Technical Design already describes `resolve(ids,
-  by="title")` as new code. (B) **No fan-out primitive** — `plan_run` iterates over
-  STEPS, not items within a step output; no `foreach`/`map_over_items`; `_STEPREF_RE`
-  has no indexing syntax, so resolving N extracted tokens (each needing one
-  `where=title=<token>` call) is not wireable. (C) **No `$in` in the MCP `where=`
-  surface** — `filters.parse_where_str` accepts only `KEY{>=,<=,!=,>,<,=}VALUE`;
-  `$in` exists internally (`search_engine` catalog prefilter on `doc_id`) but is
-  unreachable from a plan step's `where=` string. `operator_filter` is NL post-
-  retrieval filtering, NOT key-resolution retrieval. Closing #4 requires at minimum
-  a new `resolve` operator that internally loops over its input id-list (collapses
-  Gaps A+B), or adding `$in` support to `where=` (collapses to one search step).
+- [x] **#1 Entity records carry a stable key that appears verbatim in referencing
+  artifacts** — **Status**: Verified (HERB) / Refuted (general corpora) —
+  **Method**: Spike + Source Search (2026-06-05), re-checked on b7c423ea8.
+  "Title" now means the catalog document's title (RDR-236), which
+  `find_by_title_exact` matches exactly. Two June preconditions dissolve: entity
+  records need not be single-chunk (by_title returns documents, and the manifest
+  gives all their chunks), and the target collection need not be known in advance
+  (by_title searches every collection, narrowable by owner or content_type). The
+  boundary that remains: title equals key only where the caller chose it
+  (`store_put(title=<key>)`, as HERB's 120 customer records were stored). Batch
+  index paths reshape titles: `derive_title()` title-cases filename tokens
+  (`cust-0035.md` → "Cust 0035"), code chunks are titled `rel_path:Lstart-Lend`,
+  PDF and markdown titles are human-readable. Step 1's `entity_key` covers
+  store_put and configured collections; md/pdf extraction is deferred (Step 1).
+- [ ] **#2 A post-store batch hook can create catalog links** — **Status**: To
+  re-verify on the PG engine (Step 2, only if the linker is built). The June
+  verification reasoned about the T2 daemon's `asyncio.Lock` and an `fcntl` lock
+  that no longer exist. The current precedent is `fire_note_chains` firing with
+  the document's tumbler after `put_note` and `_catalog_auto_link` have returned
+  (`core.py:5951-6021`), and `manifest_write_batch_hook` writing to the catalog
+  from inside `fire_batch` on every store_put. The `nx index repo` flush grain
+  carries no tumbler, so a linker there must look the tumbler up.
+- [x] **#3 `traverse` runs as a plan step seeded by `$stepN.tumblers`** —
+  **Status**: Verified (with precondition) — **Method**: Source Search + Spike
+  (2026-06-05), still holds on b7c423ea8 (`_NON_EMBEDDING_TOOLS`, `_STEPREF_RE`,
+  `_resolve_value`; builtin plans `citation-traversal.yml`,
+  `hybrid-factual-lookup.yml`, `traverse-then-generate.yml`;
+  `tests/test_traverse_step.py`). Precondition: seeds must be catalog-registered.
+  Addition: `mentions` is not a default graph type, so a `traverse` over mentions
+  links must pass `link_types=["mentions"]` explicitly.
+- [x] **#4 Exact-key resolution of a token list needs one new step** —
+  **Status**: Verified (rewritten) — **Method**: Source Search on b7c423ea8. The
+  June finding "not expressible today" still holds for plans: there is no
+  `resolve` step, no fan-out over items inside a step, and no `$in` in the
+  `where=` string. But the engine already compiles `$in` on title, and
+  `find_by_title_exact` already does one exact lookup. So the new step is thin: a
+  runner-native `resolve` that calls `find_by_title_exact` per token and reports
+  `missing` and `ambiguous`. A `$in` string grammar is not needed for it.
+- [ ] **#5 The resolution repair can enter on the HERB ledger** — **Status**:
+  Unverified, and the code suggests it cannot as things stand — **Method**: Source
+  Search on b7c423ea8 plus the Step 0 probe. The probe recorded
+  `repair_entered=False`. By the code, that means no facet was `unsupported` with
+  `no_supporting_evidence`; with evidence present, the remaining reason is
+  `source_missing`, which RDR-232 rules is decided by the missing source and is
+  not repairable. If that is what happened, a repair keyed on
+  `no_supporting_evidence` never sees the HERB questions. Step 4 starts by
+  recording the facet states, reasons and named sources on the 7 questions
+  (§Step 4, sub-step 1); its branch depends on the answer.
 
 ## Proposed Solution
 
 ### Approach
 
-Three coordinated changes, each mapping to a discovery mechanism, each gated:
+Three changes. Only the first two are on the path to the MVV.
 
-1. **Mechanism A — ingest-time entity-linker (Gap 1).** A post-store batch hook
-   that, for each newly indexed *entity record* (a document whose title/key is an
-   identifier), creates `artifact --mentions--> entity-record` catalog links for
-   every already-indexed artifact whose text contains that key verbatim (and the
-   reverse for artifacts indexed later). This materializes the join graph at
-   ingest, discovered from the corpus alone.
+1. **A `resolve` step (Gap 2).** A runner-native plan step that takes a list of
+   key strings and returns the documents whose catalog title equals each one,
+   exactly. Keys that match nothing and keys that match more than one document
+   are reported, never dropped or guessed.
+2. **A resolution repair inside the coverage boundary (Gaps 3, 4).** When the
+   coverage boundary finds a facet unsupported and the evidence it holds
+   contains tokens that a configured *entity-key pattern* recognises (for
+   example `CUST-\d{4}`), its one repair runs `resolve` on those tokens and adds
+   the resolved records to the evidence before the single re-check. Then the
+   answer is generated from evidence that holds the names. The gate is the signal
+   itself: an unsupported facet AND entity-key tokens in the evidence. A question
+   with no such tokens never reaches it, so simple questions are untouched
+   (Beyond-Static guidance), and no second planning round, new plan dimension or
+   planner prompt change is needed.
+3. **An ingest-time entity linker (Gap 1), conditional.** Built only if a corpus
+   needs a hop past the entity record (Step 2). Not required on HERB.
 
-2. **Deterministic resolution hop (Gap 2).** Two complementary stages, both
-   required: a new `resolve(ids, by="title")` operator turns extracted entity
-   *tokens* into records via `search --where title=<id>` per id (the `mentions`
-   graph cannot — it is artifact→entity, not token→entity); then `traverse` over
-   the Mechanism-A links optionally expands resolved records to related artifacts.
-   An `operator_filter` precision step precedes resolution to narrow hop-1 seeds —
-   the benchmark proved resolution alone leaves recall at 0 without it. Dense
-   retrieval is never used for exact-key resolution.
-
-3. **Mechanism B — type-mismatch trigger, gated (Gaps 3, 4).** The planner types
-   the requested `answer_shape`; after hop 1 it types `evidence_shape`; if
-   `answer_shape` is referenced-but-not-present (identifiers for the answer type
-   appear, values do not), it inserts the resolution hop. The trigger fires only
-   on that signal — simple/single-hop questions skip it (Beyond-Static guidance).
-   The discovered plan is `plan_save`'d as a template keyed on a dimensional
-   signature so `plan_match` reuses it.
+Entity-key recognition is shared by 2 and 3: a per-collection key pattern in
+configuration, plus an optional `entity_key` a caller sets on `store_put`,
+stamped into catalog document meta (Step 1).
 
 ### Technical Design
 
-**Mechanism A — entity-linker hook.** Register in `install_default_hooks`
-(`hook_registry.py:320`) via `register_batch`. Interface (illustrative — verify
-during implementation):
+**`resolve` step (Step 3).** Interface (illustrative; verify during
+implementation):
 
 ```text
-// fn(doc_ids: list[str], collection: str, contents: list[str]) -> None
-// 1. classify which of doc_ids are ENTITY records (title matches an entity-key
-//    pattern, or carries an `entity_key` metadata flag set by the indexer)
-// 2. for each entity record E with key K:
-//      find already-indexed artifacts whose text contains token K
-//      (FTS / token-index lookup, NOT embedding search)
-//      Catalog.link_if_absent(from=artifact.tumbler, to=E.tumbler,
-//                             link_type="mentions", created_by="entity-linker")
-// 3. symmetric pass: when a non-entity artifact is indexed, link it to any
-//    existing entity records whose key it mentions
+resolve(tokens: list[str], by="title", content_type=None, owner=None)
+  -> {tumblers, ids, collections, missing, ambiguous}
+// for each distinct token:
+//   docs = find_by_title_exact(token, content_type=, owner=)
+//   0 docs  -> missing[token]
+//   >1 docs -> ambiguous[token] = [tumblers]   (never first-match)
+//   1 doc   -> its tumbler, plus its manifest chashes as ids
 ```
 
-Entity-record classification is the load-bearing design choice. Options (decide
-in spike): (a) explicit — the indexer/store_put stamps `entity_key=<K>` metadata
-on records the caller marks as entities; (b) heuristic — title matches a
-configured key regex per collection. Prefer (a) for generality; (b) as a
-zero-config default. Key→artifact matching MUST be exact token match (FTS or a
-key-token index), never semantic.
+It sits beside `traverse` in `_NON_EMBEDDING_TOOLS`, so it costs no embedding
+and no model call, and its output fits the standard `{tumblers, ids,
+collections}` retrieval contract that `$stepN` references and hydration already
+read. One HTTP call per token is fine at HERB's scale (2 to 10 tokens per
+question). A batch by-titles route is added only if a measured call exceeds about
+300 tokens. Tombstoned documents cannot reach `resolve`, because `by_title`
+returns live documents only.
 
-**Deterministic resolution hop — two complementary stages, not primary/backup.**
-The resolution hop has two distinct sub-problems that operate at different
-pipeline positions and are BOTH required:
-
-- **Stage R1 — token→record resolution (`resolve` operator, always required).**
-  Hop-1 evidence yields entity *tokens* as text (e.g. `extract` pulls
-  `CUST-0035`, `CUST-0018` from issue bodies). Turning a token string into an
-  entity record requires exact-key lookup: the new `resolve(ids, by="title")`
-  operator issues a `where=title=<id>` exact-filter retrieval per id (collapsing
-  the three Assumption-#4 gaps: no operator / no fan-out / no `$in`). The
-  `mentions` graph does NOT cover this case — `mentions` is artifact→entity, not
-  token→entity, so `traverse` cannot turn a free-floating extracted token into a
-  record. Error contract: ids that resolve to zero records are reported in a
-  `missing` field, never silently dropped (mirror `store_get_many`).
-- **Stage R2 — graph expansion (`traverse`, optional depth-extension).** Given
-  resolved entity-record tumblers, `traverse(seeds=$ref.tumblers,
-  link_types=["mentions"], direction="in/out", depth=1)` walks the Mechanism-A
-  links to reach related artifacts (e.g. entity-record → the company record it
-  belongs to). Reuses the existing `traverse` step (Assumption #3 VERIFIED).
-
-**Hop-1 precision is load-bearing, not deferred.** The benchmark proved that
-resolution alone leaves company recall at 0 because hop-1 surfaces the *wrong*
-seeds. An `operator_filter` step (existing operator, NL predicate over hop-1
-results) sits BEFORE resolution and narrows the candidate set to entities the
-question actually constrains (PRISM Selector pattern; T3 synthesis
-`research-rdr147-multihop-synthesis-2026-06-05`). The canonical end-to-end plan
-template is therefore:
+**Resolution repair (Step 4).** Inside `CoverageBoundary.run`
+(`coverage_ledger.py:1073`), after the first `evaluate`:
 
 ```text
-[decompose] → search(question) [s1]
-  → operator_filter(inputs=$s1, criterion="<entity the question constrains>") [s2]
-  → extract(inputs=$s2.contents, fields=entity_token) [s3]
-  → resolve(ids=$s3.extractions, by="title") [s4]     # token → entity record
-  → traverse(seeds=$s4.tumblers, link_types=["mentions"], depth=1) [s5]  # optional R2
-  → extract/generate(answer_field)
+if first ledger has an unsupported facet (entry rule: see Step 4 sub-step 1)
+   and anchors hold tokens matching the collection's entity-key pattern:
+     tokens = distinct matches, capped
+     r = resolve(tokens)
+     merge r's records into the reduction's input as chash anchors
+       (the existing repair_stream supplement, inside its cap of
+        MAX_REPAIR_ITEMS = 12 items; HERB needs at most 10)
+     report r.missing and r.ambiguous in the RepairReport
+     re-evaluate once (the existing single re-check)
 ```
 
-`operator_filter` between hop-1 and resolution is the difference between
-real-HERB company recall > 0 and recall ≈ 0; it is in scope, not a later concern.
+The resolution queries run together with, or in place of, the semantic facet
+queries; which is decided in Step 4 by measurement. The repair's existing
+deadline and USD rules apply unchanged; `resolve` is a zero-cost step. The
+`missing` and `ambiguous` lists are disclosed, so a partial resolution is
+visible in the run summary rather than silent.
 
-**Mechanism B — type-mismatch trigger.** Extend the inline-planner decomposition
-contract (the `claude -p` planner prompt in the `nx_answer` flow) to: (1) name
-the `answer_shape`; (2) after hop 1, decide whether evidence carries
-identifier-references to `answer_shape` rather than its values; (3) if so, emit
-the resolution sub-DAG; (4) otherwise proceed single-hop. Gating is intrinsic:
-the trigger is a positive test, so simple questions never reach it. Persist the
-emitted plan via `plan_save` with dimensions
-`{verb: "lookup", answer_shape: "entity-name", evidence_shape: "entity-ref"}` so
-`plan_match` reuses it for company / person-by-role / PR-by-author alike.
+**Entity-key classification (Step 1).** A per-collection pattern in config, for
+example `entity.collections: {"knowledge__herb-*": "CUST-\\d{4}|eid_[0-9a-f]{8}"}`,
+and an optional caller-set `entity_key` on `store_put`, stamped into catalog
+document meta (never chunk metadata, per RDR-236). One helper,
+`classify_entity(doc) -> key | None`, serves both the repair and the linker. The
+same patterns find key tokens in evidence text. Code is excluded; md/pdf
+extractors are deferred (Step 1).
+
+**Entity linker (Step 2, conditional).** If built:
+
+- *Forward pass*: a batch hook regex-scans the new artifact's own `contents` for
+  keys, looks each up with `find_by_title_exact`, and calls
+  `link_if_absent(artifact, record, "mentions", "entity-linker")`. Exact, and
+  needs no full-text index.
+- *Reverse pass*: a `generate_mention_links` generator in `link_generator.py`,
+  with a dry run, for entity records that arrive after the artifacts that name
+  them. This replaces June's "find every artifact containing the token", which
+  has no backing route (§Dependency Source Verification).
+- Default off; `mentions` stays out of the default `traverse` types.
+
+**What happens to the June template.** June's canonical plan was `search →
+operator_filter → extract → resolve → traverse → generate`, saved with
+dimensions `{verb: lookup, answer_shape: entity-name, evidence_shape:
+entity-ref}`. It is withdrawn. The inline planner cannot emit `filter`; the
+runner hands `filter` text items only, so tumblers do not carry through it;
+`plan_save` takes no free dimensions; and `answer_shape` already names RDR-232's
+terminal-text classifier. Step 0 also shows the filter is not needed on the issue
+lookups (hop-1 precision 0.967). A curated template is a contingency only
+(Step 4, branch c).
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Entity-linker hook | `nexus.hook_registry` (`register_batch`, `install_default_hooks`) | Extend: add one batch hook; no new framework. |
-| `mentions` links | `nexus.catalog.catalog_links.link_if_absent` | Reuse: existing typed-edge API. |
-| Resolution R2 (graph expansion) | `traverse` MCP tool / catalog BFS | Reuse for the hop; Extend runner to accept `traverse` as a `$ref`-seeded plan step. |
-| Resolution R1 `resolve(ids, by=title)` (token→record, always required) | `nexus.plans.runner` `_OPERATOR_TOOL_MAP` + `search --where` | Add: thin operator over the existing where-filter primitive, internal fan-out. |
-| Hop-1 precision filter | `operator_filter` (existing runner operator) | Reuse: insert as plan-template step before resolution; no new code. |
-| Type-mismatch trigger | `nx_answer` inline planner contract | Extend: decomposition-prompt discipline + plan template. |
-| Key→artifact token match | FTS / catalog | Reuse FTS; do NOT use embedding search. |
+| `resolve` step | `HttpCatalogClient.find_by_title_exact`, `resolve_many`; runner `_NON_EMBEDDING_TOOLS` | Add: a thin runner-native step over the existing exact lookup. New code (about 120 lines plus tests). |
+| Resolution repair | `CoverageBoundary.run`, `coverage_repair`, `repair_stream` | Extend: an exact-key branch inside the existing one repair. New code (about 250 lines plus tests). |
+| Entity-key patterns and `entity_key` | `config.py` `_DEFAULTS`, `.nexus.yml`; catalog document meta | Add: config key, stamp on store_put, `classify_entity` helper (about 150 lines). |
+| Graph expansion over `mentions` | `traverse` step | Reuse unchanged; it already runs as a `$ref`-seeded step. June's "extend the runner" was wrong. |
+| `mentions` links | `link_if_absent`, `upsertLink` | Reuse, conditional on Step 2. |
+| Key → artifact token match for the linker | none | Not FTS (there is no exhaustive token route). Forward pass reads the artifact's own text; reverse pass is a post-hoc generator. |
+| Hop-1 precision filter | `operator_filter` | Not used. June's "no new code" was wrong for inline plans (not in `_ALLOWED_TOOLS`) and Step 0 shows it is not load-bearing. |
+| Type-mismatch trigger in the planner prompt | none | Withdrawn; replaced by the resolution repair. |
+| Deletion cascade for links | catalog-032 FK cascade; `graphBFS` live join | Reuse; pin with a test. No new cascade code. |
 
 ### Decision Rationale
 
-Mechanism A is the most defensible execution path: the join is implied by corpus
-structure, discovered once at ingest, and executed deterministically by graph
-traversal — immune to the embedding collision that defeats every fuzzy approach,
-and validated by the entire GraphRAG subfield. Mechanism B makes the capability
-*self-discovering* from query structure rather than per-corpus hand-coding, and
-the gating respects the documented harm of blanket iteration. Reusing
-catalog/traverse/hooks keeps the surface small.
+The resolution repair is chosen because Step 0 locates the failure precisely:
+the ids are retrieved, hop-1 precision on the issue lookups is high, and the
+answer is declined at the coverage boundary. The boundary is where nexus already
+decides "the evidence does not support this facet, try once more", so an
+exact-key branch there acts at the moment of failure, on the evidence that
+failed, with RDR-232's budgets and disclosure. A planner-side trigger would act
+before the evidence exists, on a one-shot planner that cannot re-plan.
+
+The entity linker is no longer the most defensible path for HERB. It answers a
+different question (which artifacts mention this record), and on HERB the answer
+needs only the record. It stays for corpora where the answer is one more link
+away, and its cost (a write per mention, a maintenance burden on delete) is paid
+only when such a corpus exists.
 
 ## Alternatives Considered
 
-### Alternative 1: Bigger / better embedding model
+### Alternative 1: Bigger or better embedding model
 
-**Description**: Replace bge-768 with a larger embedder to separate near-identical
-entity records.
+**Description**: Replace bge-768 with a larger embedder to separate
+near-identical entity records.
 
 **Pros**: No architecture change.
 
-**Cons**: Theoretically cannot work — PRISM/Weller 2025 show no single embedding
-represents all relevance patterns as candidate sets grow combinatorially; our
-collision is an instance, not a model-quality artifact.
+**Cons**: Cannot work in principle: no single embedding represents every
+relevance pattern as candidate sets grow (PRISM, Weller 2025). The collision is
+an instance of that limit, not a model-quality artifact.
 
-**Reason for rejection**: Attacks a structural limit with a parameter knob.
+**Reason for rejection**: Treats a structural limit as a tuning knob.
 
-### Alternative 2: Pure-LLM iterative re-query (no graph, no exact-filter)
+### Alternative 2: Pure-LLM iterative re-query
 
 **Description**: Let the agent re-query semantically for each extracted id.
 
 **Pros**: No ingest-time work.
 
-**Cons**: Verified to fail — semantic re-query for `CUST-0035` returns other
-records. Also incurs the error-propagation Beyond-Static documents.
+**Cons**: Verified to fail: a semantic re-query for `CUST-0035` returns other
+records. RDR-232's existing repair is this alternative in effect (semantic
+queries on facet text) and it did not help on HERB.
 
-**Reason for rejection**: The exact failure we measured.
+**Reason for rejection**: The failure we measured.
+
+### Alternative 3: June's planner-side type-mismatch trigger
+
+**Description**: Extend the inline planner's prompt to name an answer shape,
+type the hop-1 evidence, and emit a resolution sub-plan, saved under new plan
+dimensions.
+
+**Pros**: Plans become reusable through `plan_match` (the lookup that reuses a
+saved plan for a similar question).
+
+**Cons**: The planner is one-shot, so it cannot see hop-1 evidence before
+writing the plan. It cannot emit `filter`. `plan_save` has no dimensions
+parameter, and the proposed `answer_shape` key collides with RDR-232.
+
+**Reason for rejection**: Its seam no longer exists; the coverage boundary is
+where evidence is seen.
 
 ### Briefly Rejected
 
-- **Per-corpus hardcoded joins** (e.g. a SearchFlow-specific CUST→company step):
-  failure-derived, non-general, the trap this RDR explicitly avoids.
-- **Index entity records only, no links** (what we tried): necessary but proven
-  insufficient — resolution hop still can't find the exact record by fuzzy search.
+- **Per-corpus hardcoded joins** (a SearchFlow-specific CUST → company step):
+  failure-derived and not general.
+- **Index entity records only, no exact resolution**: the June state; fuzzy
+  search cannot find the exact record.
+- **A `$in` `where=` grammar instead of a `resolve` step**: it would make one
+  search step resolve many titles, but it gives no `missing` or `ambiguous`
+  report and still returns chunks ranked by similarity. Not ruled out as a later
+  convenience (nexus-4gzc8 closed unbuilt).
 
 ## Trade-offs
 
 ### Consequences
 
-- (+) Generalizes to any entity-resolution join (company, person-by-role,
-  PR-by-author) across corpora **where entity records carry a stable extractable
-  key** — i.e. `store_put(title=<token>)` records, or corpora where Step 1's
-  `entity_key` extraction pipeline is configured (regex for structured IDs, NLP
-  for natural entities). This is NOT unconditional: per Assumption #1, batch-index
-  paths have no stable key by default — code chunks (titled `rel_path:Lstart`) are
-  explicitly out of scope for entity-key resolution; PDF/markdown require the
-  Step-1 extractor. The "one discovery rule" is the linker hook; the precondition
-  is that an entity key exists for it to match.
-- (+) Deterministic resolution — immune to embedding collision; auditable graph paths.
-- (−) Ingest cost: an extra token-match + link-write pass per entity record.
-- (−) Link-graph maintenance: re-index / deletion must keep `mentions` links consistent.
-- (−) Planner complexity: the type-mismatch trigger adds a branch to decomposition.
+- (+) Works for any join whose entity records carry a stable key: store_put
+  records titled by key, or collections with a configured key pattern. Code is
+  out of scope; md/pdf need the deferred extractor.
+- (+) Deterministic resolution, immune to embedding collision, with missing and
+  ambiguous keys disclosed.
+- (+) No planner change; the trigger lives in one runner-owned place with
+  existing budgets.
+- (−) The coverage boundary gains a second repair path to maintain.
+- (−) Per-collection key patterns are configuration someone must write.
+- (−) If the linker is built: an extra write per mention and link maintenance on
+  delete.
 
 ### Risks and Mitigations
 
-- **Risk**: Entity-record misclassification floods the graph with spurious links.
-  **Mitigation**: Prefer explicit `entity_key` stamping; cap/gate the heuristic;
-  measure link precision on HERB before enabling by default.
-- **Risk**: Calling `link_if_absent` inside a store hook deadlocks the
-  catalog-behind-daemon path. **Mitigation**: Spike first; if blocking, enqueue
-  links to an async post-commit pass.
-- **Risk**: The recursion finding — even perfect resolution doesn't close
-  `question→affected-customer` because hop-1 surfaces wrong seeds.
-  **Mitigation**: the hop-1 precision step (`operator_filter`, existing operator)
-  is IN SCOPE in the plan template (Step 4), not deferred — it is the load-bearing
-  difference between real-HERB recall > 0 and recall ≈ 0. Residual risk: for join
-  conditions requiring cross-artifact reasoning, the filter criterion depends on
-  the `mentions` typed link existing from ingest (Step 2); corpora without that
-  link seeded will still surface imprecise seeds. That residual is the honest
-  boundary, not the whole outer hop.
+- **R1, the bar passes vacuously.** The script already beats the June bar.
+  **Mitigation**: the bar is `nx_answer`'s own F1, not the script's (MVV).
+- **R2, repair noise.** RDR-232's semantic repair on "company names" pulls
+  near-identical customer records, which could move recall by chance while
+  precision falls. **Mitigation**: the ladder reports precision and F1 for
+  `nx_answer`, and the resolution branch reports how many anchors it added.
+- **R3, the repair may not enter (Assumption #5).** If the HERB facets are
+  `source_missing`, the repair is skipped by RDR-232's rule. **Mitigation**:
+  Step 4 sub-step 1 measures the reasons first and branches.
+- **R4, request kind.** "Find the names of companies …" is likely read as
+  `unknown` by the fixed rules and decided by the model call, likely as
+  discovery/listing. A curated lookup plan would then be ineligible
+  (`eligibility.py`). The repair does not depend on the request kind.
+  **Mitigation**: any curated template (Step 4, branch c) declares a kind
+  measured on the 7 questions.
+- **R5, answering from every held id may cost precision.** The evidence holds
+  more customer ids than the script reads (on the issue questions, 4 to 10
+  against 4 to 6). The derived
+  figure (issue5 F1 0.823 if every evidence company is named) says this still
+  clears the bar on HERB; a corpus with noisier evidence may not.
+- **R6, hop-1 recall.** At k=20 hop 1 surfaces 4 to 6 of the 10 to 12 ids the
+  cited artifacts name. Retrieving deeper raises recall (k=300 filtered to cited:
+  recall 1.0) but needs precision filtering. Out of scope here; recorded as the
+  next lever.
+- **R7, company-level gold.** The gold counts every customer of a gold company
+  as affected, so P3 precision overstates the customer-level figure. Named in the
+  ladder, not fixed.
+- **R8, `links_from` shows tombstoned endpoints.** Matters only if the linker
+  ships and a consumer other than `traverse` reads mentions links.
 
 ### Failure Modes
 
-- **Visible**: resolution hop returns empty → answer falls back to single-hop
-  (current behavior), logged with the unresolved ids.
-- **Silent**: stale `mentions` links after deletion → resolves to a wrong/dead
-  record. Diagnose via `link_audit`; mitigate with deletion-cascade on links.
-- **Recovery**: feature-flag the entity-linker and the trigger; off = today's behavior.
+- **Visible**: `resolve` returns keys in `missing` or `ambiguous`; the repair
+  report and run summary carry them, and the answer is generated from whatever
+  did resolve, or declined as today.
+- **Silent (if the linker ships)**: a stale `mentions` link after an entity
+  record is trashed. `traverse` already skips tombstoned endpoints and `resolve`
+  sees only live documents, so stale links cannot reach either; `links_from` and
+  `links_to` can still show them (R8). Hard delete cascades.
+- **Recovery**: the resolution repair and the linker are each behind a switch;
+  off is today's behavior.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [x] All Critical Assumptions resolved (2026-06-05): #2 link-from-hook safety and
-  #3 traverse-as-plan-step VERIFIED; #1 boundary documented (title==key only on the
-  `store_put` path); #4 REFUTED → `resolve` operator must be IMPLEMENTED (not
-  verified — it does not exist today).
-- [ ] HERB SearchFlow sandbox available as the regression fixture (exists in `assetops-kg`).
+- [x] Step 0 measured and merged (nexus-3lu23; assetops-kg PR #3).
+- [ ] This revision gated (`/conexus:rdr-gate 147`) and accepted. No
+  implementation bead starts before that.
+- [ ] Critical Assumption #5 measured (Step 4 sub-step 1). It can run before the
+  gate because it changes no code; its result may change Step 4's branch.
 
 ### Minimum Viable Validation
 
-On HERB SearchFlow, with the entity-linker enabled and the FULL plan template
-wired (`search → operator_filter → extract → resolve → traverse`), **real HERB
-company questions yield company recall > 0** — measured against the same
-benchmark harness that produced the 0.000 baseline. This is the observable
-success criterion: the headline metric the Problem Statement declared broken must
-move. The `operator_filter` precision step is the load-bearing addition — without
-it, hop-1 surfaces wrong seeds and recall stays ≈ 0 even with a perfect resolution
-hop (the benchmark already proved this). MVV is NOT scoped to a synthetic
-hop-1-correct fixture; that would pass while company recall stayed 0, which is the
-exact silent-scope-reduction this RDR must avoid. A secondary diagnostic assertion
-(resolution executes deterministically on a hop-1-correct subset) may be used to
-isolate the resolve operator during development, but it does not satisfy the MVV.
+On the Step 0 sandbox and conditions (nx and engine at the versions under test,
+bge-768, k=20, the same 1559 artifacts), **`nx_answer`'s company F1 on the 5
+issue questions is at or above the fixed script's issue5 F1 recorded in Step 0,
+0.7642857142857142.** The scorecard asserts the baseline exactly (`==
+0.7642857142857142`), so a harness change that moves the baseline fails loudly
+instead of moving the bar, and records `nx_answer`'s measured F1 exactly beside
+it. The test is `nx_answer_f1_issue5 >= 0.7642857142857142`.
+
+The measured system is `nx_answer`, through the harness's product rung (company
+names read from `final_text` against the 10-name company universe). The script
+rung stays as a diagnostic and cannot satisfy the MVV. The 2 aggregation
+questions are reported (recall, precision, F1) and not gated. A run that clears
+the bar only through the semantic repair, with the resolution branch not
+entering, does not satisfy the MVV: the run summary must show the resolution
+branch entered on the questions that pass.
 
 ### Benchmark Ladder — per-phase observable metrics
 
-The single end-to-end metric (company recall) only moves when all three phases
-land, so it gives no intermediate signal. To make the HERB SearchFlow benchmark
-an *iterative* driver, decompose it into a ladder of isolated sub-metrics — each
-phase turns its own metric off zero even while company recall is still 0. The
-benchmark harness (`assetops-kg`) emits a four-line `herb-scorecard.json`; a copy
-is checked into nexus as the regression baseline and updated per phase PR. Each
-metric is asserted as an EXACT value (`== N`, never `>= N`) so a silent-corruption
-regression cannot pass (see `feedback_exact_assertions_for_fixture_regression`).
+The harness (assetops-kg `benchmark/herb_ladder.py`) writes
+`results/herb/herb-scorecard.json`; a copy is checked into nexus as the
+regression baseline and updated per phase PR. Each recorded number is asserted
+exactly, so silent drift fails.
 
-| Phase | Isolated metric | Graded against | Independent of | Baseline → target |
+| Rung | Metric | Graded against | Step 0 value | Target |
 | --- | --- | --- | --- | --- |
-| P1 (Step 2 linker) | `mentions`-link precision + recall | gold CUST→company edge truth | retrieval entirely | 0 → link-recall 1.0, precision ≥ threshold |
-| P2 (Step 3 resolve) | resolution accuracy: gold CUST-id → correct record | fed GOLD ids | hop-1 quality | 0 → 1.0 |
-| P3 (Step 4 filter) | hop-1 precision: surfaced customers actually affected / surfaced | gold question→affected-customer truth | resolve/linker | the recursing-bottleneck number; moves as the filter tightens |
-| E2E (MVV) | company recall on real HERB questions | benchmark harness | nothing | 0.000 → > 0 |
+| P1 (Step 2, conditional) | `mentions` link recall and precision | 37 artifact → customer-id pairs (`fixtures/herb/artifact_mentions.json`; all from Slack messages) | not built | recall 1.0, precision 1.0 |
+| P2 (Step 3) | resolution accuracy | the 29 SearchFlow member customers (`p2_member_customers.json`) | 1.0 (by the harness's own exact-title lookup) | 1.0 through the `resolve` step, with `missing` and `ambiguous` empty |
+| P3 (diagnostic) | hop-1 precision | question → affected customers | all7 0.6904761904761905; issue5 0.9666666666666666 | reported, not gated |
+| E2E script (diagnostic) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.7642857142857142 | pinned exactly; it is the MVV baseline |
+| E2E `nx_answer` (MVV) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.0 | issue5 F1 ≥ 0.7642857142857142 |
+| Aggregation (reported) | company recall / precision / F1 on agg2 | HERB ground truth | script 0.0, `nx_answer` 0.0 | reported, not gated |
 
-**TDD contract.** Write all four assertions FIRST (RED). Each phase flips exactly
-one to GREEN; the downstream assertions stay RED with their recorded number, so a
-phase cannot close as "progress" while its successors are unverified. The
-phase-review-gate for each phase asserts (a) this phase's metric moved to its
-exact target AND (b) the E2E number is honestly reported, not faked. This
-operationalizes the load-bearing-jointness: shipping P2 alone flips only
-resolution-accuracy; company recall stays RED and visible in every subsequent
-review.
-
-**Gold-truth fixtures** (built once, Step 0 of Phase 1): `cust_to_company.json`
-(120 CUST→company pairs) and `question_to_affected_customers.json` (the company
-questions with their ground-truth affected-customer sets). Both derive
-deterministically from the HERB SearchFlow source; seeded, no API.
+**Jointness, as measured.** On HERB the MVV needs: the resolution repair enters
+(Assumption #5) AND `resolve` returns the right records (P2) AND the generated
+answer names the resolved companies. Hop-1 precision (P3) is not a factor on the
+issue lookups at k=20. The linker (P1) is not on the path. Each phase review
+asserts its own rung and reports the `nx_answer` rung honestly.
 
 ### Phase 1: Code Implementation
 
-#### Step 0: Benchmark ladder fixtures + RED assertions
-Build the gold-truth fixtures (`cust_to_company.json`, `question_to_affected_customers.json`) from HERB SearchFlow and the four scorecard assertions (P1/P2/P3/E2E), all RED. This is the regression oracle every subsequent step is graded against — see §Benchmark Ladder.
+#### Step 0: Benchmark rebuild and baselines (done)
 
-#### Step 1: Entity-record classification + `entity_key` stamping
-Add an `entity_key` metadata path through store_put/index. Per-indexer behavior
-(closes Assumption #1's general-corpus gap explicitly):
-- `store_put`: caller-set `entity_key` (explicit), else title if it matches the
-  collection's key regex.
-- `nx index` (markdown/RDR): regex extraction of structured IDs from frontmatter /
-  H1 / body (e.g. `CUST-\d+`, `TICKET-\d+`); optional NLP pass for natural entities.
-- `nx index pdf`: regex over extracted text; entity records here are uncommon —
-  config-gated per collection.
-- `nx index repo` (code): **explicitly excluded** — `rel_path:Lstart` titles are
-  not entity keys; no extraction attempted.
-Mechanism for matching keys in referencing artifacts MUST be exact token match
-(FTS / key-token index), never semantic.
+nexus-3lu23, merged as assetops-kg PR #3: PG sandbox, store_put ingest,
+full-text reads with loud errors, P2 scoped to the 29 members, P1 gold as
+artifact → customer-id pairs, an `nx_answer` product rung, and the baselines in
+§Step 0 measurements.
 
-#### Step 2: Entity-linker batch hook
-Register in `install_default_hooks`; exact token-match → `link_if_absent(..., link_type="mentions")`. Feature-flagged.
+#### Step 1: Entity-key classification and `entity_key` stamping
 
-#### Step 3: Resolution hop (both stages)
-Add the `resolve(ids, by="title")` operator to `_OPERATOR_TOOL_MAP` (R1, token→record exact-filter, internal fan-out over `where=title`); enable `traverse` as a `$ref`-seeded plan step (R2, graph expansion). Resolve is always-required, not a fallback to traverse — see §Technical Design.
+Per-collection key patterns in config; optional caller-set `entity_key` on
+`store_put`, stamped into catalog document meta; the `classify_entity` helper.
+`nx index repo` (code) is excluded: `rel_path:Lstart` titles are not keys.
+**Deferred, named here so it is not dropped silently:** regex or NLP key
+extraction for `nx index` markdown and `nx index pdf`, to a separate bead. A
+`where entity_key=` filter is also out of this step; it would need `META_KEYS`
+and pushdown changes in the engine.
 
-#### Step 4: Type-mismatch trigger + plan template (incl. `operator_filter`)
-Extend the inline-planner contract to type `answer_shape`/`evidence_shape` and gate on referenced-but-not-present. `plan_save` the FULL template keyed on the dimensional signature: `search → operator_filter(hop-1 precision) → extract → resolve → traverse → synthesize`. The `operator_filter` step is mandatory and load-bearing — omitting it reproduces the hop-1 precision failure and leaves company recall ≈ 0 (the MVV will fail). `operator_filter` already exists in the runner; this step is plan-template YAML, not new code.
+#### Step 2: Entity linker (conditional)
 
-#### Step 5: Deletion-cascade for `mentions` links
-Wire `mentions`-link removal into the entity-record deletion path so a deleted entity record cascades to its inbound/outbound `mentions` edges (closes the silent stale-link failure mode in §Failure Modes). Without this, resolution silently returns dead records.
+Built only if the revision's gate or a later corpus keeps P1. Forward-pass batch
+hook plus a reverse-pass generator with dry run, default off, `mentions` outside
+the default traverse types. Re-verify Assumption #2 first.
+
+#### Step 3: `resolve` step
+
+The runner-native step of §Technical Design, with `missing` and `ambiguous`
+reported. P2 is re-measured through it. June's second half ("enable `traverse` as
+a `$ref` step") is dropped: it already works.
+
+#### Step 4: Resolution repair in the coverage boundary
+
+1. **Measure the entry state.** On the 7 questions, record each facet's state and
+   reason, the named sources and their resolution, and `repair_target_ids`. This
+   changes no code.
+2. **Branch on the result:**
+   - (a) Facets are `unsupported` / `no_supporting_evidence` (the repair was off
+     for another reason): add the exact-key branch to the existing repair as
+     designed.
+   - (b) Facets are `source_missing`: the repair is skipped by RDR-232's rule.
+     Find which named source was judged missing and why. If a product or
+     component name in the question is being read as a missing document, that is
+     a named-source detection defect, fixed under RDR-232's rules as its own bead,
+     before the resolution branch can be measured. This RDR does not change
+     RDR-232's rule that a missing named source decides its facets.
+   - (c) Contingency, only if (a) or (b) lands and the MVV still fails because
+     hop-1 precision matters on some corpus: add `filter` to `_ALLOWED_TOOLS` and
+     its aliases, carry ids and tumblers through `filter`, and ship a curated YAML
+     plan (`strategy: entity-resolution`) whose declared answer kind is one the
+     HERB request kind can reach.
+3. **Gate condition (Gap 4).** The resolution branch fires on the HERB issue
+   questions and does not fire on a held-out set of single-hop questions; count
+   both and record the counts.
+
+#### Step 5: Pin link deletion behavior
+
+No new cascade code. Pin the existing hard-delete cascade with a test. Decide
+whether `links_from`, `links_to` and `link_query` should filter tombstoned
+endpoints as `traverse` does; this matters only if Step 2 ships.
 
 ### Phase 2: Operational Activation
 
-Feature flags default off; enable on HERB sandbox first. Gate default-on on the
-`herb-scorecard.json` ladder: P1 link precision/recall and P2 resolution accuracy
-at their exact targets, P3 hop-1 precision above its threshold, and E2E company
-recall > 0 — all GREEN before any default-on.
+The resolution repair and the linker default off; enable on the HERB sandbox
+first. Default-on for the resolution repair requires: the MVV green, P2 = 1.0
+through `resolve`, and Step 4's single-hop non-firing count recorded. The linker
+has its own gate if built: P1 at its targets.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `mentions` catalog links | `link_query` | `links_from`/`links_to` | deletion-cascade (new) | `link_audit` | catalog backup (existing) |
-| `lookup` plan template | `plan list` | `plan show` | `plan` delete | `plan_match` probe | T2 backup (existing) |
-
-Deletion-cascade for `mentions` links is implemented in Phase 1 Step 5 (the
-silent-failure mode above depends on it).
+| Entity-key patterns | config (`nx config`) | config | config | the repair's entered count in run summaries | config file |
+| `mentions` links (if Step 2 ships) | `link_query` | `links_from` / `links_to` | hard delete cascades by FK; trash leaves links, which `traverse` skips | `link_audit` | catalog backup (existing) |
 
 ### New Dependencies
 
-No new *external* packages. New *components* built in this RDR (Assumption #4
-confirmed new infrastructure is required):
+No new external packages. New components:
 
-- `resolve(ids, by="title")` operator — new `_OPERATOR_TOOL_MAP` entry, ~50 lines,
-  internal fan-out over the existing `where=title` filter.
-- Entity-linker batch hook — new logic in `install_default_hooks` (FTS token scan
-  + `link_if_absent` writes), ~100–200 lines.
-- `entity_key` extraction path through the indexer for non-`store_put` paths
-  (Step 1) — regex/NLP extractor + metadata stamp.
-- Deletion-cascade for `mentions` links (Step 5).
+- `resolve` step: about 120 lines plus tests.
+- Resolution repair branch in the coverage boundary: about 250 lines plus tests.
+- Entity-key config, `entity_key` stamp and `classify_entity`: about 150 lines.
+- Entity linker, conditional: about 300 lines (forward hook, reverse generator,
+  dry run).
 
-Reused unchanged: catalog typed-link API, `traverse`, `operator_filter`, the plan
-runner, hook registry, and the `where=` exact-filter primitive.
+Reused unchanged: `find_by_title_exact` and the by-title route, the coverage
+boundary's budgets and disclosure, `traverse`, the hook registry, catalog typed
+links and the FK cascade.
