@@ -218,7 +218,15 @@ queries cannot separate the paths.
 
 ## Decisions for the Project Owner
 
-These are not decided in this RDR. Each needs an answer before the first run.
+**Decided 2026-11-03** (Sam; relayed by linda and recorded on nexus-2k66t.7):
+
+- Publish: yes.
+- Spend: $0 for now.
+- Track A leads, and is the only track built now.
+- The harness is search-only: no nx_answer, no Claude command-line tool.
+- Track B and RDR-090's N=30 are deferred until LitQA2's blockers (open-access status, 248 versus 199 rows, option count) are answered; reopening them is a new owner decision.
+
+The questions as they were put:
 
 1. **Publish.** Publishing the harness and results means releasing question data under CC-BY-SA (share-alike applies to any derived question data). It does not redistribute paper text, but whether a derived question set counts as an adaptation is a licence reading the owner should confirm.
 2. **Spend.** About $35 for a 50-question LitQA2 subset; about $176 for all 248; about $0.45 indexing with Voyage, or $0 with local embeddings. Track A is free.
@@ -251,11 +259,11 @@ Only the modes that change a decision:
 
 ### Prerequisites
 
-- [ ] LitQA2 licence and open-access status checked (Critical Assumptions 1 and 3).
-- [ ] Voyage free-tier status confirmed. Research: docs state no free tier for voyage-context-3.
-- [ ] 248-versus-199 question count resolved from the dataset card and paper.
-- [ ] LitQA2 multiple-choice option count confirmed.
-- [ ] Owner decisions 1 to 5 recorded.
+- [ ] (Track B, deferred) LitQA2 licence and open-access status checked (Critical Assumptions 1 and 3).
+- [ ] (Track B, deferred; Track A uses local bge-768) Voyage free-tier status confirmed. Research: docs state no free tier for voyage-context-3.
+- [ ] (Track B, deferred) 248-versus-199 question count resolved from the dataset card and paper.
+- [ ] (Track B, deferred) LitQA2 multiple-choice option count confirmed.
+- [x] Owner decisions 1 to 5 recorded (2026-11-03, nexus-2k66t.7).
 - [ ] Pre-registered criteria committed before the first run (see Validation).
 
 ### Minimum Viable Validation
@@ -390,3 +398,4 @@ harness, not a system change.
 ## Revision History
 
 - 2026-11-03: Draft created from the design research; tightened to remove repetition and reduce the Alternatives and Failure Modes sections.
+- 2026-11-03: Owner decisions recorded: publish, $0, Track A (CoIR, search-only) leads; Track B and RDR-090 N=30 deferred.
