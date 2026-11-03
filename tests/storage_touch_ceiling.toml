@@ -40,8 +40,13 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5063
+provisioned_tests = 5084
 tolerance_tests = 0
+# 5063 -> 5084 (nexus-qo7ie.17, nexus-ypgbz, 2026-11-03): +21. tests/test_memory_curate.py adds 17 t2_tenant
+# tests: nx memory curate --t2 reads and writes real T2 rows (the replaced-row heuristic, the AUDIT_TAGS skip,
+# the census, the one report put and the never-deletes snapshot), which a fake store cannot prove.
+# tests/test_write_chunks_with_owner_rows.py adds 4 under its module-level t2_tenant mark; dropping the mark
+# was tried and 9 of the module's 10 tests touch storage unprovisioned, so the mark stays.
 # 5062 -> 5063 (nexus-1ss4n, 2026-11-03): +1 t2_tenant test, tests/db/test_eho3u_nx_answer_runs_read.py::
 # test_keyset_walk_reaches_past_the_300_row_clamp. It seeds 305 runs into the real engine and walks them by
 # before_id to prove the engine's 300-row clamp and keyset bound together; a fake server cannot prove the engine half.
