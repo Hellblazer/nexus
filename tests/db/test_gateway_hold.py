@@ -313,7 +313,7 @@ class TestOwnPace:
 class TestHolderSet:
     """nexus-wfmfi: the hold names every process that recorded into it, not only the last."""
 
-    def test_a_later_foreign_recorder_does_not_hide_this_process_but_this_process_keeps_waiting_on_it(self, cfg: Path) -> None:
+    def test_this_process_keeps_following_a_hold_another_process_also_recorded_into(self, cfg: Path) -> None:
         """B records, then this process records into B's hold: the file names both, so this process's
         ``others_only`` wait still follows B's hold. (Before: pid was overwritten with ours and the wait was skipped.)"""
         other = os.getpid() + 1

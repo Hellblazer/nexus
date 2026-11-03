@@ -1367,13 +1367,13 @@ class RefreshableHttpStoreMixin:
             hold_url = getattr(self, "_base_url", "")
             if not isinstance(hold_url, str):
                 hold_url = ""
-            held_s = gateway_hold.wait_before_attempt(
-                after=slept_until, max_wait=_numeric_timeout(kwargs.get("timeout", getattr(getattr(self, "_client", None), "timeout", None))),
-                url=hold_url,
-            )
+            max_wait = _numeric_timeout(kwargs.get("timeout", getattr(getattr(self, "_client", None), "timeout", None)))
             hook_left = _hook_deadline_left()
             if hook_left is not None:
-                held_s = min(held_s, hook_left)  # nexus-wfmfi: the hook's own deadline outranks the hold
+                # nexus-wfmfi: the hook's own deadline outranks the hold, and is passed
+                # in as the budget so a slot the hook could not use is never claimed.
+                max_wait = hook_left if max_wait is None else min(max_wait, hook_left)
+            held_s = gateway_hold.wait_before_attempt(after=slept_until, max_wait=max_wait, url=hold_url)
             if held_s > 0.0:
                 _log.info(
                     "refreshable_http_store.gateway_hold_wait",

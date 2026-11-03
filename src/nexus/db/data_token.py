@@ -2015,7 +2015,10 @@ class DataTokenManager:
             self._write_lease(base_url, tenant, cached)
             return
         try:
-            deadline = time.monotonic() + _LEASE_PUBLISH_LOCK_WAIT_S
+            wait_s = _LEASE_PUBLISH_LOCK_WAIT_S
+            if (left := deadline_left()) is not None:
+                wait_s = min(wait_s, left)  # nexus-wfmfi: the caller's deadline bounds the publish poll too
+            deadline = time.monotonic() + wait_s
             reopens = 0
             while True:
                 try:

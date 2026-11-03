@@ -1094,6 +1094,24 @@ class TestGatewayTransientRetry:
             assert store._once_with_gateway_retry("POST", "/v1/echo", json={"value": "x"}, timeout=30.0) == {"echo": {"value": "x"}}
         assert len(sleeps) == 1 and 0.0 < sleeps[0] <= 2.0
 
+    def test_wfmfi_a_hook_whose_deadline_ends_before_its_slot_takes_no_slot(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-wfmfi: the hook's deadline is the hold budget, so a hook that cannot
+        wait for its slot leaves ``next_slot`` to the waiters that can."""
+        from nexus.db import gateway_hold
+        from nexus.db.data_token import mint_deadline
+        from nexus.db.t2 import _refreshable_client as mod
+
+        hold = _config_dir() / gateway_hold.HOLD_FILENAME
+        hold.write_text(json.dumps({"not_before": time.time() + 20.0, "strikes": 1, "last_503": time.time()}))
+        module_time(monkeypatch, mod).sleep = lambda s: None
+        store = _make_echo_store()
+
+        with mint_deadline(2.0):
+            store._once_with_gateway_retry("POST", "/v1/echo", json={"value": "x"}, timeout=30.0)
+        assert "next_slot" not in json.loads(hold.read_text())
+
     def test_wfmfi_a_retry_that_starts_after_the_hook_deadline_is_not_made(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
     ) -> None:
