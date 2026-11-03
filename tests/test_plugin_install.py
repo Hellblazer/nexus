@@ -268,7 +268,9 @@ def test_all_shared_relative_links_resolve_after_install(installed_plugin: Path)
         for match in re.finditer(r"\[([^\]]*)\]\(([^)]*agent-shared/[^)]*)\)", text):
             examined += 1
             raw_path = match.group(2).split("#")[0]
-            resolved = (md_file.parent / raw_path).resolve()
+            root = "${CLAUDE_PLUGIN_ROOT}/"  # nexus-egv6q: agents and commands link by the plugin root
+            base = installed_plugin if raw_path.startswith(root) else md_file.parent
+            resolved = (base / raw_path.removeprefix(root)).resolve()
             if not resolved.exists():
                 label = str(md_file.relative_to(installed_plugin))
                 missing.append(f"  {label}: [{raw_path!r}] → {resolved}")

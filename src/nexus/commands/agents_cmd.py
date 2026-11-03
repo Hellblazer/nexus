@@ -104,8 +104,9 @@ def compose_worktree_developer(*, sn_dir: Path, conexus_dir: Path) -> str:
     from the developer when the template does not set them (``name`` and
     ``mcpServers`` always come from the template). Body: a generated-by
     marker, the template's activation preamble, then the developer body with
-    its ``../resources/agent-shared/`` links rewritten to the installed
-    conexus directory so they resolve from ``~/.claude/agents``.
+    its ``${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/`` (or older
+    ``../resources/agent-shared/``) links rewritten to the installed conexus
+    directory so they resolve from ``~/.claude/agents``.
     """
     template_path = sn_dir / "examples" / "worktree-developer.md"
     developer_path = conexus_dir / "agents" / "developer.md"
