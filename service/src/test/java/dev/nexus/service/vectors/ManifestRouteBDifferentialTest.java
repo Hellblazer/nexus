@@ -25,6 +25,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -50,22 +52,36 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>by {@link ManifestLabelStage#apply}, the Java evaluation route (a) runs after its search: the set of admitted
  *       (document, chunk) pairs;</li>
  *   <li>by the real route (b) function through {@link PgVectorRepository#searchMetadataScoped}: its set of (document,
- *       chunk) pairs must EQUAL the stage's, for every predicate;</li>
+ *       chunk) pairs must EQUAL the stage's, for every predicate, AND its rows must have the multiplicity route (b) is
+ *       documented to have (see below);</li>
  *   <li>by route (a)'s {@code manifest_search_384}, which admits a chunk when any live occurrence passes: with the
  *       predicate route (a) really pushes ({@link ManifestPushdown#of}) its chunk set must be a SUPERSET of the stage's
  *       chunks, and with the exact form ({@link ManifestPushdown#ofExact}) it must EQUAL them (content_type, whose
  *       route (a) array is deliberately wider, is held to the superset rule only).</li>
  * </ol>
  *
+ * <p><b>Multiplicity.</b> The stage returns a (document, chunk) pair once, at the document's lowest passing position.
+ * Route (b) returns one row per PASSING OCCURRENCE (manifest row), so a document holding one chunk at two positions
+ * yields two rows when both positions pass, one when only one does (by design, documented on {@code
+ * searchMetadataScopedWithTokens} and {@code searchAspectScopedWithTokens}: the callers keep the best row per
+ * document). The fixture therefore holds documents with one chunk at two positions whose labels differ (written
+ * against legacy, so the position's label and the chunk row's both matter), and each predicate is judged per
+ * occurrence: {@link ManifestLabelStage#passes} over {@link ManifestLabelStage#rowLabels} of each live occurrence is
+ * the oracle, and route (b)'s rows, counted per (document, chunk), must equal the number of occurrences that pass. A
+ * route (b) function that read one position's labels for the pair (the first, the lowest, any aggregate) admits the
+ * wrong set on the predicates where the two positions disagree.
+ *
  * <p>The fixture is built to reach every branch of the stage's {@code testValue}: written and legacy manifest rows,
  * blank and non-blank titles and authors, catalog types with and without a derived format, documents with no type, a
  * soft-deleted owner, enriched and unenriched bib columns (a year of 0, a citation count of 0), an indexed_at that is
  * NULL (so the chunk row answers) and one that is not, catalog meta present, JSON null and absent, tags as an array
- * and as a comma string, numbers stored as text, and chunk rows that disagree with the catalog.
+ * and as a comma string, numbers stored as text, chunk rows that disagree with the catalog, and one chunk held at two
+ * positions of one document (two documents do), written at one and legacy at the other, or written at both.
  *
  * <p>Non-vacuity: the matrix has a floor in size, each of the eight operators has predicates that admit something and
- * predicates that reject something, and the five keys of nexus-qpt52 (bib_year, bib_authors, bib_venue,
- * bib_citation_count, indexed_at) are each admitted and rejected by a positive and by a negative operator.
+ * predicates that reject something, the five keys of nexus-qpt52 (bib_year, bib_authors, bib_venue,
+ * bib_citation_count, indexed_at) are each admitted and rejected by a positive and by a negative operator, and the
+ * repeated chunks are seen both passing at both positions (two rows) and at one position only (one row).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ManifestRouteBDifferentialTest {
@@ -78,6 +94,13 @@ class ManifestRouteBDifferentialTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private static final List<String> OPERATORS = List.of("$eq", "$ne", "$in", "$nin", "$gte", "$gt", "$lte", "$lt");
+
+    /**
+     * Checks (a repeated pair against a predicate) that must see the pair pass at both positions, and at one only;
+     * measured 2,899 and 313 over the 5,778 predicates and the two pairs.
+     */
+    private static final int REPEAT_BOTH_FLOOR = 1000;
+    private static final int REPEAT_ONE_FLOOR = 200;
 
     /** The five keys nexus-qpt52 added to the object. */
     private static final List<String> NEW_KEYS =
@@ -147,7 +170,13 @@ class ManifestRouteBDifferentialTest {
         new Doc("d11", "Gamma", "Gil", "prose", "g.md", null, 2020, "Ghost", "Boo", 9, "", "", "", null, null, true),
         // a second holder of the shared chunks, labels all legacy
         new Doc("d12", "Juliet", "Jo", "prose", "j.txt", "{\"tags\":[\"b\",\"c\"]}", 0, "", "", 0, "", "", "", null,
-            "2026-01-15T10:00:00Z", false));
+            "2026-01-15T10:00:00Z", false),
+        // holds chunk 1 at TWO positions (written body at one, legacy at the other); enriched, no indexed_at
+        new Doc("d13", "Kilo", "Kim", "prose", "k.md", "{\"tags\":[\"a\",\"b\"],\"category\":\"decision\"}",
+            2020, "Kay, K.", "NeurIPS", 5, "", "", "", "2026-04-01T00:00:00Z", null, false),
+        // a second holder of chunk 1 at two positions (legacy at one, written with empty labels at the other)
+        new Doc("d14", "Lima", "Lee", "code", "l.py", null, 0, "", "", 0, "", "", "", null,
+            "2026-02-02T02:02:02.000001Z", false));
 
     /** Chunk-row metadata, as stored (the last writer's, and sometimes disagreeing with the catalog). */
     private static final List<String> CHUNK_META = List.of(
@@ -191,7 +220,15 @@ class ManifestRouteBDifferentialTest {
         w("d09", 0, 8, "Intro", "body", 4), l("d09", 1, 4),
         w("d10", 0, 3, "Readme", "docs", 1), w("d10", 1, 0, "Intro", "references", 1),
         w("d11", 0, 1, "Intro", "body", 3), w("d11", 1, 6, "Methods", "body", 12),
-        l("d12", 0, 1), l("d12", 1, 6), l("d12", 2, 8));
+        l("d12", 0, 1), l("d12", 1, 6), l("d12", 2, 8),
+        // nexus-qpt52 review H1: one chunk at two positions of one document, labels differing between the positions.
+        // d13 holds chunk 1 written (Methods, body, page 12) and legacy (the chunk row says Intro, references, 3).
+        w("d13", 0, 1, "Methods", "body", 12), l("d13", 1, 1), w("d13", 2, 6, null, "references", null),
+        // d14 holds chunk 1 legacy and written empty (no title, no type, no page); chunk 3 is legacy at position 2.
+        l("d14", 0, 1), w("d14", 1, 1, "", "", null), l("d14", 2, 3));
+
+    /** The (document, chunk) pairs the fixture holds at more than one live position: the multiplicity probes. */
+    private static final List<String> REPEATED = List.of("d13@" + chash(1), "d14@" + chash(1));
 
     private static String chash(int chunk) {
         return Chash.ofText("diff-b-chunk-" + chunk).toHex();
@@ -308,13 +345,42 @@ class ManifestRouteBDifferentialTest {
         return out;
     }
 
-    /** The (document, chunk) pairs route (b) returns, through the real repository path. */
-    private Set<String> routeB(Map<String, Object> where) {
-        Set<String> out = new TreeSet<>();
+    /**
+     * The rows route (b) returns, through the real repository path, as {@code doc@chash}, sorted, one entry per row (a
+     * chunk held at two passing positions of one document comes back twice).
+     */
+    private List<String> routeBRows(Map<String, Object> where) {
+        List<String> out = new ArrayList<>();
         for (Map<String, Object> r : vec.searchMetadataScoped(TENANT, "q", List.of(COLL), null, null, null, null, null,
                 where, 500)) {
             out.add(r.get("id") + "@" + r.get("chash"));
         }
+        Collections.sort(out);
+        return out;
+    }
+
+    /** The live occurrences per docKeys, read once: the lookup does not depend on the predicate's operator or operand. */
+    private final Map<Set<String>, Map<String, List<ManifestLabelStage.Occurrence>>> occurrenceCache = new HashMap<>();
+
+    /**
+     * The per-occurrence oracle: every live manifest occurrence of every chunk that passes the predicates on ITS OWN
+     * labels ({@link ManifestLabelStage#passes} over {@link ManifestLabelStage#rowLabels}), as {@code doc@chash},
+     * sorted, one entry per passing occurrence. A chunk at two passing positions of one document is listed twice.
+     */
+    private List<String> passingOccurrences(List<ManifestLabelStage.Predicate> labels) {
+        Set<String> docKeys = ManifestLabelStage.docKeysOf(labels);
+        Map<String, List<ManifestLabelStage.Occurrence>> owners = occurrenceCache.computeIfAbsent(docKeys,
+            k -> stage.occurrences(TENANT, chunkRows, k));
+        List<String> out = new ArrayList<>();
+        for (Map<String, Object> row : chunkRows) {
+            for (ManifestLabelStage.Occurrence o : owners.getOrDefault(
+                    ManifestLabelStage.ownerKey(COLL, (String) row.get("id")), List.of())) {
+                if (ManifestLabelStage.passes(labels, ManifestLabelStage.rowLabels(row, o, docKeys))) {
+                    out.add(o.docId() + "@" + row.get("id"));
+                }
+            }
+        }
+        Collections.sort(out);
         return out;
     }
 
@@ -449,8 +515,12 @@ class ManifestRouteBDifferentialTest {
     @Test
     void routeBAdmitsExactlyWhatTheStageKeeps_onEveryPredicateOfTheMatrix() {
         List<Entry> matrix = matrix();
-        int total = stageDocChunks(List.of()).size();  // no predicate: every live occurrence
+        int total = stageDocChunks(List.of()).size();  // no predicate: every live (document, chunk) pair
+        int liveOccurrences = passingOccurrences(List.of()).size();  // no predicate: every live manifest row
         List<String> mismatches = new ArrayList<>();
+        List<String> multiplicity = new ArrayList<>();
+        int repeatedBothPass = 0;
+        int repeatedOnePasses = 0;
         List<String> routeAViolations = new ArrayList<>();
         int pushedA = 0;
         int exactA = 0;
@@ -458,7 +528,9 @@ class ManifestRouteBDifferentialTest {
 
         for (Entry e : matrix) {
             Set<String> expected = stageDocChunks(e.labels());
-            Set<String> actual = routeB(e.where());
+            List<String> actualRows = routeBRows(e.where());
+            Set<String> actual = new TreeSet<>(actualRows);
+            List<String> passing = passingOccurrences(e.labels());
             examined++;
             String op = e.labels().get(0).operator();
             String key = e.labels().get(0).key();
@@ -470,6 +542,22 @@ class ManifestRouteBDifferentialTest {
                 Set<String> extra = new TreeSet<>(actual);
                 extra.removeAll(expected);
                 mismatches.add(e.name() + " [" + e.where() + "] route (b) misses " + missing + " and adds " + extra);
+            }
+            // The oracle itself: the pairs holding a passing occurrence are the pairs the stage keeps.
+            if (!expected.equals(new TreeSet<>(passing))) {
+                mismatches.add(e.name() + " [" + e.where() + "] the per-occurrence oracle " + new TreeSet<>(passing)
+                    + " disagrees with the stage " + expected);
+            }
+            // Multiplicity: route (b) returns one row per passing occurrence, so a pair held at two positions comes back
+            // once for each position that passes on its own labels.
+            if (!actualRows.equals(passing)) {
+                multiplicity.add(e.name() + " [" + e.where() + "] route (b) rows " + actualRows
+                    + " but the passing occurrences are " + passing);
+            }
+            for (String repeated : REPEATED) {
+                int rows = Collections.frequency(passing, repeated);
+                if (rows == 2) repeatedBothPass++;
+                if (rows == 1) repeatedOnePasses++;
             }
             // route (a): what it really pushes admits a superset of the stage's chunks
             ManifestPushdown.Plan planA = null;
@@ -500,9 +588,10 @@ class ManifestRouteBDifferentialTest {
             }
         }
 
-        System.out.println("QPT52-DIFF predicates=" + examined + " live_occurrences=" + total + " route_a_pushed=" + pushedA
-            + " route_a_exact_compared=" + exactA + " route_b_mismatches=" + mismatches.size()
-            + " route_a_violations=" + routeAViolations.size());
+        System.out.println("QPT52-DIFF predicates=" + examined + " live_occurrences=" + liveOccurrences + " live_pairs=" + total
+            + " route_a_pushed=" + pushedA + " route_a_exact_compared=" + exactA + " route_b_mismatches=" + mismatches.size()
+            + " route_b_multiplicity_mismatches=" + multiplicity.size() + " route_a_violations=" + routeAViolations.size()
+            + " repeated_pair_checks_both_pass=" + repeatedBothPass + " repeated_pair_checks_one_passes=" + repeatedOnePasses);
         admitReject.forEach((bucket, c) -> {
             if (!bucket.contains(" ")) {
                 System.out.println("QPT52-DIFF operator " + bucket + " admits_something=" + c[0] + " rejects_something=" + c[1]);
@@ -510,19 +599,30 @@ class ManifestRouteBDifferentialTest {
         });
         assertThat(mismatches).as("route (b) vs the stage: %d of %d predicates differ", mismatches.size(), examined)
             .isEmpty();
+        assertThat(multiplicity).as("route (b) rows vs the passing occurrences: %d of %d predicates differ",
+            multiplicity.size(), examined).isEmpty();
         assertThat(routeAViolations).as("route (a) EXISTS vs the stage").isEmpty();
 
         // Non-vacuity. The matrix is large, every operator admits something and rejects something, and the five keys of
         // nexus-qpt52 each have a positive and a negative operator that both admit and reject.
         assertThat(examined).as("matrix size").isGreaterThanOrEqualTo(1500);
-        assertThat(total).as("live occurrences in the fixture").isEqualTo(28);
+        long liveInFixture = OCCS.stream()
+            .filter(o -> DOCS.stream().anyMatch(d -> d.id().equals(o.doc()) && !d.deleted())).count();
+        assertThat(liveOccurrences).as("live manifest occurrences in the fixture").isEqualTo(34).isEqualTo((int) liveInFixture);
+        assertThat(total).as("live (document, chunk) pairs: fewer than the occurrences, a chunk is held twice").isEqualTo(32);
+        assertThat(liveOccurrences - total).as("occurrences beyond the pairs: the repeated chunks")
+            .isEqualTo(REPEATED.size());
+        assertThat(repeatedBothPass).as("repeated-pair checks where both positions pass (two route (b) rows)")
+            .isGreaterThanOrEqualTo(REPEAT_BOTH_FLOOR);
+        assertThat(repeatedOnePasses).as("repeated-pair checks where one position passes (one route (b) row)")
+            .isGreaterThanOrEqualTo(REPEAT_ONE_FLOOR);
         assertThat(pushedA).as("predicates route (a) pushes").isGreaterThanOrEqualTo(300);
         assertThat(exactA).as("exact-form manifest_search comparisons").isGreaterThanOrEqualTo(1000);
         for (String operator : OPERATORS) {
             int[] c = admitReject.get(operator);
             assertThat(c).as("operator %s examined", operator).isNotNull();
-            assertThat(c[0]).as("%s: predicates that admit something", operator).isGreaterThanOrEqualTo(20);
-            assertThat(c[1]).as("%s: predicates that reject something", operator).isGreaterThanOrEqualTo(20);
+            assertThat(c[0]).as("%s: predicates that admit something", operator).isGreaterThanOrEqualTo(100);
+            assertThat(c[1]).as("%s: predicates that reject something", operator).isGreaterThanOrEqualTo(100);
         }
         for (String key : NEW_KEYS) {
             for (String operator : List.of("$eq", "$ne", "$in", "$nin")) {
@@ -540,6 +640,32 @@ class ManifestRouteBDifferentialTest {
                 assertThat(c[1]).as("%s %s rejects something", key, operator).isPositive();
             }
         }
+    }
+
+    @Test
+    void theRepeatedChunksAreHeldAtTwoLivePositionsWithDifferingEffectiveLabels() {
+        // The premise the multiplicity check rests on, read back from the database: each repeated pair has two live
+        // manifest rows, and the three labels the stage would judge (section_title, section_type, page_number) all
+        // differ between them. One of the pairs is written at one position and legacy at the other.
+        Map<String, List<ManifestLabelStage.Occurrence>> owners = stage.occurrences(TENANT, chunkRows, Set.of());
+        int mixed = 0;
+        for (String repeated : REPEATED) {
+            String doc = repeated.substring(0, repeated.indexOf('@'));
+            String chash = repeated.substring(repeated.indexOf('@') + 1);
+            Map<String, Object> chunkRow = chunkRows.stream().filter(r -> chash.equals(r.get("id"))).findFirst().orElseThrow();
+            List<ManifestLabelStage.Occurrence> mine = owners.get(ManifestLabelStage.ownerKey(COLL, chash)).stream()
+                .filter(o -> o.docId().equals(doc)).toList();
+            assertThat(mine).as(repeated).hasSize(2);
+            if (mine.get(0).labelsWritten() != mine.get(1).labelsWritten()) mixed++;
+            Map<String, Object> first = ManifestLabelStage.rowLabels(chunkRow, mine.get(0), Set.of());
+            Map<String, Object> second = ManifestLabelStage.rowLabels(chunkRow, mine.get(1), Set.of());
+            for (String label : List.of("section_title", "section_type", "page_number")) {
+                assertThat(java.util.Objects.equals(first.get(label), second.get(label)))
+                    .as("%s: %s is the same at both positions (%s, %s)", repeated, label, first.get(label), second.get(label))
+                    .isFalse();
+            }
+        }
+        assertThat(mixed).as("repeated pairs written at one position and legacy at the other").isGreaterThanOrEqualTo(1);
     }
 
     @Test

@@ -94,7 +94,9 @@ class ManifestPushdownTest {
 
     @Test
     void aRangeOverAStringLabel_isNotPushedOnRouteA() {
-        // The stage compares in Java's order, not the database's; route (a) leaves it to the stage (route (b) compiles it).
+        // Java orders strings by UTF-16 code unit, jsonpath by code point; they differ only between a supplementary
+        // character and U+E000..U+FFFF, where an in-SQL range could admit less than the stage keeps, which route (a)'s
+        // superset rule forbids. So route (a) leaves a string range to the stage; route (b) compiles it (ofExact).
         assertThat(ManifestPushdown.of(predicates(where("section_type", op("$gte", "a"))))).isNull();
     }
 

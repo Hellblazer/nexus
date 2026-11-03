@@ -77,11 +77,33 @@ import java.util.Set;
  * >= 3))}. {@code .number()} turns a JSON number or a numeric string into an exact {@code numeric}; a value that is not
  * numeric (the empty string a missing page is counted as, text such as {@code "abc"}) is an error inside the filter,
  * which jsonpath turns into "unknown" and so into "no match", the stage's {@code comparable == false}. It needs
- * PostgreSQL 17 (the engine's floor). Residuals, none reached by the writers: the stage parses with {@link
- * java.math.BigDecimal}, which also reads non-ASCII digits, and PostgreSQL does not; a string range compares in UTF-8
- * byte order here and in UTF-16 order in Java, which differ only between supplementary characters and U+E000 to U+FFFF;
- * a catalog meta number stored in exponent form prints differently in Jackson and PostgreSQL, which matters only to a
- * string comparison of it.
+ * PostgreSQL 17 (the engine's floor).
+ *
+ * <p>Residuals between the SQL and the stage, none produced by the writers (which store plain labels, ASCII-digit
+ * numbers and, in the catalog meta, scalars of the type each key names). Where the SQL is narrower than the stage a
+ * route (b) row goes missing and a route (a) chunk could be dropped before the stage sees it; where it is wider route
+ * (b) returns an extra row and route (a) merely admits a chunk the stage then drops.
+ * <ul>
+ *   <li>Digits and numeric text. The stage parses with {@link java.math.BigDecimal} after {@link String#trim}; both
+ *       differ from PostgreSQL's {@code .number()}. BigDecimal reads non-ASCII digits and PostgreSQL does not (SQL
+ *       narrower); {@code trim} strips every control character up to U+0020 and PostgreSQL strips only its own
+ *       whitespace (SQL narrower); PostgreSQL 17 reads {@code 0x10} and {@code 1_000} as numbers and BigDecimal does
+ *       not (SQL wider).</li>
+ *   <li>Numbers compared as text. A catalog meta number held on a STRING key (a numeric {@code category}, say) is
+ *       compared by its text. The stage gets it from Jackson through {@link Double#toString}, which prints an exponent
+ *       form at 1e7 and above and below 1e-3 and keeps a decimal's trailing zeros as written ({@code 0.5} against
+ *       PostgreSQL's {@code 0.50}); the SQL reads the stored numeric's own text.</li>
+ *   <li>Arrays and objects in the catalog meta on a scalar key. PostgreSQL's lax jsonpath mode unwraps an array under
+ *       {@code .string()} and {@code .number()}, so {@code ["a"]} matches {@code "a"} through its member, where the
+ *       stage compares the value's JSON text; an object under {@code .string()} is an error, so nothing matches. A
+ *       positive operator and its negation can therefore differ between the two ({@code $ne} flips).</li>
+ *   <li>String range order. The stage orders strings by UTF-16 code unit and jsonpath by code point (UTF-8 bytes); they
+ *       differ only between a supplementary character and U+E000 to U+FFFF. On route (b) that is a difference in the
+ *       answer; on route (a) a range over a string label ({@code section_type}, say) is not pushed for this reason, but
+ *       a string range on {@code bib_authors}, {@code bib_venue} or {@code indexed_at} is (they are in {@link
+ *       #EXACT_KEYS}), and there a supplementary-plane value against an operand in U+E000 to U+FFFF could be dropped
+ *       before the stage, breaking the superset rule. Rare.</li>
+ * </ul>
  */
 final class ManifestPushdown {
 

@@ -142,7 +142,11 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  * nexus-p89h4 fix; since nexus-qpt52 that includes {@code indexed_at}, {@code bib_year}, {@code bib_venue}, {@code
  * bib_authors} and {@code bib_citation_count}). A predicate it does not carry on route (a) (a negative operator, a
  * range over a string label) still depends on the cut: a filter that rejects most of the neighbourhood returns fewer
- * rows than the limit.
+ * rows than the limit. A string range stays with this stage on route (a) because Java orders strings by UTF-16 code
+ * unit and the jsonpath comparison orders them by code point (UTF-8 bytes), which differ only between a supplementary
+ * character and U+E000 to U+FFFF; pushing it could admit less than this stage keeps, and the in-SQL form must never do
+ * that. Route (b) compiles it ({@link ManifestPushdown#ofExact}), where the SQL order is the answer (see the residuals
+ * in {@link ManifestPushdown}).
  *
  * <p><b>Route (b) (nexus-qpt52).</b> The three route (b) searches have no stage after the search, so the SQL is the
  * answer: {@link ManifestPushdown#ofExact} compiles every predicate of this stage, every operator on every answered
@@ -787,8 +791,8 @@ final class ManifestLabelStage {
      * to the document so a tombstoned document owns nothing. The same statement reads the document-level
      * values the predicates name ({@code docKeys}); nothing is read for a filter that names none.
      */
-    private Map<String, List<Occurrence>> occurrences(String tenant, List<Map<String, Object>> rows,
-                                                      Set<String> docKeys) {
+    Map<String, List<Occurrence>> occurrences(String tenant, List<Map<String, Object>> rows,
+                                              Set<String> docKeys) {
         Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             Object id = row.get("id");
@@ -1084,7 +1088,7 @@ final class ManifestLabelStage {
      * else is absent. A document-level key the document answers (see {@link Occurrence#docValues}) is its
      * value, a null one an authoritative absence; any other falls back to the chunk row.
      */
-    private static Map<String, Object> rowLabels(Map<String, Object> row, Occurrence o, Set<String> docKeys) {
+    static Map<String, Object> rowLabels(Map<String, Object> row, Occurrence o, Set<String> docKeys) {
         Map<String, Object> m = new HashMap<>(4 + docKeys.size());
         if (o != null && o.labelsWritten()) {
             m.put("section_title", o.sectionTitle());
