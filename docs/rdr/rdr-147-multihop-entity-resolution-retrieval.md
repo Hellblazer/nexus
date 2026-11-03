@@ -2,7 +2,8 @@
 title: "Multi-hop entity-resolution retrieval: an exact-key resolve step and a resolution repair inside the coverage boundary"
 id: RDR-147
 type: Architecture
-status: deferred
+status: draft
+resumed_date: 2026-11-03
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
