@@ -4,7 +4,7 @@
 waiting rows to ``aspects`` tuples, one row at a time.
 
 WHY A RUNG. ``NX_ASPECT_QUEUE=tuples`` (the default since the RDR-235 Activation
-Step 1 flip, nexus-lnwn1; ``table`` is refused since nexus-bpikw step A) points the
+Step 1 flip, nexus-lnwn1; ``table`` is retired since nexus-bpikw step A) points the
 producer and the worker at the tuple space (RDR-235). Rows the old table already holds, written before the flip
 by this or an older client, would otherwise wait for the alternating table side
 of the worker to drain them, or strand if the table side is ever retired. The
@@ -153,8 +153,9 @@ def _default_record() -> object | None:
 
 
 def _producer_mode() -> str:
-    """The flag as the rung reads it. ``table`` is refused by the producer
-    (nexus-bpikw step A); here it is the answer "not tuples", so the rung reports
+    """The flag as the rung reads it, through the strict reader. A stale ``table``
+    is retired (nexus-bpikw step A: the producer warns and queues on tuples, the
+    strict reader raises); here it is the answer "not tuples", so the rung reports
     not applicable and sends nothing, as it did for the old opt-out, instead of
     raising out of ``nx upgrade``."""
     try:
