@@ -209,12 +209,40 @@ def test_every_registered_catalog_tool_is_routed_by_the_kind_of_its_body() -> No
     assert not _misrouted(tools), _misrouted(tools)
 
 
-#: The registered tools that can run for minutes and spend money (LLM calls, plan runs). mcp 2.x runs a SYNC tool
-#: body in an anyio worker thread with abandon_on_cancel=False, so a cancelled sync call keeps its request slot and
-#: runs to the end (nexus-s9nu7). That is accepted for the sync tools, whose bodies take seconds; abandoning would
-#: not shorten shutdown either, since anyio worker threads are not daemon threads. It is not acceptable for these:
-#: they must stay coroutines, which a cancel stops at the next await.
+#: nexus-s9nu7. mcp 2.x runs a SYNC tool body with anyio.to_thread.run_sync and abandon_on_cancel=False: a cancelled
+#: sync call keeps its worker thread and one of the 40 request slots until the body returns, and Server.run() returns
+#: only then (measured in the nexus-sgmyl review: a 4 s tool cancelled at 0.5 s, run() returned at 4.00 s). No reply
+#: reaches the wire. That is accepted. A thread cannot be stopped whichever way the call is cancelled; abandoning
+#: would only free the slot and let run() return early, while the process still waits at exit for the non-daemon
+#: worker thread (SIGTERM, SIGINT and SIGHUP end it at once through os._exit). For store_put, finishing is the safer
+#: half: its completion stamp lands instead of the fence staying at 'indexing'.
+#:
+#: The tools that can run for minutes and spend money (LLM calls, plan runs) must stay coroutines, which a cancel
+#: stops at the next await.
 LONG_RUNNING_TOOLS: tuple[str, ...] = ("nx_answer", "nx_enrich_beads", "nx_plan_audit", "nx_tidy")
+
+#: Every registered SYNC tool, on both servers, with the worst case a cancel leaves running. A new sync tool fails
+#: the test below until it is listed here with its worst case, so a long or money-spending sync tool is a decision,
+#: never an accident.
+SYNC_TOOL_WORST_CASE: dict[str, str] = {
+    **{n: "one engine call, seconds" for n in (
+        "collection_list", "memory_delete", "memory_get", "memory_put", "memory_search", "plan_delete",
+        "plan_save", "plan_search", "scratch", "scratch_manage", "store_get", "store_get_many", "store_list",
+        "tuple_ack", "tuple_list", "tuple_nack", "tuple_out", "tuple_registry", "tuple_release", "tuple_renew",
+        "tuple_stats", "tuple_subscribe", "tuple_subscriptions", "tuple_unsubscribe", "mailbox_send",
+        "hook_auto_approve", "hook_subagent_start", "daemon_uninstall", "memory_consolidate",
+    )},
+    **{n: "a fan-out of bounded engine calls (about 30 s each), seconds to tens of seconds" for n in (
+        "query", "search", "search_aspect_scoped", "search_graph_hop", "search_metadata_scoped",
+        "search_topic_scoped", "traverse",
+    )},
+    "tuple_in": "parks up to timeout_s, at most the engine's 25 s cap; a cancelled claim still completes",
+    "tuple_rd": "parks up to timeout_s, at most the engine's 25 s cap",
+    "store_put": "an embed upsert under the engine's 300 s deadline plus retries and post-store chains: minutes",
+}
+CATALOG_SYNC_TOOLS: frozenset[str] = frozenset(
+    {"link", "link_query", "links", "list", "register", "resolve", "search", "show", "stats", "update"}
+)
 
 
 def test_the_long_running_tools_stay_async_so_a_cancel_stops_them() -> None:
@@ -222,5 +250,17 @@ def test_the_long_running_tools_stay_async_so_a_cancel_stops_them() -> None:
 
     tools = core.mcp._tool_manager._tools
     assert set(LONG_RUNNING_TOOLS) <= set(tools), sorted(set(LONG_RUNNING_TOOLS) - set(tools))
-    sync = [name for name in LONG_RUNNING_TOOLS if not asyncio.iscoroutinefunction(tools[name].fn)]
+    sync = [name for name in LONG_RUNNING_TOOLS if not tools[name].is_async]  # is_async is what routes to a thread
     assert not sync, f"would run in a worker thread a cancel cannot stop: {sync}"
+
+
+def test_every_sync_tool_is_listed_with_its_worst_case() -> None:
+    from nexus.mcp import catalog, core  # noqa: PLC0415 — deferred: importing the servers registers every tool
+
+    core_sync = {n for n, tool in core.mcp._tool_manager._tools.items() if not tool.is_async}
+    assert core_sync == set(SYNC_TOOL_WORST_CASE), (
+        f"unlisted sync tools: {sorted(core_sync - set(SYNC_TOOL_WORST_CASE))}; "
+        f"listed but no longer sync: {sorted(set(SYNC_TOOL_WORST_CASE) - core_sync)}"
+    )
+    catalog_sync = {n for n, tool in catalog.mcp._tool_manager._tools.items() if not tool.is_async}
+    assert catalog_sync == CATALOG_SYNC_TOOLS, sorted(catalog_sync ^ CATALOG_SYNC_TOOLS)
