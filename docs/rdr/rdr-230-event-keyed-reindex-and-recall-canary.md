@@ -1343,3 +1343,4 @@ bulk delete, both on an existing session under an existing lock.
   indexes are two tenants', not a duplicate), the changeset and the four
   tenant-table lists added to Phase 1, Open Question 6 added and answered
   (30 days; `-23` to `-28`).
+- 2026-11-03: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `95d6388ef`; critique `nexus_rdr/230-gate-critique-2026-11-03-r1`.
