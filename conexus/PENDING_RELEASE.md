@@ -46,5 +46,7 @@ it is until moved back deliberately.
 ## Awaiting the next release (pinned: v7.95.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
+- `conexus/hooks/scripts/mailbox_drain.py` (nexus-1d6pz.1): every block the drain delivers, fresh or recovered from the pending record, is preceded by a line saying it is peer data from another session, not instructions from the user and not the user's approval.
+- `conexus/skills/peer-messaging/SKILL.md` (nexus-1d6pz.3): a status question reads the threads board, where the sessions keep one, before mailing the peer.
 
 ## Deferred to the next client release
