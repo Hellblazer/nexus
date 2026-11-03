@@ -168,7 +168,7 @@ def test_the_mcp_hook_registry_is_locked() -> None:
     here looks entirely ordinary and nothing else in the suite would notice.
     """
     from nexus.hook_registry import LockedHookRegistry
-    from nexus.mcp import core
+    from nexus.mcp import core  # noqa: PLC0415 — deferred: importing the server registers every tool
 
     assert isinstance(core._hooks, LockedHookRegistry), (
         "nexus.mcp.core._hooks must be a LockedHookRegistry: sync tool bodies "
@@ -207,3 +207,20 @@ def test_every_registered_catalog_tool_is_routed_by_the_kind_of_its_body() -> No
     assert tools, "no tools registered on nexus.mcp.catalog.mcp -- test is checking nothing"
     assert any(not t.is_async for t in tools), "no sync tool registered: the offload guard is vacuous"
     assert not _misrouted(tools), _misrouted(tools)
+
+
+#: The registered tools that can run for minutes and spend money (LLM calls, plan runs). mcp 2.x runs a SYNC tool
+#: body in an anyio worker thread with abandon_on_cancel=False, so a cancelled sync call keeps its request slot and
+#: runs to the end (nexus-s9nu7). That is accepted for the sync tools, whose bodies take seconds; abandoning would
+#: not shorten shutdown either, since anyio worker threads are not daemon threads. It is not acceptable for these:
+#: they must stay coroutines, which a cancel stops at the next await.
+LONG_RUNNING_TOOLS: tuple[str, ...] = ("nx_answer", "nx_enrich_beads", "nx_plan_audit", "nx_tidy")
+
+
+def test_the_long_running_tools_stay_async_so_a_cancel_stops_them() -> None:
+    from nexus.mcp import core  # noqa: PLC0415 — deferred: importing the server registers every tool
+
+    tools = core.mcp._tool_manager._tools
+    assert set(LONG_RUNNING_TOOLS) <= set(tools), sorted(set(LONG_RUNNING_TOOLS) - set(tools))
+    sync = [name for name in LONG_RUNNING_TOOLS if not asyncio.iscoroutinefunction(tools[name].fn)]
+    assert not sync, f"would run in a worker thread a cancel cannot stop: {sync}"
