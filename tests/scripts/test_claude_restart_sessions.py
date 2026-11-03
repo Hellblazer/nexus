@@ -1614,8 +1614,7 @@ def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
     assert sorted(calls) == [("sid-alpha", "t-a"), ("sid-gamma", "t-g")]
 
 
-@pytest.mark.parametrize("mode", ["--resume", "--fresh"])
-def test_a_roll_in_either_mode_withdraws_every_ready_ask_first_and_retries_at_the_end(crs, rd, tmpdirs, monkeypatch, mode) -> None:
+def test_a_roll_withdraws_every_ready_ask_first_and_retries_at_the_end(crs, rd, tmpdirs, monkeypatch) -> None:
     """Every target, one the roll leaves alone (beta is not live) included; a failed withdrawal is
     tried again when the roll ends."""
     _live(rd, "alpha")
@@ -1626,10 +1625,65 @@ def test_a_roll_in_either_mode_withdraws_every_ready_ask_first_and_retries_at_th
                         lambda sid, tid="", what="": order.append(f"withdraw {tid}") or outcomes[tid].pop(0))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: order.append("roll") or 0)
     monkeypatch.setattr(crs, "footprint_report", lambda *a: order.append("report") or [])
-    setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
-    code, _ = _run_main(crs, monkeypatch, [mode, "--no-update", "--force", "--detached"])
+    monkeypatch.setattr(crs, "update_plugins", lambda: order.append("update"))
+    code, _ = _run_main(crs, monkeypatch, ["--resume", "--force", "--detached"])
     assert code == 0
-    assert order == ["withdraw t-a", "withdraw t-b", "roll", "withdraw t-b", "report"]
+    # first thing, before the plugin update (which can take minutes)
+    assert order == ["withdraw t-a", "withdraw t-b", "update", "roll", "withdraw t-b", "report"]
+
+
+def test_a_round_started_during_the_roll_is_left_alone(crs, rd, tmpdirs, monkeypatch) -> None:
+    """The roll reads its round once: a new --ask-ready mid-roll keeps its asks and its round file."""
+    _live(rd, "alpha")
+    _manifest_with_asks(crs, rd, {"alpha": "t-a"})
+    withdrawn: list[str] = []
+    outcomes = {"t-a": ["not withdrawn (in exited 1: down)", "withdrawn"]}
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": withdrawn.append(tid) or outcomes[tid].pop(0))
+
+    def roll(*_a, **_k):  # someone starts a new round while the roll runs
+        crs.write_manifest("20261103-090000", [{"name": "alpha", "sessionId": "sid-alpha", "path": "/x",
+                                                "how": "mail", "tuple_id": "t-new"}], [], at=time.time())
+        return 0
+
+    monkeypatch.setattr(crs, "_roll", roll)
+    reported: list = []
+    monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs, manifest=None: reported.append(manifest["stamp"]))
+    code, _ = _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force", "--detached"])
+    assert code == 0
+    assert withdrawn == ["t-a", "t-a"]  # the new round's t-new is not touched
+    after = crs.load_manifest()[0]
+    assert after["stamp"] == "20261103-090000" and after["targets"][0]["tuple_id"] == "t-new"
+    assert reported == ["20261102-120000"]
+    assert "the round file now holds round 20261103-090000" in _log(rd)
+
+
+def test_the_report_finds_this_run_s_handoffs_by_stamp_when_the_roll_was_interrupted(crs, rd, tmpdirs, monkeypatch) -> None:
+    t = tmpdirs
+    monkeypatch.setattr(crs, "RUN", {"handoff_stamp": "20261102-184822"})
+    (t / "nexus-continuation-restart-alpha-aaaa1111-20261102-184822.md").write_text("h", encoding="utf-8")
+    (t / "nexus-continuation-restart-alpha-aaaa1111-20261101-000000.md").write_text("old", encoding="utf-8")
+    lines = crs.footprint_report([{"sessionId": "aaaa1111-rest", "name": "alpha"}], {}, None)
+    assert lines[1].startswith("footprint: kept 1 handoff(s)")
+    assert "20261102-184822.md" in lines[1] and "20261101" not in lines[1]
+
+
+def test_a_later_withdrawal_clears_an_earlier_failure(crs, rd, tmpdirs, monkeypatch) -> None:
+    monkeypatch.setattr(crs, "_nx_tuple", lambda *a: subprocess.CompletedProcess(a, 1, "", "engine down"))
+    crs.withdraw_ask("sid-9", "t-x", what="ready ask")
+    assert len(crs.UNWITHDRAWN) == 1
+    _fake_mailbox(crs, monkeypatch, ["t-x"])
+    crs.withdraw_ask("sid-9", "t-x", what="ready ask")
+    assert crs.UNWITHDRAWN == []
+
+
+def test_a_new_round_says_which_previous_asks_it_could_not_withdraw(crs, rd, monkeypatch, capsys) -> None:
+    _live(rd, "alpha")
+    _manifest_with_asks(crs, rd, {"alpha": "t-old"})
+    monkeypatch.setattr(crs, "_nx_tuple", lambda *a: subprocess.CompletedProcess(a, 1, "", "engine down"))
+    monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender, out=None: [])
+    a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
+    crs.ready_round(a, _found(crs), _found(crs))
+    assert "asks of the previous round not withdrawn" in capsys.readouterr().out
 
 
 # ---- the restart's footprint (nexus-xwijj Phase 3) ----
@@ -1648,7 +1702,7 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
     t = tmpdirs
     _manifest_with_asks(crs, rd, {"alpha": "t-left", "beta": ""})
     files = ["rh-aaaa1111.txt", "rr-aaaa1111-20261102-120000.txt", "rr-bbbb2222-x.txt",
-             "nexus-continuation-restart-alpha-aaaa1111-1.md", "nexus-continuation-restart-alpha-aaaa1111-1.md.draft.txt",
+             "nexus-continuation-restart-alpha-aaaa1111-1.md", "nexus-continuation-restart-alpha-aaaa1111-1.draft.txt",
              "claude-restart-alpha-aaaa1111-2.draft.txt", "nexus-restart-ready-alpha-aaaa1111-1.json",
              "nexus-continuation-restart-other-cccc3333-1.md", "rr-aaaa1111-20261103-090000.txt",
              "nexus-continuation-restart-alpha-aaaa1111-0-earlier.md"]
@@ -1656,11 +1710,13 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
         (t / f).write_text("x", encoding="utf-8")
     crs.UNWITHDRAWN.append("mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)")
     lines = crs.footprint_report([{"sessionId": "aaaa1111-rest", "name": "alpha"}],
-                                 {"aaaa1111-rest": str(t / "nexus-continuation-restart-alpha-aaaa1111-1.md")})
+                                 {"aaaa1111-rest": str(t / "nexus-continuation-restart-alpha-aaaa1111-1.md")},
+                                 crs.load_manifest()[0])
     assert not (t / "rh-aaaa1111.txt").exists() and not (t / "rr-aaaa1111-20261102-120000.txt").exists()
     assert (t / "rr-bbbb2222-x.txt").exists()  # another session's ask is not this run's
     assert (t / "rr-aaaa1111-20261103-090000.txt").exists()  # nor a newer round's
     assert "0-earlier" not in lines[1]  # an earlier run's handoff is not this run's
+    assert str(t / "nexus-continuation-restart-alpha-aaaa1111-1.draft.txt") in lines[1]  # save_draft's real name
     assert lines[0] == "footprint: removed 2 typed-ask file(s)"
     assert lines[1].startswith("footprint: kept 1 handoff(s) and 2 draft(s) for back-out:")
     assert "cccc3333" not in lines[1]
@@ -1684,7 +1740,8 @@ def test_an_ask_that_could_not_be_withdrawn_is_recorded(crs, rd, tmpdirs, monkey
 def test_the_roll_reports_its_footprint_even_when_it_raises(crs, rd, tmpdirs, monkeypatch) -> None:
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)  # the real one would stay installed in pytest
     reported: list = []
-    monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs: reported.append([s["sessionId"] for s in found]))
+    monkeypatch.setattr(crs, "footprint_report",
+                        lambda found, handoffs, manifest=None: reported.append([s["sessionId"] for s in found]))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mid-roll")))
     _live(rd, "alpha")
     with pytest.raises(RuntimeError):

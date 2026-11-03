@@ -872,6 +872,8 @@ def withdraw_ask(sid: str, tid: str = "", what: str = "handoff ask") -> str:
                 log(f"WARN mailbox/{sid}: could not release a row it claimed ({type(e).__name__}: {e})")
     if outcome not in GONE:
         UNWITHDRAWN.append(f"mailbox/{sid[:8]}: {what} {tid[:12]}: {outcome}")
+    else:  # an earlier failure for this ask is no longer true
+        UNWITHDRAWN[:] = [u for u in UNWITHDRAWN if f" {tid[:12]}: " not in u]
     log(f"mailbox/{sid}: {what} {tid[:12]} {outcome}"
         + (f"; {len(others)} other row(s) claimed and released" if others else ""))
     return outcome
@@ -928,7 +930,11 @@ def withdraw_ready_asks(manifest: dict | None, sids: set[str] | None = None) -> 
         if withdraw_ask(t["sessionId"], tid, what="ready ask") in GONE:
             t["tuple_id"] = ""
         tried += 1
-    if tried:
+    current = load_manifest()[0] if tried else None
+    if current is not None and current["stamp"] != manifest["stamp"]:
+        log(f"ready round {manifest['stamp']}: the round file now holds round {current['stamp']}; "
+            "these withdrawals are not written over it")
+    elif tried:
         try:
             write_manifest(manifest["stamp"], manifest["targets"], manifest["excluded"], at=manifest["at"])
         except OSError as e:
@@ -952,8 +958,14 @@ def write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
             withdraw_ask(sid)
 
 
+#: This run's handoff stamp once write_handoffs picks it: the footprint report finds the handoffs by
+#: it when the roll is interrupted before write_handoffs returns them.
+RUN: dict[str, str] = {"handoff_stamp": ""}
+
+
 def _write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int, sender: str) -> dict[str, str]:
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    RUN["handoff_stamp"] = stamp
     asked: dict[str, tuple[dict, str, float]] = {}
     mailed: dict[str, int] = {}  # sessionId -> consecutive idle reads with no handoff file yet
     done: dict[str, str] = {}
@@ -1514,6 +1526,8 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
         # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
         withdraw_ready_asks(manifest, {t["sessionId"] for t in manifest["targets"]
                                        if read_reply(t["path"], manifest["at"], now)[0] != "none"})
+        if UNWITHDRAWN:
+            print("asks not withdrawn (they expire with their TTL): " + "; ".join(UNWITHDRAWN))
         problem = round_problem(found, manifest, now, a.ready_max_age)
         if problem:
             print(problem)
@@ -1538,6 +1552,8 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
     # The round starts before the first ask: a session can answer while later ones are still being
     # asked, and read_reply rejects a reply older than the round's `at` (review r2).
     withdraw_ready_asks(load_manifest()[0])  # the previous round's asks: this round replaces them
+    if UNWITHDRAWN:
+        print("asks of the previous round not withdrawn (they expire with their TTL): " + "; ".join(UNWITHDRAWN))
     exit_on_stop_signals()
     t0 = time.time()
     targets: list[dict] = []
@@ -1720,24 +1736,27 @@ def main() -> int:
     t_ref = time.time()
     log(f"=== restart {len(found)} session(s): " + ", ".join(s.get("name") or "?" for s in found))
     guard = None if a.force or a.no_ready_check else child_guard(a.ready_max_age, caller_pane, a.fresh, t_ref)
-    if not a.no_update:
-        update_plugins()
-    # Restart whichever session goes idle first, so one busy session holds up no
-    # other. The caller's own session goes last, once the others are done, so it
-    # is not cut off while they come back.
-    me = a.caller_pane
-    others = [s for s in found if s["pane"] != me]
-    callers = [s for s in found if s["pane"] == me]
-    ready = {"idle", "shell"} if a.force else {"idle"}
-    # The ready round has done its work once the roll starts: every ask it mailed is taken back now,
-    # in every mode and for every target (one the roll leaves alone too), and again at the end for
-    # any whose withdrawal failed (nexus-xwijj).
-    withdraw_ready_asks(load_manifest()[0])
+    # The ready round has done its work once the roll starts: every ask it mailed is taken back first
+    # (before the plugin update, which can take minutes while an ask is re-announced every 150 s), in
+    # every mode and for every target (one the roll leaves alone too), and again at the end for any
+    # whose withdrawal failed. The round is read once: a round started during the roll is its own
+    # (nexus-xwijj).
+    round_used = load_manifest()[0]
     try:
+        withdraw_ready_asks(round_used)
+        if not a.no_update:
+            update_plugins()
+        # Restart whichever session goes idle first, so one busy session holds up no
+        # other. The caller's own session goes last, once the others are done, so it
+        # is not cut off while they come back.
+        me = a.caller_pane
+        others = [s for s in found if s["pane"] != me]
+        callers = [s for s in found if s["pane"] == me]
+        ready = {"idle", "shell"} if a.force else {"idle"}
         return _roll(a, found, others, callers, ready, guard)
     finally:
-        withdraw_ready_asks(load_manifest()[0])
-        footprint_report(found, LAST_HANDOFFS)
+        withdraw_ready_asks(round_used)
+        footprint_report(found, LAST_HANDOFFS, round_used)
 
 
 #: The handoffs write_handoffs returned for this run, for the footprint report (empty until then).
@@ -1773,14 +1792,16 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
 TMP = Path("/tmp")
 
 
-def footprint_report(found: list[dict], handoffs: dict[str, str] | None) -> list[str]:
+def footprint_report(found: list[dict], handoffs: dict[str, str] | None, manifest: dict | None = None) -> list[str]:
     """What this restart leaves behind, logged as footprint lines, after removing its own typed-ask
     instruction files (``rh-<sid8>.txt``, ``rr-<sid8>-<stamp>.txt``), which nothing reads once the
     round is over. Kept on purpose and named: each handoff and its draft (the back-out path, and
     what a fresh session read), a resumed session's saved draft, and the ready round's replies.
-    Also named: any ask withdraw_ask could not confirm gone. Returns the lines (nexus-xwijj)."""
+    Also named: any ask withdraw_ask could not confirm gone. *manifest* is the round the roll used
+    (read once at its start); a round started during the roll is not this run's. Returns the lines
+    (nexus-xwijj)."""
     sids = {s["sessionId"][:8] for s in found if s.get("sessionId")}
-    manifest = load_manifest()[0] or {"targets": [], "stamp": ""}
+    manifest = manifest or {"targets": [], "stamp": ""}
     removed = 0
     for sid in sorted(sids):
         # The round this roll used only: a newer round's ask file is that round's (stamp-scoped).
@@ -1797,12 +1818,18 @@ def footprint_report(found: list[dict], handoffs: dict[str, str] | None) -> list
     def mine(pattern: str) -> list[str]:
         return sorted(str(f) for sid in sids for f in TMP.glob(pattern.format(sid=glob.escape(sid))))
 
-    kept_handoffs = sorted(set((handoffs or {}).values()))  # this run's, not every earlier one on disk
-    drafts = sorted(p + ".draft.txt" for p in kept_handoffs if Path(p + ".draft.txt").exists())
+    # This run's handoffs, not every earlier one on disk: those write_handoffs returned, and those with
+    # this run's stamp (the files of a roll interrupted before write_handoffs returned).
+    by_stamp = mine("nexus-continuation-restart-*-{sid}-" + glob.escape(RUN["handoff_stamp"]) + ".md") \
+        if RUN["handoff_stamp"] else []
+    kept_handoffs = sorted(set((handoffs or {}).values()) | set(by_stamp))
+    # A handoff's draft sits beside it with the .md replaced (save_draft's base is the handoff minus its suffix).
+    drafts = sorted(d for p in kept_handoffs if Path(d := str(Path(p).with_suffix("")) + ".draft.txt").exists())
     drafts += mine("claude-restart-*-{sid}-*.draft.txt")
     replies = mine("nexus-restart-ready-*-{sid}-*.json")
     still = [f"mailbox/{t['sessionId'][:8]}: ready ask {t['tuple_id'][:12]}" for t in manifest["targets"]
-             if isinstance(t.get("tuple_id"), str) and t["tuple_id"]]
+             if isinstance(t.get("tuple_id"), str) and t["tuple_id"]
+             and not any(f" {t['tuple_id'][:12]}: " in u for u in UNWITHDRAWN)]  # named once
     lines = [f"footprint: removed {removed} typed-ask file(s)",
              f"footprint: kept {len(kept_handoffs)} handoff(s) and {len(drafts)} draft(s) for back-out: "
              + (", ".join(kept_handoffs + drafts) or "none"),
