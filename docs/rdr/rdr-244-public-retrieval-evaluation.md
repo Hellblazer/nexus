@@ -2,12 +2,12 @@
 title: "Public retrieval evaluation others can run"
 id: RDR-244
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-11-03
-accepted_date:
+accepted_date: 2026-11-03
 related_issues: ["nexus-2k66t.2", "nexus-2k66t"]
 related: [RDR-090, RDR-155, RDR-200, RDR-225, RDR-232]
 ---
@@ -682,3 +682,14 @@ Spike).
 - 2026-11-03: Gate r3 residual, documents over 16 KB: nexus-2k66t.2.6.
 - 2026-11-03: Gate r3 residual, run-time cap: nexus-2k66t.2.7.
 - 2026-11-03: Gate r3 residual, Infrastructure Audit row and Key Discoveries path identity: fixed in text (Infrastructure Audit row, Key Discoveries); fix check pending the commit that carries this revision.
+- 2026-11-03: Gate round 4 — PASSED (0 Critical, 9 Significant, 0 ship-blockers); commit `8f0c4c42b`; critique `nexus_rdr/244-gate-critique-2026-11-03-r4`; fix check `nexus_rdr/244-fix-check-8f0c4c42b` (three dispatches, PASS).
+- 2026-11-03: Gate r4 residual, collection subject per dataset: nexus-2k66t.2.8.
+- 2026-11-03: Gate r4 residual, spike isolation and teardown: nexus-2k66t.2.9.
+- 2026-11-03: Gate r4 residual, "not clean" and freeze timing: nexus-2k66t.2.10.
+- 2026-11-03: Gate r4 residual, per-dataset reporting and warm-up: nexus-2k66t.2.11.
+- 2026-11-03: Gate r4 residual, qrels split: nexus-2k66t.2.12.
+- 2026-11-03: Gate r4 residual, run-time cap parameter and prerequisites (overlaps nexus-2k66t.2.7): nexus-2k66t.2.13.
+- 2026-11-03: Gate r4 residual, stale identifiers: nexus-2k66t.2.14.
+- 2026-11-03: Gate r4 residual, docs_for_chashes scope sharpened by one collection per dataset: nexus-2k66t.2.5.
+- 2026-11-03: Gate r4 residual, round 3 items still open in text (hybrid_default, aspect check, stamp_note, shared-chunk order, oversized documents): nexus-2k66t.2.1 to .2.4 and .2.6.
+- 2026-11-03: Accepted. Sam, in elsinore's pane, typed "accept RDR-244" on 2026-11-03. Gate round 4 PASSED; fix check `nexus_rdr/244-fix-check-8f0c4c42b`.
