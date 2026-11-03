@@ -26,6 +26,7 @@ from nexus.db import request_gate
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._legacy_meta_backfill import legacy_backfill_meta
 from tests.test_6pfgb10_meta_backfill import MINE, PUT, _entry, _invoke, _Manifest, _row, _World, _world_with_one_of_each
+from tests._module_seam import setattr_in
 
 A, B, C, K = "docs__x__m__v1", "docs__y__m__v1", "code__x__m__v1", "knowledge__x__minilm__v1"
 
@@ -263,7 +264,7 @@ def test_the_command_refuses_a_bad_batch_size_or_pause(monkeypatch, flags):
 def test_the_command_passes_the_batch_size_and_pause_through(monkeypatch):
     w = _catalog()
     naps: list[float] = []
-    monkeypatch.setattr(mb.time, "sleep", naps.append)
+    setattr_in(monkeypatch, mb, "time.sleep", naps.append)
     result, _ = _invoke(monkeypatch, w, "--batch-size", "75", "--pause-ms", "20", "--apply")
     assert result.exit_code == 0, result.output
     assert len([e for e in w.events if e[0] == "manifests"]) == 2, "150 entries at 75 a round"
@@ -273,7 +274,7 @@ def test_the_command_passes_the_batch_size_and_pause_through(monkeypatch):
 def test_the_defaults_are_a_round_of_fifty_and_no_pause(monkeypatch):
     w = _catalog()
     naps: list[float] = []
-    monkeypatch.setattr(mb.time, "sleep", naps.append)
+    setattr_in(monkeypatch, mb, "time.sleep", naps.append)
     result, _ = _invoke(monkeypatch, w)
     assert result.exit_code == 0, result.output
     assert len([e for e in w.events if e[0] == "manifests"]) == 3 and naps == []
