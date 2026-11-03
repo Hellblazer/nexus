@@ -14,9 +14,11 @@ deletion). What remains:
 1. package → everything            (:data:`PRECONDITION_PACKAGE` → ``*``)
 2. :data:`RUNG_RDR192_MANIFEST_BACKFILL` — the RDR-192 census and
    legacy-unmanifested backfill (nexus-wbfpw.41), the first rung since
-   nexus-lgdel.l1 emptied the ladder. It has no rung-to-rung edge: it needs
-   only the engine at the pinned tag, which the precondition stage
-   guarantees before the walk.
+   nexus-lgdel.l1 emptied the ladder. It needs no other rung, only the
+   engine at the pinned tag, which the precondition stage guarantees before
+   the walk.
+3. :data:`RUNG_RDR192_MANIFEST_BACKFILL` → :data:`RUNG_MANIFEST_SECTION_LABELS`
+   — section labels fills the legacy rows the backfill adds (nexus-dfemn).
 
 Package/engine/process are STATELESS preconditions (RDR-185 Constraints):
 re-derived from ON-DISK state at every invocation, converged before the
