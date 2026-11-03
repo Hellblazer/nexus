@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.95.0] - 2026-11-05
+
+Pairs with engine-service-v0.1.178 (REQUIRED_ENGINE_VERSION 0.1.175 -> 0.1.178). The MCP servers move to mcp 2.3 (nexus-sgmyl). The engine must be deployed to the managed service before this client tag (every wire-ledger entry is additive).
+
 ### Added
 
 - **A plan can `resolve` key tokens to documents by exact title** (nexus-v9v5r, RDR-147 Step 3; client-only, works on every engine with `/v1/catalog/by_title`, and on older ones through the client's fallback). `tool: resolve` takes `tokens`, optional `by` (only `title`), `content_type` and `owner`, makes one `find_by_title_exact` call per distinct token, and returns `{tumblers, ids, collections, chunk_collections, chunk_tumblers, by_token, missing, ambiguous}`: a token with no live document (or a blank one, which costs no lookup) is in `missing`, a token that names several is in `ambiguous` with every candidate tumbler and is never resolved to one of them, and a single match gives its tumbler and its manifest chunk hashes as `ids`, so `$stepN.ids` feeds `store_get_many` or an operator unchanged. `ids` is deduplicated across documents (identical chunk text is one T3 row); `collections`, `chunk_collections` and `chunk_tumblers` line up with it one-to-one, and `by_token` gives each resolved token its own `{tumbler, ids, collections}` from before the dedup. The match is exact (`cust-0018` does not find `CUST-0018`), and a trashed document is `missing`. No embedding, no model call, no MCP tool, no planner change. A run confined to one document skips a `resolve` step (reason `resolve_reaches_outside_document` in the scope diagnostics; the skipped step still answers `missing: []` and `ambiguous: {}`), because a title lookup reaches every document in the tenant. For the same reason a caller `scope` or owner does not narrow it: `resolve` always reads tenant-wide, and the scope diagnostics have no outcome that says so. The core is `nexus.plans.resolve_step.resolve_keys` for the Step 4 repair to call directly.
