@@ -554,8 +554,22 @@ def test_k_failed_rounds_in_a_row_stop_the_run_cleanly_and_leave_it_resumable():
     report = mb.backfill_meta(w, w, w, apply=True, batch=10, stop_after_failed_rounds=2)
     assert report.interrupted and report.stop_reason == mb.STOP_FAILED_ROUNDS
     assert report.batches_done == 2 and report.documents_examined == 20 and report.lookups_failed > 0
-    assert report.last_tumbler and report.as_dict()["resume_after"] == report.last_tumbler
+    # Both finished batches failed, so the resume point stays at the run's start: a rerun from the top, never a
+    # --start-after past documents whose keys were withheld (review r2 S1).
+    assert report.last_tumbler and report.resume_after == "" and report.as_dict()["resume_after"] == ""
     assert len([e for e in w.events if e[0] == "manifests"]) == 2, "no third round was started"
+
+
+def test_the_resume_point_stops_before_the_first_failed_round_not_at_the_last_finished_one():
+    """A clean batch, then failed ones: the resume command names the clean batch's last document, so the
+    failed batches' documents are read again; the progress position (last_tumbler) still moves on."""
+    w = _failing({2, 3})
+    report = mb.backfill_meta(w, w, w, apply=True, batch=10, stop_after_failed_rounds=2)
+    assert report.stop_reason == mb.STOP_FAILED_ROUNDS and report.batches_done == 3
+    first_batch_last = str(w.entries[9].tumbler)
+    assert report.resume_after == first_batch_last
+    assert report.last_tumbler != first_batch_last, "the progress position moved past the failed batches"
+    assert report.as_dict()["resume_after"] == first_batch_last
 
 
 def test_a_good_round_resets_the_count_of_failed_rounds():
@@ -587,7 +601,10 @@ def test_the_command_stops_after_three_failed_rounds_by_default_and_exits_1(monk
     report = json.loads(result.stdout)
     assert report["batches_done"] == 3 and report["stop_reason"] == "failed_rounds" and report["interrupted"] is True
     assert "Stopped after 3 of 15 batches: 3 rounds in a row had a failed lookup or write" in result.stderr
-    assert "Resume with: nx catalog backfill-meta --json --batch-size 10 --pause-ms 0 --stop-after-failed-rounds 3 --start-after " in result.stderr
+    # Every finished batch failed, so the resume command starts from the top: no --start-after that would skip
+    # the documents whose keys were withheld (review r2 S1).
+    assert "Resume with: nx catalog backfill-meta --json --batch-size 10 --pause-ms 0 --stop-after-failed-rounds 3\n" in result.stderr
+    assert "--start-after" not in result.stderr
 
 
 def test_the_command_option_can_raise_or_disable_the_guard(monkeypatch):

@@ -446,7 +446,7 @@ def backfill_meta_cmd(
             f"--batch-size {batch_size}", f"--pause-ms {pause_ms}",
             *([f"--max-rps {max_rps:g}"] if max_rps is not None else []),
             f"--stop-after-failed-rounds {stop_after_failed_rounds}",
-            *([f"--start-after {report.last_tumbler}"] if report.last_tumbler else []),
+            *([f"--start-after {report.resume_after}"] if report.resume_after else []),
         ]
         if report.stop_reason == STOP_FAILED_ROUNDS:
             click.echo(

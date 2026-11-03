@@ -421,7 +421,9 @@ class Report:
     batches_done: int = 0
     batches_total: int = 0
     stop_reason: str = ""           # STOP_SIGNAL (asked to stop, or a second interrupt) or STOP_FAILED_ROUNDS
-    last_tumbler: str = ""          # the last document of the last finished batch (the --start-after, before one): where a rerun resumes after
+    last_tumbler: str = ""          # the last document of the last finished batch (the --start-after, before one): where the run is
+    resume_after: str = ""          # the --start-after for a rerun: the last document before the first batch with a failed lookup or
+                                    # write, so a resume never skips a document whose keys were withheld (review r2 S1)
     cut_batch: int = 0              # the batch a second interrupt cut (0: none); its writes may have landed
     started_after: str = ""         # the --start-after tumbler this run skipped up to
 
@@ -443,7 +445,7 @@ class Report:
         if self.interrupted:  # absent from a finished run, so its JSON is what it always was
             out.update(
                 interrupted=True, batches_done=self.batches_done, batches_total=self.batches_total,
-                stop_reason=self.stop_reason, resume_after=self.last_tumbler,
+                stop_reason=self.stop_reason, resume_after=self.resume_after,
             )
             if self.cut_batch:
                 out["cut_batch_may_have_written"] = self.cut_batch
@@ -623,7 +625,7 @@ def backfill_meta(
     if not live_entries:
         raise VacuousRunError("examined 0 documents: an empty catalog is a failed sweep, not a clean one")
     live = {str(e.tumbler): e for e in live_entries}    # every owner counts, the skipped ones too
-    report = Report(applied=apply, started_after=start_after, last_tumbler=start_after)
+    report = Report(applied=apply, started_after=start_after, last_tumbler=start_after, resume_after=start_after)
     if start_after:
         at = next((i for i, e in enumerate(listing) if str(e.tumbler) == start_after), None)
         if at is None:
@@ -636,6 +638,7 @@ def backfill_meta(
     naps = sleep or time.sleep
     pause: Callable[[], None] = (lambda: naps(pause_ms / 1000)) if pause_ms else (lambda: None)
     failed_streak = 0
+    clean_so_far = True     # no batch of this run has had a failed lookup or write yet
     for index, start in enumerate(range(0, len(entries), batch), 1):
         chunk = entries[start:start + batch]
         before = copy.deepcopy(report)
@@ -652,6 +655,9 @@ def backfill_meta(
         report.last_tumbler = str(chunk[-1].tumbler)
         trouble = (report.lookups_failed - before.lookups_failed) + (report.writes_failed - before.writes_failed)
         failed_streak = failed_streak + 1 if trouble else 0
+        clean_so_far = clean_so_far and not trouble
+        if clean_so_far:
+            report.resume_after = report.last_tumbler
         history.append((clock(), count_requests()))
         stop_reason = ""
         if index < batches:
