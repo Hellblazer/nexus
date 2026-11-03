@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5062
+provisioned_tests = 5063
 tolerance_tests = 0
+# 5062 -> 5063 (nexus-1ss4n, 2026-11-03): +1 t2_tenant test, tests/db/test_eho3u_nx_answer_runs_read.py::
+# test_keyset_walk_reaches_past_the_300_row_clamp. It seeds 305 runs into the real engine and walks them by
+# before_id to prove the engine's 300-row clamp and keyset bound together; a fake server cannot prove the engine half.
 # 5059 -> 5062 (nexus-z1d0l.2.1, 2026-11-03): +3 t2_tenant tests in tests/test_rdr189_grown_plan_ttl.py, one journey each (grown
 # TTL and the ttl=0 opt-out, expiry on disuse, use resets the disuse clock). They need the live engine: the PG clock that
 # decides expiry cannot be faked, so they cannot be tenant-free. Merged from six to three to keep the rise down.
