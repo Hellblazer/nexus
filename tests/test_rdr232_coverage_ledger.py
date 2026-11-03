@@ -1061,3 +1061,43 @@ async def test_anchors_carry_the_typed_fields_per_stream() -> None:
     assert [a.item_id for a in anchors] == [f"e{i}" for i in range(1, len(anchors) + 1)], "request-local join keys"
     wire = _cov(result).to_wire()
     assert "content" not in json.dumps(wire), "the wire form carries ids and counts, never evidence text"
+
+
+# ── nexus-dfrfp: a covered facet cites only evidence that reaches the answer-writing step ────────────────────
+
+
+def _direct_view(texts: list[str], *, answer_texts: list[str] | None, check: Any) -> BoundaryView:
+    return BoundaryView(
+        evidence_texts=texts, answer_texts=answer_texts, observed=True, step_outputs=[], tools=[], scope_diagnostics=[],
+        resolved_args=[], check=check, remaining_usd=lambda: None, remaining_seconds=lambda: 300.0,
+    )
+
+
+async def _support_the_first_item(args: dict[str, Any], *, timeout: float) -> dict[str, Any]:  # noqa: ARG001
+    return supports_first_item(args["items"], args["check_instruction"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer_texts", "state", "reason"),
+    [
+        (None, "covered", ""),
+        (["reached one", "reached two"], "unsupported", "no_supporting_evidence"),
+        (["unreached one", "reached one"], "covered", ""),
+    ],
+    ids=["no-bound", "cited-item-not-handed", "cited-item-handed"],
+)
+async def test_a_finding_citing_evidence_outside_the_answer_texts_is_unsupported_and_repairable(
+    answer_texts: list[str] | None, state: str, reason: str,
+) -> None:
+    """The assessor cites the first anchor; when the answer-writing step is not handed that text, the facet is
+    ``unsupported`` (repairable) instead of ``covered``."""
+    texts = ["unreached one", "reached one", "reached two"]
+    cov = await CoverageBoundary(request=_request(1)).evaluate(
+        _direct_view(texts, answer_texts=answer_texts, check=_support_the_first_item),
+    )
+    f1 = cov.ledger.finding("f1")
+    assert [a.content for a in cov.ledger.anchors] == texts
+    assert f1 is not None and (f1.state, f1.reason) == (state, reason)
+    if state == "unsupported":
+        assert f1.evidence_ids == () and cov.repair_facet_ids == ("f1",)

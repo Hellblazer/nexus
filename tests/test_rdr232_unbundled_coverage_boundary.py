@@ -520,10 +520,11 @@ WITNESS_SPLIT_OWN_IDS = ("witness-split-later-own-ids", {})
 @pytest.mark.asyncio
 async def test_the_isolated_step_after_a_witness_is_read_by_the_boundary_and_handed_the_repair_evidence() -> None:
     """``extract, check`` is one bundle reading branch A; the generate after the witness reads branch B. The boundary
-    reads the whole run's evidence (A and B), and the repair evidence reaches the later step, as it does unbundled."""
+    reads what reaches the answer step (B only, nexus-dfrfp), and the repair evidence reaches the later step, as it
+    does unbundled."""
     bundled, bcalls = await _run(*WITNESS_SPLIT_B, bundled=True)
     unbundled, _ = await _run(*WITNESS_SPLIT_B, bundled=False)
-    assert _anchor_contents(bundled) == set(TEXTS) | set(TEXTS_B) == _anchor_contents(unbundled)
+    assert _anchor_contents(bundled) == set(TEXTS_B) == _anchor_contents(unbundled)
     assert bcalls.ran == ["generate"] and len(bcalls.bundles) == 1
     repaired, rcalls = await _run(*WITNESS_SPLIT_B, bundled=True, repair=True)
     assert repaired.coverage is not None and repaired.coverage.repair.outcome == "completed"
@@ -697,3 +698,50 @@ def test_a_chunk_id_beside_a_deferred_ref_and_texts_is_no_evidence() -> None:
     assert captured == [[TEXTS[0]]]
     assert chash not in prepared["context"]
     assert runner._boundary_evidence(prepared, captured) == ([TEXTS[0]], True)
+
+
+# ── nexus-dfrfp: covered evidence reaches the answer-writing step ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundled", [True, False], ids=["bundled", "unbundled"])
+async def test_a_covered_facet_cites_only_evidence_the_answer_writing_step_is_handed(bundled: bool) -> None:
+    """nexus-dfrfp: ``extract(A), check, generate(B)`` writes the answer from branch B only, so a facet must not be
+    ``covered`` on a branch-A item the generate is never handed. The anchors are the answer step's own input (and the
+    steps it references within the run), not the union of the whole trailing run."""
+    result, calls = await _run(*WITNESS_SPLIT_B, bundled=bundled)
+    assert result.coverage is not None
+    ledger = result.coverage.ledger
+    by_id = {a.item_id: a.content for a in ledger.anchors}
+    # Non-vacuity: the generate was handed B only, and the boundary still produced anchors with a covered finding.
+    (gen_kw,) = calls.args["generate"]
+    handed = _hand_text(gen_kw)
+    assert all(t in handed for t in TEXTS_B) and not any(t in handed for t in TEXTS)
+    covered = [f for f in ledger.findings if f.state == "covered"]
+    assert covered and set(by_id.values()) == set(TEXTS_B)
+    unreached = [(f.facet_id, i, by_id[i]) for f in covered for i in f.evidence_ids if by_id[i] not in handed]
+    assert not unreached, f"a covered facet cites evidence the generate was never handed: {unreached}"
+
+
+@pytest.mark.parametrize(
+    ("plan", "expected"),
+    [
+        ("witness-split-later-reads-b", {6}),
+        ("witness-split-later-own-ids", {5}),
+        ("extract-check-generate", {4}),
+        ("check-generate", {3}),
+        ("two-branch-probe", {4, 5}),
+        ("extract-generate", {4, 5}),
+        ("only-deferred-ref", {2, 3}),
+        ("abstract-themes", {1, 2, 3}),
+    ],
+)
+def test_the_answer_closure_is_the_answer_step_and_the_run_steps_it_references(plan: str, expected: set[int]) -> None:
+    steps = _plan(plan)["steps"]
+    run_start = len(steps)
+    while run_start > 0 and runner._is_operator_tool(runner._extract_tool_name(steps[run_start - 1])):
+        run_start -= 1
+    closure = runner._answer_closure(
+        steps, range(run_start, len(steps)), extract_tool=runner._extract_tool_name, is_witness_tool=runner._is_witness_tool,
+    )
+    assert closure == frozenset(expected)

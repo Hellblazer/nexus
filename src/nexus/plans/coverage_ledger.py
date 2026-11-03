@@ -707,6 +707,9 @@ class BoundaryView:
     remaining_usd: Callable[[], float | None]
     #: The plan index of the first step of the trailing operator run: where the boundary sits.
     terminal_step: int | None = None
+    #: nexus-dfrfp: the texts that reach the answer-writing step (its own input and that of the steps of the run it
+    #: references). A covered or contradicted finding must cite only these; ``None`` states no such bound.
+    answer_texts: Sequence[str] | None = None
     retrieve: RetrieveCall | None = None
     fetch: FetchCall | None = None
     install_supplement: Callable[[Sequence[SupplementItem]], None] | None = None
@@ -788,6 +791,24 @@ def build_anchors(
         else:
             anchors.append(EvidenceAnchor(item_id, found[0], "chunk", digest, found[1], found[2], "", "", text))
     return tuple(anchors)
+
+
+def _withhold_unreached(
+    findings: tuple["FacetFinding", ...], anchors: Sequence[EvidenceAnchor], answer_texts: Sequence[str] | None,
+) -> tuple["FacetFinding", ...]:
+    """A covered or contradicted finding that cites evidence outside *answer_texts* is unsupported and repairable
+    (nexus-dfrfp): the answer-writing step is not handed what it rests on, so the ledger cannot call the facet
+    covered, and the repair can still retrieve evidence that reaches it. ``None`` states no bound."""
+    if answer_texts is None:
+        return findings
+    reached = {t for t in answer_texts if isinstance(t, str)}
+    content = {a.item_id: a.content for a in anchors}
+    return tuple(
+        FacetFinding(f.facet_id, "unsupported", (), REPAIRABLE_REASON)
+        if f.state in ("covered", "contradicted") and any(content.get(i) not in reached for i in f.evidence_ids)
+        else f
+        for f in findings
+    )
 
 
 # ── the state table ──────────────────────────────────────────────────────────────────────────────────────
@@ -1058,7 +1079,7 @@ class CoverageBoundary:
                 findings_list.append(earlier)  # the reassessment failed, was skipped or had nothing new: the first ledger stands
             else:
                 findings_list.append(FacetFinding(f.id, "unassessed", (), _UNASSESSED_REASON.get(report.outcome, "assessment_failed")))
-        findings = tuple(findings_list)
+        findings = _withhold_unreached(tuple(findings_list), anchors, view.answer_texts)
         state, why, skip = state_for(
             [f.state for f in findings], assessment_outcome=report.outcome, anchors=len(anchors), observed=view.observed, scope_conflict=conflict,
         )
@@ -1352,7 +1373,11 @@ class CoverageBoundary:
             outer = view.remaining_seconds()
             return left if outer is None else min(left, outer)
 
-        reassess = replace(view, evidence_texts=texts, observed=observed, remaining_seconds=remaining)
+        # The merged input is what reaches the answer step now (the runner re-read the steps that do).
+        reassess = replace(
+            view, evidence_texts=texts, answer_texts=None if view.answer_texts is None else texts,
+            observed=observed, remaining_seconds=remaining,
+        )
         final = await replace(self, stage_share=1.0).evaluate(reassess, prior=first)
         if retrieval_note is not None:
             # The reassessment ran and is in ``final``; the outcome names why the retrieval brought nothing in.

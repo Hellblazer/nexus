@@ -1808,6 +1808,40 @@ def _discarded_reduce_steps(
     return sorted(reduce_indices - reachable)
 
 
+def _answer_closure(
+    steps: list[dict[str, Any]],
+    run: Sequence[int],
+    *,
+    extract_tool: "Callable[[dict[str, Any]], str]",
+    is_witness_tool: "Callable[[str], bool]",
+) -> frozenset[int]:
+    """The steps of the trailing operator run *run* whose evidence reaches the answer (nexus-dfrfp).
+
+    The answer step is the last step of the run that is not a witness (``check`` / ``verify``): the one whose output
+    ``PlanResult.final`` carries. The closure is that step plus every step of the run it references, directly or
+    transitively, through ``$stepN.<field>`` in its ORIGINAL args (the walk :func:`_discarded_reduce_steps` makes from
+    the terminal step). A step of the run outside the closure (``extract(A), check, generate(B)``: the extract) is
+    never read by the answer, so a facet must not be called covered on what only that step reads. A run of witnesses
+    alone has no answer step; the whole run is returned.
+    """
+    answer = next((i for i in reversed(run) if not is_witness_tool(extract_tool(steps[i]))), None)
+    if answer is None:
+        return frozenset(run)
+    in_run = set(run)
+    reached: set[int] = set()
+    frontier = [answer]
+    while frontier:
+        idx = frontier.pop()
+        if idx in reached or idx not in in_run:
+            continue
+        reached.add(idx)
+        refs: set[int] = set()
+        for arg_value in (steps[idx].get("args", {}) or {}).values():
+            _scan_step_refs(arg_value, refs)
+        frontier.extend(r for r in refs if r not in reached)
+    return frozenset(reached)
+
+
 def _validate_var_refs(
     steps: list[dict[str, Any]], bindings: dict[str, Any],
 ) -> None:
@@ -3787,6 +3821,11 @@ async def _plan_run_impl(
         _run_start -= 1
     _boundary_run: tuple[int, ...] = tuple(range(_run_start, len(steps)))
     _boundary_start = _boundary_run[0] if _boundary_run else -1
+    #: nexus-dfrfp: the run's steps whose evidence reaches the answer step. The coverage anchors are read from these
+    #: alone, so a facet is never covered on evidence the answer-writing step is not handed.
+    _answer_steps: frozenset[int] = _answer_closure(
+        steps, _boundary_run, extract_tool=_extract_tool, is_witness_tool=_is_witness_tool,
+    )
     #: Plan indices at or below this are skipped by the loop: a skipped boundary fills its unbundled run.
     _skip_through = -1
     _terminal_seg = next(
@@ -3947,7 +3986,7 @@ async def _plan_run_impl(
         _boundary_started = time.monotonic()
         try:
             coverage_result = await coverage_boundary.run(BoundaryView(
-                evidence_texts=texts, observed=observed, step_outputs=list(step_outputs),
+                evidence_texts=texts, answer_texts=list(texts), observed=observed, step_outputs=list(step_outputs),
                 tools=[_extract_tool(s) for s in steps], scope_diagnostics=list(scope_diagnostics),
                 resolved_args=list(resolved_step_args), check=_coverage_check,
                 remaining_seconds=_remaining_seconds, remaining_usd=_remaining_usd, terminal_step=terminal_index,
@@ -4124,6 +4163,10 @@ async def _plan_run_impl(
                 # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
                 deferred_indices = set(seg.plan_indices)
                 _bundle_at_boundary = _at_boundary(seg)
+                # nexus-dfrfp: one fused dispatch hands the bundle's evidence to its model once, so a bundle holding a
+                # step the answer reaches is read as a unit; a bundle none of whose steps the answer reaches
+                # (``extract, check`` before an isolated ``generate`` that does not read the extract) is not read.
+                _bundle_reaches_answer = any(bi in _answer_steps for bi in seg.plan_indices)
                 #: Witness Schema v1: the evidence records of each bundled check step whose items the host hydrated.
                 _bundle_records: dict[int, list[EvidenceRecord]] = {}
 
@@ -4160,7 +4203,7 @@ async def _plan_run_impl(
                         # scope injection — those are retrieval-tool concerns.
                         _mark_reserved_step(bi, steps)
                         _, b_prepared, _bundle_captured = _hydrate_capturing(btool, b_resolved, capture=capture, step_index=bi)
-                        if capture:
+                        if capture and _bundle_reaches_answer:
                             _step_texts, _step_observed = _boundary_evidence(b_prepared, _bundle_captured)
                             texts_out.extend(_step_texts)
                             observed_out = observed_out or _step_observed
@@ -4214,10 +4257,13 @@ async def _plan_run_impl(
                     # unbundled run's steps are; with no witness the list is empty and nothing changes. They are
                     # dispatched by ``dispatch``, so they are read as that dispatcher will hydrate them.
                     _later_run = [i for i in _boundary_run if i > seg.end_index]
+                    # Every later step is named for the supplement and skipped with the bundle; only those the answer
+                    # reaches are read for the anchors (nexus-dfrfp).
+                    _later_read = [i for i in _later_run if i in _answer_steps]
                     _later_hydrates = bool(getattr(dispatch, _HYDRATES_ATTR, False))
                     if _later_run:
                         _name_merge_steps(_later_run)
-                        _later_texts, _later_observed = _read_rest_of_run(_later_run, hydrate=_later_hydrates)
+                        _later_texts, _later_observed = _read_rest_of_run(_later_read, hydrate=_later_hydrates)
                         _boundary_texts = _boundary_texts + _later_texts
                         _boundary_observed = _boundary_observed or _later_observed
 
@@ -4225,8 +4271,8 @@ async def _plan_run_impl(
                         nonlocal bundle
                         rebuilt, rebuilt_texts, rebuilt_observed = _build_bundle_steps(True)
                         bundle = OperatorBundle(steps=tuple(rebuilt))
-                        if _later_run:
-                            more_texts, more_observed = _read_rest_of_run(_later_run, hydrate=_later_hydrates)
+                        if _later_read:
+                            more_texts, more_observed = _read_rest_of_run(_later_read, hydrate=_later_hydrates)
                             return rebuilt_texts + more_texts, rebuilt_observed or more_observed
                         return rebuilt_texts, rebuilt_observed
 
@@ -4682,12 +4728,17 @@ async def _plan_run_impl(
                     except Exception as exc:  # noqa: BLE001 — leave it to the dispatch below, which raises where it always did
                         _log.warning("nx_answer_coverage_prehydration_failed", error=type(exc).__name__)
                         _captured = []
-                _step_texts, _step_observed = _boundary_evidence(resolved, _captured)
+                # nexus-dfrfp: only the steps whose evidence reaches the answer step are read for the anchors.
+                _step_texts, _step_observed = (
+                    _boundary_evidence(resolved, _captured) if index in _answer_steps else ([], False)
+                )
                 # The run's other steps are dispatched one by one after this one; each that reads retrieved evidence
-                # directly is its own reduction, so it is read here (the union the bundle builder reads) and is
-                # handed the repair supplement at its own dispatch.
+                # directly is its own reduction and is handed the repair supplement at its own dispatch; those the
+                # answer reaches are read here.
                 _name_merge_steps(_boundary_run)
-                _more_texts, _more_observed = _read_rest_of_run(_boundary_run[1:], hydrate=_prehydrated)
+                _more_texts, _more_observed = _read_rest_of_run(
+                    [i for i in _boundary_run[1:] if i in _answer_steps], hydrate=_prehydrated,
+                )
                 _step_texts, _step_observed = _step_texts + _more_texts, _step_observed or _more_observed
 
                 def _rehydrate_isolated() -> tuple[list[str], bool]:
@@ -4697,8 +4748,12 @@ async def _plan_run_impl(
                     _mark_reserved_step(index, steps)  # noqa: B023
                     _, again, again_captured = _hydrate_capturing(tool, dict(_unhydrated), capture=True)  # noqa: B023
                     resolved, _prehydrated = again, True
-                    first_texts, first_observed = _boundary_evidence(again, again_captured)
-                    more_texts, more_observed = _read_rest_of_run(_boundary_run[1:], hydrate=True)
+                    first_texts, first_observed = (
+                        _boundary_evidence(again, again_captured) if index in _answer_steps else ([], False)  # noqa: B023
+                    )
+                    more_texts, more_observed = _read_rest_of_run(
+                        [i for i in _boundary_run[1:] if i in _answer_steps], hydrate=True,
+                    )
                     return first_texts + more_texts, first_observed or more_observed
 
                 _cov = await _run_coverage_boundary(_step_texts, _step_observed, index, _rehydrate_isolated)
