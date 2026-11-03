@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json as _json
+import re
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -147,7 +149,7 @@ def _attached_row(chash: str, owner="1.2.3", title="Legacy Note", position=0, **
 def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None, siblings=(SIBLING,),
           audit_ids=None) -> dict:
     counts = {k: sum(1 for r in rows if r["outcome"] == k)
-              for k in ("restored", "would_restore", "present", "dim_conflict", "missing")}
+              for k in ("restored", "would_restore", "present", "dim_conflict", "kept", "missing")}
     return {"origin_collection": ORIGIN, "quarantine_collection": siblings[0] if siblings else None,
             "quarantine_collections": list(siblings), "dry_run": dry_run,
             "audit_id": audit_id, "audit_ids": ([audit_id] if audit_id is not None else []) if audit_ids is None
@@ -196,7 +198,7 @@ class TestCli:
         out = result.output
         assert result.exit_code == 1, "a requested chash that is missing is a failed restore: exit 1\n" + out
         assert f"{a}  restored" in out and f"{b}  present" in out and f"{c}  missing" in out
-        assert "restored 1, present 1, dim_conflict 0, missing 1" in out
+        assert "restored 1, present 1, dim_conflict 0, kept 0, missing 1" in out
         assert "gc_audit 41" in out
         # The operator is told, not left to find out: the chunk is back but nothing shows it, and until it is
         # owned the reaper may take it again on the date given.
@@ -370,7 +372,7 @@ class TestCli:
         assert "1 chunk would stay HIDDEN" in out
         assert "gc_audit" not in out
 
-    @pytest.mark.parametrize("outcome", ["missing", "dim_conflict"])
+    @pytest.mark.parametrize("outcome", ["missing", "dim_conflict", "kept"])
     @pytest.mark.parametrize("dry_run", [False, True])
     def test_a_missing_or_width_conflicting_chunk_exits_1_even_on_a_dry_run(self, runner, outcome, dry_run) -> None:
         a, b = _chash("a"), _chash("b")
@@ -384,6 +386,74 @@ class TestCli:
         result = _run(runner, stub, *args)
 
         assert result.exit_code == t3_quarantine.EXIT_UNRESTORED, result.output
+
+    def test_a_kept_rival_is_named_in_the_table_the_totals_and_the_json_and_exits_1(self, runner) -> None:
+        # nexus-l003p: a chunk the engine refuses as a rival is NOT restored, so it is neither hidden nor attached:
+        # it is kept in quarantine, and the verb says so in words, counts it and exits 1 (a requested chunk is
+        # unrestored).
+        a, b = _chash("a"), _chash("b")
+        stub = _Stub([_page([
+            _row(a, "kept", reattach="superseded", reason="rival", owner="1.2.3", owner_title="Doc", position=0),
+            _attached_row(b),
+        ], audit_id=7)])
+
+        result = _run(runner, stub, "--chash", a, "--chash", b)
+
+        out = result.output
+        assert result.exit_code == t3_quarantine.EXIT_UNRESTORED == 1, out
+        assert f"{a}  kept" in out
+        assert "KEPT in quarantine with its keys: another stored chunk claims position 0 of 'Doc' (1.2.3)" in out
+        assert "restored 1, present 0, dim_conflict 0, kept 1, missing 0" in out
+        assert "1 chunk KEPT in quarantine" in out and "nx store get CHASH" in out and "your" in out
+        assert "HIDDEN" not in out, "a kept chunk is not in the collection, so it is not a hidden one"
+
+        as_json = _run(runner, _Stub([_page([
+            _row(a, "kept", reattach="superseded", reason="rival", owner="1.2.3", position=0)])]), "--chash", a, "--json")
+        doc = _doc(as_json.stdout)
+        assert as_json.exit_code == 1
+        assert doc["totals"]["kept"] == 1 and doc["hidden"] == 0
+        assert doc["rows"][0]["outcome"] == "kept" and doc["rows"][0]["reason"] == "rival"
+
+    def test_a_chunk_kept_for_an_indexing_or_failed_owner_says_to_run_again(self, runner) -> None:
+        # nexus-l003p (decision of linda, round 1): an owner mid index run, or whose run failed, ends; the chunk stays in
+        # quarantine with its keys, so the old remedy is true again and the output says it.
+        a, b = _chash("a"), _chash("b")
+        stub = _Stub([_page([
+            _row(a, "kept", reattach="superseded", reason="indexing", owner="1.2.3", owner_title="Doc", position=0),
+            _row(b, "kept", reattach="superseded", reason="failed", owner="1.2.4", owner_title="Other", position=0),
+        ])])
+
+        result = _run(runner, stub, "--chash", a, "--chash", b)
+
+        out = result.output
+        assert result.exit_code == t3_quarantine.EXIT_UNRESTORED, out
+        assert "'Doc' (1.2.3) is mid index run; not restored, not attached; run again when it finishes" in out
+        assert "'Other' (1.2.4)'s last index run failed; not restored, not attached; re-index it, then run again" in out
+        assert "1 chunk KEPT in quarantine: the owning document is in the middle of an index run. Run the same command again" in out
+        assert "1 chunk KEPT in quarantine: the owning document's last index run failed" in out
+        assert "claims the same position" not in out, "neither is a rival"
+        assert "HIDDEN" not in out
+
+    def test_a_dry_run_says_a_rival_would_be_kept(self, runner) -> None:
+        a = _chash("a")
+        stub = _Stub([_page([_row(a, "kept", reattach="superseded", reason="rival", owner="1.2.3", position=2)],
+                            dry_run=True)])
+
+        result = _run(runner, stub, "--chash", a, "--dry-run")
+
+        assert result.exit_code == 1, result.output
+        assert "would be KEPT in quarantine with its keys" in result.output
+        assert "1 chunk would be KEPT in quarantine" in result.output
+
+    def test_the_batch_size_is_the_engines_per_call_ceiling(self) -> None:
+        # nexus-l003p: a rival is kept in quarantine and refused on every page, so the batch size no longer changes a
+        # verdict, but a client batch above the route's ceiling is clamped by the engine and the pages would skip
+        # chashes. Pin the two numbers against each other: the client's _BATCH and VectorHandler's ceiling.
+        java = (Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "java" / "dev" / "nexus"
+                / "service" / "http" / "VectorHandler.java").read_text()
+        found = re.findall(r"static final int MAX_QUARANTINE_RESTORE_PER_CALL\s*=\s*(\d+)\s*;", java)
+        assert len(found) == 1, "the engine ceiling constant was renamed or duplicated; update this pin"
+        assert t3_quarantine._BATCH == int(found[0])
 
     def test_chashes_go_in_batches_of_a_thousand_and_are_deduplicated(self, runner) -> None:
         hs = [_chash(str(i)) for i in range(2500)]
@@ -452,7 +522,7 @@ class TestCli:
         assert doc["origin_collection"] == ORIGIN and doc["quarantine_collection"] == SIBLING
         assert doc["quarantine_collections"] == [SIBLING]
         assert doc["reattach"] is True
-        assert doc["totals"] == {"restored": 2, "would_restore": 0, "present": 1, "dim_conflict": 0, "missing": 0}
+        assert doc["totals"] == {"restored": 2, "would_restore": 0, "present": 1, "dim_conflict": 0, "kept": 0, "missing": 0}
         assert doc["reattach_totals"] == {"attached": 1, "would_attach": 0, "superseded": 1,
                                           "no_live_owner": 0, "no_position": 0, "owner_link_dropped": 0}
         assert doc["audit_ids"] == [5]
@@ -545,6 +615,7 @@ class TestCli:
         assert "Part of this call was already committed" in result.output
         assert "gc_audit 91, 92" in result.output and "1 chunk" in result.output
         assert "reads present" in result.output, "the operator is told the rerun is safe and what it will show"
+        assert "is kept again" in result.output, "and that a refused rival stays refused"
 
     def test_a_busy_trip_with_nothing_committed_still_says_nothing_moved_even_with_an_empty_audit_list(
             self, runner) -> None:
@@ -862,3 +933,33 @@ def test_no_reattach_against_the_real_engine_drops_the_owner_link_and_a_rerun_ca
     row = _doc(third.stdout)["rows"][0]
     assert row["outcome"] == "restored" and row["attached"] is True and row["reason"] is None
     assert _visible(origin, hs[1])
+
+
+def test_two_versions_of_one_position_are_both_kept_in_quarantine_against_the_real_engine(
+    runner: CliRunner, t2_service_env,
+) -> None:
+    # nexus-l003p: a chunk the engine refuses as a rival is not restored, so the refusal holds across separate calls
+    # and either order: the verb exits 1, the row reads kept, and nothing reaches the collection or the manifest.
+    origin = "knowledge__qrestore-rival__bge-base-en-v15-768__v1"
+    doc = register_real_doc_id(title="Contested", physical_collection=origin, owner_name="qrestore-rival-owner")
+    hs, _ = _seed_quarantined(
+        t2_service_env, origin, ["v1", "v2", "alone"],
+        metas=[{"title": "Contested", "catalog_doc_id": doc, "chunk_index": 0},
+               {"title": "Contested", "catalog_doc_id": doc, "chunk_index": 0},
+               {"title": "Contested", "catalog_doc_id": doc, "chunk_index": 1}])
+
+    for h in (hs[0], hs[1], hs[0]):
+        result = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", h, "--json"])
+        assert result.exit_code == t3_quarantine.EXIT_UNRESTORED, "kept is an unrestored chunk: exit 1\n" + result.output
+        out = _doc(result.stdout)
+        row = out["rows"][0]
+        assert row["outcome"] == "kept" and row["reattach"] == "superseded" and row["reason"] == "rival"
+        assert out["totals"]["kept"] == 1 and out["totals"]["restored"] == 0 and out["audit_ids"] == []
+        assert not _visible(origin, h), "not restored, so not in the collection"
+
+    dry = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[1], "--dry-run", "--json"])
+    assert _doc(dry.stdout)["rows"][0]["outcome"] == "kept", "the dry run predicts it"
+
+    alone = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[2], "--json"])
+    assert alone.exit_code == 0, "the control: a position with one chunk attaches\n" + alone.output
+    assert _visible(origin, hs[2]) and not _visible(origin, hs[0]) and not _visible(origin, hs[1])

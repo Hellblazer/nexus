@@ -6347,7 +6347,11 @@ FROM scope s
      * What {@link #quarantineRestore} reports: one {@link Row} per distinct requested chash, in request order.
      * {@code outcome} is one of {@code restored}, {@code would_restore} (dry run), {@code present} (the origin
      * already has the chash: never overwritten, any quarantine copy left for expiry), {@code dim_conflict} (as
-     * present, and the origin row and the quarantine copy hold embeddings of different widths) or {@code missing}
+     * present, and the origin row and the quarantine copy hold embeddings of different widths), {@code kept} (the
+     * reattach plan refused the chunk as a {@code rival} (another stored chunk names the same document position) or
+     * because its owner is mid index run ({@code indexing}) or failed its last run ({@code failed}): the chunk is NOT
+     * moved and stays in quarantine with its keys whatever {@code reattach} says, which keeps a rival refused across
+     * pages, calls and busy retries and lets a rerun after the run has ended attach the other two; nexus-l003p) or {@code missing}
      * (neither this origin's quarantine sibling nor the origin has it). For a {@code restored} row,
      * {@code noManifest} says the chunk has no own-collection manifest row AFTER the call (false when reattach
      * wrote one) and {@code reapableAfter} is the instant the reaper may take it again (restore time plus the
@@ -6416,6 +6420,8 @@ FROM scope s
         public List<String> present() { return chashesWith("present"); }
         public List<String> dimConflict() { return chashesWith("dim_conflict"); }
         public List<String> missing() { return chashesWith("missing"); }
+        /** The chashes the call kept in quarantine because another stored chunk names their document position. */
+        public List<String> kept() { return chashesWith("kept"); }
         /** The chashes whose manifest row this call wrote. */
         public List<String> attached() { return rows.stream().filter(Row::attached).map(Row::chash).toList(); }
         /** The chashes the reattach step judged with {@code verdict} (see {@link Row}). */
@@ -6823,6 +6829,11 @@ FROM scope s
      * trips on a later sibling leaves the earlier ones committed; the {@link QuarantineRestoreBusyException} then
      * carries their audit ids and chashes, and the same call sent again finishes the rest (a chash already restored
      * reads {@code present}).
+     *
+     * <p>A chunk a sibling's plan refuses as {@code rival} reads {@code kept} and stays in its quarantine sibling
+     * with its keys (nexus-l003p), so the other version, wherever it sits, still sees it as a rival on this call, on a
+     * later page, in a separate call and on the retry of a busy one; no cross-sibling pre-pass is needed. A
+     * {@code kept} row is final for the call (it is not {@code missing}, so no later sibling is asked about it).
      */
     private QuarantineRestoreOutcome restoreAcross(String tenant, String originCollection, List<String> siblings,
                                                     String[] hex, String actor, boolean dryRun, boolean reattach,
@@ -6832,18 +6843,12 @@ FROM scope s
         for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
         var auditIds = new ArrayList<Long>();
         List<String> pending = new ArrayList<>(byChash.keySet());
-        // nexus-l003p: the whole selection is judged before any sibling moves. Each sibling's restore strips the rows it
-        // brings back, so a later sibling's plan could no longer see them as rivals of its own chunks; the dry run, which
-        // sees every version still in quarantine, names the rivals up front and every real call is told them.
-        String[] rivals = dryRun || siblings.size() < 2 ? null
-            : rivalChashes(tenant, originCollection, siblings, byChash.keySet().toArray(String[]::new), actor, reattach,
-                           sourceAuditId);
         for (String sibling : siblings) {
             if (pending.isEmpty()) break;
             org.jooq.Result<?> rows;
             try {
                 rows = restoreRows(tenant, originCollection, sibling, pending.toArray(String[]::new), actor, dryRun,
-                                   reattach, sourceAuditId, rivals);
+                                   reattach, sourceAuditId);
             } catch (QuarantineRestoreBusyException busy) {
                 // Each sibling is its own transaction, so a trip here leaves the earlier siblings committed. Say so:
                 // the caller reports "nothing moved" only when that is true of the whole call.
@@ -6875,25 +6880,6 @@ FROM scope s
                                             dryRun, source, nextAfter, List.copyOf(auditIds), List.copyOf(siblings));
     }
 
-    /**
-     * The chashes the dry run of the whole selection judges {@code rival}: for each sibling in turn, a dry run over every
-     * requested chash (it takes no gate and writes nothing, and it sees the versions of a document in every sibling
-     * because nothing has moved yet). A dry run that runs past its bound is the same typed busy a real call gives, with
-     * nothing moved.
-     */
-    private String[] rivalChashes(String tenant, String originCollection, List<String> siblings, String[] hex,
-                                  String actor, boolean reattach, Long sourceAuditId) {
-        var rivals = new java.util.LinkedHashSet<String>();
-        for (String sibling : siblings) {
-            for (var r : restoreRows(tenant, originCollection, sibling, hex, actor, true, reattach, sourceAuditId, null)) {
-                if ("rival".equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_REASON))) {
-                    rivals.add(r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH));
-                }
-            }
-        }
-        return rivals.isEmpty() ? null : rivals.toArray(String[]::new);
-    }
-
     private static QuarantineRestoreOutcome.Row missingRow(String chash) {
         return new QuarantineRestoreOutcome.Row(chash, "missing", null, null, null, false, null, null, null, null,
                                                 null, null, null);
@@ -6908,14 +6894,13 @@ FROM scope s
      */
     private org.jooq.Result<?> restoreRows(String tenant, String originCollection, String quarantineCollection,
                                             String[] hex, String actor, boolean dryRun, boolean reattach,
-                                            Long sourceAuditId, String[] rivals) {
+                                            Long sourceAuditId) {
         try {
             return tenantScope.withTenant(tenant, ctx -> {
                 PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
                                                     PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
                 return ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
-                        tenant, originCollection, quarantineCollection, hex, actor, sourceAuditId, dryRun, reattach,
-                        rivals))
+                        tenant, originCollection, quarantineCollection, hex, actor, sourceAuditId, dryRun, reattach))
                    .fetch();
             });
         } catch (RuntimeException e) {
@@ -6976,7 +6961,7 @@ FROM scope s
                 : reason + "; an earlier quarantine sibling of this call had already committed ("
                     + movedChashes.size() + " chunk(s) restored or attached, gc_audit row(s) "
                     + auditIds + "), the rest were not moved. Send the same call again: a chunk already "
-                    + "restored reads present", cause);
+                    + "restored reads present, and a chunk kept in quarantine (a rival, an owner mid index run or with a failed run) is kept again", cause);
             this.reason = reason;
             this.auditIds = List.copyOf(auditIds);
             this.movedChashes = List.copyOf(movedChashes);

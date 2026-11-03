@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
+    SUPERSEDED IN PART by vectors-053 (nexus-l003p): quarantine_restore_chunks below no longer copies the quarantined row's
+    metadata back (the restored row holds the chunk keys only), judges the plan from the quarantine copy before the move, and
+    keeps a chunk refused as `rival` in quarantine (r_outcome 'kept'). Read this header for the original design only.
+
     RDR-192 Step 9, Day-2 (bead nexus-2x9xa, Sam's ruling 2026-10-01): nexus.quarantine_restore_chunks, the one
     SQL statement the quarantine RESTORE verb (nx t3 quarantine restore) moves chunks back with, and
     nexus.quarantine_reattach_plan, the read-only classifier behind its reattach step (bead nexus-wbfpw.49).

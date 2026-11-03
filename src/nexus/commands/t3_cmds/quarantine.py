@@ -33,13 +33,15 @@ those keys can no longer be attached by a later run. The engine marks such a row
 ``owner_link_dropped`` and this verb prints a warning that names the owner and position and
 recommends the default (reattach) restore. A note found by its own ``doc_id`` is not affected.
 
-The refusal to attach one of two versions of the same document position (``rival``) holds within
-ONE engine call, across every quarantine sibling the call spans: the engine judges the whole
-selection before it moves anything. It does not hold across calls, because the earlier call's
-restored row no longer names a document to compare against. This verb sends full engine-sized calls
-(``_BATCH`` = 1000 chashes, the route's ceiling) and pages a window or audit selection by call, so
-two versions that land in different batches are two calls; restore both in one batch (name them
-with ``--chash``) when they matter.
+The refusal to attach one of two versions of the same document position (``rival``) is never turned
+into a guess: a chunk the engine refuses as a rival is NOT restored. It stays in quarantine with its
+keys, the verdict row reads outcome ``kept`` (``superseded``, reason ``rival``) and the verb exits 1,
+so the other version still sees it as a rival on the next page, in the next call and on the retry of a
+busy one. The operator picks the version (compare the text with ``nx store get``, then re-index the
+document or re-put the note); the kept copies stay in quarantine until they expire. The same holds
+for a chunk whose owning document is mid index run (``indexing``) or whose last run failed
+(``failed``): both end, and the remedy (run the verb again once the run has finished) needs the keys
+the move would delete, so the chunk stays in quarantine with them and the rerun attaches it.
 
 The chunks are named in one of three ways, because the places that record what was
 quarantined differ in completeness: explicit ``--chash`` values, a ``--audit-id`` (the
@@ -68,7 +70,7 @@ OWNER_LINK_DROPPED = "owner_link_dropped"
 _BATCH = 1000
 
 #: Exit codes. 1 is a restore that left a requested chunk unrestored for a reason the operator
-#: should look at (missing, or an embedding-width conflict); a dry run exits 1 for the same
+#: should look at (missing, an embedding-width conflict, or kept in quarantine: a rival, or an owner mid index run or with a failed run); a dry run exits 1 for the same
 #: reasons, since a real run would leave them too. 3 is a restore that brought every requested
 #: chunk back but left at least one HIDDEN from search and get (no live owner row names it, or
 #: reattach refused or was switched off): the bytes are in the collection and nothing shows them,
@@ -92,7 +94,7 @@ _RECIPE_ROWS = 20
 
 _CHASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
-_OUTCOMES = ("restored", "would_restore", "present", "dim_conflict", "missing")
+_OUTCOMES = ("restored", "would_restore", "present", "dim_conflict", "kept", "missing")
 
 
 def _make_t3():
@@ -260,6 +262,17 @@ def _row_note(row: dict, dry_run: bool, content_type: str = "") -> str:
         return "collection row has another embedding width; left alone"
     elif outcome == "missing":
         return "not in the quarantine collection"
+    elif outcome == "kept":
+        lead = "would be KEPT" if dry_run else "KEPT"
+        why = row.get("reason")
+        if why == "indexing":
+            return (f"{lead} in quarantine with its keys: {who} is mid index run; not restored, not attached; "
+                    "run again when it finishes")
+        if why == "failed":
+            return (f"{lead} in quarantine with its keys: {who}'s last index run failed; not restored, not "
+                    "attached; re-index it, then run again")
+        return (f"{lead} in quarantine with its keys: another stored chunk claims position {pos} of {who}, so the "
+                "version is ambiguous; not restored, not attached")
     if row.get("attached"):
         parts.append(f"attached to {who} at position {pos}")
     elif _link_dropped(row):
@@ -364,7 +377,22 @@ def _render_text(origin: str, siblings: list[str], dry_run: bool, reattach: bool
     lead = "would restore" if dry_run else "restored"
     n = totals["would_restore"] if dry_run else totals["restored"]
     click.echo(f"{lead} {n}, present {totals['present']}, dim_conflict {totals['dim_conflict']}, "
-               f"missing {totals['missing']}")
+               f"kept {totals['kept']}, missing {totals['missing']}")
+    kept = [r for r in rows if r.get("outcome") == "kept"]
+    for why, text in (
+        ("rival", "more than one stored chunk (in the collection or in a quarantine collection) claims the same "
+                  "position of the same document, so none of the versions was restored or attached and the choice is "
+                  "yours. Compare the text with `nx store get CHASH`, then re-index the document or re-put the note; "
+                  "the kept copies stay in quarantine until they expire, and running this verb again keeps them again."),
+        ("indexing", "the owning document is in the middle of an index run. Run the same command again when it has "
+                     "finished, if you still want the chunk back: the chunk keeps the keys that name its document."),
+        ("failed", "the owning document's last index run failed, so its manifest is partial and nothing was attached "
+                   "to it. Re-index the document (`nx index repo --force`, or the matching verb: `nx index pdf`, "
+                   "`nx index md`, `nx index rdr`), then run the same command again if you still want the chunk back."),
+    ):
+        k = sum(1 for r in kept if (r.get("reason") if r.get("reason") in ("indexing", "failed") else "rival") == why)
+        if k:
+            click.echo(f"\n{k} chunk{'s' if k != 1 else ''} {'would be ' if dry_run else ''}KEPT in quarantine: {text}\n")
     tally = _tally(rows)
     if not reattach:
         dropped = tally["owner_link_dropped"]
@@ -493,7 +521,8 @@ def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
             return (f"quarantine restore: the engine was busy ({exc}). Part of this call was already committed: "
                     f"{n} chunk{'s' if n != 1 else ''} restored or attached by an earlier quarantine sibling{rows}; "
                     "the sibling that was busy and any after it were not touched. Wait a few seconds and run the "
-                    "same command again: what is done reads present, the rest is restored."
+                    "same command again: what is done reads present, the rest is restored, and a chunk kept in "
+                    "quarantine (a rival, or an owner mid index run or with a failed run) is kept again."
                     f"{after}"), EXIT_BUSY
         return (f"quarantine restore: the engine was busy ({exc}). That call rolled back: nothing moved, was attached "
                 f"or audited (no earlier quarantine sibling had committed). Wait a few seconds and run the same "
@@ -525,7 +554,9 @@ def quarantine_group() -> None:
 @click.option("--reattach/--no-reattach", "reattach", default=True,
               help="Also write the owner document's manifest row for a chunk whose metadata names a document "
               "that is still live, so the chunk is visible to search and get again (the default). "
-              "--no-reattach moves the bytes only.")
+              "--no-reattach moves the bytes only and a rerun cannot attach them afterwards: a restored row keeps "
+              "only its chunk keys, so a chunk whose owner was named by its own catalog_doc_id/doc_id loses that "
+              "link (the output warns).")
 @click.option("--dry-run", is_flag=True, default=False,
               help="Report what would be restored and attached; move nothing and write no audit row.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit one JSON document.")
@@ -560,11 +591,21 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     restored and stays HIDDEN; the output says what to do about it (for a
     knowledge__ collection, the `nx store put` that re-puts the note under its
     title; for a file collection, re-index the file). A chunk the collection
-    already holds is left alone and reported present (never overwritten), and a
-    present chunk with no manifest row is reattached the same way, so a restore
-    made with --no-reattach can be finished by running it again. A chash that is
-    nowhere reports missing. Every restore or attach writes one gc_audit row
-    (operation quarantine_restore) with the full chash list. When some but not
+    already holds is left alone and reported present (never overwritten). A
+    restored row keeps only its chunk keys (chunk_text_hash, embedding_model): the
+    document keys are removed on restore. So a --no-reattach restore of a chunk
+    whose owner was named by its own catalog_doc_id/doc_id loses that link (the
+    output warns, reason owner_link_dropped) and a rerun cannot attach it; only a
+    live note that names the chunk by its own doc_id can still be attached by a
+    rerun. A chunk that another stored chunk contests (same document, same
+    position) is KEPT in quarantine instead of restored, with the keys it came
+    with, and the verb exits 1: the other version still sees it as a rival on
+    every page, in every call and on a busy retry, so neither version is ever
+    attached alone. A chunk whose owning document is mid index run or whose last
+    index run failed is kept the same way, so the rerun after the run has ended
+    (after a re-index, for a failed one) still attaches it. A chash that is nowhere reports missing. Every restore or
+    attach writes one gc_audit row (operation quarantine_restore) with the full
+    chash list, the dropped owner links and the kept chashes. When some but not
     all of a multi-chunk document's chunks have a row, the output says
     "M of N attached". Use --dry-run first: it reports the same verdicts.
 
@@ -572,9 +613,10 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     Exit codes:
       0  every requested chunk was restored or was already present, and is
          visible to search and get (attached, or already owned).
-      1  a requested chunk is missing from quarantine, or its embedding width
-         conflicts with the collection's row; a dry run exits 1 for the same
-         reasons. Wins over 3.
+      1  a requested chunk is missing from quarantine, its embedding width
+         conflicts with the collection's row, or it was kept in quarantine (a
+         rival, or an owner mid index run or with a failed run); a dry run exits
+         1 for the same reasons. Wins over 3.
       2  a bad option (nothing was sent).
       3  every requested chunk is back but at least one stays HIDDEN from search
          and get (no live owner names it, reattach refused it, or --no-reattach
@@ -586,7 +628,8 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
          was busy rolled back; run the same command again. Each quarantine
          collection is restored in its own transaction, so the message says whether
          an earlier one had already committed (and its gc_audit ids); a chunk that
-         was restored reads present on the rerun.
+         was restored reads present on the rerun, and a chunk kept in quarantine
+         (a rival, an owner mid index run or with a failed run) is kept again.
       A failure after the first page still prints the report of the pages already
       committed, with their audit ids, before exiting 4, 5 or 6.
 
@@ -654,7 +697,7 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
                        if r.get("outcome") == "restored" and r.get("no_manifest") and r.get("reapable_after")),
                       key=lambda pair: pair[0])
     earliest = reapable[0][1] if reapable else None
-    unrestored = totals["missing"] + totals["dim_conflict"]
+    unrestored = totals["missing"] + totals["dim_conflict"] + totals["kept"]
     hidden_rows = _hidden(rows, reattach)
     owners = _owners(rows)
 

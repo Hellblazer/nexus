@@ -2158,15 +2158,15 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   sites that kept `catalog_doc_id`, `doc_id` and `chunk_index` on
   `quarantine-*` rows "until j67ix.1 moves the reattach plan's forward path"
   named a bead that closed unlanded and never had that scope. nexus-l003p owns
-  the forward-path move, with an accepted narrowing: `quarantine_restore_chunks`
-  restores the chunk keys only (this RDR's own rule), and the reattach plan is
-  judged from the quarantine copy before the move (vectors-053), so a restore
-  with reattach (the default) attaches in the same call, a note found by its own
-  `doc_id` still attaches on a rerun, and a bytes-only restore of a chunk whose
-  owner those keys named reports `owner_link_dropped` and cannot be reattached
-  by a rerun. The "never attach one of two versions of a position" refusal
-  holds within one call, across every quarantine sibling the call spans (the
-  engine judges the whole selection first, so the dry run equals the real run);
-  across separate calls, including the pages of a window or audit selection
-  (the route takes 1000 chashes per call), the earlier call's restored row is
-  stripped and cannot be compared, an accepted narrowing.
+  the forward-path move: `quarantine_restore_chunks` restores the chunk keys
+  only (this RDR's own rule), and the reattach plan is judged from the
+  quarantine copy before the move (vectors-053), so a restore with reattach (the
+  default) attaches in the same call and a note found by its own `doc_id` still
+  attaches on a rerun. A chunk the plan refuses as `rival`, or because its owner
+  is mid index run or failed its last run, is not moved: it stays in quarantine
+  with its keys (outcome `kept`, exit 1), so the "never attach one of two
+  versions of a position" refusal holds across pages, calls, quarantine
+  siblings and a busy retry, and a rerun after the run has ended attaches an
+  `indexing` or `failed` chunk; no rival narrowing remains. The one accepted
+  narrowing: a bytes-only restore (`--no-reattach`) of a chunk whose owner those
+  keys named reports `owner_link_dropped` and cannot be reattached by a rerun.

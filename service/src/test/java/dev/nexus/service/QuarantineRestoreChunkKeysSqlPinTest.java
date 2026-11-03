@@ -74,9 +74,34 @@ class QuarantineRestoreChunkKeysSqlPinTest {
         Pattern call = Pattern.compile("quarantine_reattach_plan\\([^;]*?(true|false)\\)\\s*;", Pattern.DOTALL);
         List<String> flags = call.matcher(code).results().map(m -> m.group(1)).toList();
         assertThat(flags).as("every call of the plan in the forward body").isNotEmpty().allMatch("true"::equals);
-        assertThat(code.indexOf("v_cand, true)")).as("the live plan is computed before THE MOVE")
-            .isLessThan(code.indexOf("WITH req AS"));
-        assertThat(code.indexOf("v_attachable := v_restored || v_present")).as("and the manifest rows are written after it")
-            .isGreaterThan(code.indexOf("WITH req AS"));
+        int plan = code.indexOf("v_cand, true)");
+        int move = code.indexOf("WITH req AS");
+        int write = code.indexOf("v_attachable := v_restored || v_present");
+        // indexOf answers -1 for a marker that is not there, and -1 is "less than" everything: pin that all three exist.
+        assertThat(plan).as("the live plan call is in the forward body").isGreaterThanOrEqualTo(0);
+        assertThat(move).as("THE MOVE statement is in the forward body").isGreaterThanOrEqualTo(0);
+        assertThat(write).as("the manifest write is in the forward body").isGreaterThanOrEqualTo(0);
+        assertThat(plan).as("the live plan is computed before THE MOVE").isLessThan(move);
+        assertThat(write).as("and the manifest rows are written after it").isGreaterThan(move);
+    }
+
+    @Test
+    void aRivalIsLeftOutOfTheMove_andTheFunctionKeepsItsEightArguments() throws IOException {
+        // nexus-l003p: a chunk the plan refuses as rival is not in `req`, so the DELETE never sees it and it stays in
+        // quarantine with its keys; and there is no ninth p_rivals parameter (the cross-sibling pre-pass is gone).
+        String code = codeOnly(forwardSql());
+        int kept = code.indexOf("v_kept := ARRAY(");
+        int req = code.indexOf("WITH req AS");
+        assertThat(kept).as("the live body computes the kept set").isGreaterThanOrEqualTo(0);
+        assertThat(req).isGreaterThanOrEqualTo(0);
+        assertThat(code.substring(req, code.indexOf("del AS", req)))
+            .as("req excludes the kept chashes").contains("NOT (r.h = ANY (v_kept))");
+        assertThat(code).doesNotContain("p_rivals");
+        // linda's decision (round 1): the two ending states are kept like a rival, so the "run again" remedy stays true.
+        assertThat(code).as("both kept sets (dry run and live) name the three reasons")
+            .contains("pl.why IN ('rival', 'indexing', 'failed')");
+        assertThat(code.split("pl.why IN \\('rival', 'indexing', 'failed'\\)", -1).length - 1).isEqualTo(2);
+        assertThat(code).as("no overload is dropped or granted: CREATE OR REPLACE keeps the signature")
+            .doesNotContain("DROP FUNCTION").doesNotContain("GRANT EXECUTE");
     }
 }

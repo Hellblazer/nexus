@@ -1983,15 +1983,17 @@ public final class VectorHandler implements HttpHandler {
      * <p>Response 200: {@code {"origin_collection", "quarantine_collection" (the first sibling found, null when none),
      * "quarantine_collections" (every sibling found), "dry_run", "audit_id": N|null, "audit_ids" (one per sibling that
      * wrote an audit row),
-     * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "missing": n, "reattach": bool,
+     * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "kept": n, "missing": n, "reattach": bool,
      * "attached": n, "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash", "outcome",
      * "no_manifest": bool|null, "reapable_after": ISO-8601|null, "reattach": str|null, "attached": bool,
      * "owner": tumbler|null, "owner_title": str|null, "position": int|null, "chunk_title": str|null,
      * "reason": str|null, "owner_rows": int|null, "owner_chunks": int|null}, ...],
      * "source": {...}|null, "next_after": "64-hex"|null}}. {@code rows} has one entry per distinct requested chash,
      * in request order. {@code outcome} is {@code restored}, {@code would_restore} (dry run), {@code present} (the
-     * origin has it), {@code dim_conflict} (as present, with a different embedding width in the quarantine copy) or
-     * {@code missing}. For a {@code restored} row {@code no_manifest} says the chunk has no own-collection manifest
+     * origin has it), {@code dim_conflict} (as present, with a different embedding width in the quarantine copy),
+     * {@code kept} (refused as a {@code rival}, or because its owner is mid index run or failed its last run
+     * ({@code reason} {@code rival}, {@code indexing} or {@code failed}): the chunk stays in quarantine with its keys,
+     * whatever {@code reattach} says) or {@code missing}. For a {@code restored} row {@code no_manifest} says the chunk has no own-collection manifest
      * row after the call and {@code reapable_after} is when the reaper may take it again unless an owner row is
      * repaired first; such a chunk is hidden from search and get until it has one. {@code row.reattach} is what the
      * reattach step judged ({@code attach}, {@code superseded}, {@code no_live_owner}, {@code no_position},
@@ -2105,6 +2107,7 @@ public final class VectorHandler implements HttpHandler {
         out.put("would_restore", result.wouldRestore().size());
         out.put("present", result.present().size());
         out.put("dim_conflict", result.dimConflict().size());
+        out.put("kept", result.kept().size());
         out.put("missing", result.missing().size());
         out.put("reattach", reattach);
         out.put("attached", result.attached().size());

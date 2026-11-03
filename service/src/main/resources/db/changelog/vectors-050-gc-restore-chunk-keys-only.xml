@@ -23,7 +23,8 @@
     wins, and its metadata is not touched), created_at carried through, the delete of the quarantine copy and the
     gc_audit row. The usual restore path finds the origin row already present (the manifest's foreign key needs it), so
     the INSERT only fires where it is absent; GcRestoreChunkKeysOnlyIntegrationTest bypasses that foreign key to reach it.
-    quarantine_restore_chunks (vectors-030-1) is NOT changed: it already strips all four keys, but it keeps the rest of
+    quarantine_restore_chunks is NOT changed HERE (see vectors-053, nexus-l003p, which does restore the chunk keys only and
+    judges the plan before the move). As of vectors-030-1 it stripped all four keys but kept the rest of
     the row's metadata on purpose, because its reattach plan (quarantine_reattach_plan) reads catalog_doc_id/doc_id,
     chunk_index, content_hash and the span keys off the restored origin row, and a second call that reattaches a chunk an
     earlier call restored (QuarantineRestoreIntegrationTest#withoutReattachTheBytesComeBackHidden_andARerunAttachesThePresentChunk)
