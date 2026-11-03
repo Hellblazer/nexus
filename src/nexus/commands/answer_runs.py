@@ -1066,6 +1066,14 @@ def answer_runs_cmd(
         raise click.UsageError("--all starts from the newest run and cannot be combined with --before-id")
     if all_rows and ctx.get_parameter_source("limit") == click.core.ParameterSource.COMMANDLINE:
         raise click.UsageError("--all lists every run; it cannot be combined with --limit")
+    if before_id is not None:
+        from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 - deferred: keep CLI startup fast
+
+        if limit > MAX_QUERY_RESULTS:
+            raise click.UsageError(
+                f"--limit {limit} is above the engine's {MAX_QUERY_RESULTS}-row page; "
+                f"with --before-id use --limit {MAX_QUERY_RESULTS} or less, or use --all"
+            )
     if derive_budget and (all_rows or before_id is not None):
         raise click.UsageError("--derive-budget reads its own window and cannot be combined with --all or --before-id")
     # nexus-spbay: validate/normalize --since BEFORE the service try-block —
@@ -1093,7 +1101,13 @@ def answer_runs_cmd(
             )
             return
         if all_rows:
-            result = store.query_nx_answer_runs_all(since=since, include_steps=want_steps)
+            result = store.query_nx_answer_runs_all(
+                since=since, include_steps=want_steps,
+                # stderr, never stdout: --json output must stay one clean document.
+                progress=lambda rows, cursor: click.echo(
+                    f"answer-runs: {rows} rows read, next before_id={cursor}", err=True,
+                ),
+            )
             limit = len(result.get("rows") or [])
         elif before_id is not None:
             result = store.query_nx_answer_runs(
@@ -1112,6 +1126,11 @@ def answer_runs_cmd(
             # nexus-1ss4n: asked to page, engine cannot. Never the zero-exit "(no runs)" degrade: a paging
             # caller scripting on the exit status must see the refusal.
             raise click.ClickException(str(exc)) from exc
+        if all_rows or before_id is not None:
+            # Any other failure on a paging read (a transport error or 5xx on a page, a malformed reply) is
+            # an exit 1 too: a half-read window reported as "service unreachable" with status 0 reads as a
+            # complete one to a script. Unbounded reads keep the degrade below.
+            raise click.ClickException(nx_answer_runs_read_failure_message(exc)) from exc
 
         msg = nx_answer_runs_read_failure_message(exc)
         if json_out:

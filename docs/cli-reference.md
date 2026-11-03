@@ -5421,9 +5421,18 @@ emits structured output.
 window. `--before-id N` lists the runs with id below N, highest id first, and
 `--all` pages the whole window for you, 300 rows per request, to its oldest
 run (`--all` replaces `--limit` and cannot be combined with `--limit`,
-`--before-id` or `--derive-budget`). To page by hand, pass the smallest `id` of
-the page you have as the next `--before-id`; an empty page is the start of the
-window. Ids do not move while runs are recorded (a new run takes a higher id
+`--before-id` or `--derive-budget`). To page by hand, start with a `--before-id`
+above the newest id (or use `--all`), and take each next `--before-id` from the
+smallest `id` of a page that was itself read with `--before-id`; an empty page is
+the start of the window. Never take the cursor from an unbounded page: that page
+is `created_at`-ordered, so its smallest `id` can sit above ids it did not list
+and the walk would skip them. `--all` prints one progress line per page to
+stderr, never stdout, so `--json` stays one clean document. Any read failure
+under `--all` or `--before-id` (a transport error or HTTP 5xx on a page, a
+cursor that does not advance, a row without an `id`) exits 1; only an unbounded
+read keeps the exit-0 "service unreachable" message. When the `/version` probe
+itself fails, the message says the probe failed, not that the engine lacks the
+capability. Ids do not move while runs are recorded (a new run takes a higher id
 than every cursor), so the pages neither skip nor repeat, which an offset could
 not promise. Under `--before-id` and `--all` the rows are ordered by id; an
 unbounded call keeps its `created_at` order (the two agree for runs the engine
@@ -5433,7 +5442,7 @@ every page, never only the bounded window**, so a `--before-id` page reports the
 same `total` as the first page, and `--json` echoes `before_id` (or `all: true`)
 beside `since` and `limit` so a snapshot says which window its rows came from.
 Paging needs an engine that advertises `nx_answer_runs_before_id_supported` on
-`GET /version` (the engine release after the one that carries nexus-1ss4n; none is cut yet). Against an engine
+`GET /version` (engine-service-v0.1.177 and later). Against an engine
 without it, both flags refuse with exit 1 and a message naming the flag: an older engine ignores
 the unknown `before_id` and would return the newest 300 again with HTTP 200. The
 public cloud edge trims `/version` to an allowlist, so a cloud client also reads

@@ -2270,7 +2270,7 @@ class TestKeysetPaging:
         seen: dict = {}
 
         class _Store:
-            def query_nx_answer_runs_all(self, *, since=None, include_steps=False):
+            def query_nx_answer_runs_all(self, *, since=None, include_steps=False, progress=None):
                 seen.update(since=since, include_steps=include_steps)
                 return _steps_gated(res, include_steps)
 
@@ -2291,7 +2291,7 @@ class TestKeysetPaging:
         from nexus.commands.answer_runs import answer_runs_cmd
 
         class _Store:
-            def query_nx_answer_runs_all(self, *, since=None, include_steps=False):
+            def query_nx_answer_runs_all(self, *, since=None, include_steps=False, progress=None):
                 return _steps_gated(res, include_steps)
 
         res = self._result([3, 2, 1], total=3)
@@ -2307,6 +2307,7 @@ class TestKeysetPaging:
             (["--all", "--limit", "10"], "--limit"),
             (["--all", "--derive-budget"], "--derive-budget"),
             (["--before-id", "5", "--derive-budget"], "--derive-budget"),
+            (["--before-id", "10", "--limit", "500"], "300"),
         ],
     )
     def test_conflicting_options_are_usage_errors_before_any_read(self, monkeypatch, args, needle) -> None:
@@ -2342,3 +2343,124 @@ class TestKeysetPaging:
 
         out = CliRunner().invoke(answer_runs_cmd, ["--before-id", "0"])
         assert out.exit_code == 2, out.output
+
+
+class _WalkStore:
+    """The REAL ``HttpTelemetryStore`` paging code over a scripted ``_get``: page N is ``script[N]``, an
+    Exception instance in the script is raised. Capability is forced supported unless *probe_failed*."""
+
+    @staticmethod
+    def build(script, *, probe_error: str | None = None):
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+
+        class _S(HttpTelemetryStore):
+            def __init__(self) -> None:
+                super().__init__(base_url="http://127.0.0.1:1", tenant="t", _token="x")
+                self.calls = 0
+
+            def _version_capabilities(self):
+                if probe_error is not None:
+                    self._version_probe_error = probe_error
+                    return {}
+                return {"nx_answer_runs_before_id_supported": True}
+
+            def _get(self, path, params=None):
+                item = script[self.calls]
+                self.calls += 1
+                if isinstance(item, Exception):
+                    raise item
+                return item
+
+        return _S()
+
+
+def _page(ids, total=700):
+    res = TestKeysetPaging._result(ids, total=total)
+    return res
+
+
+class TestKeysetReadFailuresAreLoud:
+    """Round 1 of nexus-1ss4n: a paging read that fails must not exit 0 with a degrade message."""
+
+    def _patch(self, monkeypatch, store) -> None:
+        monkeypatch.setattr("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: store)
+
+    @staticmethod
+    def _http_500():
+        import httpx
+
+        req = httpx.Request("GET", "http://engine/v1/telemetry/nx_answer_runs/query")
+        return httpx.HTTPStatusError("boom", request=req, response=httpx.Response(500, request=req))
+
+    def test_a_500_in_the_middle_of_an_all_walk_exits_1(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        store = _WalkStore.build([_page(list(range(300, 0, -1))), self._http_500()])
+        self._patch(monkeypatch, store)
+        out = CliRunner().invoke(answer_runs_cmd, ["--all"])
+        assert out.exit_code == 1, out.output
+        assert store.calls == 2, "the walk reached the failing second page"
+        assert "HTTP 500" in out.output
+        assert "last " not in out.output, "no partial listing as if it were the whole window"
+
+    def test_a_transport_error_on_a_before_id_page_exits_1(self, monkeypatch) -> None:
+        import httpx
+
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        self._patch(monkeypatch, _WalkStore.build([httpx.ConnectError("refused")]))
+        out = CliRunner().invoke(answer_runs_cmd, ["--before-id", "9", "--json"])
+        assert out.exit_code == 1, out.output
+        assert "unreachable" in out.output
+
+    def test_a_cursor_that_does_not_advance_exits_1(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        same = list(range(300, 0, -1))
+        self._patch(monkeypatch, _WalkStore.build([_page(same), _page(same)]))
+        out = CliRunner().invoke(answer_runs_cmd, ["--all"])
+        assert out.exit_code == 1, out.output
+        assert "did not advance" in out.output
+
+    def test_a_row_without_an_id_exits_1(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        res = _page([5, 4], total=2)
+        res["rows"][1].pop("id")
+        self._patch(monkeypatch, _WalkStore.build([res]))
+        out = CliRunner().invoke(answer_runs_cmd, ["--all"])
+        assert out.exit_code == 1, out.output
+
+    def test_an_unbounded_read_failure_keeps_its_zero_exit_degrade(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        self._patch(monkeypatch, _WalkStore.build([self._http_500()]))
+        out = CliRunner().invoke(answer_runs_cmd, [])
+        assert out.exit_code == 0, out.output
+        assert "HTTP 500" in out.output
+
+    def test_a_failed_capability_probe_says_the_probe_failed(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        self._patch(monkeypatch, _WalkStore.build([], probe_error="ConnectError: refused"))
+        out = CliRunner().invoke(answer_runs_cmd, ["--all"])
+        assert out.exit_code == 1, out.output
+        assert "probe" in out.output and "ConnectError" in out.output
+        assert "does not advertise" not in out.output
+
+
+class TestAllProgressGoesToStderr:
+    def test_one_progress_line_per_page_on_stderr_and_stdout_stays_json(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        pages = [_page(list(range(614, 314, -1))), _page(list(range(314, 14, -1))), _page(list(range(14, 0, -1))), _page([])]
+        store = _WalkStore.build(pages)  # built before the patch: it subclasses the real store
+        monkeypatch.setattr("nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: store)
+        out = CliRunner().invoke(answer_runs_cmd, ["--all", "--json"])
+        assert out.exit_code == 0, out.output
+        payload = json.loads(out.stdout)  # stdout is clean JSON
+        assert len(payload["rows"]) == 614
+        lines = [ln for ln in out.stderr.splitlines() if ln.strip()]
+        assert len(lines) == 3, lines
+        assert "300 rows" in lines[0] and "before_id=315" in lines[0]
+        assert "614 rows" in lines[2] and "before_id=1" in lines[2]

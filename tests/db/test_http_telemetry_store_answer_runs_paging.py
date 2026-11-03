@@ -44,6 +44,7 @@ class _Engine:
         self.rows: list[dict[str, Any]] = []
         self.version: dict[str, Any] = {}
         self.honours_before_id = False
+        self.version_status = 200
 
     def new(self, n_rows: int) -> _Engine:
         self.version = {"nx_answer_runs_before_id_supported": True}
@@ -67,7 +68,7 @@ class _Handler(FakeT2HandlerBase):
     def do_GET(self):  # noqa: N802
         path = urlparse(self.path).path
         if path == "/version":
-            self._send(200, dict(ENGINE.version))
+            self._send(ENGINE.version_status, dict(ENGINE.version))
             return
         if not self._check_auth():
             return
@@ -207,3 +208,32 @@ class TestQueryAll:
         ENGINE.rows[1].pop("id")
         with pytest.raises(AnswerRunsPagingUnsupportedError, match="id"):
             client.query_nx_answer_runs_all()
+
+
+class TestProbeFailureIsNamed:
+    def test_a_failed_probe_is_not_reported_as_a_missing_capability(self, client):
+        ENGINE.new(5)
+        ENGINE.version_status = 500
+        with pytest.raises(AnswerRunsPagingUnsupportedError) as ei:
+            client.query_nx_answer_runs(limit=3, before_id=4)
+        msg = str(ei.value)
+        assert "probe" in msg and "GET /version" in msg
+        assert "does not advertise" not in msg
+        assert ENGINE.queries == []
+
+    def test_a_good_probe_that_lacks_the_flag_still_says_not_advertised(self, client):
+        ENGINE.old(5)
+        with pytest.raises(AnswerRunsPagingUnsupportedError, match="does not advertise"):
+            client.query_nx_answer_runs(limit=3, before_id=4)
+
+
+class TestProgressCallback:
+    def test_called_once_per_page_with_rows_so_far_and_the_next_cursor(self, client):
+        ENGINE.new(614)
+        seen: list[tuple[int, int]] = []
+        client.query_nx_answer_runs_all(progress=lambda rows, cursor: seen.append((rows, cursor)))
+        assert seen == [(300, 315), (600, 15), (614, 1)]
+
+    def test_no_callback_is_fine(self, client):
+        ENGINE.new(3)
+        assert len(client.query_nx_answer_runs_all()["rows"]) == 3

@@ -543,6 +543,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     #: store (``t2_ctx`` makes a fresh one per call) and bounds the staleness of a long-lived one.
     _CAPABILITY_TTL_S: float = 300.0
     _version_capabilities_fetched_at: float | None = None
+    #: nexus-1ss4n: why the last ``/version`` probe this class made failed ("<ExcType>: <text>"), or ``None`` when
+    #: it answered. A failed probe caches ``{}``, which reads as "no capability"; this lets a caller that must
+    #: refuse (paging) say the probe failed rather than that the engine lacks the capability.
+    _version_probe_error: str | None = None
     #: The clock the interval is measured on; a test replaces it on the instance.
     _capability_clock: Callable[[], float] = staticmethod(time.monotonic)
 
@@ -554,8 +558,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         except Exception as exc:  # noqa: BLE001 — capability probe must never raise; caller degrades to the unsupported path
             _log.warning("nx_answer_version_capabilities_probe_failed", error=str(exc))
             caps: dict[str, Any] = {}
+            self._version_probe_error = f"{type(exc).__name__}: {exc}"
         else:
             caps = resp if isinstance(resp, dict) else {}
+            self._version_probe_error = None
         self._version_capabilities_cache = caps
         self._version_capabilities_fetched_at = self._capability_clock()
         return caps
@@ -1105,6 +1111,11 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     f"a keyset page holds at most {MAX_QUERY_RESULTS} rows (the engine clamps to it); got limit={limit}"
                 )
             if not self._supports_nx_answer_runs_before_id():
+                if self._version_probe_error is not None:
+                    raise AnswerRunsPagingUnsupportedError(
+                        "could not tell whether the engine pages by before_id: the GET /version capability probe "
+                        f"failed ({self._version_probe_error}); nothing was queried. Retry once the engine answers"
+                    )
                 raise AnswerRunsPagingUnsupportedError(
                     "this engine does not advertise nx_answer_runs_before_id_supported on GET /version, so it "
                     "would ignore before_id and return the newest rows again; upgrade the engine (nexus-1ss4n) "
@@ -1149,6 +1160,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         since: str | None = None,
         include_steps: bool = False,
+        progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         """Every ``nx_answer_runs`` row from the newest back to the start of the *since* window (nexus-1ss4n).
 
@@ -1158,7 +1170,8 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``latency_buckets`` ...) are the first page's, which are those of the whole ``since``-filtered set,
         the same meaning they have on an unbounded call; runs recorded while the walk is in progress take
         higher ids than every cursor, so they are in neither the rows nor, necessarily, ``total``. ``steps_supported`` is
-        present when *include_steps* was asked for.
+        present when *include_steps* was asked for. *progress*, when given, is called after each non-empty page
+        with ``(rows_so_far, next_before_id)``; it must not write to stdout (the CLI sends it to stderr).
 
         Raises :class:`AnswerRunsPagingUnsupportedError` when the engine does not advertise
         ``nx_answer_runs_before_id_supported`` (no request is sent), and the same error, never an endless
@@ -1192,6 +1205,8 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 )
             rows.extend(page_rows)
             cursor = min(ids)
+            if progress is not None:
+                progress(len(rows), cursor)
         assert merged is not None  # the loop body ran once
         merged["rows"] = rows
         return merged
