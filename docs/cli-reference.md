@@ -1654,7 +1654,7 @@ Captures the ETag for every `https://` catalog reference that lacks one (nexus-0
 ### nx catalog backfill-meta
 
 ```
-nx catalog backfill-meta [--apply] [--json]
+nx catalog backfill-meta [--apply] [--json] [--batch-size N] [--pause-ms M]
 ```
 
 One-time, fill-only stamp of the catalog `meta` keys that the RDR-236 Phase 1 homes now write at index and put time, for documents written before them (nexus-6pfgb.10). Dry run by default. A key the entry already holds (a retraction `''` / `0` / `[]` included, tested by presence, not truthiness) and a non-empty catalog column are never touched, except an indexed document's `tags` and `category`, where an absent, `None`, `''` or `[]` value is filled as a re-index would fill it (nexus-3ax49) and only a non-empty value is kept, and a key is sent only with a real value (the catalog merges `meta`; an explicit empty overwrites). A run that examines no document exits 1. The first line counts every live non-alias document; each key line counts only its own kind (`note.*` keys the notes, `doc.*` keys every other document), so a catalog of one note and one file reads `Examined 2 documents` and `examined 1` on every key line, and a line says `note.* keys cover the N note(s); doc.* keys cover the M non-note document(s)`; M is every live document that is not a note, a placeholder with no chunks included. A key with residue lists its reasons in parentheses.
@@ -1669,6 +1669,12 @@ The dry run prints, per key, how many documents were examined, already held it, 
 |------|-------------|
 | `--apply` | Write the keys (default: dry run, counts only) |
 | `--json` | Emit JSON instead of the human-readable report |
+| `--batch-size N` | Documents examined per round (default 50, at least 1) |
+| `--pause-ms M` | Milliseconds slept after each round's reads and again after its write (default 0) |
+
+A round reads every collection it needs once: the chunk rows of all its notes and documents are asked for in one `store-get` per collection (300 ids a request), not one per document. A 42,000-document catalog used to send about 35,700 `store-get` requests; it now sends a few per round of 50 (nexus-ldf2s, the cloud-edge saturation of 2026-10-31). `--pause-ms` is the throttle for a shared service: the pause follows the round's reads and its single write, so the service sees a few requests, a rest, one write, a rest. A progress line per round goes to stderr (about 300 lines for a long run; every round of a short one): `backfill-meta: batch 12/860, 600/43000 documents, 41 store-gets, 24 catalog reads, 12 writes, 31.2s, 19.2 docs/s, 2.5 requests/s`. Stdout carries only the report, so `--json` is unchanged. A failed `store-get` for a collection withholds the row-sourced keys of the round's documents that needed it, as a failed owner lookup does, and counts them; a rerun fills them.
+
+Ctrl-C stops after the round in progress, prints the report of the finished rounds (`--json` adds `"interrupted": true`, `batches_done` and `batches_total`) and exits 130. The verb is fill-only, so running it again carries on where the keys left off. A second Ctrl-C aborts the round in progress at once; that round is not counted, and a write it had already sent stays written.
 
 ### nx catalog backfill-collections
 

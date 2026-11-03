@@ -323,7 +323,15 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
     "--json", "as_json", is_flag=True,
     help="Emit JSON instead of the human-readable report.",
 )
-def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
+@click.option(
+    "--batch-size", type=click.IntRange(min=1), default=50, show_default=True,
+    help="Documents examined per round: each round reads every collection it needs once, then writes once.",
+)
+@click.option(
+    "--pause-ms", type=click.IntRange(min=0), default=0, show_default=True,
+    help="Sleep this many milliseconds after each round's reads and again after its write (0: no pause).",
+)
+def backfill_meta_cmd(apply: bool, as_json: bool, batch_size: int, pause_ms: int) -> None:
     """Stamp the new catalog meta keys of pre-existing documents from their chunk rows (nexus-6pfgb.10).
 
     One-time and fill-only: a key the entry already holds (a retraction value included) and a non-empty
@@ -344,15 +352,26 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
     The dry run (default) prints per key how many documents were examined, already held it, were skipped
     as shared, would be stamped, or are residue (with the reasons under ``--json``). A run that examines
     no document exits non-zero.
+
+    A round reads each collection it needs once (one store-get per 300 chunk ids, however many documents
+    the round holds), so the load on a cloud service is a few requests per round. ``--batch-size`` sets the
+    round's documents and ``--pause-ms`` spaces the rounds' reads and writes. One progress line per round
+    (about 300 lines for a long run) goes to stderr, so ``--json`` on stdout is unchanged. Ctrl-C stops
+    after the round it is in, prints the report of the finished rounds and exits 130; the verb is fill-only,
+    so running it again carries on. A second Ctrl-C aborts the round at once.
     """
-    from nexus.catalog.meta_backfill import VacuousRunError, backfill_meta  # noqa: PLC0415 — command-local
+    from nexus.catalog.meta_backfill import VacuousRunError, backfill_meta, stop_after_current_batch  # noqa: PLC0415 — command-local
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.db import make_t3  # noqa: PLC0415 — command-local
 
     reader = _cat_cmd._get_catalog()
     writer = _cat_cmd._get_catalog_writer() if apply else None
     try:
-        report = backfill_meta(reader, make_t3(), writer, apply=apply)
+        with stop_after_current_batch() as should_stop:
+            report = backfill_meta(
+                reader, make_t3(), writer, apply=apply, batch=batch_size, pause_ms=pause_ms,
+                progress=lambda p: click.echo(p.line(), err=True), should_stop=should_stop,
+            )
     except VacuousRunError as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
@@ -386,6 +405,14 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
             click.echo(f"{verb} {report.documents_written}/{report.documents_to_stamp} documents.")
         else:
             click.echo("Dry run: nothing written. Re-run with --apply.")
+    if report.interrupted:
+        click.echo(
+            f"Interrupted after {report.batches_done} of {report.batches_total} batches "
+            f"({report.documents_examined} documents examined); the report above covers the finished batches. "
+            "The verb is fill-only: run it again to carry on.",
+            err=True,
+        )
+        raise click.exceptions.Exit(130)
     if report.writes_failed:
         raise click.exceptions.Exit(1)
 

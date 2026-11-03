@@ -60,9 +60,15 @@ key table until Phase 4 deletes the keys (``tests/chunk_metadata_read_sites.toml
 """
 from __future__ import annotations
 
+import contextlib
+import copy
 import math
+import os
+import signal
+import threading
+import time
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -402,12 +408,15 @@ class Report:
     tags_legacy_strings_left: int = 0
     keys: dict[str, KeyStats] = field(default_factory=dict)
     applied: bool = False
+    interrupted: bool = False       # stopped before the last batch; only finished batches are counted
+    batches_done: int = 0
+    batches_total: int = 0
 
     def stats(self, kind: str, key: str) -> KeyStats:
         return self.keys.setdefault(f"{kind}.{key}", KeyStats())
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "applied": self.applied,
             "documents_examined": self.documents_examined, "documents_notes": self.documents_notes,
             "documents_complete": self.documents_complete, "documents_all_shared": self.documents_all_shared,
@@ -416,6 +425,9 @@ class Report:
             "tags_legacy_strings_left_for_the_array_rung": self.tags_legacy_strings_left,
             "keys": {k: v.as_dict() for k, v in sorted(self.keys.items())},
         }
+        if self.interrupted:  # absent from a finished run, so its JSON is what it always was
+            out.update(interrupted=True, batches_done=self.batches_done, batches_total=self.batches_total)
+        return out
 
 
 def _spread(items: list[Any], n: int) -> list[Any]:
@@ -451,17 +463,126 @@ def _chunk_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]
         return {}
 
 
-def backfill_meta(reader: Any, t3: Any, writer: Any | None, *, apply: bool, batch: int = _BATCH) -> Report:
+#: store-get ids per request; ``HttpVectorClient._store_get_pages`` pages at this, and the progress line's
+#: request count (``test_the_store_get_count_is_the_requests_the_client_sends``) is held to it.
+STORE_GET_PAGE = 300
+
+#: A run prints at most about this many progress lines, however many batches it has.
+PROGRESS_LINES = 300
+
+
+@dataclass
+class Work:
+    """The requests a run has issued so far. ``catalog_reads`` counts calls to the catalog reader
+    (manifests, owners); a call may page inside the client, so it is a floor."""
+
+    store_gets: int = 0
+    catalog_reads: int = 0
+    writes: int = 0
+
+    @property
+    def requests(self) -> int:
+        return self.store_gets + self.catalog_reads + self.writes
+
+
+@dataclass(frozen=True)
+class Progress:
+    """One progress report: where the run is after a finished batch, and how fast it is going."""
+
+    batch: int
+    batches: int
+    documents: int
+    documents_total: int
+    work: Work
+    elapsed: float
+
+    def line(self) -> str:
+        rate = (lambda n: n / self.elapsed) if self.elapsed > 0 else (lambda n: 0.0)
+        return (
+            f"backfill-meta: batch {self.batch}/{self.batches}, {self.documents}/{self.documents_total} documents, "
+            f"{self.work.store_gets} store-gets, {self.work.catalog_reads} catalog reads, {self.work.writes} writes, "
+            f"{self.elapsed:.1f}s, {rate(self.documents):.1f} docs/s, {rate(self.work.requests):.1f} requests/s"
+        )
+
+
+@contextlib.contextmanager
+def stop_after_current_batch() -> Iterator[Callable[[], bool]]:
+    """While active, the first Ctrl-C only asks the run to stop after the batch it is in; the second takes
+    the previous disposition (a :class:`KeyboardInterrupt`, which :func:`backfill_meta` also survives, but
+    mid-batch). Yields the "stop asked" test. Off the main thread no handler can be installed and the test
+    never fires."""
+    asked = threading.Event()
+    if threading.current_thread() is not threading.main_thread():
+        yield asked.is_set
+        return
+    previous = signal.getsignal(signal.SIGINT)
+    restore = previous if previous is not None else signal.default_int_handler
+
+    def _handler(_signum: int, _frame: Any) -> None:
+        asked.set()
+        signal.signal(signal.SIGINT, restore)  # the second Ctrl-C is the previous one's
+        os.write(2, b"backfill-meta: interrupt received, stopping after the current batch (Ctrl-C again aborts it).\n")
+
+    signal.signal(signal.SIGINT, _handler)
+    try:
+        yield asked.is_set
+    finally:
+        signal.signal(signal.SIGINT, restore)
+
+
+def backfill_meta(
+    reader: Any, t3: Any, writer: Any | None, *, apply: bool, batch: int = _BATCH, pause_ms: int = 0,
+    progress: Callable[[Progress], None] | None = None, should_stop: Callable[[], bool] | None = None,
+    sleep: Callable[[float], None] | None = None, clock: Callable[[], float] = time.monotonic,
+) -> Report:
     """Examine every live document and stamp (``apply``) or count (dry run) what :func:`plan_note` and
     :func:`plan_indexed_rows` allow. Raises :class:`VacuousRunError` when the
-    catalog lists no document."""
+    catalog lists no document.
+
+    *batch* documents are examined per round; a batch reads each collection it needs once (nexus-ldf2s).
+    *pause_ms* is slept after a batch's reads and again after its write. *progress* gets a report after
+    about every ``batches / PROGRESS_LINES``-th batch and the last. The run stops, with
+    ``Report.interrupted`` set and only finished batches counted, when *should_stop* says so after a batch
+    or a :class:`KeyboardInterrupt` ends one; it is fill-only, so a rerun carries on."""
+    if batch < 1:
+        raise ValueError(f"batch must be at least 1, got {batch}")
+    if pause_ms < 0:
+        raise ValueError(f"pause_ms must be at least 0, got {pause_ms}")
     entries = [e for e in reader.all_documents() if not getattr(e, "alias_of", "")]
     if not entries:
         raise VacuousRunError("examined 0 documents: an empty catalog is a failed sweep, not a clean one")
     live = {str(e.tumbler): e for e in entries}
     report = Report(applied=apply)
-    for start in range(0, len(entries), batch):
-        _run_batch(reader, t3, writer, entries[start:start + batch], live, apply, report)
+    batches = math.ceil(len(entries) / batch)
+    every = max(1, math.ceil(batches / PROGRESS_LINES))
+    report.batches_total = batches
+    work = Work()
+    started = clock()
+    naps = sleep or time.sleep
+    pause: Callable[[], None] = (lambda: naps(pause_ms / 1000)) if pause_ms else (lambda: None)
+    for index, start in enumerate(range(0, len(entries), batch), 1):
+        before = copy.deepcopy(report)
+        try:
+            _run_batch(reader, t3, writer, entries[start:start + batch], live, apply, report, work, pause,
+                       pause_after_write=index < batches)
+        except KeyboardInterrupt:
+            report = before  # the interrupted batch counts for nothing; a rerun redoes it
+            report.interrupted = True
+            _log.warning("meta_backfill_interrupted", batch=index, batches=batches)
+            break
+        report.batches_done = index
+        if progress is not None and (index % every == 0 or index == batches):
+            snapshot = Progress(index, batches, report.documents_examined, len(entries), copy.copy(work), clock() - started)
+            _log.info(
+                "meta_backfill_progress", batch=index, batches=batches, documents=snapshot.documents,
+                store_gets=work.store_gets, catalog_reads=work.catalog_reads, writes=work.writes,
+                elapsed=round(snapshot.elapsed, 1),
+            )
+            progress(snapshot)
+        if index < batches and should_stop is not None and should_stop():
+            report.interrupted = True
+            _log.warning("meta_backfill_stopped", batch=index, batches=batches)
+            break
     return report
 
 
@@ -473,7 +594,27 @@ def _record(report: Report, kind: str, plan: Plan) -> None:
         report.stats(kind, key).add(status)
 
 
-def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], live: dict[str, Any], apply: bool, report: Report) -> None:
+def _fetch_rows(t3: Any, wants: dict[str, list[str]], work: Work) -> tuple[dict[str, dict[str, dict]], dict[str, Exception]]:
+    """One :func:`_chunk_rows` per collection in *wants* (its chashes, de-duplicated): ``(rows, errors)``,
+    each keyed by collection. A collection whose read raised is in ``errors`` and not in ``rows``, so the
+    documents that needed it can be withheld one by one."""
+    rows: dict[str, dict[str, dict]] = {}
+    errors: dict[str, Exception] = {}
+    for coll, hashes in wants.items():
+        unique = list(dict.fromkeys(hashes))
+        work.store_gets += math.ceil(len(unique) / STORE_GET_PAGE)
+        try:
+            rows[coll] = _chunk_rows(t3, coll, unique)
+        except Exception as exc:  # noqa: BLE001 — the documents that needed this collection are withheld and counted
+            errors[coll] = exc
+            _log.warning("meta_backfill_collection_read_failed", collection=coll, chashes=len(unique), error=str(exc))
+    return rows, errors
+
+
+def _run_batch(
+    reader: Any, t3: Any, writer: Any | None, entries: list[Any], live: dict[str, Any], apply: bool, report: Report,
+    work: Work, pause: Callable[[], None], *, pause_after_write: bool = True,
+) -> None:
     notes = [e for e in entries if getattr(e, "content_type", "") == "knowledge"]
     docs = [e for e in entries if getattr(e, "content_type", "") != "knowledge"]
     report.documents_examined += len(entries)
@@ -487,6 +628,7 @@ def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], liv
     manifests: dict[str, list[Any]] = {}
     want_manifest = [str(e.tumbler) for e in needs_rows_docs + needs_rows_notes]
     if want_manifest:
+        work.catalog_reads += 1
         try:
             manifests = reader.get_manifests(want_manifest) or {}
         except Exception as exc:  # noqa: BLE001 — a failed read withholds the batch's row-sourced keys and counts it
@@ -500,26 +642,72 @@ def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], liv
         others = {t for t in owners if t != str(entry.tumbler) and (t not in live or live[t].physical_collection == coll)}
         return str(entry.tumbler) in owners and not others
 
-    # notes first: rows of every piece, then ownership only for a note no written row decides
-    note_pieces: dict[str, list[tuple[str, dict | None]]] = {}
+    # Ownership of the indexed documents' chunks first (it needs only the manifests), so that every row this
+    # batch reads, a note's and a document's, is known before the first store-get and each collection is
+    # read once (nexus-ldf2s). The rows of one document were once read with a store-get per document.
+    doc_owners: dict[str, set[str]] = {}
+    docs_ok = True
+    if needs_rows_docs:
+        want = {m.chash for e in needs_rows_docs if str(e.tumbler) not in failed for m in manifests.get(str(e.tumbler), [])}
+        if want:
+            work.catalog_reads += 1
+        try:
+            doc_owners = _owners_of(reader, sorted(want))
+        except Exception as exc:  # noqa: BLE001 — withhold the batch's row-sourced keys, count the documents
+            docs_ok = False
+            _log.warning("meta_backfill_owner_lookup_failed", chashes=len(want), error=str(exc))
+
+    wants: dict[str, list[str]] = {}
+    note_colls: dict[str, dict[str, list[str]]] = {}    # note -> collection -> its chashes
     for e in needs_rows_notes:
         tid = str(e.tumbler)
         if tid in failed:
             continue
         try:
-            mrows = manifests.get(tid, [])
             by_coll: dict[str, list[str]] = {}
-            for m in mrows:
+            for m in manifests.get(tid, []):
                 by_coll.setdefault(coll_of(e, m), []).append(m.chash)
-            fetched = {c: _chunk_rows(t3, c, hs) for c, hs in by_coll.items()}
-            note_pieces[tid] = [(m.chash, fetched.get(coll_of(e, m), {}).get(m.chash)) for m in mrows]
         except Exception as exc:  # noqa: BLE001 — withhold this note's keys, count it, go on
             _log.warning("meta_backfill_note_rows_failed", tumbler=tid, error=str(exc))
             failed.add(tid)
+            continue
+        note_colls[tid] = by_coll
+        for c, hs in by_coll.items():
+            wants.setdefault(c, []).extend(hs)
+    doc_colls: dict[str, dict[str, list[str]]] = {}     # document -> collection -> its sampled sole-owner chashes
+    if docs_ok:
+        for e in needs_rows_docs:
+            tid = str(e.tumbler)
+            if tid in failed:
+                continue
+            mrows = manifests.get(tid, [])
+            single = [(coll_of(e, m), m.chash) for m in mrows if sole_in_collection(e, coll_of(e, m), doc_owners.get(m.chash, set()))]
+            by_coll = {}
+            for c, h in _spread(single, ROW_SAMPLE):
+                by_coll.setdefault(c, []).append(h)
+            doc_colls[tid] = by_coll
+            for c, hs in by_coll.items():
+                wants.setdefault(c, []).extend(hs)
+
+    fetched, errors = _fetch_rows(t3, wants, work)
+
+    # notes first: rows of every piece, then ownership only for a note no written row decides
+    note_pieces: dict[str, list[tuple[str, dict | None]]] = {}
+    for e in needs_rows_notes:
+        tid = str(e.tumbler)
+        if tid not in note_colls:
+            continue
+        bad = next((c for c in note_colls[tid] if c in errors), None)
+        if bad is not None:
+            _log.warning("meta_backfill_note_rows_failed", tumbler=tid, error=str(errors[bad]))
+            failed.add(tid)
+            continue
+        note_pieces[tid] = [(m.chash, fetched.get(coll_of(e, m), {}).get(m.chash)) for m in manifests.get(tid, [])]
     want_owner = {c for e in needs_rows_notes if str(e.tumbler) in note_pieces for c in note_needs_ownership(e, note_pieces[str(e.tumbler)])}
     owners: dict[str, set[str]] = {}
     owners_ok = True
     if want_owner:
+        work.catalog_reads += 1
         try:
             owners = _owners_of(reader, sorted(want_owner))
         except Exception as exc:  # noqa: BLE001 — the lookup only adds sole-owner keys; its loss is counted per note
@@ -537,39 +725,30 @@ def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], liv
             sole = [c for c in need if sole_in_collection(e, e.physical_collection, owners.get(c, set()))]
             plans[tid] = ("note", plan_note(e, note_pieces[tid], sole))
 
-    # indexed documents: ownership first (cheap), then only the sole-owner rows
+    # indexed documents: only the sole-owner rows, already read
     if needs_rows_docs:
-        want = {m.chash for e in needs_rows_docs if str(e.tumbler) not in failed for m in manifests.get(str(e.tumbler), [])}
-        ok = True
-        doc_owners: dict[str, set[str]] = {}
-        try:
-            doc_owners = _owners_of(reader, sorted(want))
-        except Exception as exc:  # noqa: BLE001 — withhold the batch's row-sourced keys, count the documents
-            ok = False
-            _log.warning("meta_backfill_owner_lookup_failed", chashes=len(want), error=str(exc))
         for e in needs_rows_docs:
             tid = str(e.tumbler)
             if tid in failed:
                 continue
-            if not ok:
+            if not docs_ok:
                 failed.add(tid)
                 continue
-            mrows = manifests.get(tid, [])
-            single = [(coll_of(e, m), m.chash) for m in mrows if sole_in_collection(e, coll_of(e, m), doc_owners.get(m.chash, set()))]
-            try:
-                rows: list[dict] = []
-                by_coll = {}
-                for c, h in _spread(single, ROW_SAMPLE):
-                    by_coll.setdefault(c, []).append(h)
-                for c, hs in by_coll.items():
-                    got = _chunk_rows(t3, c, hs)
-                    rows.extend(got[h] for h in hs if h in got)
-            except Exception as exc:  # noqa: BLE001 — withhold this document's keys, count it, go on
-                _log.warning("meta_backfill_rows_failed", tumbler=tid, error=str(exc))
+            by_coll = doc_colls[tid]
+            bad = next((c for c in by_coll if c in errors), None)
+            if bad is not None:
+                _log.warning("meta_backfill_rows_failed", tumbler=tid, error=str(errors[bad]))
                 failed.add(tid)
                 continue
-            plans[tid] = ("doc_rows", plan_indexed_rows(e, rows, n_chunks=len(mrows)))
+            rows: list[dict] = []
+            for c, hs in by_coll.items():
+                got = fetched.get(c, {})
+                rows.extend(got[h] for h in hs if h in got)
+            plans[tid] = ("doc_rows", plan_indexed_rows(e, rows, n_chunks=len(manifests.get(tid, []))))
     report.lookups_failed += len(failed)
+    fetched.clear()
+    if want_manifest:
+        pause()  # the batch's reads are done
 
     payloads: list[dict[str, Any]] = []
     note_ids = {str(e.tumbler) for e in notes}
@@ -603,6 +782,7 @@ def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], liv
             report.documents_complete += 1
 
     if apply and payloads:
+        work.writes += 1
         counts = writer.update_many(payloads)
         for payload, count in zip(payloads, counts):
             if count:
@@ -610,3 +790,5 @@ def _run_batch(reader: Any, t3: Any, writer: Any | None, entries: list[Any], liv
             else:
                 report.writes_failed += 1
                 _log.warning("meta_backfill_write_failed", tumbler=payload["tumbler"])
+        if pause_after_write:
+            pause()
