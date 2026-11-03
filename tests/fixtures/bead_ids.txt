@@ -1280,6 +1280,7 @@ nexus-5a6g5
 nexus-5a8ic
 nexus-5abyd
 nexus-5aotg
+nexus-5atfd
 nexus-5axey
 nexus-5b9v0
 nexus-5b9v0.1
