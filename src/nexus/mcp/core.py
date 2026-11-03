@@ -2808,6 +2808,7 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
 def _install_exit_handlers(
     register: Callable[[Callable[[], None]], Any] | None = None,
     set_signal: Callable[[int, Any], Any] | None = None,
+    get_signal: Callable[[int], Any] | None = None,
 ) -> None:
     """Register :func:`_exit_teardown` with :mod:`atexit` and
     :func:`_sigterm_handler` for SIGTERM, SIGINT and, where the platform
@@ -2818,7 +2819,9 @@ def _install_exit_handlers(
     foreground process group, this server included. Its default action
     ends the process with no teardown, so the T1 token, its lease file and
     the peer-directory name were left behind until they lapsed (measured in
-    the restart sandbox, nexus-xwijj).
+    the restart sandbox, nexus-xwijj). An inherited ignore is kept: a
+    session started under ``nohup`` ignores SIGHUP, and this server, its
+    child, must outlive a hangup with it rather than die alone.
     *register* and *set_signal* default to ``atexit.register`` and
     ``signal.signal``; a test passes its own instead of patching the
     stdlib modules for the whole process."""
@@ -2827,10 +2830,12 @@ def _install_exit_handlers(
 
     register = register or atexit.register
     set_signal = set_signal or signal.signal
+    get_signal = get_signal or signal.getsignal
     register(_exit_teardown)
     set_signal(signal.SIGTERM, _sigterm_handler)
     set_signal(signal.SIGINT, _sigterm_handler)
-    if (hangup := getattr(signal, "SIGHUP", None)) is not None:  # POSIX only; Windows has no SIGHUP
+    hangup = getattr(signal, "SIGHUP", None)  # POSIX only; Windows has no SIGHUP
+    if hangup is not None and get_signal(hangup) is not signal.SIG_IGN:
         set_signal(hangup, _sigterm_handler)
 
 

@@ -42,8 +42,12 @@ def crs():
 
 @pytest.fixture(autouse=True)
 def _no_sent_asks(crs, monkeypatch):
-    """Each test starts with no mailed ask on record, so none is withdrawn through a real nx."""
+    """Each test starts with no mailed ask on record, so none is withdrawn through a real nx, and no
+    unwithdrawn ask either; and the script's TERM/HUP handlers (exit_on_stop_signals) are never
+    installed in the pytest process: a test that checks them patches signal.signal again itself."""
     monkeypatch.setattr(crs, "SENT_ASKS", {})
+    monkeypatch.setattr(crs, "UNWITHDRAWN", [])
+    setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
 
 
 def pane(prompt_line: str) -> str:
@@ -736,8 +740,8 @@ def test_a_reply_written_while_later_sessions_are_still_being_asked_reads_ready(
     # loop goes on asking for a while before the manifest is written.
     _live(rd, "tamsin")
 
-    def ask(found, stamp, _sender):
-        out = []
+    def ask(found, stamp, _sender, out=None):
+        out = [] if out is None else out
         for s in found:
             path = crs.ready_path(s, stamp)
             Path(path).write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
@@ -1557,7 +1561,7 @@ def _manifest_with_asks(crs, rd, asks: dict[str, str]) -> dict:
 
 def test_withdraw_ready_asks_withdraws_the_recorded_rows_once(crs, rd, monkeypatch) -> None:
     calls: list[tuple] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid, what)))
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid, what)) or "withdrawn")
     manifest = _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b", "gamma": ""})
     assert crs.withdraw_ready_asks(manifest, {"sid-alpha", "sid-gamma"}) == 1
     assert calls == [("sid-alpha", "t-a", "ready ask")]
@@ -1565,9 +1569,14 @@ def test_withdraw_ready_asks_withdraws_the_recorded_rows_once(crs, rd, monkeypat
     assert {t["sessionId"]: t.get("tuple_id") for t in again["targets"]} == {
         "sid-alpha": "", "sid-beta": "t-b", "sid-gamma": None}
     assert crs.withdraw_ready_asks(again) == 1 and calls[-1] == ("sid-beta", "t-b", "ready ask")
-    assert crs.withdraw_ready_asks(crs.load_manifest()[0]) == 0  # each is tried once
+    assert crs.withdraw_ready_asks(crs.load_manifest()[0]) == 0  # each is withdrawn once
     assert crs.withdraw_ready_asks(None) == 0
 
+
+def test_a_ready_ask_whose_withdrawal_failed_keeps_its_id(crs, rd, monkeypatch) -> None:
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": "not withdrawn (in exited 1: down)")
+    crs.withdraw_ready_asks(_manifest_with_asks(crs, rd, {"alpha": "t-a"}))
+    assert crs.load_manifest()[0]["targets"][0]["tuple_id"] == "t-a"  # tried again by a later run
 
 def test_a_ready_ask_is_acked_by_its_tuple_id_and_leaves_the_handoff_record(crs, rd, monkeypatch) -> None:
     crs.SENT_ASKS["sid-9"] = "t-handoff"
@@ -1582,33 +1591,45 @@ def test_a_new_round_withdraws_the_previous_round_s_asks(crs, rd, monkeypatch) -
     _live(rd, "alpha")
     _manifest_with_asks(crs, rd, {"alpha": "t-old"})
     calls: list[tuple] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)))
-    monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender: [])
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
+    setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
+    monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender, out=None: [])
     a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
     assert crs.ready_round(a, _found(crs), _found(crs)) == 0
     assert calls == [("sid-alpha", "t-old")]
 
 
 def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
-    _live(rd, "alpha")
-    _live(rd, "beta")
-    _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"})
+    """Answered: a reply file of any kind, a valid one or one that does not parse."""
+    for n in ("alpha", "beta", "gamma"):
+        _live(rd, n)
+    _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b", "gamma": "t-g"})
     (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
+    (rd / "ready-gamma.json").write_text("{not json", encoding="utf-8")
     calls: list[tuple] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)))
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
     monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
-    assert calls == [("sid-alpha", "t-a")]
+    assert sorted(calls) == [("sid-alpha", "t-a"), ("sid-gamma", "t-g")]
 
 
-def test_the_roll_withdraws_the_ready_asks_to_its_sessions_first(crs, rd, monkeypatch) -> None:
+@pytest.mark.parametrize("mode", ["--resume", "--fresh"])
+def test_a_roll_in_either_mode_withdraws_every_ready_ask_first_and_retries_at_the_end(crs, rd, tmpdirs, monkeypatch, mode) -> None:
+    """Every target, one the roll leaves alone (beta is not live) included; a failed withdrawal is
+    tried again when the roll ends."""
+    _live(rd, "alpha")
     _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"})
     order: list[str] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": order.append(f"withdraw {sid} {tid}"))
-    monkeypatch.setattr(crs, "_write_handoffs", lambda *a, **k: order.append("handoffs") or {})
-    crs.write_handoffs([{"sessionId": "sid-alpha", "name": "alpha"}], set(), 1, 1)
-    assert order == ["withdraw sid-alpha t-a", "handoffs"]
+    outcomes = {"t-a": ["withdrawn"], "t-b": ["not withdrawn (in exited 1: down)", "withdrawn"]}
+    monkeypatch.setattr(crs, "withdraw_ask",
+                        lambda sid, tid="", what="": order.append(f"withdraw {tid}") or outcomes[tid].pop(0))
+    monkeypatch.setattr(crs, "_roll", lambda *a, **k: order.append("roll") or 0)
+    monkeypatch.setattr(crs, "footprint_report", lambda *a: order.append("report") or [])
+    setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
+    code, _ = _run_main(crs, monkeypatch, [mode, "--no-update", "--force", "--detached"])
+    assert code == 0
+    assert order == ["withdraw t-a", "withdraw t-b", "roll", "withdraw t-b", "report"]
 
 
 # ---- the restart's footprint (nexus-xwijj Phase 3) ----
@@ -1625,6 +1646,7 @@ def tmpdirs(crs, rd, monkeypatch, tmp_path):
 
 def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd, tmpdirs) -> None:
     t = tmpdirs
+    _manifest_with_asks(crs, rd, {"alpha": "t-left", "beta": ""})
     files = ["rh-aaaa1111.txt", "rr-aaaa1111-20261102-1.txt", "rr-bbbb2222-x.txt",
              "nexus-continuation-restart-alpha-aaaa1111-1.md", "nexus-continuation-restart-alpha-aaaa1111-1.md.draft.txt",
              "claude-restart-alpha-aaaa1111-2.draft.txt", "nexus-restart-ready-alpha-aaaa1111-1.json",
@@ -1640,8 +1662,11 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
     assert lines[1].startswith("footprint: kept 1 handoff(s) and 2 draft(s) for back-out:")
     assert "cccc3333" not in lines[1]
     assert lines[2] == f"footprint: kept 1 ready reply file(s): {t / 'nexus-restart-ready-alpha-aaaa1111-1.json'}"
-    assert lines[3].endswith("mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)")
+    assert "mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)" in lines[3]
+    assert "mailbox/sid-alph: ready ask t-left" in lines[3]  # still recorded in the round file
     assert all(ln in _log(rd) for ln in lines)
+    for kept in files[3:]:  # listed, never removed
+        assert (t / kept).exists(), kept
 
 
 def test_an_ask_that_could_not_be_withdrawn_is_recorded(crs, rd, tmpdirs, monkeypatch) -> None:
@@ -1654,6 +1679,7 @@ def test_an_ask_that_could_not_be_withdrawn_is_recorded(crs, rd, tmpdirs, monkey
 
 
 def test_the_roll_reports_its_footprint_even_when_it_raises(crs, rd, tmpdirs, monkeypatch) -> None:
+    setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)  # the real one would stay installed in pytest
     reported: list = []
     monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs: reported.append([s["sessionId"] for s in found]))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mid-roll")))
@@ -1676,3 +1702,43 @@ def test_the_detached_child_turns_term_and_hup_into_an_exit(crs, rd, tmpdirs, mo
     with pytest.raises(SystemExit) as exc:
         installed[signal.SIGHUP](signal.SIGHUP, None)
     assert exc.value.code == 128 + signal.SIGHUP
+    # one-shot: a second TERM or HUP during the finally blocks is ignored, not a second exit
+    assert installed == {signal.SIGTERM: signal.SIG_IGN, signal.SIGHUP: signal.SIG_IGN}
+
+
+
+def test_a_mail_with_no_tuple_id_is_reported_as_not_withdrawable(crs, rd, tmpdirs, monkeypatch) -> None:
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "", ""))
+    assert crs.mail_ask({"sessionId": "sid-9", "name": "t"}, "/tmp/h.md", "x", kind="restart-ready") is True
+    assert crs.SENT_ASKS == {}
+    assert crs.UNWITHDRAWN and "restart-ready: sent, but nx printed no tuple id" in crs.UNWITHDRAWN[0]
+    assert "cannot be withdrawn" in _log(rd)
+
+
+def test_an_interrupted_round_still_records_the_asks_it_mailed(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
+
+    def ask(found, stamp, sender, out=None):
+        out.append({"name": "alpha", "sessionId": "sid-alpha", "path": str(rd / "r.json"), "how": "mail", "tuple_id": "t-a"})
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(crs, "ask_ready", ask)
+    a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
+    with pytest.raises(KeyboardInterrupt):
+        crs.ready_round(a, _found(crs), _found(crs))
+    assert crs.load_manifest()[0]["targets"][0]["tuple_id"] == "t-a"
+
+
+def test_a_round_file_that_cannot_be_written_withdraws_its_asks(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha")
+    setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
+    monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender, out=None: out.append(
+        {"name": "alpha", "sessionId": "sid-alpha", "path": "/x", "how": "mail", "tuple_id": "t-a"}))
+    monkeypatch.setattr(crs, "write_manifest", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    calls: list = []
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append(tid) or "withdrawn")
+    a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
+    crs.ready_round(a, _found(crs), _found(crs))
+    assert calls == ["t-a"]
+    assert "the round file was not written (disk full)" in _log(rd)

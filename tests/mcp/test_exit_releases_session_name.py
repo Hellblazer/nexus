@@ -229,6 +229,7 @@ def test_the_exit_handlers_register_the_release_with_atexit(monkeypatch) -> None
     signals: dict = {}
     core._install_exit_handlers(
         register=registered.append, set_signal=lambda sig, fn: signals.__setitem__(sig, fn),
+        get_signal=lambda _sig: None,
     )
 
     assert registered == [core._exit_teardown]
@@ -272,3 +273,20 @@ def test_the_lifespan_exit_releases_the_name(monkeypatch) -> None:
         mcp_infra.reset_t1_for_release()
 
     assert len(_releases(fake, "halcyon")) == 1
+
+
+
+def test_an_inherited_sighup_ignore_is_kept() -> None:
+    """A session started under nohup ignores SIGHUP; its MCP server keeps the ignore and outlives a
+    hangup with it, instead of dying alone (nexus-xwijj)."""
+    import signal  # noqa: PLC0415 — test-local
+
+    if not hasattr(signal, "SIGHUP"):
+        pytest.skip("no SIGHUP on this platform")
+    signals: dict = {}
+    core._install_exit_handlers(
+        register=lambda _fn: None, set_signal=lambda sig, fn: signals.__setitem__(sig, fn),
+        get_signal=lambda sig: signal.SIG_IGN if sig == signal.SIGHUP else signal.SIG_DFL,
+    )
+    assert signal.SIGHUP not in signals
+    assert signals == {signal.SIGTERM: core._sigterm_handler, signal.SIGINT: core._sigterm_handler}
