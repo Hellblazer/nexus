@@ -107,7 +107,8 @@ _MAX_QUERY_CHARS = 500
 _WS = re.compile(r"\s+")
 
 #: Why a repair ran (:attr:`RepairReport.reason`): a facet was assessed and nothing held bears on it (``unsupported``),
-#: a covered facet had most of its anchors left unread by the assessment's size cap (``unread_tail``, nexus-z6yvk), or
+#: a covered or contradicted facet had most of its anchors left unread by the assessment's size cap (``unread_tail``,
+#: nexus-z6yvk, nexus-se11w), or
 #: both. Empty when no repair ran.
 REPAIR_REASONS: tuple[str, ...] = ("unsupported", "unread_tail", "unsupported_and_unread_tail")
 
@@ -139,8 +140,8 @@ class RepairReport:
     brings nothing in; the outcome then names what the retrieval did (``retrieval_failed``, ``not_merged`` or
     ``no_new_evidence``, never ``completed``) and ``detail`` says the unread anchors were reassessed.
 
-    ``facet_ids`` are the facets the repair targeted: the unsupported ones first, then the covered facets whose
-    anchors were mostly unread (nexus-z6yvk); ``unread_facet_ids`` is the second group and ``reason`` names which
+    ``facet_ids`` are the facets the repair targeted: the unsupported ones first, then the contradicted and the
+    covered facets whose anchors were mostly unread (nexus-z6yvk, nexus-se11w); ``unread_facet_ids`` is the second group and ``reason`` names which
     groups there were (:data:`REPAIR_REASONS`; both empty when no repair ran). Both are additive to the wire shape.
     """
 
@@ -153,8 +154,8 @@ class RepairReport:
     detail: str = ""
     #: Unresolved facets named to the terminal generation by the coverage note (``0``: no note was delivered).
     noted_facets: int = 0
-    #: Why the repair ran (:data:`REPAIR_REASONS`), and which of ``facet_ids`` were covered facets with most of their
-    #: anchors unread (nexus-z6yvk).
+    #: Why the repair ran (:data:`REPAIR_REASONS`), and which of ``facet_ids`` were covered or contradicted facets with most
+    #: of their anchors unread (nexus-z6yvk, nexus-se11w).
     reason: str = ""
     unread_facet_ids: tuple[str, ...] = ()
 

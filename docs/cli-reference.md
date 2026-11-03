@@ -6320,12 +6320,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and
   closed names only. `repair` also says why it ran (nexus-z6yvk): `reason` is `unsupported`
-  (a facet no held evidence bears on), `unread_tail` (a covered facet with more than half of
+  (a facet no held evidence bears on), `unread_tail` (a covered or contradicted facet with more than half of
   the ledger's anchors left unread by the assessment's per-call size cap, which the repair then
   reads) or `unsupported_and_unread_tail`, empty when no repair ran, and `unread_facet_ids` names the
-  facets of the second kind (`facet_ids` lists the unsupported ones first, then those). A covered
+  facets of the second kind (`facet_ids` lists the unsupported ones first, then the contradicted, then the covered). A covered
   facet stays covered whatever the unread anchors say: a supporting one adds to its evidence, a
-  contradicting one marks it `conflicted`. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
+  contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) becomes covered and
+  `conflicted` when an unread anchor supports it, and stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,

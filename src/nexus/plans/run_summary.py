@@ -334,8 +334,8 @@ def build_run_summary(
         "streams": _streams_block(inputs.diagnostics),
         "scope": {"conflicts": conflicts, "diagnosed_steps": len(inputs.scope_diagnostics)},
         # ``facets_repairable``: unsupported facets of the FINAL ledger that a retrieval could still help (those the repair
-        # did not fix, when it ran). It never counts covered facets: the covered facets a repair reassessed for an unread
-        # tail (nexus-z6yvk) are ``unread_tail_facets``, so ``entered`` true with ``facets_repairable`` 0 reads as a
+        # did not fix, when it ran). It never counts covered facets: the covered and contradicted facets a repair reassessed
+        # for an unread tail (nexus-z6yvk, nexus-se11w) are ``unread_tail_facets``, so ``entered`` true with ``facets_repairable`` 0 reads as a
         # tail-only repair, whose ``reason`` is ``unread_tail`` (``""`` when no repair ran; ``reason`` and
         # ``unread_tail_facets`` are additive).
         "repair": {
