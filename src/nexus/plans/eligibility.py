@@ -57,7 +57,14 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   (an ``explicit`` hint is the caller's, and the planner builds its steps without it), and the RDR relaxes
   the unknown-kind restriction for recorded provenance only "after review": until a reviewed decision
   (nexus-jypmj.2.8) adds a route, a grown plan reads as grown with kind ``unknown`` (``unreviewed_route``).
-  The route is still recorded at the grow site; only eligibility discounts it;
+  The route is still recorded at the grow site; only eligibility discounts it. A discounted recorded kind
+  never widens eligibility, but it does narrow it for a ``lookup`` request (nexus-indyo,
+  ``grown_route_not_lookup``): a grown plan that recorded any kind other than lookup was grown by a request
+  that was not a lookup, so its steps were planned for something else, the H09 cost shape the lookup row
+  exists to keep out (nexus-jypmj.11). A grown plan that recorded lookup, or no kind, still serves lookups,
+  and ``discovery/listing`` requests are unchanged. Measured on the live library on 2026-11-03 (77 lookup
+  runs since the gate was enabled, replayed offline): no current selection changes; the rule guards the
+  library as growth adds plans;
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``,
   and it is treated like any other untrusted unknown plan. A builtin seeded before nexus-jypmj.2.1 is
   this until ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is
@@ -264,6 +271,7 @@ REASONS: frozenset[str] = frozenset({
     "untrusted_curated_claim",
     "unreviewed_route",
     "single_source_synthesis",
+    "grown_route_not_lookup",
     "judge_error",
 })
 
@@ -323,13 +331,16 @@ class PlanStanding:
 
     ``route`` is the recorded route of a grown plan's declared kind (``explicit``, ``heuristic``,
     ``model-assisted``), whether or not it was honoured; ``None`` when the row records none. ``kind`` is the
-    EFFECTIVE kind: ``unknown`` when the declared one was discounted.
+    EFFECTIVE kind: ``unknown`` when the declared one was discounted. ``recorded_kind`` is the kind a grown plan
+    recorded when that kind was discounted (``unreviewed_route``); it never widens eligibility, it only narrows
+    it (the lookup rule, nexus-indyo). ``None`` everywhere else.
     """
 
     kind: PlanAnswerKind
     provenance: str  # "curated" | "grown" | "unattested"
     flag: str | None = None
     route: str | None = None
+    recorded_kind: PlanAnswerKind | None = None
 
 
 @dataclass(frozen=True)
@@ -361,7 +372,7 @@ def classify_plan(tags: str | None, plan_json: Any) -> PlanStanding:
         if declared.route in TRUSTED_ROUTES:
             return PlanStanding(declared.kind, "grown", route=declared.route)
         # the request's guessed kind is not the plan's shape: read it as unknown until reviewed
-        return PlanStanding(_U, "grown", "unreviewed_route", route=declared.route)
+        return PlanStanding(_U, "grown", "unreviewed_route", route=declared.route, recorded_kind=declared.kind)
     if declared.provenance == "curated":
         if BUILTIN_TAG in tokens:
             return PlanStanding(declared.kind, "curated")
@@ -550,6 +561,11 @@ def _judge(
         and declared_strategy(dimensions) in SINGLE_SOURCE_EXCLUDED_STRATEGIES
     ):
         verdict = Verdict(False, "single_source_synthesis")
+    if (
+        verdict.eligible and request_kind is _L and standing.recorded_kind is not None
+        and standing.recorded_kind is not _L
+    ):
+        verdict = Verdict(False, "grown_route_not_lookup")
     return standing, verdict
 
 

@@ -6000,7 +6000,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
   `untrusted_curated_claim`, `unreviewed_route` (a grown plan whose recorded kind is discounted:
   `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
-  names a route, so every grown plan reads as unknown-kind) or `judge_error`
+  names a route, so every grown plan reads as unknown-kind), `grown_route_not_lookup`
+  (a lookup request refusing a grown plan whose discounted recorded kind is not lookup: the
+  recorded kind never widens eligibility but does narrow it, nexus-indyo) or `judge_error`
   (judging the candidate failed; kept when not enforcing, dropped when enforcing).
   The filter judges after every other drop (unmet binding, scope conflict,
   always-failing, FTS literal drop), so a count is "would have been returned, but for

@@ -217,14 +217,17 @@ def test_adding_a_route_to_the_trusted_set_makes_that_route_count(route, monkeyp
 
 
 @pytest.mark.parametrize("route", ["explicit", "heuristic", "model-assisted"])
-def test_a_discounted_route_is_refused_with_its_own_reason_and_still_serves_lookup_and_listing(route) -> None:
+def test_a_discounted_route_is_refused_with_its_own_reason_and_still_serves_listing(route) -> None:
+    """A lookup is no longer served by it: the recorded synthesis kind narrows (nexus-indyo)."""
     row = _row(910, "grown-synth", kind=S, tags="ad-hoc,grown", provenance="grown", route=route)
     out, filt = _match([row], [(910, 0.05)], S)
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
-    for request in (L, D):
-        out, _ = _match([row], [(910, 0.05)], request)
-        assert _ids(out) == [910], request
+    out, _ = _match([row], [(910, 0.05)], D)
+    assert _ids(out) == [910]
+    out, filt = _match([row], [(910, 0.05)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
 
 
 @pytest.mark.parametrize("tags", [42, ["builtin-template"], MagicMock()], ids=["int", "list", "mock"])
@@ -1264,3 +1267,47 @@ def test_the_tag_words_are_the_matchers() -> None:
 
     assert el.BUILTIN_TAG == matcher._CATEGORY_PLAN_TAG
     assert matcher._is_grown_plan_tags(el.GROWN_TAG) and not matcher._is_grown_plan_tags(el.BUILTIN_TAG)
+
+
+# ── nexus-indyo: a grown plan's recorded kind narrows, it never widens ────────────────────────────────────────────
+#: Grown plans that recorded a non-lookup kind: the request that grew them was not a lookup, so their steps were
+#: planned for something else (a synthesis plan answering a lookup is the H09 cost shape, nexus-jypmj.11).
+GROWN_SYNTHESIS = _row(904, "grown-synthesis", kind=S, tags="ad-hoc,grown", provenance="grown", route="model-assisted")
+GROWN_COMPARISON = _row(905, "grown-comparison", kind=C, tags="ad-hoc,grown", provenance="grown", route="heuristic")
+GROWN_DISCOVERY = _row(906, "grown-discovery", kind=D, tags="ad-hoc,grown", provenance="grown", route="explicit")
+
+
+@pytest.mark.parametrize("row", [GROWN_SYNTHESIS, GROWN_COMPARISON, GROWN_DISCOVERY], ids=lambda r: r["name"])
+def test_a_grown_plan_that_recorded_another_kind_does_not_serve_a_lookup(row) -> None:
+    out, filt = _match([row], [(row["id"], 0.05)], L)
+    assert out == [] and filt.excluded_plan_ids == [row["id"]]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
+
+
+@pytest.mark.parametrize("row", [GROWN_UNKNOWN, GROWN_LOOKUP, GROWN_LOOKUP_HEURISTIC], ids=lambda r: r["name"])
+def test_a_grown_plan_that_recorded_lookup_or_nothing_still_serves_a_lookup(row) -> None:
+    out, _ = _match([row], [(row["id"], 0.05)], L)
+    assert _ids(out) == [row["id"]]
+
+
+def test_the_recorded_kind_does_not_widen_a_grown_plan() -> None:
+    """The narrowing reads the recorded kind; it does not trust it. A grown plan that recorded synthesis is still
+    refused for a synthesis request (unreviewed route), as before nexus-indyo."""
+    out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], S)
+    assert out == [] and filt.excluded_plan_ids == [904]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
+
+
+def test_discovery_requests_are_unchanged_by_the_lookup_narrowing() -> None:
+    out, _ = _match([GROWN_SYNTHESIS], [(904, 0.05)], D)
+    assert _ids(out) == [904]
+
+
+def test_the_lookup_narrowing_runs_in_shadow_like_the_matrix() -> None:
+    out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], L, enforce=False)
+    assert _ids(out) == [904]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
+
+
+def test_the_lookup_narrowing_reason_is_in_the_closed_vocabulary() -> None:
+    assert "grown_route_not_lookup" in el.REASONS
