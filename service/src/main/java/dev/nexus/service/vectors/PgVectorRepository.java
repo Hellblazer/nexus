@@ -8058,7 +8058,8 @@ FROM scope s
                                                                          String queryText) {
         ManifestPushdown.Plan m = wherePlan.manifest();
         return cap -> {
-            int fetchCap = distinctChunks && cap <= Integer.MAX_VALUE / 2 ? 2 * cap : cap;
+            // A cap of 1 (the empty-page probe) needs no distinct read: any row is at least one chunk, which is the cap.
+            int fetchCap = distinctChunks && cap > 1 && cap <= Integer.MAX_VALUE / 2 ? 2 * cap : cap;
             Result<?> rows = ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
                 colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
                 fetchCap, model, tenant, queryText)).fetch();

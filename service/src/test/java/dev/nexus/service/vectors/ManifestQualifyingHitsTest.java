@@ -182,6 +182,12 @@ class ManifestQualifyingHitsTest {
             doc(seed, TENANT, "d5", "Delta", C1, false);
             occurrence(seed, TENANT, "d5", 0, C1, 0, "intro", 0, true);
             occurrence(seed, TENANT, "d5", 1, C1, 5, "intro", 1, true);
+            // D6 "Epsilon" holds chunk 9 four times over (four positions), all quad-x: one chunk, four qualifying
+            // occurrences (nexus-zk7rw review r1: the shape that fills the distinct read's bound below its cap).
+            doc(seed, TENANT, "d6", "Epsilon", C1, false);
+            for (int i = 0; i < 4; i++) {
+                occurrence(seed, TENANT, "d6", i, C1, 9, "quad-x", i, true);
+            }
             // C2: three intro chunks of D4 "Alpha" too (the same title in another collection).
             doc(seed, TENANT, "d4", "Alpha", C2, false);
             for (int i = 0; i < 3; i++) {
@@ -225,17 +231,30 @@ class ManifestQualifyingHitsTest {
     /** The function's hit count under the tenant scope, at most {@code cap}. */
     private int hits(String tenant, String[] collections, ManifestPushdown.Plan plan, JSONB chunkWhere, int cap,
                      String model) {
+        return hits(tenant, collections, plan, chunkWhere, cap, model, null);
+    }
+
+    /** The same under a text gate ({@code queryText}, the hybrid statement's). */
+    private int hits(String tenant, String[] collections, ManifestPushdown.Plan plan, JSONB chunkWhere, int cap,
+                     String model, String queryText) {
         return tenantScope.withTenant(tenant, ctx -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
-            collections, chunkWhere, null, plan.containment(), plan.jsonPath(), cap, model, tenant, null)).fetch().size());
+            collections, chunkWhere, null, plan.containment(), plan.jsonPath(), cap, model, tenant, queryText))
+            .fetch().size());
     }
 
     /** The rows {@code manifest_search_384} returns over the same predicate: every qualifying, live chunk. */
     private int searchRows(String tenant, String[] collections, ManifestPushdown.Plan plan, JSONB chunkWhere) {
+        return searchRows(tenant, collections, plan, chunkWhere, null);
+    }
+
+    /** The same under a text gate ({@code queryText}, the hybrid statement's {@code p_query_text}). */
+    private int searchRows(String tenant, String[] collections, ManifestPushdown.Plan plan, JSONB chunkWhere,
+                           String queryText) {
         Vector q = Vector.of(unit());
         return tenantScope.withTenant(tenant, ctx -> {
             // The table is small and the statement is exact: nothing here depends on the HNSW walk.
             PgSession.disableIndexScanForExactFallback(ctx);
-            return ctx.selectFrom(MANIFEST_SEARCH_384.call(q, null, null, collections, chunkWhere, null,
+            return ctx.selectFrom(MANIFEST_SEARCH_384.call(q, queryText, null, collections, chunkWhere, null,
                 plan.containment(), plan.jsonPath(), 1000, MODEL, tenant)).fetch().size();
         });
     }
@@ -306,6 +325,56 @@ class ManifestQualifyingHitsTest {
         assertThat(pairs).as("distinct chunks").hasSize(6);
         assertThat(pairs).hasSize(searchRows(TENANT, colls(C1), intro, null));
         assertThat(pairs).contains(C1 + "/" + chash(C1, 0), C1 + "/" + chash(C1, 5));
+    }
+
+    @Test
+    void oneChunkHeldFourTimes_isFourHitsOfOneChunk_soABoundOfFourFillsBelowACapOfTwo() {
+        // nexus-zk7rw review r1 blocker 1: the engine's distinct read of a page of one row asks for 2 * 2 = 4 hits and
+        // gets exactly 4, all for the one chunk. rows == bound and distinct (1) < cap (2) is the case the engine must
+        // answer with the cap; its test is ManifestSearchShortPageIntegrationTest#aPageWhoseDistinctReadFills...
+        ManifestPushdown.Plan quad = plan(where("section_type", "quad-x"));
+        var rows = tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
+            colls(C1), null, null, quad.containment(), quad.jsonPath(), 4, MODEL, TENANT, null)).fetch());
+
+        assertThat(rows).as("hits at a bound of 4").hasSize(4);
+        assertThat(rows.stream().map(r -> HexFormat.of().formatHex(r.getChunkChash())).distinct().toList())
+            .containsExactly(chash(C1, 9));
+        assertThat(hits(TENANT, colls(C1), quad, null, 1000, MODEL)).as("all of them, unbounded").isEqualTo(4);
+    }
+
+    @Test
+    void underATextGate_theCountIsNeverBelowTheRowsOfManifestSearch_forExactWordTypoAndTrigramOnlyQueries() {
+        // nexus-zk7rw review r1 blocker 2 (the critic's S2). The hybrid dense branch passes its query text to the count,
+        // and the count must admit at least what manifest_search_384 admits under the SAME text. The fixture's chunk
+        // texts are "qh <collection> chunk <i>". Measured on it (the numbers the floors below rest on): a whole word
+        // ("chunk") admits all 6 intro chunks through the full-text arm; "chunkk" (a typo no stem matches) admits all 6
+        // and "chunkk 3" and "unk 3" admit only chunk 3, through the trigram arm ALONE; nothing matches "zzzzqq" or the
+        // transposition "chunck" (word similarity 0.57, under the 0.6 threshold). A gate that fell behind
+        // manifest_search's, the trigram arm dropped say, would count 0 for the typo texts against 6 and 1 rows and
+        // skip a re-run a starved page needs.
+        ManifestPushdown.Plan intro = plan(where("section_type", "intro"));
+        int ungated = searchRows(TENANT, colls(C1), intro, null);
+        assertThat(ungated).isEqualTo(6);
+        List<String> trigramOnly = List.of("chunkk", "chunkk 3", "unk 3");
+        int examined = 0;
+        int partial = 0;
+        for (String text : List.of("chunk", "chunk3", "qh chunk 3", "qh chunk 13", "chunck", "zzzzqq", "chunkk",
+                                   "chunkk 3", "unk 3")) {
+            int rows = searchRows(TENANT, colls(C1), intro, null, text);
+            int count = hits(TENANT, colls(C1), intro, null, 1000, MODEL, text);
+            examined++;
+            if (rows > 0 && rows < ungated) partial++;
+            assertThat(count).as("gate [%s]: count %d is never below manifest_search's %d rows", text, count, rows)
+                .isGreaterThanOrEqualTo(rows);
+            if (trigramOnly.contains(text)) {
+                assertThat(rows).as("gate [%s] is admitted by the trigram arm alone", text).isPositive();
+            }
+        }
+        assertThat(examined).isEqualTo(9);
+        assertThat(partial).as("texts whose gate admits some candidates but not all").isGreaterThanOrEqualTo(2);
+        // A gate narrows the count: nothing matches "zzzzqq", and a null gate is the ungated 7 owners of 6 chunks.
+        assertThat(hits(TENANT, colls(C1), intro, null, 1000, MODEL, "zzzzqq")).isZero();
+        assertThat(hits(TENANT, colls(C1), intro, null, 1000, MODEL, null)).isEqualTo(7);
     }
 
     @Test

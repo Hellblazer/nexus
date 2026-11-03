@@ -83,6 +83,11 @@ class ManifestSearchShortPageIntegrationTest {
     private static final int TWIN = 20_970;
     /** nexus-zk7rw: a label on a chunk the capped scan reaches (7, owned twice) and one it does not (20,960). */
     private static final List<Integer> MIXED = List.of(7, 20_960);
+    /**
+     * nexus-zk7rw review r1: a chunk with FOUR qualifying owners (DOC, and DOC_TWIN at three positions). A page of one
+     * row gives a cap of 2 and a distinct read of 4 occurrences: the bound fills with one distinct chunk.
+     */
+    private static final int QUAD = 20_980;
     private static final String DOC_TWIN = "sp-doc-twin";
 
     private static String chash(int i) {
@@ -216,7 +221,7 @@ class ManifestSearchShortPageIntegrationTest {
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///short-page-twin.md")
                 .execute();
             int position = 0;
-            for (int g : List.of(7, TWIN)) {
+            for (int g : List.of(7, TWIN, QUAD, QUAD, QUAD)) {
                 seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -237,6 +242,7 @@ class ManifestSearchShortPageIntegrationTest {
         if (RARE.contains(g)) return "appendix-x";
         if (g == TAIL) return "tail-x";
         if (g == TWIN) return "twin-x";
+        if (g == QUAD) return "quad-x";
         if (MIXED.contains(g)) return "mixed-x";
         return "body";
     }
@@ -489,6 +495,24 @@ class ManifestSearchShortPageIntegrationTest {
         assertThat(distinctIds(rows)).containsExactly(chash(TWIN));
         assertThat(reruns() - reruns).isZero();
         assertThat(skips() - skipsBefore).isEqualTo(1);
+    }
+
+    @Test
+    void aPageWhoseDistinctReadFillsItsBoundBelowTheCap_isRerun_notSkipped() {
+        // nexus-zk7rw review r1 blocker 1. One chunk, four qualifying owners, a page of one row: the cap is 2 and the
+        // distinct read asks for 4 occurrences and gets exactly 4 (the bound fills) over ONE distinct chunk, fewer than
+        // the cap. The read cannot tell "there are no more" from "the bound stopped it", so it must answer the cap (an
+        // over-count, a re-run), never the 1 distinct chunk it saw, which would skip a re-run that a larger set might
+        // need. Here the chunk really is the only one, so the re-run finds nothing new and the rows are the same.
+        long before = reruns();
+        long skipsBefore = skips();
+
+        var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, label("quad-x"));
+
+        assertThat(distinctIds(rows)).containsExactly(chash(QUAD));
+        assertThat(reruns() - before).as("the bound filled, so the count reads as the cap and the page is re-run")
+            .isEqualTo(1);
+        assertThat(skips() - skipsBefore).isZero();
     }
 
     @Test

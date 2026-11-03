@@ -186,6 +186,53 @@ class ManifestObjectParityTest {
         return out;
     }
 
+    // ---- The text gate (nexus-zk7rw review r1, the critic's S2) -------------------------------------------------------
+
+    /**
+     * The functions whose text gate must be the same text: the three {@code manifest_search_<dim>} bodies (the gate a
+     * hybrid statement applies) and {@code manifest_qualifying_hits}, which applies it again to count. A count whose gate
+     * admits less than the search's would under-count, and skip a re-run a starved page needs: a silent recall loss.
+     */
+    static final List<String> GATED = List.of(
+        "manifest_search_384", "manifest_search_768", "manifest_search_1024", "manifest_qualifying_hits");
+
+    private static final String GATE_START = "(p_query_text IS NULL";
+
+    /**
+     * The normalised text gate of one function body: the parenthesised group that opens {@code (p_query_text IS NULL},
+     * through its matching close. Throws when the group is missing or never closes, so a body that lost or reshaped its
+     * gate fails loudly instead of comparing two empty strings.
+     */
+    static String gateClause(String prosrc) {
+        String body = normalise(prosrc);
+        int from = body.indexOf(GATE_START);
+        if (from < 0) {
+            throw new IllegalStateException("no text gate (a group opening '(p_query_text IS NULL')");
+        }
+        int depth = 0;
+        for (int i = from; i < body.length(); i++) {
+            char ch = body.charAt(i);
+            if (ch == '(') depth++;
+            else if (ch == ')' && --depth == 0) {
+                return body.substring(from, i + 1);
+            }
+        }
+        throw new IllegalStateException("the text gate group never closes");
+    }
+
+    /** The {@link #GATED} names whose gate differs from the first's (the reference, {@code manifest_search_384}). */
+    static List<String> gateDisagreements(Map<String, String> bodiesByName) {
+        List<String> out = new ArrayList<>();
+        String reference = gateClause(bodiesByName.get(GATED.get(0)));
+        for (String name : GATED.subList(1, GATED.size())) {
+            String gate = gateClause(bodiesByName.get(name));
+            if (!reference.equals(gate)) {
+                out.add(name + " gate differs from " + GATED.get(0) + " at " + firstDifference(reference, gate));
+            }
+        }
+        return out;
+    }
+
     private static String firstDifference(String a, String b) {
         int i = 0;
         int n = Math.min(a.length(), b.length());
@@ -364,6 +411,43 @@ class ManifestObjectParityTest {
         var mutated = withMutated("manifest_search_1024", "position('\"tags\"' in p_manifest_path) > 0",
             "position('\"tags\"' in p_manifest_path) >= 0");
         assertThat(disagreements(mutated)).hasSize(1);
+    }
+
+    @Test
+    void theCountsTextGate_isTheTextGateOfEveryManifestSearch() {
+        assertThat(gateDisagreements(bodies)).as("gates that differ from manifest_search_384's").isEmpty();
+        // Non-vacuity: the extracted gate is the whole gate (both arms), not an empty or truncated group.
+        String gate = gateClause(bodies.get("manifest_qualifying_hits"));
+        assertThat(gate).startsWith("(p_query_text IS NULL").endsWith("c.chunk_text)")
+            .contains("c.chunk_tsv @@ plainto_tsquery('english', p_query_text)")
+            .contains("p_query_text OPERATOR(nexus.<%) c.chunk_text");
+    }
+
+    private Map<String, String> withMutatedGate(String proname, String from, String to) {
+        return withMutated(proname, from, to);
+    }
+
+    @Test
+    void aGateArmDroppedFromTheCount_isReported() {
+        var mutated = withMutatedGate("manifest_qualifying_hits",
+            "OR p_query_text OPERATOR(nexus.<%) c.chunk_text", "OR false");
+        assertThat(gateDisagreements(mutated)).hasSize(1)
+            .allMatch(s -> s.startsWith("manifest_qualifying_hits gate differs from manifest_search_384"));
+    }
+
+    @Test
+    void aGateChangedInOneManifestSearch_isReportedAgainstTheCountToo() {
+        var mutated = withMutatedGate("manifest_search_384", "plainto_tsquery('english', p_query_text)",
+            "plainto_tsquery('simple', p_query_text)");
+        // The reference moved, so every other copy, the count included, differs from it.
+        assertThat(gateDisagreements(mutated)).hasSize(GATED.size() - 1);
+    }
+
+    @Test
+    void aBodyThatLostItsGate_failsLoudly() {
+        var mutated = withMutatedGate("manifest_qualifying_hits", "(p_query_text IS NULL", "(p_query_txt IS NULL");
+        assertThatThrownBy(() -> gateDisagreements(mutated)).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no text gate");
     }
 
     @Test

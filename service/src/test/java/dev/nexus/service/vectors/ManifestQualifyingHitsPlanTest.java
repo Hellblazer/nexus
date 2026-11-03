@@ -107,6 +107,30 @@ class ManifestQualifyingHitsPlanTest {
                         DSL.inline(true))
                     .from(series))
                 .execute();
+            // Autovacuum off on the three tables, so the unanalyzed phase of the test stays unanalyzed: the naptime is a
+            // minute and the fixture takes seconds, but a pin that depends on that is a race.
+            Map<String, String> off = Map.of("autovacuum_enabled", "false");
+            PgContainerHelper.setTableStorageParams(su, CATALOG_DOCUMENT_CHUNKS, off);
+            PgContainerHelper.setTableStorageParams(su, CATALOG_DOCUMENTS, off);
+            PgContainerHelper.setTableStorageParams(su, DSL.table(DSL.name("nexus", leafName(MODEL, TENANT))), off);
+        }
+    }
+
+    /** {@code nexus.partition_name('chunks', model, tenant)}: the tenant's leaf under the model partition. */
+    private static String leafName(String model, String tenant) {
+        return "chunks_m" + sha256Hex(model).substring(0, 8) + "_t_" + sha256Hex(tenant).substring(0, 16);
+    }
+
+    private static String sha256Hex(String text) {
+        try {
+            var md = java.security.MessageDigest.getInstance("SHA-256");
+            StringBuilder sb = new StringBuilder();
+            for (byte x : md.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
+                sb.append(String.format("%02x", x));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
         }
     }
 
@@ -117,11 +141,14 @@ class ManifestQualifyingHitsPlanTest {
     }
 
     private String plan(String label, int cap) {
-        return plan(label, cap, false);
+        return plan(label, cap, null, false);
     }
 
-    /** {@code noIndexScans}: the plan under the exact re-run's setting (index scans off), the control that the pin can fail. */
-    private String plan(String label, int cap, boolean noIndexScans) {
+    /**
+     * {@code queryText}: the hybrid statement's text gate (null for none). {@code noIndexScans}: the plan under the
+     * exact re-run's setting (index scans off), the control that the pin can fail.
+     */
+    private String plan(String label, int cap, String queryText, boolean noIndexScans) {
         ManifestPushdown.Plan plan = ManifestPushdown.of(ManifestLabelStage.split(Map.<String, Object>of("section_type", label)).labels());
         assertThat(plan).isNotNull();
         return tenantScope.withTenant(TENANT, ctx -> {
@@ -129,8 +156,8 @@ class ManifestQualifyingHitsPlanTest {
                 PgSession.disableIndexScanForExactFallback(ctx);
             }
             return PgContainerHelper.explainPlanInlined(ctx,
-            ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(new String[] {COLLECTION}, null, null, plan.containment(),
-                plan.jsonPath(), cap, MODEL, TENANT, null)));
+                ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(new String[] {COLLECTION}, null, null, plan.containment(),
+                    plan.jsonPath(), cap, MODEL, TENANT, queryText)));
         });
     }
 
@@ -159,27 +186,66 @@ class ManifestQualifyingHitsPlanTest {
             .doesNotContain("Sort").doesNotContain("Aggregate");
     }
 
-    @Test
-    void theCountPlanIsAStreamingIndexPlan_onAnUnanalyzedTableAndAnAnalyzedOne() throws Exception {
-        // 11 is a page of 10 plus one; 22 is the bound the distinct count reads for it.
+    /** The texts the gated plans are made for: a whole word, and a typo that only the trigram arm of the gate can match. */
+    private static final String[] GATES = {"qp chunk 7", "chunck"};
+
+    /**
+     * Every label, cap and gate in one table state. The ungated count and the gated count on an UNANALYZED table must
+     * be the streaming index plan. The gated count on an ANALYZED table is not: with a selective gate (the planner
+     * estimates 598 of 40,000 chunk rows pass it) it plans a Hash Join over a sequential scan of the chunk rows and of
+     * the manifest, which reads the collection before it returns a row. That is the critic's S1 of nexus-zk7rw round 1
+     * (the gated count's cost was never planned or measured), found by this test; it is recorded as open work, and what is
+     * held for that shape is only that the cap is still a LIMIT on top and nothing sorts or aggregates.
+     */
+    private void assertAllShapes(String state, boolean gatedStreams) {
         for (String label : new String[] {"rare-x", "body"}) {
             for (int cap : new int[] {11, 22}) {
-                assertStreamingIndexPlan("unanalyzed, " + label + ", cap " + cap, plan(label, cap));
+                assertStreamingIndexPlan(state + ", " + label + ", cap " + cap, plan(label, cap));
+                for (String gate : GATES) {
+                    String what = state + ", " + label + ", cap " + cap + ", gate '" + gate + "'";
+                    String gated = plan(label, cap, gate, false);
+                    if (gatedStreams) {
+                        assertStreamingIndexPlan(what, gated);
+                    } else {
+                        assertThat(gated).as("%s: the cap is a LIMIT at the top of the plan\n%s", what, gated)
+                            .startsWith("Limit");
+                        assertThat(gated).as("%s: nothing sorts or aggregates\n%s", what, gated)
+                            .doesNotContain("Sort").doesNotContain("Aggregate");
+                    }
+                }
             }
         }
+    }
+
+    @Test
+    void theCountPlanIsAStreamingIndexPlan_onAnUnanalyzedTableAndAnAnalyzedOne_withAndWithoutATextGate()
+            throws Exception {
+        // 11 is a page of 10 plus one; 22 is the bound the distinct count reads for it.
+        String unanalyzedPlan = plan("rare-x", 11);
+        assertAllShapes("unanalyzed", true);
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.analyzeTable(su, CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
         }
-        for (String label : new String[] {"rare-x", "body"}) {
-            for (int cap : new int[] {11, 22}) {
-                assertStreamingIndexPlan("analyzed, " + label + ", cap " + cap, plan(label, cap));
-            }
-        }
-        // Control: the pin is not inert. The same statement planned with index scans off (a plan that regressed to
-        // bitmap or sequential access) fails it.
-        assertThatThrownBy(() -> assertStreamingIndexPlan("index scans off", plan("rare-x", 11, true)))
-            .isInstanceOf(AssertionError.class).hasMessageContaining("index scans off");
+        assertAllShapes("analyzed", false);
+        // Non-vacuity: the two phases really were two states (autovacuum is off on the fixture tables, so the first
+        // phase cannot have been analyzed behind the test's back), and the plans differ.
+        assertThat(plan("rare-x", 11)).as("the analyzed plan is not the unanalyzed one").isNotEqualTo(unanalyzedPlan);
+
+        // Controls: the pins are not inert, and each fails for ITS reason.
+        assertThatThrownBy(() -> assertStreamingIndexPlan("index scans off", plan("rare-x", 11, null, true)))
+            .isInstanceOf(AssertionError.class)
+            .hasMessageContaining("index scans off: the manifest is read through an index");
+        String real = plan("rare-x", 11);
+        assertThatThrownBy(() -> assertStreamingIndexPlan("with an aggregate",
+            real.replaceFirst("Limit", "Limit\n  ->  HashAggregate")))
+            .isInstanceOf(AssertionError.class)
+            .hasMessageContaining("with an aggregate: nothing that must read every occurrence before returning one");
+        assertThatThrownBy(() -> assertStreamingIndexPlan("with a seq scan",
+            real.replaceFirst("Index Scan using idx_catalog_chunks_\\w+ on catalog_document_chunks",
+                "Index Scan using idx_catalog_chunks_collection on catalog_document_chunks\n  Seq Scan on catalog_document_chunks")))
+            .isInstanceOf(AssertionError.class)
+            .hasMessageContaining("with a seq scan: no sequential scan of the manifest");
     }
 }
