@@ -316,6 +316,10 @@ here are the ones each pass found on a named page or table.
   for them; a `MEMORY.md` index line counts as used when its linked file is
   read. Where Phase 3 Steps 1-3 or Technical Design 4 say otherwise, this entry
   rules.
+- **2026-11-03, Sam's S-8 minimum (nexus-qo7ie.4 closed).** Phase 2's
+  compliance test counts only measured rules whose index line moved out of the
+  always tier. At least 3 of the 5 must move; with fewer, Phase 2 Step 3
+  records A3 as still assumed rather than tested.
 
 ### Critical Assumptions
 
