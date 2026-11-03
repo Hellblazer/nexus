@@ -735,14 +735,16 @@ _is_controller_or_serial: bool = False
 
 
 _REQUESTED_WORKERS_ATTR = "_nexus_requested_workers"
+_CAPS_READ_ATTR = "_nexus_worker_caps_read"
 
 
-def _derive_worker_count(requested: int) -> tuple[int, list[str], bool]:
-    """The worker count the SysV and memory caps allow for *requested*: ``(count, notes, derived)``.
+def _derive_worker_count(requested: int) -> tuple[int, list[str], frozenset[str]]:
+    """The worker count the SysV and memory caps allow for *requested*: ``(count, notes, read)``.
 
-    ``derived`` is False when neither cap could be read (or none applies on this
-    box); each cap that raises counts as not derived on its own, so one broken probe
-    does not discard the other's clamp. Pure: nothing is applied or printed here.
+    ``read`` names the caps that gave a value (``"sysv"``, ``"memory"``); it is empty
+    when neither could be read (or none applies on this box). Each cap that raises
+    or answers None is left out on its own, so one broken probe does not discard the
+    other's clamp. Pure: nothing is applied or printed here.
     """
     from tests._xdist_cap import (  # noqa: PLC0415 — configure-time helpers
         clamp_numprocesses,
@@ -751,11 +753,11 @@ def _derive_worker_count(requested: int) -> tuple[int, list[str], bool]:
         memory_clamp_note,
     )
 
-    count, notes, derived = requested, [], False
+    count, notes, read = requested, [], set()
     try:
         cap = effective_cap()
         if cap is not None:
-            derived = True
+            read.add("sysv")
             value, note = clamp_numprocesses(requested=count, cap=cap)
             if note is not None:
                 count = value
@@ -765,13 +767,13 @@ def _derive_worker_count(requested: int) -> tuple[int, list[str], bool]:
     try:
         mem_cap = effective_memory_cap()
         if mem_cap is not None:
-            derived = True
+            read.add("memory")
             if count > mem_cap:
                 notes.append(memory_clamp_note(requested=count, cap=mem_cap))
                 count = mem_cap
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
         pass
-    return count, notes, derived
+    return count, notes, frozenset(read)
 
 
 def _clamp_xdist_workers(config, *, announce: bool = True) -> None:
@@ -798,7 +800,12 @@ def _clamp_xdist_workers(config, *, announce: bool = True) -> None:
     try:
         from tests._xdist_cap import set_worker_count  # noqa: PLC0415 — configure-time helper
 
-        count, notes, _derived = _derive_worker_count(requested)
+        count, notes, read = _derive_worker_count(requested)
+        if getattr(config, _CAPS_READ_ATTR, None) is None:
+            try:
+                setattr(config, _CAPS_READ_ATTR, read)
+            except Exception:  # noqa: BLE001 — without the record the re-clamp never raises
+                pass
         if count != requested:
             set_worker_count(config.option, count)
         # Printed, not logged: the operator needs to see this before a
@@ -823,7 +830,10 @@ def _reclamp_xdist_workers_after_lease_wait(config, *, platform: str | None = No
 
     Fail closed: the new count is derived first and applied only if a cap was
     actually read. A probe that fails now (``ipcs`` gone, say) leaves the count
-    the run already had; it never hands a clamped run all its workers back.
+    the run already had; it never hands a clamped run all its workers back. The
+    count may rise only when every cap read at configure time is read again: a
+    SysV probe that fails while the memory cap still answers lowers or keeps the
+    count, never raises it past what the lost cap allowed.
     """
     if not _suite_lease_waited:
         return
@@ -834,9 +844,12 @@ def _reclamp_xdist_workers_after_lease_wait(config, *, platform: str | None = No
     try:
         from tests._xdist_cap import set_worker_count  # noqa: PLC0415 — configure-time helper
 
-        count, _notes, derived = _derive_worker_count(original)
-        if not derived:
+        count, _notes, read = _derive_worker_count(original)
+        if not read:
             return
+        earlier = getattr(config, _CAPS_READ_ATTR, None)
+        if (not isinstance(earlier, frozenset) or not earlier <= read) and isinstance(before, int):
+            count = min(count, before)
         set_worker_count(config.option, count)
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
         return

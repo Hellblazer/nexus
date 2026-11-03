@@ -433,6 +433,43 @@ def test_a_re_read_that_cannot_derive_a_cap_keeps_the_count_the_run_already_had(
     assert config.option.numprocesses == 2 and config.option.tx == ["popen"] * 2
 
 
+@pytest.mark.parametrize("how", ["none", "raises"])
+def test_a_re_read_that_loses_one_cap_never_raises_the_count(
+        gate, headroom, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """Fail closed per cap: the SysV clamp that cut the run is gone, the memory cap still answers.
+
+    The memory cap alone would allow 5; the lost SysV cap allowed 2, so the run keeps 2.
+    """
+    config = _xdist_config(8)
+    gate._clamp_xdist_workers(config)
+    assert config.option.numprocesses == 2
+    monkeypatch.setattr(gate, "_suite_lease_waited", True)
+    monkeypatch.setattr(_xdist_cap, "effective_memory_cap", lambda: 5)
+    if how == "none":
+        headroom["cap"] = None
+    else:
+        def broken() -> int:
+            raise OSError("ipcs vanished")
+
+        monkeypatch.setattr(_xdist_cap, "effective_cap", broken)
+    gate._reclamp_xdist_workers_after_lease_wait(config, platform="linux", env={})
+    assert config.option.numprocesses == 2 and config.option.tx == ["popen"] * 2
+
+
+def test_a_re_read_that_loses_one_cap_still_lowers_the_count(
+        gate, headroom, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Losing a cap never blocks a cut: the memory cap that still answers may lower the count."""
+    config = _xdist_config(8)
+    headroom["cap"] = 6
+    gate._clamp_xdist_workers(config)
+    assert config.option.numprocesses == 6
+    monkeypatch.setattr(gate, "_suite_lease_waited", True)
+    monkeypatch.setattr(_xdist_cap, "effective_memory_cap", lambda: 3)
+    headroom["cap"] = None
+    gate._reclamp_xdist_workers_after_lease_wait(config, platform="linux", env={})
+    assert config.option.numprocesses == 3
+
+
 def test_waiting_for_the_lease_is_what_marks_a_run_as_having_queued(gate, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate, "_suite_lease_waited", False)
     gate._announce_suite_lease_wait("pid 1 (peer)", 0, 1800)

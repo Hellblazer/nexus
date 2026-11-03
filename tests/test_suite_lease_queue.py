@@ -261,6 +261,17 @@ def test_release_leaves_a_lease_that_names_another_pid(lease_root: Path) -> None
     assert (lease / "pid").exists() and (lease / "label").exists(), "released a lease that is not ours"
 
 
+def test_release_leaves_a_peers_lease_whose_pid_is_not_written_yet(lease_root: Path) -> None:
+    """A stale release must not remove a peer's lease caught between its mkdir and its pid write."""
+    release = _suite_lease.acquire("mine", lease_root=lease_root)
+    assert release is not None
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.rename(lease_root / "moved-aside")  # the recovery mv; the old directory keeps its inode
+    lease.mkdir()  # a peer took the path and has not written its pid yet
+    release()
+    assert lease.is_dir(), "released a peer's lease that had no pid yet"
+
+
 def test_release_removes_a_lease_that_names_this_pid(lease_root: Path) -> None:
     release = _suite_lease.acquire("mine", lease_root=lease_root)
     assert release is not None

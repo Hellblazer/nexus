@@ -704,6 +704,12 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
             # Descendants inherit this and skip the lease entirely.
             os.environ[HELD_BY_ENV] = str(os.getpid())
 
+            try:
+                st = lease.stat()
+                taken = (st.st_dev, st.st_ino)
+            except OSError:
+                taken = None
+
             def _release() -> None:
                 os.environ.pop(HELD_BY_ENV, None)
                 try:
@@ -712,6 +718,11 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
                     try:
                         recorded = int((lease / "pid").read_text().strip())
                     except (OSError, ValueError):
+                        # No pid to read: a peer may be between its mkdir and its pid write.
+                        # Only the directory this run created is ours to remove.
+                        st_now = lease.stat()
+                        if taken is None or (st_now.st_dev, st_now.st_ino) != taken:
+                            return
                         recorded = os.getpid()
                     if recorded != os.getpid():
                         return
