@@ -462,6 +462,7 @@ nexus-1v4u7.1
 nexus-1vc0n
 nexus-1vc0n.1
 nexus-1vd4v
+nexus-1vhfj
 nexus-1vogq
 nexus-1vpal
 nexus-1vpal.1
@@ -7280,6 +7281,7 @@ nexus-tacsg
 nexus-tacsg.1
 nexus-tafjk
 nexus-tafjk.1
+nexus-tahj6
 nexus-tao37
 nexus-taseo
 nexus-tawfg
