@@ -1313,11 +1313,52 @@ def test_skip_sandbox_check_restarts_and_logs_its_reason(crs, monkeypatch, passf
     assert "comment-only edit, rerun tonight" in ran[0][-1]
 
 
-@pytest.mark.parametrize("argv", [["--skip-sandbox-check", " "], ["--skip-sandbox-check"]], ids=["blank", "bare"])
+@pytest.mark.parametrize("argv", [["--skip-sandbox-check", " "], ["--skip-sandbox-check"], ["--skip-sandbox-check=  "],
+                                  ["--skip-sandbox", " "], ["--skip-sandbox-ch=\t"]],
+                         ids=["blank", "bare", "equals-blank", "abbrev-blank", "abbrev-equals-tab"])
 def test_skip_sandbox_check_needs_a_reason(crs, monkeypatch, passfile, argv) -> None:
     with pytest.raises(SystemExit) as exc:
         _main(crs, monkeypatch, *argv)
     assert exc.value.code == 2
+
+
+def test_a_reason_cannot_forge_a_log_line(crs, monkeypatch, passfile) -> None:
+    code, _ = _main(crs, monkeypatch, "--skip-sandbox-check", "tired\n12:00:00 RESTART SANDBOX PASSED")
+    assert code == 0
+    log = crs.LOG.read_text(encoding="utf-8")
+    assert "(--skip-sandbox-check: tired 12:00:00 RESTART SANDBOX PASSED)" in log
+    assert not any(ln.startswith("12:00:00 RESTART") for ln in log.splitlines())
+
+
+def test_a_detached_roll_given_a_reason_logs_it_and_rolls(crs, monkeypatch, passfile) -> None:
+    rolled: list = []
+    monkeypatch.setattr(crs, "_roll", lambda *a, **k: rolled.append(1) or 0)
+    monkeypatch.setattr(crs, "footprint_report", lambda *a, **k: [])
+    code, _ = _main(crs, monkeypatch, "--detached", "--resume", "--no-update", "--skip-sandbox-check", "direct call")
+    assert code == 0 and rolled == [1]
+    assert "restarting anyway (detached, --skip-sandbox-check: direct call)" in crs.LOG.read_text(encoding="utf-8")
+
+
+def test_a_copy_with_no_harness_says_so(crs, monkeypatch, passfile, tmp_path) -> None:
+    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
+    monkeypatch.setattr(crs, "harness_sha256", lambda *_a: "")
+    assert "has no sandbox harness beside it" in crs.sandbox_pass_problem(SHA, "2.1.316")
+
+
+def test_harness_sha256_with_no_argument_reads_harness(crs, monkeypatch, tmp_path) -> None:
+    import hashlib  # noqa: PLC0415 -- test-local
+    fake = tmp_path / "run.py"
+    fake.write_bytes(b"harness bytes")
+    monkeypatch.setattr(crs, "HARNESS", fake)
+    assert crs.harness_sha256() == hashlib.sha256(b"harness bytes").hexdigest()
+    monkeypatch.setattr(crs, "HARNESS", tmp_path / "absent.py")
+    assert crs.harness_sha256() == ""
+
+
+def test_the_record_keeps_the_tmux_and_harness_it_is_given(crs, passfile) -> None:
+    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1, tmux="tmux 9.9", harness="z" * 64)
+    rec = json.loads(passfile.read_text(encoding="utf-8"))
+    assert rec["tmux_version"] == "tmux 9.9" and rec["harness_sha256"] == "z" * 64
 
 
 def test_the_detached_roll_checks_the_gate_itself(crs, monkeypatch, passfile) -> None:

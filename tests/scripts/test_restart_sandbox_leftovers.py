@@ -516,3 +516,51 @@ def test_run_scenario_fails_a_rolling_scenario_with_no_mailed_ask_to_check(run, 
     monkeypatch.setattr(run, "RUNNERS", {"roll": lambda sb, crs, a, failures, notes: setattr(sb, "before", {"rs_alpha": {"sessionId": SID}})})
     ok, failures, _ = run.run_scenario("roll", "claude", _Args(), None)
     assert not ok and "withdrawals: no mailed handoff ask found in the log to check" in failures
+
+
+# -- the real withdrawal probe (nexus-wjlbk) --------------------------------------------------
+
+def _probe_crs(tmp_path, *, mailed=True, tid=True, outcome="withdrawn"):
+    from types import SimpleNamespace  # noqa: PLC0415 -- test-local
+    crs = SimpleNamespace(LOG=tmp_path / "operator.log", SENT_ASKS={}, calls=[])
+
+    def mail_ask(s, path, sender, ttl=1200, **kw):
+        crs.calls.append(("mail", crs.LOG))
+        if tid:
+            crs.SENT_ASKS[s["sessionId"]] = "t-probe"
+        return mailed
+
+    def withdraw_ask(sid, tid="", what="handoff ask"):
+        crs.calls.append(("withdraw", crs.LOG))
+        crs.SENT_ASKS.pop(sid, None)
+        return outcome
+
+    crs.mail_ask, crs.withdraw_ask = mail_ask, withdraw_ask
+    return crs
+
+
+@pytest.mark.parametrize(("kw", "stats", "want"), [
+    ({}, '{"available": 0, "claimed": 0, "lapsed": 0, "dead": 0}', None),
+    ({"outcome": "already taken or expired"}, '{"available": 0}', "said 'already taken or expired', not 'withdrawn'"),
+    ({"mailed": False}, '{}', "could not be mailed"),
+    ({"tid": False}, '{}', "printed no tuple id"),
+    ({}, '{"available": 1}', "rows left in the probe's mailbox"),
+    ({}, "not json", "could not be read back"),
+])
+def test_the_withdrawal_probe(run, tmp_path, kw, stats, want) -> None:
+    crs = _probe_crs(tmp_path, **kw)
+    sb = _sandbox(run, tmp_path / "home")
+    sb.real_nx = _fake_nx(tmp_path, stats=stats)
+    failures, notes = [], []
+    run.check_real_withdrawal(sb, crs, failures, notes)
+    if want is None:
+        assert failures == [] and any("withdrawn against the real engine" in n for n in notes)
+    else:
+        assert len(failures) == 1 and want in failures[0], failures
+    assert all(log == sb.log for _, log in crs.calls)  # the script logged to the sandbox's log
+    assert crs.LOG == tmp_path / "operator.log"  # and the module's LOG is put back
+
+
+def test_the_gate_scenario_runs_the_withdrawal_probe() -> None:
+    calls = [ast.unparse(c.func) for c in ast.walk(_function("scenario_gate")) if isinstance(c, ast.Call)]
+    assert "check_real_withdrawal" in calls and "check_sandbox_refusal" in calls

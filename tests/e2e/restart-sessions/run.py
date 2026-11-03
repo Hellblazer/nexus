@@ -85,7 +85,9 @@ handoff; all three then answer their own code word and no other. Exiting Claude 
 its input box, so "the draft survives" means saved and handed on.
 
 Every handoff ask the script mails must be taken back against the real engine: the restart log
-has a withdrawn or already-taken line for each, and the leftover check fails a row left behind.
+has a withdrawn or already-taken line for each, and the leftover check fails a row left behind. In
+a roll the sessions take their asks first, so ``gate`` also mails one ask to a session id nobody
+holds and requires withdraw_ask to answer "withdrawn" with the mailbox left empty.
 
 Continuity is proved from the handoff, not merely observed. Auto memory is off
 (``CLAUDE_CODE_DISABLE_AUTO_MEMORY``, ``autoMemoryEnabled: false``) and the word is given as
@@ -140,6 +142,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 import zlib
 from pathlib import Path
 
@@ -438,6 +441,12 @@ def reply_after(events: list[dict], prompt: str) -> str | None:
     return _text_of((turn[-1].get("message") or {}).get("content")) or None
 
 
+def harness_under_test(crs) -> str:
+    """The harness sha the script under test computes for itself: the run.py beside its resolved
+    checkout, "" for a copy with none (a positive control's copy outside the repo)."""
+    return crs.harness_sha256(Path(SCRIPT).resolve().parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py")
+
+
 def load_script():
     """The oracle's module (its pane readers judge the preconditions)."""
     loader = importlib.machinery.SourceFileLoader("claude_restart_sessions", str(ORACLE))
@@ -650,7 +659,7 @@ class Sandbox:
         # A pass record for the script under test, so each roll goes through the script's sandbox gate
         # (nexus-8zdbu) and is let by it; a copy without the gate ignores it.
         crs.record_sandbox_pass(self.home / crs.SANDBOX_PASS.relative_to(OPERATOR_HOME), crs.script_sha256(SCRIPT),
-                                crs.claude_version(self.claude), [], 0)
+                                crs.claude_version(self.claude), [], 0, harness=harness_under_test(crs))
         floor = crs.release_engine_floor(self.to_version, self.relrepo)
         self.floor = ".".join(map(str, floor))
         self.behind = ".".join(map(str, (floor[0], floor[1], floor[2] - 1) if floor[2] else (floor[0], max(floor[1] - 1, 0), 0)))
@@ -1470,6 +1479,44 @@ def check_sandbox_refusal(sb: Sandbox, crs, failures: list[str]) -> None:
         record.write_bytes(saved)
 
 
+def check_real_withdrawal(sb: Sandbox, crs, failures: list[str], notes: list[str]) -> None:
+    """The script's withdraw_ask against the real engine, on an ask no session can take (nexus-wjlbk):
+    in a roll the sessions take their asks first, so every withdrawal there reads "already taken or
+    expired", which is also what a withdrawal that matched nothing would say. Here mail_ask sends an
+    ask to a fresh session id nobody holds and withdraw_ask must answer "withdrawn", leaving the
+    mailbox empty. The script logs to the sandbox's restart log meanwhile, never the operator's."""
+    sid = str(uuid.uuid4())
+    saved_log = crs.LOG
+    crs.LOG = sb.log
+    crs.SENT_ASKS.pop(sid, None)
+    try:
+        if not crs.mail_ask({"sessionId": sid, "name": "rs_probe"}, "/nonexistent", "restart-sandbox", ttl=300,
+                            body="restart sandbox probe: no session holds this address; it is withdrawn at once",
+                            note="withdrawal probe: mailing an ask no session holds"):
+            failures.append("withdrawal probe: the ask could not be mailed")
+            return
+        if sid not in crs.SENT_ASKS:
+            failures.append("withdrawal probe: nx printed no tuple id for the ask, so it cannot be withdrawn")
+            return
+        outcome = crs.withdraw_ask(sid)
+        if outcome != "withdrawn":
+            failures.append(f"withdrawal probe: withdraw_ask said {outcome!r}, not 'withdrawn'")
+        else:
+            notes.append("withdrawal probe: an ask no session could take was withdrawn against the real engine")
+        try:
+            r = subprocess.run([sb.real_nx, "tuple", "stats", f"mailbox/{sid}", "--json"], capture_output=True,
+                               text=True, timeout=30)
+            st = json.loads(r.stdout) if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            st = None
+        if st is None:
+            failures.append("withdrawal probe: the probe's mailbox could not be read back")
+        elif any(st.get(k, 0) for k in ("available", "claimed", "lapsed", "dead")):
+            failures.append(f"withdrawal probe: rows left in the probe's mailbox: {st}")
+    finally:
+        crs.LOG = saved_log
+
+
 def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -> None:
     spec = sb.spec
     before = boot(sb, failures)
@@ -1478,6 +1525,7 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
         return
     assert sb.engine is not None
     check_sandbox_refusal(sb, crs, failures)
+    check_real_withdrawal(sb, crs, failures, notes)
     runs = (("502", f"engine gate: read of {sb.engine.url}/version failed (",
              f"ABORT: could not read the cloud engine's version from {sb.engine.url}; nothing installed, nothing restarted."),
             (sb.behind, f"engine gate: v{sb.to_version} requires engine {sb.floor}; {sb.engine.url} serves {sb.behind}",
@@ -2049,22 +2097,23 @@ def records_a_pass(chosen: list[str], bad: list[str]) -> bool:
     return not bad and chosen == list(SCENARIOS)
 
 
-def record_full_pass(crs, claude: str, before: tuple[str, str], chosen: list[str], elapsed: float) -> str:
+def record_full_pass(crs, claude: str, before: tuple[str, ...], chosen: list[str], elapsed: float) -> str:
     """Record a full pass for the script's restart gate, if what ran is still what is installed.
 
-    *before* is (script sha256, Claude Code version) read before the first scenario. Returns the
-    line to print; records nothing when the version is unreadable, either value changed during
-    the run, or the write fails.
+    *before* is (script sha256, Claude Code version, tmux version, harness sha256) read before the
+    first scenario. Returns the line to print; records nothing when the version is unreadable, any
+    value changed during the run, or the write fails.
     """
-    sha, version = before
+    sha, version, tmux, harness = before
     if not version:
         return "pass NOT recorded: could not read Claude Code's version"
-    after = (crs.script_sha256(SCRIPT), crs.claude_version(claude))
+    after = (crs.script_sha256(SCRIPT), crs.claude_version(claude), crs.tmux_version(), crs.harness_sha256())
     if after != before:
-        return (f"pass NOT recorded: the script or Claude Code changed during the run "
-                f"(sha {sha[:12]} -> {after[0][:12]}, version {version} -> {after[1]})")
+        return (f"pass NOT recorded: the script, Claude Code, tmux or the harness changed during the run "
+                f"(sha {sha[:12]} -> {after[0][:12]}, version {version} -> {after[1]}, {tmux} -> {after[2]}, "
+                f"harness {harness[:12]} -> {after[3][:12]})")
     try:
-        crs.record_sandbox_pass(crs.SANDBOX_PASS, sha, version, chosen, elapsed)
+        crs.record_sandbox_pass(crs.SANDBOX_PASS, sha, version, chosen, elapsed, tmux=tmux, harness=harness)
     except OSError as e:
         return f"pass NOT recorded: could not write {crs.SANDBOX_PASS} ({e})"
     return f"recorded the pass in {crs.SANDBOX_PASS} (Claude Code {version})"
@@ -2100,7 +2149,7 @@ def main() -> int:
     # The pass covers what the scenarios ran: the script's bytes and Claude Code's version as they
     # were before the first scenario, and only if neither changed by the end (a fast-forward of the
     # primary or a Claude Code auto-update mid-run would otherwise be recorded as tested).
-    tested = (crs.script_sha256(SCRIPT), crs.claude_version(claude))
+    tested = (crs.script_sha256(SCRIPT), crs.claude_version(claude), crs.tmux_version(), crs.harness_sha256())
     for name in chosen:
         ok, failures, _ = run_scenario(name, claude, a, crs)
         results[name] = (ok, len(failures))

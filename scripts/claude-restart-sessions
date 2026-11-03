@@ -226,16 +226,23 @@ def sandbox_pass_problem(script: str, claude: str) -> str:
     if rec.get("tmux_version") != (tmux := tmux_version()):
         return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
                 f"not {tmux or 'an unreadable tmux'}")
-    if rec.get("harness_sha256") != harness_sha256():
+    if rec.get("harness_sha256") != (harness := harness_sha256()):
+        if not harness:
+            return (f"this copy has no sandbox harness beside it ({HARNESS}); install the script as a symlink "
+                    "into a checkout, as the header says")
         return f"the last sandbox pass ({rec.get('passed_at', '?')}) was on another copy of the sandbox harness"
     return ""
 
 
-def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float) -> None:
-    """Write the record sandbox_pass_problem reads (the sandbox harness calls this on a full pass)."""
+def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float,
+                        tmux: str | None = None, harness: str | None = None) -> None:
+    """Write the record sandbox_pass_problem reads (the sandbox harness calls this on a full pass).
+    *tmux* and *harness* default to what is installed now; the harness passes the values it read
+    before its first scenario, so a mid-run change is not recorded as tested."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"script_sha256": script, "claude_version": claude, "tmux_version": tmux_version(),
-           "harness_sha256": harness_sha256(), "scenarios": scenarios,
+    rec = {"script_sha256": script, "claude_version": claude,
+           "tmux_version": tmux_version() if tmux is None else tmux,
+           "harness_sha256": harness_sha256() if harness is None else harness, "scenarios": scenarios,
            "seconds": round(seconds), "passed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(rec, indent=1) + "\n", encoding="utf-8")
@@ -1678,7 +1685,7 @@ def main() -> int:
     ap.add_argument("--no-ready-check", action="store_true",
                     help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
                          "restart sessions in status 'shell'")
-    ap.add_argument("--skip-sandbox-check", metavar="REASON", default="",
+    ap.add_argument("--skip-sandbox-check", metavar="REASON", default=None,
                     help="restart although no sandbox pass covers this script (see above); REASON is logged")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
@@ -1693,7 +1700,10 @@ def main() -> int:
         ap.error("--fresh and --resume are opposites; give one")
     if a.ask_ready and a.status:
         ap.error("--ask-ready and --status are separate steps; run one, then the other")
-    if "--skip-sandbox-check" in sys.argv[1:] and not a.skip_sandbox_check.strip():
+    # Checked on the parsed value, so every spelling argparse accepts (--flag=X, an abbreviation) is
+    # held to it; whitespace is collapsed so a reason cannot forge a second log line.
+    skip_reason = " ".join(a.skip_sandbox_check.split()) if a.skip_sandbox_check is not None else ""
+    if a.skip_sandbox_check is not None and not skip_reason:
         ap.error("--skip-sandbox-check takes a reason, logged with the restart")
     if (a.ask_ready or a.status) and (a.nx or a.fresh or a.resume):
         ap.error("--ask-ready and --status restart nothing; give --nx, --fresh and --resume to the restart itself")
@@ -1711,17 +1721,19 @@ def main() -> int:
         exit_on_stop_signals()
         # The gate holds here too: a direct --detached call must not get around it.
         problem = sandbox_pass_problem(script_sha256(), claude_version())
-        if problem and not a.skip_sandbox_check:
+        if problem and not skip_reason:
             log(f"ABORT: sandbox pass: {problem} (detached). Nothing installed, nothing restarted.")
             return 3
+        if problem:
+            log(f"WARN: {problem}; restarting anyway (detached, --skip-sandbox-check: {skip_reason})")
     if not a.detached:
         # The sandbox pass first: it needs no session's answer, and nothing else is worth asking
         # of a script the sandbox has not passed (nexus-8zdbu).
         problem = sandbox_pass_problem(script_sha256(), claude_version())
         if a.dry_run:
             print(f"sandbox pass: {problem or 'holds for this script, Claude Code, tmux and the harness'}")
-        elif problem and a.skip_sandbox_check:
-            log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check: {a.skip_sandbox_check.strip()})")
+        elif problem and skip_reason:
+            log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check: {skip_reason})")
         elif problem:
             log(f"ABORT: sandbox pass: {problem}. Run tests/e2e/restart-sessions/run.sh (all scenarios) first, "
                 f"or pass --skip-sandbox-check REASON. Nothing installed, nothing restarted.")

@@ -20,46 +20,51 @@ def _run_module():
     return module
 
 
-def _crs(tmp_path, sha: str, version: str | None, *, fail_write: bool = False):
+TMUX, HARNESS = "tmux 3.6a", "h" * 64
+
+
+def _crs(tmp_path, sha: str, version: str | None, *, fail_write: bool = False, tmux: str = TMUX,
+         harness: str = HARNESS):
     written: list[tuple] = []
 
-    def record(path, s, v, chosen, elapsed):
+    def record(path, s, v, chosen, elapsed, tmux=None, harness=None):
         if fail_write:
             raise PermissionError("read-only")
-        written.append((path, s, v, list(chosen)))
+        written.append((path, s, v, list(chosen), tmux, harness))
 
     return SimpleNamespace(script_sha256=lambda *_: sha, claude_version=lambda *_: version,
+                           tmux_version=lambda: tmux, harness_sha256=lambda *_: harness,
                            record_sandbox_pass=record, SANDBOX_PASS=tmp_path / "sandbox-pass.json"), written
 
 
 def test_an_unchanged_run_is_recorded_for_what_ran(tmp_path) -> None:
     crs, written = _crs(tmp_path, "a" * 64, "2.1.316")
-    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316"), ["s1"], 1.0)
+    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316", TMUX, HARNESS), ["s1"], 1.0)
     assert line.startswith("recorded the pass")
-    assert written == [(tmp_path / "sandbox-pass.json", "a" * 64, "2.1.316", ["s1"])]
+    assert written == [(tmp_path / "sandbox-pass.json", "a" * 64, "2.1.316", ["s1"], TMUX, HARNESS)]
 
 
 def test_a_script_changed_during_the_run_is_not_recorded(tmp_path) -> None:
     crs, written = _crs(tmp_path, "b" * 64, "2.1.316")
-    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316"), ["s1"], 1.0)
-    assert line.startswith("pass NOT recorded: the script or Claude Code changed") and written == []
+    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316", TMUX, HARNESS), ["s1"], 1.0)
+    assert line.startswith("pass NOT recorded: the script, Claude Code, tmux or the harness changed") and written == []
 
 
 def test_a_claude_update_during_the_run_is_not_recorded(tmp_path) -> None:
     crs, written = _crs(tmp_path, "a" * 64, "2.1.317")
-    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316"), ["s1"], 1.0)
-    assert line.startswith("pass NOT recorded: the script or Claude Code changed") and written == []
+    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316", TMUX, HARNESS), ["s1"], 1.0)
+    assert line.startswith("pass NOT recorded: the script, Claude Code, tmux or the harness changed") and written == []
 
 
 def test_an_unreadable_version_is_not_recorded(tmp_path) -> None:
     crs, written = _crs(tmp_path, "a" * 64, None)
-    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, None), ["s1"], 1.0)
+    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, None, TMUX, HARNESS), ["s1"], 1.0)
     assert line.startswith("pass NOT recorded: could not read") and written == []
 
 
 def test_a_failed_write_is_reported_not_raised(tmp_path) -> None:
     crs, _ = _crs(tmp_path, "a" * 64, "2.1.316", fail_write=True)
-    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316"), ["s1"], 1.0)
+    line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316", TMUX, HARNESS), ["s1"], 1.0)
     assert line.startswith("pass NOT recorded: could not write")
 
 
@@ -89,7 +94,8 @@ def test_main_reads_what_it_tests_before_the_first_scenario() -> None:
     loop = next(n for n in ast.walk(main) if isinstance(n, ast.For)
                 and "run_scenario" in ast.unparse(n))
     assert tested.lineno < loop.lineno
-    assert "script_sha256" in ast.unparse(tested.value) and "claude_version" in ast.unparse(tested.value)
+    assert all(f in ast.unparse(tested.value)
+               for f in ("script_sha256", "claude_version", "tmux_version", "harness_sha256"))
     assert "records_a_pass(" in ast.unparse(main)
 
 
@@ -99,3 +105,18 @@ def test_each_sandbox_home_is_seeded_with_a_pass_before_any_session_starts() -> 
     calls = [ast.unparse(n.func) for n in ast.walk(setup) if isinstance(n, ast.Call)]
     assert "crs.record_sandbox_pass" in calls
     assert calls.index("crs.record_sandbox_pass") < calls.index("self.tmux")
+
+
+def test_a_tmux_or_harness_change_during_the_run_is_not_recorded(tmp_path) -> None:
+    for kw in ({"tmux": "tmux 3.7"}, {"harness": "x" * 64}):
+        crs, written = _crs(tmp_path, "a" * 64, "2.1.316", **kw)
+        line = _run_module().record_full_pass(crs, "claude", ("a" * 64, "2.1.316", TMUX, HARNESS), ["s1"], 1.0)
+        assert line.startswith("pass NOT recorded: the script, Claude Code, tmux or the harness changed"), kw
+        assert written == []
+
+
+def test_the_sandbox_home_record_carries_the_harness_of_the_script_under_test() -> None:
+    setup = _function("setup", "Sandbox")
+    call = next(n for n in ast.walk(setup)
+                if isinstance(n, ast.Call) and ast.unparse(n.func) == "crs.record_sandbox_pass")
+    assert any(k.arg == "harness" and ast.unparse(k.value) == "harness_under_test(crs)" for k in call.keywords)
