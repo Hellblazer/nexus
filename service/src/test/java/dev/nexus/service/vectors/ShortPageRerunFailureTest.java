@@ -3,6 +3,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.PgSession;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record1;
@@ -89,7 +90,7 @@ class ShortPageRerunFailureTest {
             DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
             // No rebind supplier: a single search, whose bound was set once for the whole transaction (as the env
             // bound is). Its re-run repairs a usable page, so the page in hand is the answer if the repair times out.
-            ctx.execute("SET LOCAL statement_timeout = 100");
+            PgSession.setLocal(ctx, "statement_timeout", "100");
             String timeoutBefore = setting(ctx, "statement_timeout");
             int[] calls = {0};
             Supplier<Result<Record1<Integer>>> fetch = () -> calls[0]++ == 0 ? oneRow(ctx) : slowRow(ctx);
@@ -121,6 +122,7 @@ class ShortPageRerunFailureTest {
             Supplier<Result<Record1<Integer>>> fetch = () -> calls[0]++ == 0 ? oneRow(ctx) : slowRow(ctx);
 
             long deadlinesBefore = PgVectorRepository.shortPageRerunDeadlineCount();
+            long countDeadlinesBefore = PgVectorRepository.shortPageCountDeadlineCount();
             Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(
                 () -> PgVectorRepository.exactOnUnderReturn(ctx, 5, fetch, () -> 100, true, "t", "c"));
 
@@ -128,6 +130,8 @@ class ShortPageRerunFailureTest {
             assertThat(sqlStateOf(thrown)).as("the statement timeout, as a fan-out arm settles it").isEqualTo("57014");
             assertThat(calls[0]).as("the re-run was attempted").isEqualTo(2);
             assertThat(PgVectorRepository.shortPageRerunDeadlineCount() - deadlinesBefore).isEqualTo(1);
+            assertThat(PgVectorRepository.shortPageCountDeadlineCount() - countDeadlinesBefore)
+                .as("a re-run cancel is not counted as a count cancel").isZero();
             c.rollback();
         }
     }
@@ -246,13 +250,44 @@ class ShortPageRerunFailureTest {
             int[] calls = {0};
             Supplier<Result<Record1<Integer>>> fetch = () -> calls[0]++ == 0 ? oneRow(ctx) : threeRows(ctx);
 
+            long countDeadlinesBefore = PgVectorRepository.shortPageCountDeadlineCount();
+            long rerunDeadlinesBefore = PgVectorRepository.shortPageRerunDeadlineCount();
             Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(
                 () -> PgVectorRepository.exactOnUnderReturn(ctx, 5, fetch, () -> 100, true, "t", "c",
                     cap -> slowRow(ctx).size()));
 
             assertThat(sqlStateOf(thrown)).isEqualTo("57014");
             assertThat(calls[0]).as("no re-run after the arm's deadline").isEqualTo(1);
+            assertThat(PgVectorRepository.shortPageCountDeadlineCount() - countDeadlinesBefore)
+                .as("the count met the bound").isEqualTo(1);
+            assertThat(PgVectorRepository.shortPageRerunDeadlineCount() - rerunDeadlinesBefore)
+                .as("a count cancel is not counted as a re-run cancel").isZero();
             c.rollback();
+        }
+    }
+
+    @Test
+    void aCountThatFailsAndWhoseRollbackFailsToo_surfacesTheRollbackFailureCarryingTheCountsOwn() throws Exception {
+        // nexus-8ptg4 review: when the count fails and the rollback of its savepoint fails as well, the count's own
+        // failure must not vanish behind the rollback's. Closing the connection inside the count makes both fail.
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            Supplier<Result<Record1<Integer>>> fetch = () -> oneRow(ctx);
+            IllegalStateException countFailure = new IllegalStateException("the count's own failure");
+
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(
+                () -> PgVectorRepository.exactOnUnderReturn(ctx, 5, fetch, null, true, "t", "c", cap -> {
+                    try {
+                        c.close();
+                    } catch (java.sql.SQLException e) {
+                        throw new IllegalStateException(e);
+                    }
+                    throw countFailure;
+                }));
+
+            assertThat(thrown).as("the rollback failure escapes").isNotNull().isNotSameAs(countFailure);
+            assertThat(thrown.getSuppressed()).as("the count's own failure is not lost").contains(countFailure);
         }
     }
 

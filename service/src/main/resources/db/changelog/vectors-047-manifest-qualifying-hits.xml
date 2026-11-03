@@ -25,7 +25,11 @@
     against manifest_search_<dim> over a matrix of predicates.
 
     KEEP IN STEP. The object below is a copy of manifest_search_<dim>'s (vectors-045); a key added there must be added
-    here, and ManifestQualifyingHitsTest fails when the two disagree on a pushed predicate. A table function (not a
+    here. ManifestObjectParityTest fails when the stored text of the object (from the CROSS JOIN LATERAL that derives
+    the source format through the ) e that closes the lateral building eff, comments and layout aside) differs between
+    manifest_search_384/768/1024 and manifest_qualifying_hits, and ManifestQualifyingHitsTest fails when the two
+    disagree on a pushed predicate. A function that gains another copy of the object is added to the first test's
+    FUNCTIONS list. A table function (not a
     scalar) so the engine inlines it into the calling statement, with the compiled predicate a constant at plan time
     (the engine sets plan_cache_mode = force_custom_plan) and manifest_names_key folding as it does in the search.
 

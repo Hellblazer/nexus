@@ -348,7 +348,8 @@ class ManifestSearchShortPageIntegrationTest {
             new FanoutSettings(1, 60_000, boundMs));
 
         assertThat(PgVectorRepository.shortPageRerunDeadlineCount() - deadlinesBefore)
-            .as("the re-run itself ran into the bound (exact route alone %d ms, bound %d ms)", exactMs, boundMs)
+            .as("one arm deadline was met at the re-run, counted apart from a count's (exact route alone %d ms, "
+                + "bound %d ms)", exactMs, boundMs)
             .isEqualTo(1);
         assertThat(result.perCollection()).hasSize(1);
         assertThat(result.perCollection().get(0).errorKind()).isEqualTo(ArmErrorKind.STATEMENT_TIMEOUT);

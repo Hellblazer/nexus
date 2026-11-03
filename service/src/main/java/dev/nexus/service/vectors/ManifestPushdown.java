@@ -55,13 +55,14 @@ import java.util.Set;
  * chunks with the cap at its 1,000 minimum: 1 of 3 rows found. The repair is {@code
  * PgVectorRepository#exactOnUnderReturn} with {@code rerunWhenShort}: a statement that carries this predicate and
  * returns fewer rows than asked is re-run once exact, unless a bounded manifest count ({@code
- * manifest_qualifying_hits}, vectors-047, nexus-8ptg4) shows the page already holds every chunk the predicate admits. The EXISTS is a correlated SubPlan per HNSW candidate (pinned
- * in PlainSearchTextGatedSearchExplainTest), about 17 microseconds a candidate measured against 3 for the chunk-row
- * filter it replaced. The cost is the per-occurrence object, not the plan shape: building it in the WHERE, which does
- * let PostgreSQL convert the EXISTS to a semi-join, did not change the time and doubled the plan time of a search
- * (the engine inlines the function body on every call). vectors-045 builds only the keys the predicate names, which
- * cuts the cost by about a third; a predicate written as a column test the planner has statistics for would let it
- * drive from the manifest and find a rare label in milliseconds, and is a larger change to the function interface.
+ * manifest_qualifying_hits}, vectors-047, nexus-8ptg4) shows the page already holds every chunk the predicate admits.
+ * The EXISTS is a correlated SubPlan per HNSW candidate (pinned in PlainSearchTextGatedSearchExplainTest), about 17
+ * microseconds a candidate measured against 3 for the chunk-row filter it replaced. The cost is the per-occurrence
+ * object, not the plan shape: building it in the WHERE, which does let PostgreSQL convert the EXISTS to a semi-join,
+ * did not change the time and doubled the plan time of a search (the engine inlines the function body on every call).
+ * vectors-045 builds only the keys the predicate names, which cuts the cost by about a third; a predicate written as a
+ * column test the planner has statistics for would let it drive from the manifest and find a rare label in
+ * milliseconds, and is a larger change to the function interface.
  *
  * <p>The compiled form reuses {@link PgVectorRepository#planWhere}, so the operators, the tolerant number-or-text
  * equality and the three-valued jsonpath rules are the search's own, with one exception: a NUMERIC range on

@@ -7713,10 +7713,14 @@ FROM scope s
             java.util.function.IntUnaryOperator qualifyingUpTo) {
         java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
         ctx.connection(conn -> taken[0] = conn.setSavepoint());
+        // True while the manifest count (not the re-run) is the statement in flight, so an arm deadline is counted
+        // against the one that met it.
+        boolean counting = false;
         try {
             if (qualifyingUpTo != null) {
                 // nexus-8ptg4: ask the manifest, bounded, whether the page already holds every chunk the predicate
                 // admits. The count runs BEFORE index scans are turned off, so it reads the manifest by its keys.
+                counting = true;
                 if (rebindTimeoutMs != null) {
                     PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
                 }
@@ -7729,6 +7733,7 @@ FROM scope s
                     ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
                     return first;
                 }
+                counting = false;
             }
             PgSession.disableIndexScanForExactFallback(ctx);
             if (rebindTimeoutMs != null) {
@@ -7748,8 +7753,11 @@ FROM scope s
                 // budget was already spent, means the arm ran out of time, and the short page in hand is not that
                 // arm's answer: it propagates, and the fan-out settles it as the arm timing out (settleArmFailure),
                 // the same as a first attempt the bound cancels. The transaction is the arm's own and ends with it.
-                SHORT_PAGE_RERUN_DEADLINES.incrementAndGet();
-                log.warn("event=vector_short_page_rerun_deadline tenant={} collection={} indexed_rows={} n_results={} error={}",
+                // The count and the re-run keep separate counters: they cost different things and a bound that
+                // cancels the count says the arm had no room for even the cheap statement.
+                (counting ? SHORT_PAGE_COUNT_DEADLINES : SHORT_PAGE_RERUN_DEADLINES).incrementAndGet();
+                log.warn("event={} tenant={} collection={} indexed_rows={} n_results={} error={}",
+                         counting ? "vector_short_page_count_deadline" : "vector_short_page_rerun_deadline",
                          tenant, collection, first.size(), nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
                 throw e;
             }
@@ -7772,7 +7780,8 @@ FROM scope s
     /**
      * The bounded qualifying count for a short page, or {@link Integer#MAX_VALUE} (unknown: re-run) when the count
      * itself failed for a reason other than the arm's deadline. A failed statement leaves the transaction aborted, so
-     * the savepoint is rolled back first; if that fails too the original failure surfaces, as in the re-run.
+     * the savepoint is rolled back after the failure is logged; if the rollback fails too, that failure escapes with the
+     * count's failure attached as suppressed.
      */
     private static int qualifyingHits(DSLContext ctx, java.util.function.IntUnaryOperator qualifyingUpTo, int cap,
                                       java.sql.Savepoint taken, boolean fanOutArm, String tenant, String collection) {
@@ -7782,9 +7791,16 @@ FROM scope s
             if (fanOutArm && isArmDeadline(e)) {
                 throw e;
             }
-            ctx.connection(conn -> conn.rollback(taken));
+            // Log the count's own failure first, so it is on record whatever the rollback does.
             log.warn("event=vector_short_page_count_failed tenant={} collection={} cap={} error={}",
                      tenant, collection, cap, String.valueOf(e.getMessage()).replace('\n', ' '));
+            try {
+                ctx.connection(conn -> conn.rollback(taken));
+            } catch (RuntimeException rollbackFailure) {
+                // The transaction is unusable and this failure escapes; the count's failure rides along as suppressed.
+                rollbackFailure.addSuppressed(e);
+                throw rollbackFailure;
+            }
             return Integer.MAX_VALUE;
         }
     }
@@ -7886,13 +7902,25 @@ FROM scope s
         return SHORT_PAGE_SKIPS.get();
     }
 
-    /** Count of short-page re-runs (or their count) that hit a fan-out arm's deadline and failed the arm (nexus-8ptg4). */
+    /** Count of short-page exact re-runs that hit a fan-out arm's deadline and failed the arm (nexus-8ptg4). */
     private static final java.util.concurrent.atomic.AtomicLong SHORT_PAGE_RERUN_DEADLINES =
             new java.util.concurrent.atomic.AtomicLong();
 
     /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
     public static long shortPageRerunDeadlineCount() {
         return SHORT_PAGE_RERUN_DEADLINES.get();
+    }
+
+    /**
+     * Count of short-page manifest counts (or their bound rebind) that hit a fan-out arm's deadline and failed the arm
+     * (nexus-8ptg4); apart from {@link #shortPageRerunDeadlineCount()}, which counts the re-run's.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong SHORT_PAGE_COUNT_DEADLINES =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
+    public static long shortPageCountDeadlineCount() {
+        return SHORT_PAGE_COUNT_DEADLINES.get();
     }
 
     /** Count of exact re-runs (nexus-bq06h): an absorption counter, so the belt is measurable. */

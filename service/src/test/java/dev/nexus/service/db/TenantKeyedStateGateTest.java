@@ -613,7 +613,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, CONFIG);
             }
-            // COUNTER (42)
+            // COUNTER (46)
             for (String f : List.of(
                 "Bge768Embedder.onnxInvocationCount",
                 "CatalogRepository.vacuumInProgress",
@@ -645,7 +645,10 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.EXACT_FALLBACKS",
                 "PgVectorRepository.ROUTED_EXACT",
                 "PgVectorRepository.ROUTED_HNSW",
+                "PgVectorRepository.SHORT_PAGE_COUNT_DEADLINES",
                 "PgVectorRepository.SHORT_PAGE_RERUNS",
+                "PgVectorRepository.SHORT_PAGE_RERUN_DEADLINES",
+                "PgVectorRepository.SHORT_PAGE_SKIPS",
                 "PgVectorRepository.existenceSelectCalls",
                 "PgVectorRepository.ownerLookupCalls",
                 "RacedEmbedActivity.RACED_EMBEDS_TOTAL",
