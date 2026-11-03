@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5059
+provisioned_tests = 5062
 tolerance_tests = 0
+# 5059 -> 5062 (nexus-z1d0l.2.1, 2026-11-03): +3 t2_tenant tests in tests/test_rdr189_grown_plan_ttl.py, one journey each (grown
+# TTL and the ttl=0 opt-out, expiry on disuse, use resets the disuse clock). They need the live engine: the PG clock that
+# decides expiry cannot be faked, so they cannot be tenant-free. Merged from six to three to keep the rise down.
 # 5051 -> 5059 (nexus-ov3zi fix round 1, 2026-11-02): +8 t2_tenant tests against the real engine: tests/test_memory_replaces.py +5 (memory_get and
 # `nx memory get` name a quarantined title, the plain not-found, `nx memory list --quarantined` labels replaced and expired rows) and
 # tests/test_memory_rollup.py +3 (a replaced row survives rollup then reap, a replaced-only project has nothing to roll up, the engine

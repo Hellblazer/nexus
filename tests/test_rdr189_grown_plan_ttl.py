@@ -19,9 +19,17 @@ fidelity-import surface (``import_plan`` writes ``created_at`` and
 ``last_used`` verbatim), with margins far from the 30-day boundary (400d /
 200d against 30d, 25d and 1d inside it) so PG/Python skew cannot flip a result.
 Storage is real; only the LLM/planner seams are patched.
+
+What this does NOT drive: the TTL boundary itself. The PG clock cannot be moved, so no test here lets a row
+age across 30 days. Survival is carried by ``last_used`` and ``use_count`` after a matched ``nx_answer`` run
+(the disuse clock resets), and expiry by rows whose disuse age is already far past the TTL. The boundary
+crossing (a row at 29d kept, at 31d dropped) rests on the Java ``PlanRepositoryTest.ttl_*`` tests.
+
+Each test is one journey in one tenant (the python_unit tenant ceiling counts tests that mint one).
 """
 from __future__ import annotations
 
+import copy
 import json
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
@@ -29,7 +37,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nexus.config import _DEFAULTS
 from nexus.db.t2 import T2Database
+from nexus.db.t2.http_plan_library import HttpPlanLibrary
 from nexus.plans.match import Match
 
 pytestmark = pytest.mark.t2_tenant
@@ -76,11 +86,14 @@ async def _drive_nx_answer(db_path, question: str, *, plan_id: int, ttl_days: in
 
     ``plan_id == 0`` takes the plan-miss branch (the grow path); a non-zero
     ``plan_id`` makes ``plan_match`` return that library row (the use path).
-    ``ttl_days`` overrides ``plans.ad_hoc_ttl`` through the config loader.
+    ``load_config`` is pinned to the shipped defaults so the user's own config, ``.nexus.yml`` and ``NX_*``
+    environment cannot move the TTL under test; ``ttl_days`` overrides ``plans.ad_hoc_ttl`` on top of that.
     """
-    from nexus.config import load_config
     from nexus.mcp.core import nx_answer
 
+    config = copy.deepcopy(_DEFAULTS)
+    if ttl_days is not None:
+        config["plans"]["ad_hoc_ttl"] = ttl_days
     matches = [] if plan_id == 0 else [_match(plan_id, question)]
     with ExitStack() as stack:
         stack.enter_context(patch("nexus.mcp_infra.default_db_path", return_value=db_path))
@@ -97,10 +110,7 @@ async def _drive_nx_answer(db_path, question: str, *, plan_id: int, ttl_days: in
         ))
         stack.enter_context(patch("nexus.mcp.core.scratch", return_value="ok"))
         stack.enter_context(patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None))
-        if ttl_days is not None:
-            real = load_config()
-            overridden = {**real, "plans": {**(real.get("plans") or {}), "ad_hoc_ttl": ttl_days}}
-            stack.enter_context(patch("nexus.mcp.core.load_config", return_value=overridden))
+        stack.enter_context(patch("nexus.mcp.core.load_config", return_value=config))
         return await nx_answer(question=question)
 
 
@@ -110,12 +120,13 @@ def _grown_row(db: T2Database, question: str) -> dict:
     return rows[0]
 
 
-_GROWN_TTL = object()
-
-
 def _importer(db: T2Database, grown: dict):
+    """Import rows shaped like *grown* (scope, tags, ttl, verb), backdated by fixed offsets.
+
+    ``permanent=True`` imports the row with ``ttl=None`` instead of the grown row's TTL.
+    """
     def _import(
-        query: str, *, created_days: float, last_used_days: float | None, ttl: object = _GROWN_TTL,
+        query: str, *, created_days: float, last_used_days: float | None, permanent: bool = False,
     ) -> int:
         return db.plans.import_plan(
             project="",
@@ -124,7 +135,7 @@ def _importer(db: T2Database, grown: dict):
             outcome="success",
             tags=grown["tags"],
             scope=grown["scope"],
-            ttl=grown["ttl"] if ttl is _GROWN_TTL else ttl,
+            ttl=None if permanent else grown["ttl"],
             verb=grown.get("verb"),  # the engine rejects a NULL verb (409), as the grown row's is set
             # fts_vector is built from match_text, so a row is findable by search_plans only if it carries one.
             match_text=query,
@@ -144,37 +155,52 @@ def _active_queries(db: T2Database) -> dict[str, set[str]]:
     }
 
 
+def _get(db: T2Database, plan_id: int) -> dict:
+    row = db.plans.get_plan(plan_id)
+    assert row is not None, f"plan {plan_id} is gone"
+    return row
+
+
 class TestGrownPlanCarriesTheTtl:
     @pytest.mark.asyncio
     async def test_plan_miss_grows_a_personal_ttl_row(self, tmp_path):
-        question = "ttlprobe grow default ttl"
-        await _drive_nx_answer(tmp_path / "memory.db", question, plan_id=0)
+        db_path = tmp_path / "memory.db"
+        default_ttl = _DEFAULTS["plans"]["ad_hoc_ttl"]
+        assert default_ttl == 30, "the shipped plans.ad_hoc_ttl default is 30 days"
 
-        with T2Database(tmp_path / "memory.db") as db:
-            row = _grown_row(db, question)
-        tags = (row["tags"] or "").split(",")
-        assert row["scope"] == "personal"
+        # Every save_plan the grow path attempts, recorded while the real method still runs.
+        attempted: list[str] = []
+        real_save = HttpPlanLibrary.save_plan
+
+        def spy(self, *args, **kwargs):
+            attempted.append(str(kwargs.get("query")))
+            return real_save(self, *args, **kwargs)
+
+        with patch.object(HttpPlanLibrary, "save_plan", spy):
+            await _drive_nx_answer(db_path, "ttlprobe grow default ttl", plan_id=0)
+            await _drive_nx_answer(db_path, "ttlprobe grow override ttl", plan_id=0, ttl_days=7)
+            await _drive_nx_answer(db_path, "ttlprobe grow disabled", plan_id=0, ttl_days=0)
+
+        with T2Database(db_path) as db:
+            default_row = _grown_row(db, "ttlprobe grow default ttl")
+            override_row = _grown_row(db, "ttlprobe grow override ttl")
+            # list_plans is TTL-filtered, so an empty answer for the ttl=0 question proves nothing on its own
+            # (and the engine's CHECK ttl_days > 0 would reject a ttl=0 row anyway, which grow swallows).
+            # The opt-out is therefore pinned at the call: grow never attempts the save. The two grown
+            # questions above are the control that the spy sees a save when growth is on.
+            disabled_rows = [r for r in db.plans.list_plans(limit=100) if r["query"] == "ttlprobe grow disabled"]
+
+        tags = (default_row["tags"] or "").split(",")
+        assert default_row["scope"] == "personal"
         assert "ad-hoc" in tags and "grown" in tags
-        assert row["ttl"] == 30, "the default plans.ad_hoc_ttl is 30 days"
+        assert default_row["ttl"] == default_ttl
         # Fresh growth stamps created_at and leaves the row unused.
-        assert not row.get("last_used")
-        assert row.get("use_count", 0) == 0
-
-    @pytest.mark.asyncio
-    async def test_config_override_sets_the_grown_ttl(self, tmp_path):
-        question = "ttlprobe grow override ttl"
-        await _drive_nx_answer(tmp_path / "memory.db", question, plan_id=0, ttl_days=7)
-
-        with T2Database(tmp_path / "memory.db") as db:
-            assert _grown_row(db, question)["ttl"] == 7
-
-    @pytest.mark.asyncio
-    async def test_ttl_zero_opts_out_of_growth(self, tmp_path):
-        question = "ttlprobe grow disabled"
-        await _drive_nx_answer(tmp_path / "memory.db", question, plan_id=0, ttl_days=0)
-
-        with T2Database(tmp_path / "memory.db") as db:
-            assert [r for r in db.plans.list_plans(limit=100) if r["query"] == question] == []
+        assert not default_row.get("last_used")
+        assert default_row.get("use_count", 0) == 0
+        assert override_row["ttl"] == 7, "plans.ad_hoc_ttl overrides the default"
+        assert "ttlprobe grow default ttl" in attempted and "ttlprobe grow override ttl" in attempted
+        assert "ttlprobe grow disabled" not in attempted, "ttl 0 must not attempt a save"
+        assert disabled_rows == []
 
 
 class TestGrownPlanExpiresOnDisuse:
@@ -185,8 +211,7 @@ class TestGrownPlanExpiresOnDisuse:
         await _drive_nx_answer(db_path, grown_q, plan_id=0)
 
         with T2Database(db_path) as db:
-            grown = _grown_row(db, grown_q)
-            imp = _importer(db, grown)
+            imp = _importer(db, _grown_row(db, grown_q))
             # created 400d ago, never used: disuse age 400d > 30d.
             imp("ttlprobe never-used expired", created_days=400, last_used_days=None)
             # created 400d ago, last used 200d ago: disuse age 200d > 30d.
@@ -195,6 +220,8 @@ class TestGrownPlanExpiresOnDisuse:
             # broken query: unused but young (1d), and old but used recently (25d disuse < 30d).
             imp("ttlprobe young unused kept", created_days=1, last_used_days=None)
             imp("ttlprobe old recently-used kept", created_days=400, last_used_days=25)
+            # A permanent row (ttl NULL) is never expired, however old and unused.
+            imp("ttlprobe permanent old", created_days=400, last_used_days=None, permanent=True)
 
             seen = _active_queries(db)
 
@@ -203,23 +230,8 @@ class TestGrownPlanExpiresOnDisuse:
             assert "ttlprobe long-unused expired" not in queries, reader
             assert "ttlprobe young unused kept" in queries, reader
             assert "ttlprobe old recently-used kept" in queries, reader
-            assert grown_q in queries, f"{reader}: the freshly grown row must still be active"
-
-    @pytest.mark.asyncio
-    async def test_permanent_row_is_unaffected_by_disuse(self, tmp_path):
-        db_path = tmp_path / "memory.db"
-        grown_q = "ttlprobe permanent shape source"
-        await _drive_nx_answer(db_path, grown_q, plan_id=0)
-
-        with T2Database(db_path) as db:
-            grown = _grown_row(db, grown_q)
-            _importer(db, grown)(
-                "ttlprobe permanent old", created_days=400, last_used_days=None, ttl=None,
-            )
-            seen = _active_queries(db)
-
-        for reader, queries in seen.items():
             assert "ttlprobe permanent old" in queries, reader
+            assert grown_q in queries, f"{reader}: the freshly grown row must still be active"
 
 
 class TestGrownPlanSurvivesWithUse:
@@ -231,12 +243,12 @@ class TestGrownPlanSurvivesWithUse:
 
         with T2Database(db_path) as db:
             imp = _importer(db, _grown_row(db, grown_q))
-            # Both: created 400d ago (10x the TTL), last used 25d ago (5d from expiry). Identical, so
-            # the only difference between them is that one gets used through nx_answer below.
+            # Both: created 400d ago (10x the TTL), last used 25d ago. Identical, so the only difference
+            # between them is that one gets used through nx_answer below.
             used_id = imp("ttlprobe used by nx_answer", created_days=400, last_used_days=25)
             control_id = imp("ttlprobe control left alone", created_days=400, last_used_days=25)
-            before_used = db.plans.get_plan(used_id)
-            before_control = db.plans.get_plan(control_id)
+            before_used = _get(db, used_id)
+            before_control = _get(db, control_id)
             assert before_used["last_used"] == before_control["last_used"]
             assert before_used["use_count"] == before_control["use_count"] == 0
 
@@ -246,18 +258,15 @@ class TestGrownPlanSurvivesWithUse:
         assert "42" in answer
 
         with T2Database(db_path) as db:
-            used = db.plans.get_plan(used_id)
-            control = db.plans.get_plan(control_id)
-            active = {r["id"] for r in db.plans.list_active_plans(outcome="success")}
+            used = _get(db, used_id)
+            control = _get(db, control_id)
 
         assert used["use_count"] == 1
         assert control["use_count"] == 0
         assert control["last_used"] == before_control["last_used"], "an unused row's clock must not move"
-        # The used row's disuse clock was reset to ~now (PG clock), nowhere near its 25d-old value.
+        # The used row's disuse clock was reset to ~now (PG clock), nowhere near its 25d-old value. That
+        # reset, not the row's 400d-old created_at, is what keeps it inside the TTL from here on.
         used_last = datetime.fromisoformat(str(used["last_used"]).replace("Z", "+00:00"))
         assert abs((datetime.now(UTC) - used_last).total_seconds()) < 600, used["last_used"]
-        # Survival is by disuse, not age: created_at is 400d old against a 30d TTL, yet the row is active
-        # and its created_at is untouched.
-        assert used_id in active and control_id in active
         assert used["created_at"] == before_used["created_at"]
         assert used["ttl"] == 30
