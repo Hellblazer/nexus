@@ -165,6 +165,21 @@ def test_a_custom_path_expands_tilde_and_a_bad_setting_falls_back(tmp_path: Path
         assert md.memory_dir(repo, env=env, home=home) == default, bad
 
 
+def test_a_relative_custom_path_is_ignored_even_when_it_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The relative-path refusal must not lean on is_dir(): here the relative directory
+    # really exists under the cwd, so only the refusal keeps it out.
+    repo = _make_repo(tmp_path)
+    config = tmp_path / "cfg"
+    default = _memdir(config, repo)
+    env = {"CLAUDE_CONFIG_DIR": str(config)}
+    (tmp_path / "relmem").mkdir()
+    monkeypatch.chdir(tmp_path)
+    (config / "settings.json").write_text(json.dumps({"autoMemoryDirectory": "relmem"}))
+    assert md.memory_dir(repo, env=env, home=tmp_path / "home") == default
+
+
 def test_a_missing_directory_or_a_non_repository_returns_none(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     env = {"CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")}  # no projects/<key>/memory beneath it
