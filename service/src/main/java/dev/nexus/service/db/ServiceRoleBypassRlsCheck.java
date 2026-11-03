@@ -32,9 +32,10 @@ import java.util.concurrent.Callable;
  * and the doctor, so this refusal is not folded into it: it asks a different question (is the role the kind this
  * schema's grants are written for) and would make the status boolean mean two things.
  *
- * <p><b>Superusers pass.</b> A SUPERUSER needs no grant, so the missing-DML failure cannot happen to one, and
- * single-role development setups (the bootstrap superuser as {@code NX_DB_USER}, which carries {@code rolbypassrls}
- * too) boot as they did. The refusal is for the role that is BYPASSRLS and not a superuser, the one that fails.
+ * <p><b>Superusers pass, with a WARN.</b> A SUPERUSER needs no grant, so the missing-DML failure cannot happen to
+ * one, and single-role development setups (the bootstrap superuser as {@code NX_DB_USER}, which carries
+ * {@code rolbypassrls} too) boot as they did. RLS does not bind a superuser either, so the pass logs
+ * {@code event=service_role_superuser_isolation_not_enforced} ({@link #superuserWarning}). The refusal is for the role that is BYPASSRLS and not a superuser, the one that fails.
  *
  * <p>Runs on the SERVICE pool, so {@code current_user} IS the role that serves traffic whatever it is called, after
  * the schema migration. Raw SQL is not allowed in this tree; the catalog read goes through jOOQ's DSL.
@@ -69,6 +70,20 @@ public final class ServiceRoleBypassRlsCheck {
     }
 
     /**
+     * The warning for a superuser service role; empty for any other. A superuser passes the BYPASSRLS refusal
+     * (it needs no grant) but row-level security does not bind it either, whether or not {@code rolbypassrls}
+     * is set, so a deployment serving as one has no tenant isolation.
+     */
+    static Optional<String> superuserWarning(RoleFacts facts) {
+        if (!facts.superuser()) {
+            return Optional.empty();
+        }
+        return Optional.of("the role this service connects as, " + facts.role() + ", is a superuser: tenant isolation"
+            + " is not enforced, because row-level security does not bind a superuser. Use a NOSUPERUSER NOBYPASSRLS"
+            + " service role for anything but a single-role development setup (nexus-b1adx).");
+    }
+
+    /**
      * Reads the connected role's attributes through {@code reader} and throws {@link BypassRlsException} when
      * {@link #refusal} says so, or when they cannot be read: a service that cannot tell what role it is does not
      * serve.
@@ -85,6 +100,8 @@ public final class ServiceRoleBypassRlsCheck {
         if (refusal.isPresent()) {
             throw new BypassRlsException(refusal.get());
         }
+        superuserWarning(facts).ifPresent(w ->
+            log.warn("event=service_role_superuser_isolation_not_enforced role={} error=\"{}\"", facts.role(), w));
         log.info("event=service_role_bypassrls_check_ok role={} superuser={} bypassrls={}",
             facts.role(), facts.superuser(), facts.bypassRls());
         return facts;

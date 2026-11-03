@@ -9,9 +9,9 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-3s5r1: the version the check reads off a real server. The test image is pgvector/pgvector:pg17, so the
- * server must pass; the assertion that it is not merely "not refused" is that the version read is at the floor or
- * above and agrees with the major the image name declares.
+ * nexus-3s5r1: the version the check reads off a real server. The test image must pass the floor; the assertion
+ * that it is not merely "not refused" is that the version read is at or above the floor. No upper bound, so a move
+ * of the test image to a later major does not turn this red.
  */
 class PgVersionFloorIntegrationTest {
 
@@ -21,8 +21,8 @@ class PgVersionFloorIntegrationTest {
              var ds = PgContainerHelper.superuserDataSource(pg)) {
             PgVersionFloor.Found found = PgVersionFloor.verifyAtBoot(ds);
             assertThat(found.versionNum()).as("server_version_num of the test image")
-                .isGreaterThanOrEqualTo(PgVersionFloor.MIN_SERVER_VERSION_NUM).isLessThan(180000);
-            assertThat(found.versionText()).as("server_version text").startsWith("17");
+                .isGreaterThanOrEqualTo(PgVersionFloor.MIN_SERVER_VERSION_NUM);
+            assertThat(found.versionText()).as("server_version text").isNotBlank();
         }
     }
 }

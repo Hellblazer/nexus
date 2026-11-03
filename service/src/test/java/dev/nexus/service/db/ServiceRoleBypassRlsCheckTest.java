@@ -36,6 +36,17 @@ class ServiceRoleBypassRlsCheckTest {
     }
 
     @Test
+    void aSuperuserPassesButWithAWarning_namingTheRoleAndThatIsolationIsNotEnforced() {
+        String warn = ServiceRoleBypassRlsCheck.superuserWarning(facts("postgres", true, true)).orElseThrow();
+        assertThat(warn).contains("postgres").contains("superuser").contains("tenant isolation is not enforced");
+        assertThat(ServiceRoleBypassRlsCheck.superuserWarning(facts("root", true, false)))
+            .as("RLS does not bind a superuser whether or not rolbypassrls is set").isPresent();
+        // positive control: a role RLS binds, and a BYPASSRLS non-superuser (refused, not warned), draw no warning
+        assertThat(ServiceRoleBypassRlsCheck.superuserWarning(facts("nexus_svc", false, false))).isEmpty();
+        assertThat(ServiceRoleBypassRlsCheck.superuserWarning(facts("svc_x", false, true))).isEmpty();
+    }
+
+    @Test
     void verifyThrowsOnARefusal_returnsTheFactsOtherwise() {
         assertThatThrownBy(() -> ServiceRoleBypassRlsCheck.verify(() -> facts("svc_x", false, true)))
             .isInstanceOf(ServiceRoleBypassRlsCheck.BypassRlsException.class)

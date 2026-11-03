@@ -320,7 +320,10 @@ run:
    grantees, so a `BYPASSRLS` service role would get no DML grant on any
    tenant leaf or model partition created afterwards, and row-level security
    would not bind it. The message names the fix, `ALTER ROLE <role>
-   NOBYPASSRLS`. A superuser passes (single-role development setups). `NOINHERIT` is
+   NOBYPASSRLS`. A superuser passes (single-role development setups) with a `WARN`
+   (`event=service_role_superuser_isolation_not_enforced`, naming the role): row-level
+   security does not bind a superuser either, so tenant isolation is not enforced for a
+   superuser service role. `NOINHERIT` is
    REQUIRED, not optional decoration — a bring-your-own-Postgres cluster has
    no `bootstrap_superuser` to self-heal it later (unlike the local bundle's
    `_backfill_svc_noinherit`), so a DBA who leaves it off here bakes in the
