@@ -132,7 +132,11 @@ migration_wal_bytes_per_worker = 11038000
 # runAlways grants loop (the table, and its BIGSERIAL id sequence: the attribution of the sixth is inferred from the loop covering ALL
 # SEQUENCES, the total is measured). Measured on chas (scoped substrate run of tests/test_scenario_journeys.py, one worker, lab-m,
 # ddl: migration=2199) on this tree.
-migration_ddl_per_worker = 2199
+# 2199 -> 2201 (2026-11-03): vectors-047-1 (nexus-8ptg4, nexus.manifest_qualifying_hits) adds two DDL statements to a fresh migration:
+# 1 CREATE OR REPLACE FUNCTION and 1 GRANT EXECUTE (the DO post-check is not counted, as in vectors-045). Measured on this tree by a
+# scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker, macOS; the count is
+# identical on Linux): ddl: migration=2201.
+migration_ddl_per_worker = 2201
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

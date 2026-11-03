@@ -54,7 +54,8 @@ import java.util.Set;
  * reached, a SHORT page that is not empty, which the empty-page re-run (nexus-bq06h) never repaired. Measured on 21,000
  * chunks with the cap at its 1,000 minimum: 1 of 3 rows found. The repair is {@code
  * PgVectorRepository#exactOnUnderReturn} with {@code rerunWhenShort}: a statement that carries this predicate and
- * returns fewer rows than asked is re-run once exact. The EXISTS is a correlated SubPlan per HNSW candidate (pinned
+ * returns fewer rows than asked is re-run once exact, unless a bounded manifest count ({@code
+ * manifest_qualifying_hits}, vectors-047, nexus-8ptg4) shows the page already holds every chunk the predicate admits. The EXISTS is a correlated SubPlan per HNSW candidate (pinned
  * in PlainSearchTextGatedSearchExplainTest), about 17 microseconds a candidate measured against 3 for the chunk-row
  * filter it replaced. The cost is the per-occurrence object, not the plan shape: building it in the WHERE, which does
  * let PostgreSQL convert the EXISTS to a semi-join, did not change the time and doubled the plan time of a search

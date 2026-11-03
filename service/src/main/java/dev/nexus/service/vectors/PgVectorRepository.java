@@ -87,6 +87,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
 // nexus-p89h4 / nexus-6pfgb.25 (vectors-041): the one search function that also tests an EXISTS on the catalog
 // manifest, serving plain search, the dense text gate and the selective chash set.
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_QUALIFYING_HITS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_768;
@@ -1536,7 +1537,7 @@ public final class PgVectorRepository {
 
         Result<? extends Record> result = runPlainSearchStatement(
             tenant, model, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false, null,
-            chashAllow != null, chashAllow == null && wherePlan.manifest() != null);
+            chashAllow != null, chashAllow == null && wherePlan.manifest() != null ? wherePlan : null);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
@@ -1650,7 +1651,7 @@ public final class PgVectorRepository {
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
         return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
-                                       rebindBeforeExactRerun, null, false, false);
+                                       rebindBeforeExactRerun, null, false, null);
     }
 
     /**
@@ -1659,9 +1660,10 @@ public final class PgVectorRepository {
      * @param forceExact when true the cardinality router is bypassed and the statement runs the exact route
      *        (index scans off), whatever the collections hold: the {@code chash_allow} search, whose statement
      *        {@code fn} ranks a named set of rows and must not walk the HNSW index (nexus-jypmj)
-     * @param manifestPredicate when true {@code fn} is {@code manifest_search_<dim>} with a predicate (a label,
-     *        title, content_type or catalog-meta filter inside the scan): a page the HNSW walk fills only in part is
-     *        then re-run exact, see {@link #exactOnUnderReturn} (nexus-6pfgb.61)
+     * @param manifestWhere non-null when {@code fn} is {@code manifest_search_<dim>} with a predicate (a label,
+     *        title, content_type or catalog-meta filter inside the scan), the plan it was built from: a page the HNSW
+     *        walk fills only in part is then re-run exact unless the manifest count shows it complete, see {@link
+     *        #exactOnUnderReturn} (nexus-6pfgb.61, nexus-8ptg4)
      */
     private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
                                                              int dim, String[] colls,
@@ -1670,7 +1672,7 @@ public final class PgVectorRepository {
                                                              boolean rebindBeforeExactRerun,
                                                              ArmPhases phases,
                                                              boolean forceExact,
-                                                             boolean manifestPredicate) {
+                                                             WherePlan manifestWhere) {
         final long setupStartNanos = System.nanoTime();
         // RDR-227 Step 1: a statement over exactly one collection that has no valid per-collection index walks
         // the shared leaf index, filtered down to that collection, and stops at the first rows the filter
@@ -1764,7 +1766,9 @@ public final class PgVectorRepository {
                     // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
                     // exactOnUnderReturn for the nexus-bq06h exact fallback.
                     result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
-                                             manifestPredicate, tenant, String.join(",", colls));
+                                             manifestWhere != null, tenant, String.join(",", colls),
+                                             manifestWhere == null ? null
+                                                 : manifestQualifying(ctx, colls, manifestWhere, model, tenant));
                 }
                 completed = true;
                 return result;
@@ -3186,7 +3190,8 @@ public final class PgVectorRepository {
                 run.limiter = bound.limiter();
                 run.boundMs = bound.timeoutMs();
                 return bound.timeoutMs();
-            }, true, run.phases, chashAllow != null, chashAllow == null && wherePlan.manifest() != null));
+            }, true, run.phases, chashAllow != null,
+                chashAllow == null && wherePlan.manifest() != null ? wherePlan : null));
         } finally {
             armGate.release();
         }
@@ -3734,7 +3739,8 @@ public final class PgVectorRepository {
         if (wherePlan.manifest() != null) {
             return exactSelectFrom(ctx, nResults,
                 manifestSearchFn(dim, queryVec, gateQueryText, null, colls, wherePlan, nResults, model, tenant),
-                rebind ? statementTimeoutMs : null, true, tenant, String.join(",", colls));
+                rebind ? statementTimeoutMs : null, true, tenant, String.join(",", colls),
+                manifestQualifying(ctx, colls, wherePlan, model, tenant));
         }
         org.jooq.Table<?> hnswFirstFn = switch (dim) {
             case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
@@ -7637,15 +7643,20 @@ FROM scope s
      * predicate ({@code manifest_search_<dim>}): there the predicate runs inside the HNSW scan, which stops at
      * {@code hnsw.max_scan_tuples} (or its memory budget), so a rare label whose chunks rank past the cap yields the
      * ones the walk reached and silently drops the rest. A page that is short because the filter genuinely matches
-     * fewer rows is indistinguishable from it at this point, so it pays the re-run too: ONE exact statement over a
-     * collection the router sent down the HNSW route (more than the router threshold, 20,000 rows by default), the
-     * same cost class as the walk that came up short, which had to run to the cap to learn it could not fill the
-     * page. Below the threshold the router already ran the exact plan and this is never reached.
+     * fewer rows looks the same at this point, so a bounded manifest count tells them apart (nexus-8ptg4, {@link
+     * #manifestQualifying}): if the chunks the predicate admits are no more than the rows already on the page, the
+     * page is complete and the re-run is skipped. Otherwise the re-run is ONE exact statement over a collection the
+     * router sent down the HNSW route (more than the router threshold, 20,000 rows by default), the same cost class
+     * as the walk that came up short. Measured at 220,000 chunks: the re-run 3.6-4.0 s, the count 610 ms when the
+     * filter admits a few chunks and under 12 ms when it admits more than the cap. Below the threshold the router
+     * already ran the exact plan and this is never reached.
      *
      * <p>The empty case keeps its contract (the re-run's failure propagates). The short-page re-run is a
      * REPAIR of a page that is already usable, so it runs under a savepoint and a failure of it (a statement timeout
      * on a very large collection, most likely) returns the page in hand and logs, instead of turning a partial
-     * answer into an error.
+     * answer into an error. The one failure it does not absorb is a fan-out arm's deadline (nexus-8ptg4): with a
+     * {@code rebindTimeoutMs}, a re-run (or manifest count) that the arm's bound cancels, or that the supplier refuses
+     * because the budget is spent, propagates, so the fan-out marks the arm timed out instead of serving the short page.
      */
     private static <R extends Result<? extends Record>> R exactOnUnderReturn(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
@@ -7661,13 +7672,28 @@ FROM scope s
     static <R extends Result<? extends Record>> R exactOnUnderReturn(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
             java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection) {
+        return exactOnUnderReturn(ctx, nResults, fetch, rebindTimeoutMs, rerunWhenShort, tenant, collection, null);
+    }
+
+    /**
+     * As above; {@code qualifyingUpTo} (nexus-8ptg4) tells a page that is short because the filter genuinely matches
+     * few rows from one the scan cut short. Given a cap it returns how many chunks the statement's manifest predicate
+     * admits, counted only up to the cap, and it must never under-count (it may over-count). The short page is re-run
+     * only if that count exceeds the rows already on the page; at or below it the page holds every qualifying chunk
+     * and the O(collection) re-run has nothing to add. Null keeps the re-run unconditional. See {@link
+     * #manifestQualifying}.
+     */
+    static <R extends Result<? extends Record>> R exactOnUnderReturn(
+            DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
+            java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection,
+            java.util.function.IntUnaryOperator qualifyingUpTo) {
         R first = fetch.get();
         boolean empty = first.isEmpty();
         if (!empty && !(rerunWhenShort && first.size() < nResults)) {
             return first;
         }
         if (!empty) {
-            return shortPageRerun(ctx, nResults, fetch, rebindTimeoutMs, first, tenant, collection);
+            return shortPageRerun(ctx, nResults, fetch, rebindTimeoutMs, first, tenant, collection, qualifyingUpTo);
         }
         PgSession.disableIndexScanForExactFallback(ctx);
         if (rebindTimeoutMs != null) {
@@ -7683,10 +7709,27 @@ FROM scope s
     /** The exact re-run of a short, non-empty page; see {@link #exactOnUnderReturn}. */
     private static <R extends Result<? extends Record>> R shortPageRerun(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
-            java.util.function.IntSupplier rebindTimeoutMs, R first, String tenant, String collection) {
+            java.util.function.IntSupplier rebindTimeoutMs, R first, String tenant, String collection,
+            java.util.function.IntUnaryOperator qualifyingUpTo) {
         java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
         ctx.connection(conn -> taken[0] = conn.setSavepoint());
         try {
+            if (qualifyingUpTo != null) {
+                // nexus-8ptg4: ask the manifest, bounded, whether the page already holds every chunk the predicate
+                // admits. The count runs BEFORE index scans are turned off, so it reads the manifest by its keys.
+                if (rebindTimeoutMs != null) {
+                    PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
+                }
+                int hits = qualifyingHits(ctx, qualifyingUpTo, first.size() + 1, taken[0], rebindTimeoutMs != null,
+                                          tenant, collection);
+                if (hits <= first.size()) {
+                    SHORT_PAGE_SKIPS.incrementAndGet();
+                    log.info("event=vector_short_page_complete tenant={} collection={} page_rows={} qualifying={} n_results={}",
+                             tenant, collection, first.size(), hits, nResults);
+                    ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
+                    return first;
+                }
+            }
             PgSession.disableIndexScanForExactFallback(ctx);
             if (rebindTimeoutMs != null) {
                 PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
@@ -7699,6 +7742,17 @@ FROM scope s
             ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
             return exact.size() >= first.size() ? exact : first;
         } catch (RuntimeException e) {
+            if (rebindTimeoutMs != null && isArmDeadline(e)) {
+                // nexus-8ptg4: a fan-out arm hands in a rebind supplier, and the bound it sets is the arm's remaining
+                // request or fan-out budget. A re-run that bound cancelled, or that the supplier refused because the
+                // budget was already spent, means the arm ran out of time, and the short page in hand is not that
+                // arm's answer: it propagates, and the fan-out settles it as the arm timing out (settleArmFailure),
+                // the same as a first attempt the bound cancels. The transaction is the arm's own and ends with it.
+                SHORT_PAGE_RERUN_DEADLINES.incrementAndGet();
+                log.warn("event=vector_short_page_rerun_deadline tenant={} collection={} indexed_rows={} n_results={} error={}",
+                         tenant, collection, first.size(), nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
+                throw e;
+            }
             try {
                 ctx.connection(conn -> {
                     conn.rollback(taken[0]);
@@ -7713,6 +7767,60 @@ FROM scope s
                      tenant, collection, first.size(), nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
             return first;
         }
+    }
+
+    /**
+     * The bounded qualifying count for a short page, or {@link Integer#MAX_VALUE} (unknown: re-run) when the count
+     * itself failed for a reason other than the arm's deadline. A failed statement leaves the transaction aborted, so
+     * the savepoint is rolled back first; if that fails too the original failure surfaces, as in the re-run.
+     */
+    private static int qualifyingHits(DSLContext ctx, java.util.function.IntUnaryOperator qualifyingUpTo, int cap,
+                                      java.sql.Savepoint taken, boolean fanOutArm, String tenant, String collection) {
+        try {
+            return qualifyingUpTo.applyAsInt(cap);
+        } catch (RuntimeException e) {
+            if (fanOutArm && isArmDeadline(e)) {
+                throw e;
+            }
+            ctx.connection(conn -> conn.rollback(taken));
+            log.warn("event=vector_short_page_count_failed tenant={} collection={} cap={} error={}",
+                     tenant, collection, cap, String.valueOf(e.getMessage()).replace('\n', ' '));
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    /**
+     * The bounded count of chunks a manifest predicate admits for {@link #exactOnUnderReturn}'s short-page check
+     * (nexus-8ptg4): {@code manifest_qualifying_hits} (vectors-047) over the statement's own collections, model,
+     * tenant, chunk-row where and manifest predicate, at most {@code cap} rows. It never under-counts, so a page
+     * with as many rows as this count has every qualifying chunk. The text gate of a hybrid statement is not
+     * applied, which can only raise the count.
+     */
+    private static java.util.function.IntUnaryOperator manifestQualifying(DSLContext ctx, String[] colls,
+                                                                         WherePlan wherePlan, String model,
+                                                                         String tenant) {
+        ManifestPushdown.Plan m = wherePlan.manifest();
+        return cap -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
+                colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
+                cap, model, tenant)).fetch().size();
+    }
+
+    /**
+     * Whether {@code t} is a fan-out arm's deadline: the statement bound cancelling a statement (SQLSTATE 57014), or
+     * the arm's budget refused in its typed shape ({@link FanoutBudgetSpentException}, {@link
+     * RequestDeadlineExceededException}), found anywhere in the cause chain.
+     */
+    private static boolean isArmDeadline(Throwable t) {
+        int depth = 0;
+        for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof FanoutBudgetSpentException || c instanceof RequestDeadlineExceededException) {
+                return true;
+            }
+            if (c instanceof java.sql.SQLException sql && QUERY_CANCELED.equals(sql.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -7746,8 +7854,15 @@ FROM scope s
     private static <R extends Record> Result<R> exactSelectFrom(
             DSLContext ctx, int nResults, org.jooq.Table<R> fn,
             java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection) {
+        return exactSelectFrom(ctx, nResults, fn, rebindTimeoutMs, rerunWhenShort, tenant, collection, null);
+    }
+
+    private static <R extends Record> Result<R> exactSelectFrom(
+            DSLContext ctx, int nResults, org.jooq.Table<R> fn,
+            java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection,
+            java.util.function.IntUnaryOperator qualifyingUpTo) {
         return exactOnUnderReturn(ctx, nResults, () -> ctx.selectFrom(fn).fetch(), rebindTimeoutMs, rerunWhenShort,
-                                  tenant, collection);
+                                  tenant, collection, qualifyingUpTo);
     }
 
     /** Count of exact re-runs of a short, non-empty page that carried a manifest predicate (nexus-6pfgb.61). */
@@ -7757,6 +7872,27 @@ FROM scope s
     /** Package-visible for tests, same shape as {@link #exactFallbackCount()}. */
     public static long shortPageRerunCount() {
         return SHORT_PAGE_RERUNS.get();
+    }
+
+    /**
+     * Count of short pages NOT re-run because the manifest count showed the page already held every qualifying chunk
+     * (nexus-8ptg4).
+     */
+    private static final java.util.concurrent.atomic.AtomicLong SHORT_PAGE_SKIPS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
+    public static long shortPageSkipCount() {
+        return SHORT_PAGE_SKIPS.get();
+    }
+
+    /** Count of short-page re-runs (or their count) that hit a fan-out arm's deadline and failed the arm (nexus-8ptg4). */
+    private static final java.util.concurrent.atomic.AtomicLong SHORT_PAGE_RERUN_DEADLINES =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
+    public static long shortPageRerunDeadlineCount() {
+        return SHORT_PAGE_RERUN_DEADLINES.get();
     }
 
     /** Count of exact re-runs (nexus-bq06h): an absorption counter, so the belt is measurable. */

@@ -8,6 +8,8 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.PgVectorRepository.ArmErrorKind;
+import dev.nexus.service.vectors.PgVectorRepository.FanoutSettings;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -47,8 +49,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>What this class pins: that page IS short without the re-run (the spike's finding, recorded in the bead), that
  * the re-run makes it complete, that a scan the cap did not truncate pays no re-run, that a filter which genuinely
- * matches fewer rows than asked does pay one exact re-run and returns the same rows, and that nothing re-runs for a
- * statement with no manifest predicate.
+ * matches fewer rows than asked pays none either (nexus-8ptg4: the bounded manifest count shows the page complete) and
+ * returns the same rows, that a starved page with fewer qualifying chunks than the statement asks for still re-runs, that
+ * a fan-out arm whose re-run is cancelled is marked timed out, and that nothing re-runs for a statement with no
+ * manifest predicate.
  *
  * <p>{@code spike_measurements} prints the timings the bead records (the walk, the exact re-run, the common label, the
  * chunk-row filter). It asserts nothing, so it runs only with {@code -Dnx.spike=true}; the pins do the asserting. The
@@ -223,28 +227,39 @@ class ManifestSearchShortPageIntegrationTest {
         return PgVectorRepository.shortPageRerunCount();
     }
 
+    private static long skips() {
+        return PgVectorRepository.shortPageSkipCount();
+    }
+
     @Test
     void aRareLabelPastTheScanCap_isRepairedByOneExactRerun() {
         PgSession.overrideScanBudgetForTests(1000, 100);
         long before = reruns();
+        long skipsBefore = skips();
 
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, rare());
 
-        // Without the re-run this page held ONE row, the rank-5 chunk (spike_measurements, rows=1).
+        // Without the re-run this page held ONE row, the rank-5 chunk (spike_measurements, rows=1). The filter admits
+        // THREE chunks, fewer than the 40 the statement asks for, and the page is still starved: the discriminator
+        // compares the manifest count with the page (1 row, 3 qualifying), not with the widened n.
         assertThat(ids(rows)).containsExactlyElementsOf(rareChashes());
         assertThat(reruns() - before).isEqualTo(1);
+        assertThat(skips() - skipsBefore).isZero();
     }
 
     @Test
-    void aFilterThatGenuinelyMatchesFewRows_paysOneExactRerunAndReturnsTheSameRows() {
-        // The default budget walks all 21,000 tuples, so the three rows are all there are; the page is still short,
-        // which is all the engine can see, and it is re-run once.
+    void aFilterThatGenuinelyMatchesFewRows_isNotRerun_andReturnsTheSameRows() {
+        // nexus-8ptg4. The default budget walks all 21,000 tuples, so the three rows are all there are; the page is
+        // short because the filter admits three chunks, and the manifest count (3, against a page of 3) shows it
+        // complete. Before the discriminator this page paid one O(collection) exact re-run for nothing.
         long before = reruns();
+        long skipsBefore = skips();
 
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, rare());
 
         assertThat(ids(rows)).containsExactlyElementsOf(rareChashes());
-        assertThat(reruns() - before).isEqualTo(1);
+        assertThat(reruns() - before).isZero();
+        assertThat(skips() - skipsBefore).isEqualTo(1);
     }
 
     @Test
@@ -252,11 +267,13 @@ class ManifestSearchShortPageIntegrationTest {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("section_type", "body");
         long before = reruns();
+        long skipsBefore = skips();
 
         assertThat(vec.search(TENANT, QUERY, List.of(COLLECTION), 10, body)).hasSize(10);
         assertThat(vec.search(TENANT, QUERY, List.of(COLLECTION), 10, null)).hasSize(10);
 
         assertThat(reruns() - before).isZero();
+        assertThat(skips() - skipsBefore).as("a full page is not even asked").isZero();
     }
 
     @Test
@@ -285,5 +302,56 @@ class ManifestSearchShortPageIntegrationTest {
         var perCollection = vec.searchPerCollection(TENANT, QUERY, List.of(COLLECTION), 10, 10, null, rare(), false).rows();
         assertThat(ids(perCollection)).containsExactlyElementsOf(rareChashes());
         assertThat(reruns() - before).isEqualTo(2);
+    }
+
+    @Test
+    void theHybridDenseBranch_andThePerCollectionArm_skipTheRerunForAGenuinelyShortPage() {
+        // The default budget walks every tuple: the three rows are all the filter admits.
+        long before = reruns();
+        long skipsBefore = skips();
+
+        var hybrid = vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLLECTION), 10, rare(), false, 1).value();
+        assertThat(ids(hybrid)).containsExactlyInAnyOrderElementsOf(rareChashes());
+        var perCollection = vec.searchPerCollection(TENANT, QUERY, List.of(COLLECTION), 10, 10, null, rare(), false).rows();
+        assertThat(ids(perCollection)).containsExactlyElementsOf(rareChashes());
+
+        assertThat(reruns() - before).isZero();
+        assertThat(skips() - skipsBefore).isEqualTo(2);
+    }
+
+    /** Median milliseconds of {@code runs} timed calls. */
+    private static long medianMs(int runs, Runnable r) {
+        long[] ms = new long[runs];
+        for (int i = 0; i < runs; i++) {
+            long start = System.nanoTime();
+            r.run();
+            ms[i] = (System.nanoTime() - start) / 1_000_000;
+        }
+        java.util.Arrays.sort(ms);
+        return ms[runs / 2];
+    }
+
+    @Test
+    void aFanOutArmWhoseRerunRunsIntoItsBound_isMarkedTimedOut_notServedAShortPage() {
+        // nexus-8ptg4. A starved arm (the scan cap reaches 1 of 3 rows) re-runs exact under the arm's own statement
+        // bound. The bound is calibrated against this box: a fraction of what the exact route alone costs, so the walk
+        // and the manifest count fit inside it and the re-run does not. Before the fix the cancelled re-run was
+        // swallowed and the arm returned its one-row page as if the answer were complete.
+        PgSession.overrideSearchExactMaxRowsForTests(1_000_000);
+        long exactMs = medianMs(3, () -> vec.search(TENANT, QUERY, List.of(COLLECTION), 10, rare()));
+        PgSession.resetSearchExactMaxRowsForTests();
+        PgSession.overrideScanBudgetForTests(1000, 100);
+        int boundMs = (int) Math.max(60, exactMs * 2 / 5);
+        long deadlinesBefore = PgVectorRepository.shortPageRerunDeadlineCount();
+
+        var result = vec.searchPerCollection(TENANT, QUERY, List.of(COLLECTION), 10, 10, null, rare(), false,
+            new FanoutSettings(1, 60_000, boundMs));
+
+        assertThat(PgVectorRepository.shortPageRerunDeadlineCount() - deadlinesBefore)
+            .as("the re-run itself ran into the bound (exact route alone %d ms, bound %d ms)", exactMs, boundMs)
+            .isEqualTo(1);
+        assertThat(result.perCollection()).hasSize(1);
+        assertThat(result.perCollection().get(0).errorKind()).isEqualTo(ArmErrorKind.STATEMENT_TIMEOUT);
+        assertThat(result.rows()).as("no short page is served as the arm's answer").isEmpty();
     }
 }

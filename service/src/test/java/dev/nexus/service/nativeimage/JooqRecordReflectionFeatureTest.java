@@ -288,7 +288,9 @@ class JooqRecordReflectionFeatureTest {
     // table nexus.request_ledger_tenants, one generated Record type (RequestLedgerTenantsRecord), +1.
     // 124 -> 125: nexus-mtheb.4, telemetry-018-agent-dispatches.xml added the table nexus.agent_dispatches (one row
     // per agent dispatch with its T1 put count), one generated Record type (AgentDispatchesRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 125;
+    // 125 -> 126: nexus-8ptg4, vectors-047-manifest-qualifying-hits.xml added nexus.manifest_qualifying_hits, a RETURNS
+    // TABLE function, one generated Record type (ManifestQualifyingHitsRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 126;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

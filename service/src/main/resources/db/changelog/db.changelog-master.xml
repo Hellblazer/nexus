@@ -1972,6 +1972,14 @@
     <include file="db/changelog/vectors-046-request-ledger-tenants.xml"/>
 
     <!--
+        Bead nexus-8ptg4 (RDR-236 A8): nexus.manifest_qualifying_hits, a bounded never-under-counting count of the chunks a
+        manifest predicate admits, so a genuinely short page is not re-run exact. One table function and its nexus_svc
+        grant, no DATA EFFECT. After vectors-046 (the vectors tail), before tuples-012 and the grants-nexus-svc.xml runAlways
+        block.
+    -->
+    <include file="db/changelog/vectors-047-manifest-qualifying-hits.xml"/>
+
+    <!--
         Bead nexus-onjvw: tuples-012-1 deletes every ledger/* tuple (the retired RDR-205 v1 session ledger) with its
         nexus.tuple_deliveries and nexus.tuple_claim_log rows, across all tenants, FORCE RLS toggled around the
         DELETEs. DATA EFFECT, irreversible (stated in the changeset). After vectors-046 (current tail), before the
