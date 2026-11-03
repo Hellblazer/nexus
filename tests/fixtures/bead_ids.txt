@@ -764,6 +764,7 @@ nexus-3h0u6.1
 nexus-3hc9z
 nexus-3ihdg
 nexus-3ihdg.1
+nexus-3ihve
 nexus-3ioz2
 nexus-3ioz2.1
 nexus-3j6b
@@ -2117,6 +2118,7 @@ nexus-8o7ae.1
 nexus-8o9pm
 nexus-8o9pm.1
 nexus-8od4
+nexus-8ofx8
 nexus-8ool4
 nexus-8ooxn
 nexus-8ooxn.1
@@ -6586,6 +6588,7 @@ nexus-qo7ie.27
 nexus-qo7ie.28
 nexus-qo7ie.29
 nexus-qo7ie.3
+nexus-qo7ie.30
 nexus-qo7ie.4
 nexus-qo7ie.5
 nexus-qo7ie.6
@@ -7992,6 +7995,7 @@ nexus-w771r.1
 nexus-w7sg
 nexus-w82up
 nexus-w84ho
+nexus-w8dzp
 nexus-w8lg1
 nexus-w8lg1.1
 nexus-w8ug5
@@ -8308,6 +8312,7 @@ nexus-x6kdz.1
 nexus-x6pr
 nexus-x6pr.1
 nexus-x6qc7
+nexus-x6r1n
 nexus-x6s5k
 nexus-x70wg
 nexus-x75kg

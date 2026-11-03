@@ -7943,7 +7943,10 @@ def plan_save(
     )] = "",
     project: Annotated[str, Field(description="Project namespace for scoping (e.g. \"nexus\").")] = "",
     outcome: Annotated[str, Field(description="Plan outcome: \"success\" or \"partial\".")] = "success",
-    tags: Annotated[str, Field(description="Comma-separated tags (e.g. operation types used).")] = "",
+    tags: Annotated[str, Field(description=(
+        "Comma-separated tags (e.g. operation types used). The provenance tags `grown` and "
+        "`builtin-template` are removed: only the grow site and the seed loader set them."
+    ))] = "",
     ttl: Annotated[int | None, Field(description="Time-to-live in days. None (default) is permanent.")] = None,
     scope_tags: Annotated[str, Field(
         description=(
@@ -7973,6 +7976,11 @@ def plan_save(
       `$name` in a step's args, is refused.
     - An `answer_kind` key in `plan_json` is removed before the save, and
       the reply says so: only seeded templates declare an answer kind.
+    - The provenance tags `grown` and `builtin-template` are removed from
+      `tags` before the save (they are logged and the reply names them):
+      only the plan-grow site and the seed loader earn them. A plan saved
+      here declares nothing and reads as unattested, so `nx_answer` does
+      not serve it for a lookup or a listing.
     """
     try:
         if not query or not plan_json:
@@ -8044,6 +8052,17 @@ def plan_save(
             stripped_plan, _declaration_removed = strip_declaration(parsed_plan)
             if _declaration_removed:
                 plan_json_to_store = json.dumps(stripped_plan)
+        # nexus-3ihve: the provenance tags are claims only the grow site and the seed loader may make
+        # (both call the plan library directly, never this tool). A caller's `grown` would read as
+        # grown provenance to anything keyed on the tag, so it is removed, logged and named in the reply.
+        from nexus.plans.eligibility import strip_reserved_tags  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        tags_to_store, _tags_removed = strip_reserved_tags(tags)
+        if _tags_removed:
+            _log.warning(
+                "plan_save_reserved_tags_removed",
+                removed=list(_tags_removed), kept=tags_to_store, query=query[:80],
+            )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
         # writer, eliminating the "database is locked" races seen 2026-06-11).
@@ -8053,7 +8072,7 @@ def plan_save(
                 query=query,
                 plan_json=plan_json_to_store,
                 outcome=outcome,
-                tags=tags,
+                tags=tags_to_store,
                 project=project,
                 ttl=ttl,
                 scope_tags=_sc_tags,
@@ -8067,6 +8086,8 @@ def plan_save(
         saved = f"Saved plan: [{row_id}] {query[:80]}"
         if _declaration_removed:
             saved += " (answer_kind field removed: only seeded templates declare an answer kind)"
+        if _tags_removed:
+            saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them)"
         return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_save", e)

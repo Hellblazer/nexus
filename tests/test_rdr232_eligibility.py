@@ -155,8 +155,17 @@ def _pj(kind: K | None = None, provenance: str = "curated", route: str | None = 
         pytest.param("", _pj(L), U, "grown", "untrusted_curated_claim",
                      id="a-curated-declaration-without-the-builtin-tag-is-not-trusted"),
         pytest.param("ad-hoc", _pj(S), U, "grown", "untrusted_curated_claim", id="a-curated-claim-on-an-adhoc-row"),
-        pytest.param("builtin-template,grown", _pj(L), U, "grown", None, id="the-grown-tag-wins-over-a-curated-pair"),
-        pytest.param("ad-hoc,grown", _pj(), U, "grown", None, id="grown-tag-no-declaration"),
+        # nexus-3ihve: a grown TAG alone is not attestation. Without a valid grown declaration the row is
+        # unattested (it was read as grown before; plan 517 is such a row), whatever else it carries.
+        pytest.param("builtin-template,grown", _pj(L), U, "unattested", None,
+                     id="a-grown-tag-over-a-curated-declaration-is-unattested"),
+        pytest.param("ad-hoc,grown", _pj(), U, "unattested", None, id="grown-tag-no-declaration-is-unattested"),
+        pytest.param("grown", _pj(), U, "unattested", None, id="the-bare-grown-tag-is-unattested"),
+        pytest.param("builtin-template,grown", _pj(), U, "unattested", None,
+                     id="grown-and-builtin-tags-no-declaration-is-unattested-not-undeclared-builtin"),
+        pytest.param("ad-hoc,grown", json.dumps({"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "lookup"}}),
+                     U, "unattested", None, id="a-grown-tag-with-an-invalid-declaration-is-unattested"),
+        pytest.param("ad-hoc,grown", "{not json", U, "unattested", None, id="a-grown-tag-with-malformed-json"),
         pytest.param("ad-hoc,grown", _pj(U, "grown"), U, "grown", None, id="grown-unknown"),
         pytest.param("ad-hoc,grown", _pj(S, "grown", "explicit"), U, "grown", "unreviewed_route",
                      id="grown-with-an-explicit-route-reads-as-unknown-no-route-is-trusted-yet"),
@@ -183,23 +192,21 @@ def test_provenance_is_decided_from_the_row_and_fails_closed(tags, plan_json, ki
 
 @pytest.mark.parametrize(
     ("route", "honoured"),
-    [("explicit", False), ("heuristic", False), ("model-assisted", False), (None, False)],
-    ids=["explicit", "heuristic", "model-assisted", "none"],
+    [("explicit", False), ("heuristic", False), ("model-assisted", False)],
+    ids=["explicit", "heuristic", "model-assisted"],
 )
 def test_a_grown_plans_recorded_kind_counts_on_no_route_until_one_is_trusted(route, honoured) -> None:
     """RDR-232: recorded kind provenance relaxes the unknown-kind restriction "after review". No review has
     happened (nexus-jypmj.2.8), so ``TRUSTED_ROUTES`` ships empty and EVERY grown plan reads as unknown-kind,
     the caller's ``explicit`` hint included: it labels the request, and nothing checks it against the plan's
-    steps. ``None`` is a stored row that records no route (not producible by the grow site, and not a valid
-    declaration either: it decodes as no declaration)."""
-    plan_json = _pj(S, "grown", route) if route is not None else json.dumps(
-        {"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "synthesis", "provenance": "grown"}},
-    )
+    steps. (A row recording a kind with no route is not a valid declaration: it decodes as none, and since
+    nexus-3ihve a grown tag over it reads unattested, pinned in the provenance table above.)"""
+    plan_json = _pj(S, "grown", route)
     standing = el.classify_plan("ad-hoc,grown", plan_json)
     assert not honoured and el.TRUSTED_ROUTES == frozenset()
     assert standing.provenance == "grown"
     assert standing.kind is U
-    assert standing.flag == ("unreviewed_route" if route is not None else None)
+    assert standing.flag == "unreviewed_route"
     assert not el.eligibility(S, standing.kind, standing.provenance).eligible
     # either way the stored route is reported, so the envelope can say why
     assert standing.route == route
@@ -625,6 +632,31 @@ def test_a_grown_plan_that_recorded_an_explicit_route_kind_is_unknown_until_the_
     monkeypatch.setattr(el, "TRUSTED_ROUTES", frozenset({"explicit"}))
     out, filt = _match([GROWN_LOOKUP], [(902, 0.05)], S)
     assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
+
+
+# nexus-3ihve: a grown TAG with no grown declaration is unattested, refused for lookup and listing ---------------
+
+#: Plan 517 as it lives: tagged grown on 2026-10-22, before declarations existed, so it declares nothing.
+TAG_ONLY_GROWN = _row(517, "grown-tag-only", kind=None, tags="ad-hoc,grown", verb="lookup")
+#: A tag-only claim over a curated declaration (not producible by a writer, but a stored row can say it).
+TAG_OVER_CURATED = _row(518, "grown-tag-over-curated", kind=L, tags="builtin-template,grown", verb="lookup")
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+@pytest.mark.parametrize("row", [TAG_ONLY_GROWN, TAG_OVER_CURATED], ids=["tag-only", "tag-over-curated"])
+def test_a_tag_only_grown_row_is_refused_for_lookup_and_listing_as_unattested(row, request_kind: K) -> None:
+    out, filt = _match([row], [(row["id"], 0.05)], request_kind)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
+
+
+def test_the_declared_grown_row_beside_a_tag_only_one_still_serves_lookup_and_listing() -> None:
+    for request in (L, D):
+        out, filt = _match(
+            [TAG_ONLY_GROWN, GROWN_UNKNOWN], [(517, 0.04), (901, 0.05)], request,
+        )
+        assert _ids(out) == [901], request
+        assert filt.excluded_plan_ids == [517]
 
 
 # Scenario 5: unknown request with unknown-grown lookup history ------------------------------------------------
@@ -1319,14 +1351,18 @@ def test_the_lookup_narrowing_reason_is_in_the_closed_vocabulary() -> None:
     assert "grown_route_not_lookup" in el.REASONS
 
 
-def test_a_grown_declaration_with_no_route_records_no_kind_and_still_serves_a_lookup() -> None:
+def test_a_grown_declaration_with_no_route_is_no_declaration_so_the_row_is_unattested_for_a_lookup() -> None:
+    # nexus-3ihve changed this contract: a kind with no route is not a valid declaration (it decodes as none),
+    # so the grown TAG stands alone and attests nothing. It served lookups before (recorded_kind None, grown).
     row = _row(907, "grown-routeless", tags="ad-hoc,grown", verb="lookup")
     row["plan_json"] = json.dumps(
         {"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "synthesis", "provenance": "grown"}},
     )
-    assert el.classify_plan(row["tags"], row["plan_json"]).recorded_kind is None
-    out, _ = _match([row], [(907, 0.05)], L)
-    assert _ids(out) == [907]
+    standing = el.classify_plan(row["tags"], row["plan_json"])
+    assert (standing.provenance, standing.recorded_kind) == ("unattested", None)
+    out, filt = _match([row], [(907, 0.05)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
 
 
 def test_a_trusted_route_is_judged_by_the_matrix_not_the_lookup_narrowing(monkeypatch: pytest.MonkeyPatch) -> None:

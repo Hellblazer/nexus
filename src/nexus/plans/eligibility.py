@@ -57,8 +57,11 @@ plan recorded.
 Provenance is decided from the STORED row, failing closed (the rule ``answer_kind.py`` states):
 
 * ``curated``: the ``builtin-template`` tag AND a declaration that says ``curated``;
-* ``grown``: the ``grown`` tag OR a declaration that says ``grown``, whichever is the less trusted
-  reading. A ``curated`` declaration on a row without the builtin tag is not trusted: it reads as grown
+* ``grown``: a declaration that validates and says ``grown``. The ``grown`` TAG alone is not attestation
+  (nexus-3ihve, Sam's nexus-rflvp rule: no declaration means unattested): a row with the tag and no valid
+  grown declaration, a curated one included, reads ``unattested`` (plan 517, tagged before declarations
+  existed, is such a row). The tag still makes a row protected from a reseed (:data:`PROTECTED_TAGS`). A
+  ``curated`` declaration on a row without the builtin tag is not trusted: it reads as grown
   with kind ``unknown`` (``untrusted_curated_claim``). A grown plan's recorded kind counts only when its
   route is in :data:`TRUSTED_ROUTES`, which ships empty. Every recorded stamp (``explicit``,
   ``heuristic``, ``model-assisted``) is the request's label for the kind, not a property of the plan's steps
@@ -156,6 +159,7 @@ __all__ = [
     "LIBRARY_REMEDY",
     "PROTECTED_TAGS",
     "REASONS",
+    "RESERVED_PROVENANCE_TAGS",
     "SHADOW_REASONS",
     "SINGLE_SOURCE_EXCLUDED_STRATEGIES",
     "TRUSTED_ROUTES",
@@ -173,6 +177,7 @@ __all__ = [
     "fallback_reason",
     "memoized_library_check",
     "reseedable_dimensions",
+    "strip_reserved_tags",
     "reset_library_memo",
     "warn_library_not_reseeded",
 ]
@@ -270,6 +275,32 @@ def warn_library_not_reseeded(check: "BuiltinCheck") -> None:
 #: The row tags provenance reads. ``BUILTIN_TAG`` is ``matcher._CATEGORY_PLAN_TAG``; a test pins that.
 BUILTIN_TAG = "builtin-template"
 GROWN_TAG = "grown"
+
+#: Tags only a writer that attests may set: the grow site stamps ``grown`` with a grown declaration, the seed
+#: loader stamps ``builtin-template`` with a curated one. ``plan_save`` removes both from a caller's tags
+#: (nexus-3ihve); the writers call the library directly and are not affected. ``ad-hoc`` is not here: it
+#: reads as nothing in :func:`classify_plan`.
+RESERVED_PROVENANCE_TAGS: frozenset[str] = frozenset({BUILTIN_TAG, GROWN_TAG})
+
+
+def strip_reserved_tags(tags: str | None) -> tuple[str, tuple[str, ...]]:
+    """*tags* without :data:`RESERVED_PROVENANCE_TAGS`, and the reserved tags removed (in order, once each).
+
+    Other tags keep their order; the result is comma-joined with each token stripped, so a tag string with
+    no reserved tag in it comes back as its tokens, normalised, never reworded.
+    """
+    kept: list[str] = []
+    removed: list[str] = []
+    for token in (t.strip() for t in (tags or "").split(",")):
+        if not token:
+            continue
+        if token in RESERVED_PROVENANCE_TAGS:
+            if token not in removed:
+                removed.append(token)
+        else:
+            kept.append(token)
+    return ",".join(kept), tuple(removed)
+
 
 #: The matcher branches that produce candidates.
 BRANCHES: tuple[str, ...] = ("cosine", "category_route", "fts")
@@ -380,9 +411,10 @@ def classify_plan(tags: str | None, plan_json: Any) -> PlanStanding:
     declared = decode_declaration(plan_json)
     if GROWN_TAG in tokens or declared.provenance == "grown":
         # A grown declaration that validated carries its route, so its kind is a recorded one. A grown
-        # TAG with a curated or absent declaration has no route: its kind is unknown.
+        # TAG with a curated or absent declaration attests nothing (nexus-3ihve): the tag is claimable text,
+        # the declaration is what a writer stamps. It reads unattested, so it serves no request kind.
         if declared.provenance != "grown":
-            return PlanStanding(_U, "grown")
+            return PlanStanding(_U, "unattested")
         if declared.kind is _U:
             return PlanStanding(_U, "grown")
         if declared.route in TRUSTED_ROUTES:
