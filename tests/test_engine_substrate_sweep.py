@@ -71,10 +71,19 @@ def _dead_pid() -> int:
 
 
 def _spawn_sleeper() -> subprocess.Popen:
-    """A real, live child process this test fully owns and cleans up."""
-    return subprocess.Popen(
+    """A real, live child process this test fully owns and cleans up.
+
+    Returned only once its command line shows the sleeper's own argv: read in the
+    instant before the exec lands, it is the parent's argv, and a test that reads it
+    twice (the expected line, then the identifier's own read) sees two different
+    lines and a ``mismatch`` (develop red on c0d0df325, nexus-yu65a)."""
+    proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
     )
+    settle_by = time.monotonic() + 10.0
+    while "time.sleep(30)" not in process_command(proc.pid) and time.monotonic() < settle_by:
+        time.sleep(0.01)
+    return proc
 
 
 def _cmdline_of(proc: subprocess.Popen) -> str:
