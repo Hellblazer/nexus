@@ -6,7 +6,9 @@ repo go to the fake too, except where a test names a real repo.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
 import os
 import shlex
 import signal
@@ -452,27 +454,124 @@ def test_the_scripts_own_steps_apply_a_patch_on_a_crlf_working_tree(tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
-def test_the_watchdog_starts_before_the_run_and_watches_the_sessions_own_connection() -> None:
+def before(text: str, *needles: str) -> None:
+    """Each needle occurs in *text*, in this order."""
+    at = -1
+    for needle in needles:
+        found = text.find(needle, at + 1)
+        assert found > at, (needle, "is missing or out of order")
+        at = found
+
+
+def _watchdog_parts() -> tuple[str, str, str]:
+    """(the whole script, the watchdog block, the watchdog thread's script block)."""
     script = wht.remote_script("wren", "abc", ["t.py"], bundle=None, fixup="", floor=None)
-    watch = script.index("# End this run when its ssh client is gone")
-    assert watch < script.index("lab-run-win.cmd"), "the watchdog must be up before the slot wait starts"
-    block = script[watch:script.index("$ErrorActionPreference = 'Continue'")]
-    for needle in ("$env:SSH_CONNECTION", "Get-NetTCPConnection -LocalPort $($conn[3]) -RemotePort $($conn[1])",
-                   "-State Established", "taskkill.exe /T /F /PID $PID", "-EncodedCommand", "} catch {"):
-        assert needle in block, needle
+    block = script[:script.index("trap {")]
+    thread = block[block.index("AddScript({"):block.index("}).AddArgument($PID)")]
+    return script, block, thread
 
 
-def test_the_runs_ssh_call_has_a_connection_of_its_own() -> None:
-    """A shared ControlMaster connection stays Established after its client dies (measured on qwent 2026-11-03),
-    so the run's ssh call turns sharing off; the short setup calls may share."""
+def test_the_watchdog_is_the_first_thing_the_script_does() -> None:
+    script, block, _ = _watchdog_parts()
+    assert script.startswith("# End this run when its client is gone")
+    assert script.index("BeginInvoke()") < script.index("git clone") < script.index("lab-run-win.cmd"), (
+        "setup's git calls and the slot wait run under the watchdog"
+    )
+    assert "trap {" not in block, "the setup trap must not turn a watchdog failure into a setup failure"
+
+
+def test_starting_the_watchdog_cannot_fail_the_run_and_needs_an_ssh_session() -> None:
+    _, block, _ = _watchdog_parts()
+    lines = block.splitlines()
+    assert lines[1] == "try {" and lines[-1].startswith("} catch { Write-Host"), "the whole start is one try/catch"
+    assert "throw" not in block
+    before(block, "if ($env:SSH_CONNECTION) {", "CreateRunspace()", "BeginInvoke()")
+
+
+def test_the_watchdog_ends_the_tree_on_end_of_file_or_silence_and_never_on_its_own_error() -> None:
+    _, block, thread = _watchdog_parts()
+    before(thread, "[Console]::OpenStandardInput()", "ReadAsync(", "if (-not $read.Wait($silence * 1000)) { break }",
+           "if ($read.Result -le 0) { break }", "} catch { return }", "& taskkill.exe /T /F /PID $target")
+    assert thread.count("break") == 2, "only silence and end of file leave the loop toward the kill"
+    assert f"AddArgument($PID).AddArgument({wht.WATCHDOG_SILENCE_S})" in block
+    assert wht.WATCHDOG_SILENCE_S >= 6 * wht.HEARTBEAT_S, "silence means many missed beats, never one slow one"
+
+
+def test_the_runs_ssh_call_goes_through_the_heartbeat() -> None:
+    seen: list[list[str]] = []
+
+    def beat(argv):
+        seen.append(list(argv))
+        return 7
+
     rec = _Recorder(on_origin=True)
-    wht.main(["--session", "wren", "--", "t.py"], run=rec)
-    run_call = rec.calls[-1]
-    assert run_call[0] == "ssh" and "pwsh -NoProfile -File" in run_call[-1]
-    joined = " ".join(run_call[:-1])
-    assert "ControlMaster=no" in joined and "ControlPath=none" in joined
+    assert wht.main(["--session", "wren", "--", "t.py"], run=rec, beat=beat) == 7
+    (call,) = seen
+    assert call[0] == "ssh" and "pwsh -NoProfile -File" in call[-1]
+    assert not any("pwsh -NoProfile -File" in c[-1] for c in rec.calls if c[0] == "ssh"), "the run is not sent twice"
 
 
+def test_main_defaults_to_the_heartbeat_for_the_real_runner() -> None:
+    src = inspect.getsource(wht.main)
+    assert "if beat is None and run is subprocess.run:" in src and "beat = run_with_heartbeat" in src
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="select on a pipe is POSIX")
+def test_the_heartbeat_reaches_the_child_and_its_exit_code_comes_back(tmp_path: Path) -> None:
+    got = tmp_path / "got"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os, select, sys, time\n"
+        "data = b''\n"
+        "end = time.monotonic() + 3\n"
+        "while len(data) < 3 and (left := end - time.monotonic()) > 0:\n"
+        "    if select.select([sys.stdin], [], [], left)[0]:\n"
+        "        chunk = os.read(sys.stdin.fileno(), 1)\n"
+        "        if not chunk:\n"
+        "            break\n"
+        "        data += chunk\n"
+        f"open({str(got)!r}, 'wb').write(data)\n"
+        "sys.exit(5)\n"
+    )
+    assert wht.run_with_heartbeat([sys.executable, str(child)], interval=0.05) == 5
+    assert got.read_bytes() == b"..."
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_a_sigkilled_client_closes_the_childs_stdin(tmp_path: Path) -> None:
+    """SIGKILL cannot be caught, and the ssh child outlives its client; its stdin still reaches end of file, which
+    is what the remote watchdog reads (measured on qwent: the remote run ended within 3 s)."""
+    eof = tmp_path / "eof"
+    pidfile = tmp_path / "child.pid"
+    standin = tmp_path / "standin.py"
+    standin.write_text(
+        "import os, sys\n"
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        "while sys.stdin.buffer.read(1):\n"
+        "    pass\n"
+        f"open({str(eof)!r}, 'w').write('eof')\n"
+    )
+    client_py = tmp_path / "client.py"
+    client_py.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(REPO_ROOT / 'scripts' / 'windows_hand_test.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); sys.modules['w'] = w; spec.loader.exec_module(w)\n"
+        f"w.run_with_heartbeat([sys.executable, {str(standin)!r}], interval=0.05)\n"
+    )
+    client = subprocess.Popen([sys.executable, str(client_py)])
+    deadline = time.monotonic() + 20
+    while not pidfile.exists() or not pidfile.read_text():
+        assert time.monotonic() < deadline, "the stand-in never started"
+        time.sleep(0.05)
+    client.kill()
+    client.wait(timeout=20)
+    deadline = time.monotonic() + 10
+    while not eof.exists():
+        assert time.monotonic() < deadline, "the orphaned child never saw end of file"
+        time.sleep(0.05)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 def test_sigterm_ends_the_client_and_its_ssh_child(tmp_path: Path) -> None:
     """A real child process: under end_on_signal a SIGTERM to the client also ends the process subprocess.run is
     waiting on (the ssh stand-in), where the default action would leave it running."""
@@ -481,11 +580,11 @@ def test_sigterm_ends_the_client_and_its_ssh_child(tmp_path: Path) -> None:
     standin.write_text(f"import os, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
     client_py = tmp_path / "client.py"
     client_py.write_text(
-        "import importlib.util, subprocess, sys\n"
+        "import importlib.util, sys\n"
         f"spec = importlib.util.spec_from_file_location('w', {str(REPO_ROOT / 'scripts' / 'windows_hand_test.py')!r})\n"
         "w = importlib.util.module_from_spec(spec); sys.modules['w'] = w; spec.loader.exec_module(w)\n"
         "w.end_on_signal()\n"
-        f"subprocess.run([sys.executable, {str(standin)!r}])\n"
+        f"w.run_with_heartbeat([sys.executable, {str(standin)!r}], interval=0.05)\n"
     )
     client = subprocess.Popen([sys.executable, str(client_py)])
     deadline = time.monotonic() + 20
@@ -503,3 +602,25 @@ def test_sigterm_ends_the_client_and_its_ssh_child(tmp_path: Path) -> None:
             break
         assert time.monotonic() < deadline, "the ssh stand-in outlived its client"
         time.sleep(0.05)
+
+
+def test_end_on_signal_turns_sigterm_and_sighup_into_system_exit() -> None:
+    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        wht.end_on_signal()
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            handler = signal.getsignal(sig)
+            assert callable(handler), sig
+            with pytest.raises(SystemExit) as exc:
+                handler(sig, None)
+            assert exc.value.code == 128 + sig
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+
+
+def test_the_entry_point_installs_the_signal_handlers_before_main() -> None:
+    tree = ast.parse((REPO_ROOT / "scripts" / "windows_hand_test.py").read_text(encoding="utf-8"))
+    (block,) = [n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test)]
+    calls = [ast.unparse(s) for s in block.body]
+    assert calls[0] == "end_on_signal()" and "main()" in calls[1], calls

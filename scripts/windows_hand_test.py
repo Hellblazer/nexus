@@ -38,6 +38,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -147,45 +148,77 @@ def _check_pytest_arg(arg: str) -> str:
     return arg
 
 
-#: Seconds between the watchdog's checks that the ssh session is still there.
-WATCHDOG_POLL_S: int = 5
+#: Seconds between the client's heartbeat bytes on the run's ssh stdin.
+HEARTBEAT_S: float = 5.0
+#: Seconds of heartbeat silence after which the remote run ends: twelve missed beats, so a slow link never trips it.
+WATCHDOG_SILENCE_S: int = 60
 
-#: Ends this script's process tree when its ssh client is gone (nexus-bj8e7). Windows OpenSSH does not end a
-#: session's processes when the client goes away: measured 2026-11-03 on qwent, a killed client left pwsh, its
-#: powershell parent and both sshd session processes alive, so a client killed while queued for lab-run-win left the
-#: wrapper to take the build slot later and run with nobody reading it. What does change is the session's TCP
-#: connection, which goes to CloseWait at once. The watchdog polls that connection (its ports come from
-#: SSH_CONNECTION) and, once it is no longer Established, taskkill /T ends this script and everything under it,
-#: lab-run-win's queue wait included. That needs a connection of the run's own: the run's ssh call (SSH_OWN_CONNECTION)
-#: turns connection sharing off, because a shared (ControlMaster) connection outlives a dead client. With no
-#: SSH_CONNECTION (run by hand on qwent) no watchdog starts.
+#: Ends this script's process tree when its client is gone (nexus-bj8e7). Windows OpenSSH does not end a session's
+#: processes when the client goes away: measured 2026-11-03 on qwent, a killed client left pwsh, its powershell
+#: parent and both sshd session processes alive, so a client killed while queued for lab-run-win left the wrapper to
+#: take the build slot later and run with nobody reading it. The TCP table was no answer: a hidden process polling
+#: it on qwent missed a live session's connection for whole runs, twice. The client's stdin is: the client sends a
+#: byte every HEARTBEAT_S on the run's ssh stdin (:func:`run_with_heartbeat`), and a watchdog thread in this
+#: script reads it. End of file (the client process died, whatever killed it, SIGKILL included, or its ssh did:
+#: measured, end of file reached the remote within 4 s) or WATCHDOG_SILENCE_S without a byte (a half-open link, a
+#: sleeping laptop) runs taskkill /T on this script and everything under it: setup's git calls, lab-run-win's wait
+#: for the slot, pytest. It runs first in the script, before setup. A watchdog that fails to start, or whose read
+#: fails, never kills: the run goes on unwatched. With no SSH_CONNECTION (run by hand on qwent) none starts.
 WATCHDOG_LINES: list[str] = [
-    "# End this run when its ssh client is gone (nexus-bj8e7). A failure here only loses the watchdog.",
+    "# End this run when its client is gone (nexus-bj8e7). A watchdog failure never ends the run.",
     "try {",
-    "if ($env:SSH_CONNECTION) {",
-    "  $conn = $env:SSH_CONNECTION -split ' '",
-    "  $watch = @\"",
-    "while (`$true) {",
-    "  if (-not (Get-Process -Id $PID -ErrorAction SilentlyContinue)) { exit 0 }",
-    "  `$t = Get-NetTCPConnection -LocalPort $($conn[3]) -RemotePort $($conn[1]) -State Established "
-    "-ErrorAction SilentlyContinue",
-    "  if (-not `$t) {",
-    "    & taskkill.exe /T /F /PID $PID | Out-Null",
-    "    exit 0",
+    "  if ($env:SSH_CONNECTION) {",
+    "    $wdRunspace = [runspacefactory]::CreateRunspace(); $wdRunspace.Open()",
+    "    $wdShell = [powershell]::Create(); $wdShell.Runspace = $wdRunspace",
+    "    [void]$wdShell.AddScript({",
+    "      param($target, $silence)",
+    "      try {",
+    "        $in = [Console]::OpenStandardInput(); $buf = New-Object byte[] 256",
+    "        while ($true) {",
+    "          $read = $in.ReadAsync($buf, 0, $buf.Length)",
+    "          if (-not $read.Wait($silence * 1000)) { break }",
+    "          if ($read.Result -le 0) { break }",
+    "        }",
+    "      } catch { return }",
+    "      & taskkill.exe /T /F /PID $target | Out-Null",
+    f"    }}).AddArgument($PID).AddArgument({WATCHDOG_SILENCE_S})",
+    "    $null = $wdShell.BeginInvoke()",
+    "    Write-Host 'windows_hand_test: watchdog on the client heartbeat'",
     "  }",
-    f"  Start-Sleep -Seconds {WATCHDOG_POLL_S}",
-    "}",
-    "\"@",
-    "  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watch))",
-    "  Start-Process -FilePath 'pwsh' -ArgumentList '-NoProfile', '-NonInteractive', '-EncodedCommand', $enc "
-    "-WindowStyle Hidden | Out-Null",
-    "  Write-Host \"windows_hand_test: watchdog on the ssh connection from port $($conn[1])\"",
-    "}",
     "} catch { Write-Host \"windows_hand_test: no watchdog ($_)\" }",
 ]
 
-#: ssh options for the run's own connection: no sharing, so the connection ends with the client (see WATCHDOG_LINES).
-SSH_OWN_CONNECTION: list[str] = ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
+
+def run_with_heartbeat(argv: Sequence[str], *, interval: float = HEARTBEAT_S,
+                       popen: Callable[..., subprocess.Popen] = subprocess.Popen) -> int:
+    """Run *argv* (the run's ssh call) with a byte written to its stdin every *interval* seconds, and return its
+    exit code. The remote watchdog (WATCHDOG_LINES) ends the run on end of file or on silence. The pipe's write end
+    lives only in this process, so any death of the client closes it; an exception here (SystemExit from
+    :func:`end_on_signal` included) kills the child first."""
+    proc = popen(list(argv), stdin=subprocess.PIPE)
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            try:
+                proc.stdin.write(b".")
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                return
+
+    threading.Thread(target=beat, name="windows-hand-heartbeat", daemon=True).start()
+    try:
+        return proc.wait()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        stop.set()
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
 
 
 def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle: str | None,
@@ -201,6 +234,7 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         return f"if ($LASTEXITCODE -ne 0) {{ Write-Host 'windows_hand_test: {what} failed'; exit {fail} }}"
 
     lines = [
+        *WATCHDOG_LINES,
         f"trap {{ Write-Host \"windows_hand_test: setup error: $_\"; exit {fail} }}",
         "$ErrorActionPreference = 'Stop'",
         # $LASTEXITCODE is $null until a native command runs, so the clone's
@@ -270,7 +304,6 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
         f"if ($head -ne '{sha}') {{ Write-Host \"windows_hand_test: {expected_head} is $head, not {sha}\"; exit {fail} }}",
         f"Write-Host 'windows_hand_test: testing {sha}" + (" plus uncommitted changes'" if patch is not None else "'"),
     ]
-    lines += WATCHDOG_LINES
     lines += [
         "$ErrorActionPreference = 'Continue'",
         "$env:NX_TEST_T2_SUBSTRATE = 'none'",
@@ -334,17 +367,22 @@ def _check(run: Runner) -> int:
     return 0
 
 
-def main(argv: Sequence[str] | None = None, *, run: Runner = subprocess.run) -> int:
+def main(argv: Sequence[str] | None = None, *, run: Runner = subprocess.run,
+         beat: Callable[[Sequence[str]], int] | None = None) -> int:
     """Exit with pytest's code, or SETUP_FAILED when any local or remote setup
-    step fails, so a setup failure is never read as a test result."""
+    step fails, so a setup failure is never read as a test result. The run's
+    ssh call goes through *beat* (default :func:`run_with_heartbeat`); with an
+    injected *run* and no *beat* it goes through *run*, as tests want."""
+    if beat is None and run is subprocess.run:
+        beat = run_with_heartbeat
     try:
-        return _main(argv, run=run)
+        return _main(argv, run=run, beat=beat)
     except (subprocess.CalledProcessError, OSError) as exc:
         _say(f"windows_hand_test: setup failed: {exc}", err=True)
         return SETUP_FAILED
 
 
-def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
+def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[str]], int] | None) -> int:
     ap = argparse.ArgumentParser(description="Run pytest on native Windows (qwent) for a commit.")
     ap.add_argument("--session", help="your session name: work goes under C:\\build\\hand\\<session>")
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -413,11 +451,12 @@ def _main(argv: Sequence[str] | None, *, run: Runner) -> int:
     # code other than 0 or 1 into 1 unless it is passed on explicitly.
     remote_ps1 = rf"C:\build\hand\{ns.session}\win-hand.ps1"
     # An unset $LASTEXITCODE (pwsh never started) would exit 0: count it as setup.
-    proc = run(["ssh", *SSH_OWN_CONNECTION, ns.host,
+    ssh_argv = ["ssh", ns.host,
                 f"pwsh -NoProfile -File '{remote_ps1}'; "
-                f"if ($LASTEXITCODE -eq $null) {{ exit {SETUP_FAILED} }} else {{ exit $LASTEXITCODE }}"],
-               check=False)
-    return proc.returncode
+                f"if ($LASTEXITCODE -eq $null) {{ exit {SETUP_FAILED} }} else {{ exit $LASTEXITCODE }}"]
+    if beat is not None:
+        return beat(ssh_argv)
+    return run(ssh_argv, check=False).returncode
 
 
 def end_on_signal() -> None:
