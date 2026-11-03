@@ -3330,6 +3330,11 @@ def _identify_leg(pid: int, expected_cmdline: str) -> str:
     if not pid_alive(pid):
         return "dead"
     actual = process_command(pid)
+    if not actual and pid_alive(pid):
+        # A live pid can read an empty command line for the instant between its exec's pipe close
+        # and its new argv (/proc/<pid>/cmdline, nexus-yu65a): read once more before calling it dead.
+        time.sleep(0.05)
+        actual = process_command(pid)
     if not actual:
         return "dead"  # exited between the liveness check and this read
     if not expected_cmdline or actual.strip() != expected_cmdline.strip():

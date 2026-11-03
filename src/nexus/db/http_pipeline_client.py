@@ -59,7 +59,9 @@ and then sees its rows (nexus-rqw0m). Before that, a second flush found the
 popped buffer empty and returned, and an interrupt release sent ``/fail``
 while a stage thread's pages were still on the wire. The cost: one stage's
 slow POST delays the other stages' reads. Lock order is ``_flush_lock`` then
-``_buffer_lock``, never the reverse. Matches PipelineDB's cross-thread usage
+``_buffer_lock``, never the reverse. A buffer drop (``clear_orphan_wal``,
+``delete_pipeline_data``) takes ``_flush_lock`` too, so a failing flush's restore cannot
+resurrect what was dropped (nexus-yu65a). Matches PipelineDB's cross-thread usage
 contract (three stage threads, one store).
 """
 from __future__ import annotations
@@ -624,7 +626,7 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
     # ── cleanup / scan ──────────────────────────────────────────────────────
 
     def clear_orphan_wal(self, content_hash: str, *, timeout: float | None = None) -> None:
-        self._drop_buffers(content_hash)
+        self._drop_buffers(content_hash, timeout=timeout)
         self._post_fenced("/v1/pipeline/clear_wal", self._ref(content_hash), timeout=timeout)
 
     def delete_pipeline_data(
@@ -719,11 +721,31 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
                         self.delete_pipeline_data(content_hash, pipeline_id=pipeline_id)
         return orphans
 
-    def _drop_buffers(self, content_hash: str) -> None:
-        with self._buffer_lock:
-            self._page_buffer.pop(content_hash, None)
-            self._chunk_buffer.pop(content_hash, None)
-            self._progress_buffer.pop(content_hash, None)
+    def _drop_buffers(self, content_hash: str, *, timeout: float | None = None) -> None:
+        """Discard *content_hash*'s buffered pages, chunks and progress.
+
+        Takes ``_flush_lock`` first (nexus-yu65a). A flush pops the buffers before it posts and
+        puts them back if the post fails, so a drop that ran in that window found nothing and the
+        restore then re-inserted what the caller had just discarded. Holding the flush lock makes
+        the drop wait for the in-flight flush to land or restore, and then drop whichever it left.
+        It also orders the engine side: the caller's ``/clear_wal`` or ``/delete`` goes after the
+        in-flight POST, never beside it. A per-hash generation the restore checked would fix the
+        buffers but not that ordering.
+
+        *timeout* bounds the wait, as in :meth:`flush`: past it ``TimeoutError`` is raised and
+        nothing is dropped, so ``clear_orphan_wal`` sends no ``/clear_wal`` either and the pages of
+        the flush still in flight stay with the row. ``delete_pipeline_data`` takes no timeout
+        and waits as long as the flush does. The lock is released before the caller's engine call,
+        which a later flush's new writes may then follow; they are new writes, not the dropped ones."""
+        if not self._flush_lock.acquire(timeout=-1 if timeout is None else max(0.0, timeout)):
+            raise TimeoutError(f"drop of {content_hash} waited {timeout}s for an in-flight flush")
+        try:
+            with self._buffer_lock:
+                self._page_buffer.pop(content_hash, None)
+                self._chunk_buffer.pop(content_hash, None)
+                self._progress_buffer.pop(content_hash, None)
+        finally:
+            self._flush_lock.release()
 
     def __enter__(self) -> "HttpPipelineDB":
         return self
