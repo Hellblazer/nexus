@@ -137,8 +137,13 @@ class TestRecord:
         assert (state["not_before"], state["strikes"]) == (1002.0, 1)
 
     def test_max_wait_clamps_a_short_budget_caller(self, cfg: Path) -> None:
+        """Never past the budget; spread inside it, so a crowd of such callers does not send together."""
         gh.record_503(10.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
-        assert gh.wait_before_attempt(max_wait=3.0, now=1000.0, rng=_rng()) == 3.0
+        rng = random.Random(5)
+        waits = [gh.wait_before_attempt(max_wait=3.0, now=1000.0, rng=rng) for _ in range(50)]
+        assert all(0.0 <= w <= 3.0 for w in waits)
+        assert len(set(waits)) == len(waits)
+        assert max(waits) - min(waits) > 2.0
 
     def test_a_wedged_lock_holder_falls_back_to_the_own_schedule(
         self, cfg: Path, monkeypatch: pytest.MonkeyPatch,
@@ -422,8 +427,17 @@ class TestStaggeredWake:
     def test_a_wait_clamped_by_the_callers_budget_claims_no_slot(self, cfg: Path) -> None:
         gh.record_503(10.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
         before = (cfg / gh.HOLD_FILENAME).read_text()
-        assert gh.wait_before_attempt(max_wait=3.0, now=1000.0, rng=_rng(), url="https://edge") == 3.0
+        assert 0.0 <= gh.wait_before_attempt(max_wait=3.0, now=1000.0, rng=_rng(), url="https://edge") <= 3.0
         assert (cfg / gh.HOLD_FILENAME).read_text() == before
+
+    def test_a_slot_past_the_budget_is_not_burned(self, cfg: Path) -> None:
+        """A waiter whose slot the caller will not wait for leaves the file's next slot where it was,
+        so the callers behind it still get the slots that fit."""
+        gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())  # not_before 1005
+        slot = json.loads((cfg / gh.HOLD_FILENAME).read_text())["next_slot"]
+        # a budget that ends before the next slot (1005 + SLOT_S): no slot is taken
+        gh.wait_before_attempt(max_wait=5.1, now=1000.0, rng=_rng(), url="https://edge")
+        assert json.loads((cfg / gh.HOLD_FILENAME).read_text())["next_slot"] == slot
 
     def test_a_wedged_lock_falls_back_to_the_jittered_wait(self, cfg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         gh.record_503(5.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
@@ -478,6 +492,90 @@ class TestStaggeredWake:
         assert len(wakes) == 8
         assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
         assert self._peak_concurrency(wakes, self.REQUEST_S) <= 2
+
+
+class TestBudgetedCallers:
+    """nexus-3zreb review round 2 (F1): the production callers all pass ``max_wait`` (T3 ``_get`` and the
+    T2 mixin 30 s, the mint at most 15 s). A waiter whose slot lies past that budget used to be sent at
+    the budget's one instant, so a crowd of them came back together: 19 waiters on a 30 s hold peaked at
+    17, 500 at 484. They now draw a moment in the last ``min(max_wait, SPREAD_WINDOW_S)`` of the budget.
+
+    The bound: a draw is uniform over a window of W = min(max_wait, 30) s, so N waiters make about
+    N / W sends a second and, with a request time T, about N * T / W in flight. T is 0.3 s here; the
+    seeds are fixed, so each peak below is the one run's, set a little above its measurement.
+    """
+
+    REQUEST_S = TestStaggeredWake.REQUEST_S
+
+    @staticmethod
+    def _wakes(hold_s: float, waiters: int, max_wait: float, *, seed: int = 1929, lag: float = 1.0) -> list[float]:
+        """Waiters all ask at 1001; the hold was recorded *lag* s before (0: they ask the instant it is, and
+        a 30 s hold outlasts a 30 s budget)."""
+        rng = random.Random(seed)
+        gh.record_503(hold_s, retry_after=None, url="https://edge", now=1001.0 - lag, rng=rng)
+        return [
+            1001.0 + gh.wait_before_attempt(max_wait=max_wait, now=1001.0, rng=rng, url="https://edge")
+            for _ in range(waiters)
+        ]
+
+    @pytest.mark.parametrize(
+        ("hold_s", "waiters", "max_wait", "peak", "lag"),
+        [
+            (30.0, 19, 30.0, 4, 0.0), (30.0, 100, 30.0, 6, 0.0), (30.0, 500, 30.0, 14, 0.0),
+            (30.0, 19, 30.0, 4, 1.0), (30.0, 100, 30.0, 6, 1.0), (30.0, 500, 30.0, 14, 1.0),
+            (20.0, 19, 30.0, 4, 1.0), (20.0, 100, 30.0, 6, 1.0), (20.0, 500, 30.0, 14, 1.0),
+            (30.0, 19, 15.0, 4, 1.0), (30.0, 100, 15.0, 8, 1.0), (20.0, 100, 15.0, 8, 1.0),
+            (10.0, 500, 15.0, 22, 1.0),
+        ],
+    )
+    def test_the_peak_stays_bounded_for_the_production_call_shapes(
+        self, cfg: Path, hold_s: float, waiters: int, max_wait: float, peak: int, lag: float,
+    ) -> None:
+        wakes = self._wakes(hold_s, waiters, max_wait, lag=lag)
+        assert min(wakes) >= 1001.0
+        assert max(wakes) <= 1001.0 + max_wait  # nobody is held past the caller's own budget
+        assert TestStaggeredWake._peak_concurrency(wakes, self.REQUEST_S) <= peak
+        assert peak < waiters / 4  # a bound that is a fraction of the crowd, not the crowd
+
+    @pytest.mark.parametrize("lag", [0.0, 1.0])
+    def test_the_clamped_sends_do_not_stack_on_the_budget_end(self, cfg: Path, lag: float) -> None:
+        wakes = self._wakes(30.0, 100, 30.0, lag=lag)
+        assert len(set(wakes)) == len(wakes)
+        assert max(wakes) - min(wakes) > 20.0
+        assert sum(1 for w in wakes if w == 1031.0) <= 1  # the one slot that ends there, not the crowd
+
+    def test_a_wait_that_fits_the_budget_still_takes_its_slot(self, cfg: Path) -> None:
+        """Slots stay the first choice: a hold that ends inside the budget keeps one send per slot."""
+        wakes = sorted(self._wakes(5.0, 20, 30.0))
+        assert wakes[0] >= 1005.0
+        assert all(b - a >= gh.SLOT_S - 1e-9 for a, b in zip(wakes, wakes[1:], strict=False))
+
+    def test_a_hold_longer_than_the_budget_claims_no_slot_and_takes_no_lock(
+        self, cfg: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        gh.record_503(30.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())
+
+        def boom(fn: object) -> None:
+            raise AssertionError("the lock was taken")
+
+        monkeypatch.setattr(gh, "_locked", boom)
+        assert 0.0 <= gh.wait_before_attempt(max_wait=30.0, now=1001.0, rng=_rng(), url="https://edge") <= 30.0
+
+    def test_a_wedged_lock_does_not_stack_a_budgeted_caller_on_its_budget_end(
+        self, cfg: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        gh.record_503(10.0, retry_after=None, url="https://edge", now=1000.0, rng=_rng())  # 9 s left at 1001: the jitter can pass the 10 s budget
+        monkeypatch.setattr(gh, "LOCK_WAIT_S", 0.05)
+        rng = random.Random(11)
+        fd = os.open(cfg / (gh.HOLD_FILENAME + ".lock"), os.O_RDWR | os.O_CREAT)
+        try:
+            _locking.lock_fd(fd, blocking=True)
+            waits = [gh.wait_before_attempt(max_wait=10.0, now=1001.0, rng=rng, url="https://edge") for _ in range(20)]
+        finally:
+            _locking.unlock_fd(fd)
+            os.close(fd)
+        assert all(0.0 <= w <= 10.0 for w in waits)
+        assert len(set(waits)) == len(waits)
 
 
 def test_the_hold_is_shared_between_real_processes(cfg: Path) -> None:

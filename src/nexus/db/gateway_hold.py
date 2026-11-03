@@ -31,6 +31,12 @@ bounded by the request time over that spacing. The slots run for
 goes at a random moment inside that window, so the load past the slots spreads
 evenly instead of piling on one instant.
 
+A caller also has a budget, the longest it will wait (``max_wait``: its request
+timeout). A waiter whose slot, or whose hold, ends past its budget takes no slot
+(it would never use it) and goes at a random moment in the last
+:data:`SPREAD_WINDOW_S` of the budget, so a crowd of budgeted callers does not
+come back together at the budget's end.
+
 Everything here is best effort. An unreadable, garbled or unwritable file
 means no shared hold, never a failed request. The callers do the sleeping
 through their own ``time.sleep``, so this module never blocks.
@@ -194,15 +200,33 @@ def _ours(state: dict[str, Any]) -> bool:
     return state.get("pid") == os.getpid()
 
 
-def _place(not_before: float, next_slot: float, rng: random.Random | None) -> tuple[float, float | None]:
+def _tail_draw(earliest: float, latest: float, rng: random.Random | None) -> float:
+    """A random moment in the last :data:`SPREAD_WINDOW_S` of ``[earliest, latest]``.
+
+    For a caller whose budget ends before its slot would: it sends inside its
+    budget, spread, instead of every such caller sending at the budget's end."""
+    return (rng or random).uniform(max(earliest, latest - SPREAD_WINDOW_S), latest)
+
+
+def _place(
+    not_before: float, next_slot: float, rng: random.Random | None, *, budget: tuple[float, float] | None = None,
+) -> tuple[float, float | None]:
     """The moment to send and the file's next slot (``None``: leave it).
 
     The next free slot, while it falls inside :data:`SPREAD_WINDOW_S` of the
-    hold's end; past that a random moment inside the window, taking no slot."""
+    hold's end and, for a caller with a *budget* (its ``(earliest, latest)``
+    send time), inside the budget; past that a random moment (inside the
+    window after the hold, or the tail of the budget), taking no slot, so the
+    callers behind it still get the slots that fit."""
     wake = max(not_before, next_slot)
-    if wake > not_before + SPREAD_WINDOW_S:
-        return not_before + (rng or random).uniform(0.0, SPREAD_WINDOW_S), None
-    return wake, wake + SLOT_S
+    limit = not_before + SPREAD_WINDOW_S
+    if budget is not None:
+        limit = min(limit, budget[1])
+    if wake <= limit:
+        return wake, wake + SLOT_S
+    if budget is not None:
+        return _tail_draw(budget[0], budget[1], rng), None
+    return not_before + (rng or random).uniform(0.0, SPREAD_WINDOW_S), None
 
 
 def _endpoint_of(url: str | Callable[[], str]) -> str:
@@ -232,7 +256,11 @@ def wait_before_attempt(
     hold in force returns the wait to this process's send slot (see the module
     docstring), never more than *max_wait* (the caller's own request timeout),
     so a short-budget caller such as a hook is not held past the time it would
-    give the request. *url* is the endpoint the caller is about to send to; a
+    give the request. A caller whose slot lies past *max_wait*, or whose hold
+    outlasts it, takes no slot: it draws a random moment in the last
+    :data:`SPREAD_WINDOW_S` of its budget (nexus-3zreb), so a crowd of such
+    callers (every production caller passes *max_wait*) does not send together
+    at the budget's end. *url* is the endpoint the caller is about to send to; a
     hold recorded for another endpoint is not its hold. It may be a function
     returning the endpoint, called only when a hold is in force and names one,
     so a caller that must resolve its endpoint pays for that only then.
@@ -242,7 +270,8 @@ def wait_before_attempt(
     process, not on the schedule its own 503 recorded for the others.
 
     Reading is lock-free. Taking a slot needs the file's lock, and happens only
-    when a hold is in force and the wait fits inside *max_wait*; if the lock
+    when a hold is in force that ends inside *max_wait*, and only a slot that
+    fits inside it is taken; if the lock
     cannot be had, the wait is the remaining hold plus up to
     :data:`MAX_JITTER_S` of jitter.
     """
@@ -260,15 +289,18 @@ def wait_before_attempt(
     endpoint = _endpoint_of(url) if state.get("url") else ""
     if not _same_endpoint(state, endpoint):
         return 0.0
-    if max_wait is not None and remaining >= max_wait:
-        return max(0.0, max_wait)  # the caller sends at max_wait whatever the slots say
+    budget = None if max_wait is None else (start, start + max(0.0, max_wait))
+    if budget is not None and remaining >= max_wait:
+        # The hold outlasts the caller's budget: it sends inside the budget whatever the slots say,
+        # spread over its tail so a crowd of such callers does not send at one instant. No slot, no lock.
+        return max(0.0, _tail_draw(budget[0], budget[1], rng) - start)
 
     def claim(path: Path) -> float:
         held = _sane(_read(path), now)
         not_before = held.get("not_before", 0.0)
         if not_before <= start or not _same_endpoint(held, endpoint) or (others_only and _ours(held)):
             return start  # the hold moved or ended between the read and the lock
-        wake, next_slot = _place(not_before, held.get("next_slot", 0.0), rng)
+        wake, next_slot = _place(not_before, held.get("next_slot", 0.0), rng, budget=budget)
         if next_slot is not None:
             _write(path, {**held, "next_slot": next_slot})
         return wake
@@ -278,7 +310,9 @@ def wait_before_attempt(
     except Exception as exc:  # noqa: BLE001 — best effort: no slot means the old jittered wait
         _log.debug("gateway_hold_slot_failed", error=type(exc).__name__)
         wait = remaining + _jitter(remaining, rng)
-    return wait if max_wait is None else max(0.0, min(wait, max_wait))
+        if budget is not None and start + wait > budget[1]:
+            wait = _tail_draw(budget[0], budget[1], rng) - start
+    return max(0.0, wait)
 
 
 #: How long a 503 path waits for the hold file's lock before giving up on

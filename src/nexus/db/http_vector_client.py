@@ -624,6 +624,21 @@ def _attempt_url() -> str:
     return getattr(_attempt_url_capture, "value", "")
 
 
+#: The ``(base_url, token)`` pair the gateway-hold wait resolved for the attempt about to
+#: be sent (nexus-3zreb review round 2): :func:`_request_once` takes it instead of
+#: resolving the endpoint a second time, so an attempt resolves at most once. Set only
+#: by :func:`_gateway_hold_url`, taken (and cleared) by :func:`_request_once`, and cleared
+#: by the retry loop around every attempt so a pair never outlives the attempt it was for.
+_prefetched_endpoint = threading.local()
+
+
+def _take_prefetched_endpoint() -> tuple[str, str] | None:
+    """The pair the hold wait resolved for this thread's next attempt, once; ``None`` when it did not."""
+    pair = getattr(_prefetched_endpoint, "value", None)
+    _prefetched_endpoint.value = None
+    return pair
+
+
 def _note_data_token_response(base_url: str, tenant: str, status_code: int) -> None:
     """Clear the manager's remint-futility flag for ``(base_url, tenant)``
     once a response (success or error) comes back non-401 (nexus-umue1,
@@ -761,7 +776,7 @@ def _request_once(
     """
     import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
-    base_url, token = _resolve_endpoint()
+    base_url, token = _take_prefetched_endpoint() or _resolve_endpoint()
     _stash_attempt_url(base_url)
     # nexus-wrwb7 (RDR-005 2a self-minting): when a mint_token credential is
     # configured, present the manager's self-minted data token instead of
@@ -1509,16 +1524,19 @@ def _gateway_hold_url() -> str:
     """The endpoint the first send goes to, for the shared gateway hold (nexus-cphvg).
 
     Handed to ``wait_before_attempt`` as a function: it is called only when a
-    hold in force names an endpoint, so a send with no hold resolves the
-    endpoint once (in ``_request_once``), not twice. Every later wait and every
-    record uses the endpoint the previous attempt reached (:func:`_attempt_url`).
+    hold in force names an endpoint. Every later wait and every record uses the
+    endpoint the previous attempt reached (:func:`_attempt_url`). The pair it
+    resolves is left for ``_request_once`` (:func:`_take_prefetched_endpoint`), so
+    the attempt resolves the endpoint once, with or without a hold in force.
 
     ``""`` when it cannot be resolved: the hold then applies as it did before
-    endpoints were compared, and ``_request_once`` raises its own error."""
+    endpoints were compared, and ``_request_once`` resolves again and raises its own error."""
     try:
-        return _resolve_endpoint()[0]
+        pair = _resolve_endpoint()
     except Exception:  # noqa: BLE001 — best effort: an unresolvable endpoint is _request_once's to report
         return ""
+    _prefetched_endpoint.value = pair
+    return pair[0]
 
 
 def _error_body(exc: Any) -> bytes:
@@ -1585,6 +1603,7 @@ def _request(
         sent_to = ""  # the endpoint the previous attempt reached
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             # nexus-v1929: another process's 503 holds this one too, before every send.
+            _prefetched_endpoint.value = None  # a pair left by an interrupted attempt is not this one's
             if (
                 held_s := gateway_hold.wait_before_attempt(
                     after=slept_until, max_wait=timeout, url=sent_to or _gateway_hold_url,

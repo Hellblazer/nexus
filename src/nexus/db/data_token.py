@@ -1841,6 +1841,14 @@ class DataTokenManager:
                         and time.monotonic() >= refresh_deadline
                     ):
                         return refresh_of
+                    if (caller_deadline := _mint_deadline.get()) is not None and time.monotonic() >= caller_deadline:
+                        # The caller's own deadline (a hook) passed while a sibling holds the lock:
+                        # the wait for the sibling is a sleep, and no sleep outlasts it (nexus-3zreb).
+                        raise DataTokenMintError(
+                            f"data-token mint-on-miss lock wait stopped at the caller's deadline for "
+                            f"{_log_endpoint(base_url)} tenant={tenant!r}: a sibling process holds the "
+                            "mint lock and has not published a lease."
+                        )
                     if time.monotonic() >= deadline:
                         raise DataTokenMintError(
                             f"data-token mint-on-miss lock wait exceeded "

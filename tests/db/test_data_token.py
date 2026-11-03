@@ -485,7 +485,7 @@ def test_a_mint_hold_wait_is_bounded_by_its_budget() -> None:
     sleep = _FakeSleep()
     mgr = _manager(poster, _FakeClock(), sleep=sleep)
     assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
-    assert sleep.calls == [_MINT_HOLD_WAIT_BUDGET_S]
+    assert len(sleep.calls) == 1 and 0.0 < sleep.calls[0] <= _MINT_HOLD_WAIT_BUDGET_S  # inside the budget, not past it
 
 
 def test_a_mint_503_records_the_shared_hold_with_its_endpoint() -> None:
@@ -561,7 +561,7 @@ def test_the_hold_wait_budget_is_spent_across_attempts_not_per_attempt() -> None
     sleep = _FakeSleep()
     mgr = DataTokenManager(
         clock=_FakeClock(), poster=poster, mint_credential=lambda: "mintcred", mint_tenant=lambda: "",
-        sleep=_foreign_hold_on_every_sleep(sleep),
+        sleep=_foreign_hold_on_every_sleep(sleep), rng=_CeilingRng(),  # the ceiling draw: the wait is the whole budget
     )
     assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
     # wait (the budget), retry sleep, retry sleep: no hold wait before sends 2 and 3
@@ -618,10 +618,10 @@ def test_the_mint_deadline_context_reaches_a_mint_made_deep_inside_a_store() -> 
     poster = _FakePoster()
     poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
     sleep = _FakeSleep()
-    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    mgr = _manager(poster, _FakeClock(), sleep=sleep, rng=_CeilingRng())  # the ceiling draw: a wait is the whole bound
     with mint_deadline(2.0):
         assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
-    assert sleep.calls and sleep.calls[0] <= 2.0
+    assert sleep.calls == [pytest.approx(2.0, abs=0.05)]  # cut to what the deadline left
     # and the bound ends with the block: the next mint (another tenant) waits its full budget
     poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
     sleep.calls.clear()

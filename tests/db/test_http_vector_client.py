@@ -2607,7 +2607,7 @@ class TestGatewayTransientRetry:
         module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
 
         hv._request("GET", "/v1/vectors/store-get", tenant="default", timeout=3, body=None)
-        assert sleeps == [3.0]
+        assert len(sleeps) == 1 and 0.0 < sleeps[0] <= 3.0  # a moment inside the call's own 3 s, not the hold's 10 s
 
     def test_cphvg_a_hold_for_another_endpoint_does_not_hold_t3(self, monkeypatch, tmp_path):
         """nexus-cphvg: a 503 a local engine drew holds clients of that engine, not of the managed URL."""

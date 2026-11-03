@@ -178,6 +178,50 @@ def test_lock_wait_timeout_message_names_degraded_server_alongside_stuck_sibling
         os.close(fd)
 
 
+def test_a_mint_waiting_on_a_sibling_stops_at_the_callers_deadline(tmp_path: Path) -> None:
+    """nexus-3zreb review round 2: the wait for another process's mint lock is a sleep, and a hook's
+    deadline bounds every sleep of a mint. bearer_for(deadline_s=0.3) used to wait out the whole lock
+    ceiling (3 s here, 150 s in production) with a sibling holding the lock."""
+    lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    lock_fd(fd, blocking=True)
+    try:
+        poster = _FakePoster()
+        mgr = _manager(
+            poster, _FakeClock(), config_dir=tmp_path, wall_clock=_FakeWallClock(),
+            sleep=time.sleep, lock_wait_ceiling_seconds=3.0,
+        )
+        started = time.monotonic()
+        with pytest.raises(DataTokenMintError, match="caller's deadline"):
+            mgr.bearer_for(BASE_URL, TENANT, deadline_s=0.3)
+        elapsed = time.monotonic() - started
+        assert 0.3 <= elapsed < 1.5, elapsed  # the deadline, not the 3 s ceiling
+        assert poster.calls == []  # it never minted
+    finally:
+        unlock_fd(fd)
+        os.close(fd)
+
+
+def test_a_mint_waiting_on_a_sibling_without_a_deadline_still_waits_for_the_ceiling(tmp_path: Path) -> None:
+    lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    lock_fd(fd, blocking=True)
+    try:
+        mgr = _manager(
+            _FakePoster(), _FakeClock(), config_dir=tmp_path, wall_clock=_FakeWallClock(),
+            sleep=time.sleep, lock_wait_ceiling_seconds=0.6,
+        )
+        started = time.monotonic()
+        with pytest.raises(DataTokenMintError, match="exceeded"):
+            mgr.bearer_for(BASE_URL, TENANT)
+        assert time.monotonic() - started >= 0.6
+    finally:
+        unlock_fd(fd)
+        os.close(fd)
+
+
 # ── per-key lock sharding (nexus-7qz06) ──────────────────────────────────
 
 

@@ -1072,7 +1072,7 @@ class TestGatewayTransientRetry:
         store = _make_echo_store()
 
         assert store._once_with_gateway_retry("POST", "/v1/echo", json={"value": "x"}, timeout=3.0) == {"echo": {"value": "x"}}
-        assert sleeps == [3.0]
+        assert len(sleeps) == 1 and 0.0 < sleeps[0] <= 3.0  # a moment inside the call's own 3 s, not the hold's 10 s
 
     def test_v1929_an_engine_deadline_503_holds_no_one_else(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
