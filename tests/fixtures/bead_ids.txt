@@ -498,6 +498,7 @@ nexus-223oj
 nexus-2297
 nexus-22man
 nexus-22man.1
+nexus-22out
 nexus-22q3w
 nexus-22r1f
 nexus-22vvy
@@ -5191,6 +5192,7 @@ nexus-l2ku5
 nexus-l2ku5.1
 nexus-l2vam
 nexus-l2yn
+nexus-l35bq
 nexus-l3dg2
 nexus-l3dg2.1
 nexus-l3lhq
@@ -6451,6 +6453,7 @@ nexus-q81g7
 nexus-q81g7.1
 nexus-q82tk
 nexus-q8rbu
+nexus-q94t1
 nexus-q99w4
 nexus-q9u2n
 nexus-qab
