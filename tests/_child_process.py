@@ -252,7 +252,8 @@ def _identity_tokens(expect: tuple[str, ...]) -> tuple[str, ...]:
     the test's own tmp dir does; so does a script path paired with a per-run nonce from the same command line."""
     if not expect or not all(isinstance(t, str) and t for t in expect):
         raise ValueError("pid_is needs at least one non-empty identity token")
-    if not any("/" in t or "\\" in t for t in expect):
+    # A path token must name something: a lone separator is in every command line on the box.
+    if not any(("/" in t or "\\" in t) and t.strip("/\\") for t in expect):
         raise ValueError(f"an identity token must hold a path unique to the spawned process, got {expect!r}")
     return expect
 

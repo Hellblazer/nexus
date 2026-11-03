@@ -3382,9 +3382,11 @@ class PDFExtractor:
                     # reserved while any member lives, and this sweep exists for
                     # a pool that outlives its leader. Once the leader is reaped
                     # AND no member is left, the number is free for a new session
-                    # leader; the sweep would then hit that group. It takes every
-                    # member exiting and the kernel reusing the number inside the
-                    # sweep's own microseconds; leaving the pool alive costs more.
+                    # leader; the sweep would then hit that group. The window runs
+                    # from the last member's exit to this call (a stop from
+                    # stop_mineru_workers' thread can come later than the reap),
+                    # on a box whose pid counter has wrapped (macOS: 99999);
+                    # see process_group.kill_tree. Leaving the pool alive costs more.
                     safe_killpg_group(worker_pgid)
                     return
 

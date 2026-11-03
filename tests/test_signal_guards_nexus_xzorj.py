@@ -220,7 +220,7 @@ def _wait_dead(proc: subprocess.Popen) -> bool:
     return True
 
 
-@posix_only
+# Runs on Windows too: its match path reads process_argv (review r2 of nexus-xzorj).
 def test_kill_if_identity_spares_a_live_process_that_is_not_the_one_spawned() -> None:
     """The recycled-pid case: the number names a LIVE process, but not the sleeper the test started."""
     stranger = _spawn_sleeper(_nonce())
@@ -235,7 +235,7 @@ def test_kill_if_identity_spares_a_live_process_that_is_not_the_one_spawned() ->
         stranger.wait(timeout=10)
 
 
-@posix_only
+# Runs on Windows too: its match path reads process_argv (review r2 of nexus-xzorj).
 def test_kill_if_identity_kills_the_process_it_matches() -> None:
     """Non-vacuity: the same call with the right identity does kill."""
     tag = _nonce()
@@ -244,14 +244,15 @@ def test_kill_if_identity_kills_the_process_it_matches() -> None:
         assert pid_is(mine.pid, tag) is True
         assert kill_if_identity(mine.pid, tag) is True
         assert _wait_dead(mine)
-        assert mine.returncode == -signal.SIGKILL
+        # POSIX reports the signal; Windows reports TerminateProcess's exit code, which is never 0.
+        assert mine.returncode == (-signal.SIGKILL if hasattr(signal, "SIGKILL") else mine.returncode) and mine.returncode != 0
     finally:
         if mine.poll() is None:
             mine.kill()
             mine.wait(timeout=10)
 
 
-@posix_only
+# Runs on Windows too: its match path reads process_argv (review r2 of nexus-xzorj).
 def test_every_token_must_match_so_a_shared_script_path_needs_its_run_nonce() -> None:
     """A script path every run shares is not an identity alone: it needs the per-run token beside it."""
     tag = _nonce()
@@ -273,8 +274,8 @@ def test_kill_if_identity_refuses_a_pid_it_cannot_vouch_for(pid: object) -> None
 
 
 @pytest.mark.parametrize(
-    "tokens", [(), ("",), ("sleep 30",), ("time.sleep(120)",), ("python", "nx_setup.py"), ("/ok", "")],
-    ids=["none", "empty", "sleep-30", "bare-sleep", "no-separator-in-any", "one-empty"],
+    "tokens", [(), ("",), ("sleep 30",), ("time.sleep(120)",), ("python", "nx_setup.py"), ("/ok", ""), ("/",), ("\\", "python")],
+    ids=["none", "empty", "sleep-30", "bare-sleep", "no-separator-in-any", "one-empty", "bare-slash", "bare-backslash"],
 )
 def test_a_token_that_cannot_name_one_process_is_refused(tokens: tuple[str, ...]) -> None:
     """An empty token matches everything; one with no path separator is every such process's command line
