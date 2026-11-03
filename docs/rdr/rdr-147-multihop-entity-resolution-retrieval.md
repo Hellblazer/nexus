@@ -880,3 +880,4 @@ linker conditional.
 - 2026-06-05: gate PASSED (round 1).
 - 2026-11-03: revised around the Step 0 measurements (nexus-t9npq); status
   deferred -> draft for the re-gate.
+- 2026-11-03: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `68c697ec1`; critique `nexus_rdr/147-gate-critique-2026-11-03-r2`.
