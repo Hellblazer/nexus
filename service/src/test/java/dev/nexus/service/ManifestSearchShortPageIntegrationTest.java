@@ -435,7 +435,7 @@ class ManifestSearchShortPageIntegrationTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"metadata", "aspect", "graph"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"metadata", "graph"})
     void routeB_aFilterThatGenuinelyMatchesFewRows_isCountedNotRerun(String family) {
         // nexus-8ptg4 on route (b): the default budget walks every tuple, so the three rows are all the filter admits.
         // manifest_qualifying_hits counts three occurrences against a page of three and the O(collection) re-run is
@@ -448,6 +448,22 @@ class ManifestSearchShortPageIntegrationTest {
         assertThat(chashes(rows)).containsExactlyElementsOf(rareChashes());
         assertThat(reruns() - before).isZero();
         assertThat(skips() - skipsBefore).isEqualTo(1);
+    }
+
+    @Test
+    void routeB_theAspectFamily_isNeverCounted_aShortPageAlwaysPaysTheRerun() {
+        // nexus-6pfgb.41 review r2: search_aspect_scoped inner-joins document_aspects on (tenant_id, doc_id), which
+        // nothing makes unique, so one manifest occurrence can give several rows and the per-occurrence count could
+        // fall below the page and skip a needed re-run. The aspect family is passed no count: the same short page that
+        // the other two families skip is re-run here (reruns +1, skips 0), with the same rows.
+        long before = reruns();
+        long skipsBefore = skips();
+
+        var rows = routeB(vecHnsw, "aspect", rare());
+
+        assertThat(chashes(rows)).containsExactlyElementsOf(rareChashes());
+        assertThat(reruns() - before).isEqualTo(1);
+        assertThat(skips() - skipsBefore).isZero();
     }
 
     @org.junit.jupiter.params.ParameterizedTest

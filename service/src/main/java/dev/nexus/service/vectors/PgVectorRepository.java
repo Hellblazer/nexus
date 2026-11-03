@@ -4340,7 +4340,7 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model),
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
                              embed.tokens(), skippedCollections);
     }
 
@@ -4447,7 +4447,8 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model),
+        // countable = false: the aspect join can give one occurrence several rows (runCombinedQueryWithChash).
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false),
                              embed.tokens(), skippedCollections);
     }
 
@@ -4597,7 +4598,7 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model),
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
                              embed.tokens(), skippedCollections);
     }
 
@@ -4811,13 +4812,20 @@ public final class PgVectorRepository {
      * <p>The count is {@code manifest_qualifying_hits}, which counts one row per (manifest occurrence, chunk row) pair
      * and so has the grain of a route (b) row; it applies route (a)'s {@code content_type} words, a superset of
      * route (b)'s exact ones, and none of the function's own narrowing (type, author, year, corpus, subtree, the aspect
-     * join, the graph hop), so it can over-count, which only costs a re-run, and never under-counts.
+     * join, the graph hop), so it can over-count, which only costs a re-run, and never under-counts, for a function
+     * that returns at most one row per (manifest occurrence, chunk row). The aspect family does not: it inner-joins
+     * {@code document_aspects} on (tenant_id, doc_id), which nothing makes unique, so a document with two aspect rows
+     * yields two route (b) rows per occurrence and the count could fall below the page. Its caller passes
+     * {@code countable = false}, and a short aspect page always pays the exact re-run (nexus-6pfgb.41 review r2).
      *
      * @param colls the collection names, which also name the statement in the re-run's log line
      * @param model the collections' embedding model, for the count
+     * @param countable whether {@code fn} returns at most one row per (manifest occurrence, chunk row), so the
+     *        bounded count may skip the re-run
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
-            String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, String[] colls, String model) {
+            String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, String[] colls, String model,
+            boolean countable) {
         boolean manifestPredicate = rb.hasManifest();
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement first (see runCombinedQuery), so the GUC round
@@ -4834,8 +4842,10 @@ public final class PgVectorRepository {
             PgSession.setSearchPlanCacheMode(ctx);
             return manifestPredicate
                 ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", colls),
-                                  manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null, rb.manifest()),
-                                                     model, tenant))
+                                  countable
+                                      ? manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null,
+                                                                                     rb.manifest()), model, tenant)
+                                      : null)
                 : ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
