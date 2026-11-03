@@ -26,6 +26,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+
+from nexus.daemon.storage_service_daemon import StorageServiceStartError
+from tests._module_seam import setattr_in
 from click.testing import CliRunner
 
 from nexus import upgrade_finish as uf
@@ -350,7 +353,7 @@ def test_a_failed_single_file_copy_restarts_the_service_and_keeps_the_old_engine
     def boom(*_a, **_kw):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(b.os, "replace", boom)
+    setattr_in(monkeypatch, b, "os.replace", boom)
     with pytest.raises(OSError):
         _install(tmp_path)
     assert fake.events == ["stop_service", "start_service"]
@@ -661,8 +664,6 @@ def test_a_bundle_that_fails_after_the_engine_went_in_still_starts_the_service_o
     "The autostart unit x was started but the storage service did not become ready within 60s; retrying.",
 ])
 def test_a_start_that_outlasts_the_wait_is_a_warning_not_an_error(tmp_path, monkeypatch, message):
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError
-
     fake = _Ops(start_error=StorageServiceStartError(message, still_starting=True))
     _verb_world(tmp_path, monkeypatch, fake)
     _serve(monkeypatch, {_ENGINE_ASSET: _txz(_BIN)})
@@ -690,8 +691,6 @@ def test_a_start_that_really_failed_is_still_an_error(tmp_path, monkeypatch, mes
 
 
 def test_the_restart_error_carries_the_slow_start_split(tmp_path):
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError
-
     slow = _Ops(start_error=StorageServiceStartError("supervisor did not become ready within 60s", still_starting=True))
     with pytest.raises(rq.RestartAfterReplaceError) as err:
         with rq.quiesced(tmp_path, replacing="engine", ops=slow.ops()):

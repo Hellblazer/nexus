@@ -370,8 +370,6 @@ class TestUnitStartTimeoutMessage:
     @staticmethod
     def _record_still_starting(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
         """Record ``still_starting`` on every StorageServiceStartError raised (nexus-86aaz r2)."""
-        from nexus.daemon import storage_service_daemon as ssd
-
         seen: list[bool] = []
         real_init = ssd.StorageServiceStartError.__init__
 
