@@ -138,7 +138,7 @@ def test_step_10_keeps_the_exit_3_retry_and_the_stdin_run_goes_straight_to_the_c
 def test_step_11_reads_the_statuses_through_decisions_and_never_chooses_numbers() -> None:
     s11 = step(11)
     path_run = s11[s11.index("Path run, before any question"):]
-    before(path_run, "list_suggestions", "`STATUSES=` path", "REVIEW decisions", "`undecided`", "ask the questions",
+    before(path_run, "list_suggestions", "`STATUSES=` path", "REVIEW decisions", "`undecided`", "Ask questions 1",
            "REVIEW decisions", "`apply_args`")
     assert "--from-file '<statuses>'" in s11
     assert "an edit the app holds is decided only there" in s11
