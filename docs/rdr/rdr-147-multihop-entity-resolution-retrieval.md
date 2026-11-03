@@ -812,3 +812,71 @@ No new external packages. New components:
 Reused unchanged: `find_by_title_exact` and the by-title route, the coverage
 boundary's budgets and disclosure, `traverse`, the hook registry, catalog typed
 links and the FK cascade.
+
+## Finalization Gate
+
+### Contradiction Check
+
+One tension is stated rather than resolved. The design places the exact-key
+branch inside RDR-232's coverage repair (Technical Design), while Critical
+Assumption #5 records that, by the code, the repair may never enter on the HERB
+questions (their facets read `source_missing`, which RDR-232 rules not
+repairable). The plan does not hide this: Step 4 starts by measuring the facet
+states and reasons on the 7 questions and branches on the result. Apart from
+that, no contradictions found between research findings, design principles and
+the proposed solution.
+
+### Assumption Verification
+
+#1, #3 and #4 are verified by source search on b7c423ea8 (research records
+147-research-3 to 147-research-5). #2 (a post-store batch hook can write catalog
+links) is to be re-verified on the PG engine, and only if the conditional linker
+is built (Step 2). #5 is unverified and acknowledged at gate round 2 (Sam,
+2026-11-03; 147-research-6); Step 4 sub-step 1 measures it before any Step 4
+code.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| `HttpCatalogClient.find_by_title_exact` / `GET /v1/catalog/by_title` | nexus client and engine | Source Search (b7c423ea8) |
+| `traverse` plan step seeded by `$stepN.tumblers` | nexus plans runner | Source Search + Spike (June), re-read on b7c423ea8 |
+| `CoverageBoundary.run` and its single repair | nexus plans (RDR-232) | Source Search (b7c423ea8) |
+| `link_if_absent` / engine link upsert | nexus client and engine | Source Search (re-plan survey) |
+
+### Scope Verification
+
+The Minimum Viable Validation is in scope and is the Step 4 exit test: on the
+Step 0 sandbox and conditions, `nx_answer`'s company F1 on the 5 issue questions
+is at or above 0.7642857142857142, the fixed script's measured baseline, with the
+baseline asserted exactly and the resolution branch shown to have entered on the
+questions that pass. The 2 aggregation questions are reported, not gated (Sam,
+2026-11-03).
+
+### Cross-Cutting Concerns
+
+- **Versioning**: no wire change for `resolve` (it calls the existing by-title
+  route); entity keys live in catalog document meta, so no schema change.
+- **Deployment model**: client-only steps; the engine is unchanged unless a
+  batch by-titles route is later needed (more than 300 tokens per call).
+- **Incremental adoption**: the resolution repair is gated on an unsupported
+  facet plus recognised key tokens, so other questions take today's path; the
+  linker is off by default.
+- **Memory management**: `resolve` holds one call's tokens and their manifests;
+  bounded by the plan step's input.
+- Build tool compatibility, Licensing, IDE compatibility, Secret/credential
+  lifecycle: N/A.
+
+### Proportionality
+
+Right-sized for a redesign of three mechanisms and the validation bar. The
+document is long because it carries measured numbers with their conditions and
+the anchors an implementer needs; the implementation itself is about 520 lines
+plus tests on the MVV path (resolve, the repair branch, entity keys), with the
+linker conditional.
+
+## Revision History
+
+- 2026-06-05: gate PASSED (round 1).
+- 2026-11-03: revised around the Step 0 measurements (nexus-t9npq); status
+  deferred -> draft for the re-gate.
