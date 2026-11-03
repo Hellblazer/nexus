@@ -79,4 +79,4 @@ multiple design notes rather than surface a single chunk.
 - **Running `debug` without a `failing_path`.** No reasonable
   default; raises `PlanRunBindingError`.
 
-See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and the plan authoring guide (https://github.com/Hellblazer/nexus/blob/main/docs/plan-authoring-guide.md).

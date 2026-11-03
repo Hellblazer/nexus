@@ -71,5 +71,5 @@ history walking through typed catalog links.
   further will miss.
 
 See [`/conexus:plan-first`](../plan-first/SKILL.md) for the gate discipline
-across all retrieval, and `docs/plan-authoring-guide.md` for how the
+across all retrieval, and the plan authoring guide (https://github.com/Hellblazer/nexus/blob/main/docs/plan-authoring-guide.md) for how the
 research plan template is authored.

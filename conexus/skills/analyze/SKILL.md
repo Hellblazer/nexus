@@ -69,4 +69,4 @@ before synthesis.
 - **Using bare `criterion`.** "important" is not a criterion; pick
   an axis the ranker can actually sort by.
 
-See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and the plan authoring guide (https://github.com/Hellblazer/nexus/blob/main/docs/plan-authoring-guide.md).

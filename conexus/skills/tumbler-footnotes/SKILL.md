@@ -95,8 +95,7 @@ edit that would otherwise fight the footnote layout).
   footnote bodies in already-converted docs — re-running refreshes them.
 
 `--check`/`--dry-run`, `--check`/`--to-links` and `--refresh`/`--to-links`
-are mutually exclusive (exit 2). Full flag reference: `docs/cli-reference.md`
-§ `nx catalog footnotes`.
+are mutually exclusive (exit 2). Full flag reference: `nx catalog footnotes --help`.
 
 ## Agent-Specific PRODUCE
 

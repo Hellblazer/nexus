@@ -68,4 +68,4 @@ comparison).
   an area to its documentation coverage (coverage-first). Different
   traversal purposes.
 
-See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and the plan authoring guide (https://github.com/Hellblazer/nexus/blob/main/docs/plan-authoring-guide.md).

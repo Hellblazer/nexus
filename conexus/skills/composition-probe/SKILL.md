@@ -63,14 +63,14 @@ In the project root, check for build files in order:
 
 ```
 if pyproject.toml present:    runner = "uv run pytest /tmp/probe-<id>.py -xvs"
-elif pom.xml present:         runner = "scripts/mvnw-leased.sh test -Dtest=<classname> --no-transfer-progress"
+elif pom.xml present:         runner = "<mvn> test -Dtest=<classname> --no-transfer-progress"
 elif package.json present:    runner = "npm test -- /tmp/probe-<id>.ts"
 else:                         surface language-detection failure to the user; halt
 ```
 
-`scripts/mvnw-leased.sh` (nexus-c00dw) takes the single-builder lease before running the wrapped `./mvnw` — never dispatch a bare `mvn`/`./mvnw` here, this subagent's probe run can collide with a concurrent service build.
+`<mvn>` is `scripts/mvnw-leased.sh` when the project has that script (the nexus repo, nexus-c00dw): it takes the single-builder lease before running the wrapped `./mvnw`, so there never dispatch a bare `mvn`/`./mvnw`, because this subagent's probe run can collide with a concurrent service build. In any other project `<mvn>` is `./mvnw` when it exists, else `mvn`.
 
-Map the runner to a file extension: `pytest` → `.py`, `mvnw-leased.sh` → `.java`, `npm` → `.ts`.
+Map the runner to a file extension: `pytest` → `.py`, `<mvn>` → `.java`, `npm` → `.ts`.
 
 ### Step 4: Dispatch Subagent
 
