@@ -203,7 +203,7 @@ count" below refers to it.
 | 20 | Voyage rerank | engine `VoyageReranker.java` | query plus candidate chunk text to Voyage | Q4, decided: sensitive candidates are kept from the reranker, engine-side |
 | 21 | MinerU remote | pdf_extractor.py:2787; config.py:623 | PDF bytes to `pdf.mineru_server_url`, possibly off the machine | `--sensitive` with a non-loopback URL falls to the local subprocess ladder, or refuses if none |
 | 22 | Cloud tenant storage | `HttpVectorClient` upserts in cloud mode | chunk text and embeddings to the managed tenant | `--sensitive` prints a one-line disclosure naming tenant and embedder; Q3, decided: an acknowledgement flag is required |
-| 23 | MCP read tools (output side) | mcp/core.py:3779 `search`, 5028 `query`, 6097 `store_get`, 6723 `store_get_many`; scoped searches; `traverse`; catalog `show`/`list` | content and titles to the session model | Sam's decision Q1 |
+| 23 | MCP read tools (output side) | mcp/core.py:3779 `search`, 5028 `query`, 6097 `store_get`, 6723 `store_get_many`; scoped searches; `traverse`; catalog `show`/`list` | content and titles to the session model | Q1, decided: withheld by default; the operator-only `sensitivity.mcp_output` key can switch to `flag` |
 | 24 | CLI `nx search` / `query` | commands/search_cmd.py:217 | stdout, often read by Claude Code's Bash tool | Q2, decided: withheld under Claude Code, badged in a terminal |
 | 25 | Install ping | install_ping.py:191 | install id, version, mode; no content | `n/a`; listed so the census is complete |
 
