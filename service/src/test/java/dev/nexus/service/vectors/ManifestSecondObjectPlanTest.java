@@ -46,6 +46,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * keys and asserts the second object is absent, and for one that names each of them and asserts it is present.
  *
  * <p>The plan, not the rows, is the subject, so the tables are empty: folding is decided from the constants alone.
+ *
+ * <p><b>Route (c) (nexus-u9dc5).</b> The get and get-all-metadata routes test the same object through {@code
+ * nexus.manifest_admits_chunk}, a one-row SQL function called in FROM so that it inlines: the statement the repository
+ * runs ({@link PgVectorRepository#getWhereCondition}) is planned here with the same two assertions. A function that
+ * stopped inlining (a scalar body with a sub-select does not) would plan as a Function Scan, evaluate the object's guards
+ * per chunk instead of folding them and parse the jsonpath per chunk; the rows would be right. The orphan branch of the
+ * function builds the chunk row's own object behind the same guards, so a search that names none of the six keys carries
+ * no trace of them from either branch.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ManifestSecondObjectPlanTest {
@@ -146,6 +154,19 @@ class ManifestSecondObjectPlanTest {
         assertThat(plan).as("the predicate must be one route (a) pushes: %s", where).isNotNull();
         return explain(MANIFEST_SEARCH_384.call(query(), null, null, new String[] {COLL}, null, null,
             plan.containment(), plan.jsonPath(), 10, MODEL, TENANT));
+    }
+
+    /**
+     * The plan of the statement route (c) runs for {@code where}: the chunk scope and {@link
+     * PgVectorRepository#getWhereCondition}, the condition {@code getWhere} and {@code getAllMetadata} both build.
+     */
+    private String routeCPlan(Map<String, Object> where) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
+        return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
+            ctx.select(ch.chash()).from(ch.table())
+               .where(PgVectorRepository.chunkScope(ch, TENANT, MODEL, COLL)
+                   .and(PgVectorRepository.getWhereCondition(ch, where))),
+            new PgContainerHelper.ExplainOptions(false, true, false, false)));
     }
 
     /** {@code where} maps that name none of the six second-object keys, each one the route (a) search can push. */
@@ -254,5 +275,42 @@ class ManifestSecondObjectPlanTest {
             checked.add(key);
         }
         assertThat(checked).as("manifest_search keys examined").hasSize(SECOND_OBJECT_KEYS.size() - 1);
+    }
+
+    // ── route (c): the get routes ───────────────────────────────────────────
+
+    @Test
+    void routeC_aWhereNamingNoSecondObjectKey_plansWithoutTheSecondObject() {
+        int checked = 0;
+        for (Map<String, Object> w : wheresNamingNone()) {
+            assertSecondObjectAbsent("manifest_admits_chunk " + w, routeCPlan(w));
+            checked++;
+        }
+        assertSecondObjectAbsent("manifest_admits_chunk $ne", routeCPlan(where("section_type", op("$ne", "references"))));
+        checked++;
+        // beside a chunk key, which stays on the row
+        Map<String, Object> mixed = where("section_type", "body");
+        mixed.put("source_key", "k");
+        assertSecondObjectAbsent("manifest_admits_chunk mixed", routeCPlan(mixed));
+        checked++;
+        assertThat(checked).as("route (c) shapes examined").isEqualTo(wheresNamingNone().size() + 2);
+    }
+
+    @Test
+    void routeC_aWhereNamingASecondObjectKey_plansWithItAndOnlyItsBranch() {
+        for (String key : SECOND_OBJECT_KEYS) {
+            assertSecondObjectBuiltFor("manifest_admits_chunk " + key, key, routeCPlan(wheresNaming(key)));
+        }
+    }
+
+    @Test
+    void routeC_aWhereOnAChunkKeyOnly_plansWithoutTheCatalog() {
+        // Chunk keys are unchanged: the row comparison, no manifest function, no catalog table in the statement.
+        for (Map<String, Object> w : List.of(where("source_key", "k"), where("content_hash", op("$in", List.of("a", "b"))),
+                where("source_key", op("$ne", "k")))) {
+            String plan = routeCPlan(w);
+            assertThat(plan).as("a chunk-key where %s must not touch the catalog. Plan was:%n%s", w, plan)
+                .doesNotContain("catalog_document_chunks").doesNotContain("manifest_admits_chunk");
+        }
     }
 }

@@ -290,7 +290,9 @@ class JooqRecordReflectionFeatureTest {
     // per agent dispatch with its T1 put count), one generated Record type (AgentDispatchesRecord), +1.
     // 125 -> 126: nexus-8ptg4, vectors-047-manifest-qualifying-hits.xml added nexus.manifest_qualifying_hits, a RETURNS
     // TABLE function, one generated Record type (ManifestQualifyingHitsRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 126;
+    // 126 -> 127: nexus-u9dc5, vectors-051-route-c-manifest-keys.xml added nexus.manifest_admits_chunk, a RETURNS TABLE
+    // function (a one-row SQL function, so that it inlines), one generated Record type (ManifestAdmitsChunkRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 127;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

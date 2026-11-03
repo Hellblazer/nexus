@@ -87,6 +87,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
 // nexus-p89h4 / nexus-6pfgb.25 (vectors-041): the one search function that also tests an EXISTS on the catalog
 // manifest, serving plain search, the dense text gate and the selective chash set.
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ADMITS_CHUNK;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_QUALIFYING_HITS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384;
@@ -3980,6 +3981,9 @@ public final class PgVectorRepository {
      * loud with 400 rather than silently matching nothing; compound
      * {@code $and}/{@code $or} remains untranslated.
      *
+     * <p>A key {@link ManifestLabelStage} answers is not compared on the chunk row but per owning document from the
+     * catalog (nexus-u9dc5, {@link #getWhereCondition}).
+     *
      * @param where metadata equality predicates (ANDed); null/empty returns the
      *              collection paginated (the {@code store-get}-without-ids shape)
      * @return Chroma-style envelope {@code {ids, documents, metadatas}} aligned by
@@ -4015,13 +4019,7 @@ public final class PgVectorRepository {
                                         boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
-        if (where != null) {
-            for (Map.Entry<String, Object> e : where.entrySet()) {
-                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
-            }
-        }
-        org.jooq.Condition finalCond = cond;
+        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
 
         if (includeNonLive) {
             var nonLiveResult = tenantScope.withTenant(tenant, ctx ->
@@ -4067,7 +4065,56 @@ public final class PgVectorRepository {
             includeSourceUri);
     }
 
-    /** Backward-compat 5-arg overload of {@link #getWhere} (source_uri not included). */
+    /**
+     * The {@code where} condition of the two where-taking get routes ({@link #getWhere}, {@link #getAllMetadata}),
+     * both branches of each (nexus-u9dc5, the route (c) half, RDR-236 Phase 3). Every key {@link ManifestLabelStage}
+     * answers leaves the chunk-row comparison and is judged per OWNING DOCUMENT from the catalog by {@code
+     * nexus.manifest_admits_chunk} (vectors-051): the chunk is admitted when any live owner's own value passes, and a
+     * chunk with no live owner is judged on its own row, as the stage judges a hit with no manifest row. The
+     * predicates are compiled by {@link ManifestPushdown#ofExact}, the form route (b) runs, so every operator is
+     * answered on every key. A key outside the answered set (a chunk key such as {@code source_key} or {@code
+     * content_hash}) is the {@link #metadataCondition} comparison on the row, unchanged.
+     *
+     * <p>Why evaluate and not refuse. After RDR-236 Phase 4 Step 1 the writers stop stamping the document keys and the
+     * position labels on the shared row, and a {@code where} on one of them read from the row would return nothing
+     * and say nothing. A split that the stage refuses (an unknown operator, a non-scalar operand) is a 400 here as on
+     * the searches.
+     *
+     * <p>The same condition serves {@code includeNonLive}: that mode skips only the liveness predicate, so it still
+     * answers a key per owning document, and a chunk whose owners are all tombstoned is judged on its own row.
+     */
+    static org.jooq.Condition getWhereCondition(DimTables.ChunkTable ch, Map<String, Object> where) {
+        if (where == null || where.isEmpty()) {
+            return DSL.trueCondition();
+        }
+        ManifestLabelStage.Split split = ManifestLabelStage.split(where);
+        org.jooq.Condition cond = DSL.trueCondition();
+        Map<String, Object> rest = split.rest();
+        if (rest != null) {
+            for (Map.Entry<String, Object> e : rest.entrySet()) {
+                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
+            }
+        }
+        if (split.active()) {
+            cond = cond.and(manifestAdmitsCondition(ch, ManifestPushdown.ofExact(split.labels())));
+        }
+        return cond;
+    }
+
+    /**
+     * {@code EXISTS (SELECT 1 FROM nexus.manifest_admits_chunk(tenant, collection, chash, metadata, NULL, path) WHERE
+     * admitted)} over the row of {@code ch}. The function is a one-row SQL function called in FROM so that it
+     * inlines, as {@code nexus.chunk_live_owners} does: the bound path is then a constant of the plan, the guards of
+     * the keys it does not name fold away and the jsonpath is parsed once, not per chunk.
+     */
+    private static org.jooq.Condition manifestAdmitsCondition(DimTables.ChunkTable ch, ManifestPushdown.Plan plan) {
+        Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
+        var admits = MANIFEST_ADMITS_CHUNK.call(ch.tenantId(), ch.collection(), rawChash, ch.metadata(),
+            DSL.val((JSONB) null, SQLDataType.JSONB), DSL.val(plan.jsonPath()));
+        return DSL.exists(DSL.selectOne().from(admits).where(admits.ADMITTED));
+    }
+
+        /** Backward-compat 5-arg overload of {@link #getWhere} (source_uri not included). */
     public Map<String, Object> getWhere(String tenant, String collection,
                                         Map<String, Object> where,
                                         int limit, int offset) {
@@ -4106,6 +4153,9 @@ public final class PgVectorRepository {
      * are same-process and cheap; client-to-server round trips pay real
      * network latency each time.
      *
+     * <p>A {@code where} on a key {@link ManifestLabelStage} answers is judged per owning document from the catalog
+     * (nexus-u9dc5, {@link #getWhereCondition}); any other key is compared on the chunk row.
+     *
      * <p>Capped at {@value #GET_ALL_METADATA_MAX_ROWS} rows — above that the
      * caller should fall back to the paginated path rather than have the
      * server materialize an unbounded result set in memory. Throws {@link
@@ -4138,13 +4188,7 @@ public final class PgVectorRepository {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
-        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
-        if (where != null) {
-            for (Map.Entry<String, Object> e : where.entrySet()) {
-                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
-            }
-        }
-        org.jooq.Condition finalCond = cond;
+        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
         var result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
             // this staleness-cache-build read was structurally invisible to the

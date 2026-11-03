@@ -78,6 +78,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * and as a comma string, numbers stored as text, chunk rows that disagree with the catalog, and one chunk held at two
  * positions of one document (two documents do), written at one and legacy at the other, or written at both.
  *
+ * <p><b>Route (c) leg (nexus-u9dc5).</b> The same fixture and the same matrix are also judged through the get routes
+ * ({@link PgVectorRepository#getAllMetadata} and {@link PgVectorRepository#getWhere}, both modes), which answer the
+ * stage-answered keys through {@code nexus.manifest_admits_chunk} and have no stage after the read. They are compared on
+ * the set of CHUNKS admitted (a get route returns chunks, not documents), against {@link ManifestLabelStage#apply}'s
+ * chunk-level admission, and the fixture adds the chunks route (b) cannot see: four ORPHANS (no manifest row, and one
+ * whose only owner is tombstoned), which the stage judges on the chunk row's own values. The physical-scan mode
+ * ({@code includeNonLive}) must return exactly the stage's chunks, orphans included; the live mode exactly those among
+ * them that have a live owner. A chunk key (not answered by the stage) must keep its row comparison.
+ *
  * <p>Non-vacuity: the matrix has a floor in size, each of the eight operators has predicates that admit something and
  * predicates that reject something, the five keys of nexus-qpt52 (bib_year, bib_authors, bib_venue,
  * bib_citation_count, indexed_at) are each admitted and rejected by a positive and by a negative operator, and the
@@ -181,10 +190,10 @@ class ManifestRouteBDifferentialTest {
     /** Chunk-row metadata, as stored (the last writer's, and sometimes disagreeing with the catalog). */
     private static final List<String> CHUNK_META = List.of(
         /* 00 */ "{}",
-        /* 01 */ "{\"section_type\":\"references\",\"section_title\":\"Intro\",\"page_number\":3,\"source_author\":\"Eve\","
+        /* 01 */ "{\"source_key\":\"sk-shared\",\"section_type\":\"references\",\"section_title\":\"Intro\",\"page_number\":3,\"source_author\":\"Eve\","
                   + "\"title\":\"Row Title\",\"content_type\":\"prose\",\"indexed_at\":\"2026-03-03T03:03:03.000000+00:00\","
                   + "\"category\":\"row-cat\",\"tags\":\"r1,r2\"}",
-        /* 02 */ "{\"section_type\":null,\"page_number\":\"5\",\"content_type\":\"pdf\",\"ttl_days\":\"9\","
+        /* 02 */ "{\"source_key\":\"sk-shared\",\"section_type\":null,\"page_number\":\"5\",\"content_type\":\"pdf\",\"ttl_days\":\"9\","
                   + "\"frecency_score\":0.25,\"bib_year\":1990}",
         /* 03 */ "{\"content_type\":\"markdown\",\"quality_gate_overridden\":\"true\",\"source_agent\":\"row-agent\","
                   + "\"extraction_method\":\"m\",\"extraction_source\":\"e\",\"tags\":[\"rt\"]}",
@@ -195,6 +204,31 @@ class ManifestRouteBDifferentialTest {
         /* 07 */ "{\"page_number\":\"abc\",\"section_type\":\"appendix\",\"ttl_days\":7,\"frecency_score\":\"1000\","
                   + "\"quality_gate_overridden\":false,\"tags\":\"\"}",
         /* 08 */ "{\"content_type\":\"prose\",\"category\":\"decision\",\"source_agent\":\"claude\"}");
+
+    /** First chunk index of the chunks route (b) cannot see (nexus-u9dc5): ORPHANS, judged on their own row. */
+    private static final int FIRST_EXTRA_CHUNK = 20;
+
+    /**
+     * Chunk-row metadata of the route (c) extras. Three have no manifest row at all; the fourth is held only by the
+     * tombstoned document d11, which owns nothing. Every answered key appears on at least one of them, in the forms
+     * the stage reads (text, numbers, numeric text, a boolean, a list, null and empty), and the first and the fourth
+     * carry values a live owner's catalog would contradict, so a catalog read of a non-owner would be seen.
+     */
+    private static final List<String> EXTRA_META = List.of(
+        /* 20 */ "{\"source_key\":\"sk-shared\",\"section_type\":\"references\",\"section_title\":\"Intro\",\"page_number\":3,"
+                  + "\"source_author\":\"Eve\",\"title\":\"Row Title\",\"content_type\":\"pdf\","
+                  + "\"indexed_at\":\"2026-03-03T03:03:03.000000+00:00\",\"category\":\"row-cat\",\"tags\":\"r1,r2\","
+                  + "\"bib_year\":1990,\"bib_authors\":\"Row A\",\"bib_venue\":\"Row V\",\"bib_citation_count\":4,"
+                  + "\"bib_doi\":\"10.1/x\",\"bib_openalex_id\":\"W1\",\"bib_semantic_scholar_id\":\"0042\",\"ttl_days\":\"9\","
+                  + "\"frecency_score\":0.25,\"quality_gate_overridden\":\"true\",\"source_agent\":\"row-agent\","
+                  + "\"extraction_method\":\"m\",\"extraction_source\":\"e\"}",
+        /* 21 */ "{}",
+        /* 22 */ "{\"content_type\":\"markdown\",\"section_type\":\"\",\"page_number\":\"abc\",\"tags\":[\"a\",\"b\"],"
+                  + "\"bib_year\":\"2021\",\"quality_gate_overridden\":false,\"indexed_at\":\"2026-06-01T00:00:00.000000+00:00\","
+                  + "\"title\":\"Alpha\",\"source_author\":\"Alice\",\"category\":null,\"ttl_days\":7,\"frecency_score\":\"1000\"}",
+        /* 23 */ "{\"source_key\":\"sk-shared\",\"section_type\":\"body\",\"section_title\":\"Methods\",\"page_number\":\"12\","
+                  + "\"content_type\":\"prose\",\"title\":\"Gamma\",\"source_author\":\"Gil\",\"bib_year\":2020,"
+                  + "\"bib_authors\":\"Ghost\",\"bib_venue\":\"Boo\",\"tags\":\"arch\",\"category\":\"decision\"}");
 
     /** A manifest occurrence: (document, position, chunk, written, section_title, section_type, page_number). */
     private record Occ(String doc, int position, int chunk, boolean written, String sectionTitle, String sectionType,
@@ -225,7 +259,9 @@ class ManifestRouteBDifferentialTest {
         // d13 holds chunk 1 written (Methods, body, page 12) and legacy (the chunk row says Intro, references, 3).
         w("d13", 0, 1, "Methods", "body", 12), l("d13", 1, 1), w("d13", 2, 6, null, "references", null),
         // d14 holds chunk 1 legacy and written empty (no title, no type, no page); chunk 3 is legacy at position 2.
-        l("d14", 0, 1), w("d14", 1, 1, "", "", null), l("d14", 2, 3));
+        l("d14", 0, 1), w("d14", 1, 1, "", "", null), l("d14", 2, 3),
+        // nexus-u9dc5: chunk 23 is held only by the tombstoned d11 (its catalog row, labels and tags own nothing).
+        w("d11", 2, 23, "Tomb", "references", 99));
 
     /** The (document, chunk) pairs the fixture holds at more than one live position: the multiplicity probes. */
     private static final List<String> REPEATED = List.of("d13@" + chash(1), "d14@" + chash(1));
@@ -242,6 +278,9 @@ class ManifestRouteBDifferentialTest {
     PgVectorRepository vec;
     ManifestLabelStage stage;
     List<Map<String, Object>> chunkRows;
+
+    /** The route (c) extras as the stage receives them: four chunks with no live owner (nexus-u9dc5). */
+    List<Map<String, Object>> extraRows;
 
     @BeforeAll
     void start() throws Exception {
@@ -285,6 +324,24 @@ class ManifestRouteBDifferentialTest {
                 row.put("id", chash(i));
                 row.put("collection", COLL);
                 chunkRows.add(row);
+            }
+            extraRows = new ArrayList<>();
+            for (int i = 0; i < EXTRA_META.size(); i++) {
+                int chunk = FIRST_EXTRA_CHUNK + i;
+                seed.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT)
+                    .set(CHUNKS.COLLECTION, COLL)
+                    .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash(chunk)))
+                    .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .set(CHUNKS.CHUNK_TEXT, "diff-b chunk " + chunk)
+                    .set(CHUNKS.METADATA, JSONB.valueOf(EXTRA_META.get(i)))
+                    .set(CHUNKS.EMBEDDING_384, VectorSeeds.vecXY(384, 1f, 0f))
+                    .execute();
+                Map<String, Object> row = new LinkedHashMap<>(
+                    JSON.readValue(EXTRA_META.get(i), new TypeReference<LinkedHashMap<String, Object>>() {}));
+                row.put("id", chash(chunk));
+                row.put("collection", COLL);
+                extraRows.add(row);
             }
             for (Doc d : DOCS) {
                 var insert = seed.insertInto(CATALOG_DOCUMENTS)
@@ -666,6 +723,177 @@ class ManifestRouteBDifferentialTest {
             }
         }
         assertThat(mixed).as("repeated pairs written at one position and legacy at the other").isGreaterThanOrEqualTo(1);
+    }
+
+    // ── route (c): the get routes (nexus-u9dc5) ─────────────────────────────
+
+    /** The chunks the stage keeps among {@code rows}, document-blind: the ids of its output rows. */
+    private Set<String> stageChunkIds(List<Map<String, Object>> rows, List<ManifestLabelStage.Predicate> labels) {
+        Set<String> out = new TreeSet<>();
+        for (Map<String, Object> row : stage.apply(TENANT, rows, labels, Integer.MAX_VALUE)) {
+            out.add((String) row.get("id"));
+        }
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Set<String> idsOf(Map<String, Object> envelope) {
+        return new TreeSet<>((List<String>) envelope.get("ids"));
+    }
+
+    private List<Map<String, Object>> allRows() {
+        List<Map<String, Object>> all = new ArrayList<>(chunkRows);
+        all.addAll(extraRows);
+        return all;
+    }
+
+    private Set<String> liveChunkIds() {
+        Set<String> ids = new TreeSet<>();
+        chunkRows.forEach(r -> ids.add((String) r.get("id")));
+        return ids;
+    }
+
+    @Test
+    void routeCAdmitsExactlyTheChunksTheStageKeeps_orphansIncluded_onEveryPredicateOfTheMatrix() {
+        List<Entry> matrix = matrix();
+        List<Map<String, Object>> all = allRows();
+        Set<String> live = liveChunkIds();
+        Set<String> orphans = new TreeSet<>();
+        extraRows.forEach(r -> orphans.add((String) r.get("id")));
+        List<String> mismatches = new ArrayList<>();
+        int examined = 0;
+        int orphanAdmitted = 0;
+        int orphanRejected = 0;
+        int liveAdmitted = 0;
+        int liveRejected = 0;
+        int stageDiffersFromLiveOnly = 0;
+        Map<String, int[]> perOperator = new TreeMap<>();
+
+        for (Entry e : matrix) {
+            Set<String> expected = stageChunkIds(all, e.labels());
+            Set<String> expectedLive = new TreeSet<>(expected);
+            expectedLive.retainAll(live);
+            examined++;
+            Set<String> physical = idsOf(vec.getAllMetadata(TENANT, COLL, e.where(), true));
+            Set<String> liveRead = idsOf(vec.getAllMetadata(TENANT, COLL, e.where(), false));
+            Set<String> getLive = idsOf(vec.getWhere(TENANT, COLL, e.where(), 1000, 0, false, false));
+            Set<String> getPhysical = idsOf(vec.getWhere(TENANT, COLL, e.where(), 1000, 0, false, true));
+            if (!expected.equals(physical)) {
+                mismatches.add(e.name() + " [" + e.where() + "] get-all-metadata (include_non_live) returns " + physical
+                    + " but the stage keeps " + expected);
+            }
+            if (!expectedLive.equals(liveRead)) {
+                mismatches.add(e.name() + " [" + e.where() + "] get-all-metadata returns " + liveRead
+                    + " but the stage keeps, among live chunks, " + expectedLive);
+            }
+            if (!expectedLive.equals(getLive)) {
+                mismatches.add(e.name() + " [" + e.where() + "] get returns " + getLive + " but the stage keeps " + expectedLive);
+            }
+            if (!expected.equals(getPhysical)) {
+                mismatches.add(e.name() + " [" + e.where() + "] get (include_non_live) returns " + getPhysical
+                    + " but the stage keeps " + expected);
+            }
+            Set<String> keptOrphans = new TreeSet<>(expected);
+            keptOrphans.retainAll(orphans);
+            if (!keptOrphans.isEmpty()) orphanAdmitted++;
+            if (keptOrphans.size() < orphans.size()) orphanRejected++;
+            if (!expectedLive.isEmpty()) liveAdmitted++;
+            if (expectedLive.size() < live.size()) liveRejected++;
+            if (!expected.equals(expectedLive)) stageDiffersFromLiveOnly++;
+            int[] c = perOperator.computeIfAbsent(e.labels().get(0).operator(), k -> new int[2]);
+            if (!expected.isEmpty()) c[0]++;
+            if (expected.size() < all.size()) c[1]++;
+        }
+
+        System.out.println("U9DC5-DIFF route (c) predicates=" + examined + " chunks=" + all.size() + " live_chunks=" + live.size()
+            + " orphan_chunks=" + orphans.size() + " mismatches=" + mismatches.size()
+            + " predicates_admitting_an_orphan=" + orphanAdmitted + " predicates_rejecting_an_orphan=" + orphanRejected
+            + " predicates_admitting_a_live_chunk=" + liveAdmitted + " predicates_rejecting_a_live_chunk=" + liveRejected
+            + " predicates_where_orphans_change_the_answer=" + stageDiffersFromLiveOnly);
+        perOperator.forEach((op, c) -> System.out.println("U9DC5-DIFF route (c) operator " + op + " admits_something=" + c[0]
+            + " rejects_something=" + c[1]));
+        assertThat(mismatches).as("route (c) vs the stage: %d of %d predicates differ", mismatches.size(), examined).isEmpty();
+
+        // Non-vacuity: the same matrix as route (b), the fixture holds the orphans, and the orphans are told apart.
+        assertThat(examined).as("matrix size").isGreaterThanOrEqualTo(1500);
+        assertThat(live).as("chunks with a live owner").hasSize(9);
+        assertThat(orphans).as("orphan chunks, one of them held only by a tombstoned document").hasSize(4);
+        assertThat(orphanAdmitted).as("predicates that admit an orphan").isGreaterThanOrEqualTo(300);
+        assertThat(orphanRejected).as("predicates that reject an orphan").isGreaterThanOrEqualTo(300);
+        assertThat(stageDiffersFromLiveOnly).as("predicates where the orphans change the answer").isGreaterThanOrEqualTo(300);
+        assertThat(liveAdmitted).as("predicates that admit a live chunk").isGreaterThanOrEqualTo(300);
+        assertThat(liveRejected).as("predicates that reject a live chunk").isGreaterThanOrEqualTo(300);
+        for (String operator : OPERATORS) {
+            int[] c = perOperator.get(operator);
+            assertThat(c).as("operator %s examined", operator).isNotNull();
+            assertThat(c[0]).as("%s: predicates that admit something", operator).isGreaterThanOrEqualTo(100);
+            // measured: $ne rejects something in 89 predicates (a negative operator rejects little over 13 chunks)
+            assertThat(c[1]).as("%s: predicates that reject something", operator).isGreaterThanOrEqualTo(50);
+        }
+    }
+
+    @Test
+    void routeCSeesTheOrphansOnlyInThePhysicalScan_andTheTombstonedOnlyChunkIsOne() {
+        // The premise of the leg above, read back from the database: with no predicate the live read lists the chunks
+        // that have a live owner and the physical scan lists those and the four that have none.
+        assertThat(idsOf(vec.getAllMetadata(TENANT, COLL, null, false))).isEqualTo(liveChunkIds());
+        Set<String> all = new TreeSet<>();
+        allRows().forEach(r -> all.add((String) r.get("id")));
+        assertThat(idsOf(vec.getAllMetadata(TENANT, COLL, null, true))).isEqualTo(all);
+        // the tombstoned-only chunk: its manifest row is there, its document is deleted, and the stage reads it as an
+        // orphan (no live occurrence), judged on the chunk row: the row says section_type body where the manifest row
+        // of d11 says references
+        String tomb = chash(FIRST_EXTRA_CHUNK + 3);
+        assertThat(stage.occurrences(TENANT, extraRows, Set.of()).getOrDefault(ManifestLabelStage.ownerKey(COLL, tomb), List.of()))
+            .as("a tombstoned owner owns nothing").isEmpty();
+        assertThat(idsOf(vec.getAllMetadata(TENANT, COLL, where("section_type", "body"), true))).contains(tomb);
+        assertThat(idsOf(vec.getAllMetadata(TENANT, COLL, where("section_type", "references"), true))).doesNotContain(tomb);
+    }
+
+    @Test
+    void routeCLeavesAChunkKeyOnTheRow_aloneAndBesideAnAnsweredKey() {
+        // source_key is not a key the stage answers: it stays the row comparison, on live chunks and on orphans.
+        Set<String> withKey = new TreeSet<>(List.of(chash(1), chash(2), chash(FIRST_EXTRA_CHUNK), chash(FIRST_EXTRA_CHUNK + 3)));
+        assertThat(ManifestLabelStage.split(where("source_key", "sk-shared")).active()).isFalse();
+        assertThat(idsOf(vec.getAllMetadata(TENANT, COLL, where("source_key", "sk-shared"), true))).isEqualTo(withKey);
+        Set<String> liveWithKey = new TreeSet<>(withKey);
+        liveWithKey.retainAll(liveChunkIds());
+        assertThat(liveWithKey).hasSize(2);
+        assertThat(idsOf(vec.getAllMetadata(TENANT, COLL, where("source_key", "sk-shared"), false))).isEqualTo(liveWithKey);
+        assertThat(idsOf(vec.getAllMetadata(TENANT, COLL, where("source_key", "no-such-key"), true))).isEmpty();
+        // beside an answered key: the two are ANDed, and each is judged by its own rule
+        int examined = 0;
+        int admitting = 0;
+        List<String> mismatches = new ArrayList<>();
+        List<Map<String, Object>> keyed = new ArrayList<>();
+        for (Map<String, Object> r : allRows()) {
+            if (withKey.contains((String) r.get("id"))) keyed.add(r);
+        }
+        for (Entry e : matrix()) {
+            Map<String, Object> mixed = new LinkedHashMap<>(e.where());
+            mixed.put("source_key", "sk-shared");
+            Set<String> expected = stageChunkIds(keyed, e.labels());
+            Set<String> actual = idsOf(vec.getAllMetadata(TENANT, COLL, mixed, true));
+            examined++;
+            if (!expected.isEmpty()) admitting++;
+            if (!expected.equals(actual)) {
+                mismatches.add(e.name() + " [" + mixed + "] returns " + actual + " but the stage keeps " + expected);
+            }
+        }
+        assertThat(mismatches).as("an answered key beside a chunk key: %d of %d predicates differ", mismatches.size(), examined)
+            .isEmpty();
+        assertThat(examined).isGreaterThanOrEqualTo(1500);
+        assertThat(admitting).as("predicates that admit a chunk beside the chunk key").isGreaterThanOrEqualTo(100);
+    }
+
+    @Test
+    void routeCRefusesAnOperatorTheStageRefuses_asTheSearchesDo() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> vec.getAllMetadata(TENANT, COLL, where("section_type", op("$regex", "x")), false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("section_type");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> vec.getWhere(TENANT, COLL, where("tags", op("$in", "arch")), 10, 0, false, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("tags");
     }
 
     @Test

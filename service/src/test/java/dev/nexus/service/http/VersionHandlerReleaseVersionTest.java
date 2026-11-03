@@ -225,6 +225,15 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"route_b_manifest_keys_supported\":true");
     }
 
+    // ── nexus-u9dc5: route (c), the get routes, answers every stage-answered key per owning document ──
+
+    @Test
+    void versionAdvertisesTheRouteCManifestKeysAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendRouteCManifestKeysCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"route_c_manifest_keys_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test

@@ -42,6 +42,7 @@ import java.util.function.Supplier;
  *  "search_row_owner_span_supported":true,
  *  "vector_search_chash_allow_supported":true,
  *  "route_b_manifest_keys_supported":true,
+ *  "route_c_manifest_keys_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -474,6 +475,25 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-u9dc5 capability advertisement (RDR-236 Phase 3, the route (c) half the Phase 4 sweep precondition reads,
+     * RDR-236 line 1760): do {@code POST /v1/vectors/get} and {@code /get-all-metadata} answer a {@code where} on
+     * EVERY key {@code ManifestLabelStage} answers (the labels, {@code source_author}, {@code title}, {@code
+     * content_type}, {@code tags}, the {@code bib_*} keys, {@code indexed_at} and the catalog-meta keys), with any
+     * operator, per OWNING DOCUMENT from the catalog (Liquibase {@code vectors-051-1}, {@code
+     * nexus.manifest_admits_chunk}), where an engine without it reads every one of them from the shared chunk row's
+     * last writer?
+     *
+     * <p>A flag of its own, separate from {@code route_b_manifest_keys_supported}: the sweep precondition names the
+     * route (b) and route (c) capabilities, and an engine can carry one without the other. Both engines answer the same
+     * request with HTTP 200 and the same envelope, so the flag is the only evidence. Always present, always {@code
+     * true} on an engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendRouteCManifestKeysCapabilityField(StringBuilder body) {
+        body.append(",\"route_c_manifest_keys_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -669,6 +689,8 @@ public final class VersionHandler implements HttpHandler {
         appendVectorSearchChashAllowCapabilityField(body);
         // nexus-qpt52: route (b) answers every stage-answered key and operator per owning document.
         appendRouteBManifestKeysCapabilityField(body);
+        // nexus-u9dc5: route (c), the get routes, answers the same keys per owning document.
+        appendRouteCManifestKeysCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

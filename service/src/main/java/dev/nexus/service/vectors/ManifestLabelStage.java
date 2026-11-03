@@ -148,6 +148,13 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  * that. Route (b) compiles it ({@link ManifestPushdown#ofExact}), where the SQL order is the answer (see the residuals
  * in {@link ManifestPushdown}).
  *
+ * <p><b>Route (c) (nexus-u9dc5).</b> {@code get} and {@code get-all-metadata} have no stage after the read either, so
+ * they answer every key above in SQL through {@code nexus.manifest_admits_chunk} (vectors-051), over the same object
+ * and the same {@link ManifestPushdown#ofExact} paths as route (b); a chunk with no live owner is judged on its row as
+ * {@link #apply} judges a hit with no manifest row. {@code ManifestRouteBDifferentialTest} holds it to {@link #apply}
+ * on the chunk set, orphans included. Changing a rule here means changing the SQL object (vectors-049, vectors-051 and
+ * their copies) and that test's fixture in the same commit.
+ *
  * <p><b>Route (b) (nexus-qpt52).</b> The three route (b) searches have no stage after the search, so the SQL is the
  * answer: {@link ManifestPushdown#ofExact} compiles every predicate of this stage, every operator on every answered
  * key, and {@code ManifestRouteBDifferentialTest} holds it to {@link #apply} over a matrix. Changing a rule here

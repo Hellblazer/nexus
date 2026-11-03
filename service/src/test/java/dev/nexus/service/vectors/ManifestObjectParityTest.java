@@ -35,15 +35,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code eff}), drops SQL comments, collapses whitespace, and asserts every block is the same string. Whitespace and
  * comments may differ between functions; a key, a fallback, a test or a function name may not.
  *
- * <p>THE ONE DECLARED DIFFERENCE (nexus-6pfgb.41). The nine route (b) bodies ({@code search_metadata_scoped_<dim>},
- * {@code search_aspect_scoped_<dim>}, {@code search_graph_hop_<dim>}) carry the same object except for the {@code
+ * <p>THE ONE DECLARED DIFFERENCE (nexus-6pfgb.41; nexus-u9dc5 adds the route (c) body). The nine route (b) bodies
+ * ({@code search_metadata_scoped_<dim>}, {@code search_aspect_scoped_<dim>}, {@code search_graph_hop_<dim>}) and the
+ * route (c) body ({@code manifest_admits_chunk}, the 14th) carry the same object except for the {@code
  * content_type} key. {@code manifest_search} over-admits on that key because route (a)'s stage judges it exactly
  * afterwards; route (b) has no stage, so its words are the stage's exact rule ({@code ManifestLabelStage#matches}). The
  * key is cut out of every block (from {@code 'content_type', CASE} to {@code 'tags', CASE}); the rest must be equal in
- * all thirteen, and the cut text must be the reference's in the route (a) four and {@link #ROUTE_B_CONTENT_TYPE} in the
- * route (b) nine. Nothing else may differ.
+ * all fourteen, and the cut text must be the reference's in the route (a) four and {@link #ROUTE_B_CONTENT_TYPE} in the
+ * route (b) nine and the route (c) one. Nothing else may differ.
  *
- * <p>TO COVER ANOTHER FUNCTION add its name to {@link #ROUTE_A} or {@link #ROUTE_B}. The extractor ({@link
+ * <p>TO COVER ANOTHER FUNCTION add its name to {@link #ROUTE_A}, {@link #ROUTE_B} or {@link #ROUTE_C}. The extractor ({@link
  * #objectBlock}) and the comparison ({@link #disagreements}) are static and take plain strings, so they can be
  * pointed at any source text.
  */
@@ -60,8 +61,15 @@ class ManifestObjectParityTest {
         "search_aspect_scoped_384", "search_aspect_scoped_768", "search_aspect_scoped_1024",
         "search_graph_hop_384", "search_graph_hop_768", "search_graph_hop_1024");
 
+    /**
+     * The route (c) copy (nexus-u9dc5): {@code nexus.manifest_admits_chunk}, which the get and get-all-metadata routes
+     * call. Route (c) has no stage after the read either, so its {@code content_type} key is route (b)'s exact form.
+     */
+    static final List<String> ROUTE_C = List.of("manifest_admits_chunk");
+
     /** Every function that carries the per-occurrence object. */
-    static final List<String> FUNCTIONS = java.util.stream.Stream.concat(ROUTE_A.stream(), ROUTE_B.stream()).toList();
+    static final List<String> FUNCTIONS = java.util.stream.Stream.of(ROUTE_A, ROUTE_B, ROUTE_C)
+        .flatMap(List::stream).toList();
 
     private static final String CONTENT_TYPE_START = "'content_type', CASE WHEN nexus.manifest_names_key(";
     private static final String TAGS_START = "'tags', CASE WHEN nexus.manifest_names_key(";
@@ -163,13 +171,13 @@ class ManifestObjectParityTest {
 
     /**
      * The functions whose {@code content_type} key is not the one they are declared to carry: the first route (a) copy's
-     * for the route (a) four, {@link #ROUTE_B_CONTENT_TYPE} for the route (b) nine.
+     * for the route (a) four, {@link #ROUTE_B_CONTENT_TYPE} for the route (b) nine and the route (c) one.
      */
     static List<String> contentTypeDisagreements(Map<String, String> bodiesByName) {
         String reference = parts(bodiesByName.get(ROUTE_A.get(0))).contentType();
         List<String> out = new ArrayList<>();
         for (String name : FUNCTIONS) {
-            String expected = ROUTE_B.contains(name) ? ROUTE_B_CONTENT_TYPE : reference;
+            String expected = ROUTE_A.contains(name) ? reference : ROUTE_B_CONTENT_TYPE;
             String actual = parts(bodiesByName.get(name)).contentType();
             if (!expected.equals(actual)) {
                 out.add(name + " content_type is not its declared form at " + firstDifference(expected, actual));
@@ -220,8 +228,8 @@ class ManifestObjectParityTest {
 
     @Test
     void everyFunctionBuildsTheSameObject_exceptTheDeclaredContentTypeKey() {
-        assertThat(bodies.keySet()).as("non-vacuity: all thirteen are compared").containsExactlyElementsOf(FUNCTIONS);
-        assertThat(FUNCTIONS).hasSize(13);
+        assertThat(bodies.keySet()).as("non-vacuity: all fourteen are compared").containsExactlyElementsOf(FUNCTIONS);
+        assertThat(FUNCTIONS).hasSize(14);
         assertThat(disagreements(bodies))
             .as("functions whose per-occurrence object differs from %s", FUNCTIONS.get(0)).isEmpty();
     }
@@ -312,6 +320,27 @@ class ManifestObjectParityTest {
         assertThat(disagreements(mutated)).isEmpty();
         assertThat(contentTypeDisagreements(mutated)).hasSize(1)
             .allMatch(s -> s.startsWith("search_metadata_scoped_384 content_type"));
+    }
+
+    @Test
+    void aKeyRenamedInTheRouteCCopy_isReported() {
+        // nexus-u9dc5: the 14th body is held to the same object. A key renamed in manifest_admits_chunk is a drift the
+        // route (c) get would answer differently from the stage and from route (b).
+        var mutated = withMutated("manifest_admits_chunk", "'extraction_method'", "'extraction_methd'");
+        assertThat(disagreements(mutated)).as("a renamed key").hasSize(1)
+            .allMatch(s -> s.startsWith("manifest_admits_chunk differs from manifest_search_384"));
+    }
+
+    @Test
+    void aRouteCContentTypeOnTheOverAdmittingRouteAForm_isReported() {
+        // Route (c) has no stage after the read, so the route (a) form that over-admits would return a chunk the stage
+        // drops: the only difference from the declared form is this key, and it is reported as such.
+        var mutated = new LinkedHashMap<>(bodies);
+        mutated.put("manifest_admits_chunk",
+            withContentTypeOf(bodies.get("manifest_admits_chunk"), bodies.get(ROUTE_A.get(0))));
+        assertThat(disagreements(mutated)).isEmpty();
+        assertThat(contentTypeDisagreements(mutated)).hasSize(1)
+            .allMatch(s -> s.startsWith("manifest_admits_chunk content_type"));
     }
 
     @Test

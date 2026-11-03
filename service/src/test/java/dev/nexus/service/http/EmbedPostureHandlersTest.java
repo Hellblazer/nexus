@@ -371,6 +371,16 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheRouteCManifestKeysCapability() throws Exception {
+        // nexus-u9dc5: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
+        // handler's body actually calls it, and that the flag is its own (the route (b) one is read beside it).
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("route_c_manifest_keys_supported").asBoolean()).isTrue();
+        assertThat(body.get("route_b_manifest_keys_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void version_throughTheRealHandler_advertisesTheChashAllowCapability() throws Exception {
         // nexus-jypmj: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
         // handler's body actually calls it.

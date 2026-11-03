@@ -691,7 +691,8 @@ class PgVectorRepositoryContractTest {
         // Review c0e4493e finding 2: metadataCondition (the jOOQ twin used by
         // getWhere/getAllMetadata) carries its own range-operator branch —
         // "the two translators must not drift" needs DB-level proof on BOTH,
-        // not just the search() path.
+        // not just the search() path. The key is a CHUNK key (nexus-u9dc5): bib_year is answered per owning
+        // document now, which ManifestRouteBDifferentialTest holds to the stage; this test keeps covering the row twin.
         String col = "code__getwheregte__voyage-code-3__v1";
         embedder1024.register("gw t1", 1.0f, 0.0f);
         embedder1024.register("gw t2", 0.8f, 0.6f);
@@ -700,14 +701,14 @@ class PgVectorRepositoryContractTest {
             List.of("023b5a0797ab810e8a41d1fa6cf304ceb2e3efbcb18813340c3448f62870f65e", "49e273168c155793fabc9392608f4b6d9c40b050020b6ad8fcaf1e019e624eeb",
                     "dd8e3600d58b8dbb83bd696895333dcf153c0ff6ce27479f56925a1a2ba0c7b1"),
             List.of("gw t1", "gw t2", "gw t3"),
-            List.of(Map.of("bib_year", 2021),
-                    Map.of("bib_year", 2019),
-                    Map.of("bib_year", "not-a-year")));
+            List.of(Map.of("chunk_rank", 2021),
+                    Map.of("chunk_rank", 2019),
+                    Map.of("chunk_rank", "not-a-year")));
         own(TENANT_A, col, "023b5a0797ab810e8a41d1fa6cf304ceb2e3efbcb18813340c3448f62870f65e", "49e273168c155793fabc9392608f4b6d9c40b050020b6ad8fcaf1e019e624eeb",
             "dd8e3600d58b8dbb83bd696895333dcf153c0ff6ce27479f56925a1a2ba0c7b1");
 
         Map<String, Object> env = repo1024.getWhere(
-            TENANT_A, col, Map.of("bib_year", Map.of("$gte", 2020)), 10, 0, false);
+            TENANT_A, col, Map.of("chunk_rank", Map.of("$gte", 2020)), 10, 0, false);
 
         assertThat((List<String>) env.get("ids"))
             .as("jOOQ twin: numeric $gte matches only JSON-number rows >= 2020, "
