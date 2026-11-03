@@ -1780,9 +1780,12 @@ def footprint_report(found: list[dict], handoffs: dict[str, str] | None) -> list
     what a fresh session read), a resumed session's saved draft, and the ready round's replies.
     Also named: any ask withdraw_ask could not confirm gone. Returns the lines (nexus-xwijj)."""
     sids = {s["sessionId"][:8] for s in found if s.get("sessionId")}
+    manifest = load_manifest()[0] or {"targets": [], "stamp": ""}
     removed = 0
     for sid in sorted(sids):
-        for f in [TMP / f"rh-{sid}.txt", *ASK_DIR.glob(f"rr-{glob.escape(sid)}-*.txt")]:
+        # The round this roll used only: a newer round's ask file is that round's (stamp-scoped).
+        rr = [ASK_DIR / f"rr-{sid}-{manifest['stamp']}.txt"] if manifest["stamp"] else []
+        for f in [TMP / f"rh-{sid}.txt", *rr]:
             try:
                 f.unlink()
                 removed += 1
@@ -1794,10 +1797,10 @@ def footprint_report(found: list[dict], handoffs: dict[str, str] | None) -> list
     def mine(pattern: str) -> list[str]:
         return sorted(str(f) for sid in sids for f in TMP.glob(pattern.format(sid=glob.escape(sid))))
 
-    kept_handoffs = sorted({p for p in (handoffs or {}).values()} | set(mine("nexus-continuation-restart-*-{sid}-*.md")))
-    drafts = mine("nexus-continuation-restart-*-{sid}-*.draft.txt") + mine("claude-restart-*-{sid}-*.draft.txt")
+    kept_handoffs = sorted(set((handoffs or {}).values()))  # this run's, not every earlier one on disk
+    drafts = sorted(p + ".draft.txt" for p in kept_handoffs if Path(p + ".draft.txt").exists())
+    drafts += mine("claude-restart-*-{sid}-*.draft.txt")
     replies = mine("nexus-restart-ready-*-{sid}-*.json")
-    manifest = load_manifest()[0] or {"targets": []}
     still = [f"mailbox/{t['sessionId'][:8]}: ready ask {t['tuple_id'][:12]}" for t in manifest["targets"]
              if isinstance(t.get("tuple_id"), str) and t["tuple_id"]]
     lines = [f"footprint: removed {removed} typed-ask file(s)",

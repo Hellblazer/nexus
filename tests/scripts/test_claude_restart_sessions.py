@@ -1647,17 +1647,20 @@ def tmpdirs(crs, rd, monkeypatch, tmp_path):
 def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd, tmpdirs) -> None:
     t = tmpdirs
     _manifest_with_asks(crs, rd, {"alpha": "t-left", "beta": ""})
-    files = ["rh-aaaa1111.txt", "rr-aaaa1111-20261102-1.txt", "rr-bbbb2222-x.txt",
+    files = ["rh-aaaa1111.txt", "rr-aaaa1111-20261102-120000.txt", "rr-bbbb2222-x.txt",
              "nexus-continuation-restart-alpha-aaaa1111-1.md", "nexus-continuation-restart-alpha-aaaa1111-1.md.draft.txt",
              "claude-restart-alpha-aaaa1111-2.draft.txt", "nexus-restart-ready-alpha-aaaa1111-1.json",
-             "nexus-continuation-restart-other-cccc3333-1.md"]
+             "nexus-continuation-restart-other-cccc3333-1.md", "rr-aaaa1111-20261103-090000.txt",
+             "nexus-continuation-restart-alpha-aaaa1111-0-earlier.md"]
     for f in files:
         (t / f).write_text("x", encoding="utf-8")
     crs.UNWITHDRAWN.append("mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)")
     lines = crs.footprint_report([{"sessionId": "aaaa1111-rest", "name": "alpha"}],
                                  {"aaaa1111-rest": str(t / "nexus-continuation-restart-alpha-aaaa1111-1.md")})
-    assert not (t / "rh-aaaa1111.txt").exists() and not (t / "rr-aaaa1111-20261102-1.txt").exists()
+    assert not (t / "rh-aaaa1111.txt").exists() and not (t / "rr-aaaa1111-20261102-120000.txt").exists()
     assert (t / "rr-bbbb2222-x.txt").exists()  # another session's ask is not this run's
+    assert (t / "rr-aaaa1111-20261103-090000.txt").exists()  # nor a newer round's
+    assert "0-earlier" not in lines[1]  # an earlier run's handoff is not this run's
     assert lines[0] == "footprint: removed 2 typed-ask file(s)"
     assert lines[1].startswith("footprint: kept 1 handoff(s) and 2 draft(s) for back-out:")
     assert "cccc3333" not in lines[1]
@@ -1665,7 +1668,7 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
     assert "mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)" in lines[3]
     assert "mailbox/sid-alph: ready ask t-left" in lines[3]  # still recorded in the round file
     assert all(ln in _log(rd) for ln in lines)
-    for kept in files[3:]:  # listed, never removed
+    for kept in files[3:7]:  # listed, never removed
         assert (t / kept).exists(), kept
 
 
