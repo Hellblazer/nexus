@@ -21,12 +21,17 @@ from tests._module_seam import module_time, setattr_in
 from tests.test_suite_lease import _dead_pid, _events, _live_holder, _virtual_time, events_log, lease_root  # noqa: F401 -- fixtures
 
 
-def _ticket(root: Path, *, older_by_s: float = 5.0, pid: int | None = None, label: str = "first-in-line") -> Path:
-    """A waiter's ticket as a peer would have left it, ``older_by_s`` before now."""
+def _ticket(root: Path, *, older_by_s: float = 5.0, pid: int | None = None, label: str = "first-in-line",
+            silent_for_s: float = 0.0) -> Path:
+    """A waiter's ticket as a peer would have left it: it arrived ``older_by_s`` ago and last
+    showed it was alive ``silent_for_s`` ago."""
     queue_dir = root / _suite_lease.QUEUE_DIR
     queue_dir.mkdir(parents=True, exist_ok=True)
     path = queue_dir / f"{time.time_ns() - int(older_by_s * 1e9):020d}-{os.getpid() if pid is None else pid}"
     path.write_text(f"{label}\n")
+    if silent_for_s:
+        then = time.time() - silent_for_s
+        os.utime(path, (then, then))
     return path
 
 
@@ -68,13 +73,55 @@ def test_a_dead_waiters_ticket_does_not_hold_the_line_and_is_removed(lease_root:
     assert not corpse.exists()
 
 
-def test_a_ticket_older_than_any_wait_is_ignored_even_with_a_live_pid(lease_root: Path) -> None:
-    """A reused pid must not hold the line forever."""
-    stale = _ticket(lease_root, older_by_s=_suite_lease.TICKET_MAX_AGE_SECONDS + 60)
+def test_a_ticket_that_stopped_showing_it_is_alive_is_ignored_even_with_a_live_pid(lease_root: Path) -> None:
+    """A reused or hung pid must not hold the line: a live waiter touches its ticket every pass."""
+    stale = _ticket(lease_root, silent_for_s=_suite_lease.TICKET_STALE_SECONDS + 30)
     release = _suite_lease.acquire("next", wait_seconds=60, lease_root=lease_root)
     assert release is not None
     release()
     assert not stale.exists()
+
+
+def test_a_ticket_that_keeps_showing_it_is_alive_holds_the_line_however_long_ago_it_arrived(
+        lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Arrival age is not liveness: a waiter that has queued for an hour is still first."""
+    _ticket(lease_root, older_by_s=7200.0)
+    _virtual_time(monkeypatch)
+    assert _suite_lease.acquire("later", wait_seconds=5, lease_root=lease_root) is None
+
+
+def test_a_waiter_touches_its_own_ticket_every_pass(lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ahead = _ticket(lease_root)
+    ages: list[float] = []
+
+    def on_sleep(t: float) -> None:
+        mine = max(p for p in (lease_root / _suite_lease.QUEUE_DIR).iterdir() if p != ahead)
+        ages.append(time.time() - mine.stat().st_mtime)
+        long_ago = time.time() - 600
+        os.utime(mine, (long_ago, long_ago))  # the next pass must bring it back
+        os.utime(ahead, None)  # the peer stays alive
+
+    _virtual_time(monkeypatch, on_sleep=on_sleep)
+    assert _suite_lease.acquire("later", wait_seconds=4, lease_root=lease_root) is None
+    assert len(ages) >= 3 and all(age < 30 for age in ages[1:]), ages
+
+
+def test_a_ticket_a_peer_removed_while_this_run_slept_is_put_back(lease_root: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """After a laptop sleep every ticket reads stale to the first waiter awake; the others must stay in line."""
+    ahead = _ticket(lease_root)
+    present: list[bool] = []
+
+    def on_sleep(t: float) -> None:
+        mine = [p for p in (lease_root / _suite_lease.QUEUE_DIR).iterdir() if p != ahead]
+        present.append(bool(mine))
+        for p in mine:
+            p.unlink()  # a peer swept it while this run slept
+        os.utime(ahead, None)
+
+    _virtual_time(monkeypatch, on_sleep=on_sleep)
+    assert _suite_lease.acquire("later", wait_seconds=4, lease_root=lease_root) is None
+    assert present[1:] and all(present[1:]), present
 
 
 def test_a_later_ticket_does_not_block_an_earlier_arrival(lease_root: Path) -> None:
@@ -85,13 +132,15 @@ def test_a_later_ticket_does_not_block_an_earlier_arrival(lease_root: Path) -> N
     assert behind.exists(), "another waiter's ticket is not ours to remove"
 
 
-def test_a_garbage_ticket_name_is_skipped(lease_root: Path) -> None:
+def test_a_garbage_ticket_name_is_skipped_and_removed(lease_root: Path) -> None:
     queue_dir = lease_root / _suite_lease.QUEUE_DIR
     queue_dir.mkdir(parents=True)
-    (queue_dir / "00000000000000000001-notapid").write_text("x\n")
+    garbage = queue_dir / "00000000000000000001-notapid"
+    garbage.write_text("x\n")
     release = _suite_lease.acquire("next", wait_seconds=60, lease_root=lease_root)
     assert release is not None
     release()
+    assert not garbage.exists(), "an unparseable ticket was left to be re-read on every pass"
 
 
 def test_a_ticket_is_removed_on_every_way_out(lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,3 +249,34 @@ def test_a_wall_clock_stepped_backwards_does_not_lengthen_the_wait(lease_root: P
     proxy.time = lambda: state["wall"]
     assert _suite_lease.acquire("steps", wait_seconds=5, lease_root=lease_root) is None
     assert state["mono"] == 5.0
+
+
+def test_release_leaves_a_lease_that_names_another_pid(lease_root: Path) -> None:
+    """A forked child, or a run whose lease was reclaimed and re-taken, must not remove the new holder's lease."""
+    release = _suite_lease.acquire("mine", lease_root=lease_root)
+    assert release is not None
+    lease = lease_root / _suite_lease.RESOURCE
+    (lease / "pid").write_text(f"{_dead_pid()}\n")  # now it names someone else
+    release()
+    assert (lease / "pid").exists() and (lease / "label").exists(), "released a lease that is not ours"
+
+
+def test_release_removes_a_lease_that_names_this_pid(lease_root: Path) -> None:
+    release = _suite_lease.acquire("mine", lease_root=lease_root)
+    assert release is not None
+    release()
+    assert not (lease_root / _suite_lease.RESOURCE).exists()
+    release()  # idempotent
+
+
+def test_queue_head_names_the_oldest_live_ticket_and_skips_the_dead(lease_root: Path) -> None:
+    _ticket(lease_root, older_by_s=30.0, pid=_dead_pid(), label="gone")
+    _ticket(lease_root, older_by_s=20.0, label="front of the line")
+    _ticket(lease_root, older_by_s=10.0, label="behind")
+    assert _suite_lease.queue_head(lease_root) == f"pid {os.getpid()} (front of the line)"
+
+
+def test_queue_head_is_none_for_an_empty_or_missing_queue(lease_root: Path) -> None:
+    assert _suite_lease.queue_head(lease_root) is None
+    (lease_root / _suite_lease.QUEUE_DIR).mkdir(parents=True)
+    assert _suite_lease.queue_head(lease_root) is None

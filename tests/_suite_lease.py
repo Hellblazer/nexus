@@ -45,9 +45,11 @@ whichever waiter's poll happened to land first after a release won, and with
 three or more waiters one could lose every round. A waiter now takes a TICKET
 (a file under ``suite.queue``, named by the nanosecond it arrived and its pid)
 before its first attempt and may ``mkdir`` the lease only while no LIVE older
-ticket exists. A ticket whose pid is dead, or that is older than
-``TICKET_MAX_AGE_SECONDS``, is ignored and removed, so a killed waiter cannot
-block the line. ``mkdir`` stays the only mutual exclusion; the tickets only
+ticket exists. A waiter touches its ticket on every pass, so a ticket whose
+pid is dead, or that has not been touched for ``TICKET_STALE_SECONDS`` (a hung
+waiter, or a pid the OS reused), is ignored and removed, so a killed waiter
+cannot block the line. A waiter whose ticket a peer removed (every ticket reads
+stale to the first waiter awake after a laptop sleep) puts it back. ``mkdir`` stays the only mutual exclusion; the tickets only
 order who tries. A run with no wait budget takes no ticket and does not queue.
 Any failure to read or write the queue falls back to the old unordered poll.
 
@@ -129,10 +131,11 @@ STALE_SWEEP_AGE_SECONDS = 3600.0
 #: start with ``suite.stale.``, so the stale sweep never touches it.
 QUEUE_DIR = f"{RESOURCE}.queue"
 
-#: A ticket older than this is ignored (and removed) whatever its pid says: a
-#: waiter never legitimately waits longer than its budget, so an older ticket
-#: belongs to a pid that was reused. The slack covers a budget a little over the default.
-TICKET_MAX_AGE_SECONDS = 1800.0 + 600.0
+#: A ticket not touched for this long is ignored (and removed) whatever its pid
+#: says. A live waiter touches its ticket on every pass (about once a second), so
+#: a silent one belongs to a hung process or a reused pid. Arrival age is not
+#: liveness: a waiter that has queued for the whole budget is still first.
+TICKET_STALE_SECONDS = 30.0
 
 _STALE_PREFIX = f"{RESOURCE}.stale."
 
@@ -482,6 +485,15 @@ def _describe(fields: tuple[int | None, str | None]) -> str:
     return f"pid {pid}" + (f" ({label})" if label else "")
 
 
+def _write_ticket(path: Path, label: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, LEASE_FILE_MODE)
+    try:
+        os.write(fd, f"{label}\n".encode())
+        os.fchmod(fd, LEASE_FILE_MODE)
+    finally:
+        os.close(fd)
+
+
 def _take_ticket(root: Path, label: str) -> Path | None:
     """Join the line: a file named by arrival time and pid. ``None`` when the queue cannot be written (no ordering then)."""
     try:
@@ -492,15 +504,23 @@ def _take_ticket(root: Path, label: str) -> Path | None:
         except OSError:
             pass  # not ours to chmod: the creator already set it
         path = queue / f"{time.time_ns():020d}-{os.getpid()}"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, LEASE_FILE_MODE)
-        try:
-            os.write(fd, f"{label}\n".encode())
-            os.fchmod(fd, LEASE_FILE_MODE)
-        finally:
-            os.close(fd)
+        _write_ticket(path, label)
         return path
     except Exception:  # noqa: BLE001 -- no queue is the old behaviour, not an error
         return None
+
+
+def _touch_ticket(ticket: Path, label: str) -> None:
+    """Show the line this waiter is alive; put the ticket back, under its name, if a peer removed it."""
+    try:
+        os.utime(ticket)
+    except FileNotFoundError:
+        try:
+            _write_ticket(ticket, label)
+        except Exception:  # noqa: BLE001 -- a waiter out of the line still tries the lease, as an unordered poll
+            pass
+    except Exception:  # noqa: BLE001 -- a ticket that cannot be touched ages out; the wait goes on
+        pass
 
 
 def _drop_ticket(ticket: Path | None) -> None:
@@ -512,32 +532,55 @@ def _drop_ticket(ticket: Path | None) -> None:
         pass
 
 
-def _ticket_ahead(ticket: Path) -> tuple[int | None, str | None] | None:
-    """The oldest LIVE ticket that arrived before *ticket*, as ``(pid, label)``; ``None`` when this one is first.
+def _first_live_ticket(queue: Path, before: str | None) -> tuple[int | None, str | None] | None:
+    """The oldest LIVE ticket in *queue* named before *before* (any, when ``None``), as ``(pid, label)``.
 
-    A dead pid, an over-age ticket or a name that does not parse is not in the
-    line: it is removed best-effort and skipped. An unreadable queue reads as
-    "first", so a queue this user cannot read degrades to the unordered poll
-    rather than to a wait that cannot end.
+    A dead pid, a ticket untouched for ``TICKET_STALE_SECONDS`` or a name that
+    does not parse is not in the line: it is removed best-effort and skipped. An
+    unreadable queue reads as empty.
     """
     try:
-        names = sorted(os.listdir(ticket.parent))
+        names = sorted(os.listdir(queue))
     except OSError:
         return None
-    oldest_ns = time.time_ns() - int(TICKET_MAX_AGE_SECONDS * 1e9)
+    stale_before = time.time_ns() / 1e9 - TICKET_STALE_SECONDS
     for name in names:
-        if name >= ticket.name:
+        if before is not None and name >= before:
             return None
         try:
             arrived, _, pid_text = name.partition("-")
-            arrived_ns, pid = int(arrived), int(pid_text)
+            int(arrived)  # the arrival stamp must parse too
+            pid = int(pid_text)
         except ValueError:
+            _drop_ticket(queue / name)
             continue
-        if arrived_ns < oldest_ns or not _pid_alive(pid):
-            _drop_ticket(ticket.parent / name)
+        try:
+            touched = (queue / name).stat().st_mtime
+        except OSError:
+            continue  # removed since the listing
+        if touched < stale_before or not _pid_alive(pid):
+            _drop_ticket(queue / name)
             continue
-        return pid, _read_label_file(ticket.parent / name)
+        return pid, _read_label_file(queue / name)
     return None
+
+
+def _ticket_ahead(ticket: Path) -> tuple[int | None, str | None] | None:
+    """The oldest live ticket that arrived before *ticket*; ``None`` when this one is first.
+
+    An unreadable queue reads as "first", so a queue this user cannot read
+    degrades to the unordered poll rather than to a wait that cannot end.
+    """
+    return _first_live_ticket(ticket.parent, ticket.name)
+
+
+def queue_head(lease_root: Path | None = None) -> str | None:
+    """Describe the first live ticket in the line, or ``None`` when nobody is queued (a message's "who is ahead")."""
+    try:
+        head = _first_live_ticket((lease_root or _lease_root()) / QUEUE_DIR, None)
+    except Exception:  # noqa: BLE001 -- a message helper must not raise into a refusal
+        return None
+    return None if head is None else _describe(head)
 
 
 def _read_label_file(path: Path) -> str | None:
@@ -593,6 +636,8 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
         while True:
             gone: tuple[int | None, str | None] | None = None  # what THIS pass set aside; used only if its re-claim wins
             held = False
+            if ticket is not None:
+                _touch_ticket(ticket, label)
             ahead = _ticket_ahead(ticket) if ticket is not None else None
             if ahead is not None:
                 held, seen = True, ahead  # someone who arrived first is owed the next try
@@ -662,6 +707,14 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
             def _release() -> None:
                 os.environ.pop(HELD_BY_ENV, None)
                 try:
+                    # Not ours any more (a forked child's copy of this closure, or a lease that was
+                    # reclaimed and taken by a peer): removing it would release THEIR lease.
+                    try:
+                        recorded = int((lease / "pid").read_text().strip())
+                    except (OSError, ValueError):
+                        recorded = os.getpid()
+                    if recorded != os.getpid():
+                        return
                     for child in lease.iterdir():
                         child.unlink(missing_ok=True)
                     lease.rmdir()

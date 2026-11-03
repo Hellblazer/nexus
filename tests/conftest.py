@@ -1,3 +1,4 @@
+import atexit
 import contextlib
 import logging
 import os
@@ -317,6 +318,11 @@ _suite_lease_release = None
 #: that queued re-reads it afterwards (``_reclamp_xdist_workers_after_lease_wait``).
 _suite_lease_waited = False
 
+#: True once ``atexit`` carries ``_release_suite_lease``: the backstop for the code that runs
+#: after the session-start gates (xdist's own sessionstart, a Ctrl-C), where pytest runs no
+#: ``pytest_sessionfinish``. Registered once per process, before the lease can exist.
+_suite_lease_backstop_registered = False
+
 
 #: Explicit opt-out for a run that must go ahead even though the lease cannot
 #: be taken. Never set by CI; the default is to fail closed.
@@ -330,6 +336,10 @@ _LOCAL_HEAVY_ENV = "NX_LOCAL_HEAVY"
 #: Optional free text beside ``NX_LOCAL_HEAVY=1``: why this run could not go through
 #: ``lab-remote``. It is logged with the ``local_heavy`` event and never required.
 _LOCAL_HEAVY_REASON_ENV = "NX_LOCAL_HEAVY_REASON"
+
+#: Set on the config once the ``local_heavy`` event is written, so the guard's second look at the
+#: same run (``_reclamp_xdist_workers_after_lease_wait``) does not log a second bypass.
+_LOCAL_HEAVY_LOGGED_ATTR = "_nexus_local_heavy_logged"
 
 #: A ``lab-run`` grant exports these (``tests/_tmp_root.py`` reads LAB_CPUS the same
 #: way); ``lab-remote``'s host copy also sets LAB_REMOTE.
@@ -400,11 +410,17 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
                 "against the engine substrate on this machine, outside a lab-run grant\n"
             )
             _sys.stderr.flush()
+            if getattr(config, _LOCAL_HEAVY_LOGGED_ATTR, False):
+                return  # the re-check after a queued run's count rose: the same run, one line
             extra: dict[str, object] = {"workers": workers}
             reason = (env.get(_LOCAL_HEAVY_REASON_ENV) or "").strip()
             if reason:
                 extra["reason"] = reason
             _suite_lease.record_event(_suite_lease.RESOURCE, "local_heavy", 0, extra=extra)
+            try:
+                setattr(config, _LOCAL_HEAVY_LOGGED_ATTR, True)
+            except Exception:  # noqa: BLE001 — a config that refuses the attribute logs again; harmless
+                pass
             return
         import shlex  # noqa: PLC0415
 
@@ -462,7 +478,7 @@ def _take_suite_lease(*, platform: str | None = None) -> None:
     Controller-only, like the gate above: xdist workers spawn after this
     returns and must not each take a lease they would then each release.
     """
-    global _suite_lease_release, _suite_lease_waited
+    global _suite_lease_release, _suite_lease_waited, _suite_lease_backstop_registered
     _suite_lease_waited = False
     if not _selected_t2_substrate_boots_engine():
         return
@@ -502,6 +518,11 @@ def _take_suite_lease(*, platform: str | None = None) -> None:
                     + _suite_lease.recovery_hint(),
                     returncode=75,
                 )
+        if not _suite_lease_backstop_registered:
+            # Before the lease can exist, so no window holds one with nothing to give it back.
+            # Idempotent with ``pytest_sessionfinish`` (which runs first on a normal exit).
+            atexit.register(_release_suite_lease)
+            _suite_lease_backstop_registered = True
         _suite_lease_release = _suite_lease.acquire(
             _suite_lease_label(),
             wait_seconds=wait,
@@ -512,15 +533,28 @@ def _take_suite_lease(*, platform: str | None = None) -> None:
             # Held past the wait, or another run took it between the check
             # above and this acquire. Running on would be exactly the overlap
             # the lease exists to prevent, and silently: fail closed.
-            who = _suite_lease.holder() or "a run that has just taken it"
+            who = _suite_lease.holder()
+            ahead = _suite_lease.queue_head() if who is None else None
             if _suite_lease_unguarded():
                 import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
 
                 _sys.stderr.write(
-                    f"suite lease: held by {who}; proceeding UNGUARDED because "
+                    f"suite lease: held by {who or ahead or 'a run that has just taken it'}; proceeding UNGUARDED because "
                     f"{_SUITE_LEASE_UNGUARDED_ENV} is set\n"
                 )
+            elif ahead is not None:
+                # The lease is free; a waiter that arrived first is owed it. Nothing to clear by hand:
+                # a ticket whose run is gone is skipped within TICKET_STALE_SECONDS.
+                pytest.exit(
+                    f"suite lease: refusing to run. {ahead} is ahead in the line and the lease was free for it "
+                    f"when this run gave up after waiting {wait} s; two substrate-heavy "
+                    "runs at once exhaust the machine-wide shared-memory budget "
+                    "(nexus-6qp25). Re-run when it finishes, or set "
+                    f"{_SUITE_LEASE_UNGUARDED_ENV}=1 to run without the guard.",
+                    returncode=75,
+                )
             else:
+                who = who or "a run that has just taken it"
                 pytest.exit(
                     f"suite lease: refusing to run. The lease is held by {who} after waiting "
                     f"{wait} s (or it won the race for the lease); two substrate-heavy "
@@ -703,6 +737,43 @@ _is_controller_or_serial: bool = False
 _REQUESTED_WORKERS_ATTR = "_nexus_requested_workers"
 
 
+def _derive_worker_count(requested: int) -> tuple[int, list[str], bool]:
+    """The worker count the SysV and memory caps allow for *requested*: ``(count, notes, derived)``.
+
+    ``derived`` is False when neither cap could be read (or none applies on this
+    box); each cap that raises counts as not derived on its own, so one broken probe
+    does not discard the other's clamp. Pure: nothing is applied or printed here.
+    """
+    from tests._xdist_cap import (  # noqa: PLC0415 — configure-time helpers
+        clamp_numprocesses,
+        effective_cap,
+        effective_memory_cap,
+        memory_clamp_note,
+    )
+
+    count, notes, derived = requested, [], False
+    try:
+        cap = effective_cap()
+        if cap is not None:
+            derived = True
+            value, note = clamp_numprocesses(requested=count, cap=cap)
+            if note is not None:
+                count = value
+                notes.append(note)
+    except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
+        pass
+    try:
+        mem_cap = effective_memory_cap()
+        if mem_cap is not None:
+            derived = True
+            if count > mem_cap:
+                notes.append(memory_clamp_note(requested=count, cap=mem_cap))
+                count = mem_cap
+    except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
+        pass
+    return count, notes, derived
+
+
 def _clamp_xdist_workers(config, *, announce: bool = True) -> None:
     """Hold xdist parallelism inside the box's shared-memory budget (nexus-6qp25)
     and inside the run's memory grant (nexus-vo9qn).
@@ -725,29 +796,16 @@ def _clamp_xdist_workers(config, *, announce: bool = True) -> None:
         except Exception:  # noqa: BLE001 — a config that refuses the attribute just never re-clamps
             pass
     try:
-        from tests._xdist_cap import (
-            clamp_numprocesses,
-            effective_cap,
-            effective_memory_cap,
-            memory_clamp_note,
-            set_worker_count,
-        )
+        from tests._xdist_cap import set_worker_count  # noqa: PLC0415 — configure-time helper
 
-        cap = effective_cap()
-        if cap is not None:
-            value, note = clamp_numprocesses(requested=requested, cap=cap)
-            if note is not None:
-                set_worker_count(config.option, value)
-                requested = value
-                # Printed, not logged: the operator needs to see this before a
-                # 15-minute run, and log level here is not yet configured.
-                if announce:
-                    print(f"\n[nexus] {note}\n")
-        mem_cap = effective_memory_cap()
-        if mem_cap is not None and requested > mem_cap:
-            set_worker_count(config.option, mem_cap)
-            if announce:
-                print(f"\n[nexus] {memory_clamp_note(requested=requested, cap=mem_cap)}\n")
+        count, notes, _derived = _derive_worker_count(requested)
+        if count != requested:
+            set_worker_count(config.option, count)
+        # Printed, not logged: the operator needs to see this before a
+        # 15-minute run, and log level here is not yet configured.
+        if announce:
+            for note in notes:
+                print(f"\n[nexus] {note}\n")
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
         return
 
@@ -762,6 +820,10 @@ def _reclamp_xdist_workers_after_lease_wait(config, *, platform: str | None = No
     gates, so the count can still be changed here. Only a run that actually waited
     does this. The laptop guard looks again if the count went UP, because it
     judged the run on the lower number.
+
+    Fail closed: the new count is derived first and applied only if a cap was
+    actually read. A probe that fails now (``ipcs`` gone, say) leaves the count
+    the run already had; it never hands a clamped run all its workers back.
     """
     if not _suite_lease_waited:
         return
@@ -772,10 +834,12 @@ def _reclamp_xdist_workers_after_lease_wait(config, *, platform: str | None = No
     try:
         from tests._xdist_cap import set_worker_count  # noqa: PLC0415 — configure-time helper
 
-        set_worker_count(config.option, original)
+        count, _notes, derived = _derive_worker_count(original)
+        if not derived:
+            return
+        set_worker_count(config.option, count)
     except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
         return
-    _clamp_xdist_workers(config, announce=False)
     after = _xdist_worker_count(config)
     if after != before:
         print(f"\n[nexus] suite lease wait over: xdist workers {before} -> {after} (headroom re-read)\n")
@@ -831,12 +895,15 @@ def pytest_unconfigure(config):
 
 
 def _run_session_start_gates(config) -> None:
-    """The controller's gates, in order; any refusal after the lease is taken gives it back.
+    """The controller's gates, in order; any failure after the lease is taken gives it back.
 
-    pytest does not call ``pytest_sessionfinish`` for an ``Exit`` raised in
-    ``pytest_sessionstart``, so a refusal after ``_take_suite_lease`` (the engine
-    preflight, a laptop re-check) used to leave a lease its dead pid disowned: the
-    next run reclaimed it and logged a spurious ``stale_reclaimed`` (nexus-74bc6).
+    pytest does not call ``pytest_sessionfinish`` for an ``Exit`` (or a Ctrl-C, or any
+    other exception) raised in ``pytest_sessionstart``, so a failure after
+    ``_take_suite_lease`` (the engine preflight, a laptop re-check) used to leave a
+    lease its dead pid disowned: the next run reclaimed it and logged a spurious
+    ``stale_reclaimed`` (nexus-74bc6). The code AFTER these gates (xdist's own
+    sessionstart, its worker spawn) is covered by the ``atexit`` backstop
+    ``_take_suite_lease`` registers.
     """
     try:
         _refuse_heavy_laptop_run(config)
@@ -844,7 +911,7 @@ def _run_session_start_gates(config) -> None:
         _take_suite_lease()
         _reclamp_xdist_workers_after_lease_wait(config)
         _preflight_engine_substrate()
-    except pytest.exit.Exception:
+    except BaseException:  # noqa: BLE001 — Exit, Ctrl-C or a gate's own bug: none of them reaches sessionfinish
         _release_suite_lease()
         raise
 
