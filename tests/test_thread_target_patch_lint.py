@@ -167,14 +167,18 @@ def _patching_targets(source: str) -> list[tuple[int, str]]:
     return _scan(source)[0]
 
 
-def _offenders() -> tuple[list[str], set[tuple[str, str]], int, int, list[str]]:
-    """``(offenders, ALLOWED entries used, targets seen, targets resolved, files skipped)``."""
+def _offenders(root: Path | None = None) -> tuple[list[str], set[tuple[str, str]], int, int, list[str]]:
+    """``(offenders, ALLOWED entries used, targets seen, targets resolved, files skipped)``.
+
+    ``root`` defaults to the tests tree; a test points it at a directory of its own.
+    """
+    tests = _TESTS if root is None else root
     found: list[str] = []
     used: set[tuple[str, str]] = set()
     seen = resolved = 0
     skipped: list[str] = []
-    for path in sorted(_TESTS.rglob("*.py")):
-        rel = path.relative_to(_TESTS.parent).as_posix()
+    for path in sorted(tests.rglob("*.py")):
+        rel = path.relative_to(tests.parent).as_posix()
         try:
             hits, n_seen, n_resolved = _scan(path.read_text(encoding="utf-8"))
         except SyntaxError:
@@ -363,3 +367,13 @@ def test_a_patch_entered_on_the_tests_thread_is_gone_when_the_body_returns() -> 
         release.set()
         t.join(5)
         assert not t.is_alive()
+
+
+def test_a_file_the_lint_cannot_parse_is_reported_not_passed(tmp_path: Path) -> None:
+    """The scan counts an unparsable file as skipped; dropping it silently would hide a target."""
+    root = tmp_path / "tests"
+    root.mkdir()
+    (root / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    (root / "fine.py").write_text("x = 1\n", encoding="utf-8")
+    _found, _used, _seen, _resolved, skipped = _offenders(root)
+    assert skipped == ["tests/broken.py"]
