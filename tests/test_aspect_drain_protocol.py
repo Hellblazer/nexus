@@ -40,9 +40,12 @@ from tests._module_seam import patch_time
 
 @pytest.fixture(autouse=True)
 def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path, so it says so: the unset
-    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+    """This module tests the aspect queue TABLE path. The producer's table mode is
+    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
+    ``tests/_aspect_table_producer.py``, not from the environment."""
+    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+    use_table_producer(monkeypatch)
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
@@ -529,9 +532,16 @@ class TestWorkerDrainIntegration:
             infra_mod.t2_ctx = original_t2_ctx
 
     def test_restart_after_drain_allows_claiming(
-        self, queue_path: Path, locks_dir: Path
+        self, queue_path: Path, locks_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After drain, calling start() re-arms the worker to process new rows.
+
+        The row is a TABLE row, so the worker runs the table-only cadence (an engine
+        with no ``aspects`` template). With the template the worker parks slot 0's
+        ``in`` for up to 25 s and looks at the table on the poll interval, which is
+        right for production and too slow for this test's 3 s window; the variable
+        used to select that cadence and no longer reaches the worker (nexus-bpikw
+        step A).
 
         SG-1 fix (nexus-1091): replaces the vacuous ``or True`` assertion with
         a real verification that the enqueued row was actually claimed (removed
@@ -540,7 +550,9 @@ class TestWorkerDrainIntegration:
         import nexus.aspect_extractor as extractor_mod
         import nexus.mcp_infra as infra_mod
         from nexus.aspect_worker import drain_worker, ensure_worker_started
+        from nexus.aspect_worker_tuples import TupleQueueSide
 
+        monkeypatch.setattr(TupleQueueSide, "supported", lambda self: False)
         original_t2_ctx = infra_mod.t2_ctx
         original_t2_index_write = infra_mod.t2_index_write
         original_extract = extractor_mod.extract_aspects

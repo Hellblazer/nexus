@@ -4,8 +4,8 @@
 waiting rows to ``aspects`` tuples, one row at a time.
 
 WHY A RUNG. ``NX_ASPECT_QUEUE=tuples`` (the default since the RDR-235 Activation
-Step 1 flip, nexus-lnwn1; ``table`` is the opt-out) points the producer and the
-worker at the tuple space (RDR-235). Rows the old table already holds, written before the flip
+Step 1 flip, nexus-lnwn1; ``table`` is refused since nexus-bpikw step A) points the
+producer and the worker at the tuple space (RDR-235). Rows the old table already holds, written before the flip
 by this or an older client, would otherwise wait for the alternating table side
 of the worker to drain them, or strand if the table side is ever retired. The
 upgrade ladder (RDR-185) is the standing mechanism for a data transition that
@@ -78,6 +78,7 @@ from nexus.db.t2.http_aspect_queue import (
     ASPECTS_SUBSPACE,
     LIST_WAITING_ENGINE_RELEASE as LIST_WAITING_ENGINE_TAG,
     AspectQueueListWaitingUnsupportedError,
+    AspectQueueTableModeRetiredError,
     HttpAspectQueue,
     WaitingRow,
     _identity_body,
@@ -151,6 +152,17 @@ def _default_record() -> object | None:
     return default_completion_record(RUNG_NAME)
 
 
+def _producer_mode() -> str:
+    """The flag as the rung reads it. ``table`` is refused by the producer
+    (nexus-bpikw step A); here it is the answer "not tuples", so the rung reports
+    not applicable and sends nothing, as it did for the old opt-out, instead of
+    raising out of ``nx upgrade``."""
+    try:
+        return aspect_queue_mode()
+    except AspectQueueTableModeRetiredError:
+        return "table"
+
+
 def _default_queue() -> HttpAspectQueue:
     return HttpAspectQueue()
 
@@ -172,7 +184,7 @@ class AspectQueueTuplesRung:
     def __init__(
         self,
         *,
-        mode_fn: Callable[[], str] = aspect_queue_mode,
+        mode_fn: Callable[[], str] = _producer_mode,
         queue_factory: Callable[[], Any] = _default_queue,
         tuples_factory: Callable[[], Any] = _default_tuples,
         batch_limit: int = DEFAULT_BATCH_LIMIT,

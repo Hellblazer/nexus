@@ -87,13 +87,15 @@ def _failures() -> dict:
 
 
 @pytest.mark.t2_tenant
-def test_the_flush_counts_a_refused_aspect_batch_in_tuples_mode_and_not_in_table_mode(
+def test_the_flush_counts_a_refused_aspect_batch_under_tuples_and_under_a_stale_table_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both modes through a real ``index_repository()`` on one tenant (nexus-9edxe
-    folded the two tests): the tuples-mode flush counts the refusal, then, on a
-    second repo, the table-mode control does not. Tuples first, so the control's
-    'no row added' is read against a count that has just risen."""
+    """Both values through a real ``index_repository()`` on one tenant (nexus-9edxe
+    folded the two tests): the flush counts the refusal under ``tuples``, then, on a
+    second repo, under a leftover ``NX_ASPECT_QUEUE=table`` too. The table producer is
+    retired (nexus-bpikw step A), so the second flush is no longer a control that stays
+    silent: the flush hook has one producer, and a refused batch is counted whatever
+    the variable says (the producer's own retirement refusal lands here the same way)."""
     calls = _refuse_every_batch(monkeypatch)
 
     monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuples")
@@ -111,4 +113,4 @@ def test_the_flush_counts_a_refused_aspect_batch_in_tuples_mode_and_not_in_table
     counted = failures["total"]
     _index(_rdr_repo(tmp_path, "table-repo"), tmp_path)
     assert len(calls) > tuples_calls, "table: harness broken: the flush hook never reached enqueue_many"
-    assert _failures()["total"] == counted, "table: a refused batch left a hook_failures row"
+    assert _failures()["total"] - counted == len(calls) - tuples_calls, "table: a refused batch is counted too"

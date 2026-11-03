@@ -908,12 +908,9 @@ Both verbs are RETIRED and always raise a `click.UsageError` regardless of the f
 
 Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163), on a non-retryable error, or when a stale reclaim finds it already at the retry cap. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues the failed table rows and revives the dead tasks of the `aspects` tuple queue, so the worker picks them up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
 
-It reads both sides. Failed table rows are handled by `NX_ASPECT_QUEUE`, which defaults to `tuples` (see [Configuration](configuration.md)):
+It reads both sides. Each failed table row is enqueued as an `aspects` task, keyed by its `doc_id`, and the failed row is then deleted from the table, so the doctor does not count it again. A failed row with no `doc_id` cannot become a task. It is skipped, the message says to re-index the document, and the remaining rows still run. The table's in-place reset (`NX_ASPECT_QUEUE=table`) is retired (nexus-bpikw): with that value set the verb prints the retirement message and exits 1 before it reads or writes (see [Configuration](configuration.md)).
 
-- `NX_ASPECT_QUEUE=tuples` (the default): each failed row is enqueued as an `aspects` task, keyed by its `doc_id`, and the failed row is then deleted from the table, so the doctor does not count it again. A failed row with no `doc_id` cannot become a task. It is skipped, the message says to re-index the document, and the remaining rows still run.
-- `NX_ASPECT_QUEUE=table`: each failed row is reset in place to `pending` with `retry_count=0` and any stale backoff cleared, as before RDR-235. No tuple task is written for it.
-
-Dead tasks of the `aspects` tuple queue are revived in both modes. A dead task is written back as available with its attempts reset and its retention clock restarted. An engine with no `aspects` template has no dead tasks, and the verb then reads the table alone.
+Dead tasks of the `aspects` tuple queue are revived too. A dead task is written back as available with its attempts reset and its retention clock restarted. An engine with no `aspects` template has no dead tasks, and the verb then reads the table alone.
 
 | Flag | Description |
 |------|-------------|

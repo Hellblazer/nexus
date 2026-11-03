@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-235 (bead nexus-5r2sc.3.2): the aspect-queue producer behind
-``NX_ASPECT_QUEUE=tuples|table``.
+``NX_ASPECT_QUEUE``.
 
-Tuples mode turns ``HttpAspectQueue.enqueue`` and ``enqueue_many`` into
-``out mode=replace`` on the ``aspects`` template with an identity body
-``{collection, source_path, doc_id, content_hash}`` and nonce = ``doc_id``.
-Table mode (the default) sends nothing to ``/v1/tuples``.
+Tuples mode (the only producer since nexus-bpikw step A) turns
+``HttpAspectQueue.enqueue`` and ``enqueue_many`` into ``out mode=replace`` on the
+``aspects`` template with an identity body ``{collection, source_path, doc_id,
+content_hash}`` and nonce = ``doc_id``. ``NX_ASPECT_QUEUE=table`` is refused.
 
 Two layers (nexus-9edxe, tenant consolidation round 2). Everything the producer
 decides on its own runs over ``_MockEngine``, an ``httpx.MockTransport`` handler
 behind the real ``HttpTupleStore`` (so the payload, the size cap and the typed
-error mapping are the real client code) and mints no tenant: table mode, the
+error mapping are the real client code) and mints no tenant: the table refusal, the
 bounded fan-out, the skipped rows, the batch that stops at the tenant ceiling and
 the missing template. Two tests reach the real engine, because their subject is
 what the engine and the catalog do with the producer's writes: the producer
@@ -40,6 +40,7 @@ from nexus.db.t2.http_aspect_queue import (
     ASPECTS_KEYS,
     ASPECTS_SUBSPACE,
     AspectQueueEngineUnsupportedError,
+    AspectQueueTableModeRetiredError,
     AspectTupleCounts,
     HttpAspectQueue,
     aspect_queue_mode,
@@ -200,50 +201,59 @@ class TestFlag:
         monkeypatch.delenv(ASPECT_QUEUE_ENV, raising=False)
         assert aspect_queue_mode() == "tuples"
 
-    @pytest.mark.parametrize("value, expected", [
-        ("tuples", "tuples"), ("TUPLES", "tuples"), (" table ", "table"), ("TABLE", "table"),
-        ("", "tuples"), ("   ", "tuples"),
-    ])
-    def test_values(self, monkeypatch: pytest.MonkeyPatch, value: str, expected: str) -> None:
+    @pytest.mark.parametrize("value", ["tuples", "TUPLES", "", "   "])
+    def test_values(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
         monkeypatch.setenv(ASPECT_QUEUE_ENV, value)
-        assert aspect_queue_mode() == expected
+        assert aspect_queue_mode() == "tuples"
 
-    def test_an_unknown_value_warns_once_and_means_table(
+    @pytest.mark.parametrize("value", ["table", " table ", "TABLE"])
+    def test_table_is_refused_and_the_message_names_the_retirement(
+        self, monkeypatch: pytest.MonkeyPatch, value: str,
+    ) -> None:
+        """nexus-bpikw step A: the table producer is retired. The explicit opt-out
+        (and the runbook's old rollback) is now a refusal that says so, in every
+        spelling the flag always accepted, not a silent route to the old queue."""
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, value)
+        with pytest.raises(AspectQueueTableModeRetiredError) as exc:
+            aspect_queue_mode()
+        msg = str(exc.value)
+        assert "retired" in msg and "nexus-bpikw" in msg
+        assert ASPECT_QUEUE_ENV in msg and "tuples" in msg, "it names the variable and what to do"
+
+    def test_an_unknown_value_warns_once_and_means_tuples(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A typo falls back to the queue every released engine supports, and
-        says so once per process; it does not fail every ingest hook. That the
-        enqueue then sends nothing to the tuple space is pinned with the table
-        mode test below, which runs under this same value."""
+        """A typo (``tuple``) lands on the only producer there is, and says so
+        once per process; it does not fail every ingest hook."""
         monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuple")
         with structlog.testing.capture_logs() as cap:
-            assert aspect_queue_mode() == "table"
-            assert aspect_queue_mode() == "table"
-        warnings = [e for e in cap if e["event"] == "aspect_queue_mode_unknown_falling_back_to_table"]
+            assert aspect_queue_mode() == "tuples"
+            assert aspect_queue_mode() == "tuples"
+        warnings = [e for e in cap if e["event"] == "aspect_queue_mode_unknown_falling_back_to_tuples"]
         assert len(warnings) == 1 and warnings[0]["value"] == "tuple"
 
 
 @pytest.mark.usefixtures("no_registration")
-class TestTableModeSendsNothingToTheTupleSpace:
-    def test_enqueue_and_enqueue_many_leave_the_tuple_space_alone(
+class TestTableModeIsRefusedBeforeAnythingIsSent:
+    def test_enqueue_and_enqueue_many_raise_and_send_nothing(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Under the explicit opt-out ("table") and under an unknown value (a typo
-        means table), nothing goes to ``/v1/tuples``, and the table queue's own
-        routes carry the write."""
+        """Under ``table`` neither route reaches the engine: not the tuple space and
+        not the table queue's own enqueue routes (which Step B's changeset drops)."""
         eng = _MockEngine()
         queue = eng.queue()
-        coll = _coll()
-        doc = _tumbler()
-        for flag in ("table", "tuple"):
-            monkeypatch.setenv(ASPECT_QUEUE_ENV, flag)
-            queue.enqueue(coll, "/p/a.md", content="text", doc_id=doc)
-            assert queue.enqueue_many([
-                {"collection": coll, "source_path": f"/p/{i}.md", "doc_id": doc} for i in range(3)
-            ]) == 3
-            assert eng.tuple_posts() == [], f"flag={flag!r}"
-        assert eng.paths.count("/v1/aspects/queue/enqueue") == 2, "the table queue took the single writes"
-        assert eng.paths.count("/v1/aspects/queue/enqueue_many") == 2, "and the batches"
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
+        with pytest.raises(AspectQueueTableModeRetiredError):
+            queue.enqueue(_coll(), "/p/a.md", content="text", doc_id=_tumbler())
+        with pytest.raises(AspectQueueTableModeRetiredError):
+            queue.enqueue_many([{"collection": _coll(), "source_path": "/p/b.md", "doc_id": _tumbler()}])
+        assert eng.tuple_posts() == [] and eng.paths == [], "nothing was sent"
+
+    def test_an_unknown_value_enqueues_on_the_tuple_space(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        eng = _MockEngine()
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuple")
+        eng.queue().enqueue(_coll(), "/p/a.md", content="text", doc_id=_tumbler())
+        assert len(eng.tuple_posts()) == 1 and "/v1/aspects/queue/enqueue" not in eng.paths
 
 
 @pytest.mark.usefixtures("tuples_mode")

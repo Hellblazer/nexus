@@ -44,7 +44,8 @@ DEFAULT_TENANT: str = "default"
 
 # ── RDR-235: the producer behind NX_ASPECT_QUEUE ─────────────────────────────
 
-#: Selects where :meth:`HttpAspectQueue.enqueue` and ``enqueue_many`` write.
+#: The variable that once selected the producer. ``tuples`` (or unset) is the only
+#: producer; ``table`` is refused (:class:`AspectQueueTableModeRetiredError`).
 ASPECT_QUEUE_ENV: str = "NX_ASPECT_QUEUE"
 ASPECT_QUEUE_MODES: tuple[str, str] = ("table", "tuples")
 
@@ -64,27 +65,45 @@ ENQUEUE_FANOUT_WORKERS: int = 8
 _warned_unknown_modes: set[str] = set()
 
 
+class AspectQueueTableModeRetiredError(RuntimeError):
+    """``NX_ASPECT_QUEUE=table`` was asked for after the table producer was retired
+    (nexus-bpikw step A, RDR-235). The tuple queue is the only producer."""
+
+
 def aspect_queue_mode() -> str:
-    """``"tuples"`` (default) or ``"table"``, read from ``NX_ASPECT_QUEUE`` at
-    call time. An unset or blank value is ``tuples`` (the RDR-235 Activation
-    Step 1 flip, nexus-lnwn1); ``table`` is the explicit opt-out and the
-    rollback. Any other value logs one warning per process and means ``table``,
-    NOT the default: ``table`` is the path every released engine supports and
-    the rollback path the runbook names, so a typo lands on the conservative
-    queue and says so, instead of failing every ingest hook or quietly picking
-    the path that needs the newer engine."""
+    """``"tuples"``, read from ``NX_ASPECT_QUEUE`` at call time. An unset or blank
+    value is ``tuples``. ``table`` raises :class:`AspectQueueTableModeRetiredError`:
+    the producer's table mode is retired (nexus-bpikw step A), so the old opt-out
+    and the runbook's old rollback are refused instead of quietly routed to the
+    tuple queue. Any other value logs one warning per process and means ``tuples``,
+    the only producer left: a typo (``tuple``) must not fail every ingest hook.
+
+    The worker does not call this: it drains both queues whatever the variable
+    says (RDR-235 gate S1), so rows an older client left in the table are still
+    claimed.
+
+    ``enqueue`` and ``enqueue_many`` still carry a table branch, taken only when
+    this function returns ``"table"``, which production never does. It is the seam
+    the suite uses to seed legacy table rows for the worker's drain and the
+    table readers (``tests/_aspect_table_producer.py``); step B deletes it with
+    the table."""
     raw = os.environ.get(ASPECT_QUEUE_ENV, "").strip().lower()
     if raw in ("", "tuples"):
         return "tuples"
     if raw == "table":
-        return "table"
+        raise AspectQueueTableModeRetiredError(
+            f"{ASPECT_QUEUE_ENV}=table is retired: the aspect queue table producer was "
+            "removed (nexus-bpikw, RDR-235) and the engine's 'aspects' tuple queue is the "
+            f"only producer. Unset {ASPECT_QUEUE_ENV} or set it to 'tuples'. Rows already in "
+            "the table are still drained by the worker."
+        )
     if raw not in _warned_unknown_modes:
         _warned_unknown_modes.add(raw)
         _log.warning(
-            "aspect_queue_mode_unknown_falling_back_to_table",
+            "aspect_queue_mode_unknown_falling_back_to_tuples",
             env=ASPECT_QUEUE_ENV, value=raw, allowed=list(ASPECT_QUEUE_MODES),
         )
-    return "table"
+    return "tuples"
 
 
 @dataclass(frozen=True)

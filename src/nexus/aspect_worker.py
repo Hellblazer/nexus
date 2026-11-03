@@ -272,16 +272,8 @@ def _self_fault_reason(exc: BaseException) -> str | None:
     return None
 
 
-#: Wait after a failed tuple claim in ``tuples`` mode (see ``_run_loop``).
+#: Wait after a failed tuple claim (see ``_run_loop``).
 _TUPLE_CLAIM_RETRY_S: float = 30.0
-
-
-def _aspect_queue_mode() -> str:
-    """``NX_ASPECT_QUEUE`` (``tuples`` by default, or ``table``), read at call time. A seam
-    for the loop; the rule itself is ``http_aspect_queue.aspect_queue_mode``."""
-    from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415 — deferred: heavy import, service-side
-
-    return aspect_queue_mode()
 
 
 def _backoff_interval_seconds(retry_count: int, *, rng=random.random) -> int:
@@ -655,22 +647,21 @@ class AspectExtractionWorker:
                 continue
 
             # RDR-235 gate S1 (decided): this worker drains BOTH queues whenever
-            # the engine has the ``aspects`` template, whatever its own
-            # NX_ASPECT_QUEUE value; only the producer is flagged. So a flip back
-            # to ``table`` strands nothing: a table-mode worker still claims what
-            # is left on the tuple queue. The flag decides one thing here, the
-            # cadence: ``tuples`` parks slot 0's ``in`` (a claim in under a
-            # second) and checks the table on the poll interval or a wake-file
-            # touch (the default since nexus-lnwn1); ``table`` keeps the old poll cadence
-            # for both queues.
+            # the engine has the ``aspects`` template, whatever NX_ASPECT_QUEUE
+            # says; the variable no longer reaches the worker at all (nexus-bpikw
+            # step A retired the producer's table mode), so a table row an older
+            # client left behind is still claimed. The cadence follows the tuples
+            # path whenever the template is supported: slot 0's ``in`` parks (a
+            # claim in under a second) and the table is checked on the poll
+            # interval or a wake-file touch. On an engine with no template the
+            # table is polled alone.
             tuples_ok = side.supported()
-            tuples_mode = tuples_ok and _aspect_queue_mode() == "tuples"
             claim_failed = False
 
             # Table turn.
             rows: list = []
             table_due = (
-                not tuples_mode
+                not tuples_ok
                 or table_busy
                 or self._wake_touched()
                 or time.monotonic() >= next_table_check
@@ -697,7 +688,7 @@ class AspectExtractionWorker:
             parked = False
             tuple_failed = False
             if tuples_ok and not self._stop_event.is_set():
-                park = tuples_mode and not table_busy
+                park = not table_busy
                 claims, failed = side.claim_batch(park=park)
                 if not failed:
                     self._note_engine_contact()
@@ -714,11 +705,11 @@ class AspectExtractionWorker:
                 continue
             if parked and not claim_failed:
                 continue  # the park was the wait
-            # A failed tuple claim in ``tuples`` mode is the main path blipping, not
+            # A failed tuple claim is the main path blipping, not
             # an idle queue: retry within half a minute, not a poll interval.
             retry_s = (
                 min(self._poll_interval, _TUPLE_CLAIM_RETRY_S)
-                if tuple_failed and tuples_mode else self._poll_interval
+                if tuple_failed else self._poll_interval
             )
             self._wait_for_wake_or_timeout(retry_s)
 

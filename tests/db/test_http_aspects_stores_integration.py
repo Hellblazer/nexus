@@ -623,10 +623,12 @@ class TestQueueMVV:
         import time as _time
         from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
-        # The subject is the TABLE client's wire shape, so this test opts out of the
-        # tuples default (RDR-235 Activation Step 1, nexus-lnwn1): under tuples the
-        # enqueue writes tasks and claim_batch's table has nothing to return.
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+        # The subject is the TABLE client's wire shape. The table producer is retired
+        # (nexus-bpikw step A), so the seam writes the rows: under the tuple producer
+        # the enqueue writes tasks and claim_batch's table has nothing to return.
+        from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+        use_table_producer(monkeypatch)
         base_url, token, _ = service
         tenant = f"queue-claimbatch-{_time.time_ns()}"
         doc_id = "doc-fk-control"

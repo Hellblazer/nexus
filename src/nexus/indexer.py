@@ -6860,10 +6860,8 @@ def _run_index(
                 )
                 # RDR-235: a refusal here (MaxLiveRowsExceeded) must be counted,
                 # not only logged; the single-document hook does the same.
-                from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415 — deferred: keeps the table path's imports as they were
-                if aspect_queue_mode() == "tuples":
-                    from nexus.aspect_worker import record_batch_enqueue_failure  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
-                    record_batch_enqueue_failure(collection, len(rows), _enq_exc)
+                from nexus.aspect_worker import record_batch_enqueue_failure  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
+                record_batch_enqueue_failure(collection, len(rows), _enq_exc)
             else:
                 # Auto-spawn gate (mirrors aspect_extraction_enqueue_hook's own
                 # gate exactly — see its docstring for the unit-suite rationale).

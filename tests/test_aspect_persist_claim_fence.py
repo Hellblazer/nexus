@@ -41,9 +41,12 @@ from tests._catalog_fixture_ops import register_real_doc_id
 
 @pytest.fixture(autouse=True)
 def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path, so it says so: the unset
-    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+    """This module tests the aspect queue TABLE path. The producer's table mode is
+    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
+    ``tests/_aspect_table_producer.py``, not from the environment."""
+    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+    use_table_producer(monkeypatch)
 
 _SUBSPACE = "aspects"
 _KEYS = {"queue": "aspects"}

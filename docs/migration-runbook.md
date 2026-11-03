@@ -107,9 +107,9 @@ credential-only tenant needs no `nx upgrade` of its own
 ### The `aspect-queue-tuples` rung
 
 RDR-235 moves aspect extraction from the `aspect_extraction_queue` table to the
-engine's `aspects` tuple queue, selected by `NX_ASPECT_QUEUE=tuples`. This rung
-moves the rows the table already holds, so none wait for the table side of the
-worker or strand.
+engine's `aspects` tuple queue, the only producer (`NX_ASPECT_QUEUE=tuples`, or
+unset). This rung moves the rows the table already holds, so none wait for the
+table side of the worker or strand.
 
 **What flips in this release (RDR-235 Activation Step 1, nexus-lnwn1).** The
 producer default changes: with `NX_ASPECT_QUEUE` unset, the indexer, the MCP
@@ -124,25 +124,31 @@ retention expires them, the tuple queue would fill towards its 10,000-task cap
 (further enqueues then fail and are logged, so new documents get no aspects),
 and the old client's `nx doctor` would show an empty queue. Upgrade every host
 that runs an aspect worker before, or in the same step as, the producer hosts;
-a producer host whose only worker host is older keeps `NX_ASPECT_QUEUE=table`
-until that host is upgraded. A single-host install needs nothing: its own worker
+a producer host whose only worker host is older must wait until that host is
+upgraded (the table producer is retired, see below). A single-host install needs nothing: its own worker
 is upgraded with it. After you upgrade, `nx upgrade` runs this rung once and
 moves the table's waiting rows; a stalled tuple queue shows in `nx doctor`'s
 aspects row.
 
-**Rollback.** Set `NX_ASPECT_QUEUE=table` on the producer hosts. The producer
-then writes the table again, the rung stops being applicable, and the worker
-keeps draining any task already on the tuple queue. Nothing is lost in either
-direction: a row is either still in the table or already a task, and a crash
-between the two steps leaves it in both places, never in neither. An engine older
-than `engine-service-v0.1.169` has no `aspects` template and refuses the
-`tuples` producer with a message naming that release; set `table` there. The
-variable is read by each process at call time, so a long-lived producer (an MCP
-server session, a running indexer) keeps its old setting until it is restarted:
-restart those processes after changing it, in either direction.
+**Retired: `NX_ASPECT_QUEUE=table`** (nexus-bpikw, RDR-235). The producer's table
+mode is gone: the value is refused with an error that names the retirement, and
+there is no rollback to the table producer. A producer host whose only worker
+host is older (above) must now be upgraded in the same step. Rows the table still
+holds are still drained by the worker, moved by this rung, and listed by
+`nx doctor`; a failed row is re-enqueued as a task by `nx aspects
+requeue-failed`.
+
+**No rollback to the table producer.** Nothing is lost in the move: a row is
+either still in the table or already a task, and a crash between the two steps
+leaves it in both places, never in neither. An engine older than
+`engine-service-v0.1.169` has no `aspects` template and refuses the `tuples`
+producer with a message naming that release; upgrade the engine. A process that
+still has `NX_ASPECT_QUEUE=table` in its environment (an MCP server session, a
+running indexer, a shell profile) logs the refusal at each enqueue until the
+variable is removed: unset it and restart those processes.
 
 - It applies only when `NX_ASPECT_QUEUE` is `tuples` (the default, unset
-  included), the engine has the `aspects` template, and the engine answers
+  included; the retired `table` is reported as not applicable), the engine has the `aspects` template, and the engine answers
   `GET /v1/aspects/queue/list_waiting` (`engine-service-v0.1.170`; older
   engines answer 404). Any other case is reported as not applicable, nothing is
   recorded, and the rung is detected again at each `nx upgrade`. With

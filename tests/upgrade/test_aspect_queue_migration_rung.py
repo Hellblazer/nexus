@@ -382,6 +382,24 @@ class TestSkips:
         assert len(logs.events("aspect_queue_rung_skipped")) == 1
         assert ASPECT_QUEUE_ENV in status.pending_detail
 
+    def test_a_stale_table_value_in_the_environment_is_not_applicable_and_does_not_raise(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-bpikw step A: the producer refuses ``NX_ASPECT_QUEUE=table``, and the rung's
+        DEFAULT flag reader (no injected ``mode_fn``) turns that refusal into the same
+        'not applicable' answer, so ``nx upgrade`` does not raise on such an install. A
+        collaborator that raised on the table value would build, and send, nothing."""
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
+
+        def must_not_be_built():  # noqa: ANN202
+            raise AssertionError("the rung built a collaborator before checking the flag")
+
+        status = rung_module.AspectQueueTuplesRung(
+            queue_factory=must_not_be_built, tuples_factory=must_not_be_built,
+        ).detect()
+        assert status.applicable is False and status.converged is False
+        assert ASPECT_QUEUE_ENV in status.pending_detail
+
     def test_an_engine_without_the_aspects_template_is_not_applicable(self, logs) -> None:
         w = World(rows=[_row("/a.md", "1.1.1")], template=False)
         status = w.rung().detect()
@@ -717,7 +735,11 @@ def real(monkeypatch: pytest.MonkeyPatch):
     corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
     monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
-    monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")  # explicit: the steps below set "tuples" where the move runs
+    # The table producer is retired (nexus-bpikw step A): the seam writes the table rows the
+    # steps below move, and they set "tuples" (or the refused "table") where the rung runs.
+    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+    use_table_producer(monkeypatch)
     queue = HttpAspectQueue()
     store = HttpTupleStore()
     yield queue, store
@@ -757,8 +779,10 @@ class TestTheMoveRealEngine:
         queue.enqueue(coll, "/dead.md", content_hash="h-dead", doc_id=d[3])
         queue.enqueue(coll, "/dead-sibling.md", content_hash="h-sib", doc_id=d[3])
 
-        # Step 1, the flag at table moves nothing: not applicable, the tuple space stays empty
-        # and the table keeps all five rows.
+        # Step 1, a leftover flag at table moves nothing: not applicable (the producer refuses the
+        # value, the rung reads that as "not tuples" and does not raise), the tuple space stays
+        # empty and the table keeps all five rows.
+        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
         status = AspectQueueTuplesRung().detect()
         assert status.applicable is False, "step 1: the flag at table is not applicable"
         assert store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300) == [], "step 1: nothing was sent"
@@ -799,7 +823,6 @@ class TestTheMoveRealEngine:
         assert rung.detect() == RungStatus(applicable=True, converged=True)
 
         # table: only the failed row is left
-        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
         assert queue.list_waiting() == [], "step 3: the table emptied"
         assert [r.source_path for r in queue.list_failed()] == ["/dead.md"], (
             "step 3: a failed row never moves, nor is deleted"
@@ -827,9 +850,11 @@ class TestTheMoveRealEngine:
         assert len(store.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300)) == 4, "step 3: a second run changed nothing"
 
         # Step 4, a real crash between out and delete, then a rerun leaves one task for the document.
-        monkeypatch.setenv(ASPECT_QUEUE_ENV, "table")
+        from tests._aspect_table_producer import table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
         crash_doc = register_real_doc_id(title="crash")
-        queue.enqueue(_coll(), "/crash.md", content_hash="h", doc_id=crash_doc)
+        with table_producer():
+            queue.enqueue(_coll(), "/crash.md", content_hash="h", doc_id=crash_doc)
         monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuples")
 
         class Crashing(HttpAspectQueue):

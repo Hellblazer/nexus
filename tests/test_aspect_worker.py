@@ -94,10 +94,12 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             return write_fn(db)
 
     monkeypatch.setattr(infra, "t2_index_write", _direct_index_write)
-    # This module's drain, hook and batch classes test the TABLE producer, so they
-    # say so: the unset default is "tuples" since nexus-lnwn1. The tuple-loop
-    # tests set their own mode (TestTupleLoop._start).
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+    # This module's drain, hook and batch classes test the TABLE producer, which is
+    # retired (nexus-bpikw step A): the seam in tests/_aspect_table_producer.py seeds
+    # its rows. The tuple-loop tests set their own mode (TestTupleLoop._start).
+    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+    use_table_producer(monkeypatch)
     return db_path
 
 
@@ -2851,19 +2853,22 @@ class TestTupleLoop:
         assert len(tuples.ops("in_")) >= 5, "slot 0 parks again and again"
         assert 2 <= table.claims <= 5, f"table checked on the poll interval, not every park: {table.claims}"
 
-    def test_table_mode_never_parks_and_probes_both_queues_each_poll(
+    def test_a_stale_table_value_does_not_change_the_worker_cadence(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
+        """nexus-bpikw step A: the variable no longer reaches the worker. With a
+        leftover NX_ASPECT_QUEUE=table in the environment it still parks slot 0 and
+        checks the table on the poll interval, exactly as with the variable unset."""
         tuples, table = _FakeTuples(), _FakeTable()
         w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table, mode="table")
         try:
             time.sleep(0.9)
         finally:
             w.stop(timeout=5)
-        assert tuples.ops("in_") == [], "a table-mode worker holds no park"
-        assert len(tuples.ops("inp")) >= 10 and table.claims >= 2
+        assert len(tuples.ops("in_")) >= 5, "slot 0 parks again and again"
+        assert 2 <= table.claims <= 5, f"table checked on the poll interval, not every park: {table.claims}"
 
-    def test_table_mode_still_drains_leftover_tuple_tasks(
+    def test_a_stale_table_value_still_drains_leftover_tuple_tasks(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
         tuples = _FakeTuples([_task_body(i) for i in range(3)])

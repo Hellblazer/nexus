@@ -60,7 +60,9 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from nexus.db.t2 import T2Database
 
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")  # explicit: each test sets "tuples" where it needs the producer
+    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — the table producer is retired (nexus-bpikw step A); the seam seeds its rows
+
+    use_table_producer(monkeypatch)  # each test sets "tuples" where it needs the producer
     monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
     d = T2Database(tmp_path / "t2.db")
     monkeypatch.setattr(infra, "t2_index_write", lambda fn, **kw: fn(d))
@@ -496,7 +498,7 @@ def test_task_shapes_the_old_table_and_a_retired_collection_on_the_engine(
 
     # ── alternation: both queues drain in tuples mode; table mode drains leftover tasks ──
     _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(db, monkeypatch)
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")  # a stale value: the worker ignores it
     _a_table_mode_worker_still_drains_leftover_tuple_tasks(db, monkeypatch)
 
     # ── S10: superseded ─────────────────────────────────────────────────────────
@@ -543,7 +545,7 @@ def _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(
 def _a_table_mode_worker_still_drains_leftover_tuple_tasks(
     db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # gate S1 rollback: the flag is unset (table), tasks are on the tuple queue
+    # gate S1 rollback: a stale NX_ASPECT_QUEUE=table in the environment, tasks are on the tuple queue
     docs = [_doc(f"s1-{i}") for i in range(2)]
     for i, d in enumerate(docs):
         _out(db, d, source=f"/s1-{i}.md")
