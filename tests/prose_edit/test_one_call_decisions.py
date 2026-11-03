@@ -92,3 +92,20 @@ def test_step_13_takes_the_combined_answer_and_handles_other() -> None:
            'typed in "Other"', "show the card with that change", "once more")
     assert "End your turn with that question." in card
     assert TEXT.count("Keep this voice card for this document?") == 1
+
+
+def test_a_run_with_chat_decisions_still_asks_apply() -> None:
+    """Branch B can end with every set empty (the author ticked each undecided edit in chat); only the Branch A
+    condition and the chat sentence keep it on the Apply question, as the design's 'chat-decided edits keep the
+    Apply confirm' requires."""
+    para = _app_decided()
+    assert "took Branch A of step 11 (no edit question was asked in chat)" in para
+    assert "When any edit was decided in chat, the run asks `Apply` as above." in para
+    assert "ask the author to confirm unless the run is App-decided, below" in _apply_paragraph()
+
+
+def test_a_no_to_the_query_question_goes_to_step_12_and_branch_b_uses_explicit_numbers() -> None:
+    assert 'on "No", or with no query and no paragraph proposal' in _branch("A")
+    b = _branch("B")
+    assert "again with the author's explicit numbers" in b
+    assert "only when it was not already asked in this step" in b
