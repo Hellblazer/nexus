@@ -657,6 +657,30 @@ public final class ChunkKeySweep {
      */
     public Applied apply(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, String only, int batchSize,
                          int maxBatches, Duration budget, Resume resume) {
+        return apply(tenant, plan, accepted, only, batchSize, maxBatches, budget, resume, new Progress());
+    }
+
+    /**
+     * What an {@link #apply} call has committed so far. Each batch is its own transaction, so a call that throws in
+     * batch N has already committed batches 1..N-1; the caller that must record the call (the root audit) reads these
+     * counts after the throw. Written by the thread that runs the call, read after it returns or throws.
+     */
+    public static final class Progress {
+        private volatile long rowsSwept;
+        private volatile int batches;
+
+        public long rowsSwept() {
+            return rowsSwept;
+        }
+
+        public int batches() {
+            return batches;
+        }
+    }
+
+    /** As above, reporting the rows committed and batches run to {@code progress} as each batch ends. */
+    public Applied apply(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, String only, int batchSize,
+                         int maxBatches, Duration budget, Resume resume, Progress progress) {
         int size = clampBatch(batchSize);
         long t00 = System.nanoTime();
         Set<String> sweepable;
@@ -723,6 +747,8 @@ public final class ChunkKeySweep {
                     b.rows(), b.selectMs(), b.updateMs());
             }
             swept += b.updated();
+            progress.rowsSwept = swept;
+            progress.batches = batches;
             if (b.rows() == 0) {
                 finished = true;
             } else {

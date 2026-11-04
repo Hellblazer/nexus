@@ -112,6 +112,14 @@ class TestWire:
         assert dry["tenant"] == "nexus" and dry["dry_run"] is True
         assert applied["tenant"] == "gate-xr789" and applied["dry_run"] is False
 
+    def test_the_operator_label_rides_in_the_body_only_when_given(self) -> None:
+        with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write"):
+            _client().chunk_keys_sweep(tenant="nexus")
+            _client().chunk_keys_sweep(tenant="nexus", operator="sam-laptop")
+        plain, labelled = (c.args[1] for c in post.call_args_list)
+        assert "operator" not in plain
+        assert labelled["operator"] == "sam-laptop"
+
     def test_a_first_call_sends_neither_accept_nor_resume_when_given_none(self) -> None:
         with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write"):
             _client().chunk_keys_sweep(dry_run=False)
@@ -292,8 +300,12 @@ class TestCli:
         assert result.exit_code == rk.EXIT_NO_ROUTE
         lines = [ln for ln in result.output.splitlines() if ln.strip()]
         assert len(lines) == 1, result.output
-        assert "cannot sweep another tenant" in lines[0] and "upgrade the engine" in lines[0]
+        assert "cannot sweep another tenant" in lines[0]
         assert "'default'" in lines[0] and repr(TENANT) in lines[0]
+        # Actionable on a cloud whose client credentials are mint-locked: the engine version, both halves, the root
+        # token, and no advice to use a tenant's own token (which cannot be minted there).
+        assert "engine-service-v0.1.178" in lines[0] and "--tenant" in lines[0] and "root service token" in lines[0]
+        assert "own NX_SERVICE_TOKEN" not in lines[0]
         assert "Traceback" not in result.output
         assert all(kw["dry_run"] for _, kw in client.calls), "no apply request was sent"
 
@@ -320,6 +332,103 @@ class TestCli:
         result = _run(client, "--tenant", TENANT, "--apply")
         assert result.exit_code == rk.EXIT_USAGE
         assert f"engine says {reason}" in result.output
+
+    def test_the_operator_label_is_sent_on_the_dry_run_and_every_apply_call(self) -> None:
+        client = FakeClient(_dry_report(), applies=[_apply(4, done=False, remaining=2), _apply(2, done=True)])
+        result = _run(client, "--tenant", TENANT, "--apply", "--accept", "keyless_notes=2", "--operator", "sam-laptop")
+        assert result.exit_code == 0, result.output
+        assert [kw["operator"] for _, kw in client.calls] == ["sam-laptop"] * 3
+        bare = FakeClient(_dry_report())
+        _run(bare, "--tenant", TENANT)
+        assert bare.calls[0][1]["operator"] is None
+
+    def test_the_operator_label_is_refused_on_the_table_wide_steps_which_record_no_audit(self) -> None:
+        client = FakeClient(_dry_report())
+        result = _run(client, "--add-check", "--apply", "--operator", "sam")
+        assert result.exit_code == rk.EXIT_USAGE and client.calls == []
+
+    def test_the_audit_row_ids_and_actor_the_engine_returns_are_printed_for_a_dry_run(self) -> None:
+        report = {**_dry_report(), "audit": {"actor": "root:0123456789abcdef", "tenant": TENANT, "intent_id": 41,
+                                              "outcome_id": 42}}
+        result = _run(FakeClient(report), "--tenant", TENANT)
+        assert result.exit_code == 0, result.output
+        assert "gc_audit rows 41 (intent) and 42 (outcome)" in result.output
+        assert "actor root:0123456789abcdef" in result.output
+
+    def test_an_apply_prints_every_calls_audit_rows_and_json_carries_them(self) -> None:
+        def audit(i: int) -> dict:
+            return {"actor": "root:aa", "tenant": TENANT, "intent_id": i, "outcome_id": i + 1}
+        applies = [{**_apply(4, done=False, remaining=2), "audit": audit(11)}, {**_apply(2, done=True), "audit": audit(13)}]
+        dry = {**_dry_report(), "audit": audit(9)}
+        text = _run(FakeClient(dry, applies=list(applies)), "--tenant", TENANT, "--apply", "--accept", "keyless_notes=2")
+        assert text.exit_code == 0, text.output
+        for label, ids in (("dry run", "9 (intent) and 10"), ("call 1", "11 (intent) and 12"),
+                           ("call 2", "13 (intent) and 14")):
+            assert f"audit ({label}): gc_audit rows {ids} (outcome)" in text.output, text.output
+        doc = json.loads(_run(FakeClient(dry, applies=list(applies)), "--tenant", TENANT, "--apply",
+                              "--accept", "keyless_notes=2", "--json").stdout)
+        assert [(a["call"], a["intent_id"]) for a in doc["audit"]] == [("dry run", 9), ("call 1", 11), ("call 2", 13)]
+
+    def test_an_audit_write_failure_says_rows_were_changed_prints_the_counts_the_resume_hint_and_exits_6(self) -> None:
+        """The engine swept and could not write the outcome row (500 audit_write_failed): the old verb printed one
+        'refused' line. The operator must read that the rows changed, how many, and what to do next."""
+        failing = VectorServiceError("POST ... HTTP 500", code=500, reason="audit_write_failed", engine_body={
+            "error": "the sweep ran but its outcome audit row could not be written; this call's counts are in this "
+                     "answer",
+            "reason": "audit_write_failed", "rows_swept": 7, "rows_changed": True, "done": False,
+            "resume": {"sig": "s"}, "audit": {"actor": "root:aa", "tenant": TENANT, "intent_id": 31,
+                                              "outcome_id": None}})
+
+        class SecondApplyFails(FakeClient):
+            def chunk_keys_sweep(self, **kw):
+                if not kw.get("dry_run", True) and sum(1 for _, k in self.calls if not k.get("dry_run", True)) == 1:
+                    self.calls.append(("sweep", kw))
+                    raise failing
+                return super().chunk_keys_sweep(**kw)
+
+        client = SecondApplyFails(_dry_report(), applies=[_apply(4, done=False, remaining=9)])
+        result = _run(client, "--tenant", TENANT, "--apply", "--accept", "keyless_notes=2")
+        assert result.exit_code == rk.EXIT_AUDIT == 6
+        assert "7 rows swept by this call (4 more in the earlier calls of this run)" in result.output
+        assert "WERE changed" in result.output
+        assert "gc_audit id 31" in result.output and "no outcome row" in result.output
+        assert "re-running the same command" in result.output
+        assert "nx catalog gc-audit list --operation retire_keys_sweep" in result.output
+        assert "Traceback" not in result.output
+
+    def test_an_audit_write_failure_on_a_dry_run_says_no_row_was_changed(self) -> None:
+        failing = VectorServiceError("POST ... HTTP 500", code=500, reason="audit_write_failed", engine_body={
+            "error": "x", "reason": "audit_write_failed", "rows_changed": False,
+            "audit": {"actor": "root:aa", "tenant": TENANT, "intent_id": 5, "outcome_id": None}})
+        result = _run(FakeClient(_dry_report(), error=failing), "--tenant", TENANT)
+        assert result.exit_code == rk.EXIT_AUDIT
+        assert "no row was changed" in result.output and "WERE changed" not in result.output
+
+    def test_a_sweep_that_failed_part_way_reports_the_partial_counts_and_exits_6(self) -> None:
+        failing = VectorServiceError("POST ... HTTP 500", code=500, reason="sweep_failed", engine_body={
+            "error": "the sweep failed after 1 rows in 1 batches", "reason": "sweep_failed", "rows_swept": 1,
+            "rows_changed": True, "audit": {"actor": "root:aa", "tenant": TENANT, "intent_id": 5, "outcome_id": 6}})
+        result = _run(FakeClient(_dry_report(), error=failing), "--tenant", TENANT)
+        assert result.exit_code == rk.EXIT_AUDIT
+        assert "1 rows swept by this call" in result.output and "WERE changed" in result.output
+        assert "gc_audit id 6" in result.output
+
+    @pytest.mark.parametrize("reason", ["audit_unavailable", "audit_intent_failed"])
+    def test_a_refusal_before_any_read_says_nothing_was_changed_and_exits_1(self, reason: str) -> None:
+        refusal = VectorServiceError("refused", code=503 if reason == "audit_unavailable" else 500, reason=reason,
+                                     engine_body={"error": f"engine says {reason}", "reason": reason})
+        result = _run(FakeClient(_dry_report(), error=refusal), "--tenant", TENANT)
+        assert result.exit_code == rk.EXIT_FAILED
+        assert f"engine says {reason}" in result.output and "Nothing was read or changed" in result.output
+
+    def test_a_preconditions_refusal_prints_the_audit_rows_it_left(self) -> None:
+        refusal = VectorServiceError("refused", code=409, reason="sweep_preconditions_not_met", engine_body={
+            "error": "the sweep preconditions are not met", "reason": "sweep_preconditions_not_met",
+            "blocking": ["keyless_notes"], "report": {"preconditions": {"keyless_notes": 3}, "accepted": {}},
+            "audit": {"actor": "root:aa", "tenant": TENANT, "intent_id": 70, "outcome_id": 71}})
+        result = _run(FakeClient(_dry_report(), error=refusal), "--tenant", TENANT, "--apply")
+        assert result.exit_code == rk.EXIT_PRECONDITION
+        assert "gc_audit rows 70 (intent) and 71 (outcome)" in result.output
 
     def test_apply_loops_until_the_engine_says_done_and_sums_the_rows(self) -> None:
         client = FakeClient(_dry_report(), applies=[_apply(4, done=False, remaining=2), _apply(2, done=True)])

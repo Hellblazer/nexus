@@ -16,10 +16,17 @@ Nothing calls them on its own. This verb is the operator's way in, per tenant an
 that would run the sweep on every install ships later, after a cloud dry run has been read.
 
 ``--tenant`` names the tenant to sweep and is sent to the engine. A credential bound to that tenant sweeps it; the
-ROOT credential may name any registered tenant (the engine runs the call in that tenant's scope and records it in
-``gc_audit``); another credential naming a different tenant is refused. The verb then checks that the engine's answer
-names the tenant asked for, before any apply: an engine that predates the target field ignores it and answers for the
-credential's own tenant, and a sweep of the wrong tenant is not undone. That case is one line and exit 4.
+ROOT credential may name any registered tenant (the engine runs the call in that tenant's scope); a tenant credential
+naming another tenant is refused (``tenant_mismatch``), and a data or mint credential is refused by the scope guard.
+The verb then checks that the engine's answer names the tenant asked for, before any apply: an engine that predates
+the target field ignores it and answers for the credential's own tenant, and a sweep of the wrong tenant is not undone.
+That case is one line and exit 4.
+
+Every sweep the ROOT credential makes is audited by the engine, in the target tenant's ``gc_audit`` (operation
+``retire_keys_sweep``): an intent row before the first read and an outcome row after the work. The answers carry the
+row ids and the actor (a hash prefix of the credential), and the verb prints them. ``--operator LABEL`` is recorded in
+both rows, because one shared root token names no person. If the engine cannot write the audit, it refuses before any
+read or change; if it cannot write the outcome row after the work, the rows ARE changed and the verb exits 6.
 
 Pacing: ``--max-rps`` holds every request the verb sends to that rate (the request gate, nexus-ldf2s). Run against
 the cloud, start with ``--max-rps 2``. An apply is a write and goes through the production-write guard
@@ -36,12 +43,15 @@ import click
 from nexus.db.http_vector_client import VectorServiceError
 
 #: Exit codes. 1 is a failed call, 2 a usage error or a tenant the engine refuses, 3 a precondition the engine counts
-#: that is neither zero nor accepted, 4 an engine that predates the routes or the target tenant, 5 a stalled apply.
+#: that is neither zero nor accepted, 4 an engine that predates the routes or the target tenant, 5 a stalled apply,
+#: 6 the sweep ran but its audit row could not be written (rows were changed).
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_NO_ROUTE = 4
 EXIT_STALLED = 5
+#: The engine did the work and could not write its audit row (or said the sweep failed part-way): rows may have changed.
+EXIT_AUDIT = 6
 
 #: Consecutive apply calls that swept nothing and did not finish before the verb gives up.
 _STALL_LIMIT = 3
@@ -79,14 +89,41 @@ def parse_accept(values: tuple[str, ...]) -> dict[str, int]:
 
 
 def _old_engine_tenant(asked: str, answered: object) -> NoReturn:
-    """The engine answered for another tenant than the one asked for: it predates the ``tenant`` field."""
+    """The engine answered for another tenant than the one asked for: it predates the ``tenant`` field.
+
+    The remedy is the engine, never a tenant token: on a managed cloud client credentials are mint-locked, so a token
+    for ``asked`` cannot be made. Both halves are needed: an engine newer than the pinned 0.1.178 that carries the
+    root-names-the-target change, and a client with ``--tenant`` (this one has it).
+    """
     _fail(
-        f"This engine cannot sweep another tenant (it answered for tenant {answered!r}, not {asked!r}): upgrade the "
-        f"engine, or run this with {asked!r}'s own NX_SERVICE_TOKEN.", EXIT_NO_ROUTE,
+        f"This engine cannot sweep another tenant (it answered for tenant {answered!r}, not {asked!r}): the engine must "
+        f"be upgraded to a build newer than engine-service-v0.1.178 that carries the root-names-the-target change "
+        f"(nexus-6pfgb.43) AND the client must carry --tenant (this one does); run it with the root service token, "
+        f"which is how a mint-locked cloud sweeps a tenant it cannot mint a token for. Nothing was written.",
+        EXIT_NO_ROUTE,
     )
 
 
-def _engine_error(exc: VectorServiceError) -> NoReturn:
+def _audit_line(label: str, audit: object) -> str | None:
+    """One line naming the gc_audit rows a root sweep call wrote: actor, tenant, intent id, outcome id."""
+    if not isinstance(audit, dict):
+        return None
+    return (f"  audit ({label}): gc_audit rows {audit.get('intent_id')} (intent) and {audit.get('outcome_id')} "
+            f"(outcome) in tenant {audit.get('tenant')}, actor {audit.get('actor')}")
+
+
+def _audit_lines(audits: list[tuple[str, dict]]) -> list[str]:
+    return [ln for label, a in audits if (ln := _audit_line(label, a))]
+
+
+def _swept_phrase(body: dict, swept_before: int) -> str:
+    n = body.get("rows_swept")
+    earlier = f" ({swept_before} more in the earlier calls of this run)" if swept_before else ""
+    return f"{n if n is not None else '?'} rows swept by this call{earlier}"
+
+
+def _engine_error(exc: VectorServiceError, *, swept_before: int = 0,
+                  audits: list[tuple[str, dict]] | None = None) -> NoReturn:
     if exc.code == 404:
         _fail(
             "This engine does not carry the retire-keys routes (HTTP 404). Upgrade the engine to the release that "
@@ -97,6 +134,40 @@ def _engine_error(exc: VectorServiceError) -> NoReturn:
     lines = [f"The engine refused: {body.get('error') or exc}"]
     if reason in ("tenant_mismatch", "unknown_tenant"):
         _fail("\n".join(lines), EXIT_USAGE)
+    if reason in ("audit_unavailable", "audit_intent_failed"):
+        # Refused before any read or change: say so, and that the sweep is not the thing that is wrong.
+        lines.append("The sweep records every root-credential call in gc_audit first and refuses when it cannot. "
+                     "Nothing was read or changed; retry once the engine's audit sink is available.")
+        _fail("\n".join(lines + _audit_lines(audits or [])), EXIT_FAILED)
+    if reason == "audit_write_failed":
+        changed = body.get("rows_changed")
+        lines = ["The sweep RAN, but the engine could not write the outcome row of its audit "
+                 "(reason audit_write_failed)."]
+        lines.append("  " + _swept_phrase(body, swept_before) + "; "
+                     + ("those rows WERE changed and cannot be taken back." if changed
+                        else "no row was changed (a dry run)."))
+        audit = body.get("audit") or {}
+        lines.append(f"  The intent row is gc_audit id {audit.get('intent_id')} in tenant {audit.get('tenant')} "
+                     f"(actor {audit.get('actor')}); there is no outcome row for this call.")
+        lines.extend(_audit_lines(audits or []))
+        if body.get("resume"):
+            lines.append("  The engine handed back where it stopped; re-running the same command takes up from the "
+                         "rows that are left (a repeated apply is safe: it sweeps what is still there).")
+        else:
+            lines.append("  Re-running the same command is safe: the sweep takes only the rows that are still there.")
+        lines.append("  Read the rows with a credential bound to the target tenant: nx catalog gc-audit list "
+                     "--operation retire_keys_sweep --json")
+        _fail("\n".join(lines), EXIT_AUDIT)
+    if reason == "sweep_failed":
+        lines = [f"The engine's sweep failed part-way: {body.get('error')}"]
+        lines.append("  " + _swept_phrase(body, swept_before) + "; "
+                     + ("those rows WERE changed." if body.get("rows_changed") else "no row was changed."))
+        a = body.get("audit")
+        if a:
+            lines.append(f"  The outcome row (failed, with the partial counts) is gc_audit id {a.get('outcome_id')}, "
+                         f"intent {a.get('intent_id')}, in tenant {a.get('tenant')}.")
+        lines.extend(_audit_lines(audits or []))
+        _fail("\n".join(lines), EXIT_AUDIT)
     if reason == "sweep_preconditions_not_met":
         report = body.get("report") or {}
         pre = report.get("preconditions") or {}
@@ -107,7 +178,10 @@ def _engine_error(exc: VectorServiceError) -> NoReturn:
             parts.append(f"{n}={pre.get(n, '?')}" + ("" if got is None else f" (accepted {got})"))
         lines.append("Blocking preconditions: " + ", ".join(parts))
         lines.append("Fix them, or accept each residue with --accept NAME=N (N at least the live count).")
-        _fail("\n".join(lines), EXIT_PRECONDITION)
+        a = _audit_line("refused", body.get("audit"))
+        if a:
+            lines.append(a)
+        _fail("\n".join(lines + _audit_lines(audits or [])), EXIT_PRECONDITION)
     for t in body.get("tenants") or []:
         detail = ", ".join(f"{k}={v}" for k, v in t.items() if k != "tenant")
         lines.append(f"  tenant {t.get('tenant')}: {detail}")
@@ -174,19 +248,25 @@ def _render_dry_run(report: dict, *, tenant: str) -> None:
 
 
 def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int], collection: str | None,
-               batch_size: int | None, as_json: bool) -> None:
+               batch_size: int | None, as_json: bool, operator: str | None = None) -> None:
+    audits: list[tuple[str, dict]] = []
     try:
         report = client.chunk_keys_sweep(
             dry_run=True, accept=accept, collection=collection, batch_size=batch_size,
-            measure_batch=None if not apply else False, tenant=tenant,
+            measure_batch=None if not apply else False, tenant=tenant, operator=operator,
         )
     except VectorServiceError as exc:
-        _engine_error(exc)
+        _engine_error(exc, audits=audits)
     if report.get("tenant") != tenant:
         _old_engine_tenant(tenant, report.get("tenant"))
+    if isinstance(report.get("audit"), dict):
+        audits.append(("dry run", report["audit"]))
     out: dict[str, Any] = {"tenant": tenant, "dry_run": not apply, "report": report}
     if not as_json:
         _render_dry_run(report, tenant=tenant)
+        if not apply:
+            for ln in _audit_lines(audits):
+                click.echo(ln)
     if not apply:
         if as_json:
             click.echo(json.dumps(out, indent=2, default=str))
@@ -195,7 +275,11 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
         return
     if report.get("blocking"):
         if as_json:
+            out["audit"] = [{"call": label, **a} for label, a in audits]
             click.echo(json.dumps(out, indent=2, default=str))
+        else:
+            for ln in _audit_lines(audits):
+                click.echo(ln)
         _fail(
             "Not applied: " + ", ".join(report["blocking"]) + " stand in the way. Accept each residue you have "
             "judged with --accept NAME=N (N at least its live count), or fix it.", EXIT_PRECONDITION,
@@ -210,12 +294,15 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
             last = client.chunk_keys_sweep(
                 dry_run=False, accept=accept, collection=collection, batch_size=batch_size,
                 max_batches=_MAX_BATCHES, budget_seconds=_BUDGET_SECONDS, resume=resume, tenant=tenant,
+                operator=operator,
             )
         except VectorServiceError as exc:
-            _engine_error(exc)
+            _engine_error(exc, swept_before=swept, audits=audits)
         if last.get("tenant") != tenant:
             _old_engine_tenant(tenant, last.get("tenant"))
         calls += 1
+        if isinstance(last.get("audit"), dict):
+            audits.append((f"call {calls}", last["audit"]))
         n = int(last.get("rows_swept", 0))
         swept += n
         if calls == 1:
@@ -240,10 +327,13 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
     out["applied"] = {"rows_swept": swept, "calls": calls, "remaining_rows": last.get("remaining_rows"),
                       "locked_skipped_rows": last.get("locked_skipped_rows", 0),
                       "blocked_collections": last.get("blocked_collections", [])}
+    out["audit"] = [{"call": label, **a} for label, a in audits]
     if as_json:
         click.echo(json.dumps(out, indent=2, default=str))
         return
     click.echo(f"Swept {swept} rows in {calls} calls; {last.get('remaining_rows')} left.")
+    for ln in _audit_lines(audits):
+        click.echo(ln)
     for c in last.get("blocked_collections") or []:
         click.echo(f"  Left alone: {c['collection']} ({c['blocked']}), {c.get('retired_key_rows', '?')} rows.")
 
@@ -313,6 +403,9 @@ def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) ->
               help="The tenant to sweep. Required for the sweep. The root credential may name any registered tenant; "
                    "another credential may name only its own. The verb checks the engine's answer names this tenant, "
                    "and refuses (exit 4) an engine too old to sweep another tenant.")
+@click.option("--operator", "operator", metavar="LABEL", default=None,
+              help="Who is running this, recorded with the engine's audit rows of a root-credential sweep (one shared "
+                   "root token names no person). At most 80 printable characters.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False,
               help="Count only (the default). Spelled out so a script says what it means.")
 @click.option("--apply", "apply", is_flag=True, default=False,
@@ -336,7 +429,7 @@ def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) ->
 @click.option("--validate", "validate", is_flag=True, default=False,
               help="Table-wide, operator only: VALIDATE the chunk CHECKs. Needs --apply.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit one JSON document.")
-def retire_keys_cmd(tenant: str | None, dry_run: bool, apply: bool, accept: tuple[str, ...], collection: str | None,
+def retire_keys_cmd(tenant: str | None, operator: str | None, dry_run: bool, apply: bool, accept: tuple[str, ...], collection: str | None,
                     batch_size: int | None, max_rps: float | None, add_check: bool, replace: bool, validate: bool,
                     as_json: bool) -> None:
     """Retire the chunk-row metadata keys: sweep a tenant, then add and validate the CHECKs (nexus-6pfgb.43).
@@ -348,6 +441,10 @@ def retire_keys_cmd(tenant: str | None, dry_run: bool, apply: bool, accept: tupl
       3. nx t3 retire-keys --add-check --apply    CHECKs NOT VALID (refused while a tenant is not ready)
       4. nx t3 retire-keys --validate --apply     VALIDATE (refused while a tenant breaks one)
 
+    Every sweep the ROOT credential makes is recorded by the engine in the target tenant's gc_audit (an intent row
+    before the first read, an outcome row after); the verb prints the row ids and the actor. Read them with a
+    credential bound to that tenant: nx catalog gc-audit list --operation retire_keys_sweep --json.
+
     The dry run is the default and writes nothing, locks nothing and runs no UPDATE; its time is the batch SELECT
     only, so the projected duration is a lower bound. Apply refuses while a precondition the engine counts is
     non-zero and not accepted up to its count (--accept NAME=N). The sweep never touches a quarantine- or taxonomy
@@ -358,7 +455,8 @@ def retire_keys_cmd(tenant: str | None, dry_run: bool, apply: bool, accept: tupl
     model, or a quarantined_by without quarantined_at; and, because a NOT VALID CHECK is evaluated on every new row
     version, ANY update of a row that still holds a retired key (the rows the sweep leaves in a blocked collection,
     which the output names) until it is fixed. Exit codes: 0 ok; 1 a failed call; 2 usage, or a tenant the engine
-    refuses; 3 a precondition; 4 an engine without the routes, or too old to sweep another tenant; 5 a stalled apply.
+    refuses; 3 a precondition; 4 an engine without the routes, or too old to sweep another tenant; 5 a stalled apply;
+    6 the sweep ran but the engine could not write its audit row (rows were changed), or failed part-way.
     """
     from nexus.db import request_gate  # noqa: PLC0415 — command-local
 
@@ -375,6 +473,9 @@ def retire_keys_cmd(tenant: str | None, dry_run: bool, apply: bool, accept: tupl
             _fail("--add-check and --validate are table-wide: they take no --tenant.", EXIT_USAGE)
         if accepted:
             _fail("--accept belongs to the per-tenant sweep, not to --add-check or --validate.", EXIT_USAGE)
+        if operator:
+            _fail("--operator labels the per-tenant sweep's audit rows; --add-check and --validate record none.",
+                  EXIT_USAGE)
         if not apply:
             _fail(
                 f"{'--add-check' if add_check else '--validate'} writes (DDL on nexus.chunks) and has no dry run, so "
@@ -392,4 +493,4 @@ def retire_keys_cmd(tenant: str | None, dry_run: bool, apply: bool, accept: tupl
         else:
             assert tenant is not None
             _run_sweep(client, tenant=tenant, apply=apply, accept=accepted, collection=collection,
-                       batch_size=batch_size, as_json=as_json)
+                       batch_size=batch_size, as_json=as_json, operator=operator)
