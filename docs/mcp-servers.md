@@ -15,7 +15,9 @@ The `nexus` and `nexus-catalog` servers register automatically when you install 
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (46 registered tools: 44 for agents, 2 internal `hook_*` tools the plugin's hooks call)
+## `nexus` — retrieval + storage (46 tools)
+
+Of the 46 registered tools, 44 are for agents; 2 are internal `hook_*` tools the plugin's own hooks call.
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 

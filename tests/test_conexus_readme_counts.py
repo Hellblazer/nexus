@@ -107,7 +107,7 @@ def test_the_core_tool_table_names_every_agent_facing_tool_and_only_those() -> N
 def test_docs_mcp_servers_states_the_registered_count() -> None:
     text = (_REPO / "docs" / "mcp-servers.md").read_text(encoding="utf-8")
     [(registered, agents, hooks)] = re.findall(
-        r"## `nexus` — retrieval \+ storage \((\d+) registered tools: (\d+) for agents, (\d+) internal", text)
+        r"Of the (\d+) registered tools, (\d+) are for agents; (\d+) are internal `hook_\*` tools", text)
     every = _registered("nexus.mcp.core")
     assert (int(registered), int(agents), int(hooks)) == (len(every), len(_core_agent_tools()),
                                                          len(every) - len(_core_agent_tools()))

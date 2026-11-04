@@ -65,6 +65,7 @@ carries no method signature for a contract change to reconcile against) is a
 ---
 
 ## Unshipped
+- `89e60c7b2` -- bead nexus-pplwc -- engine tag `the next engine-service tag` -- [additive] text only: `ReembedHandler.RESTART_COMMAND`, the restart remedy inside the engine's re-embed refusal message, reads `nx daemon service stop, then nx daemon service start` instead of the `&&` form Windows PowerShell 5.1 rejects; the client's `corpus._SERVICE_RESTART_COMMAND` changes with it and `tests/test_reembed_job.py` pins the two by reading the Java source. The client files the checker flags (`http_vector_client.py`, `indexer.py`) change only their own printed remedies. Direction safety: OLD client + NEW engine is safe -- no client parses the refusal text, it prints it; NEW client + OLD engine is safe -- the 0.1.178 engine keeps printing the `&&` form until its tag, and no runtime check compares the two. Ack condition: none.
 
 
 ## Shipped
