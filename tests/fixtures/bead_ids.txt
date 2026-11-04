@@ -8041,6 +8041,7 @@ nexus-w3vnt
 nexus-w48ru
 nexus-w48ru.1
 nexus-w4k
+nexus-w4l00
 nexus-w5gma
 nexus-w5gma.1
 nexus-w5v8j
