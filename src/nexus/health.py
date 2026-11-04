@@ -694,7 +694,7 @@ def _check_orphan_uv_install() -> list[HealthResult]:
         ),
         fix_suggestions=[
             "nx self install    # registers it for reap, then reaps once its holders are gone",
-            "the reinstall script of a nexus checkout    # same, from a checkout",
+            "the reinstall-tool.sh script in a nexus checkout's scripts directory    # same, from a checkout",
         ],
     )]
 

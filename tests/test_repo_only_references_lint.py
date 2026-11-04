@@ -257,6 +257,9 @@ _ALLOWED: dict[str, list[Site]] = {
     "src/nexus/upgrade_finish.py": [
         Site("scripts/reinstall-tool.sh", "/scripts/reinstall-tool.sh", "the prefix is the uv receipt's own checkout directory; reached only for an install built from a local checkout"),
     ],
+    "src/nexus/health.py": [
+        Site("reinstall-tool.sh", "in a nexus checkout's scripts directory", "a second fix suggestion, labelled as the from-a-checkout alternative to the line before it, and qualified as living in a nexus checkout"),
+    ],
     "src/nexus/commands/self_cmd.py": [
         Site("reinstall-tool.sh", "a dev checkout uses", "named for the dev-checkout case only, in a sentence conditional on running from one"),
         Site("reinstall-tool.sh", "For a checkout, run", "printed when nx runs from a source checkout, where the script is in the checkout's scripts directory"),
