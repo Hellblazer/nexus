@@ -114,12 +114,9 @@ def primary_checkout_name(cwd: str) -> str:
         return _primary_names[key]
     name = ""
     try:
-        import subprocess  # noqa: PLC0415 — stdlib, branch-local
+        from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — branch-local
 
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["git", "-C", key, "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
+        proc = run_bounded(["git", "-C", key, "rev-parse", "--git-common-dir"], timeout=5)
         common = proc.stdout.strip()
         if proc.returncode == 0 and common:
             path = os.path.realpath(common if os.path.isabs(common) else os.path.join(key, common))

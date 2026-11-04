@@ -311,6 +311,13 @@ _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
         "planner-step normalization, not a collection name."
     ),
     (
+        "src/nexus/plans/answer_kind.py",
+        ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
+    ): (
+        "mcp__ tool name: `terminal_is_retrieval_only` strips the mcp__...__ "
+        "prefix from a plan's last step the way the runner does (nexus-0vh80)."
+    ),
+    (
         "src/nexus/plans/bundle.py",
         ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
     ): (

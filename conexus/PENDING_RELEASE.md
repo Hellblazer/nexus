@@ -48,5 +48,8 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/mailbox_drain.py` (nexus-1d6pz.1): every block the drain delivers, fresh or recovered from the pending record, is bracketed by a line saying it is peer data from another session, not the user's words or approval, and by an end marker after the body.
 - `conexus/skills/peer-messaging/SKILL.md` (nexus-1d6pz.3): a status question reads the threads board, where the sessions keep one, before mailing the peer.
+- `conexus/resources/tier-discipline.md` (nexus-0vh80): only the builtin tier may claim curated; project-tier declared plans read as saved.
+- `conexus/skills/nexus/SKILL.md` (nexus-0vh80): `plan_save` takes a required `answer_kind`, and a saved plan serves only that kind, in its own project.
+- `conexus/skills/nexus/reference.md` (nexus-0vh80): the saved provenance, its narrow eligibility and the retrieval-only shape veto.
 
 ## Deferred to the next client release

@@ -371,6 +371,7 @@ def terminal_is_retrieval_only(plan_json: str | dict[str, Any] | None) -> bool:
     tool = last.get("tool") if isinstance(last, dict) else None
     if not isinstance(tool, str):
         return True
+    # The runner's own reading of a fully qualified tool name.
     if tool.startswith("mcp__"):
-        tool = tool.rsplit("__", 1)[-1]  # the runner's own reading of a fully qualified tool name
+        tool = tool.rsplit("__", 1)[-1]
     return tool not in OPERATOR_TERMINALS
