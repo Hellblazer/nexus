@@ -37,8 +37,9 @@ What changed, and why:
   again. Its numbers replace the June ones everywhere in this record.
 - **The June end-to-end score was a hand-written script, not nexus.** With the
   harness fixed, that script already scores above the old bar ("recall > 0")
-  with no nexus change. The new bar measures `nx_answer` itself, against the
-  fixed script's score.
+  with no nexus change. The new bar measures `nx_answer` itself: join
+  completeness and precision ≥ 0.95 are gated, and recall and F1 are reported
+  beside the fixed script's score (§Minimum Viable Validation).
 - **The headline is new.** Today `nx_answer` declines all 7 company questions
   with `[non-answer: uncovered]`, while the evidence it retrieved holds the
   customer ids. The mechanism that addresses that is a *resolution repair*
@@ -318,6 +319,14 @@ November 2026: a read-only re-plan survey against nexus `develop` (T2
   q4) gave the boundary 6 anchors out of 80 chunks. Step 0's
   `repair_entered=False` / `not_attempted` came from its probe on a different
   question.
+- **Measured (2026-11-03, 147-research-8)** — A resolved customer record merged
+  alone does not make the re-check cover `f1`: 0 of 8 runs. The re-check reads
+  only the new anchors, and a record names a company but not the issue.
+- **Measured (2026-11-03, 147-research-9)** — A joined item (the message that
+  named the id, then the resolved record, as one item) does: `f1` covered in 10 of
+  10 valid runs, and the generated answer named exactly the companies of the
+  merged pairs. Of the 45 joined items merged over those runs, the re-check cited
+  35 as supporting (147-research-10).
 - **Documented** — StepChain, ByoKG, HippoRAG2 and LEGO-GraphRAG build explicit
   entity graphs for this join; PRISM and PAR-RAG decompose with precision
   filtering; Self-RAG and FLARE gate retrieval reflectively; Beyond-Static
@@ -381,7 +390,7 @@ against 5 gold companies). Hop-1 retrieval recall, not the join, sets the gap.
 The problem is that `nx_answer` never turns held ids into names. Hop-1 recall at
 k=20 is the next limit (0.667 against the oracle's 1.0), and it is out of scope
 here (§Risks). The cited-artifact oracle has perfect recall but a lower F1 than
-the script, so recall alone does not clear the bar.
+the script, so recall alone does not make the answer better than the script's.
 
 ### Critical Assumptions
 
@@ -430,6 +439,13 @@ the script, so recall alone does not clear the bar.
   so the repair enters; no facet is `source_missing` and no question names a
   source. q1 does not reach the boundary (plan 7). Step 0's
   `repair_entered=False` came from its probe on a different question.
+- [x] **#6 RDR-232's single re-check judges a joined item supporting** —
+  **Status**: Verified (HERB, 10 of 10) — **Method**: Spike, 2026-11-03
+  (147-research-8, 147-research-9, 147-research-10). A record alone: 0 of 8. A
+  joined item: `f1` covered in 10 of 10 valid runs. Caveats: one corpus and one
+  question shape (the 5 issue questions, twice each); the verdict is a model
+  call; the re-check cited 35 of the 45 joined items as supporting; the 2 q2
+  runs ran on grown plan 14 and covered `f1` on their single joined item.
 
 ## Proposed Solution
 
@@ -504,8 +520,13 @@ if first ledger has an unsupported facet (entry rule: see Step 4 sub-step 1)
        it judges the new joined items only)
 ```
 
-The resolution queries run together with, or in place of, the semantic facet
-queries; which is decided in Step 4 by measurement. The repair's existing
+When the branch enters, it runs in place of the semantic facet queries, the
+case 147-research-9 measured (joined items merged with no semantic repair
+query); running both together is unmeasured and not built. In `_repair` the
+branch runs before the two `no_new_evidence` returns
+(`coverage_ledger.py:1313` and `:1335` at 532b9d186), which otherwise end the
+repair before any re-check when the semantic queries find nothing new, as they
+did on q2, q3, q4 and q7 (147-research-7). The repair's existing
 deadline and USD rules apply unchanged; `resolve` is a zero-cost step. The
 `missing` and `ambiguous` lists are disclosed, so a partial resolution is
 visible in the run summary rather than silent.
@@ -630,7 +651,8 @@ where evidence is seen.
 
 - (+) Works for any join whose entity records carry a stable key: store_put
   records titled by key, or collections with a configured key pattern. Code is
-  out of scope; md/pdf need the deferred extractor.
+  out of scope; md/pdf need the deferred extractor. Shown on one corpus (HERB)
+  and one question shape so far (Assumption #6).
 - (+) Deterministic resolution, immune to embedding collision, with missing and
   ambiguous keys disclosed.
 - (+) No planner change; the trigger lives in one runner-owned place with
@@ -643,7 +665,9 @@ where evidence is seen.
 ### Risks and Mitigations
 
 - **R1, the bar passes vacuously.** The script already beats the June bar.
-  **Mitigation**: the bar is `nx_answer`'s own F1, not the script's (MVV).
+  **Mitigation**: the MVV measures `nx_answer` itself and gates join
+  completeness and precision ≥ 0.95; the script's F1 is reported beside it and
+  cannot satisfy the MVV.
 - **R2, repair noise.** RDR-232's semantic repair on "company names" pulls
   near-identical customer records, which could move recall by chance while
   precision falls. **Mitigation**: the ladder reports precision and F1 for
@@ -658,9 +682,11 @@ where evidence is seen.
   measured on the 7 questions.
 - **R5, answering from every held id may cost precision.** The evidence holds
   more customer ids than the script reads (on the issue questions, 4 to 10
-  against 4 to 6). The derived
-  figure (issue5 F1 0.823 if every evidence company is named) says this still
-  clears the bar on HERB; a corpus with noisier evidence may not.
+  against 4 to 6). Measured with the joined items, precision was 0.9667 on the
+  issue questions (147-research-9), above the MVV's 0.95; a corpus with noisier
+  evidence may not hold it. The derived issue5 F1 of 0.823 was not reached
+  (measured 0.7167) because the measured runs' evidence held fewer customer ids
+  (§Step 0 measurements).
 - **R6, hop-1 recall.** At k=20 hop 1 surfaces 4 to 6 of the 10 to 12 ids the
   cited artifacts name. Retrieving deeper raises recall (k=300 filtered to cited:
   recall 1.0) but needs precision filtering. Out of scope here; recorded as the
@@ -724,8 +750,10 @@ branch entered on the questions that pass.
 
 The harness (assetops-kg `benchmark/herb_ladder.py`) writes
 `results/herb/herb-scorecard.json`; a copy is checked into nexus as the
-regression baseline and updated per phase PR. Each recorded number is asserted
-exactly, so silent drift fails.
+regression baseline and updated per phase PR. Each number from a deterministic
+rung (P2, P3, the E2E script) is asserted exactly, so silent drift fails; the
+`nx_answer` rung's numbers come from model calls and are asserted against their
+gate thresholds, not exactly (plan T2 `nexus/plan-rdr147-2026-11-03`).
 
 | Rung | Metric | Graded against | Step 0 value | Target |
 | --- | --- | --- | --- | --- |
@@ -782,7 +810,9 @@ a `$ref` step") is dropped: it already works.
 2. **Branch on the result:**
    - (a) Facets are `unsupported` / `no_supporting_evidence` and the repair
      enters (the measured case, 147-research-7): add the exact-key branch to the
-     existing repair as designed, merging joined items (147-research-9).
+     existing repair as designed, merging joined items in place of the semantic
+     facet queries and before the `no_new_evidence` returns (§Technical Design;
+     147-research-9).
    - (b) Excluded by measurement: no facet is `source_missing` and no question
      names a source (147-research-7). Kept for the record: facets `source_missing`
      would mean the repair is skipped by RDR-232's rule.
@@ -841,7 +871,9 @@ links and the FK cascade.
 No contradictions found between research findings, design principles and the
 proposed solution. The tension the round-2 gate named (the repair might never
 enter on the HERB questions) is resolved by measurement: it enters on q2 to q7
-(147-research-7).
+(147-research-7). The round-3 gate found four sites that still stated the
+retired F1-against-the-script bar; they now state the MVV's terms (join
+completeness and precision gated, F1 reported; nexus-wunaf).
 
 ### Assumption Verification
 
@@ -849,7 +881,10 @@ enter on the HERB questions) is resolved by measurement: it enters on q2 to q7
 147-research-3 to 147-research-5). #2 (a post-store batch hook can write catalog
 links) is to be re-verified on the PG engine, and only if the conditional linker
 is built (Step 2). #5 was acknowledged unverified at gate round 2 (Sam,
-2026-11-03; 147-research-6) and is now verified by spike (147-research-7).
+2026-11-03; 147-research-6) and is now verified by spike (147-research-7). #6
+(the re-check judges a joined item supporting) is verified by spike on HERB only
+(147-research-8 and 147-research-9; counts in 147-research-10), with the caveats
+listed under it.
 
 #### API Verification
 
