@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """pytest plugin for scripts/tenant_delta.py (nexus-g37hn): at collection, count the tests in
 each module that will mint a test tenant, and write ``{"counts": {module: count}, "failed": {nodeid: reason}}``
-to ``$TENANT_CENSUS_OUT``. ``failed`` holds every collector that failed to collect (a module, or a package or
+to ``$TENANT_CENSUS_OUT``, with ``"complete": true`` (written only once the census hook ran). ``failed`` holds every collector that failed to collect (a module, or a package or
 directory whose conftest or ``__init__`` failed; ``""`` is the session itself), with its first error line, so a
 run with ``--continue-on-collection-errors`` says which modules it could not count (nexus-l35bq).
 
@@ -57,15 +57,7 @@ def pytest_collection_modifyitems(session, config, items) -> None:
             except ValueError:
                 key = item.nodeid.split("::", 1)[0]
             counts[key] += 1
-    _write(dict(counts))
-
-
-def _write(counts: dict[str, int]) -> None:
+    # Written here and only here, marked complete: a collection that ended before this hook (a UsageError, or an
+    # earlier modifyitems hook that raised) leaves no file, and the reader refuses it rather than reading zeros.
     with open(os.environ["TENANT_CENSUS_OUT"], "w", encoding="utf-8") as out:
-        json.dump({"counts": counts, "failed": dict(_FAILED)}, out)
-
-
-def pytest_collection_finish(session) -> None:
-    # A session whose own collection failed never reaches pytest_collection_modifyitems; write what is known.
-    if not os.path.exists(os.environ["TENANT_CENSUS_OUT"]):
-        _write({})
+        json.dump({"complete": True, "counts": dict(counts), "failed": dict(_FAILED)}, out)

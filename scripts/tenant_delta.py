@@ -35,6 +35,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = Path(__file__).resolve().parent
+#: The reason given for a module the fallback ran out of time before trying.
+_NOT_TRIED = "not tried, over the time budget"
 #: The module name the census plugin is loaded under, copied from PLUGIN_DIR; no tree carries this name.
 _PLUGIN_AS = "_tenant_delta_census_now"
 
@@ -113,10 +115,16 @@ def census(root: Path, modules: list[str], *, deadline: float,
         )
         if not out.is_file():
             raise CollectionFailed(root, proc.returncode, _first_error(proc.stdout + proc.stderr))
-        data = json.loads(out.read_text(encoding="utf-8"))
-        if not (isinstance(data, dict) and isinstance(data.get("counts"), dict) and isinstance(data.get("failed"), dict)):
-            # Never read an unexpected census as "no tenant tests" (an older plugin wrote a bare mapping).
-            raise CollectionFailed(root, proc.returncode, "the census plugin wrote an unexpected format")
+        try:
+            data = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise CollectionFailed(root, proc.returncode, f"the census file could not be read ({exc})") from exc
+        if not (isinstance(data, dict) and data.get("complete") is True
+                and isinstance(data.get("counts"), dict) and isinstance(data.get("failed"), dict)):
+            # Never read an incomplete or unexpected census as "no tenant tests" (an older plugin wrote a bare
+            # mapping; a collection cut short before the census hook writes nothing).
+            raise CollectionFailed(root, proc.returncode,
+                                   _first_error(proc.stdout + proc.stderr) or "the census is incomplete")
         failed_nodes: dict[str, str] = data["failed"]
         if "" in failed_nodes:
             raise CollectionFailed(root, proc.returncode, failed_nodes[""])
@@ -136,7 +144,7 @@ def _one_by_one(root: Path, modules: list[str], *, deadline: float,
             c, f = census(root, [module], deadline=deadline, own_src=own_src)
         except subprocess.TimeoutExpired:
             for rest in modules[i:]:
-                failed[rest] = "not tried, over the time budget"
+                failed[rest] = _NOT_TRIED
             break
         except CollectionFailed as exc:
             f, c = {module: exc.reason}, {}
@@ -176,9 +184,13 @@ def base_census(repo: Path, base: str, modules: list[str], *,
             tar.extractall(root, filter="data")
         tar_path.unlink()
         counts, failed = _attempt(root, modules, deadline=deadline, own_src=False)
-        retry = [m for m, why in failed.items() if why != "not tried, over the time budget"]
+        retry = [m for m, why in failed.items() if why != _NOT_TRIED]
         if retry:
-            again, still = _attempt(root, retry, deadline=deadline, own_src=True)
+            try:
+                again, still = _attempt(root, retry, deadline=deadline, own_src=True)
+            except subprocess.TimeoutExpired:
+                # Pass 1's counts stand; the modules it could not count are left uncounted, not dropped.
+                again, still = {}, {m: failed[m] for m in retry}
             counts.update(again)
             for module in retry:
                 if module not in still:
@@ -234,13 +246,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     rows = [(m, base.get(m, 0), head.get(m, 0)) for m in modules if m not in uncounted]
     delta = sum(h - b for _m, b, h in rows)
-    if delta == 0 and not uncounted and args.quiet_if_zero:
+    # An uncounted module with no tenant test at head cannot raise the count; only the others are named.
+    risky = {m: r for m, r in uncounted.items() if head.get(m, 0) > 0}
+    if delta == 0 and not risky and args.quiet_if_zero:
         return 0
     for module, before, after in rows:
         if after != before:
             _say(f"  {module}: {before} -> {after} ({after - before:+d})")
-    # An uncounted module with no tenant test at head cannot raise the count; only the others are named.
-    risky = {m: r for m, r in uncounted.items() if head.get(m, 0) > 0}
     for module, reason in risky.items():
         _say(f"  WARNING: {module}: not counted at the merge base, {head[module]} at head ({reason})")
     limit = ceiling(repo)

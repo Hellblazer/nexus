@@ -198,6 +198,29 @@ def test_a_base_unpacked_under_a_symlinked_temp_dir_attributes_a_failing_module(
     assert list(failed) == ["tests/test_b.py"] and "no_such_module_at_base" in failed["tests/test_b.py"]
 
 
+def test_a_collection_cut_short_before_the_census_is_refused_not_read_as_zero(repo: Path) -> None:
+    """nexus-l35bq review r2: when an earlier modifyitems hook raises, pytest skips the census hook. The census is
+    then missing, never an empty one that would read every module as having no tenant tests."""
+    _commit(repo, {
+        "tests/conftest.py": _CONFTEST + "\n\ndef pytest_collection_modifyitems(items):\n    raise RuntimeError('boom')\n",
+        "tests/test_a.py": "import pytest\n\n@pytest.mark.t2_tenant\ndef test_one():\n    pass\n",
+    }, "head with a raising hook")
+    proc = _run(repo)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "WARNING: tenant delta: could not count" in proc.stderr
+
+
+def test_a_failed_package_covers_only_the_modules_under_it() -> None:
+    spec = importlib.util.spec_from_file_location("tenant_delta_owner", SCRIPT)
+    td = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(td)
+    failed = {"tests/hooks": "ImportError: x"}
+    assert td._owner("tests/hooks/test_a.py", failed) == "ImportError: x"
+    assert td._owner("tests/hooks_extra/test_b.py", failed) is None
+    assert td._owner("tests/hooks", failed) == "ImportError: x"
+    assert td._owner("tests/test_c.py", {"tests/test_c.py::TestX": "E"}) == "E"
+
+
 def test_a_count_over_its_budget_is_refused_and_says_so(repo: Path) -> None:
     _commit(repo, {"tests/test_b.py": "import pytest\n\n@pytest.mark.t2_tenant\ndef test_m():\n    pass\n"},
             "head")
