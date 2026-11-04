@@ -104,6 +104,11 @@ def test_inactive_cache_hits_are_dropped_evicted_and_not_resurrected(library) ->
     assert not active_after & set(inactive), active_after
     assert {plan_id: library.get_plan(plan_id)["last_used"] for plan_id in inactive} == before
 
+    # Positive control for the premise: a run start on an expired row does revive it today, which is
+    # why the drop must happen before the run. This flips when the engine guards the write (nexus-i1eb4).
+    library.increment_run_started(just_past)
+    assert just_past in {r["id"] for r in library.list_active_plans(outcome="success")}
+
 
 def test_permanent_plan_never_expires() -> None:
     from nexus.plans.matcher import _is_expired

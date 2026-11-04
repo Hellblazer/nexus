@@ -303,6 +303,9 @@ class TestGrownPlanSurvivesWithUse:
             imp = _importer(db, _grown_row(db, grown_q))
             used_id = imp(f"ttlprobe {label} run", created_days=400, last_used_days=25)
             before = _get(db, used_id)
+            # The branch expectations below assume the composite record route, which the in-tree engine
+            # advertises; on an engine without it the failed run takes the early increment_run_started.
+            assert db.telemetry._supports_nx_answer_run_complete(), "engine lacks the composite route"
 
         result = MagicMock()
         result.steps = steps
