@@ -256,6 +256,36 @@ class NxAnswerRunCompleteTransactionTest {
         assertThat(nxAnswerRunExists(q)).isTrue();
     }
 
+    /**
+     * nexus-i1eb4: the composite shares incrementRunStartedIn, so a run on a
+     * plan past its TTL counts the run and its outcome but leaves last_used
+     * where it was; the plan stays expired.
+     */
+    @Test
+    @Order(8)
+    void expiredPlanCountsTheRunButKeepsLastUsed() {
+        OffsetDateTime lastUsed = OffsetDateTime.now(ZoneOffset.UTC).minusDays(200).withNano(0);
+        long planId = tenantScope.withTenant(TENANT, ctx -> ctx.insertInto(PLANS)
+            .set(PLANS.TENANT_ID, TENANT)
+            .set(PLANS.QUERY, "expired composite question " + System.nanoTime())
+            .set(PLANS.PLAN_JSON, JSONB.valueOf("{}"))
+            .set(PLANS.VERB, "test")
+            .set(PLANS.TTL_DAYS, 30)
+            .set(PLANS.CREATED_AT, OffsetDateTime.now(ZoneOffset.UTC).minusDays(400))
+            .set(PLANS.LAST_USED, lastUsed)
+            .returning(PLANS.ID)
+            .fetchOne(PLANS.ID));
+        String question = "expired-composite-" + System.nanoTime();
+
+        telemetryRepo.recordNxAnswerRunComplete(TENANT, question, planId, 0.71, 1,
+            "final text", 0.0123, 81422, OffsetDateTime.now(ZoneOffset.UTC), List.of(), false);
+
+        var row = planRepo.getById(TENANT, planId).orElseThrow();
+        assertThat(row.getUseCount()).as("the run still counts").isEqualTo(1);
+        assertThat(row.getFailureCount()).as("and so does its outcome").isEqualTo(1);
+        assertThat(row.getLastUsed()).as("an expired plan keeps its old last_used").isEqualTo(lastUsed);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private long newPlan(String project, String query) {

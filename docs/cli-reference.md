@@ -4079,7 +4079,9 @@ and the RDR-200 continuation handoff) each issue their own deferred use-count
 bump paired with their own terminal write, so no path records an outcome
 without having counted its use. One consequence: `last_used` now moves at the
 end of a run rather than the start, later by the run's duration (up to about
-80 seconds at p50 — nothing reads it at finer resolution than that).
+80 seconds at p50 — nothing reads it at finer resolution than that). It moves
+only while the plan is inside its TTL: a run on an expired plan counts but
+leaves `last_used` alone, so the plan stays expired (nexus-i1eb4).
 
 ### nx plan delete
 

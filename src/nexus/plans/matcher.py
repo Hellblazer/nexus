@@ -198,8 +198,10 @@ def _is_expired(row: dict, *, now: datetime | None = None) -> bool:
     expired once ``now - coalesce(last_used, created_at)`` exceeds ``ttl``
     days. The T1 plan cache refreshes from ``list_active_plans`` only every
     90 s and ``get_plan`` applies no TTL, so without this check an expired
-    plan matched in that window would run, and its run-start write would
-    stamp ``last_used = now()`` and bring it back to life. A row whose
+    plan matched in that window would run. An engine before nexus-i1eb4 also
+    stamps ``last_used = now()`` at run start and brings it back to life;
+    a newer engine keeps it expired but still runs it, so the check stays
+    either way. A row whose
     anchor timestamp cannot be read is kept: the engine stays the authority.
     The ages are in days, so clock skew between client and engine moves the
     boundary by only that many seconds; the engine's row reads truncate to
@@ -794,8 +796,8 @@ def plan_match(
                 # nexus-a0ksy: the cache still holds a plan that
                 # list_active_plans no longer returns, because it expired
                 # or was disabled after the last cache refresh. Drop it
-                # before it can run (a run start would reset last_used
-                # and undo an expiry) and evict it.
+                # before it can run (on an engine before nexus-i1eb4 the
+                # run start would also reset last_used) and evict it.
                 _log.info(
                     "plan_match_inactive_cache_hit", plan_id=plan_id,
                     reason="disabled" if row.get("disabled_at") else "expired",

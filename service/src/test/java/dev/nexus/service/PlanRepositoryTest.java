@@ -303,6 +303,19 @@ class PlanRepositoryTest {
     }
 
     @Test
+    @Order(26)
+    void incrementRunStarted_onANeverUsedExpiredPlan_leavesLastUsedNull() throws Exception {
+        long id = savePlanWithTtl("proj-ttl-runstart-unused", "never-used expired run start", 30);
+        backdatePlan(id, 400, null);
+
+        repo.incrementRunStarted(TENANT_A, id);
+
+        var row = repo.getById(TENANT_A, id).get();
+        assertThat(row.getUseCount()).as("the run still counts").isEqualTo(1);
+        assertThat(row.getLastUsed()).as("a never-used expired plan stays never-used").isNull();
+    }
+
+    @Test
     @Order(27)
     void incrementRunStarted_onALiveOrPermanentPlan_resetsLastUsed() throws Exception {
         long live = savePlanWithTtl("proj-ttl-runstart-live", "live run start", 30);

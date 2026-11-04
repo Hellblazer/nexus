@@ -453,8 +453,9 @@ public final class PlanRepository {
     }
 
     /**
-     * Bump {@code use_count} and stamp {@code last_used}.
-     * Mirrors {@code PlanLibrary.increment_run_started}.
+     * Bump {@code use_count}, and stamp {@code last_used} only while the plan
+     * is inside its TTL (nexus-i1eb4), so a run start cannot revive an
+     * expired plan. Mirrors {@code PlanLibrary.increment_run_started}.
      */
     public void incrementRunStarted(String tenant, long id) {
         tenantScope.withTenant(tenant, ctx -> {

@@ -3,8 +3,10 @@
 
 The T1 plan cache refreshes from ``list_active_plans`` only every 90 s and
 ``get_plan`` applies no TTL, so a plan that expired inside that window came
-back from ``plan_match``. Running it would stamp ``last_used = now()`` at run
-start and make the expired plan active again. These tests drive the real
+back from ``plan_match`` and ran. An engine before nexus-i1eb4 also stamped
+``last_used = now()`` at run start and made the expired plan active again; the
+last assertion below needs an engine that carries nexus-i1eb4, which the
+hermetic engine built from this tree does. These tests drive the real
 matcher over the real engine with backdated rows imported through
 ``/v1/plans/import``.
 """
