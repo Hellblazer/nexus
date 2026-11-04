@@ -433,8 +433,10 @@ public class ChunkConstraintAdmin {
          * or a PERMISSIVE policy FOR SELECT (or ALL) with the qual {@code true} applies to it (named, or PUBLIC, or a role
          * it inherits) and no RESTRICTIVE policy for SELECT (or ALL) with any other qual does (nexus-gy3vq: Postgres
          * ANDs every applicable restrictive policy onto the permissive ones, so one that is not {@code true} can hide
-         * rows whatever the permissive policy admits). Anything else reads the rows its (unset) tenant stamp allows,
-         * which is none, and the probe would report an empty table as clean.
+         * rows whatever the permissive policy admits). "true" means the qual as pg_policies renders it is the literal
+         * {@code true}: an equivalent spelling such as {@code 1 = 1}, or a restrictive policy with no USING qual, is
+         * read as narrowing and refused, which fails closed. Anything else reads the rows its (unset) tenant stamp
+         * allows, which is none, and the probe would report an empty table as clean.
          */
         void requireUnrestrictedView() {
             String role = ctx.select(DSL.currentUser()).fetchOne(0, String.class);

@@ -337,7 +337,9 @@ class _OneShotServer:
 
 
 @pytest.fixture
-def one_shot():
+def one_shot(monkeypatch):
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)  # urllib and httpx would route 127.0.0.1 through a proxy
     srv = _OneShotServer()
     yield srv
     srv.close()
@@ -378,9 +380,12 @@ def test_without_a_one_shot_hook_the_gate_would_see_nothing(one_shot, monkeypatc
 
 def test_a_long_lived_gate_keeps_a_bounded_tail_of_stamps():
     """The count is exact however long the gate lives; the diagnostic stamps keep only the newest."""
-    gate = request_gate.RequestGate()
-    for _ in range(request_gate.MAX_STAMPS + 5):
+    ticks = iter(range(10 ** 9))
+    gate = request_gate.RequestGate(clock=lambda: float(next(ticks)))
+    n = request_gate.MAX_STAMPS + 5
+    for _ in range(n):
         gate.acquire()
-    assert gate.count == request_gate.MAX_STAMPS + 5
+    assert gate.count == n
     assert len(gate.stamps) == request_gate.MAX_STAMPS
+    assert gate.stamps[0] == 5.0 and gate.stamps[-1] == float(n - 1)  # the newest kept, the oldest five dropped
 

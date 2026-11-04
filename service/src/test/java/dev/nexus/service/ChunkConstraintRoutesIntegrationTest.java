@@ -349,16 +349,64 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
             su.setAutoCommit(true);
             PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "blind_read_all2", PgContainerHelper.PolicyKind.PERMISSIVE,
                 "SELECT", BLIND);
-            PgContainerHelper.createPolicy(su, CHUNKS, "blind_narrowed", PgContainerHelper.PolicyKind.RESTRICTIVE,
-                "SELECT", BLIND, false);
             try {
-                HttpResponse<String> r = add(ROOT);
-                assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
-                assertThat(json(r).path("reason").asText()).isEqualTo("admin_cannot_see_all_tenants");
-                assertThat(r.body()).contains("blind_narrowed");
+                PgContainerHelper.createPolicy(su, CHUNKS, "blind_narrowed", PgContainerHelper.PolicyKind.RESTRICTIVE,
+                    "SELECT", BLIND, false);
+                try {
+                    HttpResponse<String> r = add(ROOT);
+                    assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
+                    assertThat(json(r).path("reason").asText()).isEqualTo("admin_cannot_see_all_tenants");
+                    assertThat(r.body()).contains("blind_narrowed");
+                } finally {
+                    PgContainerHelper.dropPolicy(su, CHUNKS, "blind_narrowed");
+                }
             } finally {
-                PgContainerHelper.dropPolicy(su, CHUNKS, "blind_narrowed");
                 PgContainerHelper.dropPolicy(su, CHUNKS, "blind_read_all2");
+            }
+        } finally {
+            service.chunkConstraintAdmin(admin());
+        }
+    }
+
+    /** A restrictive policy that narrows nothing the role reads; each must leave the trusted role trusted. */
+    private enum Harmless { RESTRICTIVE_TRUE_FOR_THE_ROLE, RESTRICTIVE_FALSE_FOR_ANOTHER_ROLE, RESTRICTIVE_FALSE_FOR_UPDATE_ONLY }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(Harmless.class)
+    @Order(13)
+    void aRestrictivePolicyThatDoesNotNarrowTheRolesSelectDoesNotRefuseIt(Harmless kind) throws Exception {
+        // nexus-gy3vq, the other direction: only a restrictive policy that applies to the role's SELECT and is
+        // not true refuses it.
+        String other = "gy3vq_other_role";
+        service.chunkConstraintAdmin(blindAdmin());
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            if (kind == Harmless.RESTRICTIVE_FALSE_FOR_ANOTHER_ROLE) {
+                PgContainerHelper.createLoginRole(su, other, "gy3vqotherpw", false);
+            }
+            PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "blind_read_all3", PgContainerHelper.PolicyKind.PERMISSIVE,
+                "SELECT", BLIND);
+            try {
+                switch (kind) {
+                    case RESTRICTIVE_TRUE_FOR_THE_ROLE -> PgContainerHelper.createPolicy(su, CHUNKS, "blind_harmless",
+                        PgContainerHelper.PolicyKind.RESTRICTIVE, "SELECT", BLIND, true);
+                    case RESTRICTIVE_FALSE_FOR_ANOTHER_ROLE -> PgContainerHelper.createPolicy(su, CHUNKS, "blind_harmless",
+                        PgContainerHelper.PolicyKind.RESTRICTIVE, "SELECT", other, false);
+                    case RESTRICTIVE_FALSE_FOR_UPDATE_ONLY -> PgContainerHelper.createPolicy(su, CHUNKS, "blind_harmless",
+                        PgContainerHelper.PolicyKind.RESTRICTIVE, "UPDATE", BLIND, false);
+                }
+                try {
+                    HttpResponse<String> r = add(ROOT);
+                    assertThat(r.statusCode()).as("trusted, so it reaches the tenant check: " + r.body()).isEqualTo(409);
+                    assertThat(json(r).path("reason").asText()).isEqualTo("tenant_unswept");
+                } finally {
+                    PgContainerHelper.dropPolicy(su, CHUNKS, "blind_harmless");
+                }
+            } finally {
+                PgContainerHelper.dropPolicy(su, CHUNKS, "blind_read_all3");
+                if (kind == Harmless.RESTRICTIVE_FALSE_FOR_ANOTHER_ROLE) {
+                    PgContainerHelper.dropRoleRevokingGrants(su, other);
+                }
             }
         } finally {
             service.chunkConstraintAdmin(admin());

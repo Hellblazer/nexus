@@ -81,7 +81,8 @@ import javax.crypto.spec.SecretKeySpec;
  * does not verify (forged, edited, another tenant's, or issued before an engine restart) is IGNORED: the call is a first
  * call and does its own checks. Whatever the token says, every batch and the final count also exclude the bypass
  * collections in SQL and the collections the token itself lists as blocked. A token that does verify can be sent
- * again for as long as this instance runs, and a replay carries the first call's census verdicts, however old
+ * again for as long as this instance runs, and a replay carries the first call's census verdicts and skips its
+ * precondition and residue checks, however old
  * (nexus-gy3vq: accepted, by design): a replay re-sweeps from its cursor, and a row already swept no longer matches
  * the retired-key predicate, so it repeats nothing; but a collection whose census would block it now and did not at
  * the first call is still swept by the replay, until a call without a token runs the census again.
@@ -188,12 +189,7 @@ public final class ChunkKeySweep {
         if (r.sig() == null || r.collections() == null || r.blocked() == null) {
             return false;
         }
-        String expected;
-        try {
-            expected = sign(tenant, r.cursor(), r.collections(), r.blocked(), r.remaining());
-        } catch (IllegalStateException e) {
-            return false;  // a token this instance could not even encode is not one it signed (nexus-gy3vq)
-        }
+        String expected = sign(tenant, r.cursor(), r.collections(), r.blocked(), r.remaining());
         return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), r.sig().getBytes(StandardCharsets.UTF_8));
     }
 
