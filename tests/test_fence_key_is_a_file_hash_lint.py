@@ -153,7 +153,8 @@ class _Walk:
         self.functions = _functions(modules)
         self.modules = modules
         self.problems: list[str] = []
-        self.seen: set[tuple[Path, str, str]] = set()
+        self.done: dict[tuple[Path, str, str], int] = {}
+        self.in_progress: set[tuple[Path, str, str]] = set()
         self.on_path: set[str] = set()
 
     def call_sites(self, target: str):
@@ -200,13 +201,17 @@ class _Walk:
             self.problems.append(f"{where}: the key {expr.id!r} is neither assigned here nor a parameter")
             return 0
         key = (path, fn.name, expr.id)
-        if key in self.seen:
+        if key in self.done:
+            return self.done[key]  # reached by another path of a diamond: the same answer
+        if key in self.in_progress:
             return 0  # a cycle reaches nothing by itself; the callers outside it must
-        self.seen.add(key)
+        self.in_progress.add(key)
         self.on_path.add(fn.name)
         index = params.index(expr.id) if expr.id in params else None
         reached = sum(self.trace(cpath, cfn, _argument(call, args, index, expr.id))
                       for cpath, cfn, call, args in self.call_sites(fn.name))
+        self.in_progress.discard(key)
+        self.done[key] = reached
         if reached == 0:
             self.problems.append(f"{where}: the key arrives as parameter {expr.id!r} and no caller passes a file hash")
         return reached
@@ -245,8 +250,8 @@ def test_every_fence_key_at_the_writer_seams_is_the_indexed_file_s_sha256() -> N
     # A writer called outside any function (module level, a class body) is not a site the walk saw.
     for path, tree in walk.modules:
         anywhere = sum(1 for c in ast.walk(tree) if isinstance(c, ast.Call) and _callee(c)[0] in _WRITERS)
-        in_functions = sum(1 for fns in walk.functions.values() for fpath, fn in fns if fpath == path
-                           for c in ast.walk(fn) if isinstance(c, ast.Call) and _callee(c)[0] in _WRITERS)
+        in_functions = len({id(c) for fns in walk.functions.values() for fpath, fn in fns if fpath == path
+                            for c in ast.walk(fn) if isinstance(c, ast.Call) and _callee(c)[0] in _WRITERS})
         if anywhere and not in_functions >= anywhere:
             problems.append(f"{path.relative_to(_SRC.parents[1])}: a writer is called outside any function")
     assert not problems, "\n".join(problems)

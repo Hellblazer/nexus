@@ -79,6 +79,18 @@ def test_a_marker_the_doctor_cannot_open_is_a_failing_row_not_silence(tmp_path: 
     assert row.ok is False and "could not be read" in row.detail
 
 
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root searches a 000 directory")
+def test_a_data_directory_the_doctor_cannot_search_is_a_failing_row_not_silence(tmp_path: Path) -> None:
+    config = _cluster(tmp_path, "16")
+    pgdata = config / "postgres"
+    pgdata.chmod(0)
+    try:
+        [row] = _check_local_pg_version(config)
+    finally:
+        pgdata.chmod(0o700)
+    assert row.ok is False and "could not be read" in row.detail
+
+
 def test_a_leftover_directory_with_no_cluster_in_use_has_no_row(tmp_path: Path) -> None:
     """A machine with no local cluster in use (no PG_DATA) gets no row, whatever is left under the config dir."""
     config = tmp_path / "config"
