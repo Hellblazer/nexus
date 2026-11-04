@@ -363,7 +363,7 @@ def test_resolve_is_a_non_embedding_tool() -> None:
 
 def test_the_embedding_domain_check_lets_resolve_through() -> None:
     # A collection arg of the wrong model for the declared domain trips the guard on a retrieval tool ...
-    wrong = {"collections": "knowledge__x__voyage-context-3__v1"}
+    wrong = {"collections": "knowledge__x__bge-768__v1"}
     with pytest.raises(runner.PlanRunEmbeddingDomainError):
         runner._check_embedding_domain(0, "search", {"taxonomy_domain": "code"}, wrong)
     # ... and not on resolve, which has no embedding space.
