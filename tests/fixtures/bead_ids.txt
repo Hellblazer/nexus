@@ -571,6 +571,7 @@ nexus-2dq.1
 nexus-2e874
 nexus-2e874.1
 nexus-2edpf
+nexus-2egi7
 nexus-2ekv8
 nexus-2em
 nexus-2em.1
@@ -6408,6 +6409,7 @@ nexus-poqc6
 nexus-pp3gb
 nexus-ppl
 nexus-ppl.1
+nexus-pplwc
 nexus-ppuwc
 nexus-pq3wr
 nexus-pqatt
