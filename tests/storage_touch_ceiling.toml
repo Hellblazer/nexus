@@ -40,8 +40,12 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5097
+provisioned_tests = 5103
 tolerance_tests = 0
+# 5097 -> 5103 (nexus-gie46, 2026-11-04): +6. The new tests/test_rdr147_link_deletion_pins.py pins how the catalog deletes links
+# (hard delete cascades, trash keeps and restore returns them, traverse skips a trashed endpoint, links_from/links_to still show one,
+# find_by_title_exact skips one) against the real engine: it purges aged tombstones and drops the link FKs, which a fake cannot do.
+# Measured locally (the guard in fail mode): 6 tests, provisioned 6.
 # 5096 -> 5097 (nexus-l003p, 2026-11-03): +1. tests/test_t3_quarantine_restore.py gains one real-engine test (a kept rival survives a
 # second restore call and the quarantine copy keeps its keys), which needs a real engine tenant to quarantine and restore through.
 # 5084 -> 5096 (nexus-0sm1t, 2026-11-03): +12. The ladder deferral log is a T2 note, and with no local flag file
