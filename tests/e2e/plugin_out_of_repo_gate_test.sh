@@ -38,6 +38,12 @@ e2e_python_resolve 10 || exit 2
 export NX_GATE_RETRY_SLEEP=0   # the backoff between retries is tested on its own
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/plugin_out_of_repo_gate_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
+# No run in this self-test may reach the operator's real ~/.claude: the gate's exit cleanup
+# resolves <CLAUDE_CONFIG_DIR>/projects, and a test that left it unset once let a mutant of
+# that cleanup delete real project directories. Tests that need their own config dir still
+# set it per call.
+mkdir -p "$WORKDIR/claude-config/projects"
+export CLAUDE_CONFIG_DIR="$WORKDIR/claude-config"
 PASS=0; FAIL=0
 ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
