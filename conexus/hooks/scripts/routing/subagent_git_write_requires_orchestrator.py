@@ -3816,9 +3816,20 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
     return head
 
 
-#: The chas test host's ssh aliases (nexus-yc7fs, Sam 2026-10-14). A git write
-#: sent there runs in chas's own clone, never in the checkout this guard protects.
-_REMOTE_TEST_HOSTS: frozenset[str] = frozenset({"chas", "chas-test"})
+#: The ssh aliases of a remote test host (nexus-yc7fs). A git write sent there
+#: runs in that host's own clone, never in the checkout this guard protects.
+#: ``NX_REMOTE_TEST_HOSTS`` (comma-separated aliases) names them; set it empty
+#: to exempt none. Unset, the default is the nexus maintainers' test box
+#: (``chas`` / ``chas-test``): an alias a user's ssh config does not define
+#: never matches a command that can run.
+_DEFAULT_REMOTE_TEST_HOSTS: frozenset[str] = frozenset({"chas", "chas-test"})
+
+
+def _remote_test_hosts() -> frozenset[str]:
+    raw = os.environ.get("NX_REMOTE_TEST_HOSTS")
+    if raw is None:
+        return _DEFAULT_REMOTE_TEST_HOSTS
+    return frozenset(h.strip() for h in raw.split(",") if h.strip())
 
 #: ssh flags that run nothing locally. Every other option is refused, since
 #: ProxyCommand, LocalCommand, -F (a config that can set either) and -J (a
@@ -3933,7 +3944,7 @@ def _remote_test_host_command(command: str) -> str | None:
         host = tok
         i += 1
 
-    if host is None or host.rsplit("@", 1)[-1] not in _REMOTE_TEST_HOSTS:
+    if host is None or host.rsplit("@", 1)[-1] not in _remote_test_hosts():
         return None
     if any(word in tok for tok in tokens[i:] for word in _ONWARD_HOP_WORDS):
         return None

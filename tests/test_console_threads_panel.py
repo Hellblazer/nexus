@@ -52,6 +52,17 @@ def test_bd_absent_renders_one_line_notice_not_a_traceback() -> None:
     assert "Traceback" not in resp.text
 
 
+def test_a_user_without_bd_sees_no_error_and_the_board_still_answers() -> None:
+    now = datetime.now(timezone.utc)
+    rows = [{"title": "s", "timestamp": _iso(now), "content": "## A\nstate: live\n"}]
+    skipped = lambda: BeadsResult((), skipped="bd is not installed")  # noqa: E731 -- a seam stand-in
+    html = _client(bd_runner=skipped, threads_reader=lambda: rows).get("/threads").text
+    assert "Could not read the list of beads" not in html
+    assert "Can't tell what needs you right now." not in html
+    assert "Nothing needs you. 1 session reported, newest just now." in html
+    assert "Beads are not shown: bd is not installed." in html
+
+
 def test_beads_listed_with_id_title_priority_assignee() -> None:
     beads = BeadsResult((
         Bead("nexus-abc", "Decide the thing", 1, "sam"),
@@ -182,7 +193,9 @@ def _fake_bd(tmp_path, monkeypatch, script: str) -> None:
 def test_run_bd_reports_missing_binary(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))  # empty dir: no bd
     result = threads_route.run_bd_needs_sam()
-    assert not result.ok and "not on PATH" in result.error
+    # No bd is not a failure: a user without beads has no bead list to read
+    # (user-surface inventory 2026-11-04, new row 9). It is skipped, said once.
+    assert result.ok and result.beads == () and "bd is not installed" in result.skipped
 
 
 def test_run_bd_parses_output_and_passes_the_label_filter(tmp_path, monkeypatch) -> None:

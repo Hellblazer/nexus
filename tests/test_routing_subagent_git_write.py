@@ -4068,3 +4068,43 @@ def test_the_chas_carve_out_is_not_vacuous(shared_repo):
     spec.loader.exec_module(guard)
     for cmd in _CHAS_ALLOWED:
         assert guard._primary_match(guard._normalize_for_primary_scan(cmd)), cmd
+
+
+# --- The remote test hosts are configuration, not a constant ------------------
+# (user-surface inventory 2026-11-04, A-2377: the hook shipped the maintainers'
+# box as the only exempt host, with no way for a user to name their own.)
+
+_REMOTE_CMD = "ssh {host} 'git -C x add f'"
+
+
+def _remote_verdict(host: str, cwd: pathlib.Path, hosts: str | None) -> dict:
+    """Verdict for one ssh-to-``host`` git write with ``NX_REMOTE_TEST_HOSTS``
+    set to ``hosts`` (``None`` = variable absent)."""
+    env = os.environ.copy()
+    env["NX_HOOK_PYTHON"] = sys.executable
+    env.pop("NX_REMOTE_TEST_HOSTS", None)
+    if hosts is not None:
+        env["NX_REMOTE_TEST_HOSTS"] = hosts
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        input=json.dumps(_payload(_REMOTE_CMD.format(host=host), agent=True, cwd=str(cwd))),
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+    return _hso(proc)
+
+
+def test_remote_test_hosts_default_is_the_maintainers_box(shared_repo):
+    assert _remote_verdict("chas-test", shared_repo, None).get("permissionDecision") != "deny"
+    assert _remote_verdict("devbox", shared_repo, None).get("permissionDecision") == "deny"
+
+
+def test_remote_test_hosts_env_names_the_users_own_host(shared_repo):
+    assert _remote_verdict("devbox", shared_repo, "devbox,ci-box").get("permissionDecision") != "deny"
+    assert _remote_verdict("ci-box", shared_repo, "devbox, ci-box").get("permissionDecision") != "deny"
+    # the variable REPLACES the default: the maintainers' alias is no longer exempt
+    assert _remote_verdict("chas-test", shared_repo, "devbox").get("permissionDecision") == "deny"
+
+
+def test_remote_test_hosts_env_empty_exempts_none(shared_repo):
+    assert _remote_verdict("chas-test", shared_repo, "").get("permissionDecision") == "deny"
+    assert _remote_verdict("chas", shared_repo, " , ").get("permissionDecision") == "deny"

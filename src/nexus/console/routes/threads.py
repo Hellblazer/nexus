@@ -43,13 +43,13 @@ Clock = Callable[[], datetime]
 def run_bd_needs_sam(timeout: float = BD_TIMEOUT_SECONDS) -> BeadsResult:
     """Live beads (open, in progress or blocked) labelled ``needs-sam``, from the repo the console started in.
 
-    Never raises: a missing ``bd``, a timeout, a non-zero exit or unparseable
+    Never raises: a missing ``bd`` comes back as ``skipped`` (a user without beads has none to read); a timeout, a non-zero exit or unparseable
     output comes back as a one-line ``error``.
     """
     try:
         proc = run_bounded(_BD_ARGV, timeout=timeout)
     except FileNotFoundError:
-        return BeadsResult((), "bd is not on PATH")
+        return BeadsResult((), skipped="bd is not installed")
     except subprocess.TimeoutExpired:
         return BeadsResult((), f"bd list timed out after {timeout:g}s")
     except OSError as exc:
