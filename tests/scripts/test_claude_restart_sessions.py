@@ -2126,7 +2126,7 @@ def test_a_roll_withdraws_every_ready_ask_first_and_retries_at_the_end(crs, rd, 
     monkeypatch.setattr(crs, "withdraw_ask",
                         lambda sid, tid="", what="": order.append(f"withdraw {tid}") or outcomes[tid].pop(0))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: order.append("roll") or 0)
-    monkeypatch.setattr(crs, "footprint_report", lambda *a: order.append("report") or [])
+    monkeypatch.setattr(crs, "footprint_report", lambda *a, **_k: order.append("report") or [])
     monkeypatch.setattr(crs, "update_plugins", lambda: order.append("update"))
     code, _ = _run_main(crs, monkeypatch, ["--resume", "--force", "--detached"])
     assert code == 0
@@ -2149,7 +2149,7 @@ def test_a_round_started_during_the_roll_is_left_alone(crs, rd, tmpdirs, monkeyp
 
     monkeypatch.setattr(crs, "_roll", roll)
     reported: list = []
-    monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs, manifest=None: reported.append(manifest["stamp"]))
+    monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs, manifest=None, **_k: reported.append(manifest["stamp"]))
     code, _ = _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force", "--detached"])
     assert code == 0
     assert withdrawn == ["t-a", "t-a"]  # the new round's t-new is not touched
@@ -2327,6 +2327,56 @@ def test_the_footprint_removes_the_marker_directory_when_it_is_empty(crs, rd, tm
     crs.footprint_report([], {}, None)  # absent directory: nothing to do
 
 
+def _aged(path: Path, age_s: float) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    then = time.time() - age_s
+    os.utime(path, (then, then))
+    return path
+
+
+def test_the_stale_marker_sweep_removes_only_old_empty_markers(crs, rd) -> None:
+    """nexus-drza4: markers leak when the round file is malformed or missing, or after a SIGKILL. The
+    sweep removes a file only when it is named like a marker, is an empty regular file and is older
+    than the age given, so a newer round's markers (younger by construction) survive it."""
+    day = crs.MARKER_SWEEP_AGE_S
+    leaked = _aged(crs.ask_marker({"sessionId": "aaaa1111-rest"}, "/tmp/h.md"), day + 60)
+    newer = _aged(crs.ask_marker({"sessionId": "bbbb2222-rest"}, "/tmp/h.md"), 60)
+    not_empty = _aged(crs.ask_marker({"sessionId": "cccc3333-rest"}, "/tmp/h.md"), day + 60)
+    not_empty.write_text("x")
+    os.utime(not_empty, (time.time() - day - 60,) * 2)
+    foreign = _aged(crs.ASK_MARKERS / "notes.txt", day + 60)
+    sub = crs.ASK_MARKERS / "aaaa1111-0123456789ab"
+    if sub.exists():
+        sub.unlink()
+    sub.mkdir()
+    os.utime(sub, (time.time() - day - 60,) * 2)
+
+    assert crs.sweep_stale_markers(day) == 1
+    assert not leaked.exists()
+    assert newer.exists() and not_empty.exists() and foreign.exists() and sub.is_dir()
+
+
+def test_the_stale_marker_sweep_tolerates_an_absent_directory(crs) -> None:
+    assert not crs.ASK_MARKERS.exists()
+    assert crs.sweep_stale_markers(crs.MARKER_SWEEP_AGE_S) == 0
+
+
+def test_the_footprint_sweeps_a_leaked_marker_and_then_removes_the_directory(crs, rd, tmpdirs) -> None:
+    """A marker no round file records (its round file was lost) goes once it is old enough, and the
+    directory with it."""
+    leaked = _aged(crs.ask_marker({"sessionId": "dddd4444-rest"}, "/tmp/h.md"), crs.MARKER_SWEEP_AGE_S + 60)
+    crs.footprint_report([], {}, None)
+    assert not leaked.exists() and not crs.ASK_MARKERS.exists()
+
+
+def test_the_footprint_keeps_a_leaked_marker_younger_than_the_runs_ask_ttl(crs, rd, tmpdirs) -> None:
+    """A run with a long handoff timeout passes a longer age: a marker inside it is kept."""
+    marker = _aged(crs.ask_marker({"sessionId": "eeee5555-rest"}, "/tmp/h.md"), crs.MARKER_SWEEP_AGE_S + 60)
+    crs.footprint_report([], {}, None, stale_after=crs.MARKER_SWEEP_AGE_S * 2)
+    assert marker.exists()
+
+
 # ---- the restart's footprint (nexus-xwijj Phase 3) ----
 
 @pytest.fixture
@@ -2397,7 +2447,7 @@ def test_the_roll_reports_its_footprint_even_when_it_raises(crs, rd, tmpdirs, mo
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)  # the real one would stay installed in pytest
     reported: list = []
     monkeypatch.setattr(crs, "footprint_report",
-                        lambda found, handoffs, manifest=None: reported.append([s["sessionId"] for s in found]))
+                        lambda found, handoffs, manifest=None, **_k: reported.append([s["sessionId"] for s in found]))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mid-roll")))
     _live(rd, "alpha")
     with pytest.raises(RuntimeError):
@@ -2409,7 +2459,7 @@ def test_the_detached_child_turns_term_and_hup_into_an_exit(crs, rd, tmpdirs, mo
     installed: dict = {}
     setattr_in(monkeypatch, crs, "signal.signal", lambda sig, fn: installed.__setitem__(sig, fn))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: 0)
-    monkeypatch.setattr(crs, "footprint_report", lambda *a: [])
+    monkeypatch.setattr(crs, "footprint_report", lambda *a, **_k: [])
     _live(rd, "alpha")
     code, _ = _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force", "--detached"])
     assert code == 0
