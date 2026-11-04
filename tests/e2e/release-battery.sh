@@ -14,13 +14,20 @@
 #                                                                     target (uv pip compile, off-host; network)
 #   plugins tests/e2e/plugin-out-of-repo-gate.sh --all                the four plugins (conexus, sn, tool-spill,
 #                                                                     prose-edit) run from a project outside any
-#                                                                     nexus checkout. The live pass needs the claude
-#                                                                     CLI (the laptop): where it is not on PATH the leg
-#                                                                     runs --static-only and its verdict line says
-#                                                                     "(static pass only)". NX_BATTERY_PLUGIN_GATE_LIVE=0
-#                                                                     asks for the static pass on purpose. Unlike the
-#                                                                     five above it also runs in --plugin-only mode:
-#                                                                     the plugin trees are what that mode changes.
+#                                                                     nexus checkout: the static pass over each plus
+#                                                                     the CANARY (a fixture plugin with random nonces
+#                                                                     that measures what Claude Code substitutes).
+#                                                                     Deterministic by design; the model-driven
+#                                                                     per-target sweep is NOT in the battery (release
+#                                                                     skill Step 11c, advisory, after publish). The
+#                                                                     canary needs the claude CLI (the laptop): where
+#                                                                     $NX_GATE_CLAUDE (default claude) is not on PATH
+#                                                                     the leg runs --static-only, its row reads
+#                                                                     "(static pass only)" and so does the CLOSING
+#                                                                     LINE. NX_BATTERY_PLUGIN_GATE_LIVE=0 asks for that
+#                                                                     on purpose. Unlike the five above it also runs in
+#                                                                     --plugin-only mode: the plugin trees are what
+#                                                                     that mode changes.
 #
 # Serial first: tests/e2e/release-preflight.sh (the ci-evidence required-context
 # drift tests, the wire-contract ledger, the mandatory pins and the pin sweep).
@@ -237,14 +244,17 @@ define_leg dual       group  "DUAL-EMBEDDER GATE (PASSED|FAILED)"       tests/e2
 # macOS 13 negative control. Network, no install; release battery and by hand only,
 # never the default suite. Offline self-test: tests/e2e/constraints_resolve_gate_test.sh.
 define_leg resolve    group  "CONSTRAINTS RESOLVE GATE (PASSED|FAILED)" tests/e2e/constraints-resolve-gate.sh
-# nexus-z7ddd: the plugins as a user runs them, from a project that is not a nexus checkout. The live
-# pass is one claude call per agent and skill; where claude is absent (chas, CI pool) the static pass
-# runs alone and says so in its verdict line rather than skipping.
+# nexus-z7ddd: the plugins as a user runs them, from a project that is not a nexus checkout. Static pass
+# plus the canary (4 short claude runs against a fixture plugin); where claude is absent (chas, CI pool)
+# the static pass runs alone and says so in the row AND in the closing line rather than skipping. The same
+# NX_GATE_CLAUDE knob the gate reads decides it, so the probe and the run cannot disagree.
 PLUGINS_GATE_ARGS=(--all)
-if [ "${NX_BATTERY_PLUGIN_GATE_LIVE:-1}" = 0 ] || ! command -v "${NX_BATTERY_CLAUDE:-claude}" >/dev/null 2>&1; then
+PLUGINS_STATIC_ONLY=0
+if [ "${NX_BATTERY_PLUGIN_GATE_LIVE:-1}" = 0 ] || ! command -v "${NX_GATE_CLAUDE:-claude}" >/dev/null 2>&1; then
   PLUGINS_GATE_ARGS+=(--static-only)
+  PLUGINS_STATIC_ONLY=1
 fi
-define_leg plugins    group  "PLUGIN OUT-OF-REPO GATE (PASSED|FAILED)"  tests/e2e/plugin-out-of-repo-gate.sh "${PLUGINS_GATE_ARGS[@]}"
+define_leg plugins    group  "PLUGIN OUT-OF-REPO GATE (PASSED|FAILED|UNVERIFIED|NOT-APPLICABLE)"  tests/e2e/plugin-out-of-repo-gate.sh "${PLUGINS_GATE_ARGS[@]}"
 
 # nexus-rbmja.3: the plugin-only fast lane. The five legs above (all but plugins) stay in the table and are marked
 # SKIPPED, never omitted. What the eligibility gate above proved is that the diff from the last client
@@ -298,6 +308,11 @@ battery_verdict() {  # battery_verdict <red-count>
   local red="$1" why=() joined mode=""
   [ "${ONLY_SKIPPED:-0}" -eq 0 ] || why+=("${ONLY_SKIPPED} leg(s) skipped by --only")
   [ "$PLUGIN_ONLY" != 1 ] || mode="PLUGIN-ONLY vs ${PLUGIN_ONLY_BASE}: ${PLUGIN_SKIPPED} leg(s) skipped by design"
+  # The plugins leg ran without the canary (no claude, or asked for): the closing line says so, so a
+  # reader of the last line alone does not take a static-only plugin check for the measured one.
+  if [ "${PLUGINS_STATIC_ONLY:-0}" = 1 ] && [ "${LEG_STATUS[plugins]:-}" = PASSED ]; then
+    mode="${mode:+$mode; }plugins leg static pass only: the canary did not run, run it where claude is"
+  fi
   if [ "$red" -eq 0 ]; then
     if [ "${#why[@]}" -gt 0 ]; then
       joined="$(printf '%s; ' "${why[@]}")"

@@ -3,17 +3,25 @@
 # A reference the gate would fail (REPO-ONLY, RELATIVE-DEAD, MISSING, OUTSIDE,
 # UNSUBSTITUTED) is accepted only if it has an entry here. One entry per line:
 #
-#   <plugin name> | <plugin-relative file> | <target as written> | <reason>
+#   <plugin name> | <plugin-relative file> | <target as written> | <class> | <reason>
 #
-# The plugin name is the "name" in its .claude-plugin/plugin.json (conexus, sn,
-# conexus-tool-spill, conexus-prose-edit). There is no line number: the key is
-# the file and the target, so an edit above the line does not stale the entry.
-# The reason says why a user's session is unharmed by the reference (at least 12
-# characters; an empty or one-word reason is refused). A repeated key is refused.
+# The plugin name is the "name" in its .claude-plugin/plugin.json: conexus, sn,
+# conexus-tool-spill or conexus-prose-edit (any other name is refused, so a typo
+# cannot sit here unused). The class is the failing class the gate reports for
+# that reference; an entry with another class covers nothing and goes stale.
+# There is no line number: the key is the file, the target and the class, so an
+# edit above the line does not stale the entry.
+# The reason says why a user's session is unharmed by the reference: at least
+# three words (an empty or thin reason is refused). A repeated key is refused.
 #
 # An entry goes STALE, and the gate fails on it, when its file or target is gone
-# from the plugin, or when the reference no longer fails. Remove it then.
+# from the plugin, or when the reference no longer fails with that class. Remove
+# or fix it then.
 #
 # This file ships empty on purpose: the way to deal with a failing reference is
 # to fix the text (a GitHub link, inline text, a path relative to the file). An
 # entry is a recorded decision for the rare reference that must stay as written.
+#
+# Not covered by this gate at all (so not listed here): the text that
+# src/nexus/session_start_guidance.py and src/nexus/hooks/subagent_start.py
+# generate and inject. It is Python source outside every plugin tree.

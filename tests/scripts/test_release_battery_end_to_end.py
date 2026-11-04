@@ -56,6 +56,9 @@ class _Battery:
 
     def __init__(self, tmp_path: Path) -> None:
         self.root = tmp_path / "repo"
+        self.fake_claude = tmp_path / "fake-claude"
+        self.fake_claude.write_text("#!/bin/bash\nexit 0\n")
+        self.fake_claude.chmod(0o755)
         self.out = tmp_path / "legout"
         self.ran = tmp_path / "ran"
         for d in (self.out, self.ran):
@@ -115,7 +118,8 @@ class _Battery:
         r = subprocess.run(
             ["bash", str(self.root / "tests" / "e2e" / "release-battery.sh"), "--max-parallel", "20", *args],
             capture_output=True, text=True, timeout=300, cwd=self.root,
-            env={"PATH": os.environ["PATH"], "HOME": str(self.root.parent), **(env or {})},
+            env={"PATH": os.environ["PATH"], "HOME": str(self.root.parent),
+                 "NX_GATE_CLAUDE": str(self.fake_claude), **(env or {})},
         )
         work = re.search(r"RELEASE BATTERY: work=(\S+)", r.stdout)
         if work:  # the battery leaves its work dir (logs) behind by design
@@ -204,8 +208,8 @@ def test_a_leg_that_exits_zero_without_its_verdict_line_is_missing_not_passed(ba
 _SKIPPED_LEGS = _FULL  # lsg, pkgup, mvv, dual, resolve: shown SKIPPED, never omitted
 
 
-def _plugin(battery: _Battery, *args: str) -> subprocess.CompletedProcess[str]:
-    return battery.run("--plugin-only", _TAG, *args)
+def _plugin(battery: _Battery, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return battery.run("--plugin-only", _TAG, *args, env=env)
 
 
 @pytest.mark.parametrize(
@@ -423,25 +427,43 @@ def test_skip_preflight_does_not_compose_with_plugin_only(battery: _Battery) -> 
 # ── nexus-z7ddd: the plugin out-of-repo gate leg ──────────────────────────────────────────────────────
 
 
-def _fake_claude(tmp_path: Path) -> str:
-    stub = tmp_path / "claude"
-    stub.write_text("#!/bin/bash\nexit 0\n")
-    stub.chmod(0o755)
-    return str(stub)
-
-
-def test_the_plugins_leg_runs_live_where_claude_is_and_static_only_where_it_is_not(
+def test_the_plugins_leg_runs_the_canary_where_claude_is_and_static_only_where_it_is_not(
         battery: _Battery, tmp_path: Path) -> None:
     """Mutation (drop the claude probe, or always pass --static-only): a laptop battery never runs the
-    live pass, or a chas battery asks for a live pass it cannot make and goes red on exit 2."""
-    r = battery.run(env={"NX_BATTERY_CLAUDE": _fake_claude(tmp_path)})
+    canary, or a chas battery asks for a canary it cannot make and goes red on exit 2. One knob,
+    NX_GATE_CLAUDE, is what the battery probes and what the gate runs."""
+    r = battery.run()
     assert r.returncode == 0, (r.stdout, r.stderr)
-    assert (battery.out / "plugins.args").read_text() == "--all", "claude is on PATH: the live pass is asked for"
-    r = battery.run(env={"NX_BATTERY_CLAUDE": str(tmp_path / "no-such-claude")})
+    assert (battery.out / "plugins.args").read_text() == "--all", "claude is on PATH: the canary is asked for"
+    assert r.stdout.rstrip().splitlines()[-1] == "RELEASE BATTERY PASSED", "and the closing line is bare"
+    r = battery.run(env={"NX_GATE_CLAUDE": str(tmp_path / "no-such-claude")})
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert (battery.out / "plugins.args").read_text() == "--all --static-only", "no claude: the static pass, by name"
-    r = battery.run(env={"NX_BATTERY_CLAUDE": _fake_claude(tmp_path), "NX_BATTERY_PLUGIN_GATE_LIVE": "0"})
+    r = battery.run(env={"NX_GATE_PLUGIN_GATE_LIVE_UNUSED": "1", "NX_BATTERY_PLUGIN_GATE_LIVE": "0"})
     assert (battery.out / "plugins.args").read_text() == "--all --static-only", "the operator asked for static"
+    r = battery.run(env={"NX_BATTERY_CLAUDE": str(tmp_path / "no-such-claude")})
+    assert (battery.out / "plugins.args").read_text() == "--all", "the retired NX_BATTERY_CLAUDE knob decides nothing"
+
+
+def test_a_static_only_plugins_leg_is_named_in_the_closing_line_in_both_modes(
+        battery: _Battery, tmp_path: Path) -> None:
+    """The row says static-only; the LAST line is what a reader takes away. Mutation (drop the note from
+    battery_verdict): a battery run where the canary never ran closes on a bare PASSED."""
+    env = {"NX_GATE_CLAUDE": str(tmp_path / "no-such-claude")}
+    note = "plugins leg static pass only: the canary did not run"
+    r = battery.run(env=env)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    closing = r.stdout.rstrip().splitlines()[-1]
+    assert closing.startswith("RELEASE BATTERY PASSED (") and note in closing, closing
+    r = _plugin(battery, env=env)
+    closing = r.stdout.rstrip().splitlines()[-1]
+    assert f"PLUGIN-ONLY vs {_TAG}" in closing and note in closing, closing
+    r = battery.run("--only", "mvv", env=env)
+    assert "PARTIAL" in r.stdout.rstrip().splitlines()[-1]
+    assert note not in r.stdout.rstrip().splitlines()[-1], "the plugins leg did not run under --only mvv"
+    battery.set_leg("plugins", "PLUGIN OUT-OF-REPO GATE FAILED -- all\n", 1)
+    r = battery.run(env=env)
+    assert r.stdout.rstrip().splitlines()[-1] == "RELEASE BATTERY FAILED: 1 red leg(s)"
 
 
 def test_a_red_plugins_leg_fails_the_battery_in_both_modes(battery: _Battery) -> None:
@@ -462,6 +484,9 @@ def test_a_plugins_leg_that_exits_zero_without_its_verdict_line_is_missing(batte
     battery.set_leg("plugins", "PLUGIN OUT-OF-REPO GATE UNVERIFIED -- no live run produced a result\n", 2)
     r = battery.run()
     assert r.returncode == 1 and _row(r.stdout, "plugins").startswith("FAILED"), r.stdout
+    assert "GATE UNVERIFIED" in _row(r.stdout, "plugins"), "the row carries the gate's own UNVERIFIED line, not a child's PASSED"
+    battery.set_leg("plugins", "PLUGIN OUT-OF-REPO GATE PASSED -- /x/conexus\nPLUGIN OUT-OF-REPO GATE UNVERIFIED -- all\n", 2)
+    assert "GATE UNVERIFIED -- all" in _row(battery.run().stdout, "plugins")
 
 
 def test_the_plugins_leg_reports_a_static_only_pass_in_the_table(battery: _Battery) -> None:

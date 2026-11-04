@@ -141,7 +141,7 @@ tests/e2e/local-service-gate.sh      # leg lsg: integration incl. the local-serv
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
 tests/e2e/constraints-resolve-gate.sh   # leg resolve: the shipped constraints.txt + overrides.txt RESOLVE (uv pip compile, no install): 22 compiles on Linux x86_64/aarch64 py3.12/3.13 (cpu; [pdf] also cu130 and cu126), Windows x64 and macOS 14 arm64, default and [pdf], plus a macOS 13 negative control (nexus-2k66t.4.4); network; needs a uv that knows --torch-backend cu130 and cu126 (the gate probes and says so); offline self-test tests/e2e/constraints_resolve_gate_test.sh
-tests/e2e/plugin-out-of-repo-gate.sh --all   # leg plugins: the four plugin dirs run from a project outside any nexus checkout (nexus-z7ddd); the battery adds --static-only where claude is absent, and the row then reads "(static pass only)": run it again on the laptop; offline self-test tests/e2e/plugin_out_of_repo_gate_test.sh
+tests/e2e/plugin-out-of-repo-gate.sh --all   # leg plugins: the four plugin dirs run from a project outside any nexus checkout (nexus-z7ddd): the static pass plus a canary (a fixture plugin with random nonces that measures what Claude Code substitutes); deterministic, no per-target model sweep; where claude is absent the leg is --static-only, and its row AND the battery's closing line say "static pass only": run it again on the laptop; offline self-test tests/e2e/plugin_out_of_repo_gate_test.sh
 tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
 ```
 
@@ -586,7 +586,7 @@ published plugins as the marketplace installed them. Run them once Step
 ```bash
 tests/e2e/fresh-install-mvv.sh --published X.Y.Z    # FRESH-install axis, published bytes
 NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade   # UPGRADE axis, published bytes
-tests/e2e/plugin-out-of-repo-gate.sh --installed X.Y.Z   # PLUGIN axis, installed marketplace copies (laptop: needs claude)
+tests/e2e/plugin-out-of-repo-gate.sh --installed X.Y.Z --sweep   # PLUGIN axis, installed marketplace copies: static + canary + the advisory per-target sweep (laptop: needs claude)
 ```
 
 The first (nexus-796zn) is the post-publish shakedown for a box that has
@@ -639,30 +639,44 @@ copy that line and the reason into the ship record. A skip is a release decision
 it to Sam. The first release that carries RDR-237 also needs the Minimum Viable
 Validation done before the tag (see the prerequisite near the top of this file).
 
-**Plugin out-of-repo gate (nexus-z7ddd).** The pre-tag battery's `plugins` leg runs the
-four plugin directories of the checkout. Every plugin check before it ran inside the nexus
-checkout, where a relative `../resources` link, `conexus/registry.yaml` and the repo scripts all open; a
-user's project has none of them. `--installed X.Y.Z` runs the same gate on what the
-marketplace delivered, `~/.claude/plugins/cache/nexus-plugins/<plugin>/X.Y.Z` for
-`conexus`, `sn`, `conexus-tool-spill` and `conexus-prose-edit`. Update the marketplace
-first (`/plugin marketplace update nexus-plugins`, then update each of the four) so that
-all four directories exist at X.Y.Z; a plugin missing there fails the run, it is never
-skipped. It runs from a scratch project with no git repository above it, one `claude -p`
-per agent and per loadable skill (about 50 calls, a few minutes), and ends
-`PLUGIN OUT-OF-REPO GATE PASSED -- installed X.Y.Z: 2 passed, 2 not applicable`. Read it
-as follows:
+**Plugin out-of-repo gate (nexus-z7ddd).** Every plugin check before it ran inside the nexus
+checkout, where a relative `../resources` link, `conexus/registry.yaml` and the repo scripts all
+open; a user's project has none of them. Two runs, with different standing:
 
-- `sn` and `conexus-tool-spill` report NOT-APPLICABLE: they have no agents, skills,
-  commands or resource markdown to census, and `sn`'s hook-injected sections get the
-  static pass. Two NOT-APPLICABLE and two passed is the expected shape; four
-  NOT-APPLICABLE is a failure (nothing was examined).
-- `(static pass only)` in the verdict means `claude` was absent. The static pass proves the
-  paths; it does not close the loop, so run it again on the laptop.
-- Exit 2 (`UNVERIFIED`) is not a pass.
-- A red result is a plugin defect in the published copy: fix forward as a plugin-only
-  patch release and take it to Sam. A reference that must stay as written goes in
-  `tests/e2e/plugin-out-of-repo-allowlist.txt` with a written reason; that file ships
-  empty, and a stale entry fails the gate.
+- **The pre-tag battery's `plugins` leg is deterministic.** `--all` runs the static pass over the
+  four plugin directories of the checkout (every file reference classified; the allowlist and its
+  stale check) plus a canary: a fixture plugin the gate builds with random nonces, four short
+  `claude -p` runs, judged on the Read events and the text Claude Code delivered, never on what a
+  model says. The canary measures what the static classes assume (the plugin-root variable is
+  substituted in an agent, a skill's SKILL.md and a command, and is NOT substituted in a file the
+  model Reads or when written without braces) and fails when Claude Code says otherwise. No
+  per-target model sweep is in the battery. On chas or in CI (no `claude`) the leg is static only,
+  and both its row and the battery's closing line say so: run it again on the laptop.
+- **`--installed X.Y.Z --sweep` after publish is advisory.** It runs the same static pass and canary
+  on what the marketplace delivered, `~/.claude/plugins/cache/nexus-plugins/<plugin>/X.Y.Z` for
+  `conexus`, `sn`, `conexus-tool-spill` and `conexus-prose-edit`, then the sweep: one `claude -p`
+  per agent and loadable skill, the model quoting and Reading each reference. Update the
+  marketplace first (`/plugin marketplace update nexus-plugins`, then update each of the four) so
+  all four directories exist at X.Y.Z, with a `plugin.json` that names that plugin and that
+  version; a plugin missing there, mislabelled or hollow fails the run, it is never skipped.
+
+Read the verdict as follows:
+
+- Expected shape: `conexus` and `conexus-prose-edit` passed, `sn` (hook-injected sections only) and
+  `conexus-tool-spill` NOT-APPLICABLE. The gate pins this: a `conexus` that is NOT-APPLICABLE, or an
+  `sn` with no hook markdown, is a hollow plugin and a failure.
+- The sweep fails only on definite evidence (a Read error on a path that exists, a literal variable
+  in a Read, a relative target quoted from an agent, a path opened from a nexus checkout). A target
+  it could not probe is UNPROBED: counted and named, retried twice, never red. Below its coverage
+  floor (at least one opened reference per mechanism) it is UNVERIFIED, exit 2.
+- Exit 2 (`UNVERIFIED`) is not a pass. `(static pass only)` in a verdict means `claude` was absent.
+- The live runs touch nothing of the real install: the plugin under test runs from a scratch copy with
+  its hooks emptied, `NX_UPGRADE_AUTO=0`, scratch tool directories and an empty plugin registry. If a
+  gate run ever leaves a `gen-*` directory under `~/.local/share/nexus/tools`, that is a gate defect.
+- A red result is a plugin defect in the published copy: fix forward as a plugin-only patch release
+  and take it to Sam. A reference that must stay as written goes in
+  `tests/e2e/plugin-out-of-repo-allowlist.txt` with a written reason; that file ships empty, and a
+  stale entry fails the gate.
 
 Logs for a run you want to keep: add `--out <dir>` (one subdirectory per plugin holds the
 stream-json events and `gate.log`).
