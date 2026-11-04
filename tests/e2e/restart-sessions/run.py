@@ -28,7 +28,10 @@ with nothing written to the operator's ~/.claude. Four scenarios, each in its ow
   so nx reports X and only the exit code can stop the roll. Both sessions write their
   handoff; the script must abort after the handoffs with nothing exited, no plugin update,
   X absent from the plugin cache, and the handoffs kept.
-- ``gate``: the ``/version`` stand-in answers 502, then (a second run) a version below the
+- ``gate``: first the script's sandbox gate against a real process: with the HOME's pass record
+  removed a roll must exit 3 with the sandbox ABORT line, reading no engine and asking nothing;
+  with ``--skip-sandbox-check REASON`` it must log the reason and go on to the engine gate. Then
+  the ``/version`` stand-in answers 502, then (a second run) a version below the
   floor, with ``--engine-wait 0``. Each run must exit 2 in the foreground with the gate's
   ABORT line for that case, after one read, before any handoff is asked or anything installed.
 
@@ -36,9 +39,15 @@ Shared by every scenario:
 
 - a scratch HOME (onboarding done, the work folder trusted) and a scratch nexus config dir
   holding a copy of the operator's ``config.yml``, so the sessions' MCP servers and ``nx``
-  reach the operator's own service. The copy and the data-token leases minted from it are
-  deleted on every exit the harness sees (pass, fail, SIGTERM, SIGHUP; not SIGKILL, and not
-  under ``--keep``), and the sessions' leftover tool processes are ended by checked pid. The
+  reach the operator's own service. The copy, the data-token leases minted from it and the
+  sessions' T1 session leases are deleted on every exit the harness sees (pass, fail, SIGTERM,
+  SIGHUP, SIGINT; not SIGKILL, and not under ``--keep``); once cleanup starts it ignores those
+  signals and holds them until it ends. Every process below the private tmux server is
+  recorded every 2 s while the run lasts, so a long-lived descendant of a session that exited
+  (its Serena and other MCP servers), reparented with no HOME in its argv, is ended with the
+  other leftovers when its start time and argv still match. A process that detaches within
+  one poll (the SessionEnd launcher's double fork) is not caught here. Sessions run with
+  ``NX_UPGRADE_AUTO=0`` and without the operator's ``NX_TOOLS_DIR``. The
   sessions write to that service as the operator would: the restart mail expires with its
   TTL, and nothing here asks a session to write anything permanent;
 - the conexus and sn plugins from a git marketplace named nexus-plugins, served from the
@@ -56,7 +65,9 @@ Shared by every scenario:
   ``nx`` on PATH reports X once that ran (anything else goes to the real nx); a ``uv`` on
   PATH records every ``cache`` command and refuses ``tool install``, ``upgrade`` and
   ``uninstall`` (anything else goes to the real uv). X is the installed version's next
-  patch that is not a tag in this checkout. The marketplace and plugin updates are the real
+  patch that is not a tag in this checkout. The ``nx`` stand-in also records and refuses
+  ``nx upgrade`` (the version-lockstep hook's action would upgrade the operator's install).
+  The marketplace and plugin updates are the real
   claude CLI's.
 
 Expected in ``roll``: alpha, draft and paste are asked by mail and nochan by typing; all four
@@ -73,6 +84,11 @@ handoff until its exit, is saved at the restart, and is read by the fresh rs_dra
 handoff; all three then answer their own code word and no other. Exiting Claude Code clears
 its input box, so "the draft survives" means saved and handed on.
 
+Every handoff ask the script mails must be taken back against the real engine: the restart log
+has a withdrawn or already-taken line for each, and the leftover check fails a row left behind. In
+a roll the sessions take their asks first, so ``gate`` also mails one ask to a session id nobody
+holds and requires withdraw_ask to answer "withdrawn" with the mailbox left empty.
+
 Continuity is proved from the handoff, not merely observed. Auto memory is off
 (``CLAUDE_CODE_DISABLE_AUTO_MEMORY``, ``autoMemoryEnabled: false``) and the word is given as
 task context, not "remember"; each fresh session's word must be in its handoff file, must
@@ -82,7 +98,7 @@ session in the same folder with no handoff, must not know any word.
 
 Not exercised: a real cloud engine (the gate reads the stand-in), a real PyPI install, the
 operator's own marketplace remote, a restart with ``--resume`` (no scenario resumes a
-session), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
+session), the ready-round check (the roll passes ``--no-ready-check``; unit tests cover it), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
 restart()'s fallback for a handoff that went stale.
 
 Positive controls: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script; the
@@ -99,11 +115,16 @@ Run through run.sh (it supplies the automation token, RDR-219). Prints one verdi
 ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1 (a precondition
 that fails once a sandbox is up is a failure, exit 1); exit 2 when the token, claude or tmux
 is missing. A failed scenario's scratch HOME is kept and named.
+
+A pass of all four scenarios is recorded in ~/.local/state/claude-restart-sessions/sandbox-pass.json
+(the script's sha256 and Claude Code's version), which the script's restart gate reads (nexus-8zdbu).
+Each sandbox HOME gets its own record for the script under test, so every roll passes that gate.
 """
 # ruff: noqa: T201 -- a gate harness: stdout carries its progress and verdict line
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import http.server
 import importlib.machinery
@@ -121,6 +142,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 import zlib
 from pathlib import Path
 
@@ -140,6 +162,18 @@ PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" 
 OPERATOR_HOME = Path.home()
 SANDBOX_PY = Path(__file__).resolve()
 SCENARIOS = ("roll", "variant", "abort", "gate")
+#: A fresh session is settled at its prompt when idle, or in ``shell``: a session launched without the
+#: channel is told by its SessionStart guidance to wait for mail with ``nx tuple wait`` in the
+#: background, and one that does so sits at its prompt in ``shell`` (the 2026-11-02 measuring roll:
+#: rs_nochan, reading its handoff, did exactly that and the idle-only wait timed out at 300 s).
+SETTLED = frozenset({"idle", "shell"})
+
+
+def settled_for(spec: Spec, name: str) -> frozenset[str]:
+    """Settled statuses for a fresh *name*: ``shell`` only for a session launched without the
+    channel. With the channel, ``shell`` would mean the channel did not arm and the session fell
+    back to polling: a broken restart, not a settled one."""
+    return SETTLED if name not in spec.channel else frozenset({"idle"})
 #: A file bump_market writes into each published plugin tree: which release a cache folder's content is.
 RELEASE_MARK = ".sandbox-release"
 #: The typed re-asks after a mail ask name no failure word of their own, so they are banned by phrase.
@@ -189,6 +223,228 @@ SPECS = {
     "abort": Spec("abort", {}, (), frozenset({"rs_alpha"}), plain=("rs_alpha", "rs_nochan"), install_fails=True),
     "gate": Spec("gate", {}, ("rs_alpha",), frozenset({"rs_alpha"}), engine=("502",)),
 }
+
+
+#: Serena's user config for a sandbox HOME. With none, Serena writes its default, which opens a
+#: dashboard tab in the operator's browser for every sandbox session (Serena's macOS tray manager
+#: is shared across HOMEs). Missing keys take Serena's defaults; the operator's own file is not
+#: copied (it sets the JetBrains backend). ``projects`` is the one key Serena requires: its loader
+#: raises SerenaConfigError without it, and the session's Serena MCP then fails to start.
+SERENA_CONFIG = ("projects: []\nweb_dashboard: false\nweb_dashboard_open_on_launch: false\n"
+                 "gui_log_window: false\n")
+
+
+#: The signals main() turns into an exit. Once cleanup starts it holds them until it ends: a second
+#: ^C or a terminal closing mid-cleanup must not leave the tmux server (it holds the token) or the
+#: config copy, and must still stop the run once cleanup is done.
+CLEANUP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+@contextlib.contextmanager
+def signals_deferred():
+    """Inside the block, record CLEANUP_SIGNALS instead of acting on them; yield the list they are
+    recorded in, and restore the handlers that were set after it. raise_deferred() acts on them."""
+    saved = {s: signal.getsignal(s) for s in CLEANUP_SIGNALS}
+    pending: list[int] = []
+    try:
+        for s in CLEANUP_SIGNALS:
+            signal.signal(s, lambda signum, _frame: pending.append(signum))
+        yield pending
+    finally:
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+
+def say(line: str) -> None:
+    """Print a progress line; a dead stdout (a hung-up terminal, a closed pipe) never stops
+    cleanup, which runs after exactly that when the operator closes the terminal."""
+    try:
+        print(line, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def raise_deferred(pending: list[int]) -> None:
+    """Act on the first signal signals_deferred() held, as main()'s handlers would have."""
+    if not pending:
+        return
+    if pending[0] == signal.SIGINT:
+        raise KeyboardInterrupt
+    sys.exit(128 + pending[0])
+
+
+def tree_of(rows: str, root: int) -> list[tuple[int, str]]:
+    """Every process below *root* in ``ps -o pid=,ppid=,args=`` output, as (pid, argv)."""
+    kids: dict[int, list[tuple[int, str]]] = {}
+    for row in rows.splitlines():
+        parts = row.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
+    out, todo = [], [root]
+    while todo:
+        for child in kids.get(todo.pop(), []):
+            out.append(child)
+            todo.append(child[0])
+    return out
+
+
+class ProcWatch:
+    """Record every process below the given roots, polled while the sandbox runs.
+
+    A session that exits mid-roll leaves its Serena MCP server and SessionEnd hooks reparented
+    to init, with argv that names nothing of the sandbox: the pre-kill descendant walk no longer
+    reaches them and the HOME sweep cannot see them. A record taken while the tree was whole
+    can; cleanup ends each recorded process still running the same argv."""
+
+    def __init__(self, roots, interval: float = 2.0) -> None:
+        self._roots, self._interval = roots, interval
+        self._seen: dict[int, str] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="sandbox-proc-watch", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=10)
+
+    def poll(self) -> None:
+        roots = [r for r in self._roots() if r > 1]
+        if not roots:
+            return
+        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True,
+                              timeout=30).stdout
+        found = [c for r in roots for c in tree_of(rows, r) if c[0] > 1]
+        with self._lock:
+            new = [pid for pid, args in found if self._seen.get(pid, ("", ""))[1] != args]
+        starts = started_at(new)
+        with self._lock:
+            for pid, args in found:
+                if pid in starts:  # a reused pid takes its newest start and argv
+                    self._seen[pid] = (starts[pid], args)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.poll()
+            except Exception:  # noqa: BLE001,S110 -- a missed poll is covered by the next and by the HOME sweep
+                pass
+            self._stop.wait(self._interval)
+
+    def seen(self) -> list[tuple[int, str]]:
+        with self._lock:
+            return sorted((pid, args) for pid, (_, args) in self._seen.items())
+
+    def still_running(self) -> list[tuple[int, str]]:
+        """The recorded processes still running with the start time and argv they were recorded
+        with: a pid reused since by another process (the operator's, say) is left out."""
+        with self._lock:
+            seen = dict(self._seen)
+        now = started_at(list(seen))
+        return sorted((pid, args) for pid, (start, args) in seen.items()
+                      if now.get(pid) == start and _args_of(pid) == args)
+
+
+def started_at(pids: list[int]) -> dict[int, str]:
+    """Each running pid's start time as ps prints it (``lstart``); a pid not running is absent."""
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(["ps", "-ww", "-o", "pid=,lstart=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=30).stdout
+    except subprocess.TimeoutExpired:
+        return {}
+    starts = {}
+    for row in out.splitlines():
+        parts = row.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            starts[int(parts[0])] = " ".join(parts[1].split())
+    return starts
+
+
+#: Files in the sandbox's nexus config dir that hold a credential: the config copy, the data-token
+#: leases minted from it, and the T1 session leases (each carries a T1 token; a kept HOME held them).
+CREDENTIAL_PREFIXES = ("data_token_lease.", "t1_session_lease.")
+
+
+def credentials_left(config_dir: Path) -> list[str]:
+    return sorted(f.name for f in config_dir.glob("*")
+                  if f.name == "config.yml" or f.name.startswith(CREDENTIAL_PREFIXES))
+
+
+#: The exit code the sandbox's nx and uv shims refuse with.
+REFUSED = 97
+
+
+def nx_shim_text(real_nx: str, marker: Path, refused_log: Path) -> str:
+    """The sandbox's nx: after the stand-in install, ``--version`` reports the installed release;
+    ``nx upgrade`` (the version-lockstep hook's action, an ``--auto`` spawn) is recorded and
+    refused, since it would upgrade the operator's install; anything else runs the real nx."""
+    m, log = shlex.quote(str(marker)), shlex.quote(str(refused_log))
+    return ("#!/bin/sh\n# restart sandbox: nx --version reports the stand-in install; nx upgrade is refused\n"
+            f'if [ "$1" = "--version" ] && [ -f {m} ]; then echo "nx, version $(cat {m})"; exit 0; fi\n'
+            'for a in "$@"; do case "$a" in\n'
+            "  -*) ;;\n"
+            f'  upgrade) echo "$*" >> {log}; exit {REFUSED} ;;\n'
+            "  *) break ;;\n"
+            "esac; done\n"
+            f"exec {shlex.quote(real_nx)} \"$@\"\n")
+
+
+def write_serena_config(home: Path) -> Path:
+    """Write SERENA_CONFIG as *home*'s ~/.serena/serena_config.yml, before any session starts."""
+    path = home / ".serena" / "serena_config.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(SERENA_CONFIG, encoding="utf-8")
+    return path
+
+
+def _text_of(content) -> str:
+    """The text of a transcript message's content: a plain string, or its text parts joined."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+
+def _is_prompt(d: dict) -> bool:
+    """A user entry that is a typed prompt: not a tool result, and not a meta entry Claude Code
+    writes mid-turn (skill content, a slash-command expansion, a task notification)."""
+    content = (d.get("message") or {}).get("content")
+    return d.get("type") == "user" and not d.get("isMeta") and (isinstance(content, str) or any(
+        isinstance(c, dict) and c.get("type") == "text" for c in content or []))
+
+
+def reply_after(events: list[dict], prompt: str) -> str | None:
+    """The turn's answer to the LAST user entry whose text is *prompt*: the last assistant text
+    before the next prompt, once the turn's last entry is that text (no tool call or tool result
+    after it). None while there is none yet (the turn is still running, or the prompt has not
+    landed). A preamble written before a tool call is not the answer."""
+    at = None
+    for i, d in enumerate(events):
+        if d.get("type") == "user" and _text_of((d.get("message") or {}).get("content")).strip() == prompt.strip():
+            at = i
+    if at is None:
+        return None
+    turn = []
+    for d in events[at + 1:]:
+        if _is_prompt(d):
+            break
+        if d.get("type") in ("user", "assistant"):
+            turn.append(d)
+    if not turn or turn[-1].get("type") != "assistant":
+        return None
+    return _text_of((turn[-1].get("message") or {}).get("content")) or None
+
+
+def harness_under_test(crs) -> str:
+    """The harness sha the script under test computes for itself: the run.py beside its resolved
+    checkout, "" for a copy with none (a positive control's copy outside the repo)."""
+    return crs.harness_sha256(Path(SCRIPT).resolve().parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py")
 
 
 def load_script():
@@ -339,7 +595,9 @@ class Sandbox:
                 "CLAUDE_CODE_SSE_PORT", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "NEXUS_CONFIG_DIR",
                 "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
                 "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID",
-                "NX_SESSION_ID", "NX_T1_SESSION_ID")
+                "NX_SESSION_ID", "NX_T1_SESSION_ID",
+                # the operator's generation root: hooks would resolve nx there, past the nx stand-in
+                "NX_TOOLS_DIR")
         self.env = {k: v for k, v in os.environ.items() if k not in drop}
         uv_dirs = {"UV_CACHE_DIR": OPERATOR_HOME / ".cache" / "uv",
                    "UV_PYTHON_INSTALL_DIR": OPERATOR_HOME / ".local" / "share" / "uv" / "python",
@@ -349,7 +607,10 @@ class Sandbox:
                 self.env.setdefault(k, str(v))
         self.env.update(HOME=str(home), NX_NO_TELEMETRY="1", NX_RESTART_CLAUDE=claude, TERM="xterm-256color",
                         CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="1", CLAUDE_CODE_DISABLE_AUTO_MEMORY="1",
-                        DISABLE_AUTOUPDATER="1")  # the dim ghost prompt that broke 7.92.0
+                        DISABLE_AUTOUPDATER="1",  # the dim ghost prompt that broke 7.92.0
+                        # nexus-75w5d's kill switch: a session's SessionStart must not spawn a detached
+                        # nx upgrade --auto, which would act on the operator's install and outlive the run
+                        NX_UPGRADE_AUTO="0")
         # --nx installs a release: the sandbox's own stand-ins (setup_release) take its place.
         self.market = home / "market"
         self.cache = home / ".claude" / "plugins" / "cache" / MARKET
@@ -360,6 +621,7 @@ class Sandbox:
         self.real_uv = shutil.which("uv") or ""
         self.uv_cleans = home / "uv-cache-clean.log"
         self.uv_refused = home / "uv-refused.log"
+        self.nx_refused = home / "nx-refused.log"
         self.reinstall_argv = home / "reinstall-argv.txt"
         self.holds = {name: home / f"{name}.hold" for name in spec.busy}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}"
@@ -369,14 +631,17 @@ class Sandbox:
         self.floor = self.behind = ""
         #: Each session as it was before the roll (boot fills it; cleanup reads its session ids).
         self.before: dict[str, dict] = {}
+        #: Every process below the private tmux server, recorded while it runs (setup starts it).
+        self.watch = ProcWatch(self.server_pids)
 
     # tmux on the private server only
-    def tmux(self, *args: str, check: bool = False) -> subprocess.CompletedProcess:
+    def tmux(self, *args: str, check: bool = False, timeout: float | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(["tmux", "-L", self.sock, "-f", "/dev/null", *args],
-                              capture_output=True, text=True, env=self.env, check=check)
+                              capture_output=True, text=True, env=self.env, check=check, timeout=timeout)
 
     def setup(self, crs) -> None:
         (self.home / ".claude").mkdir(parents=True)
+        write_serena_config(self.home)
         self.work.mkdir()
         _git(self.work, "init", "-q")
         (self.work / "README.md").write_text("restart sandbox\n", encoding="utf-8")
@@ -391,6 +656,10 @@ class Sandbox:
                         "autoMemoryEnabled": False}), encoding="utf-8")
         self.setup_market()
         self.setup_release()
+        # A pass record for the script under test, so each roll goes through the script's sandbox gate
+        # (nexus-8zdbu) and is let by it; a copy without the gate ignores it.
+        crs.record_sandbox_pass(self.home / crs.SANDBOX_PASS.relative_to(OPERATOR_HOME), crs.script_sha256(SCRIPT),
+                                crs.claude_version(self.claude), [], 0, harness=harness_under_test(crs))
         floor = crs.release_engine_floor(self.to_version, self.relrepo)
         self.floor = ".".join(map(str, floor))
         self.behind = ".".join(map(str, (floor[0], floor[1], floor[2] - 1) if floor[2] else (floor[0], max(floor[1] - 1, 0), 0)))
@@ -403,6 +672,19 @@ class Sandbox:
         os.chmod(self.nexus_config / "config.yml", 0o600)
         self.tmux("new-session", "-d", "-s", "rs", "-x", "220", "-y", "50", "-n", "ctl", "-c", str(self.work),
                   "bash --noprofile --norc", check=True)
+        self.watch.start()
+
+    def socket_path(self) -> Path:
+        """The private tmux server's socket file. kill-server leaves it behind (measured 2026-11-02)."""
+        return Path(self.env.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}" / self.sock
+
+    def server_pids(self) -> list[int]:
+        """The private tmux server's pid ([] when it is not running): every session runs below it."""
+        try:
+            out = self.tmux("display-message", "-p", "#{pid}", timeout=30).stdout.strip()
+        except subprocess.TimeoutExpired:
+            return []
+        return [int(out)] if out.isdigit() else []
 
     def claude_cli(self, *args: str) -> None:
         r = subprocess.run([self.claude, *args], capture_output=True, text=True, env=self.env)
@@ -478,11 +760,7 @@ class Sandbox:
             raise RuntimeError("nx is not on PATH")
         self.bin.mkdir()
         shim = self.bin / "nx"
-        marker = shlex.quote(str(self.installed_marker))
-        shim.write_text(
-            "#!/bin/sh\n# restart sandbox: after the stand-in install, --version reports the installed release\n"
-            f'if [ "$1" = "--version" ] && [ -f {marker} ]; then echo "nx, version $(cat {marker})"; exit 0; fi\n'
-            f"exec {shlex.quote(self.real_nx)} \"$@\"\n", encoding="utf-8")
+        shim.write_text(nx_shim_text(self.real_nx, self.installed_marker, self.nx_refused), encoding="utf-8")
         shim.chmod(0o755)
         # The script cleans uv's cached conexus before installing; in the detached child that runs
         # with the tmux server's environment, whose UV_CACHE_DIR is the operator's. Record it instead.
@@ -530,18 +808,9 @@ class Sandbox:
     @staticmethod
     def descendants(pid: int) -> list[tuple[int, str]]:
         """Every process below *pid*, as (pid, argv)."""
-        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True).stdout
-        kids: dict[int, list[tuple[int, str]]] = {}
-        for row in rows.splitlines():
-            parts = row.split(None, 2)
-            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
-                kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2]))
-        out, todo = [], [pid]
-        while todo:
-            for child in kids.get(todo.pop(), []):
-                out.append(child)
-                todo.append(child[0])
-        return out
+        rows = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,args="], capture_output=True, text=True,
+                              timeout=30).stdout
+        return tree_of(rows, pid)
 
     def _plugin_roots(self, pid: int) -> set[str]:
         roots = "|".join(re.escape(r) for r in {str(self.cache), os.path.realpath(self.cache)})
@@ -557,10 +826,10 @@ class Sandbox:
         self.tmux("send-keys", "-t", f"rs:{name}", "Enter", check=True)
 
     def delete_config(self) -> None:
-        """Remove the copied nexus config and the data-token leases minted from it (credentials)."""
-        (self.nexus_config / "config.yml").unlink(missing_ok=True)
-        for f in self.nexus_config.glob("data_token_lease.*"):
-            f.unlink(missing_ok=True)
+        """Remove the copied nexus config, the data-token leases minted from it and the sessions'
+        T1 session leases (credentials)."""
+        for name in credentials_left(self.nexus_config):
+            (self.nexus_config / name).unlink(missing_ok=True)
 
     def entries(self) -> list[dict]:
         out = []
@@ -600,24 +869,29 @@ class Sandbox:
     def pane_of(self, name: str) -> str:
         return f"rs:{name}"
 
-    def prompt(self, name: str, text: str, timeout: float = 240, done: frozenset[str] = frozenset({"idle"})) -> None:
-        """Type a prompt, Enter, then wait until the session is idle with a new text reply.
+    def prompt(self, name: str, text: str, timeout: float = 240, done: frozenset[str] = frozenset({"idle"})) -> str:
+        """Type a prompt, Enter, then wait until the session is idle with a text reply to THIS prompt;
+        return that reply.
 
         Status alone is not the turn's end: with the conexus plugin loaded, hooks move a fresh
         session's status timestamp on their own, and an idle status read that way returned
-        before the reply was written (nexus-cmqe8 sandbox, 2026-11-01).
+        before the reply was written (nexus-cmqe8 sandbox, 2026-11-01). Nor is a reply count: a
+        fresh session's first turn (reading its handoff) could still be writing its reply when the
+        count was taken, so that reply raised the count and was read as the answer (the
+        2026-11-02 roll: "THAT'S THE HANDOFF..." for a session that then answered HELIOTROPE).
+        The reply is the turn's last text after the user entry carrying *text* (reply_after).
         """
-        d0 = self.wait_status(name, {"idle"}, 120)
+        d0 = self.wait_status(name, set(done), 120)
         sid = str(d0.get("sessionId", ""))
-        replies0 = self.reply_count(sid)
         self.tmux("send-keys", "-t", self.pane_of(name), "-l", text, check=True)
         time.sleep(1)
         self.tmux("send-keys", "-t", self.pane_of(name), "Enter", check=True)
         deadline = time.time() + timeout
         while time.time() < deadline:
             d = self.session(name) or {}
-            if d.get("status") in done and self.reply_count(sid) > replies0:
-                return
+            reply = reply_after(self.events(sid), text)
+            if d.get("status") in done and reply is not None:
+                return reply
             time.sleep(1)
         raise TimeoutError(f"{name}: prompt did not finish within {timeout:.0f}s")
 
@@ -636,16 +910,6 @@ class Sandbox:
         self.wait_status(name, {"busy"}, 60)
         time.sleep(15)  # past the request: the wait itself, not the model's turn, holds it busy
         self.wait_status(name, {"busy"}, 5)
-
-    def reply_count(self, session_id: str) -> int:
-        """Assistant transcript entries that carry text, for the session."""
-        n = 0
-        for d in self.events(session_id):
-            content = (d.get("message") or {}).get("content")
-            if d.get("type") == "assistant" and isinstance(content, list) and any(
-                    isinstance(c, dict) and c.get("type") == "text" and c.get("text") for c in content):
-                n += 1
-        return n
 
     def capture(self, name: str) -> str:
         return self.tmux("capture-pane", "-e", "-p", "-t", self.pane_of(name)).stdout
@@ -696,16 +960,6 @@ class Sandbox:
             hits += [f"{rel}: {w}" for w in words if w in text]
         return hits
 
-    def last_reply(self, session_id: str) -> str:
-        text = ""
-        for d in self.events(session_id):
-            msg = d.get("message") or {}
-            if d.get("type") == "assistant" and isinstance(msg.get("content"), list):
-                parts = [c.get("text", "") for c in msg["content"] if isinstance(c, dict) and c.get("type") == "text"]
-                if any(parts):
-                    text = "".join(parts)
-        return text
-
     def read_log(self) -> str:
         return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
 
@@ -715,14 +969,15 @@ def body_lines(log: str) -> list[str]:
     return [ln.split(" ", 1)[1] if " " in ln else ln for ln in log.splitlines()]
 
 
-def roll_command(sb: Sandbox, *, rc_file: Path | None = None) -> str:
+def roll_command(sb: Sandbox, *, rc_file: Path | None = None, extra: str = "") -> str:
     spec = sb.spec
     assert sb.engine is not None
     cmd = (f"TMUX_PANE={shlex.quote(sb.pane_id(spec.caller))} "
            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --nx {sb.to_version} --fresh "
            f"--repo {shlex.quote(str(sb.relrepo))} --endpoint {sb.engine.url} --engine-wait {spec.engine_wait} "
            + ("--fallback-resume " if spec.fallback else "")
-           + f"--no-update --handoff-timeout 600 --wait {spec.wait}")
+           + f"--no-update --no-ready-check --handoff-timeout 600 --wait {spec.wait}"
+           + (f" {extra}" if extra else ""))
     if rc_file is not None:
         cmd += f"; echo $? > {shlex.quote(str(rc_file))}"
     return cmd
@@ -816,7 +1071,9 @@ def check_fresh(sb: Sandbox, before: dict[str, dict], handoffs: dict[str, str], 
         if any(w in body for w in others):
             failures.append(f"{name}: its handoff carries another session's word")
         try:
-            d = sb.wait_status(name, {"idle"}, 300, not_sid=old)
+            d = sb.wait_status(name, set(settled_for(sb.spec, name)), 300, not_sid=old)
+            if d.get("status") == "shell":
+                notes.append(f"{name}: settled in shell (no channel; a background nx tuple wait)")
         except TimeoutError as exc:
             failures.append(str(exc))
             continue
@@ -848,11 +1105,10 @@ def check_fresh(sb: Sandbox, before: dict[str, dict], handoffs: dict[str, str], 
             else:
                 notes.append("rs_draft: the fresh session read its saved draft with its handoff")
         try:
-            sb.prompt(name, "What is the project code word for this task? Reply with only the word.")
+            reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.", done=settled_for(sb.spec, name)).upper()
         except TimeoutError as exc:
             failures.append(str(exc))
             continue
-        reply = sb.last_reply(d["sessionId"]).upper()
         source = sb.first_mention(d["sessionId"], word, path)
         if word not in reply:
             failures.append(f"{name}: asked for its code word after the restart, replied {reply[:80]!r}")
@@ -1050,9 +1306,8 @@ def scenario_roll(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     # Negative control: a fresh session in the same folder with no handoff must not know any word.
     sb.start_session("rs_blank")
     sb.wait_status("rs_blank", {"idle"}, 120)
-    sb.prompt("rs_blank", "What is the project code word for this task? If you do not know it, reply with only: UNKNOWN")
-    blank = sb.session("rs_blank") or {}
-    blank_reply = sb.last_reply(str(blank.get("sessionId", ""))).upper()
+    blank_reply = sb.prompt("rs_blank", "What is the project code word for this task? If you do not know it, "
+                                        "reply with only: UNKNOWN").upper()
     if any(w in blank_reply for w in spec.words.values()):
         failures.append(f"negative control: a fresh session with no handoff knew a word: {blank_reply[:80]!r}")
     elif "UNKNOWN" not in blank_reply:
@@ -1169,6 +1424,99 @@ def scenario_abort(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -
     notes.append(f"abort took {time.time() - t0:.0f}s; handoffs kept: {sorted(handoffs)}")
 
 
+def run_roll(sb: Sandbox, tag: str, extra: str = "", timeout: float = 120) -> tuple[str, str]:
+    """Type one roll command into the control pane and wait for its exit code; return (rc, the log it
+    wrote). The rc is "none" when it did not exit within *timeout*."""
+    rc_file = sb.home / f"rc-{tag}"
+    n0 = len(sb.read_log().splitlines())
+    sb.tmux("send-keys", "-t", "rs:ctl", "-l", roll_command(sb, rc_file=rc_file, extra=extra), check=True)
+    sb.tmux("send-keys", "-t", "rs:ctl", "Enter", check=True)
+    deadline = time.time() + timeout
+    while not rc_file.exists() and time.time() < deadline:
+        time.sleep(1)
+    time.sleep(1)
+    rc = rc_file.read_text(encoding="utf-8").strip() if rc_file.exists() else "none"
+    log = "\n".join(sb.read_log().splitlines()[n0:])
+    print(f"[sandbox:{sb.spec.name}] {tag} run log:\n" + "\n".join("    " + ln for ln in log.splitlines()), flush=True)
+    return rc, log
+
+
+#: The reason the gate scenario gives --skip-sandbox-check, which the script must log.
+SKIP_REASON = "restart sandbox: the gate's escape hatch"
+
+
+def check_sandbox_refusal(sb: Sandbox, crs, failures: list[str]) -> None:
+    """The script's sandbox gate against a real process (nexus-wjlbk): with no pass record in the HOME
+    a roll exits 3 having done nothing (no engine read, no install, no ask); with --skip-sandbox-check
+    REASON it logs the reason and goes on to the engine gate. The record is put back after."""
+    assert sb.engine is not None
+    record = sb.home / crs.SANDBOX_PASS.relative_to(OPERATOR_HOME)
+    saved = record.read_bytes()
+    record.unlink()
+    try:
+        sb.engine.answers, sb.engine.reads = ["502"], 0
+        rc, log = run_roll(sb, "refuse")
+        lines = body_lines(log)
+        if rc != "3":
+            failures.append(f"sandbox refusal: the script exited {rc} with no sandbox pass, not 3")
+        if not any(ln.startswith("ABORT: sandbox pass: no sandbox pass recorded") for ln in lines):
+            failures.append("sandbox refusal: the log lacks the ABORT: sandbox pass line")
+        if extra := [ln for ln in lines if not ln.startswith("ABORT: sandbox pass:")]:
+            failures.append(f"sandbox refusal: the script went past the gate: {extra[0][:160]}")
+        if sb.engine.reads:
+            failures.append(f"sandbox refusal: the engine was read {sb.engine.reads} time(s) although the gate refused")
+        sb.engine.answers, sb.engine.reads = ["502"], 0
+        rc, log = run_roll(sb, "skip", extra=f"--skip-sandbox-check {shlex.quote(SKIP_REASON)}")
+        lines = body_lines(log)
+        if rc != "2":
+            failures.append(f"sandbox skip: the script exited {rc}, not 2 (the engine gate's refusal)")
+        if not any(ln.startswith("WARN: no sandbox pass recorded") and ln.endswith(f"(--skip-sandbox-check: {SKIP_REASON})")
+                   for ln in lines):
+            failures.append("sandbox skip: the log lacks the WARN line with the reason")
+        if sb.engine.reads != 1:
+            failures.append(f"sandbox skip: /version read {sb.engine.reads} time(s), not once: the skip did not reach the engine gate")
+    finally:
+        record.write_bytes(saved)
+
+
+def check_real_withdrawal(sb: Sandbox, crs, failures: list[str], notes: list[str]) -> None:
+    """The script's withdraw_ask against the real engine, on an ask no session can take (nexus-wjlbk):
+    in a roll the sessions take their asks first, so every withdrawal there reads "already taken or
+    expired", which is also what a withdrawal that matched nothing would say. Here mail_ask sends an
+    ask to a fresh session id nobody holds and withdraw_ask must answer "withdrawn", leaving the
+    mailbox empty. The script logs to the sandbox's restart log meanwhile, never the operator's."""
+    sid = str(uuid.uuid4())
+    saved_log = crs.LOG
+    crs.LOG = sb.log
+    crs.SENT_ASKS.pop(sid, None)
+    try:
+        if not crs.mail_ask({"sessionId": sid, "name": "rs_probe"}, "/nonexistent", "restart-sandbox", ttl=300,
+                            body="restart sandbox probe: no session holds this address; it is withdrawn at once",
+                            note="withdrawal probe: mailing an ask no session holds"):
+            failures.append("withdrawal probe: the ask could not be mailed")
+            return
+        if sid not in crs.SENT_ASKS:
+            failures.append("withdrawal probe: nx printed no tuple id for the ask, so it cannot be withdrawn")
+            return
+        outcome = crs.withdraw_ask(sid)
+        if outcome != "withdrawn":
+            failures.append(f"withdrawal probe: withdraw_ask said {outcome!r}, not 'withdrawn'")
+        else:
+            notes.append("withdrawal probe: an ask no session could take was withdrawn against the real engine")
+        try:
+            r = subprocess.run([crs._nx_binary(), "tuple", "stats", f"mailbox/{sid}", "--json"], capture_output=True,
+                               text=True, timeout=30)
+            st = json.loads(r.stdout) if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            st = None
+        if st is None:
+            failures.append("withdrawal probe: the probe's mailbox could not be read back")
+        elif any(st.get(k, 0) for k in ("available", "claimed", "lapsed", "dead")):
+            failures.append(f"withdrawal probe: rows left in the probe's mailbox: {st}")
+    finally:
+        crs.LOG = saved_log
+
+
 def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -> None:
     spec = sb.spec
     before = boot(sb, failures)
@@ -1176,6 +1524,8 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     if failures:
         return
     assert sb.engine is not None
+    check_sandbox_refusal(sb, crs, failures)
+    check_real_withdrawal(sb, crs, failures, notes)
     runs = (("502", f"engine gate: read of {sb.engine.url}/version failed (",
              f"ABORT: could not read the cloud engine's version from {sb.engine.url}; nothing installed, nothing restarted."),
             (sb.behind, f"engine gate: v{sb.to_version} requires engine {sb.floor}; {sb.engine.url} serves {sb.behind}",
@@ -1217,15 +1567,150 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
 RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario_abort, "gate": scenario_gate}
 
 
+def check_withdrawals(log: str, before: dict[str, dict], failures: list[str]) -> int:
+    """Every handoff ask the script mailed was taken back against the real engine (nexus-wjlbk): the
+    log has a withdraw line for that session saying withdrawn or already taken or expired. The rows
+    themselves are covered by the footprint check (a row left in a session's mailbox fails it).
+    Returns how many mailed asks were checked."""
+    checked = 0
+    for name, d in before.items():
+        sid = str((d or {}).get("sessionId", ""))
+        if not sid or f"mailing handoff ask to {name} ->" not in log:
+            continue
+        checked += 1
+        if not re.search(rf"mailbox/{re.escape(sid)}: handoff ask \S+ (withdrawn|already taken or expired)(;|$)", log,
+                         re.MULTILINE):
+            failures.append(f"{name}: its mailed handoff ask has no withdrawn or already-taken line in the log")
+    return checked
+
+
 def _args_of(pid: int) -> str:
-    return subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    try:
+        return subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=30).stdout.strip()
+    except subprocess.TimeoutExpired:
+        return ""  # unknown: _end signals only a process whose argv it read back
+
+
+class SweepUnavailable(RuntimeError):
+    """A process sweep could not read the process table: a scenario must not read that as clean."""
 
 
 def _naming(home: Path) -> list[tuple[int, str]]:
     """Live processes whose argv names the scratch HOME (its mkdtemp path is unique to this run)."""
     # The mkdtemp path holds only [A-Za-z0-9_/.-]: as a pgrep pattern its "." alone is not literal, harmlessly.
-    out = subprocess.run(["pgrep", "-f", str(home)], capture_output=True, text=True).stdout.split()
+    try:
+        out = subprocess.run(["pgrep", "-f", str(home)], capture_output=True, text=True, timeout=30).stdout.split()
+    except subprocess.TimeoutExpired as exc:
+        raise SweepUnavailable("the argv search did not answer within 30 s") from exc
     return [(int(p), _args_of(int(p))) for p in out if p.isdigit() and int(p) not in (os.getpid(), 1)]
+
+
+def parse_cwds(lsof_out: str) -> dict[int, str]:
+    """``lsof -Fpn -d cwd`` output as {pid: cwd}."""
+    cwds, pid = {}, None
+    for line in lsof_out.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:]) if line[1:].isdigit() else None  # a bad pid line never lends its cwd to the last good one
+        elif line.startswith("n") and pid is not None:
+            cwds[pid] = line[1:]
+    return cwds
+
+
+def _cwds() -> dict[int, str]:
+    """Every visible process's working directory: /proc on Linux, lsof elsewhere. Raises
+    SweepUnavailable when the table cannot be read, or when it lacks this process (a positive
+    control: a read that misses the harness itself would miss a leftover too)."""
+    proc = Path("/proc")
+    if (proc / "self" / "cwd").exists():
+        cwds = {}
+        for d in proc.iterdir():
+            if d.name.isdigit():
+                try:
+                    cwds[int(d.name)] = os.readlink(d / "cwd")
+                except OSError:
+                    pass
+    else:
+        try:
+            r = subprocess.run(["lsof", "-n", "-P", "-w", "-d", "cwd", "-Fpn"], capture_output=True, text=True,
+                               timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SweepUnavailable(f"lsof: {type(exc).__name__}: {exc}") from exc
+        cwds = parse_cwds(r.stdout)
+    if os.getpid() not in cwds:
+        raise SweepUnavailable(f"the process table read lacks this harness (pid {os.getpid()}; {len(cwds)} read)")
+    return cwds
+
+
+def under(path: str, home: Path) -> bool:
+    roots = {str(home), os.path.realpath(home)}
+    return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+
+def _ppid_args(pids: list[int]) -> dict[int, tuple[int, str]]:
+    """Each running pid's (ppid, argv), read in one ps call."""
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(["ps", "-ww", "-o", "pid=,ppid=,args=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=30).stdout
+    except subprocess.TimeoutExpired as exc:
+        raise SweepUnavailable("the parent-pid read did not answer within 30 s") from exc
+    got = {}
+    for row in out.splitlines():
+        parts = row.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            got[int(parts[0])] = (int(parts[1]), parts[2].strip())
+    return got
+
+
+def _working_in(home: Path) -> list[tuple[int, str]]:
+    """Orphaned processes (parent pid 1) whose working directory is in the scratch HOME. The
+    SessionEnd launcher double-forks within ~120 ms and is reparented to init with no HOME in its
+    argv, so neither the tree poll nor the argv sweep sees it; it keeps the session's working
+    directory (the sandbox's work folder). A cwd is read without reading the process's
+    environment, which holds the token. Only orphans: a shell or editor the operator opened in the
+    work folder has a parent of its own and is never touched."""
+    inside = [p for p, cwd in _cwds().items() if p not in (os.getpid(), 1) and under(cwd, home)]
+    return sorted((p, args) for p, (ppid, args) in _ppid_args(inside).items() if ppid == 1)
+
+
+def _sandbox_procs(home: Path) -> tuple[list[tuple[int, str]], str]:
+    """Live processes that name the HOME in their argv, or are orphans working in it; and why the
+    cwd half could not run ("" when it did)."""
+    procs, errs = set(), []
+    for half in (_naming, _working_in):
+        try:
+            procs |= set(half(home))
+        except SweepUnavailable as exc:
+            errs.append(str(exc))
+    return sorted(procs), "; ".join(errs)
+
+
+def _slug(text: str) -> str:
+    """Claude Code's per-folder name: every character but a letter or digit becomes "-"."""
+    return re.sub(r"[^A-Za-z0-9]", "-", text)
+
+
+def claude_temp_roots() -> list[Path]:
+    """Where Claude Code keeps per-folder temp (its Bash tool's task output), one folder per
+    working directory, named by the folder's slug."""
+    uid = os.getuid()
+    return list(dict.fromkeys(Path(os.path.realpath(d)) / f"claude-{uid}" for d in ("/tmp", tempfile.gettempdir())))
+
+
+def claude_session_files(sids: set[str]) -> list[Path]:
+    """Files Claude Code keeps per session in its temp roots (``cache-break-state-<session id>.json``,
+    seen from 2.1.317), for these full session ids."""
+    return sorted(f for d in claude_temp_roots() for sid in sids if sid
+                  for f in [d / f"cache-break-state-{sid}.json"] if f.exists())
+
+
+def claude_temp_dirs(home: Path) -> list[Path]:
+    """This run's folders under the Claude temp roots: their slug carries the HOME's name, which
+    mkdtemp made unique to this run."""
+    mark = _slug(home.name)
+    return sorted(d / n for d in claude_temp_roots() for n in _names(d) if mark in n)
 
 
 def _end(procs: list[tuple[int, str]]) -> int:
@@ -1245,6 +1730,10 @@ def _end(procs: list[tuple[int, str]]) -> int:
     return sent
 
 
+#: How long cleanup lets a lingering sandbox process end by itself before it is signalled.
+LINGER_S = 60
+
+
 def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     """End the sandbox and prove it ended; return what is still dirty (each one fails the run).
 
@@ -1252,40 +1741,87 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
     then the config copy they were reading. The sessions' tool processes (rs_shell's background
     sleep, a busy session's hold) and the killed sessions' MCP servers and hooks can outlive their
     claude and carry its environment, token included: the descendants collected before the kill, and
-    anything whose argv still names the scratch HOME after 60 s, are ended by checked pid. The config
-    is deleted again at the end, for a lease minted by a process that lingered."""
+    anything whose argv still names the scratch HOME after 60 s, are ended by checked pid; so is every
+    process the watch recorded below the tmux server during the run (an exited session's Serena and
+    MCP servers, reparented with no HOME in their argv) whose start time and argv still match. The
+    config is deleted again at the end, for a lease minted by a process that lingered. The caller
+    runs it under signals_deferred(); every subprocess here has a timeout."""
+    say(f"[sandbox:{sb.spec.name}] cleanup: running; a ^C or TERM now is held until it ends")
     leftovers: list[tuple[int, str]] = []
     try:  # never at the cost of the kill-server and the config deletion below
+        sb.watch.poll()
+    except Exception as exc:  # noqa: BLE001 -- the run's earlier polls still count
+        notes.append(f"last process-watch poll failed: {type(exc).__name__}: {exc}")
+    sb.watch.stop()
+    try:
         roots = [int(d.get("pid", 0) or 0) for d in sb.entries()]
         leftovers = [c for r in roots if r > 1 for c in sb.descendants(r) if c[0] > 1]
     except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
         notes.append(f"leftover tool processes not collected: {type(exc).__name__}: {exc}")
-    sb.tmux("kill-server")
+    watched = sb.watch.seen()
+    try:
+        leftovers = sorted(set(leftovers) | set(sb.watch.still_running()))
+    except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
+        notes.append(f"watched processes not checked: {type(exc).__name__}: {exc}")
+    try:
+        sb.tmux("kill-server", timeout=30)
+    except subprocess.TimeoutExpired:
+        notes.append("tmux kill-server timed out")
     sb.delete_config()
     time.sleep(3)
     ended = _end(leftovers)
-    for _ in range(30):
-        if not _naming(sb.home):
-            break
+    deadline = time.time() + LINGER_S
+    while time.time() < deadline and _sandbox_procs(sb.home)[0]:
         time.sleep(2)
-    late = _naming(sb.home)
-    ended_late = _end(late)
+    ended_late = 0
+    for _ in range(3):  # an orphan's own children become orphans when it is ended: sweep again
+        late = _sandbox_procs(sb.home)[0]
+        if not late:
+            break
+        ended_late += _end(late)
+    for d in claude_temp_dirs(sb.home):  # Claude Code's per-folder temp for the work folder
+        shutil.rmtree(d, ignore_errors=True)
     sb.delete_config()
-    notes.append(f"cleanup: {len(leftovers)} session descendant(s) collected, {ended} still running and signalled; "
-                 f"{ended_late} more still naming the HOME after 60 s")
+    notes.append(f"cleanup: {len(watched)} process(es) recorded below the tmux server during the run; "
+                 f"{len(leftovers)} session descendant(s) collected, {ended} still running and signalled; "
+                 f"{ended_late} more still naming or working in the HOME after 60 s")
+    try:
+        if sb.nx_refused.exists():
+            refused = sb.nx_refused.read_text(encoding="utf-8").splitlines()
+            notes.append(f"the nx shim refused {len(refused)} nx upgrade call(s): {refused[:5]}")
+    except OSError as exc:
+        notes.append(f"nx refusals not read: {exc}")
+    try:
+        if sb.socket_path().is_socket() and not sb.server_pids():
+            sb.socket_path().unlink()
+    except OSError as exc:
+        notes.append(f"tmux socket not removed: {exc}")
     dirty = []
-    if sb.tmux("has-session", "-t", "rs").returncode == 0:
-        dirty.append(f"tmux server {sb.sock} still running")
-    left = [f.name for f in sb.nexus_config.glob("*") if f.name == "config.yml" or f.name.startswith("data_token_lease.")]
+    if sb.socket_path().exists():
+        dirty.append(f"tmux socket {sb.socket_path()} still there")
+    if sb.before and not watched:
+        dirty.append("the process watch recorded nothing below the tmux server although sessions ran")
+    try:
+        if sb.tmux("has-session", "-t", "rs", timeout=30).returncode == 0:
+            dirty.append(f"tmux server {sb.sock} still running")
+    except subprocess.TimeoutExpired:
+        dirty.append(f"tmux server {sb.sock} did not answer has-session within 30 s")
+    left = credentials_left(sb.nexus_config)
     if left:
         dirty.append(f"credentials left in {sb.nexus_config}: {left}")
-    if still := _naming(sb.home):
-        dirty.append(f"{len(still)} process(es) still name the HOME: {[p for p, _ in still][:10]}")
+    still, sweep_err = _sandbox_procs(sb.home)
+    if still:
+        dirty.append(f"{len(still)} process(es) still name or work in the HOME: {[p for p, _ in still][:10]}")
+    if sweep_err:
+        dirty.append(f"the cwd sweep could not run: {sweep_err}")
+    if left := claude_temp_dirs(sb.home):
+        dirty.append(f"Claude Code temp folders for the work folder still there: {[str(d) for d in left]}")
     return dirty
 
 
 def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[str]]:
     spec = SPECS[name]
+    fp_before = footprint_before()
     home = Path(tempfile.mkdtemp(prefix=f"nx-restart-sandbox-{name}-"))
     sb = Sandbox(home, f"nx-rs-{os.getpid()}-{name}", claude, a.model, spec)
     failures: list[str] = []
@@ -1295,47 +1831,292 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         sb.setup(crs)
         print(f"[sandbox:{name}] HOME {home}; watch: tmux -L {sb.sock} attach -t rs", flush=True)
         RUNNERS[name](sb, crs, a, failures, notes)
+        if sb.before:
+            n = check_withdrawals(sb.read_log(), sb.before, failures)
+            notes.append(f"withdrawals: {n} mailed handoff ask(s) checked against the log")
+            if n == 0 and name != "gate":  # every rolling scenario mails at least one ask: none found is a broken check
+                failures.append("withdrawals: no mailed handoff ask found in the log to check")
         ok = not failures
     except Exception as exc:  # noqa: BLE001 -- a harness fault is a failed run with its reason
         failures.append(f"harness: {type(exc).__name__}: {exc}")
     finally:
         # Nothing before the kill-server and the config deletion may raise past them: each step
-        # that reads the sandbox's files is guarded and only reported.
-        sids: set[str] = set()
-        try:
-            for hold in sb.holds.values():
-                hold.unlink(missing_ok=True)
-            sids = {str(d.get("sessionId", ""))[:8] for d in sb.entries()}
-            sids |= {str(d.get("sessionId", ""))[:8] for d in sb.before.values() if d}
-        except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
-            notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
-        if not a.keep:
-            dirty = cleanup(sb, notes)
-            if dirty:
-                failures.extend(f"cleanup: {d}" for d in dirty)
-                ok = False
-        sb.close_servers()
-        for n in notes:
-            print(f"[sandbox:{name}] {n}", flush=True)
-        for f in failures:
-            print(f"[sandbox:{name}] FAIL {f}", flush=True)
-        print(f"[sandbox:{name}] {'passed' if ok else 'FAILED'}: {len(spec.sessions)} session(s), {len(failures)} failure(s)",
-              flush=True)
-        if a.keep:
-            print(f"[sandbox:{name}] --keep: the sessions still run on a copy of your nexus config at "
-                  f"{sb.nexus_config}/config.yml; delete it when done; tmux -L {sb.sock} kill-server", flush=True)
-        if ok and not a.keep:
-            for sid in filter(None, sids):  # the script's /tmp files for these sessions
-                for f in Path("/tmp").glob(f"rh-{sid}.*"):
+        # that reads the sandbox's files is guarded and only reported, and a signal now is held
+        # until the sandbox is gone and the verdict printed, then acted on.
+        with signals_deferred() as pending:
+            sids: set[str] = set()
+            full: set[str] = set()
+            try:
+                for hold in sb.holds.values():
+                    hold.unlink(missing_ok=True)
+                full = {str(d.get("sessionId", "")) for d in sb.entries()}
+                full |= {str(d.get("sessionId", "")) for d in sb.before.values() if d}
+                full.discard("")
+                sids = {sid[:8] for sid in full}
+            except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
+                notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
+            if not a.keep:
+                dirty = cleanup(sb, notes)
+                if dirty:
+                    failures.extend(f"cleanup: {d}" for d in dirty)
+                    ok = False
+                if bad := upgrade_check(sb):
+                    failures.extend(bad)
+                    ok = False
+            else:
+                sb.watch.stop()
+            sb.close_servers()
+            if not a.keep:
+                for f in claude_session_files(full):  # Claude Code's own per-session temp files
                     f.unlink(missing_ok=True)
-                for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
-                    f.unlink(missing_ok=True)
-            shutil.rmtree(home, ignore_errors=True)
-            if home.exists():
-                print(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)", flush=True)
-        else:
-            print(f"[sandbox:{name}] kept {home} (transcripts, restart log, handoffs under /tmp)", flush=True)
+            if ok and not a.keep:
+                for sid in filter(None, sids):  # the script's /tmp files for these sessions
+                    for f in Path("/tmp").glob(f"rh-{sid}.*"):
+                        f.unlink(missing_ok=True)
+                    for f in Path("/tmp").glob(f"nexus-continuation-restart-rs_*-{sid}-*"):
+                        f.unlink(missing_ok=True)
+            if not a.keep:
+                # What the scenario left outside its HOME fails it, except what it leaves on purpose.
+                try:
+                    left = footprint_after(fp_before, sb, full, sb.real_nx, kept=not ok)
+                except Exception as exc:  # noqa: BLE001 -- a check that could not run is a failure, not a pass
+                    left = {"footprint": [f"not taken: {type(exc).__name__}: {exc}"]}
+                if route_leftovers(left, failures, notes):
+                    ok = False
+            for n in notes:
+                say(f"[sandbox:{name}] {n}")
+            for f in failures:
+                say(f"[sandbox:{name}] FAIL {f}")
+            say(f"[sandbox:{name}] {'passed' if ok else 'FAILED'}: {len(spec.sessions)} session(s), {len(failures)} failure(s)")
+            if a.keep:
+                say(f"[sandbox:{name}] --keep: the sessions still run on a copy of your nexus config at "
+                    f"{sb.nexus_config}/config.yml; delete it when done; tmux -L {sb.sock} kill-server")
+            if ok and not a.keep:
+                shutil.rmtree(home, ignore_errors=True)
+                if home.exists():
+                    say(f"[sandbox:{name}] could not remove {home}; it holds no credentials (deleted above)")
+            else:
+                say(f"[sandbox:{name}] kept {home} (transcripts, restart log, handoffs under /tmp)")
+        raise_deferred(pending)
     return ok, failures, notes
+
+
+#: Where a scenario could leave something outside its scratch HOME (nexus-xwijj Phase 2): the
+#: shared temp folders (one entry per real folder), the operator's ~/.claude and nexus config,
+#: Claude Code's per-folder temp, and tmux's socket folder.
+TEMP_DIRS = tuple(dict.fromkeys(Path(os.path.realpath(d)) for d in ("/tmp", tempfile.gettempdir())))
+
+
+def _names(d: Path, strict: bool = False) -> set[str]:
+    """The entry names in *d*; empty when it is absent. *strict*: an unreadable folder raises."""
+    try:
+        return {e.name for e in d.iterdir()}
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        if strict:
+            raise
+        return set()
+
+
+def _lines(f: Path) -> int:
+    try:
+        with f.open(encoding="utf-8", errors="replace") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def footprint_before() -> dict:
+    """What the shared places hold before a scenario: names in each temp folder and Claude temp
+    root, the operator's ~/.claude/sessions and nexus config, and the length of the operator's
+    restart log."""
+    claude = OPERATOR_HOME / ".claude"
+    return {"temp": {str(d): _names(d, strict=True) for d in TEMP_DIRS},
+            "claude temp": {str(d): _names(d, strict=True) for d in claude_temp_roots()},
+            "sessions": _names(claude / "sessions"),
+            "config": _names(OPERATOR_HOME / ".config" / "nexus"),
+            "log": _lines(claude / "restart-sessions.log")}
+
+
+#: Left on purpose, so not a failure: a sandbox session's RDR-208 directory lease on the operator's
+#: service (``directory/<rs name>``). It lapses on its own, minutes after the session dies; a
+#: session killed with its tmux server does not release it (nexus-xwijj Phase 3: nx-mcp handles
+#: SIGHUP like SIGTERM). Reported as a note.
+EXPECTED_PLACES = ("directory lease",)
+
+
+def route_leftovers(left: dict[str, list[str]], failures: list[str], notes: list[str]) -> bool:
+    """File each place footprint_after found: a note for EXPECTED_PLACES, a failure for any other.
+    True when anything failed."""
+    failed = False
+    for place, items in left.items():
+        if place in EXPECTED_PLACES:
+            notes.append(f"left on purpose: {place}: {items}")
+        else:
+            failures.append(f"left outside the HOME: {place}: {items}")
+            failed = True
+    if not failed:
+        notes.append("footprint: nothing left outside the HOME but what is left on purpose")
+    return failed
+
+
+def footprint_after(before: dict, sb: Sandbox, sids: set[str], nx: str, kept: bool = False) -> dict[str, list[str]]:
+    """What the scenario left outside its scratch HOME, by place. Counted only when it names the
+    scenario: one of its session ids (the 8-character prefix the restart script's files carry, or
+    the full id), its tmux socket, or its HOME. So an entry another session on the box wrote
+    meanwhile is not counted. Places: new entries in the temp folders and the Claude temp roots;
+    the tmux socket file; new operator ~/.claude/sessions files for one of its session ids; new
+    lines in the operator's restart log naming it; new operator nexus config entries naming it;
+    rows in its sessions' mailboxes and the directory leases they hold on the operator's service.
+    Not counted: the HOME itself (removed next on a pass, kept on a failure); on a failure
+    (*kept*), the handoffs it keeps under /tmp. A place that cannot be read, no nx to ask the
+    service, or no session ids to attribute by, is itself a finding: the check never reads as clean
+    when it did not look."""
+    out: dict[str, list[str]] = {}
+    if not sids:
+        out["session ids"] = ["none collected: nothing could be attributed to this scenario"]
+    marks = {sid[:8] for sid in sids if sid} | {sb.sock, sb.home.name}
+    slug = _slug(sb.home.name)
+
+    def ours(name: str) -> bool:
+        return any(m and m in name for m in marks)
+
+    def on_purpose(n: str) -> bool:
+        # The HOME itself is removed right after this on a pass and kept on a failure: never counted.
+        return n == sb.home.name or (kept and n.startswith(("nexus-continuation-restart-rs_", "rh-")))
+
+    for key, label in (("temp", "temp"), ("claude temp", "claude temp")):
+        for d, names in before[key].items():
+            try:
+                now = _names(Path(d), strict=True)
+            except OSError as exc:
+                out[f"{label} {d}"] = [f"not readable: {exc}"]
+                continue
+            new = sorted(n for n in now - names if (ours(n) or slug in n) and not on_purpose(n))
+            if new:
+                out[f"{label} {d}"] = new
+    if sb.socket_path().exists():
+        out["tmux socket"] = [str(sb.socket_path())]
+    claude = OPERATOR_HOME / ".claude"
+    mine = []
+    try:
+        new_sessions = sorted(_names(claude / "sessions", strict=True) - before["sessions"])
+    except OSError as exc:
+        out["operator ~/.claude/sessions"] = [f"not readable: {exc}"]
+        new_sessions = []
+    for n in new_sessions:
+        d = None
+        for _ in range(2):  # a file another session is writing parses a moment later
+            try:
+                d = json.loads((claude / "sessions" / n).read_text(encoding="utf-8"))
+                break
+            except FileNotFoundError:
+                d = {}
+                break
+            except (OSError, ValueError):
+                time.sleep(1)
+        if d is None:
+            mine.append(f"{n} (not parsable: cannot tell whose it is)")
+        elif isinstance(d, dict) and str(d.get("sessionId", "")) in sids:
+            mine.append(n)
+    if mine:
+        out.setdefault("operator ~/.claude/sessions", []).extend(mine)
+    log = claude / "restart-sessions.log"
+    try:
+        with log.open(encoding="utf-8", errors="replace") as fh:
+            added = [ln.rstrip() for i, ln in enumerate(fh) if i >= before["log"] and ours(ln)]
+    except FileNotFoundError:
+        added = []
+    except OSError as exc:
+        added = [f"not readable: {exc}"]
+    if added:
+        out["operator restart log"] = added[:5]
+    try:
+        new = sorted(n for n in _names(OPERATOR_HOME / ".config" / "nexus", strict=True) - before["config"] if ours(n))
+    except OSError as exc:
+        new = [f"not readable: {exc}"]
+    if new:
+        out["operator nexus config"] = new
+    if not nx:
+        out["operator service"] = ["nx is not on PATH: mailboxes and directory leases not checked"]
+        return out
+    rows, leases = [], []
+    for sid in sorted(s for s in sids if s):
+        try:
+            r = subprocess.run([nx, "tuple", "stats", f"mailbox/{sid}", "--json"], capture_output=True,
+                               text=True, timeout=30)
+            if r.returncode != 0:
+                rows.append(f"mailbox/{sid[:8]}: not read (exit {r.returncode})")
+                continue
+            st = json.loads(r.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            rows.append(f"mailbox/{sid[:8]}: not read ({type(exc).__name__})")
+            continue
+        live = {k: st.get(k, 0) for k in ("available", "claimed", "lapsed", "dead")}
+        if any(live.values()):
+            rows.append(f"mailbox/{sid[:8]} {live}")
+    for name in sorted({*sb.spec.sessions, "rs_blank"}):
+        try:
+            r = subprocess.run([nx, "tuple", "directory", name], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            rows.append(f"directory/{name}: not read ({type(exc).__name__})")
+            continue
+        if r.returncode != 0:
+            rows.append(f"directory/{name}: not read (exit {r.returncode})")
+            continue
+        held = set(re.findall(r"session_id:\s*(\S+)", r.stdout)) & sids
+        leases += [f"directory/{name} ({sid[:8]})" for sid in sorted(held)]
+    if rows:
+        out["operator service"] = rows
+    if leases:
+        out["directory lease"] = leases
+    return out
+
+
+def upgrade_check(sb: Sandbox) -> list[str]:
+    """The sessions ran with the auto-upgrade kill switch (Phase 1) and it took: their hook log has
+    the hook's ``upgrade_auto_disabled`` line and no ``upgrade_auto_child_spawned``. Empty when so."""
+    if not sb.before:
+        return []  # no session booted: nothing ran the hook
+    log = sb.nexus_config / "logs" / "hook.log"
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [f"auto-upgrade: hook log not read ({exc}); the kill switch is unproven"]
+    bad = []
+    if "upgrade_auto_child_spawned" in text:
+        bad.append("auto-upgrade: a session spawned nx upgrade --auto despite NX_UPGRADE_AUTO=0")
+    if "upgrade_auto_disabled" not in text:
+        bad.append("auto-upgrade: no session logged upgrade_auto_disabled; the kill switch is unproven")
+    return bad
+
+
+def records_a_pass(chosen: list[str], bad: list[str]) -> bool:
+    """Only a run of every scenario, in order, with none failed, is a pass the restart gate honours."""
+    return not bad and chosen == list(SCENARIOS)
+
+
+def record_full_pass(crs, claude: str, before: tuple[str, ...], chosen: list[str], elapsed: float) -> str:
+    """Record a full pass for the script's restart gate, if what ran is still what is installed.
+
+    *before* is (script sha256, Claude Code version, tmux version, harness sha256) read before the
+    first scenario. Returns the line to print; records nothing when the version is unreadable, any
+    value changed during the run, or the write fails.
+    """
+    sha, version, tmux, harness = before
+    if not version:
+        return "pass NOT recorded: could not read Claude Code's version"
+    after = (crs.script_sha256(SCRIPT), crs.claude_version(claude), crs.tmux_version(), crs.harness_sha256())
+    if after != before:
+        return (f"pass NOT recorded: the script, Claude Code, tmux or the harness changed during the run "
+                f"(sha {sha[:12]} -> {after[0][:12]}, version {version} -> {after[1]}, {tmux} -> {after[2]}, "
+                f"harness {harness[:12]} -> {after[3][:12]})")
+    try:
+        crs.record_sandbox_pass(crs.SANDBOX_PASS, sha, version, chosen, elapsed, tmux=tmux, harness=harness)
+    except OSError as e:
+        return f"pass NOT recorded: could not write {crs.SANDBOX_PASS} ({e})"
+    return f"recorded the pass in {crs.SANDBOX_PASS} (Claude Code {version})"
 
 
 def main() -> int:
@@ -1365,6 +2146,10 @@ def main() -> int:
     chosen = [s for s in SCENARIOS if s in (a.scenario or SCENARIOS)]
     results = {}
     t0 = time.time()
+    # The pass covers what the scenarios ran: the script's bytes and Claude Code's version as they
+    # were before the first scenario, and only if neither changed by the end (a fast-forward of the
+    # primary or a Claude Code auto-update mid-run would otherwise be recorded as tested).
+    tested = (crs.script_sha256(SCRIPT), crs.claude_version(claude), crs.tmux_version(), crs.harness_sha256())
     for name in chosen:
         ok, failures, _ = run_scenario(name, claude, a, crs)
         results[name] = (ok, len(failures))
@@ -1373,6 +2158,8 @@ def main() -> int:
     verdict = "RESTART SANDBOX FAILED" if bad else "RESTART SANDBOX PASSED"
     print(f"{verdict} -- {len(chosen)} scenario(s) ({', '.join(chosen)}), {total} failure(s)"
           + (f" in {', '.join(bad)}" if bad else "") + f", {time.time() - t0:.0f}s", flush=True)
+    if records_a_pass(chosen, bad):
+        print(record_full_pass(crs, claude, tested, chosen, time.time() - t0), flush=True)
     return 1 if bad else 0
 
 

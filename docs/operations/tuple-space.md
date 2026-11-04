@@ -193,6 +193,8 @@ cadence as any other engine change (see `docs/agents/engine-service-release.md`)
 live rows needs an explicit data changeset with a migration note; adding
 or widening one does not.
 
+Each template also carries a doc block: what it is for, who writes and reads it, what its fields and values mean, and a worked example. `nx tuple dictionary [NAME]` prints it next to the live census of that template's subspaces, and the `tuple_registry` MCP tool returns it with `doc=True`. That block is where a template's meaning is written down, mailbox `kind` values included; the skills still restate call shapes beside it.
+
 ## `NX_TUPLE_TEMPLATE_DIR` must be unset in production
 
 One test-only path exists beside the resource files: the engine also loads

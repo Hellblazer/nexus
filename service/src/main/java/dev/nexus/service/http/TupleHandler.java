@@ -50,8 +50,9 @@ import java.util.Optional;
  *                                   mode (bead nexus-5r2sc.2.2, RDR-235 E4): optional, absent or "replace", any other
  *                                   value is a 400. "replace" is allowed only on an id_from=keys+nonce template (else a
  *                                   400 naming it) and answers {"id": "&lt;hex&gt;", "outcome": "created"|"replaced"|"dirtied"}:
- *                                   the newest body wins on the deterministic id; a claimed row is marked dirty and its
- *                                   holder's ack returns it to available instead of consuming it. A plain out (no mode)
+ *                                   the newest body wins on the deterministic id; a claimed row (claim_state 'claimed',
+ *                                   its lease live or lapsed and unswept; nexus-7h2jj) is marked dirty and a live holder's
+ *                                   ack returns it to available instead of consuming it. A plain out (no mode)
  *                                   keeps the {"id": ...} response.
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}

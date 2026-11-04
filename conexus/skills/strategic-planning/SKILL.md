@@ -10,7 +10,7 @@ Delegates to the **strategic-planner** agent.
 
 ## Model Selection
 
-Default: **opus** (`conexus/agents/strategic-planner.md` pins `model: opus` in its
+Default: **opus** (`${CLAUDE_PLUGIN_ROOT}/agents/strategic-planner.md` pins `model: opus` in its
 frontmatter, and an agent's own declaration beats the session default, so
 omitting `model` on the Agent tool gets opus). Pass `model: sonnet`
 explicitly for the cheap end of the table below:

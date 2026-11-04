@@ -1492,6 +1492,15 @@ public final class PgContainerHelper {
      */
     public static void createPolicyUsingTrue(Connection su, Table<?> table, String policy, PolicyKind kind,
                                              String command, String role) throws Exception {
+        createPolicy(su, table, policy, kind, command, role, true);
+    }
+
+    /**
+     * As {@link #createPolicyUsingTrue}, with {@code USING (qual)} for a qual of {@code true} or {@code false}
+     * (nexus-gy3vq: a RESTRICTIVE policy that admits nothing).
+     */
+    public static void createPolicy(Connection su, Table<?> table, String policy, PolicyKind kind,
+                                    String command, String role, boolean qual) throws Exception {
         requireTestIdentifier(policy);
         requireRoleOrPublic(role);
         if (!Set.of("ALL", "SELECT", "INSERT", "UPDATE", "DELETE").contains(command)) {
@@ -1500,7 +1509,7 @@ public final class PgContainerHelper {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-create-policy.xml",
             "databasechangelog_test_create_policy", Map.of(
                 "table", renderTableParam(DSL.using(su, SQLDialect.POSTGRES), table), "policy", policy,
-                "kind", kind.name(), "command", command, "role", role));
+                "kind", kind.name(), "command", command, "role", role, "qual", qual ? "true" : "false"));
     }
 
     /**

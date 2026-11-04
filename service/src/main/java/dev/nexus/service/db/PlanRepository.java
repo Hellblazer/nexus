@@ -453,8 +453,9 @@ public final class PlanRepository {
     }
 
     /**
-     * Bump {@code use_count} and stamp {@code last_used}.
-     * Mirrors {@code PlanLibrary.increment_run_started}.
+     * Bump {@code use_count}, and stamp {@code last_used} only while the plan
+     * is inside its TTL (nexus-i1eb4), so a run start cannot revive an
+     * expired plan. Mirrors {@code PlanLibrary.increment_run_started}.
      */
     public void incrementRunStarted(String tenant, long id) {
         tenantScope.withTenant(tenant, ctx -> {
@@ -496,9 +497,16 @@ public final class PlanRepository {
      * holds no state of its own.
      */
     static void incrementRunStartedIn(DSLContext ctx, long id) {
+        // nexus-i1eb4: the run counts either way, but only a plan still inside
+        // its TTL gets a fresh last_used. Stamping an expired row would reset
+        // its disuse clock and make it active again, which defeats the TTL for
+        // any caller that starts a run on a stale plan id. PG evaluates the
+        // CASE against the row as it was before this UPDATE.
         ctx.update(PLANS)
            .set(PLANS.USE_COUNT, PLANS.USE_COUNT.add(1))
-           .set(PLANS.LAST_USED, OffsetDateTime.now(ZoneOffset.UTC))
+           .set(PLANS.LAST_USED, when(notExpiredCondition(),
+                   val(OffsetDateTime.now(ZoneOffset.UTC)))
+               .otherwise(PLANS.LAST_USED))
            .where(PLANS.ID.eq(id))
            .execute();
     }
@@ -914,9 +922,12 @@ public final class PlanRepository {
      * The read-time expiry predicate shared by {@link #listActivePlans},
      * {@link #searchPlans}, and {@link #listPlans} — extracted to ONE place
      * (coordinator scope addition, hygiene-001 follow-on) so the read filter
-     * and {@link #deleteExpiredPlans} cannot diverge. Returns TRUE for a plan
-     * that is still active: {@code ttl_days IS NULL} (permanent) or its age
-     * since last use (falling back to creation) is within {@code ttl_days}.
+     * and {@link #deleteExpiredPlans} cannot diverge. One write path reads it
+     * too: {@link #incrementRunStartedIn} stamps {@code last_used} only where
+     * it holds (nexus-i1eb4), so a change here also changes which run starts
+     * reset a plan's disuse clock. Returns TRUE for a plan that is still
+     * active: {@code ttl_days IS NULL} (permanent) or its age since last use
+     * (falling back to creation) is within {@code ttl_days}.
      */
     private static Condition notExpiredCondition() {
         return PLANS.TTL_DAYS.isNull().or(

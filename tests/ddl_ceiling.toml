@@ -132,7 +132,38 @@ migration_wal_bytes_per_worker = 11038000
 # runAlways grants loop (the table, and its BIGSERIAL id sequence: the attribution of the sixth is inferred from the loop covering ALL
 # SEQUENCES, the total is measured). Measured on chas (scoped substrate run of tests/test_scenario_journeys.py, one worker, lab-m,
 # ddl: migration=2199) on this tree.
-migration_ddl_per_worker = 2199
+# 2199 -> 2201 (2026-11-03): vectors-047-1 (nexus-8ptg4, nexus.manifest_qualifying_hits) adds two DDL statements to a fresh migration:
+# 1 CREATE OR REPLACE FUNCTION and 1 GRANT EXECUTE (the DO post-check is not counted, as in vectors-045). Measured on this tree by a
+# scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker, macOS; the count is
+# identical on Linux): ddl: migration=2201.
+# 2201 -> 2228 (2026-11-03, after vectors-047 above): vectors-048-1 (nexus-6pfgb.41, the route (b) catalog pre-filter) adds 27 DDL statements to a fresh migration: for
+# each of the nine route (b) functions (search_metadata_scoped, search_aspect_scoped, search_graph_hop, at 384, 768 and 1024) 1 DROP FUNCTION
+# (the old signature, which a surviving overload would keep beside the new one), 1 CREATE OR REPLACE FUNCTION (the new signature, two more
+# parameters) and 1 GRANT EXECUTE (a new signature is not granted by the old one); the post-condition DO block is not DDL.
+# Counted from the changeset's statements (27) and measured: chas, 2026-11-03, lab-m, scoped substrate run of tests/test_scenario_journeys.py, one worker,
+# ddl: migration=2226 (14 passed) on the tree before vectors-047; 2201 + 27 = 2228 on top of it.
+# 2228 -> 2241 (2026-11-03, after vectors-048 above): vectors-049-1 (nexus-qpt52, route (b) answers every stage-answered key) adds 13 DDL
+# statements to a fresh migration: 13 CREATE OR REPLACE FUNCTION (manifest_search_384, 768 and 1024, manifest_qualifying_hits, and the nine route (b)
+# functions), each a replacement of an existing function so no GRANT EXECUTE follows; the post-condition DO block is not DDL. Counted from the
+# changeset's statements (13) and measured: macOS laptop, 2026-11-03, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2241.
+# 2241 -> 2243 (2026-11-03, after vectors-049 above): vectors-050-1 (nexus-6pfgb.40, the gc restore functions restore only the CHUNK keys) adds 2 DDL
+# statements to a fresh migration: 2 CREATE OR REPLACE FUNCTION (gc_restore_rereferenced and gc_restore_rereferenced_bounded), each a replacement of an
+# existing function so no GRANT EXECUTE follows. Counted from the changeset's statements (2) and measured: macOS laptop, 2026-11-03, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2243.
+# 2243 -> 2245 (2026-11-03, after vectors-050 above): vectors-051-1 (nexus-u9dc5, the route (c) get and get-all-metadata answer the stage's keys per owning
+# document) adds 2 DDL statements to a fresh migration: 1 CREATE OR REPLACE FUNCTION (nexus.manifest_admits_chunk, new) and its GRANT EXECUTE to nexus_svc. Counted
+# from the changeset's statements (2) and measured: macOS laptop, 2026-11-03, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2245.
+# 2245 -> 2248 (2026-11-03, after vectors-051 above): vectors-052-1 (nexus-zk7rw, manifest_qualifying_hits names its chunk and takes the text gate) adds 3 DDL statements to a
+# fresh migration: 1 DROP FUNCTION (the eight-argument form), 1 CREATE FUNCTION (the nine-argument one) and its GRANT EXECUTE to nexus_svc; the post-condition DO block is not DDL.
+# Counted from the changeset's statements (3) and measured: chas (lab-m), 2026-11-03, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2248.
+# 2248 -> 2249 (2026-11-03, after vectors-052 above): vectors-053-1 (nexus-l003p, quarantine_restore_chunks restores the CHUNK keys only, judges the reattach plan before the move and keeps a rival version in quarantine) adds 1 DDL
+# statement to a fresh migration: 1 CREATE OR REPLACE FUNCTION, a replacement of an existing function with the same signature, so no GRANT EXECUTE follows; the post-condition DO block is not DDL.
+# Counted from the changeset's statements (1) and measured: chas (lab-m), 2026-11-03, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2249.
+migration_ddl_per_worker = 2249
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

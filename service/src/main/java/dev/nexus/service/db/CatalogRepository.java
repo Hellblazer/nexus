@@ -39,6 +39,7 @@ import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.RacedEmbedActivity;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.DatePart;
 import org.jooq.DeleteConditionStep;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -48,6 +49,7 @@ import org.jooq.Record3;
 import org.jooq.ResultQuery;
 import org.jooq.SelectField;
 import org.jooq.Table;
+import org.jooq.TableField;
 import org.jooq.UpdateSetMoreStep;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -2794,6 +2796,11 @@ public final class CatalogRepository {
             long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays);
             long eligible   = agedTombstoneCount(ctx, tenant, olderThanDays);
 
+            // nexus-pvkbv: the purge deletes the aged tombstones' manifest rows (the fk-001 cascade), and a sole
+            // remaining holder with no span would then show the departed writer's. The aged set is gone after
+            // the purge, so the clear runs before it, in the same transaction.
+            DepartedWriterSpans.clearBeforeTrashPurge(ctx, tenant, agedThreshold(olderThanDays));
+
             Long purgedRaw = dev.nexus.service.jooq.nexus.Routines.purgeTrash(
                 ctx.configuration(), olderThanInterval(olderThanDays));
             long purged = purgedRaw != null ? purgedRaw : 0L;
@@ -5438,8 +5445,12 @@ public final class CatalogRepository {
         PLAIN,
         /** Mirrors {@link #appendManifestChunks}' pre-existing minimal upsert: only
          *  {@code chash}/{@code collection} (and, nexus-tko2w, the section labels that describe the
-         *  chunk at the position, with their {@code labels_written} marker) are updated on conflict (chunk_index/line/char
-         *  positions are NOT touched — this method's long-standing contract, unchanged). */
+         *  chunk at the position, with their {@code labels_written} marker) are updated on conflict
+         *  (chunk_index is NOT touched — this method's long-standing contract, unchanged). The four span
+         *  columns follow the chunk (nexus-mzpsh): when the chash or the collection at the position changes
+         *  they take the incoming row's values, NULL included, because the old span described another chunk;
+         *  when the same chunk is written again an incoming value replaces the stored one and an incoming
+         *  NULL keeps it, so a known span is never erased by a row that states none. */
         UPSERT_APPEND,
         /** Mirrors the two RDR-176 ETL import paths' full-column upsert. */
         UPSERT_IMPORT
@@ -5549,6 +5560,15 @@ public final class CatalogRepository {
                 .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE))
                 .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER))
                 .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN))
+                // nexus-mzpsh: the span describes the chunk at the position. A different chunk (or the same
+                // chash under another collection) takes the incoming span, NULL too; the same chunk written
+                // again takes an incoming value and keeps its stored one against an incoming NULL. Every
+                // right-hand side reads the row as it was before this statement, so the chash comparison is
+                // against the old chash though the chash is set above.
+                .set(CATALOG_DOCUMENT_CHUNKS.LINE_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_START))
+                .set(CATALOG_DOCUMENT_CHUNKS.LINE_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_END))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_START))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_END))
                 .execute();
             case UPSERT_IMPORT -> insert
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -5571,6 +5591,21 @@ public final class CatalogRepository {
     }
 
     /**
+     * nexus-mzpsh: the {@code ON CONFLICT DO UPDATE} value of a manifest span column for {@link
+     * ManifestInsertMode#UPSERT_APPEND}: the incoming value when the conflicting row holds another chunk (its
+     * chash or collection differs), else the incoming value if it has one and the stored one if not.
+     */
+    private static Field<Integer> spanOnConflict(TableField<?, Integer> column) {
+        // chash and collection are both NOT NULL (baseline; catalog-025), so a plain != would not misread a NULL
+        // here; isDistinctFrom on the collection costs nothing and keeps a NULL from reading as "same chunk"
+        // should the constraint ever be relaxed.
+        Condition otherChunk = CATALOG_DOCUMENT_CHUNKS.CHASH.ne(DSL.excluded(CATALOG_DOCUMENT_CHUNKS.CHASH))
+            .or(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isDistinctFrom(DSL.excluded(CATALOG_DOCUMENT_CHUNKS.COLLECTION)));
+        return DSL.when(otherChunk, DSL.excluded(column))
+            .otherwise(DSL.coalesce(DSL.excluded(column), column));
+    }
+
+    /**
      * nexus-tko2w: whether an incoming manifest row's section labels are the document's own answer. An
      * explicit boolean {@code labels_written} wins (a row read back from this engine and written again, as the
      * re-embed move and a client's manifest rewrite do, says what it was: a legacy row stays legacy even
@@ -5587,7 +5622,7 @@ public final class CatalogRepository {
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null, null);
+        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null, null, null);
     }
 
     /**
@@ -5637,6 +5672,10 @@ public final class CatalogRepository {
      *        flushed by the caller only after the transaction commits, so a
      *        deadlock-retried attempt cannot count a race twice. Ignored
      *        (may be {@code null}) when {@code resolvedChunks} is null.
+     * @param priorRows nexus-pvkbv: the document's manifest rows (collection, chash and their own span) read
+     *        BEFORE this call, under the caller's own fail-open savepoint ({@link #writeManifestMany}), or {@link
+     *        #PRIOR_ROWS_UNREAD} when that read failed (the departed-chunk span clear is then skipped), or
+     *        {@code null} when the caller has none: the delete below then returns the removed rows itself.
      * @return {@code collection}, unchanged — kept as the return type so the
      *         post-commit sweep step ({@link #runSweepTransaction},
      *         {@link #writeManifestMany}) has the collection to sweep
@@ -5648,7 +5687,8 @@ public final class CatalogRepository {
                                           int[] chunksWrittenOut,
                                           Set<String> writtenThisRequest,
                                           List<String>[] writtenChashesOut,
-                                          RacedEmbeds racedOut) {
+                                          RacedEmbeds racedOut,
+                                          List<DepartedWriterSpans.Gone> priorRows) {
         requireNonBlank(collection, "collection");
         // Case-1 duty only (RDR-191): does docId exist at all? A ghost
         // document (exists, no physical_collection) is no longer a special
@@ -5682,7 +5722,19 @@ public final class CatalogRepository {
                 chunksWrittenOut[0] = written;
             }
         }
-        ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+        // nexus-pvkbv: the span clear below needs the rows this rewrite removes (collection, chash, and the
+        // document's own span, which tells whether it could have written the chunk row's). The batch writer
+        // already read them (priorRows, fail-open, one statement it paid for anyway); any other caller gets
+        // them from the delete itself (RETURNING), with no statement of its own.
+        List<DepartedWriterSpans.Gone> removed;
+        var removal = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
+        if (priorRows == null) {
+            removed = DepartedWriterSpans.Gone.allOf(
+                removal.returningResult(DepartedWriterSpans.Gone.COLUMNS).fetch());
+        } else {
+            removal.execute();
+            removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows;
+        }
         if (!rows.isEmpty()) {
             stampIndexedAt(ctx, tenant, docId);
             // nexus-11gh6 §7d: routed through the single-homed insert helper.
@@ -5696,6 +5748,15 @@ public final class CatalogRepository {
             // per-row resolution outcome to vary on, so there is nothing to
             // skip.
             insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
+        }
+        // nexus-pvkbv: a chunk this document held and no longer does (edited so it dropped it, or now under
+        // another collection) keeps the span this document wrote on the chunk row; the row records no writer, so
+        // a sole remaining holder with no span of its own would show it. After the delete: the delete's trigger
+        // has locked only those of these chunk rows that are older than an hour, in key order; a younger row is
+        // locked by nothing before the clear's UPDATE, and a deadlock there retries (see DepartedWriterSpans).
+        if (removed != null && !removed.isEmpty()) {
+            DepartedWriterSpans.clear(ctx, tenant,
+                DepartedWriterSpans.departed(removed, collection, newChashes(rows)));
         }
         // nexus-b6enc F5: the manifest IS the count's source of truth — fold
         // it in the same transaction so no REPLACE can leave a stale count.
@@ -5721,6 +5782,36 @@ public final class CatalogRepository {
                 "writeManifest refused: document is tombstoned: " + docId);
         }
         return collection;
+    }
+
+    /**
+     * nexus-pvkbv: {@code writeManifestRows}' {@code priorRows} when the batch writer's guarded before-read
+     * failed. Compared by identity; the span clear is skipped, the manifest write goes on. A private instance
+     * no other code can produce (a shared {@code List.of()} would be the JVM-wide empty list, equal by
+     * identity to every caller's).
+     */
+    private static final List<DepartedWriterSpans.Gone> PRIOR_ROWS_UNREAD =
+        Collections.unmodifiableList(new ArrayList<>());
+
+    /** Position to the lower-case hex chash {@code rows} write there (the last row of a position wins), nexus-pvkbv. */
+    private static Map<Integer, String> chashesByPosition(List<Map<String, Object>> rows) {
+        Map<Integer, String> out = new LinkedHashMap<>();
+        for (var row : rows) {
+            Integer position = i(row, "position");
+            String c = s(row, "chash");
+            if (position != null && c != null && !c.isBlank()) out.put(position, c.toLowerCase(java.util.Locale.ROOT));
+        }
+        return out;
+    }
+
+    /** The lower-case hex chashes {@code rows} write, for the departed-chunk comparison (nexus-pvkbv). */
+    private static Set<String> newChashes(List<Map<String, Object>> rows) {
+        Set<String> out = new HashSet<>(Math.max(16, rows.size() * 2));
+        for (var row : rows) {
+            String c = s(row, "chash");
+            if (c != null && !c.isBlank()) out.add(c.toLowerCase(java.util.Locale.ROOT));
+        }
+        return out;
     }
 
     /**
@@ -6296,13 +6387,16 @@ public final class CatalogRepository {
                         // entry is left out of dropped_chashes and the RDR-192 reaper covers
                         // the un-swept chunks), never the write.
                         long tBeforeReadStart = System.nanoTime();
-                        Set<String> beforeRead =
+                        // nexus-pvkbv: the same read also yields the rows' collection and own span, which
+                        // writeManifestRows hands to the departed-chunk span clear.
+                        List<DepartedWriterSpans.Gone> beforeRows =
                             withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
                                   tenant, docId, () -> {
                                       java.util.function.Consumer<String> hook = beforeReadHookForTests;
                                       if (hook != null) hook.accept(docId);
-                                      return currentManifestChashes(ctx, tenant, docId);
+                                      return currentManifestRows(ctx, tenant, docId);
                                   }, null);
+                        Set<String> beforeRead = beforeRows == null ? null : chashesOf(beforeRows);
                         long tBeforeReadEnd = System.nanoTime();
                         // nexus-wbfpw.66: the two time accumulators (this one and writeNanosTotal) are NOT
                         // zeroed per attempt, on purpose. They measure time spent, so EVERY attempt adds
@@ -6315,7 +6409,8 @@ public final class CatalogRepository {
                         try {
                             writeManifestRows(ctx, tenant, docId, collection, rows,
                                     resolvedChunks, chunksWrittenHolder,
-                                    requestWrittenChashes, newlyWrittenChashesHolder, docRaced);
+                                    requestWrittenChashes, newlyWrittenChashesHolder, docRaced,
+                                    beforeRows == null ? PRIOR_ROWS_UNREAD : beforeRows);
                             if (move != null) {
                                 completeMove(ctx, tenant, docId, collection, move.sourceCollection(), moveSatelliteHolder);
                                 // The job's record of this move, in the same transaction. Lock order for a job's
@@ -6774,8 +6869,9 @@ public final class CatalogRepository {
     }
 
     /**
-     * Read doc_id's CURRENT manifest chashes — the sweep's "before" set,
-     * read BEFORE {@link #writeManifestRows} deletes them (nexus-eslkl).
+     * Read doc_id's CURRENT manifest rows as {@code (collection, chash, span)} — the sweep's "before" set (its
+     * chashes, {@link #chashesOf}), read BEFORE {@link #writeManifestRows} deletes them (nexus-eslkl), and the
+     * departed-chunk span clear's input (nexus-pvkbv; {@code DepartedWriterSpans}).
      *
      * <p>{@link #liveParentDoc}-filtered (TombstoneFilterGateTest): a
      * tombstoned doc_id cannot reach the sweep in practice anyway —
@@ -6786,19 +6882,23 @@ public final class CatalogRepository {
      * manifest read in the file (getManifest/getManifestMany) rather than
      * relying on a downstream throw to make an unguarded read harmless.
      */
-    private static Set<String> currentManifestChashes(DSLContext ctx, String tenant, String docId) {
-        Set<String> out = new LinkedHashSet<>();
+    private static List<DepartedWriterSpans.Gone> currentManifestRows(DSLContext ctx, String tenant, String docId) {
         // RDR-223 P1.2: ORDER BY position so the dropped list a write_many response reports is
         // in the previous manifest's order, deterministically (the sweep itself never cared).
-        var rows = ctx.select(CHK_CHASH_HEX).from(CATALOG_DOCUMENT_CHUNKS)
-                      .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                             .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
-                             .and(liveParentDoc(ctx, tenant)))
-                      .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
-                      .fetch();
+        return DepartedWriterSpans.Gone.allOf(ctx.select(DepartedWriterSpans.Gone.COLUMNS)
+                  .from(CATALOG_DOCUMENT_CHUNKS)
+                  .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                         .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                         .and(liveParentDoc(ctx, tenant)))
+                  .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+                  .fetch());
+    }
+
+    /** The distinct hex chashes of {@code rows}, in their order (the sweep's "before" set). */
+    private static Set<String> chashesOf(List<DepartedWriterSpans.Gone> rows) {
+        Set<String> out = new LinkedHashSet<>();
         for (var r : rows) {
-            String c = r.value1();
-            if (c != null && !c.isBlank()) out.add(c);
+            if (r.chash() != null) out.add(r.hex());
         }
         return out;
     }
@@ -7352,9 +7452,14 @@ public final class CatalogRepository {
             // a batched multi-row statement. RDR-191: every row is stamped
             // with the SAME `collection` -- there is no per-row resolution
             // outcome left to vary on.
+            // nexus-pvkbv: an upsert that puts another chunk at a position this document holds displaces the
+            // chunk that stood there; the rows at these positions are read first, the displaced ones cleared after.
+            Map<Integer, String> writtenAt = chashesByPosition(rows);
+            Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
             for (var row : rows) {
                 insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_APPEND);
             }
+            DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
             // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
             // exactly as writeManifestRows does (nexus-b6enc F5). The REPLACE
             // path folded and the APPEND path did not, so an append-grown
@@ -7652,8 +7757,16 @@ public final class CatalogRepository {
             // purged document is back. No sweep gate: a purge names no collection (it deletes the
             // document's rows whichever collection they name), and the gate is per collection.
             acquireIndexRunLock(ctx, tenant, docId);
-            int deleted = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
-                             .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+            var removed = DepartedWriterSpans.Gone.allOf(ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                             .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                             .returningResult(DepartedWriterSpans.Gone.COLUMNS)
+                             .fetch());
+            int deleted = removed.size();
+            // nexus-pvkbv: every chunk the document held is departed; see DepartedWriterSpans. A tombstoned
+            // document throws below and the whole transaction, this clear included, rolls back.
+            if (deleted > 0) {
+                DepartedWriterSpans.clear(ctx, tenant, DepartedWriterSpans.departed(removed, null, Set.of()));
+            }
             // nexus-eldyi: guarded, fail loud. *deleted* counts
             // catalog_document_chunks rows (a DIFFERENT table with no
             // deleted_at of its own), so it stays an honest count regardless
@@ -8339,6 +8452,197 @@ public final class CatalogRepository {
                 out.add(m);
             }
             return out;
+        });
+    }
+
+    /**
+     * A chunk row's {@code indexed_at} text with an explicit offset ({@code Z}, {@code +05:30}, {@code -0800}).
+     * PYTHON TWIN: {@code nexus.catalog.note_ttl.parse_iso} ({@code datetime.fromisoformat}), which the rung's scan
+     * reads the stamp with; this is the subset of its forms that PostgreSQL reads the same way. A stamp outside it
+     * is counted, never judged (see {@link #manifestSectionLabelFillable}).
+     */
+    private static final String STAMP_WITH_OFFSET =
+        "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$";
+
+    /**
+     * A chunk row's {@code indexed_at} text with no offset: read as UTC, as {@code nexus.catalog.note_ttl.parse_iso} does.
+     * PYTHON TWIN: the same function, see {@link #STAMP_WITH_OFFSET}.
+     */
+    private static final String STAMP_NAIVE =
+        "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$";
+
+    /**
+     * The per-chunk suffix an indexer appends to a chunk row's title ({@code :12-30}, {@code :chunk-3}, {@code :page-2}).
+     * PYTHON TWIN: {@code _CHUNK_TITLE_SUFFIX} in {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
+    private static final String CHUNK_TITLE_SUFFIX = ":(chunk-[0-9]+|[0-9]+-[0-9]+|page-[0-9]+)$";
+
+    /**
+     * Everything up to the last slash: what {@code os.path.basename} drops.
+     * PYTHON TWIN: {@code os.path.basename} in {@code _title_names_document} of
+     * {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
+    private static final String FILE_NAME_PREFIX = "^.*/";
+
+    /**
+     * How long after a document a chunk row may be stamped and still be its own.
+     * PYTHON TWIN: {@code nexus.catalog.note_ttl.PUT_SKEW} (five minutes), applied in {@code _labels_from_chunk_row}
+     * of {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
+    private static final int SECTION_LABEL_SKEW_SECONDS = 300;
+
+    /**
+     * The {@code metadata.backfill_from} value of a document the orphan backfill minted.
+     * PYTHON TWIN: {@code ORPHAN_BACKFILL_MARKER} in {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
+    private static final String ORPHAN_BACKFILL_VALUE = "t3_orphan";
+
+    /** The most rows {@link #manifestSectionLabelFillable} counts in one call. */
+    public static final int FILLABLE_COUNT_MAX_LIMIT = 10_000;
+
+    /**
+     * The statement bound of {@link #manifestSectionLabelFillable}, in milliseconds (nexus-l4hds): a count that
+     * outlasts it is cancelled by PostgreSQL (SQLSTATE 57014) and the route answers 503. The client's own timeout is
+     * longer, so it reads the engine's answer instead of timing out first.
+     */
+    public static final int FILLABLE_COUNT_TIMEOUT_MS = 10_000;
+
+    /**
+     * System property that replaces {@link #FILLABLE_COUNT_TIMEOUT_MS} (read on every call): the test hook that makes
+     * the timeout path deterministic (a test holds a table lock and sets a short bound).
+     */
+    public static final String FILLABLE_COUNT_TIMEOUT_PROPERTY = "nexus.catalog.fillable_count_timeout_ms";
+
+    /** SQLSTATE query_canceled: the statement bound fired. */
+    public static final String QUERY_CANCELED = "57014";
+
+
+    /** {@code pg_input_is_valid(text, 'timestamptz')} as a typed condition: true when the cast would not raise. */
+    private static Condition validTimestamptz(Field<String> text) {
+        return DSL.condition(DSL.function(DSL.name("pg_input_is_valid"), SQLDataType.BOOLEAN, text, DSL.val("timestamptz")));
+    }
+    /**
+     * How many manifest rows the manifest-section-labels rung could still fill, counted up to {@code limit}
+     * (nexus-l4hds): one bounded, tenant-scoped, read-only query in place of the rung's client-side walk of
+     * every document.
+     *
+     * <p>A row counts when ALL of these hold, each the engine form of a guard in
+     * {@code nexus.upgrade_ladder.rungs.manifest_section_labels} (that module's docstring is the rule of record):
+     * <ul>
+     *   <li>the row is legacy: {@code labels_written} is false and it holds a chash;</li>
+     *   <li>its document is live, not an alias, and not minted by the orphan backfill
+     *       ({@code metadata.backfill_from = t3_orphan});</li>
+     *   <li>its chash has no other live manifest row (another document's, or the same document's at another
+     *       position) and no manifest row of a TOMBSTONED document, anywhere in the tenant;</li>
+     *   <li>the chunk row at {@code (collection, chash)} carries at least one of {@code section_title},
+     *       {@code section_type}, {@code page_number};</li>
+     *   <li>the chunk row's {@code indexed_at} and the document's both exist and the chunk's is no more than five
+     *       minutes after the document's ({@code note_ttl.PUT_SKEW});</li>
+     *   <li>the chunk row's {@code title}, with any per-chunk suffix stripped, is absent or names the document
+     *       (its title, its file path, or the file name).</li>
+     * </ul>
+     *
+     * <p>Where SQL cannot say what Python's {@code datetime.fromisoformat} says, the answer errs toward COUNTING
+     * the row: a chunk {@code indexed_at} that is not {@code YYYY-MM-DD[T ]HH:MM[:SS[.f]]} with an optional offset
+     * is not judged by the date guard here, and neither is one of that shape that PostgreSQL cannot read as a
+     * timestamp (month 13, hour 99: {@code pg_input_is_valid} says so without raising). A count above what the
+     * rung's scan would fill makes the rung run its scan once and record the completion; a count below it would hide
+     * a fill, so the error is never that way.
+     *
+     * <p>BOUNDS. The count runs under a {@code statement_timeout} of {@link #FILLABLE_COUNT_TIMEOUT_MS} set inside
+     * its transaction; a count that outlasts it throws a {@code DataAccessException} whose cause chain holds
+     * SQLSTATE {@link #QUERY_CANCELED}, which the route maps to 503. The chunk row is joined on the tenant and on the
+     * manifest row's own {@code embedding_model} (the partition keys of {@code chunks}): the tenant equality prunes
+     * at plan time, and the model, read from each row, prunes only at execution.
+     *
+     * <p>One arm names TOMBSTONED holders by design (the deleted-holder exclusion, a NOT EXISTS whose join
+     * requires {@code DELETED_AT.isNotNull()}); the row's own document and every other-holder join are live only.
+     *
+     * @param limit stops the scan at this many matches (1 to {@link #FILLABLE_COUNT_MAX_LIMIT}); a result equal to
+     *              {@code limit} means "at least that many"
+     */
+    public int manifestSectionLabelFillable(String tenant, int limit) {
+        if (limit < 1 || limit > FILLABLE_COUNT_MAX_LIMIT) {
+            throw new IllegalArgumentException("limit must be 1.." + FILLABLE_COUNT_MAX_LIMIT);
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
+                FILLABLE_COUNT_TIMEOUT_PROPERTY, FILLABLE_COUNT_TIMEOUT_MS)));
+            var row = CATALOG_DOCUMENT_CHUNKS;
+            var doc = CATALOG_DOCUMENTS;
+            var other = CATALOG_DOCUMENT_CHUNKS.as("other_holder");
+            var otherDoc = CATALOG_DOCUMENTS.as("other_holder_doc");
+            var gone = CATALOG_DOCUMENT_CHUNKS.as("deleted_holder");
+            var goneDoc = CATALOG_DOCUMENTS.as("deleted_holder_doc");
+
+            // The chunk row's own keys. metadata is NULL on a row written without any, which fails every test below.
+            Field<String> chunkTitle = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
+            Field<String> chunkStamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "indexed_at");
+            // "metadata -> key IS NOT NULL" is key presence: a key whose value is JSON null reads as the jsonb value null, not SQL NULL.
+            Condition hasLabelKey = DSL.jsonbGetAttribute(CHUNKS.METADATA, "section_title").isNotNull()
+                .or(DSL.jsonbGetAttribute(CHUNKS.METADATA, "section_type").isNotNull())
+                .or(DSL.jsonbGetAttribute(CHUNKS.METADATA, "page_number").isNotNull());
+
+            // The stamp as an instant, NULL when it is not in a shape this reads (then the row is counted, see above).
+            // A stamp with no offset is read as UTC, as parse_iso does.
+            // pg_input_is_valid (PostgreSQL 16+; the floor is 17) says whether the cast would raise, so month 13 is
+            // 'cannot read' (NULL, counted) and never an error for the whole tenant. CASE evaluates in order, so the
+            // cast of an invalid stamp is not reached.
+            Field<String> naiveAsUtc = DSL.concat(chunkStamp, DSL.inline("+00"));
+            Field<OffsetDateTime> stampAt = DSL.when(chunkStamp.likeRegex(STAMP_WITH_OFFSET)
+                        .and(validTimestamptz(chunkStamp)),
+                    DSL.cast(chunkStamp, SQLDataType.TIMESTAMPWITHTIMEZONE))
+                .when(chunkStamp.likeRegex(STAMP_NAIVE)
+                        .and(validTimestamptz(naiveAsUtc)),
+                    DSL.cast(naiveAsUtc, SQLDataType.TIMESTAMPWITHTIMEZONE));
+            // chunk - document <= 5 minutes (note_ttl.PUT_SKEW), compared as epoch seconds.
+            Condition withinSkew = DSL.extract(stampAt, DatePart.EPOCH)
+                .minus(DSL.extract(doc.INDEXED_AT, DatePart.EPOCH)).le(DSL.val(SECTION_LABEL_SKEW_SECONDS));
+            Condition attributable = chunkStamp.isNotNull().and(chunkStamp.ne(""))
+                .and(doc.INDEXED_AT.isNotNull())
+                .and(stampAt.isNull().or(withinSkew));
+
+            // _title_names_document: no title is not contradicted; else the title, the title without its per-chunk
+            // suffix, or that one's file name, equals the document's title, file path or file name. Empty names do not count.
+            Field<String> unsuffixed = DSL.regexpReplaceAll(chunkTitle, CHUNK_TITLE_SUFFIX, "");
+            Field<String> unsuffixedName = DSL.regexpReplaceAll(unsuffixed, FILE_NAME_PREFIX, "");
+            Field<String> ownTitle = DSL.nullif(doc.TITLE, "");
+            Field<String> ownPath = DSL.nullif(doc.FILE_PATH, "");
+            Field<String> ownName = DSL.nullif(DSL.regexpReplaceAll(doc.FILE_PATH, FILE_NAME_PREFIX, ""), "");
+            Condition namesDocument = chunkTitle.isNull().or(chunkTitle.eq(""));
+            for (Field<String> candidate : List.of(chunkTitle, unsuffixed, unsuffixedName)) {
+                namesDocument = namesDocument.or(candidate.eq(ownTitle)).or(candidate.eq(ownPath)).or(candidate.eq(ownName));
+            }
+
+            var matching = ctx.selectOne()
+                .from(row)
+                .join(doc).on(doc.TENANT_ID.eq(row.TENANT_ID).and(doc.TUMBLER.eq(row.DOC_ID)))
+                .join(CHUNKS).on(CHUNKS.TENANT_ID.eq(row.TENANT_ID)
+                    .and(CHUNKS.EMBEDDING_MODEL.eq(row.EMBEDDING_MODEL))
+                    .and(CHUNKS.COLLECTION.eq(row.COLLECTION)).and(CHUNKS.CHASH.eq(row.CHASH)))
+                .where(row.TENANT_ID.eq(tenant)
+                    .and(CHUNKS.TENANT_ID.eq(tenant))
+                    .and(row.LABELS_WRITTEN.isFalse())
+                    .and(row.CHASH.isNotNull())
+                    .and(doc.DELETED_AT.isNull())
+                    .and(doc.ALIAS_OF.eq(""))
+                    .and(DSL.jsonbGetAttributeAsText(doc.METADATA, "backfill_from").isDistinctFrom(ORPHAN_BACKFILL_VALUE))
+                    .and(hasLabelKey)
+                    .and(attributable)
+                    .and(namesDocument)
+                    // exactly one live holder of the chash: this row
+                    .andNotExists(ctx.selectOne().from(other)
+                        .join(otherDoc).on(otherDoc.TENANT_ID.eq(other.TENANT_ID)
+                            .and(otherDoc.TUMBLER.eq(other.DOC_ID)).and(otherDoc.DELETED_AT.isNull()))
+                        .where(other.TENANT_ID.eq(tenant).and(other.CHASH.eq(row.CHASH))
+                            .and(other.DOC_ID.ne(row.DOC_ID).or(other.POSITION.ne(row.POSITION)))))
+                    // and no tombstoned document holds it either
+                    .andNotExists(ctx.selectOne().from(gone)
+                        .join(goneDoc).on(goneDoc.TENANT_ID.eq(gone.TENANT_ID)
+                            .and(goneDoc.TUMBLER.eq(gone.DOC_ID)).and(goneDoc.DELETED_AT.isNotNull()))
+                        .where(gone.TENANT_ID.eq(tenant).and(gone.CHASH.eq(row.CHASH)))))
+                .limit(limit);
+            return ctx.fetchCount(matching);
         });
     }
 
@@ -9617,12 +9921,31 @@ public final class CatalogRepository {
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
                                                    String expectedTargetSupersededBy,
                                                    String newContentType, String newOwnerId) {
+        return renameCollection(tenant, oldName, newName, expectedTargetSupersededBy,
+            newContentType, newOwnerId, null);
+    }
+
+    /**
+     * Same as the six-argument form, plus the model token the CLIENT read off the new name
+     * (nexus-ucagi). A rename keeps the source row's {@code embedding_model}, so a new name
+     * carrying another token would claim a model the vectors are not in. When
+     * {@code newNameEmbeddingModel} is non-null and the source row holds a model, a
+     * difference is refused with {@link CollectionModelMismatchException} (a 409
+     * {@code collection_model_mismatch}) before anything is written. The engine does not
+     * parse names (RDR-204), so the token is the caller's, exactly as {@code newContentType}
+     * and {@code newOwnerId} are; {@code null} (a client predating the field, or a legacy new
+     * name that carries no token) skips the check.
+     */
+    public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
+                                                   String expectedTargetSupersededBy,
+                                                   String newContentType, String newOwnerId,
+                                                   String newNameEmbeddingModel) {
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
         QuarantineOrigin.requireNotQuarantine("rename", oldName);
         QuarantineOrigin.requireNotQuarantine("rename", newName);
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
-            newContentType, newOwnerId);
+            newContentType, newOwnerId, newNameEmbeddingModel);
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
         // evict it so a later same-named collection re-registers.
         //
@@ -10088,7 +10411,8 @@ public final class CatalogRepository {
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
-                                                        String newContentTypeOrNull, String newOwnerIdOrNull) {
+                                                        String newContentTypeOrNull, String newOwnerIdOrNull,
+                                                        String newNameEmbeddingModelOrNull) {
         // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
@@ -10111,6 +10435,29 @@ public final class CatalogRepository {
             // documents out of or into is not renamed underneath it. Read under the sweep gates above, in the
             // rename's own transaction.
             refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
+            // nexus-ucagi: step 1 below copies the SOURCE row's embedding_model onto the new row, and
+            // step 2 re-files the chunks under it, so the vectors stay in that model's space whatever
+            // the new name says. A new name whose token (the caller's, RDR-204: the engine does not
+            // parse names) disagrees would register a name claiming a model the vectors are not in;
+            // readers that trust the token over the row then disagree with what the engine embeds by.
+            // Refused here, before step 1, so nothing is written. Skipped when the caller sent no
+            // token (an older client, or a legacy new name) and for a `disputed` source, whose row
+            // model is itself in doubt (hygiene-002) -- the two cases the client verbs
+            // (corpus.rename_model_conflict and their disputed warning) already exempt.
+            if (newNameEmbeddingModelOrNull != null) {
+                var src = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                    .from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(oldName))
+                    .fetchOne();
+                if (src != null) {
+                    String srcModel = src.value1();
+                    boolean disputed = "disputed".equals(src.value2());
+                    if (!disputed && srcModel != null && !srcModel.equals(newNameEmbeddingModelOrNull)) {
+                        throw CollectionModelMismatchException.forRename(
+                            oldName, srcModel, newName, newNameEmbeddingModelOrNull);
+                    }
+                }
+            }
             // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
             // as a superseded tombstone instead of deleting it, a round-trip rename
             // (X->Y then Y->X) finds X's tombstone sitting at the target. A tombstone is
@@ -12261,7 +12608,12 @@ public final class CatalogRepository {
                 // batching through ONE multi-row statement per chunk stays
                 // safe.
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+                // nexus-pvkbv: a changed-content import puts another chunk at a held position; see appendOneDocumentTx.
+                Map<Integer, String> writtenAt = chashesByPosition(batch);
+                Map<Integer, DepartedWriterSpans.Gone> priorAt =
+                    DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
                 insertManifestChunkRows(ctx, tenant, docId, collection, batch, ManifestInsertMode.UPSERT_IMPORT);
+                DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
             }
             return rows.size();
         });
@@ -12272,7 +12624,10 @@ public final class CatalogRepository {
         requireDocumentExists(ctx, tenant, docId);
         acquireSweepGateShared(ctx, tenant, collection);
         acquireIndexRunLock(ctx, tenant, docId);
+        Map<Integer, String> writtenAt = chashesByPosition(List.of(row));
+        Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
         insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT);
+        DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
     }
 
     /**

@@ -2,7 +2,8 @@
 title: "The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates"
 id: RDR-239
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-03
 priority: medium
 author: Sam
 reviewed-by: self
@@ -51,8 +52,8 @@ retention and limits. The seven shipped templates (`aspects`,
 `board/<topic>`, `board/ci/<topic>`, `directory/<name>`,
 `lock/<resource>`, `mailbox/<address>`, `queue/<name>`) carry their meaning in YAML comment headers: what the
 subspace is for, why take is disabled, what the retention bounds, what
-`kind` values mean. `board.yaml` has 37 lines of such comment above 25 lines
-of schema. The engine reads these files with its own reader
+`kind` values mean. Before Phase 2, `board.yaml` had 35 comment lines and
+17 lines of schema. The engine reads these files with its own reader
 (`service/src/main/java/dev/nexus/service/tuples/MiniYaml.java`), which
 drops comments. So the meaning never leaves the repository. The fix
 delivers the meaning as schema fields that the registry serves.
@@ -182,6 +183,20 @@ Research records: T2 `nexus_rdr/239-research-1`, `239-research-2`, and
   mailboxes hold only consumed rows, which `rd` does not return. The
   dictionary view therefore shows the consumed and claimed counts beside
   the available ones (Technical Design item 3).
+- **⚠️ Documented** (linda, 2026-11-02, nexus-mdbds.2.23): how the
+  dictionary resolves NAME without a new client matcher. NAME equal to a
+  registry template name gives that template; otherwise a census row for
+  exactly that subspace gives its engine `template` field; otherwise NAME
+  is matched against the registry names by the resolver the client already
+  had (`subscriptions._take_enabled`, literal before patterned), lifted
+  into one shared function. Census rows from an engine older than the
+  `template` field are grouped by the same resolver. An engine whose
+  registry has no `doc` for any template prints "engine predates the
+  dictionary", still shows the census, and exits 0; a template without a
+  doc on an engine that serves docs for others prints "this template has
+  no doc block" (fix round, nexus-mdbds.2.17). With no NAME the verb
+  covers every template with its census totals, from one listing of every
+  subspace grouped by the same resolver.
 
 ### Critical Assumptions
 
@@ -196,16 +211,21 @@ Research records: T2 `nexus_rdr/239-research-1`, `239-research-2`, and
   `nexus_rdr/239-research-4`), plus a small amount of boot work: one
   validation per template, run by the same shared validator that `out()`
   uses. The boot check and `out()` call one validator, extracted in Phase 2
-  Step 1; today the shape, nonce and size checks are private methods of
+  Step 1; before it the shape, nonce and size checks were private methods of
   `TupleRepository` (`validateOutShape`, `validateNonce`) that the template
-  loader cannot call, and a second copy would drift. The example's
+  loader could not call, and a second copy would drift. The example's
   `subspace` must resolve, by the registry's own matching, to the template
   that holds the example. Verification: the registry response in bytes
   before and after, for the default response and for `?doc=1`, and the
   registry boot time before and after. Baseline: the gate critic read 3,695
   bytes for the eight-template response on 2026-10-31 (T2
   `nexus_rdr/239-research-3`); Phase 2 takes its own before figure on the
-  unchanged engine.
+  unchanged engine. Measured (2026-11-02, nexus-mdbds.2.14 and .16): the
+  default response is 2,807 bytes before and after the change; `?doc=1` is
+  11,865 bytes, about 4.2 times the default; `loadAtBoot` takes 0.425 ms
+  before and 0.430 ms after. A2 holds for the default response. `?doc=1`
+  is the cost to watch: `tuple_registry(doc=True)` returns that whole
+  response to the model.
 
 ## Proposed Solution
 
@@ -214,7 +234,8 @@ Research records: T2 `nexus_rdr/239-research-1`, `239-research-2`, and
 Add one optional, closed `doc` block to the template schema. Serve it from
 the registry route on request (`?doc=1`). Fill it for the seven shipped
 templates. Render a dictionary view that joins it with the live census. A
-lint requires the block on every template the engine loads.
+lint requires the block on every template shipped in the engine's resources
+(a template loaded from `NX_TUPLE_TEMPLATE_DIR` is not linted).
 
 ### Technical Design
 
@@ -230,7 +251,10 @@ lint requires the block on every template the engine loads.
      below), so a typo cannot pass. When a dimension declares allowed values
      (the mailbox `address_kind` allows `agent` and `session`), a value map
      for it must have exactly those values as its keys, so the map cannot
-     disagree with the enum. Documentation only; it does not restrict
+     disagree with the enum; a key that declares `values` is held to them the
+     same way. A one-line description is compared with nothing: the
+     `aspects` description of `queue` restates the key's one allowed value
+     and nothing checks it. Documentation only; it does not restrict
      `out()`, since RDR-211 chose free text on purpose. (Phase 1 replaced the
      drafted `dimension_values`: a meaningful name can be a key, and `from`
      and `topic` carry meaning with no enumerable values.)
@@ -328,9 +352,16 @@ lint requires the block on every template the engine loads.
    loaded, fails the lint instead of going unchecked. It checks that every
    file path and RDR id cited in `writers`, `readers` and `see_also` exists
    in the repository (paths and RDR ids only; module and symbol names are
-   not checked). And it checks the placeholder rule for examples: an
-   address segment starts with `example`, a UUID-shaped value is all zeros
-   except its last digit, and a 40-hex value is all zeros.
+   not checked). It checks the placeholder rule for examples: a subspace
+   segment that fills a `<param>` slot starts with `example`, except in
+   `mailbox/<address>`, whose slot may hold a reserved UUID; literal
+   segments and the literal subspace `aspects` are exempt; a UUID-shaped
+   value is all zeros except its last digit; and a 40-hex or 64-hex value is
+   all zeros. It checks that the `writers` and `readers` of `board/<topic>`
+   and `queue/<name>` carry the `Unverified:` prefix. Each check fails when
+   it examined nothing. A Python mirror of the path and RDR-id check,
+   `tests/test_tuple_template_doc_paths_lint.py`, runs in the lint job of
+   PRs that change code (see Drift).
 
 ### Decision Rationale
 
@@ -370,8 +401,8 @@ Teach the reader to keep comments and serve them as text.
 **Cons:** comments are unstructured, mix maintainer reasoning with user
 documentation, and cannot carry a validated example.
 
-**Reason for rejection:** comments mix maintainer reasoning with user
-documentation, and cannot carry an example that the engine validates.
+**Reason for rejection:** for the reasons above. The field set in Technical
+Design item 1 gives the same text a structure the engine can check.
 
 ## Trade-offs
 
@@ -394,6 +425,11 @@ documentation, and cannot carry an example that the engine validates.
 - **The registry response grows.** Mitigation: `doc` rides only
   `?doc=1`, caps bound each string and each block, and A2 measures the
   bytes before and after.
+- **The shared validator changes the write path.** Step 1 moves `out()`'s
+  shape, nonce and size checks into one validator that the boot check also
+  calls, so a defect there would refuse real posts. Mitigation: the
+  extraction keeps the checks and their order, and `TupleRepositoryTest`
+  and `TupleSizeLimitsWireTest` run unchanged against it.
 - **Scope creep into stage 2.** Mitigation: the constraint at the top; a
   trigger or action field proposed during review goes to the stage-2 RDR.
 
@@ -413,8 +449,9 @@ carried forward, since the template is retired.
 ### Phase 2: Engine
 
 Precondition: nexus-onjvw is on `develop` and inside engine-service-v0.1.174
-(verified 2026-11-01, T2 `nexus_rdr/239-research-6`); Step 1 checks it
-again. The engine ships first, and the client tolerates a missing `doc`, so
+(verified 2026-11-01, T2 `nexus_rdr/239-research-6`); its commit was
+checked again as an ancestor of the branch when Step 2 began
+(nexus-mdbds.2.10). The engine ships first, and the client tolerates a missing `doc`, so
 Phase 3 does not wait for the deployed engine except for its own
 end-to-end check.
 
@@ -475,6 +512,9 @@ one pointer sentence.
   field parses; an unknown `doc` field is refused naming it; an undeclared
   name in `fields` is refused naming it; a value map whose keys differ from
   a dimension's declared values is refused (one missing key, one extra key);
+  a `doc` without `summary` is refused; `doc.body` on a template whose
+  `max_body_bytes` is 0 is refused; an `example` without `subspace` is
+  refused;
   `nonce` is required exactly when `id_from` is `keys+nonce` and refused
   otherwise; an example whose subspace resolves to a different template is
   refused; `writers: []` is accepted; `Long` and `Boolean` example keys and
@@ -486,20 +526,24 @@ one pointer sentence.
   the template loads without `doc` and a structured warning names the
   template and the field. The shipped set loads through `loadAtBoot`.
 - Shared validator: a change to the validator makes both an `out()` call and
-  the boot check of an example fail (a positive control, so the two cannot
-  have drifted apart).
+  the boot check of an example fail. This is a positive control run once at
+  implementation (recorded on nexus-mdbds.2.9 and nexus-mdbds.2.10), not a
+  standing test; what
+  stands is that both callers use the one validator.
 - Digest: a doc-only edit changes the registry digest.
 - Route: `doc` round-trips through `GET /v1/tuples/registry?doc=1`; the
   default response carries no `doc`; census rows carry `template`.
 - Client: `nx tuple dictionary 'board/ci/<topic>'` shows the summary,
   writers, readers, example and the census (`available`, `claimed`,
-  `consumed`, `dead`, `newest_created_at`) for `board/ci/nexus-develop`;
+  `consumed`, `dead`, `newest_created_at`) for a `board/ci/example-branch`
+  the test posts first;
   against a registry with no `doc` it prints "engine predates the
   dictionary" and still shows the census.
 - Lint: removing `doc.example` from one template fails it; a template file
   in the templates directory and not in `RESOURCE_TEMPLATE_PATHS` fails it;
   a cited path that does not exist fails it; an example that breaks the
-  placeholder rule fails it.
+  placeholder rule fails it; a board or queue writer without `Unverified:`
+  fails it; a run that examined no template fails it.
 
 ## Finalization Gate
 
@@ -525,18 +569,19 @@ item 1 make it hold: 8 of 8 examples passed the engine's own `out()` checks,
 checks, so "the same checks as `out()`" holds for the shipped code only once
 Phase 2 Step 1 makes them one shared validator, and the Test Plan's
 validator case checks that both paths fail together. A2 (serving and
-validating the dictionary is cheap) is not yet measured. It is an
-engineering assumption, not a design one. The cost that matters is the
-registry response size, so `doc` rides only `?doc=1`; Phase 2 Step 2
-measures boot time, and Phase 2 Step 4 measures response bytes for the
-default response and for `?doc=1`, before the change ships.
+validating the dictionary is cheap) was measured in Phase 2 (nexus-mdbds.2.14
+and .16): the default registry response is 2,807 bytes before and after,
+`?doc=1` is 11,865 bytes (about 4.2 times), and `loadAtBoot` goes from
+0.425 ms to 0.430 ms. A2 holds for the default response, which is why `doc`
+rides only `?doc=1`; a caller asking for `doc` pays about 12 KB per call.
 
 ### Scope Verification
 
 The four gaps map to four deliverables: Gap 1 to the schema field and the
 route, Gap 2 to `writers`, `readers` and `fields`, Gap 3 to the validated
 `example`, and Gap 4 to `nx tuple dictionary` and the census `template`
-field. Nothing in scope serves the
+field. Phase 3 Step 3 (repointing the restated mailbox `kind` meanings at
+the dictionary) serves Gap 2. Nothing in scope serves the
 later stages beyond documenting what exists. Stages 2 and 3 get their own
 RDRs (nexus-mdbds.1 first). The ledger's retirement shipped as its own
 engine change (engine-service-v0.1.174) and is not part of this RDR.
@@ -562,8 +607,13 @@ engine change (engine-service-v0.1.174) and is not part of this RDR.
 - **Drift.** Enforced: the example, which the engine validates with the
   checks `out()` applies; the names in `fields`; value maps against declared
   values; the file paths and RDR ids cited in `writers`, `readers` and
-  `see_also`; and the presence of `doc.summary` and `doc.example` on every
-  loaded template. Not enforced: what `summary`, `writers`, `readers` and
+  `see_also` (by the Java lint when the engine changes, and by a Python
+  mirror, `tests/test_tuple_template_doc_paths_lint.py`, in the lint job of
+  any PR that changes code, which catches a renamed cited file under
+  `conexus/` or `scripts/` in the PR that renames it; CI skips that job for
+  a PR touching only `docs/**`, so a renamed `docs/` file or RDR shows on the
+  next PR that changes code); and the
+  presence of `doc.summary` and `doc.example` on every loaded template. Not enforced: what `summary`, `writers`, `readers` and
   the descriptions say. That is maintained prose, and it can go stale the
   way the comment in `ledger.yaml` did. The mitigations are that it sits in
   the file whose shape it describes, and that board and queue say
@@ -593,4 +643,6 @@ served comments) fail the drift test this RDR exists for.
 | 2026-10-31 | Phase 1 content written (`docs/rdr/rdr-239-doc-blocks.md`); A1 refuted and resolved: `fields` replaces `dimension_values`, `body` added, `example` gains `subspace` and `nonce`; stale-comment and writerless-template findings recorded. |
 | 2026-10-31 | Pre-gate revision: Background and Investigation added; Finalization Gate written; seven templates after the ledger retirement (nexus-onjvw); `dimension_values` in Risks corrected to `fields`; plan uses Phase and Step headings. |
 | 2026-11-01 | Amended after gate round 1 for the planning decisions of nexus-mdbds.2 (decision beads nexus-mdbds.2.1 to 2.5): `doc` rides only `?doc=1` and enters the digest, with byte caps and a response-size measure for A2; a failing `doc` is fatal for classpath templates and dropped with a warning for `NX_TUPLE_TEMPLATE_DIR` templates; the drift claim is restated and board and queue are marked `Unverified`; census columns, the `template` field and `NAME` are defined; the lint is a Java test over `loadAtBoot`; the boot check and `out()` share one validator; the ledger retirement is verified shipped; the Test Plan gaps are filled. Research: `nexus_rdr/239-research-3` to `-7`. |
-- 2026-11-01: Gate round 1 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `2ae483be1` (content-identical to the pre-rebase commit the gate read); critique `nexus_rdr/239-gate-critique-2026-11-01-r1`.
+| 2026-11-02 | Implementation-time additions after the gate, each in a bead: the Python mirror lint `tests/test_tuple_template_doc_paths_lint.py` (nexus-mdbds.2.19); the NAME-resolution rules and the "engine predates the dictionary" message, recorded under Key Discoveries (nexus-mdbds.2.23); the per-template "this template has no doc block" message (nexus-mdbds.2.17); the lint's exemption and non-vacuity rules (nexus-mdbds.2.24). |
+| 2026-11-03 | Close records (rdr-close critique, T2 `nexus_rdr/239-scope-critique-2026-11-03`): A2's measured figures recorded in Critical Assumptions and Assumption Verification; the 2026-11-02 row above added. |
+| 2026-11-01 | Gate round 1 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `2ae483be1` (content-identical to the pre-rebase commit the gate read); critique `nexus_rdr/239-gate-critique-2026-11-01-r1`. |

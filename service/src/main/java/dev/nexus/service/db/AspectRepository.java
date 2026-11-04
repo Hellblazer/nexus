@@ -207,12 +207,26 @@ public final class AspectRepository {
      * (a retired name answers 409), then the {@code document_aspects} insert. So a 409 means the claim was
      * live at that instant, and a lapsed claim on a retired name answers 404.
      *
+     * <p><b>The fence runs before the payload gates (nexus-eyynd M1).</b> A fenced write is judged in this
+     * order: (1) the pair itself, one field without the other or a blank one, 400 before any transaction;
+     * (2) the claim lookup, 404 {@code ClaimNotFound} or 403 {@code ClaimOwnership}; (3) for a claim that is
+     * not an {@code aspects} task, 403 {@code ClaimTaskMismatch}, and for one that is, the same refusal when
+     * its body names another document than the {@code doc_id} written (checked here only when the write
+     * carries a non-blank {@code doc_id}); (4) the confidence gate, which drops a confidence below
+     * 0.3 (or a null or absent one) as {@code -1}, 200 {@code written:false};
+     * (5) the required-field and blank-{@code doc_id} gates, 400. So a lapsed, foreign or mismatched claim is
+     * refused 404 or 403 whatever the payload would have answered, where before a low-confidence or malformed
+     * payload got 200 or 400 and never reached the fence. A claim on the right task keeps the payload
+     * answers: low confidence is 200 {@code written:false}, a malformed payload 400. The payload gates run
+     * inside the transaction, after the lock, so the claim is locked for the (short) time they take; a
+     * claim-less write has no lock and runs the gates first, as ever. Nothing is written on any refusal.
+     *
      * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, then
      * {@code document_aspects}, in every path, so a rename that rewrites task bodies before its registry
      * loop cannot deadlock against a persist of the same document.
      */
     public long upsertAspect(String tenant, Map<String, Object> body) {
-        // Before the confidence gate: a malformed pair is a caller bug whatever the confidence is.
+        // Before everything else: a malformed pair is a caller bug whatever the payload or the claim is.
         Object rawClaimId = body.get("claim_id");
         Object rawClaimant = body.get("claimant");
         if ((rawClaimId == null) != (rawClaimant == null)) {
@@ -224,6 +238,35 @@ public final class AspectRepository {
         }
         String claimId = (String) rawClaimId;
         String claimant = (String) rawClaimant;
+        if (claimId == null) {
+            // No fence: the payload gates run before a transaction opens, as ever.
+            ValidUpsert valid = validateUpsert(body);
+            return valid == null ? -1L : tenantScope.withTenant(tenant, ctx -> writeAspect(ctx, tenant, body, valid));
+        }
+        // Fenced: the claim is looked up and locked FIRST, so a lapsed or foreign claim answers 404 or 403
+        // whatever the payload is (nexus-eyynd M1); the payload gates run after it, in the same transaction.
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then
+            // document_aspects, in every path. This lookup takes the first lock; the insert takes the second.
+            // A rename rewrites task bodies (tuple row locks) before its registry loop updates
+            // document_aspects, so the orders agree and neither can deadlock the other.
+            var claimRow = TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant);
+            requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
+            ValidUpsert valid = validateUpsert(body);
+            return valid == null ? -1L : writeAspect(ctx, tenant, body, valid);
+        });
+    }
+
+    /** An upsert body that passed the confidence, required-field and doc_id gates. */
+    private record ValidUpsert(double confidence, String collection, String sourcePath, String docId,
+                               String modelVersion, String extractorName, OffsetDateTime extractedAt) { }
+
+    /**
+     * The payload gates of {@link #upsertAspect}, in their fixed order: a confidence below the threshold
+     * (null and absent count as below) returns {@code null}, a missing required field or a blank
+     * {@code doc_id} is an {@link IllegalArgumentException}.
+     */
+    private static ValidUpsert validateUpsert(Map<String, Object> body) {
         // nexus-j0nec: an explicit JSON "confidence": null must be DROPPED like
         // absent/low confidence (Python _MIN_CONFIDENCE gate semantics), never
         // NPE via ((Number) null).doubleValue() -> HTTP 500.
@@ -233,7 +276,7 @@ public final class AspectRepository {
         if (confidence < MIN_CONFIDENCE) {
             log.warn("event=aspect_upsert_rejected_low_confidence collection={} source_path={} confidence={}",
                 body.get("collection"), body.get("source_path"), body.get("confidence"));
-            return -1L;
+            return null;
         }
 
         String collection    = (String) body.get("collection");
@@ -255,82 +298,81 @@ public final class AspectRepository {
         if (docId == null || docId.isBlank()) {
             throw new IllegalArgumentException("doc_id required");
         }
+        return new ValidUpsert(confidence, collection, sourcePath, docId, modelVersion, extractorName,
+                parseTs(extractedAt));
+    }
 
-        OffsetDateTime extractedAtTs = parseTs(extractedAt);
-
-        return tenantScope.withTenant(tenant, ctx -> {
-            if (claimId != null) {
-                // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST,
-                // then document_aspects, in every path. This lookup takes the first lock; the insert below
-                // takes the second. A rename rewrites task bodies (tuple row locks) before its registry loop
-                // updates document_aspects, so the orders agree and neither can deadlock the other.
-                requireClaimOnTaskFor(TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant),
-                        claimId, docId);
-            }
-            ensureCollectionRegistered(ctx, tenant, collection);
-            var result = ctx.insertInto(DOCUMENT_ASPECTS,
-                    DOCUMENT_ASPECTS.TENANT_ID,
-                    DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.SOURCE_PATH,
-                    DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
-                    DOCUMENT_ASPECTS.PROPOSED_METHOD,
-                    DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
-                    DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
-                    DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
-                    DOCUMENT_ASPECTS.EXTRAS,
-                    DOCUMENT_ASPECTS.CONFIDENCE,
-                    DOCUMENT_ASPECTS.EXTRACTED_AT,
-                    DOCUMENT_ASPECTS.MODEL_VERSION,
-                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
-                    DOCUMENT_ASPECTS.SOURCE_URI,
-                    DOCUMENT_ASPECTS.SALIENT_SENTENCES,
-                    DOCUMENT_ASPECTS.DOC_ID)
-                .values(
-                    tenant,
-                    collection,
-                    sourcePath,
-                    (String) body.get("problem_formulation"),
-                    (String) body.get("proposed_method"),
-                    (String) body.get("experimental_datasets"),
-                    (String) body.get("experimental_baselines"),
-                    (String) body.get("experimental_results"),
-                    jsonbOrNull((String) body.get("extras")),
-                    confidence,
-                    extractedAtTs,
-                    modelVersion,
-                    extractorName,
-                    // hygiene-001: source_uri is NOT NULL now too; nne() guards
-                    // against a caller that omits it (was a silent NULL write
-                    // before this migration, matching CatalogRepository's own
-                    // nne()-guarded NOT NULL text columns).
-                    NoteUri.canonical(nne((String) body.get("source_uri"))),
-                    jsonbOrNull((String) body.get("salient_sentences")),
-                    docId)
-                .onConflict(
-                    DOCUMENT_ASPECTS.TENANT_ID,
-                    DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.SOURCE_PATH)
-                .doUpdate()
-                .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
-                .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
-                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,  EX_EXPERIMENTAL_DATASETS)
-                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES, EX_EXPERIMENTAL_BASELINES)
-                .set(DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,   EX_EXPERIMENTAL_RESULTS)
-                .set(DOCUMENT_ASPECTS.EXTRAS,                 EX_EXTRAS)
-                .set(DOCUMENT_ASPECTS.CONFIDENCE,             EX_CONFIDENCE)
-                .set(DOCUMENT_ASPECTS.EXTRACTED_AT,           EX_EXTRACTED_AT)
-                .set(DOCUMENT_ASPECTS.MODEL_VERSION,          EX_MODEL_VERSION)
-                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME,         EX_EXTRACTOR_NAME)
-                .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI)
-                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_SENTENCES)
-                // nexus-x1de2 (52): an id-less re-upsert must never strip an
-                // attribution a previous write established — same COALESCE the
-                // other two writers already use.
-                .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
-                .returning(DOCUMENT_ASPECTS.ID)
-                .fetch();
-            return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
-        });
+    private long writeAspect(DSLContext ctx, String tenant, Map<String, Object> body, ValidUpsert v) {
+        String collection = v.collection();
+        String sourcePath = v.sourcePath();
+        String modelVersion = v.modelVersion();
+        String extractorName = v.extractorName();
+        String docId = v.docId();
+        double confidence = v.confidence();
+        OffsetDateTime extractedAtTs = v.extractedAt();
+        ensureCollectionRegistered(ctx, tenant, collection);
+        var result = ctx.insertInto(DOCUMENT_ASPECTS,
+                DOCUMENT_ASPECTS.TENANT_ID,
+                DOCUMENT_ASPECTS.COLLECTION,
+                DOCUMENT_ASPECTS.SOURCE_PATH,
+                DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
+                DOCUMENT_ASPECTS.PROPOSED_METHOD,
+                DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,
+                DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES,
+                DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,
+                DOCUMENT_ASPECTS.EXTRAS,
+                DOCUMENT_ASPECTS.CONFIDENCE,
+                DOCUMENT_ASPECTS.EXTRACTED_AT,
+                DOCUMENT_ASPECTS.MODEL_VERSION,
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                DOCUMENT_ASPECTS.SOURCE_URI,
+                DOCUMENT_ASPECTS.SALIENT_SENTENCES,
+                DOCUMENT_ASPECTS.DOC_ID)
+            .values(
+                tenant,
+                collection,
+                sourcePath,
+                (String) body.get("problem_formulation"),
+                (String) body.get("proposed_method"),
+                (String) body.get("experimental_datasets"),
+                (String) body.get("experimental_baselines"),
+                (String) body.get("experimental_results"),
+                jsonbOrNull((String) body.get("extras")),
+                confidence,
+                extractedAtTs,
+                modelVersion,
+                extractorName,
+                // hygiene-001: source_uri is NOT NULL now too; nne() guards
+                // against a caller that omits it (was a silent NULL write
+                // before this migration, matching CatalogRepository's own
+                // nne()-guarded NOT NULL text columns).
+                NoteUri.canonical(nne((String) body.get("source_uri"))),
+                jsonbOrNull((String) body.get("salient_sentences")),
+                docId)
+            .onConflict(
+                DOCUMENT_ASPECTS.TENANT_ID,
+                DOCUMENT_ASPECTS.COLLECTION,
+                DOCUMENT_ASPECTS.SOURCE_PATH)
+            .doUpdate()
+            .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
+            .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
+            .set(DOCUMENT_ASPECTS.EXPERIMENTAL_DATASETS,  EX_EXPERIMENTAL_DATASETS)
+            .set(DOCUMENT_ASPECTS.EXPERIMENTAL_BASELINES, EX_EXPERIMENTAL_BASELINES)
+            .set(DOCUMENT_ASPECTS.EXPERIMENTAL_RESULTS,   EX_EXPERIMENTAL_RESULTS)
+            .set(DOCUMENT_ASPECTS.EXTRAS,                 EX_EXTRAS)
+            .set(DOCUMENT_ASPECTS.CONFIDENCE,             EX_CONFIDENCE)
+            .set(DOCUMENT_ASPECTS.EXTRACTED_AT,           EX_EXTRACTED_AT)
+            .set(DOCUMENT_ASPECTS.MODEL_VERSION,          EX_MODEL_VERSION)
+            .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME,         EX_EXTRACTOR_NAME)
+            .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI)
+            .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_SENTENCES)
+            // nexus-x1de2 (52): an id-less re-upsert must never strip an
+            // attribution a previous write established — same COALESCE the
+            // other two writers already use.
+            .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
+            .returning(DOCUMENT_ASPECTS.ID)
+            .fetch();
+        return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
     }
 
     /** The aspect-extraction queue's subspace (the literal {@code aspects} template, RDR-235 E3). */
@@ -342,13 +384,19 @@ public final class AspectRepository {
     /**
      * A claim id is a credential for one task: the locked claim row must be an {@code aspects} task whose
      * body names the {@code doc_id} being written. Anything else, a body that is not a JSON object or has no
-     * string {@code doc_id} included, is refused {@link ClaimTaskMismatchException} (403).
+     * string {@code doc_id} included, is refused {@link ClaimTaskMismatchException} (403). A write whose own
+     * {@code doc_id} is absent or blank is checked for the subspace only; the doc_id gate that follows refuses
+     * it 400.
      */
     private static void requireClaimOnTaskFor(dev.nexus.service.jooq.nexus.tables.records.TuplesRecord claimRow,
                                               String claimId, String docId) {
         String subspace = claimRow.getSubspace();
         if (!TASK_SUBSPACE.equals(subspace)) {
             throw new ClaimTaskMismatchException(claimId, "an aspects task (it is a claim in '" + subspace + "')");
+        }
+        if (docId == null || docId.isBlank()) {
+            // No document to compare: the payload gate answers 400 doc_id required, after this fence.
+            return;
         }
         String taskDocId = null;
         try {

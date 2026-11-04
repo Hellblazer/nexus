@@ -671,18 +671,22 @@ def test_the_lease_peeks_keep_the_fixed_twenty_percent_bar(tmp_path: Path, high:
 
 
 def test_the_mint_backoff_is_full_jitter_under_the_schedule(tmp_path: Path) -> None:
-    """Revert: the sleeps are exactly (1.0, 2.0) for every client."""
+    """Revert: the sleeps are exactly (1.0, 2.0) for every client.
+
+    A 429 here: a 503 follows the shared gateway hold instead (nexus-3zreb),
+    whose own spacing is what keeps clients refused together apart.
+    """
 
     def sleeps_for(seed: int) -> list[float]:
         slept: list[float] = []
         ep = _Endpoint()
-        ep.script[:] = [503, 503, 503]
+        ep.script[:] = [429, 429, 429]
         mgr = DataTokenManager(
             clock=_Clock(), wall_clock=_Clock(), poster=ep, sleep=slept.append,
             mint_credential=lambda: "cred", mint_tenant=lambda: "", config_dir=tmp_path / str(seed),
             rng=random.Random(seed),
         )
-        with pytest.raises(DataTokenMintError, match="503"):
+        with pytest.raises(DataTokenMintError, match="429"):
             mgr.bearer_for(BASE, TENANT)
         return slept
 

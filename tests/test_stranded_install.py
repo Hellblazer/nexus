@@ -601,14 +601,14 @@ class TestWiring:
         (config / "memory.db").write_bytes(b"x")
         monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", _PIN)
 
-        server = SimpleNamespace(_mcp_server=SimpleNamespace(instructions=None))
+        server = SimpleNamespace(_lowlevel_server=SimpleNamespace(instructions=None))
         assert apply_stranded_notice(server) is True
-        assert "STRANDED INSTALL" in server._mcp_server.instructions
-        assert f"conexus=={_PIN}" in server._mcp_server.instructions
+        assert "STRANDED INSTALL" in server._lowlevel_server.instructions
+        assert f"conexus=={_PIN}" in server._lowlevel_server.instructions
 
-        prior = SimpleNamespace(_mcp_server=SimpleNamespace(instructions="keep me"))
+        prior = SimpleNamespace(_lowlevel_server=SimpleNamespace(instructions="keep me"))
         assert apply_stranded_notice(prior) is True
-        assert prior._mcp_server.instructions.startswith("keep me\n\n")
+        assert prior._lowlevel_server.instructions.startswith("keep me\n\n")
 
     def test_apply_stranded_notice_disarmed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -620,9 +620,9 @@ class TestWiring:
         monkeypatch.delenv("NEXUS_CATALOG_PATH", raising=False)
         (config / "memory.db").write_bytes(b"x")
         monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", None)
-        server = SimpleNamespace(_mcp_server=SimpleNamespace(instructions="untouched"))
+        server = SimpleNamespace(_lowlevel_server=SimpleNamespace(instructions="untouched"))
         assert apply_stranded_notice(server) is False
-        assert server._mcp_server.instructions == "untouched"
+        assert server._lowlevel_server.instructions == "untouched"
 
 
 class TestAssemblerScopeConsistency:

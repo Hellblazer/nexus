@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 
 import httpx
 import pytest
@@ -412,3 +413,99 @@ def test_create_pipeline_409_non_conflict_shape_reraises_original(
         db.create_pipeline(HASH, "/a.pdf", "docs__test")
     assert exc_info.value.response.status_code == 409
     assert exc_info.value.response.json()["constraint"] == "unique_email"
+
+
+# ── nexus-yu65a: a drop cannot be undone by a concurrent failing flush ──────
+
+
+class _ObservedLock:
+    """Stands in for ``HttpPipelineDB._flush_lock``: a real lock that sets *contended* when an acquire
+    is attempted while it is held, so a test knows a second thread has reached the wait without
+    sleeping."""
+
+    def __init__(self, contended: threading.Event) -> None:
+        self._lock = threading.Lock()
+        self._contended = contended
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.locked():
+            self._contended.set()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+
+def _interleave_failing_flush_with_drop(db: HttpPipelineDB, server: _Server, drop) -> None:
+    """Hold a flush in flight on its /pages POST, start *drop* on another thread, wait until that
+    thread has either contended for the flush lock or posted its engine call (the two things a drop
+    can do next), then let the flush fail and join both threads. No sleeps: every wait is on an event
+    one of the threads sets."""
+    settled = threading.Event()
+    inside = threading.Event()
+    release = threading.Event()
+    db._flush_lock = _ObservedLock(settled)  # type: ignore[assignment]
+    original = server.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/pipeline/pages" and request.method == "POST":
+            inside.set()
+            assert release.wait(10), "test never released the in-flight flush"
+            return httpx.Response(500, json={"error": "transient"})
+        if request.url.path in ("/v1/pipeline/clear_wal", "/v1/pipeline/delete"):
+            settled.set()
+        return original(request)
+
+    db._client = httpx.Client(transport=httpx.MockTransport(handler))
+    db.write_page(HASH, 0, "t")
+    db.update_progress(HASH, pages_extracted=1)
+    db.write_chunk(HASH, 0, "c", "id0", embedding=None)
+    flush_errors: list[BaseException] = []
+
+    def flush() -> None:
+        try:
+            db.flush(HASH)
+        except BaseException as exc:  # noqa: BLE001 — the expected transient failure
+            flush_errors.append(exc)
+
+    flusher = threading.Thread(target=flush)
+    flusher.start()
+    assert inside.wait(10), "the flush never reached its POST"
+    dropper = threading.Thread(target=drop)
+    dropper.start()
+    assert settled.wait(10), "the drop neither waited for the flush nor posted"
+    release.set()
+    flusher.join(10)
+    dropper.join(10)
+    assert not flusher.is_alive() and not dropper.is_alive()
+    assert flush_errors, "the flush was meant to fail"
+
+
+@pytest.mark.parametrize("drop_name", ["clear_orphan_wal", "delete_pipeline_data"])
+def test_drop_is_not_resurrected_by_a_concurrent_failing_flush(
+    db: HttpPipelineDB, server: _Server, drop_name: str,
+) -> None:
+    """The flush pops the buffers, its POST fails, and its except-restore puts them back. A drop that
+    lands between the pop and the restore found nothing to drop, and the restore then re-inserted the
+    pages, chunks and progress the caller had just discarded (nexus-yu65a). The drop now waits for the
+    in-flight flush, so it drops what the restore put back."""
+    _interleave_failing_flush_with_drop(db, server, lambda: getattr(db, drop_name)(HASH))
+    assert (db._page_buffer.get(HASH), db._chunk_buffer.get(HASH), db._progress_buffer.get(HASH)) == (
+        None, None, None), "a failed flush restored buffers the drop had discarded"
+
+
+def test_clear_orphan_wal_gives_up_past_its_timeout_while_a_flush_is_in_flight(
+    db: HttpPipelineDB, server: _Server,
+) -> None:
+    """The drop shares the flush lock, so a bounded drop (the interrupt release) must not wait past
+    its bound: it raises ``TimeoutError`` before touching the buffers or the engine, like a bounded
+    flush does."""
+    db._flush_lock.acquire()  # an in-flight flush, held by this thread
+    try:
+        db.write_page(HASH, 0, "t")
+        with pytest.raises(TimeoutError):
+            db.clear_orphan_wal(HASH, timeout=0.0)
+    finally:
+        db._flush_lock.release()
+    assert db._page_buffer[HASH], "a drop that gave up must not have dropped"
+    assert server.calls("/v1/pipeline/clear_wal") == []

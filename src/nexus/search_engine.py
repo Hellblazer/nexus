@@ -529,9 +529,13 @@ def _attach_display_paths(
             o for o in owners
             if o in homes and homes[o] in ("", r.collection)
         ]
-        live = [titles[o] for o in live_owners if titles.get(o)]
-        if live:
-            r.metadata["_display_title"] = owner_titles(live)
+        # nexus-fv2u4 (RDR-236 reader remedy R1), shakedown 7.94.0 class B: the label is the
+        # catalog title of the document the hit is attributed to (``doc_id``, the same one the
+        # path above comes from), never a join of the other documents that share the chunk.
+        # An attributed document the catalog did not resolve (or homed in another collection)
+        # leaves the label unset, so the formatters fall back to the path or the id.
+        if did and did in homes and homes[did] in ("", r.collection) and titles.get(did):
+            r.metadata["_display_title"] = titles[did]
         # RDR-236 Phase 1 (nexus-6pfgb.9): the hit is scored by the frecency of the document it
         # is attributed to (``doc_id``), taken from the same page lookup as the title above, never
         # from the shared row (the last writer's file). Absent when that document states none.
@@ -604,8 +608,8 @@ def _display_doc_ids(results: list[SearchResult]) -> set[str]:
         if r.metadata.get("doc_id")
     }
     # Owners per hit are capped: a chunk many documents share (boilerplate)
-    # would otherwise make every search resolve all of them for a label
-    # that names three.
+    # would otherwise make every search resolve all of them for the owner
+    # facts (the label names only the attributed owner, nexus-fv2u4).
     doc_ids |= {
         o for r in results
         for o in r.metadata.get("_owner_doc_ids", ())[:_OWNER_TITLE_RESOLVE_CAP]

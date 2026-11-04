@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
+from nexus.plans.evidence_diagnostics import ReducerInputRecorder
 from nexus.plans.primary_evidence import PrimaryEvidence, SelectedChunk
+from nexus.plans.repair_stream import RepairSupplement, SupplementItem
 from nexus.plans.reserved_stream import (
     RESERVED_SHARE_MAX,
     ReservedStream,
@@ -497,7 +499,9 @@ def test_extract_explicit_inputs_without_a_stream_are_untouched() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_run_review_default_shape_merges_at_extract_not_compare() -> None:
+async def test_plan_run_review_default_shape_merges_at_compare_not_extract() -> None:
+    """nexus-dfrfp: compare is the answer step and extract is a branch it does not read, so the stream goes to compare
+    (it used to go to the first consumer, extract, and never reached the answer)."""
     from nexus.mcp import core as mcp_core
     from nexus.plans.runner import plan_run
 
@@ -533,9 +537,10 @@ async def test_plan_run_review_default_shape_merges_at_extract_not_compare() -> 
 
     extract_in = seen["extract"]
     texts = extract_in if isinstance(extract_in, list) else json.loads(extract_in)
-    assert texts[:3] == [r.text for r in stream.items]
-    assert seen["compare"] == ["secondary 0", "secondary 1"]
-    assert result.reserved_report["merged_at_step"] == 2
+    assert texts == ["secondary 0", "secondary 1"]
+    assert seen["compare"][:3] == [r.text for r in stream.items]
+    assert seen["compare"][3:] == ["secondary 0", "secondary 1"]
+    assert result.reserved_report["merged_at_step"] == 3
     assert result.reserved_report["dropped_before_terminal"] is None, "compare reads retrieval output, not an operator's"
 
 
@@ -720,3 +725,25 @@ def test_a_record_only_stream_is_built_and_an_empty_one_is_not() -> None:
     only = ReservedStream.from_evidence(None, extra=(ReservedItem.record("x", "body"),))
     assert only is not None and [i.raw for i in only.items] == ["body"]
     assert not only.is_primary_chash(""), "a record has no chash to dedupe a vector hit against"
+
+
+def test_named_target_steps_replace_the_first_consumer_rule_on_all_three_carriers() -> None:
+    """nexus-dfrfp: with target steps named, the reserved stream, the repair supplement and the reducer-input recorder act at
+    those steps alone (the first consumer outside them is skipped), and a reset returns each to the first-consumer rule."""
+    stream, supp, rec = _stream(1), RepairSupplement(items=(SupplementItem(text="repair"),)), ReducerInputRecorder()
+    for carrier in (stream, supp, rec):
+        carrier.target_steps = frozenset({3})
+    for step in (1, 3):
+        stream.current_step, supp.current_step = step, step
+        assert stream.should_merge() is (step == 3) and supp.should_merge() is (step == 3)
+        rec.set_step(step)
+        rec.note([f"input at {step}"])
+    assert (rec.step, rec.items) == (3, ("input at 3",)), "the recorder ignores a step outside the targets"
+    stream.current_step = 3
+    stream.merge(["x"])
+    assert stream.merged_step == 3
+    for carrier in (stream, supp, rec):
+        carrier.reset_run()
+        assert carrier.target_steps == frozenset()
+    stream.current_step = 1
+    assert stream.should_merge() and supp.should_merge()

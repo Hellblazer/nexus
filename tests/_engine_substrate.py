@@ -3330,6 +3330,11 @@ def _identify_leg(pid: int, expected_cmdline: str) -> str:
     if not pid_alive(pid):
         return "dead"
     actual = process_command(pid)
+    if not actual and pid_alive(pid):
+        # A live pid can read an empty command line for the instant between its exec's pipe close
+        # and its new argv (/proc/<pid>/cmdline, nexus-yu65a): read once more before calling it dead.
+        time.sleep(0.05)
+        actual = process_command(pid)
     if not actual:
         return "dead"  # exited between the liveness check and this read
     if not expected_cmdline or actual.strip() != expected_cmdline.strip():
@@ -3350,20 +3355,11 @@ def _kill_engine_leg(pid: int, *, grace_s: float = 5.0) -> None:
     from nexus.daemon.service_registry import pid_alive
 
     def _signal_group(sig: int) -> bool:
-        if getattr(os, "killpg", None) is None:
-            # Windows: no process group to reach. The owner's job object
-            # (tests._child_process.popen_in_group) already killed the tree
-            # when the owner died; this is the single-process fallback.
-            return safe_killpg(pid, sig)
-        try:
-            pgid = os.getpgid(pid)
-        except ProcessLookupError:
-            return False
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return False
-        return True
+        # The product's primitive: it resolves the group from the live pid, refuses a pgid of 0 or 1 and
+        # the caller's own group, and degrades to the single process where there are no groups (Windows,
+        # where the owner's job object, tests._child_process.popen_in_group, already killed the tree).
+        # A raw killpg(getpgid(pid)) here had none of the guards (nexus-xzorj).
+        return safe_killpg(pid, sig)
 
     if not _signal_group(signal.SIGTERM):
         return

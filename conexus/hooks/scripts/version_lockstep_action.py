@@ -28,9 +28,28 @@ Flow:
           skips plugin convergence, the generated-agent and hooks refresh,
           the repos.json migration, beads PRIME and the engine install, and
           this action is where those run. See :func:`start_background_upgrade`.
-  4. Marker on confirmed success only: re-read ``nx --version`` and write
-     the marker iff it now equals the target. Any failure leaves the
-     marker stale so the next session re-nudges and retries.
+  4. Marker on confirmed work only (nexus-rcngf). The binary must satisfy
+     the target (``nx --version`` re-read) before anything is written. Then
+     the retry sentinel ``UPGRADE_RETRY_MARKER`` goes into the marker BEFORE
+     the ``nx upgrade`` child is spawned: from then on the work is owed, and
+     every failure path (a child that dies, exits nonzero, loses the lock,
+     this action dying) leaves it, so the next session dispatches the action
+     again. This action then WAITS on its own child. Exit 0 writes the target,
+     compare-and-swap: only while the marker still holds the sentinel, since
+     a sibling action or the CLI's own settle may have written a version.
+     It needs nothing from the CLI: a plugin-only fast-lane release ships a
+     CLI without ``settle_upgrade_retry``, and the marker settles all the same.
+     The fast path, the synchronous ``nx upgrade`` fallback and the dev-tree
+     and ref-drift branches are as they were.
+  5. Two guards before a child is spawned. IN FLIGHT: the upgrade lock
+     (``<config>/upgrade-auto.lock``) is probed without blocking
+     (:func:`upgrade_lock_held`, a copy of ``nexus.util.upgrade_auto_lock.
+     auto_lock_held``); a held lock means an upgrade is running, so nothing is
+     spawned and the marker is left as it is. BOUND: after
+     :data:`_MAX_CONSECUTIVE_FAILURES` consecutive failed upgrade exits for one
+     target (counted in ``<marker>.failures``) nothing is spawned either; the
+     action logs the remedy once per dispatch and leaves the sentinel, so
+     ``nx doctor`` still says the work is owed. A new target resets the count.
 
 nexus-konsk (P0, 2026-09-11): a FIFTH entry point, gated by the sentinel
 target ``_REF_DRIFT_SENTINEL`` (``version_lockstep_hook.detect_ref_drift``
@@ -79,6 +98,7 @@ if sys.version_info < (3, 12):
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import IO
 
@@ -524,8 +544,11 @@ def _popen_detached(argv: list[str], env: dict[str, str], stderr: IO[bytes] | in
 UNATTENDED_ENV = "NX_UPGRADE_UNATTENDED"
 
 
-def start_background_upgrade() -> int | None:
-    """Start plain ``nx upgrade`` DETACHED; return its pid, or None when it did not start.
+def start_background_upgrade() -> subprocess.Popen | None:
+    """Start plain ``nx upgrade`` DETACHED; return the child, or None when it did not start.
+
+    The caller waits on the returned ``Popen`` (nexus-rcngf): the action confirms the marker
+    itself when the child exits 0.
 
     nexus-qytet: step 3b used to wait on ``nx upgrade`` under a 120 s timeout.
     An upgrade-time rebuild (about 0.8 GB) does not fit, and the timeout KILLED
@@ -547,9 +570,9 @@ def start_background_upgrade() -> int | None:
     "Started" is checked: the child is waited on for
     :data:`_UPGRADE_START_WAIT_S`, and one that has exited NONZERO by then (it
     rejected the invocation, or crashed on import) is not started. A child that
-    exited 0 inside the window already finished, which counts. None on a missing
-    ``nx``, a Popen ``OSError`` or an immediate nonzero exit: the caller falls
-    back to the bounded synchronous run.
+    exited 0 inside the window already finished, which counts (``wait()`` on it
+    returns 0 at once). None on a missing ``nx``, a Popen ``OSError`` or an
+    immediate nonzero exit: the caller falls back to the bounded synchronous run.
     """
     nx = resolve_nx()
     if nx is None:
@@ -574,12 +597,27 @@ def start_background_upgrade() -> int | None:
         rc = proc.wait(timeout=_UPGRADE_START_WAIT_S)
     except subprocess.TimeoutExpired:
         _last_start_state = "running"
-        return proc.pid  # still running: an upgrade in progress
+        return proc  # still running: an upgrade in progress
     if rc != 0:
         debug(f"detached nx upgrade exited {rc} at once; not started (see {upgrade_log_path()})")
         return None
     _last_start_state = "finished"
-    return proc.pid
+    return proc
+
+
+#: What this action writes into the marker before it spawns the detached ``nx upgrade`` (nexus-rcngf), and what
+#: that child leaves when it loses the upgrade lock (exit 75, nexus-emiky): the binary is current and the rest of
+#: the upgrade is owed. Not a version. Copy of
+#: ``nexus.lockstep_marker.UPGRADE_RETRY_MARKER``; a test keeps the copies equal.
+UPGRADE_RETRY_MARKER = "retry-nx-upgrade"
+
+
+def read_marker() -> str | None:
+    """The marker's text, or None when it is absent, empty or unreadable."""
+    try:
+        return marker_path().read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 def write_marker(version: str) -> None:
@@ -588,6 +626,169 @@ def write_marker(version: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(version, encoding="utf-8")
     debug(f"wrote marker {path} = {version}")
+
+
+def try_write_marker(text: str) -> None:
+    """:func:`write_marker`, but an unwritable marker is logged and not raised: the callers are the
+    retry-sentinel moves (nexus-emiky), which must not stop the upgrade they accompany."""
+    try:
+        write_marker(text)
+    except OSError as exc:
+        debug(f"marker could not be written: {exc}")
+
+
+def settle_marker_if_owed(version: str) -> bool:
+    """Compare-and-swap: write *version* only while the marker still holds
+    :data:`UPGRADE_RETRY_MARKER`. A sibling action, or the CLI's own
+    ``settle_upgrade_retry``, may have written a version since; that stays. True when written."""
+    if read_marker() != UPGRADE_RETRY_MARKER:
+        return False
+    try:
+        write_marker(version)
+    except OSError as exc:
+        debug(f"marker could not be written: {exc}")
+        return False
+    return True
+
+
+#: The upgrade lock's file name in the config dir, and the pause before a first "held" is believed.
+#: COPIES of ``nexus.util.upgrade_auto_lock.LOCK_NAME`` and ``_PROBE_RETRY_DELAY_S`` (this script
+#: imports nothing from ``nexus``); ``TestUpgradeLockProbeCopy`` keeps them, and the probe, equal.
+_UPGRADE_LOCK_NAME = "upgrade-auto.lock"
+_PROBE_RETRY_DELAY_S = 0.05
+
+
+def _lock_is_held_once(path: Path) -> bool:
+    """One non-blocking try at the lock; the lock is dropped again at once.
+
+    Copy of ``acquire_auto_lock`` + ``nexus._locking.lock_fd(blocking=False)``: ``flock`` on POSIX,
+    ``msvcrt.locking`` (byte 0, ``LK_NBLCK``) on Windows, where any failure to lock reads as held.
+    Fails open (False) on anything else, so a lock problem never stops the upgrade."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        return False
+    try:
+        if _IS_WINDOWS:
+            import msvcrt  # noqa: PLC0415 -- Windows only
+
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            try:
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            return False
+        import fcntl  # noqa: PLC0415 -- POSIX only
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _upgrade_lock_path() -> Path:
+    """COPY of ``nexus.util.upgrade_auto_lock.lock_path()`` with no argument (pinned by test)."""
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    return (Path(override) if override else Path.home() / ".config" / "nexus") / _UPGRADE_LOCK_NAME
+
+
+#: How long the action waits for a running upgrade to release the lock before it gives up for this session. The
+#: session's own `nx upgrade --auto` (the upgrade-auto hook runs first) holds the lock while it works, so a single
+#: probe would let the owed work slip a session at a time; a bounded wait lets a short --auto finish first.
+LOCK_WAIT_S: float = 120.0
+_LOCK_POLL_S: float = 2.0
+
+
+def wait_for_upgrade_lock(wait_s: float | None = None, poll_s: float | None = None) -> bool:
+    """True when the upgrade lock is free now or frees within *wait_s* (default :data:`LOCK_WAIT_S`, read at call
+    time); False when a holder kept it throughout."""
+    wait_s = LOCK_WAIT_S if wait_s is None else wait_s
+    poll_s = _LOCK_POLL_S if poll_s is None else poll_s
+    deadline = time.monotonic() + wait_s
+    while upgrade_lock_held():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_s)
+    return True
+
+
+def upgrade_lock_held() -> bool:
+    """True when a live process holds the upgrade lock (``<config>/upgrade-auto.lock``), i.e. an
+    ``nx upgrade`` is in flight. Copy of ``nexus.util.upgrade_auto_lock.auto_lock_held``: a first
+    "held" is tried once more after a short pause, so a concurrent probe's instant grab does not read
+    as a holder. The path is the CLI's own rule (``upgrade_auto_lock._config_dir``): ``NEXUS_CONFIG_DIR``,
+    else ``~/.config/nexus``, and not ``NX_CONFIG_DIR``, which the marker honours but the lock does not."""
+    path = _upgrade_lock_path()
+    for attempt in range(2):
+        if not _lock_is_held_once(path):
+            return False
+        if attempt == 0:
+            time.sleep(_PROBE_RETRY_DELAY_S)
+    return True
+
+
+#: After this many consecutive failed ``nx upgrade`` exits for one target the action stops spawning one.
+_MAX_CONSECUTIVE_FAILURES = 3
+
+
+def failures_path() -> Path:
+    """The failure counter, beside the marker (so ``NX_LOCKSTEP_MARKER`` moves both)."""
+    marker = marker_path()
+    return marker.with_name(marker.name + ".failures")
+
+
+def read_failures(target: str) -> int:
+    """Consecutive failed upgrade exits recorded for *target*; 0 for another target (a new plugin
+    starts again), a missing or unreadable file."""
+    try:
+        parts = failures_path().read_text(encoding="utf-8").split()
+    except OSError:
+        return 0
+    if len(parts) != 2 or parts[0] != target or not parts[1].isdigit():
+        return 0
+    return int(parts[1])
+
+
+def record_failure(target: str) -> int:
+    """Count one more failed upgrade exit for *target*; returns the new count. Best effort."""
+    count = read_failures(target) + 1
+    try:
+        path = failures_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{target} {count}", encoding="utf-8")
+    except OSError as exc:
+        debug(f"failure count could not be written: {exc}")
+    return count
+
+
+def clear_failures() -> None:
+    """A successful upgrade exit ends the run of failures."""
+    try:
+        failures_path().unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        debug(f"failure count could not be cleared: {exc}")
+
+
+#: The remedy logged when the action stops spawning after repeated failures.
+_FAILURES_REMEDY = "run `nx upgrade` interactively to see the error"
 
 
 def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
@@ -664,6 +865,11 @@ def main(argv: list[str]) -> None:
         generation = generation_install_present()
         if not generation and not uv_receipt_present():
             debug("no generation layout and no uv-tool receipt (dev tree); skipping")
+            # nexus-emiky: a retry sentinel left by an earlier managed install must not nudge a dev box at
+            # every session start for work this action will never do. The target is not a version for the
+            # ref-drift dispatch, which has no claim on the marker.
+            if not ref_drift_only and read_marker() == UPGRADE_RETRY_MARKER:
+                try_write_marker(target)
             return
 
         if ref_drift_only:
@@ -697,7 +903,11 @@ def main(argv: list[str]) -> None:
         # behavioral gain, and (test seam note) would consume a second
         # element from callers' scripted installed_versions() sequences.
         before = installed_nx_version()
-        if satisfies(before, target):
+        # nexus-emiky: the retry sentinel says the binary is current and the `nx upgrade` work is owed (an earlier
+        # action wrote it before its child, or a child lost the upgrade lock, exit 75), so the fast path must not
+        # write the version over it and stop.
+        retry_owed = read_marker() == UPGRADE_RETRY_MARKER
+        if satisfies(before, target) and not retry_owed:
             debug(f"nx already satisfies target {target}; writing marker")
             write_marker(target)
             return
@@ -728,8 +938,11 @@ def main(argv: list[str]) -> None:
         # `nx self install` of a first ~0.8 GB generation gets the long
         # budget; the legacy `uv tool upgrade` keeps the short one.
         step_timeout = _SELF_INSTALL_TIMEOUT if generation else _UV_TIMEOUT
-        if not run_cmd(upgrade_cmd, timeout=step_timeout):
-            debug("uv tool upgrade failed; leaving marker stale for retry")
+        if satisfies(before, target):
+            debug("retry owed and the binary is current; starting the upgrade again without the binary step")
+            log_event("lockstep_upgrade_retry", target=target, installed=str(before))
+        elif not run_cmd(upgrade_cmd, timeout=step_timeout):
+            debug("uv tool upgrade failed; leaving marker as it was for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="uv_upgrade_failed")
             return
         # nexus-vyy65: this build runs detached and its output is shown only under NX_HOOK_DEBUG, so a
@@ -738,40 +951,79 @@ def main(argv: list[str]) -> None:
         slim_line = pdf_slim_line(_last_stdout) if generation else None
         if slim_line is not None:
             log_event("lockstep_pdf_slim", target=target, line=slim_line)
-        # 3b. The migrations and any upgrade-time rebuild run DETACHED
-        #     (nexus-qytet): this step must not be the timeout that kills a
-        #     ~0.8 GB rebuild. Step 4 below confirms the BINARY (3a installed
-        #     it); the marker means "binary confirmed", NOT "nx upgrade
-        #     finished". A migration that fails or does not finish is retried
-        #     by the next SessionStart's `nx upgrade --auto`. "Started" is
-        #     checked (the child survived its first seconds); if it cannot be
-        #     started, fall back to the bounded synchronous run, as before.
-        child_pid = start_background_upgrade()
-        if child_pid is not None:
-            log_event(
-                "lockstep_upgrade_background", target=target, state=_last_start_state or "started",
-                pid=str(child_pid), log=str(upgrade_log_path()),
-            )
-        elif not run_cmd(["nx", "upgrade"], timeout=_NX_UPGRADE_TIMEOUT):
-            debug("nx upgrade failed; leaving marker stale for retry")
-            log_event("lockstep_upgrade_result", target=target, outcome="nx_upgrade_failed")
-            return
-
-        # 4. Marker only on confirmed lockstep (installed >= target).
+        # 3b. Marker on confirmed work only (nexus-rcngf). The binary is
+        #     re-read first: nothing is spawned, and no sentinel written, for a
+        #     binary still below the target (a failed step 3a never reaches
+        #     the migrations; the same holds when it "succeeded" and did not
+        #     move the version).
         after = installed_nx_version()
-        if satisfies(after, target):
-            write_marker(target)
-            log_event(
-                "lockstep_upgrade_result", target=target, outcome="success",
-                installed=str(after),
-                upgrade="detached" if child_pid is not None else "finished",
-            )
-        else:
-            debug("version still below target after upgrade; leaving marker stale")
+        if not satisfies(after, target):
+            debug("version still below target after upgrade; leaving marker as it was")
             log_event(
                 "lockstep_upgrade_result", target=target,
                 outcome="version_still_mismatched", installed=str(after),
             )
+            return
+        # The sentinel goes in BEFORE anything is spawned: from here the
+        # `nx upgrade` work is owed, and every failure path (a child that
+        # dies, exits nonzero or loses the lock, an exception, this action
+        # being killed) leaves it for the next session. In retry mode it is
+        # already there.
+        if not retry_owed:
+            try_write_marker(UPGRADE_RETRY_MARKER)
+        # In flight: a live holder of the upgrade lock is an upgrade running
+        # now. Spawning another would wait up to PLAIN_WAIT_S for the lock and
+        # then run the whole upgrade again. Wait up to LOCK_WAIT_S for it (the
+        # session's own --auto usually finishes in that time); if it is still
+        # held, leave the marker as it is for the next session.
+        if not wait_for_upgrade_lock():
+            log_event("lockstep_upgrade_in_flight", target=target, installed=str(after))
+            return
+        # Bound: a failure that repeats on every attempt is not retried for
+        # ever. The sentinel stays, so `nx doctor` still says the work is owed.
+        failures = read_failures(target)
+        if failures >= _MAX_CONSECUTIVE_FAILURES:
+            log_event(
+                "lockstep_upgrade_gave_up", target=target, failures=str(failures),
+                remedy=_FAILURES_REMEDY, log=str(upgrade_log_path()),
+            )
+            return
+        # 3c. The migrations and any upgrade-time rebuild run DETACHED
+        #     (nexus-qytet): this step must not be the timeout that kills a
+        #     ~0.8 GB rebuild. "Started" is checked (the child survived its
+        #     first seconds); if it cannot be started, fall back to the
+        #     bounded synchronous run, as before. The action then waits on its
+        #     own child: exit 0 settles the sentinel to the target (compare-
+        #     and-swap), anything else leaves it and counts a failure.
+        child = start_background_upgrade()
+        if child is not None:
+            log_event(
+                "lockstep_upgrade_background", target=target, state=_last_start_state or "started",
+                pid=str(child.pid), log=str(upgrade_log_path()),
+            )
+            rc = child.wait()
+            succeeded, exit_text = rc == 0, str(rc)
+        else:
+            succeeded, exit_text = run_cmd(["nx", "upgrade"], timeout=_NX_UPGRADE_TIMEOUT), "fallback"
+        if not succeeded:
+            debug("nx upgrade failed; the sentinel stays for retry")
+            count = record_failure(target)
+            log_event(
+                "lockstep_upgrade_result", target=target, outcome="nx_upgrade_failed",
+                failures=str(count), exit=exit_text,
+            )
+            return
+        clear_failures()
+        if child is not None:
+            settled = settle_marker_if_owed(target)
+        else:
+            write_marker(target)
+            settled = True
+        log_event(
+            "lockstep_upgrade_result", target=target, outcome="success",
+            installed=str(after), upgrade="detached" if child is not None else "finished",
+            marker="version" if settled else "kept",
+        )
     except Exception as exc:  # noqa: BLE001 - detached action must never raise
         debug(f"swallowed unexpected error: {exc}")
 

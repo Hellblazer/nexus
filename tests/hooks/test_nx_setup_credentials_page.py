@@ -50,6 +50,7 @@ from tests.hooks.test_nx_setup import (
     _in_process,
     _load_module,
     _retry,
+    _run_identity,
     _terminate,
     _wait_for,
 )
@@ -589,7 +590,7 @@ def test_a_killed_cloud_run_leaves_an_opener_that_the_next_start_deletes(tmp_pat
     opener, _address = _page(box)
     assert opener.exists()
     pid = box.status()["pid"]
-    _terminate(pid)
+    _terminate(pid, *_run_identity(box))
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
     assert opener.exists(), "a killed run cannot clean up: that is the case this covers"
     _wait_for_the_build_child_to_end(box)
@@ -638,7 +639,7 @@ def _reap_orphaned_child(box: Box) -> None:
         pid = int((box.setup / "lock" / "child").read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return
-    _terminate(pid)
+    _terminate(pid, str(box.root))  # every fake program this box runs lives under its tmp root
     _wait_for(lambda: not _alive(pid), 15, "the orphaned child to end")
 
 
@@ -927,7 +928,7 @@ def test_a_run_killed_after_acceptance_loses_the_pair_and_the_next_cloud_run_ope
     _request(address, "POST", fields={"service_url": svc.url, "service_token": good})
     _wait_for(lambda: _credentials(box) == _SIX[3], 20, "the acceptance")
     pid = box.status()["pid"]
-    _terminate(pid)
+    _terminate(pid, *_run_identity(box))
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
     for text in _tree_text(box.config).values():
         assert good not in text, "an accepted pair is not written to disk to survive a kill"
@@ -944,7 +945,7 @@ def test_a_run_killed_after_acceptance_loses_the_pair_and_the_next_cloud_run_ope
     status = box.status_file() or {}
     assert status["credentials"] == _SIX[0] and status["state"] == "running"
     assert [c for c in box.calls("nx") if c["args"][:1] == ["config"]] == [], "nothing was saved"
-    _terminate(box.status()["pid"])
+    _terminate(box.status()["pid"], *_run_identity(box))
 
 
 # -- the run: cloud and local ---------------------------------------------------------------------
@@ -1765,7 +1766,7 @@ def test_a_run_killed_after_acceptance_reads_as_interrupted_with_the_credentials
     _request(address, "POST", fields={"service_url": svc.url, "service_token": good, "tenant": ""})
     _wait_for(lambda: _credentials(box) == _SIX[3], 20, "the acceptance")
     pid = box.status()["pid"]
-    _terminate(pid)
+    _terminate(pid, *_run_identity(box))
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
     _wait_for_the_build_child_to_end(box)
     _age_lock(box.setup)
@@ -1783,7 +1784,7 @@ def test_the_status_of_a_run_killed_before_acceptance_is_unchanged(tmp_path: Pat
     _page(box)
     _wait_for_the_waiting_status(box)
     pid = box.status()["pid"]
-    _terminate(pid)
+    _terminate(pid, *_run_identity(box))
     _wait_for(lambda: not _alive(pid), 15, "the run to die")
     _wait_for_the_build_child_to_end(box)
     _age_lock(box.setup)
@@ -1837,7 +1838,7 @@ def test_saved_credentials_do_not_skip_the_page_outside_a_resume(tmp_path: Path,
     _prior_status(box, prior, **extra)
     assert box.start("cloud")["started"] is True
     _page(box)
-    _terminate(box.status()["pid"])
+    _terminate(box.status()["pid"], *_run_identity(box))
 
 
 def test_a_failed_nx_doctor_in_cloud_mode_names_nx_config_init_and_promises_no_new_page(tmp_path: Path) -> None:
@@ -1866,7 +1867,7 @@ def test_a_saved_token_with_no_address_opens_the_page(tmp_path: Path) -> None:
     _prior_status(box, "failed", failed_step="service", cloud_saved=True)
     assert box.start("cloud")["started"] is True
     _page(box)
-    _terminate(box.status()["pid"])
+    _terminate(box.status()["pid"], *_run_identity(box))
 
 
 def test_saving_a_mint_credential_first_removes_a_saved_service_token(tmp_path: Path, service: Callable[..., FakeService]) -> None:
@@ -1923,7 +1924,7 @@ def test_a_saved_address_with_no_token_still_opens_the_page(tmp_path: Path) -> N
     (box.config / "config.yml").write_text("credentials:\n  service_url: https://svc.example\n", encoding="utf-8")
     assert box.start("cloud")["started"] is True
     _page(box)
-    _terminate(box.status()["pid"])
+    _terminate(box.status()["pid"], *_run_identity(box))
 
 
 # -- the words the model and the user are given -------------------------------------------------------------

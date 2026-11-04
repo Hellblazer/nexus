@@ -104,7 +104,7 @@ def _registered_conexus_tools() -> list[str]:
     """Full ``mcp__plugin_conexus_<server>__<tool>`` names for every tool the
     conexus MCP servers register.
 
-    Enumerates the live FastMCP tool registries so the auto-approve allow-list
+    Enumerates the live MCPServer tool registries so the auto-approve allow-list
     is validated against what the servers ACTUALLY expose. This catches drift
     where a new tool ships without a hook entry and therefore prompts the user
     (the operator_filter/check/verify/groupby/aggregate gap, 2026-05-27).
@@ -119,7 +119,7 @@ def _registered_conexus_tools() -> list[str]:
         ("nexus.mcp.catalog", "nexus-catalog"),
     ):
         mcp = importlib.import_module(module).mcp
-        for tool in mcp._tool_manager._tools:  # FastMCP registry
+        for tool in mcp._tool_manager._tools:  # MCPServer registry
             names.append(f"mcp__plugin_conexus_{server}__{tool}")
     names.append("mcp__plugin_conexus_sequential-thinking__sequentialthinking")
     return sorted(n for n in names if n not in _MANUAL_APPROVAL_REQUIRED)

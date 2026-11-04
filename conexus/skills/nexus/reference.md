@@ -170,7 +170,7 @@ Store content in the T3 permanent knowledge store.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `content` | str | required | Text content to store |
-| `collection` | str | required | The bare subject the note belongs to (`distributed-systems`); the placeholders `default`/`knowledge`/`notes`/`tmp`/`test` are refused (nexus-0fw11; docs/collections.md Rule 1) |
+| `collection` | str | required | The bare subject the note belongs to (`distributed-systems`); the placeholders `default`/`knowledge`/`notes`/`tmp`/`test` are refused (nexus-0fw11; Rule 1 of https://github.com/Hellblazer/nexus/blob/main/docs/collections.md) |
 | `title` | str | `""` | Document title (recommended for dedup) |
 | `tags` | str | `""` | Comma-separated tags |
 | `ttl` | str | `"permanent"` | TTL: `Nd`, `Nw`, or `"permanent"` |

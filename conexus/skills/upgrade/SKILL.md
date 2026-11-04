@@ -171,7 +171,8 @@ clients), clear the stranded banner
 (`nx stranded ack`, or move the pre-PG files it names aside), re-index from
 source, `nx store import`, and `nx catalog import` LAST (links resolve by
 `source_uri` against documents already there). The full procedure is
-`docs/migration-runbook.md` § Getting that data into the managed cloud; surface
+the migration runbook (https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md), § Getting that data into the managed cloud. With no web access the
+order above is the rule: switch the config, re-index, `nx store import`, `nx catalog import` last. Surface
 the choices to the user rather than making them.
 
 ## Managed service

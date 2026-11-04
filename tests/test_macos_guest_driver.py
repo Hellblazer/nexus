@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from tests import _suite_lease
-from tests._child_process import kill_group, signal_group, terminal_signals_default
+from tests._child_process import kill_group, kill_if_identity, pid_is, signal_group, terminal_signals_default
 
 REPO: Path = Path(__file__).resolve().parent.parent
 GUEST_DIR: Path = REPO / "tests" / "e2e" / "macos-guest"
@@ -393,17 +393,21 @@ class Harness:
 
     def cleanup(self) -> None:
         """Nothing a test started may outlive it: deadmen sleep for the lifetime cap, a fake tart run loops."""
-        pidfiles = list((self.base / "deadman").glob("*.pid")) + list((self.root / "vms").glob("*.runpid"))
-        for pf in pidfiles:
+        # A pid file outlives its process, so the number may be anyone's by now: it is signalled (and its
+        # children with it) only while its live command line is still the one this test's script runs,
+        # the deadman a subshell of this test's own copy of host.sh (its path is under the test's tmp dir) and
+        # the run the fake tart (nexus-xzorj).
+        pidfiles = [(pf, str(self.host)) for pf in (self.base / "deadman").glob("*.pid")]
+        pidfiles += [(pf, str(self.root / "tart")) for pf in (self.root / "vms").glob("*.runpid")]
+        for pf, identity in pidfiles:
             try:
                 pid = int(pf.read_text())
             except (OSError, ValueError):
                 continue
+            if not pid_is(pid, identity):
+                continue
             subprocess.run(["pkill", "-KILL", "-P", str(pid)], check=False)
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            kill_if_identity(pid, identity)
         for proc in self.procs:
             if proc.poll() is None:
                 kill_group(proc)  # every process started here has a session of its own

@@ -4628,7 +4628,9 @@ class TestRestartStaleEngineLine:
                 patch("nexus.upgrade_finish.unload_stale_t2_launchagent", return_value=[]), \
                 patch("nexus.upgrade_finish.converge_service_autostart_unit", return_value=[]):
             result = CliRunner().invoke(daemon_mod.daemon_group, ["restart-stale"])
-        assert result.exit_code == 0, result.output
+        # nexus-n8gpr: a running service off the release's engine (another version, or no version) exits 1.
+        want = 1 if running.up and running.version != REQUIRED_ENGINE_VERSION and applicable else 0
+        assert result.exit_code == want, result.output
         return result.output, probe
 
     def test_running_engine_at_required_version_is_converged(self, tmp_path, monkeypatch):

@@ -315,7 +315,7 @@ class TestReadPathsNeverRetireAPlanForItsDeclaration:
         assert lib.disabled == [99], "only the genuinely non-executable row is retired"
 
 
-def _plan_save(plan: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+def _plan_save(plan: dict[str, Any], tags: str = "") -> tuple[str, list[dict[str, Any]]]:
     """Run the plan_save MCP tool against a recording library; returns (reply, save_plan kwargs per call)."""
     from unittest.mock import MagicMock
 
@@ -337,7 +337,7 @@ def _plan_save(plan: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         patch("nexus.mcp.core._t2_index_write", fake_write),
         patch("nexus.mcp.core._record_tier_write"),
     ):
-        return plan_save(query="q", plan_json=json.dumps(plan), verb="research"), saved
+        return plan_save(query="q", plan_json=json.dumps(plan), verb="research", tags=tags), saved
 
 
 class TestPlanSaveNeverStoresADeclaration:
@@ -373,6 +373,49 @@ class TestPlanSaveNeverStoresADeclaration:
         assert strip_declaration({"steps": [], ANSWER_KIND_KEY: 1}) == ({"steps": []}, True)
         plan = {"steps": []}
         assert strip_declaration(plan) == (plan, False)
+
+
+class TestPlanSaveNeverStoresProvenanceTags:
+    """nexus-3ihve: ``grown`` and ``builtin-template`` are provenance a writer earns (the grow site, the seed
+    loader), never one a caller of ``plan_save`` can claim. Other tags pass through untouched."""
+
+    _STEPS = [{"tool": "search", "args": {"query": "$intent"}}]
+
+    @pytest.mark.parametrize(
+        ("given", "stored"),
+        [
+            pytest.param("grown", "", id="grown"),
+            pytest.param("builtin-template", "", id="builtin-template"),
+            pytest.param("grown,builtin-template", "", id="both"),
+            pytest.param("rdr-097, grown ,research", "rdr-097,research", id="spaced-among-others"),
+            pytest.param("ad-hoc,grown", "ad-hoc", id="adhoc-kept-grown-dropped"),
+            pytest.param("research,notes", "research,notes", id="no-reserved-tag-is-stored-as-given"),
+            pytest.param("", "", id="empty"),
+        ],
+    )
+    def test_reserved_tags_are_not_stored(self, given: str, stored: str) -> None:
+        out, saved = _plan_save({"steps": self._STEPS}, tags=given)
+        assert out.startswith("Saved plan: [7]"), out
+        assert saved[0]["tags"] == stored
+
+    def test_the_reply_says_what_was_removed(self) -> None:
+        out, _ = _plan_save({"steps": self._STEPS}, tags="grown,builtin-template,x")
+        assert "reserved tags removed" in out and "grown" in out and "builtin-template" in out
+        quiet, _ = _plan_save({"steps": self._STEPS}, tags="x")
+        assert quiet == "Saved plan: [7] q"
+
+    def test_a_tag_only_grown_claim_does_not_serve_a_lookup_after_the_save(self) -> None:
+        from nexus.plans import eligibility as el
+
+        _, saved = _plan_save({"steps": self._STEPS}, tags="grown")
+        standing = el.classify_plan(saved[0]["tags"], saved[0]["plan_json"])
+        assert standing.provenance == "unattested"
+        assert not el.eligibility(PlanAnswerKind.LOOKUP, standing.kind, standing.provenance).eligible
+
+    def test_the_tool_description_names_the_reserved_tags(self) -> None:
+        from nexus.mcp.core import plan_save
+
+        assert "grown" in plan_save.__doc__ and "builtin-template" in plan_save.__doc__
 
 
 class TestTemplatesDeclareOnlyAtTemplateLevel:

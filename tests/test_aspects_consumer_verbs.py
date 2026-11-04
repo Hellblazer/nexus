@@ -28,11 +28,9 @@ from nexus.commands.aspects import aspects_group
 from tests._catalog_fixture_ops import register_real_doc_id
 
 
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path, so it says so: the unset
-    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+# The aspect queue TABLE producer is retired (nexus-bpikw step A). A test that needs
+# legacy table rows writes them inside ``tests._aspect_table_producer.table_producer()``
+# (see ``TestRequeueFailed._seed_failed``); the verb under test runs the real producer.
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
@@ -224,17 +222,34 @@ class TestRequeueFailed:
 
     def _seed_failed(self, db_path: Path) -> None:
         from nexus.db.t2 import T2Database
-        with T2Database(db_path) as db:
+        from tests._aspect_table_producer import table_producer
+        from tests._catalog_fixture_ops import register_real_doc_id
+
+        # The table producer is retired (nexus-bpikw step A): the seam writes the legacy
+        # rows. One document per row, since a task's identity is its doc_id.
+        with T2Database(db_path) as db, table_producer():
             q = db.aspect_queue
             for coll, sp in [("knowledge__a", "x.pdf"), ("knowledge__a", "y.pdf"),
                              ("knowledge__b", "z.pdf")]:
-                q.enqueue(coll, sp, content="c", doc_id=_shared_doc_id())
+                q.enqueue(coll, sp, content="c", doc_id=register_real_doc_id())
                 # Claim first (pending -> in_progress) so mark_failed mirrors
                 # the worker's real state transitions on the engine.
                 claimed = q.claim_next()
                 assert claimed is not None and claimed.source_path == sp
                 q.mark_failed(coll, sp, "boom")
             q.enqueue("knowledge__a", "ok.pdf", doc_id=_shared_doc_id())  # stays pending
+
+    def _task_paths(self, db_path: Path) -> list[str]:
+        """The source paths of the ``aspects`` tuple tasks: where a re-enqueued row goes."""
+        import json
+
+        from nexus.db.t2 import T2Database
+
+        with T2Database(db_path) as db:
+            return sorted(
+                json.loads(t.body)["source_path"]
+                for t in db.tuples.rd("aspects", {"queue": "aspects"}, n=300)
+            )
 
     def _status(self, db_path: Path, source_path: str) -> str:
         from nexus.db.t2 import T2Database
@@ -259,8 +274,12 @@ class TestRequeueFailed:
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
         assert "Re-enqueued 3 failed row(s)" in res.output
+        # A re-enqueued row becomes a tuple task and its failed table row is deleted
+        # (nexus-5r2sc.3.10); the pending row beside them is not touched.
         for sp in ("x.pdf", "y.pdf", "z.pdf"):
-            assert self._status(_queue_t2, sp) == "pending"
+            assert self._status(_queue_t2, sp) == "<absent>"
+        assert self._task_paths(_queue_t2) == ["x.pdf", "y.pdf", "z.pdf"]
+        assert self._status(_queue_t2, "ok.pdf") == "pending"
 
     def test_collection_scope(self, _queue_t2: Path) -> None:
         self._seed_failed(_queue_t2)
@@ -269,7 +288,8 @@ class TestRequeueFailed:
         )
         assert res.exit_code == 0, res.output
         assert "Re-enqueued 2 failed row(s) in knowledge__a" in res.output
-        assert self._status(_queue_t2, "x.pdf") == "pending"   # knowledge__a
+        assert self._status(_queue_t2, "x.pdf") == "<absent>"  # knowledge__a: now a task
+        assert self._task_paths(_queue_t2) == ["x.pdf", "y.pdf"]
         assert self._status(_queue_t2, "z.pdf") == "failed"    # knowledge__b untouched
 
     def test_limit_caps_requeue_count(self, _queue_t2: Path) -> None:
@@ -277,10 +297,11 @@ class TestRequeueFailed:
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "2"])
         assert res.exit_code == 0, res.output
         assert "Re-enqueued 2 failed row(s)" in res.output
-        # Exactly 2 of the 3 flip to pending (oldest-enqueued first); 1 stays failed.
+        # Exactly 2 of the 3 become tasks (oldest-enqueued first); 1 stays failed.
         statuses = [self._status(_queue_t2, sp) for sp in ("x.pdf", "y.pdf", "z.pdf")]
-        assert statuses.count("pending") == 2
+        assert statuses.count("<absent>") == 2
         assert statuses.count("failed") == 1
+        assert len(self._task_paths(_queue_t2)) == 2
 
     def test_limit_rejects_nonpositive(self, _queue_t2: Path) -> None:
         self._seed_failed(_queue_t2)
@@ -292,7 +313,10 @@ class TestRequeueFailed:
     def test_no_failed_rows_message(self, _queue_t2: Path) -> None:
         from nexus.db.t2 import T2Database
         with T2Database(_queue_t2) as db:
-            db.aspect_queue.enqueue("knowledge__a", "only-pending.pdf", doc_id=_shared_doc_id())
+            from tests._aspect_table_producer import table_producer
+
+            with table_producer():
+                db.aspect_queue.enqueue("knowledge__a", "only-pending.pdf", doc_id=_shared_doc_id())
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
         assert "no failed rows" in res.output

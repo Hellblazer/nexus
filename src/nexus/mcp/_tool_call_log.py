@@ -34,10 +34,13 @@ process), then greps ``mcp_tool_call pid=N`` after that start line's timestamp
 ``meta_keys_truncated`` set when anything was cut) so a hostile client cannot
 grow a line.
 
-HOOK. FastMCP binds its ``call_tool`` handler into the low-level server's
-``request_handlers[CallToolRequest]`` during ``FastMCP.__init__``, so the wrap
-happens on the constructed server, the same private-internals coupling as
-``_stale_host.install_stale_host_hook`` (verified against mcp 1.27.1). It
+HOOK. A ``Server.middleware`` entry (mcp 2.x; the 1.x ``request_handlers``
+wrap is gone with the decorator registry, nexus-sgmyl). The chain runs ahead of
+every inbound message, so the entry acts only on ``ctx.method == "tools/call"``
+and passes everything else straight through. Middleware runs BEFORE params
+validation, so the keys are read from the raw wire params: ``name`` and the
+keys of ``_meta``, never a value. The middleware list is documented as
+provisional by the SDK ("may change in a 2.x minor release"), so the install
 degrades to a status string, never an exception: an unverifiable SDK shape must
 not break startup (nexus-vc5yb / nexus-3hc9z).
 """
@@ -45,6 +48,7 @@ not break startup (nexus-vc5yb / nexus-3hc9z).
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -72,26 +76,26 @@ def _reset_state() -> None:
     _cwd_healed = False
 
 
-def _meta_keys(req: Any) -> list[str]:
+def _meta_keys(params: Any) -> list[str]:
     """Sorted keys of the request's ``_meta``, ``[]`` when it has none.
 
-    ``RequestParams.Meta`` declares ``progressToken`` and allows extras, so the
-    keys are the declared fields that were set plus every extra.
+    Read off the raw wire params, so these are exactly the keys the client sent:
+    the declared ``progressToken`` when present plus every extra.
     """
-    meta = req.params.meta
-    if meta is None:
+    if not isinstance(params, Mapping):
         return []
-    keys = set(meta.model_fields_set)
-    keys.update(meta.model_extra or {})
-    return sorted(str(k) for k in keys)
+    meta = params.get("_meta")
+    if not isinstance(meta, Mapping):
+        return []
+    return sorted(str(k) for k in meta)
 
 
-def _emit(req: Any) -> None:
+def _emit(params: Any) -> None:
     global _limit_noted
     # Fetched per call, not at import: this module loads before
     # configure_logging runs, and a logger bound earlier would miss the config.
     log = structlog.get_logger(__name__)
-    all_keys = _meta_keys(req)
+    all_keys = _meta_keys(params)
     kept = all_keys[:_MAX_KEYS]
     keys = [k[:_MAX_KEY_LEN] for k in kept]
     truncated = len(all_keys) > _MAX_KEYS or any(len(k) > _MAX_KEY_LEN for k in kept)
@@ -109,7 +113,8 @@ def _emit(req: Any) -> None:
     extra: dict[str, Any] = (
         {"meta_keys_truncated": True, "meta_keys_total": len(all_keys)} if truncated else {}
     )
-    emit("mcp_tool_call", tool=req.params.name, meta_keys=keys, pid=os.getpid(), **extra)
+    name = params.get("name") if isinstance(params, Mapping) else None
+    emit("mcp_tool_call", tool=name, meta_keys=keys, pid=os.getpid(), **extra)
 
 
 _cwd_healed = False
@@ -130,33 +135,29 @@ def _heal_cwd() -> None:
 
 
 def install_tool_call_log(server: object) -> str:
-    """Wrap the server's ``CallToolRequest`` handler with the per-call event.
+    """Add the per-call event to the server's middleware chain.
 
     Returns a short status for the caller to log; never raises.
     """
     try:
-        from mcp import types  # noqa: PLC0415 — SDK loaded only when patching
-
-        registry = server._mcp_server.request_handlers  # type: ignore[attr-defined]
-        original = registry.get(types.CallToolRequest)
-        if original is None:
-            return "unavailable: no CallToolRequest handler registered"
-        if getattr(original, "_nx_tool_call_log", False):
+        middleware = server.middleware  # type: ignore[attr-defined]
+        if any(getattr(m, "_nx_tool_call_log", False) for m in middleware):
             return "already applied"
 
-        async def _logged(req: Any) -> Any:
-            try:
-                _emit(req)
-            except Exception:  # noqa: BLE001 — observability must never break a tool call
-                pass
-            try:
-                _heal_cwd()
-            except Exception:  # noqa: BLE001 — a failed chdir must never break a tool call
-                pass
-            return await original(req)
+        async def _logged(ctx: Any, call_next: Any) -> Any:
+            if ctx.method == "tools/call":
+                try:
+                    _emit(ctx.params)
+                except Exception:  # noqa: BLE001 — observability must never break a tool call
+                    pass
+                try:
+                    _heal_cwd()
+                except Exception:  # noqa: BLE001 — a failed chdir must never break a tool call
+                    pass
+            return await call_next(ctx)
 
         _logged._nx_tool_call_log = True  # type: ignore[attr-defined]
-        registry[types.CallToolRequest] = _logged
+        middleware.append(_logged)
         return "applied"
     except Exception as exc:  # noqa: BLE001 — boundary: an unverifiable SDK shape must not kill startup
         return f"unavailable: {type(exc).__name__}: {exc}"

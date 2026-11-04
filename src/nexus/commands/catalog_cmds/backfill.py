@@ -323,37 +323,90 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
     "--json", "as_json", is_flag=True,
     help="Emit JSON instead of the human-readable report.",
 )
-def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
+@click.option(
+    "--batch-size", type=click.IntRange(min=1), default=50, show_default=True,
+    help="Documents examined per round: each round reads every collection it needs once, then writes once.",
+)
+@click.option(
+    "--pause-ms", type=click.IntRange(min=0), default=0, show_default=True,
+    help="Sleep this many milliseconds after each round's reads and again after its write (0: no pause).",
+)
+@click.option(
+    "--max-rps", type=click.FloatRange(min=0, min_open=True), default=None,
+    help="Hard limit on HTTP requests a second, enforced on every request the command sends: listing pages, "
+         "manifest, owner and store-get pages, writes, retries and fallbacks (default: no limit). "
+         "THE guard for a shared or cloud service.",
+)
+@click.option(
+    "--stop-after-failed-rounds", type=click.IntRange(min=0), default=3, show_default=True,
+    help="Stop cleanly (resumable, exit 1) after this many consecutive rounds with a failed lookup or write "
+         "(0: never).",
+)
+@click.option(
+    "--start-after", metavar="TUMBLER", default="",
+    help="Resume: skip the listing up to and including this tumbler (the interrupt message prints the exact "
+         "command). The listing is in the catalog's own order, so the skip is by position, not by comparing tumblers.",
+)
+def backfill_meta_cmd(
+    apply: bool, as_json: bool, batch_size: int, pause_ms: int, max_rps: float | None,
+    stop_after_failed_rounds: int, start_after: str,
+) -> None:
     """Stamp the new catalog meta keys of pre-existing documents from their chunk rows (nexus-6pfgb.10).
 
     One-time and fill-only: a key the entry already holds (a retraction value included) and a non-empty
-    catalog column are never touched, and a key is sent only with a real value. Notes (``knowledge``)
-    take ``put_at``, ``ttl_days``, ``tags`` (as an array), ``category`` and ``source_agent`` from the row
-    the note itself wrote, or ``tags``/``category``/``source_agent``/``put_at`` from a row of a chunk it
-    solely owns. Indexed documents take ``source_format`` (``pdf`` / ``markdown`` / ``code`` / ``prose``,
-    nexus-6pfgb.23) as the engine derives it from their ``content_type`` and ``file_path``, and ``tags`` and
-    ``category`` (nexus-9cstf) as the register-time rules give them for the same two columns (type ``paper``
-    at a ``.pdf`` path is ``nx index pdf``, ``pdf`` the repo PDF path), all with no chunk row read; a pair
-    the rule derives nothing for is residue (``no_rule``, ``no_file_path``, ``no_extension``,
-    ``not_pdf_path`` for a ``paper`` at another path, or ``ambiguous_indexer`` for the tags of a prose or rdr
-    file that is not markdown and for both keys of one at a ``.pdf`` path), and ``extraction_method``, ``quality_gate_overridden`` (only where True),
-    ``extraction_source``, ``frecency_score`` (with its computed_at) and an empty ``author`` from chunks
-    they solely own, when those rows agree and are no later than the document. A document whose chunks
-    are all shared is skipped and counted. A legacy comma string under ``tags`` is left for the array rung.
+    catalog column are never touched, and a key is sent only with a real value. Notes (Sam's option B)
+    take ``ttl_days`` and ``put_at`` only from a row they wrote themselves, and ``tags``, ``category`` and
+    ``source_agent`` from that row or, failing one, from a piece they solely own. Indexed documents take
+    ``extraction_method``, ``quality_gate_overridden``, ``extraction_source``, ``frecency_score`` and the
+    catalog ``author`` from chunks they SOLELY own (a chunk two documents share keeps its last writer's
+    value, so a document whose chunks are all shared is skipped and counted), and the derived keys
+    ``source_format``, ``tags`` and ``category`` from the entry itself.
 
     The dry run (default) prints per key how many documents were examined, already held it, were skipped
     as shared, would be stamped, or are residue (with the reasons under ``--json``). A run that examines
-    no document exits non-zero.
+    no document exits non-zero (a resume past the last document is the one exception: it says so, exits 0).
+
+    LOAD ON A SHARED SERVICE. Every pass, dry run or apply, lists the whole catalog and reads the chunk rows
+    of most documents again: the keys are filled only where absent, so a dry run and the apply that follows
+    each cost the full read. A round of ``--batch-size`` documents sends about seven requests (a manifest
+    page, an owner page, a store-get per collection and 300 chunks, then the write). ``--max-rps`` is the
+    guard: it holds EVERY request to that rate, retries and fallbacks included; ``--pause-ms`` only spaces
+    the rounds. For a cloud catalog start with ``--max-rps 2``. Keep the catalog's other writers (indexers,
+    hooks, ``nx store put``) quiet for the whole of every pass, not only the apply: the write merges a
+    key into ``meta`` and overwrites one a writer set after the listing was taken.
+
+    One progress line per round (about 300 lines for a long run) goes to stderr, so ``--json`` on stdout is
+    unchanged: requests sent, the rate since the start and over the last 10 rounds, failed lookups and
+    writes. Ctrl-C or SIGTERM stops after the round it is in, prints the report of the finished rounds and
+    the exact command to resume (``--start-after``); the verb is fill-only, so running it again is safe. A
+    second signal aborts the round at once: its counts are lost and its write may already have landed.
+    ``--stop-after-failed-rounds`` stops the same way after that many failing rounds in a row.
+
+    Exit codes: 0 finished; 1 a write failed (even when also interrupted) or the run stopped on failed
+    rounds; 130 stopped by Ctrl-C; 143 stopped by SIGTERM; 2 a usage error.
     """
-    from nexus.catalog.meta_backfill import VacuousRunError, backfill_meta  # noqa: PLC0415 — command-local
+    import signal  # noqa: PLC0415 — command-local
+
+    from nexus.catalog.meta_backfill import (  # noqa: PLC0415 — command-local
+        STOP_FAILED_ROUNDS, ResumePointError, VacuousRunError, backfill_meta, stop_after_current_batch,
+    )
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.db import make_t3  # noqa: PLC0415 — command-local
+    from nexus.db import request_gate  # noqa: PLC0415 — command-local
 
-    reader = _cat_cmd._get_catalog()
-    writer = _cat_cmd._get_catalog_writer() if apply else None
+    gate = request_gate.RequestGate(max_rps)
+    writer = None
     try:
-        report = backfill_meta(reader, make_t3(), writer, apply=apply)
-    except VacuousRunError as exc:
+        with request_gate.paced(gate), stop_after_current_batch() as stop:
+            reader = _cat_cmd._get_catalog()
+            writer = _cat_cmd._get_catalog_writer() if apply else None
+            report = backfill_meta(
+                reader, make_t3(), writer, apply=apply, batch=batch_size, pause_ms=pause_ms,
+                progress=lambda p: click.echo(p.line(), err=True), should_stop=stop,
+                requests=lambda: gate.count, stop_after_failed_rounds=stop_after_failed_rounds,
+                start_after=start_after,
+            )
+    except (VacuousRunError, ResumePointError) as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         if writer is not None:
@@ -368,10 +421,15 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
             f"{report.documents_complete} complete, {report.documents_all_shared} with only shared chunks, "
             f"{verb.lower()} {report.documents_to_stamp}."
         )
+        click.echo(
+            f"  note.* keys cover the {report.documents_notes} note(s); "
+            f"doc.* keys cover the {report.documents_examined - report.documents_notes} non-note document(s)."
+        )
         for name, st in sorted(report.keys.items()):
+            why = f" ({', '.join(f'{r} {n}' for r, n in sorted(st.residue.items()))})" if st.residue else ""
             click.echo(
                 f"  {name}: examined {st.examined}, held {st.present}, skipped (shared) {st.shared}, "
-                f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}"
+                f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}{why}"
             )
         if report.tags_legacy_strings_left:
             click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung (nexus-6pfgb.38).")
@@ -381,6 +439,41 @@ def backfill_meta_cmd(apply: bool, as_json: bool) -> None:
             click.echo(f"{verb} {report.documents_written}/{report.documents_to_stamp} documents.")
         else:
             click.echo("Dry run: nothing written. Re-run with --apply.")
+    if start_after and not report.batches_total:
+        click.echo(f"Nothing after {start_after}: it is the last document of the listing, so an earlier pass reached the end.", err=True)
+    if report.interrupted:
+        resume = ["nx catalog backfill-meta"] + (["--apply"] if apply else []) + (["--json"] if as_json else []) + [
+            f"--batch-size {batch_size}", f"--pause-ms {pause_ms}",
+            *([f"--max-rps {max_rps:g}"] if max_rps is not None else []),
+            f"--stop-after-failed-rounds {stop_after_failed_rounds}",
+            *([f"--start-after {report.resume_after}"] if report.resume_after else []),
+        ]
+        if report.stop_reason == STOP_FAILED_ROUNDS:
+            click.echo(
+                f"Stopped after {report.batches_done} of {report.batches_total} batches: {stop_after_failed_rounds} rounds in a row "
+                f"had a failed lookup or write ({report.lookups_failed} lookups failed, {report.writes_failed} writes failed in all). "
+                "Check the service, then resume (the verb is fill-only).",
+                err=True,
+            )
+        else:
+            name = signal.Signals(stop.signum or signal.SIGINT).name
+            click.echo(
+                f"Interrupted by {name} after {report.batches_done} of {report.batches_total} batches "
+                f"({report.documents_examined} documents examined); the report above covers the finished batches only.",
+                err=True,
+            )
+            if report.cut_batch:
+                click.echo(
+                    f"Batch {report.cut_batch} was cut by a second interrupt: it is NOT in the report above, and its writes "
+                    "may already have landed. The verb is fill-only, so redoing it is safe.",
+                    err=True,
+                )
+        click.echo("Resume with: " + " ".join(resume), err=True)
+        if report.writes_failed:
+            click.echo(f"{report.writes_failed} writes failed in the finished batches: exit 1, which outranks the interrupt's.", err=True)
+        if report.writes_failed or report.stop_reason == STOP_FAILED_ROUNDS:
+            raise click.exceptions.Exit(1)    # a failure outranks the interrupt: 130 must not hide it
+        raise click.exceptions.Exit(128 + int(stop.signum or signal.SIGINT))
     if report.writes_failed:
         raise click.exceptions.Exit(1)
 

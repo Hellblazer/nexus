@@ -63,6 +63,11 @@ class MemoryRepositoryQuarantineReadPathTest {
         "upsert", "delete", "deleteById", "expire", "mergeMemories", "putOrMerge",
         "importRow", "importBatch", "reap", "restore", "insertSummary",
         "listSummaries",
+        // RDR-238 (nexus-qo7ie.6): a write. Its return type is a ReplaceResult record carrying the
+        // quarantined row's id, title and content, which the by-return-type walk cannot see as a read. It
+        // looks its target up WITHOUT the read predicate on purpose, to refuse a quarantined target by
+        // name (MemoryRepositoryReplacesTest.refuses_aQuarantinedTarget_asMissingWouldHideIt).
+        "replaceMemory",
         // nexus-xn9ut: a COUNT, not a row read, so the walk cannot see it by
         // return type; its quarantine predicate is pinned by name in
         // countEntries_excludesAQuarantinedRow below.

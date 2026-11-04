@@ -1,0 +1,45 @@
+module=lua54 lua_version=see-runtime
+implementation=Lua 5.4
+== empty-env escape probes, _G wiped, attribute filter on
+global_io                      RETURNED       str:nil
+global_os                      RETURNED       str:nil
+os_execute                     ERROR          LuaError: [string "probe"]:1: attempt to index a nil value (global 'os')
+require_fn                     RETURNED       str:nil
+require_os                     ERROR          LuaError: [string "probe"]:1: attempt to call a nil value (global 'require')
+load_fn                        RETURNED       str:nil
+loadstring_fn                  RETURNED       str:nil
+dofile_loadfile                RETURNED       tuple:('nil', 'nil')
+debug_lib                      RETURNED       str:nil
+python_module                  RETURNED       str:nil
+string_global                  RETURNED       str:nil
+getmetatable_fn                RETURNED       str:nil
+setmetatable_fn                RETURNED       str:nil
+getfenv_setfenv                RETURNED       tuple:('nil', 'nil')
+rawget_fn                      RETURNED       str:nil
+collectgarbage_fn              RETURNED       str:nil
+pairs_fn                       RETURNED       str:nil
+_G_global                      RETURNED       str:nil
+package_lib                    RETURNED       str:nil
+ffi_luajit                     RETURNED       str:nil
+jit_global                     RETURNED       str:nil
+string_meta_index              RETURNED       str:nil
+string_dump_via_meta           RETURNED       str:_LuaFunction
+string_dump_produces_bytecode  RETURNED       int:66
+host_secret                    RETURNED       str:S-VALUE
+host_call                      RETURNED       str:read-ok
+host_dunder_class              ERROR          AttributeError: access denied: __class__
+host_dunder_globals            ERROR          AttributeError: access denied: __globals__
+host_module_attr_type          RETURNED       str:module
+host_module_attr_call          RETURNED       str:/private/tmp/claude-501/-Users-hal-hildebrand-git-nexus/194d0b0f-e829-4a63-91df-5e799c40e1fe/scratchpad/rdr242
+host_module_attr_system        RETURNED       str:builtin_function_or_method
+== attribute filter OFF, host object
+host_dunder_class_nofilter     RETURNED       type:<class '__main__.Host'>
+host_module_attr_call_nofilter RETURNED       str:/private/tmp/claude-501/-Users-hal-hildebrand-git-nexus/194d0b0f-e829-4a63-91df-5e799c40e1fe/scratchpad/rdr242
+== host passed a closure from the full runtime (host hygiene)
+leaked_closure_reaches_io      RETURNED       str:nil
+leaked_closure_reaches_os      RETURNED       str:nil
+== _G wiped vs not wiped, script env probe
+wipe=True io_in_script=RETURNED str:nil
+wipe=False io_in_script=RETURNED str:nil
+== host-side compile of bytecode in 't' context
+('REJECTED', "attempt to load a binary chunk (mode is 't')")

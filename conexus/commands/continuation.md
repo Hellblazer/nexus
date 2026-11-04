@@ -19,7 +19,7 @@ Three steps. Run the session-retro audits, write the handoff file, then emit one
 Any tripped threshold files a mechanization bead (`bd create`) — never just a handoff note.
 
 1. **Directive-diff (Gap 2)**: diff sent scope-updates vs each hand-back's addressed items; count `nx scratch` tag `crossed-resend`. >2 crossed-resends → bead.
-2. **Commit-pathspec (Gap 4)**: `bash tests/e2e/lib/commit_scope_audit.sh <session-start-ref>.. <intended pathspecs...>`. Any `!!! FOREIGN FILE(S)` → bead.
+2. **Commit-pathspec (Gap 4)**: when the project has `tests/e2e/lib/commit_scope_audit.sh` (the nexus repo does), run `bash tests/e2e/lib/commit_scope_audit.sh <session-start-ref>.. <intended pathspecs...>`; in any other project, compare `git diff --name-only <session-start-ref>..` against the intended pathspecs by hand. Any `!!! FOREIGN FILE(S)` from the script, or any file outside the pathspecs → bead.
 
 ### Step 1: write the full handoff to `<Target file>`
 

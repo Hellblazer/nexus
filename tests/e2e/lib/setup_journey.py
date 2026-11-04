@@ -410,6 +410,21 @@ class Sandbox:
         nx = current / "bin" / "nx"
         if not nx.exists():
             return
+        # The aspect worker an nx call spawned outlives the service by design
+        # (nexus-wl9pk): stop it by its lease, FIRST, and in its own try block so
+        # a hung or failing worker stop never skips the service stop below. The
+        # sandbox's installed nx may be older than the verb (journey C is a legacy
+        # tree), so the checkout's nx stops it: the verb reads the lease record
+        # and signals by pid, which also reaches a worker the older nx spawned.
+        try:
+            stopped = self.run(
+                [self.uv, "run", "--no-sync", "--project", str(REPO), "nx", "daemon", "aspect-worker",
+                 "stop", "--config-dir", str(self.config)],
+                timeout=120, cwd=REPO,
+            )
+            say(f"   {self.name}: aspect-worker stop exit {stopped.returncode}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            say(f"   {self.name}: aspect-worker stop could not run: {exc}")
         try:
             done = self.run([str(nx), "daemon", "service", "stop", "--with-pg"], timeout=120)
             say(f"   {self.name}: service stop exit {done.returncode}")
@@ -554,14 +569,14 @@ async def _session(box: Sandbox, server: str):
             async with ClientSession(read, write) as session:
                 init = await asyncio.wait_for(session.initialize(), timeout=120)
                 listed = await asyncio.wait_for(session.list_tools(), timeout=120)
-                conn = Connection(init.serverInfo.name, init.instructions or "", frozenset(t.name for t in listed.tools))
+                conn = Connection(init.server_info.name, init.instructions or "", frozenset(t.name for t in listed.tools))
                 yield session, conn
 
 
 async def _call(box: Sandbox, session: Any, server: str, name: str, arguments: dict[str, Any], timeout: float) -> str:
     result = await asyncio.wait_for(session.call_tool(name, arguments), timeout=timeout)
     text = "\n".join(getattr(c, "text", "") for c in result.content)
-    if result.isError:
+    if result.is_error:
         fail(f"{box.name}: {server}.{name} returned an error: {text[:400]}")
     return text
 

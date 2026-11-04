@@ -66,10 +66,23 @@ from nexus.db.t2.records import AspectRecord, HighlightRecord
 
 
 @pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path, so it says so: the unset
-    default is ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1)."""
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+def _aspect_queue_table_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module tests the aspect queue TABLE path. The producer's table mode is
+    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
+    ``tests/_aspect_table_producer.py``, not from the environment.
+
+    A test whose :class:`SelfHealCase` sets ``producer == "tuples"`` (nexus-dm617) is
+    about the DEFAULT producer: it gets no seam and an unset ``NX_ASPECT_QUEUE``,
+    exactly what production runs. (``TestTuplesProducerEndpointRefresh`` overrides
+    this fixture with the same rule.)"""
+    callspec = getattr(request.node, "callspec", None)
+    case = callspec.params.get("case") if callspec is not None else None
+    if getattr(case, "producer", "table") == "tuples":
+        monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
+        return
+    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+    use_table_producer(monkeypatch)
 
 _SRC_T2_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "nexus" / "db" / "t2"
 _BYPASS_PATTERN = re.compile(r"self\._client\.(get|post|put|delete|patch|request)\(")
@@ -90,6 +103,12 @@ def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "nexus.corpus.write_with_registration_retry",
         lambda name, write_fn, **kwargs: write_fn(),
+    )
+    # The tuples producer registers through ``ensure_collection_registered``
+    # (nexus-dm617): same extra call, same stub.
+    monkeypatch.setattr(
+        "nexus.corpus.ensure_collection_registered",
+        lambda name, **kwargs: None,
     )
 
 
@@ -332,6 +351,49 @@ class _AspectQueueHandler(_RotatableBearerHandlerBase):
         if not self._check_bearer():
             return
         self._send(200, {"count": self.state.extra["pending_count"]})
+
+
+# aspect_queue_tuples --------------------------------------------------------
+# The DEFAULT producer (nexus-dm617): ``HttpAspectQueue.enqueue`` writes an
+# ``aspects`` task through the ``HttpTupleStore`` that ``_tuples()`` builds, and
+# ``tuple_counts`` reads the subspace census through the same store.
+
+_ASPECT_TUPLES_STATE = _FakeState(initial_bearer="selfheal-aspect-tuples-initial-bearer")
+_ASPECT_TUPLES_STATE.rows = {}  # nonce -> number of tasks written under it (a replace keeps it at 1)
+
+
+class _AspectTuplesHandler(_RotatableBearerHandlerBase):
+    state = _ASPECT_TUPLES_STATE
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        self._record("POST", path)
+        if path != "/v1/tuples/out":
+            self._send(404, {"error": "not found"})
+            return
+        if not self._check_bearer():
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        req = json.loads(self.rfile.read(length)) if length else {}
+        nonce = req.get("nonce", "")
+        outcome = "replaced" if nonce in self.state.rows else "created"
+        self.state.rows[nonce] = 1
+        self._send(200, {"id": f"tuple-{nonce}", "outcome": outcome})
+
+    def do_GET(self):  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path
+        self._record("GET", path)
+        if path != "/v1/tuples/subspace_stats":
+            self._send(404, {"error": "not found"})
+            return
+        if not self._check_bearer():
+            return
+        self._send(200, {
+            "subspace": parse_qs(parsed.query).get("subspace", [""])[0],
+            "total": len(self.state.rows),
+            "available": len(self.state.rows),
+        })
 
 
 # centroid --------------------------------------------------------------
@@ -663,6 +725,10 @@ class SelfHealCase:
     missing_expected: Any = None
     # optional chartered bypass-method exemptions (telemetry only)
     chartered_bypass_methods: tuple[str, ...] = ()
+    # which aspect-queue producer the autouse fixture leaves in force:
+    # "table" (the legacy seam, every case but one) or "tuples" (the default
+    # producer; nexus-dm617)
+    producer: str = "table"
 
 
 # Per-store assertion callables. Named functions rather than inline lambdas
@@ -693,6 +759,14 @@ def _assert_aspect_queue_write(state: _FakeState, r1: Any, r2: Any) -> None:
 
 def _assert_aspect_queue_read(result: Any) -> None:
     assert result == 1, "expected pending_count == 1"
+
+
+def _assert_aspect_tuples_write(state: _FakeState, r1: Any, r2: Any) -> None:
+    assert sorted(state.rows) == ["1.1.1", "1.1.2"], "expected one aspects task per doc_id"
+
+
+def _assert_aspect_tuples_read(result: Any) -> None:
+    assert (result.available, result.claimed, result.dead) == (1, 0, 0), "expected one available task"
 
 
 def _assert_centroid_write(state: _FakeState, r1: Any, r2: Any) -> None:
@@ -799,6 +873,23 @@ CASES: list[SelfHealCase] = [
         do_read=lambda store, ctx: store.pending_count(),
         read_count_key="GET /v1/aspects/queue/pending_count",
         assert_read_result=_assert_aspect_queue_read,
+    ),
+    SelfHealCase(
+        store_id="aspect_queue_tuples",
+        # The tuples producer's transport is the HttpTupleStore ``_tuples()`` builds;
+        # the table case above already guards http_aspect_queue.py itself.
+        source_file="http_tuple_store.py",
+        handler_cls=_AspectTuplesHandler,
+        state=_ASPECT_TUPLES_STATE,
+        make_store=HttpAspectQueue,
+        do_write=lambda store, tag: store.enqueue("selfheal-coll", f"doc{tag}.pdf", "hash", doc_id=f"1.1.{tag}"),
+        write_count_key="POST /v1/tuples/out",
+        assert_write_effect=_assert_aspect_tuples_write,
+        seed_for_read=lambda store: store.enqueue("selfheal-coll-r", "doc.pdf", "hash", doc_id="1.1.9"),
+        do_read=lambda store, ctx: store.tuple_counts(),
+        read_count_key="GET /v1/tuples/subspace_stats",
+        assert_read_result=_assert_aspect_tuples_read,
+        producer="tuples",
     ),
     SelfHealCase(
         store_id="centroid",
@@ -1158,3 +1249,73 @@ class TestTimeoutPassthrough:
         assert default_store._client.timeout != custom_store._client.timeout
         default_store.close()
         custom_store.close()
+
+
+class TestTuplesProducerEndpointRefresh:
+    """nexus-dm617: the DEFAULT producer's transport follows a moved endpoint.
+
+    ``HttpAspectQueue._tuples()`` builds its ``HttpTupleStore`` from the queue's
+    CONSTRUCTION arguments over the queue's shared client. After a supervisor-style
+    restart the old port refuses connections and a new one is live; the enqueue must
+    land on the new one with exactly one successful request on each side. (The
+    bearer-rotation half is the ``aspect_queue_tuples`` case in ``CASES``; a store
+    built with a pinned ``base_url`` would keep retrying the dead port, and a store
+    pinned on both halves would refuse to re-resolve at all.)
+    """
+
+    @pytest.fixture(autouse=True)
+    def _aspect_queue_table_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Overrides the module's autouse table-producer seam: this class is about the
+        # default producer, with NX_ASPECT_QUEUE unset.
+        monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
+
+    @staticmethod
+    def _start(bearer: str) -> tuple[HTTPServer, int, _FakeState]:
+        state = _FakeState(initial_bearer=bearer)
+        state.rows = {}
+        handler = type("_OwnStateHandler", (_AspectTuplesHandler,), {"state": state})
+        server = HTTPServer(("127.0.0.1", _free_port()), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, server.server_address[1], state
+
+    def test_enqueue_reaches_the_new_endpoint_after_a_port_change(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        bearer = "selfheal-aspect-tuples-endpoint-bearer"
+        old_server, old_port, old_state = self._start(bearer)
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", str(old_port))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", bearer)
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        new_server = None
+        queue = HttpAspectQueue()
+        try:
+            queue.enqueue("selfheal-coll", "a.pdf", "hash", doc_id="1.1.1")
+            assert old_state.request_count["POST /v1/tuples/out"] == 1
+
+            old_server.shutdown()
+            old_server.server_close()
+            new_server, new_port, new_state = self._start(bearer)
+            attempts = 0
+            while new_port == old_port and attempts < 5:
+                new_server.shutdown()
+                new_server.server_close()
+                new_server, new_port, new_state = self._start(bearer)
+                attempts += 1
+            assert new_port != old_port, "could not allocate a distinct port for the port-churn lever"
+            monkeypatch.setenv("NX_SERVICE_PORT", str(new_port))
+
+            queue.enqueue("selfheal-coll", "b.pdf", "hash", doc_id="1.1.2")
+
+            assert new_state.request_count["POST /v1/tuples/out"] == 1, (
+                "the enqueue after the port change must land on the NEW endpoint exactly once"
+            )
+            assert old_state.request_count["POST /v1/tuples/out"] == 1, (
+                "nothing more may reach the dead endpoint's server (it is stopped)"
+            )
+            assert sorted(new_state.rows) == ["1.1.2"]
+        finally:
+            queue.close()
+            if new_server is not None:
+                new_server.shutdown()
+                new_server.server_close()

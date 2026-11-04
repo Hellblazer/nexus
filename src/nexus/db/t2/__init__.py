@@ -73,7 +73,7 @@ from nexus.db.t2.records import _sanitize_fts5
 if TYPE_CHECKING:
     import httpx
 
-    from nexus.db.t2.http_memory_store import MemoryExpireResult
+    from nexus.db.t2.http_memory_store import MemoryExpireResult, ReplacePutResult
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger()
@@ -448,6 +448,35 @@ class T2Database:
             project=project,
             title=title,
             content=content,
+            tags=tags,
+            ttl=ttl,
+            agent=agent,
+            session=session,
+        )
+
+    def put_replacing(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        replaces: str,
+        tags: str = "",
+        ttl: int | None = None,
+        agent: str | None = None,
+        session: str | None = None,
+    ) -> ReplacePutResult:
+        """Replacing put (RDR-238): the new row and the quarantined row's echo.
+
+        The engine quarantines the replaced row (nexus-ov3zi); it is not deleted, so
+        its topic assignments are left alone, exactly as TTL-expiry quarantine leaves
+        them (``expire`` runs no taxonomy cascade). A restored row comes back with the
+        assignments it had. ``delete`` is the path that purges them.
+        """
+        return self.memory.put_replacing(
+            project=project,
+            title=title,
+            content=content,
+            replaces=replaces,
             tags=tags,
             ttl=ttl,
             agent=agent,

@@ -1,7 +1,7 @@
 {
   "nexus": {
     "collection_list": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {},
@@ -10,7 +10,7 @@
       "qualname": "collection_list"
     },
     "daemon_uninstall": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -28,7 +28,7 @@
       "qualname": "daemon_uninstall"
     },
     "hook_auto_approve": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.hooks",
       "parameters": {
         "properties": {
@@ -60,7 +60,7 @@
       "qualname": "_make_tool_function.<locals>._tool"
     },
     "hook_subagent_start": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.hooks",
       "parameters": {
         "properties": {
@@ -114,7 +114,7 @@
       "qualname": "_make_tool_function.<locals>._tool"
     },
     "mailbox_send": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -174,7 +174,7 @@
       "qualname": "mailbox_send"
     },
     "memory_consolidate": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -226,7 +226,7 @@
       "qualname": "memory_consolidate"
     },
     "memory_delete": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -243,7 +243,7 @@
       "qualname": "memory_delete"
     },
     "memory_get": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -262,7 +262,7 @@
       "qualname": "memory_get"
     },
     "memory_put": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -277,6 +277,10 @@
             "type": "string"
           },
           "project": {
+            "type": "string"
+          },
+          "replaces": {
+            "default": "",
             "type": "string"
           },
           "session": {
@@ -309,7 +313,7 @@
       "qualname": "memory_put"
     },
     "memory_search": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -552,7 +556,7 @@
       "qualname": "nx_tidy"
     },
     "plan_delete": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -568,7 +572,7 @@
       "qualname": "plan_delete"
     },
     "plan_save": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -619,7 +623,7 @@
       "qualname": "plan_save"
     },
     "plan_search": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -647,7 +651,7 @@
       "qualname": "plan_search"
     },
     "query": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -702,7 +706,7 @@
       "qualname": "query"
     },
     "scratch": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -749,7 +753,7 @@
       "qualname": "scratch"
     },
     "scratch_manage": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -773,7 +777,7 @@
       "qualname": "scratch_manage"
     },
     "search": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -835,7 +839,7 @@
       "qualname": "search"
     },
     "search_aspect_scoped": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -879,7 +883,7 @@
       "qualname": "search_aspect_scoped"
     },
     "search_graph_hop": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -937,7 +941,7 @@
       "qualname": "search_graph_hop"
     },
     "search_metadata_scoped": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -985,7 +989,7 @@
       "qualname": "search_metadata_scoped"
     },
     "search_topic_scoped": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1057,7 +1061,7 @@
       "qualname": "setup_status"
     },
     "store_get": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -1080,7 +1084,7 @@
       "qualname": "store_get"
     },
     "store_get_many": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1141,7 +1145,7 @@
       "qualname": "store_get_many"
     },
     "store_list": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1167,7 +1171,7 @@
       "qualname": "store_list"
     },
     "store_put": {
-      "is_async": true,
+      "is_async": false,
       "meta": {
         "anthropic/alwaysLoad": true
       },
@@ -1186,6 +1190,10 @@
             "type": "string"
           },
           "content": {
+            "type": "string"
+          },
+          "entity_key": {
+            "default": "",
             "type": "string"
           },
           "session": {
@@ -1210,7 +1218,7 @@
       "qualname": "store_put"
     },
     "traverse": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1274,7 +1282,7 @@
       "qualname": "traverse"
     },
     "tuple_ack": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1306,7 +1314,7 @@
       "qualname": "tuple_ack"
     },
     "tuple_in": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1341,7 +1349,7 @@
       "qualname": "tuple_in"
     },
     "tuple_list": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1363,7 +1371,7 @@
       "qualname": "tuple_list"
     },
     "tuple_nack": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1398,7 +1406,7 @@
       "qualname": "tuple_nack"
     },
     "tuple_out": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1490,7 +1498,7 @@
       "qualname": "tuple_out"
     },
     "tuple_rd": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1536,16 +1544,21 @@
       "qualname": "tuple_rd"
     },
     "tuple_registry": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
-        "properties": {},
+        "properties": {
+          "doc": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
         "type": "object"
       },
       "qualname": "tuple_registry"
     },
     "tuple_release": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1565,7 +1578,7 @@
       "qualname": "tuple_release"
     },
     "tuple_renew": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1589,7 +1602,7 @@
       "qualname": "tuple_renew"
     },
     "tuple_stats": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1605,7 +1618,7 @@
       "qualname": "tuple_stats"
     },
     "tuple_subscribe": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1621,7 +1634,7 @@
       "qualname": "tuple_subscribe"
     },
     "tuple_subscriptions": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {},
@@ -1630,7 +1643,7 @@
       "qualname": "tuple_subscriptions"
     },
     "tuple_unsubscribe": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
@@ -1648,7 +1661,7 @@
   },
   "nexus-catalog": {
     "link": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1684,7 +1697,7 @@
       "qualname": "catalog_link"
     },
     "link_query": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1730,7 +1743,7 @@
       "qualname": "catalog_link_query"
     },
     "links": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1758,7 +1771,7 @@
       "qualname": "catalog_links"
     },
     "list": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1784,7 +1797,7 @@
       "qualname": "catalog_list"
     },
     "register": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1833,7 +1846,7 @@
       "qualname": "catalog_register"
     },
     "resolve": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1855,7 +1868,7 @@
       "qualname": "catalog_resolve"
     },
     "search": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1897,7 +1910,7 @@
       "qualname": "catalog_search"
     },
     "show": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {
@@ -1911,7 +1924,7 @@
       "qualname": "catalog_show"
     },
     "stats": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {},
@@ -1920,7 +1933,7 @@
       "qualname": "catalog_stats"
     },
     "update": {
-      "is_async": true,
+      "is_async": false,
       "module": "nexus.mcp.catalog",
       "parameters": {
         "properties": {

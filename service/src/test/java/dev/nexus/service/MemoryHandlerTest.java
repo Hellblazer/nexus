@@ -1148,6 +1148,185 @@ class MemoryHandlerTest {
         assertThat(delete("/v1/memory/summaries", TENANT).statusCode()).isEqualTo(405);
     }
 
+    // ── RDR-238 P1 S1 (nexus-qo7ie.6): put with `replaces` ────────────────────
+
+    @Test
+    void put_withoutReplaces_keepsTheOldResponseShape() throws Exception {
+        var resp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-shape\",\"title\":\"a\",\"content\":\"c\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), MAP_T).keySet())
+            .as("a put without replaces answers {id} and nothing else").containsExactly("id");
+        // JSON null replaces means "absent", like the other optional fields
+        var r = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-shape\",\"title\":\"b\",\"content\":\"c\",\"replaces\":null}");
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(r.body(), MAP_T).keySet()).containsExactly("id");
+    }
+
+    @Test
+    void put_withABlankReplaces_is400_andWritesNothing() throws Exception {
+        for (String blank : new String[] {"\"\"", "\"  \"", "\"\\t\""}) {
+            var r = post("/v1/memory/put", TENANT,
+                "{\"project\":\"rep-blank\",\"title\":\"b\",\"content\":\"c\",\"replaces\":" + blank + "}");
+            assertThat(r.statusCode()).as("replaces=%s", blank).isEqualTo(400);
+            assertThat((String) mapper.readValue(r.body(), MAP_T).get("error")).contains("replaces is blank");
+        }
+        assertThat(get("/v1/memory/get?project=rep-blank&title=b", TENANT).statusCode())
+            .as("a blank replaces writes nothing").isEqualTo(404);
+    }
+
+    @Test
+    void put_withReplaces_whenTheNewTitleExists_is409_andBothRowsAreUnchanged() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-exists\",\"title\":\"old\",\"content\":\"old body\"}");
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-exists\",\"title\":\"x\",\"content\":\"x body\"}");
+        var resp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-exists\",\"title\":\"x\",\"content\":\"NEW\",\"replaces\":\"old\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat((String) mapper.readValue(resp.body(), MAP_T).get("error")).contains("already exists");
+        assertThat((String) mapper.readValue(get("/v1/memory/get?project=rep-exists&title=old", TENANT).body(),
+            MAP_T).get("content")).isEqualTo("old body");
+        assertThat((String) mapper.readValue(get("/v1/memory/get?project=rep-exists&title=x", TENANT).body(),
+            MAP_T).get("content")).isEqualTo("x body");
+    }
+
+    @Test
+    void put_withReplaces_quarantinesTheTarget_andEchoesItsIdTitleAndContent() throws Exception {
+        long oldId = ((Number) mapper.readValue(post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-ok\",\"title\":\"old\",\"content\":\"old body\",\"tags\":\"a\",\"ttl\":30}").body(),
+            MAP_T).get("id")).longValue();
+
+        var resp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-ok\",\"title\":\"new\",\"content\":\"new body\\nreplaces: old\","
+            + "\"replaces\":\"old\"}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.keySet()).containsExactlyInAnyOrder("id", "replaced_id", "replaced_title", "replaced_content");
+        assertThat(((Number) body.get("replaced_id")).longValue()).as("the old row's id").isEqualTo(oldId);
+        assertThat(body.get("replaced_title")).isEqualTo("old");
+        assertThat(body.get("replaced_content")).isEqualTo("old body");
+        assertThat(((Number) body.get("id")).longValue()).isPositive().isNotEqualTo(oldId);
+
+        // Hidden from get (by title and by id), list and search ...
+        assertThat(get("/v1/memory/get?project=rep-ok&title=old", TENANT).statusCode()).isEqualTo(404);
+        assertThat(get("/v1/memory/get?id=" + oldId, TENANT).statusCode()).isEqualTo(404);
+        assertThat(mapper.readValue(get("/v1/memory/list?project=rep-ok", TENANT).body(), LIST_T))
+            .extracting(r -> r.get("title")).containsExactly("new");
+        assertThat(mapper.readValue(post("/v1/memory/search", TENANT,
+            "{\"query\":\"body\",\"project\":\"rep-ok\"}").body(), LIST_T))
+            .extracting(r -> r.get("title")).containsExactly("new");
+        var stored = mapper.readValue(get("/v1/memory/get?project=rep-ok&title=new", TENANT).body(), MAP_T);
+        assertThat(stored.get("content")).isEqualTo("new body\nreplaces: old");
+
+        // ... present in the quarantined listing, unmarked, so reap leaves it.
+        var q = mapper.readValue(get("/v1/memory/quarantined?project=rep-ok", TENANT).body(), LIST_T);
+        assertThat(q).singleElement().satisfies(r -> {
+            assertThat(((Number) r.get("id")).longValue()).isEqualTo(oldId);
+            assertThat(r.get("content")).isEqualTo("old body");
+            assertThat(r.get("quarantined_at")).isNotNull();
+            assertThat(r.get("rolled_up_at")).isNull();
+        });
+        var reap = post("/v1/memory/reap", TENANT, "{}");
+        assertThat((List<?>) mapper.readValue(reap.body(), MAP_T).get("deleted_ids"))
+            .extracting(o -> ((Number) o).longValue())
+            .as("reap deletes only quarantined AND rolled-up rows").doesNotContain(oldId);
+
+        // ... and restorable by id with its content intact.
+        var restored = post("/v1/memory/" + oldId + "/restore", TENANT, "");
+        assertThat(mapper.readValue(restored.body(), MAP_T)).containsEntry("restored", true);
+        var back = mapper.readValue(get("/v1/memory/get?id=" + oldId, TENANT).body(), MAP_T);
+        assertThat(back.get("title")).isEqualTo("old");
+        assertThat(back.get("content")).isEqualTo("old body");
+        assertThat(back.get("tags")).isEqualTo("a");
+        assertThat(back.get("ttl")).as("restore makes the row permanent").isNull();
+    }
+
+    @Test
+    void summaries_aReplacedSourceId_is409WithCode_nothingWritten_andReapLeavesTheRow() throws Exception {
+        String project = "rep-rollup-" + System.nanoTime();
+        long oldId = ((Number) mapper.readValue(post("/v1/memory/put", TENANT,
+            "{\"project\":\"" + project + "\",\"title\":\"old\",\"content\":\"old body\",\"ttl\":30}").body(),
+            MAP_T).get("id")).longValue();
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"" + project + "\",\"title\":\"new\",\"content\":\"n\",\"replaces\":\"old\"}");
+
+        var resp = post("/v1/memory/summaries", TENANT, mapper.writeValueAsString(Map.of(
+            "project", project, "content", "summary of old", "source_ids", List.of(oldId), "model", "m")));
+
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(mapper.readValue(resp.body(), MAP_T)).containsEntry("code", "replaced_source_id");
+        assertThat(mapper.readValue(get("/v1/memory/summaries?project=" + project, TENANT).body(), LIST_T))
+            .isEmpty();
+        var q = mapper.readValue(get("/v1/memory/quarantined?project=" + project, TENANT).body(), LIST_T);
+        assertThat(q).singleElement().satisfies(r -> {
+            assertThat(r.get("rolled_up_at")).isNull();
+            assertThat(r.get("ttl")).as("the wire shows ttl null for a replaced row").isNull();
+        });
+        assertThat((List<?>) mapper.readValue(post("/v1/memory/reap", TENANT, "{}").body(), MAP_T)
+            .get("deleted_ids")).extracting(o -> ((Number) o).longValue()).doesNotContain(oldId);
+    }
+
+    @Test
+    void put_withReplaces_aSecondReplaceOfTheSameTarget_is409Quarantined() throws Exception {
+        post("/v1/memory/put", TENANT, "{\"project\":\"rep-twice\",\"title\":\"old\",\"content\":\"o\"}");
+        assertThat(post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-twice\",\"title\":\"n1\",\"content\":\"1\",\"replaces\":\"old\"}")
+            .statusCode()).isEqualTo(200);
+        var again = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-twice\",\"title\":\"n2\",\"content\":\"2\",\"replaces\":\"old\"}");
+        assertThat(again.statusCode()).isEqualTo(409);
+        assertThat((String) mapper.readValue(again.body(), MAP_T).get("error")).contains("quarantined");
+        assertThat(get("/v1/memory/get?project=rep-twice&title=n2", TENANT).statusCode()).isEqualTo(404);
+    }
+
+    @Test
+    void put_withReplaces_refusals_are4xx_nameTheTarget_andWriteNothing() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-no\",\"title\":\"tagged\",\"content\":\"keep tagged\",\"tags\":\"kind:gate,bead:x\"}");
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-no\",\"title\":\"code-review-nexus-d9xt2\",\"content\":\"keep titled\"}");
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-no\",\"title\":\"plain\",\"content\":\"keep plain\"}");
+
+        record Case(String replaces, String title, int status, String... mentions) {}
+        for (Case c : new Case[] {
+            new Case("absent-title", "n1", 409, "absent-title", "no row titled"),
+            new Case("plain", "plain", 400, "plain", "title being written"),
+            new Case("tagged", "n3", 409, "tagged", "audit tag", "kind:gate"),
+            new Case("code-review-nexus-d9xt2", "n4", 409, "code-review-nexus-d9xt2", "audit-record title pattern",
+                     "(^|[-_.: ])review([-_.: ]|$)")}) {
+            var resp = post("/v1/memory/put", TENANT,
+                "{\"project\":\"rep-no\",\"title\":\"" + c.title() + "\",\"content\":\"X\",\"replaces\":\""
+                + c.replaces() + "\"}");
+            assertThat(resp.statusCode()).as("replaces=%s", c.replaces()).isEqualTo(c.status());
+            String error = (String) mapper.readValue(resp.body(), MAP_T).get("error");
+            assertThat(error).contains(c.mentions());
+            if (!c.title().equals(c.replaces())) {
+                assertThat(get("/v1/memory/get?project=rep-no&title=" + c.title(), TENANT).statusCode())
+                    .as("the new row was not written for replaces=%s", c.replaces()).isEqualTo(404);
+            }
+        }
+        for (String kept : new String[] {"tagged", "code-review-nexus-d9xt2", "plain"}) {
+            var r = get("/v1/memory/get?project=rep-no&title=" + kept, TENANT);
+            assertThat(r.statusCode()).as("%s survives every refusal", kept).isEqualTo(200);
+            assertThat((String) mapper.readValue(r.body(), MAP_T).get("content"))
+                .as("%s is unchanged (the refused body was X)", kept).startsWith("keep");
+        }
+    }
+
+    @Test
+    void put_withReplaces_acrossTenants_isMissing() throws Exception {
+        post("/v1/memory/put", OTHER_TENANT,
+            "{\"project\":\"rep-x\",\"title\":\"theirs\",\"content\":\"other tenant\"}");
+        var resp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"rep-x\",\"title\":\"n\",\"content\":\"c\",\"replaces\":\"theirs\"}");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(get("/v1/memory/get?project=rep-x&title=theirs", OTHER_TENANT).statusCode()).isEqualTo(200);
+    }
+
     private static String tokenFor(String tenant) {
         return OTHER_TENANT.equals(tenant) ? OTHER_TOKEN : TOKEN;
     }

@@ -7,13 +7,13 @@ gate and claim-at-delivery removed.
 
 Two independent halves live here:
 
-- :func:`run_stdio_with_channel` replaces ``FastMCP.run_stdio_async`` at
+- :func:`run_stdio_with_channel` replaces ``MCPServer.run_stdio_async`` at
   the server's one call site (:func:`nexus.mcp.core.main`): it declares
   ``capabilities.experimental["claude/channel"] = {}`` at initialize
   (which is what makes Claude Code register a listener -- RDR-211 Phase 1
   Step 0, T2 ``nexus_rdr/211-spike-4-channel-2026-09-17``), and stashes the
   raw stdio write stream on this module (:data:`_write_stream`) so a sender
-  never needs a handle on the ``ServerSession`` FastMCP builds internally.
+  never needs a handle on the ``ServerSession`` MCPServer builds internally.
 - :class:`ChannelWaiter` is the lifespan's one background task: it parks
   ``HttpTupleStore.wait`` over the session's :class:`~nexus.mcp.
   subscriptions.SubscriptionSet`, and NEVER claims anything (T2
@@ -97,19 +97,20 @@ Neither half needs ``mcp.server.session.ServerSession`` at all: sending a
 notification is a raw ``JSONRPCNotification`` on the write stream (the
 SDK's typed notification union has no member for a channel notification),
 and gating a send on "the client has finished initializing" is done by
-registering a handler for ``types.InitializedNotification`` on the
-low-level ``Server`` -- the SAME public registration point
-``Server.progress_notification()`` uses, confirmed reachable: a client
-notification flows through ``BaseSession._receive_loop`` ->
-``_received_notification`` (session-internal state) -> unconditionally
-``_handle_incoming`` -> ``session.incoming_messages`` -> ``Server.run``'s
-own message loop -> ``_handle_notification`` -> ``notification_handlers
-[type(notify)]``. ``InitializedNotification`` is the one client
-notification NOT swallowed before that last dispatch (unlike
-``InitializeRequest``, which ``ServerSession._received_request`` answers
-and completes without ever reaching the low-level ``Server``), so this
-handler fires exactly once per session, right when the handshake
-completes.
+registering a handler for ``notifications/initialized`` on the low-level
+``Server`` (``add_notification_handler``, mcp 2.x; the 1.x
+``notification_handlers[types.InitializedNotification]`` dict is gone). The
+2.x ``ServerRunner`` marks the connection initialized and THEN invokes a
+registered handler for that method, so the handler fires exactly once per
+connection, right when the handshake completes (nexus-sgmyl, verified against
+mcp 2.3.0 ``mcp/server/runner.py``).
+
+Handshake era only. The channel capability rides ``initialize``'s
+``capabilities.experimental``. A client that opens with the 2026-07-28
+per-request envelope skips ``initialize`` and reads ``server/discover``, which
+the SDK builds without our experimental map; Claude Code opens with
+``initialize`` today, and a modern-era client would see no channel capability
+and so register no listener (a documented no-op, not an error).
 """
 from __future__ import annotations
 
@@ -138,7 +139,7 @@ from nexus.tuple_sender import (
 )
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from nexus.mcp.subscriptions import SubscriptionSet
 
@@ -317,39 +318,47 @@ _write_stream: Any | None = None
 _initialized_event: asyncio.Event | None = None
 
 
-async def _on_initialized(_notify: Any) -> None:
+async def _on_initialized(_ctx: Any, _params: Any) -> None:
     if _initialized_event is not None:
         _initialized_event.set()
 
 
-async def run_stdio_with_channel(mcp: "FastMCP") -> None:
+def install_initialized_gate(server: Any) -> None:
+    """Register :func:`_on_initialized` for ``notifications/initialized`` on the
+    low-level ``Server``. A separate function so a test wires a bare ``Server``
+    exactly as :func:`run_stdio_with_channel` wires the real one."""
+    import mcp.types as types  # noqa: PLC0415 — deferred: only needed for the stdio driver
+
+    server.add_notification_handler("notifications/initialized", types.NotificationParams, _on_initialized)
+
+
+async def run_stdio_with_channel(mcp: "MCPServer") -> None:
     """Replaces ``mcp.run(transport="stdio")`` -> ``anyio.run(self.
     run_stdio_async)`` at the one call site in :func:`nexus.mcp.core.main`.
 
-    Byte-identical to ``FastMCP.run_stdio_async`` except for the one line
+    Byte-identical to ``MCPServer.run_stdio_async`` except for the one line
     this bead exists to add: ``experimental_capabilities=
     CHANNEL_CAPABILITY`` on ``create_initialization_options``.
-    ``FastMCP.run_stdio_async`` itself passes none (it calls
+    ``MCPServer.run_stdio_async`` itself passes none (it calls
     ``create_initialization_options()`` with no arguments), so declaring
     the capability requires driving the low-level ``Server.run`` call
     directly -- which is also what hands this function the write stream
     early enough to stash it before any tool call, or the lifespan's
     waiter task, could need it.
 
-    ``mcp._mcp_server.lifespan`` is already ``_t1_lifespan`` wrapped by
-    FastMCP's own ``lifespan_wrapper`` (set at ``FastMCP.__init__`` time
+    ``mcp._lowlevel_server.lifespan`` is already ``_t1_lifespan`` wrapped by
+    MCPServer's own ``lifespan_wrapper`` (set at ``MCPServer.__init__`` time
     from ``settings.lifespan``), so calling ``Server.run`` here runs the
-    EXACT SAME lifespan FastMCP would have run through
+    EXACT SAME lifespan MCPServer would have run through
     ``run_stdio_async`` -- nothing about lifespan behavior changes, only
     the initialize options passed alongside it.
     """
-    import mcp.types as types  # noqa: PLC0415 — deferred: only needed for the stdio driver
     from mcp.server.stdio import stdio_server  # noqa: PLC0415 — deferred: only needed for the stdio driver
 
     global _write_stream, _initialized_event
 
-    server = mcp._mcp_server  # noqa: SLF001 — the low-level Server FastMCP already wires handlers/lifespan onto; there is no public accessor
-    server.notification_handlers[types.InitializedNotification] = _on_initialized
+    server = mcp._lowlevel_server  # noqa: SLF001 — the low-level Server MCPServer already wires handlers/lifespan onto; there is no public accessor
+    install_initialized_gate(server)
 
     async with stdio_server() as (read_stream, write_stream):
         _write_stream = write_stream
@@ -384,8 +393,8 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
         await ev.wait()
         if _write_stream is None:  # torn down while we waited
             return False
-    message = types.JSONRPCMessage(
-        types.JSONRPCNotification(jsonrpc="2.0", method=_CHANNEL_METHOD, params={"content": content, "meta": meta})
+    message = types.JSONRPCNotification(
+        jsonrpc="2.0", method=_CHANNEL_METHOD, params={"content": content, "meta": meta},
     )
     await ws.send(SessionMessage(message=message))
     return True

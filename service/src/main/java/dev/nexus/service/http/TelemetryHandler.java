@@ -51,7 +51,8 @@ import java.util.Set;
  *                                              exact total and a no-T1-put summary (nexus-mtheb.4)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   POST /v1/telemetry/nx_answer_runs/complete one-transaction run+steps+plan-counters (RDR-203)
- *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
+ *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u); optional
+ *                                              before_id=N keyset bound, id < N newest id first (nexus-1ss4n)
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
  *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
  *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries; same dry_run=true
@@ -759,7 +760,11 @@ public final class TelemetryHandler implements HttpHandler {
         // include_steps into an unbounded N runs x M steps page.
         int limit = Math.min(parseIntParam(params, "limit", 20), MAX_QUERY_RUNS_LIMIT);
         boolean includeSteps = "true".equalsIgnoreCase(params.get("include_steps"));
-        HttpUtil.send(ex, 200, json(repo.queryNxAnswerRuns(tenant, since, limit, includeSteps)));
+        // nexus-1ss4n: keyset bound. Rows with id < before_id, newest id first, still under the
+        // clamp. A value that is not a whole number is a 400: ignoring it would return the newest
+        // page again, which a pager reads as "no progress" at best and as the window at worst.
+        Long beforeId = parseOptLongParam(params, "before_id");
+        HttpUtil.send(ex, 200, json(repo.queryNxAnswerRuns(tenant, since, limit, includeSteps, beforeId)));
     }
 
     // ── hook_failures ──────────────────────────────────────────────────────────
@@ -1703,6 +1708,17 @@ public final class TelemetryHandler implements HttpHandler {
         String v = params.get(key);
         if (v == null || v.isBlank()) return def;
         try { return Integer.parseInt(v); } catch (NumberFormatException e) { return def; }
+    }
+
+    /** The named parameter as a {@code Long}; absent or blank is {@code null}; anything else non-numeric is a 400. */
+    private static Long parseOptLongParam(Map<String, String> params, String key) {
+        String v = params.get(key);
+        if (v == null || v.isBlank()) return null;
+        try {
+            return Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("'" + key + "' must be a whole number, got: " + v);
+        }
     }
 
     private void requireMethod(HttpExchange ex, String actual, String expected) throws IOException {

@@ -14,9 +14,11 @@ deletion). What remains:
 1. package → everything            (:data:`PRECONDITION_PACKAGE` → ``*``)
 2. :data:`RUNG_RDR192_MANIFEST_BACKFILL` — the RDR-192 census and
    legacy-unmanifested backfill (nexus-wbfpw.41), the first rung since
-   nexus-lgdel.l1 emptied the ladder. It has no rung-to-rung edge: it needs
-   only the engine at the pinned tag, which the precondition stage
-   guarantees before the walk.
+   nexus-lgdel.l1 emptied the ladder. It needs no other rung, only the
+   engine at the pinned tag, which the precondition stage guarantees before
+   the walk.
+3. :data:`RUNG_RDR192_MANIFEST_BACKFILL` → :data:`RUNG_MANIFEST_SECTION_LABELS`
+   — section labels fills the legacy rows the backfill adds (nexus-dfemn).
 
 Package/engine/process are STATELESS preconditions (RDR-185 Constraints):
 re-derived from ON-DISK state at every invocation, converged before the
@@ -25,8 +27,9 @@ appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
 :data:`RUNG_ORDER` holds four rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
-:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`; none
-depends on another).
+:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`). One
+depends on another: section labels waits on the RDR-192 backfill, whose rows it fills. The walk follows the edges
+(nexus-dfemn): a deferred rung holds back only the rungs with an edge from it.
 Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
 in :data:`HARD_EDGES`; the order is validated against the edges at
 import/construction time.
@@ -56,8 +59,9 @@ from nexus.upgrade_ladder.protocol import Rung
 RUNG_RDR192_MANIFEST_BACKFILL = "rdr192-manifest-backfill"
 
 #: RDR-235 Phase 1 step 3 (nexus-5r2sc.3.6): move the aspect queue table's
-#: waiting rows to ``aspects`` tuples. It applies only under
-#: ``NX_ASPECT_QUEUE=tuples`` (the default since nexus-lnwn1) on an engine that has the template and the
+#: waiting rows to ``aspects`` tuples. It applies only with ``NX_ASPECT_QUEUE`` unset or
+#: ``tuples`` (the default since nexus-lnwn1; ``table`` is retired since nexus-bpikw step A, and the rung
+#: reports it as not applicable) on an engine that has the template and the
 #: ``list_waiting`` route, and reports every other case as not applicable, so
 #: nothing is recorded and it is detected again on the next ``nx upgrade``.
 RUNG_ASPECT_QUEUE_TUPLES = "aspect-queue-tuples"
@@ -69,7 +73,7 @@ RUNG_NOTE_TAGS_ARRAY = "note-tags-array"
 
 #: RDR-236 (nexus-1nrcu): copy a chunk row's section label onto the legacy manifest rows (written before
 #: catalog-046, labels_written false) whose chash has exactly one live manifest row in the tenant. Fill-only,
-#: independent of the other rungs; it sits after the RDR-192 backfill, whose rows it may then fill.
+#: it has a hard edge from the RDR-192 backfill, whose legacy rows it fills (see :data:`HARD_EDGES`).
 RUNG_MANIFEST_SECTION_LABELS = "manifest-section-labels"
 
 #: Stateless preconditions — NOT rungs (see module docstring).
@@ -93,6 +97,9 @@ RUNG_ORDER: tuple[str, ...] = (
 #: the source precedes every rung.
 HARD_EDGES: tuple[tuple[str, str], ...] = (
     (PRECONDITION_PACKAGE, ALL_RUNGS),
+    # The section-labels rung fills the legacy manifest rows the RDR-192 backfill adds, and once recorded it reads
+    # converged for good, so it must not run while the backfill is deferred (nexus-dfemn review r1).
+    (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS),
 )
 
 #: RQ2 edges 4–5 (chunk-identity / embedder-era co-residency inside the
@@ -181,7 +188,7 @@ class LadderRegistry:
     accepted in the order given; edges over KNOWN names are enforced.
     """
 
-    def __init__(self, rungs: Sequence[Rung]) -> None:
+    def __init__(self, rungs: Sequence[Rung], *, edges: Sequence[tuple[str, str]] = HARD_EDGES) -> None:
         validate_hard_edges()
         names = [rung.name for rung in rungs]
         seen: set[str] = set()
@@ -190,12 +197,21 @@ class LadderRegistry:
                 raise LadderOrderError(f"duplicate rung name {name!r} in ladder registry")
             seen.add(name)
         position = {name: i for i, name in enumerate(names)}
-        for before, after in expand_edges(HARD_EDGES, RUNG_ORDER):
-            if before in position and after in position and position[before] >= position[after]:
-                raise LadderOrderError(
-                    f"registry order violates hard edge {before!r} → {after!r}"
-                )
+        requires: dict[str, set[str]] = {name: set() for name in names}
+        for before, after in expand_edges(edges, [*RUNG_ORDER, *(n for n in names if n not in RUNG_ORDER)]):
+            if before in position and after in position:
+                if position[before] >= position[after]:
+                    raise LadderOrderError(
+                        f"registry order violates hard edge {before!r} → {after!r}"
+                    )
+                requires[after].add(before)
         self._rungs: tuple[Rung, ...] = tuple(rungs)
+        self._requires: dict[str, frozenset[str]] = {k: frozenset(v) for k, v in requires.items()}
+
+    def prerequisites(self, name: str) -> frozenset[str]:
+        """The rungs *name* has a hard edge from (nexus-dfemn): a rung that did not reach a recorded state blocks
+        only these. Preconditions are not rungs and never appear here."""
+        return self._requires.get(name, frozenset())
 
     @property
     def rungs(self) -> tuple[Rung, ...]:

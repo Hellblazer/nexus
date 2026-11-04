@@ -20,6 +20,7 @@ Verify without writing (what the Python pin does):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import pathlib
 import sys
 
@@ -32,7 +33,9 @@ OUTPUT = (
 #: ROW (the reaper's quarantine keys) is deliberately NOT emitted: the engine owns those keys, and
 #: EngineOwnedPredicateIntegrationTest forbids any main source naming quarantined_by or
 #: reaper_quarantined_at outside a comment (the one predicate is Routines.reaperOwnsQuarantinedRow).
-#: The Phase 4 CHECK renders the ROW allow-list from the Python table into DDL instead.
+#: The Phase 4 CHECK renders the ROW allow-list from the Python table into DDL instead; the engine pins the list
+#: it receives with a SHA-256 of the sorted ROW keys (``ROW_KEYS_SHA256``) and of the quarantine pair
+#: (``QUARANTINE_IMPLIES_SHA256``), so it holds the exact set without a source naming one (nexus-6pfgb.43).
 CLASSES = ("CHUNK", "DOCUMENT", "POSITION", "LEGACY")
 
 _DOC = {
@@ -53,6 +56,15 @@ def _literal_set(name: str, keys: list[str]) -> str:
         f"    /** {_DOC[name]} */\n"
         f"    public static final Set<String> {name} = Set.of(\n{body});\n"
     )
+
+
+def digest(keys: list[str]) -> str:
+    """SHA-256 (hex) of ``keys`` joined by a newline, in the order given: the engine recomputes it the same way."""
+    return hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
+
+
+def _digest_constant(name: str, doc: str, keys: list[str]) -> str:
+    return f'    /** {doc} */\n    public static final String {name} =\n        "{digest(keys)}";\n'
 
 
 def render() -> str:
@@ -84,6 +96,21 @@ def render() -> str:
     ]
     for cls in CLASSES:
         parts.append("\n" + _literal_set(cls, sorted(ckm.keys_of(cls))))
+    parts.append(
+        "\n" + _digest_constant(
+            "ROW_KEYS_SHA256",
+            "SHA-256 (hex) of the ROW keys, sorted and joined by a newline: the engine holds the exact set without "
+            "naming a key. A request whose engine-owned keys hash otherwise is refused.",
+            sorted(ckm.keys_of("ROW")),
+        )
+    )
+    parts.append(
+        "\n" + _digest_constant(
+            "QUARANTINE_IMPLIES_SHA256",
+            "SHA-256 (hex) of the quarantine implication pair {@code by} then {@code at}, joined by a newline.",
+            list(ckm.QUARANTINE_IMPLIES),
+        )
+    )
     parts.append("}\n")
     return "".join(parts)
 

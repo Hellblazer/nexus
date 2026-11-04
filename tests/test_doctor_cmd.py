@@ -1006,6 +1006,9 @@ class TestCheckQuotas:
         with (
             patch("nexus.config.is_local_mode", return_value=True),
             patch("nexus.config.get_credential", return_value=""),
+            # nexus-9oplr: local mode reads the engine's /version; this test is not about that read.
+            patch("nexus.commands.doctor._engine_embedding_posture",
+                  return_value={"error": "not probed in this test"}),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
         assert result.exit_code == 0, result.output

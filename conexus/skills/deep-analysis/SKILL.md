@@ -4,7 +4,7 @@ description: Use when surface-level analysis is insufficient and problems requir
 effort: high
 ---
 
-**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; reuse a matching plan via `plan_search` before dispatching multiple agents. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
+**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; reuse a matching plan via `plan_search` before dispatching multiple agents. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
 
 # Deep Analysis Skill
 
@@ -12,7 +12,7 @@ Delegates to the **deep-analyst** agent.
 
 ## Model Selection
 
-Default: **opus** (`conexus/agents/deep-analyst.md` pins `model: opus` in its
+Default: **opus** (`${CLAUDE_PLUGIN_ROOT}/agents/deep-analyst.md` pins `model: opus` in its
 frontmatter, and an agent's own declaration beats the session default, so
 omitting `model` on the Agent tool gets opus). Pass `model: sonnet`
 explicitly for the cheap end of the table below:

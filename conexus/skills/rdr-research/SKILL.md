@@ -18,6 +18,9 @@ Optionally delegates to **deep-research-synthesizer** (haiku) for evidence gathe
 
 Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`. All file paths below use `$RDR_DIR` in place of `docs/rdr`.
 
+`<RDR dir>` is the absolute path of the RDR directory: `$RDR_DIR` joined to the repository root of the worktree in use.
+In any brief or relay, put the absolute path itself where `<RDR dir>` stands, never the placeholder or the shell variable: a dispatched agent cannot expand either.
+
 ## Subcommands
 
 ### `/conexus:rdr-research add <id>`
@@ -48,7 +51,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
    A value outside either set is refused. Source stays in the finding text.
 
 3. **Append to RDR markdown**: Add a formatted entry to the Research Findings > Key Discoveries section:
-   Prose register (`$RDR_DIR/REGISTER.md`, fallback `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`): findings in plain terms a non-native-speaker expert can follow; say what is known and what is not; a dead end recorded plainly is a finding.
+   Prose register (`$RDR_DIR/REGISTER.md`, fallback `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md`): findings in plain terms a non-native-speaker expert can follow; say what is known and what is not; a dead end recorded plainly is a finding.
    ```markdown
    - **✅ Verified** (source search) — Finding text here
      *Source: source description*
@@ -138,7 +141,7 @@ When dispatching agents (deep-research-synthesizer or codebase-deep-analyzer) vi
 - nx store: [document titles or "none"]
 - nx memory: {repo}_rdr/NNN (RDR metadata and existing research records)
 - nx scratch: [scratch IDs or "none"]
-- Files: $RDR_DIR/NNN-*.md
+- Files: <RDR dir>/NNN-*.md
 
 ### Deliverable
 Research finding with classification, verification method, and source reference ready for T2 storage.

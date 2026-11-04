@@ -692,6 +692,7 @@ class TestStarvationIsVisible:
         assert engine.censused == []
         assert "keeps its progress" not in detail
 
+    @pytest.mark.t2_tenant  # the doctor row reads the deferral log of a pending rung (nexus-0sm1t)
     def test_the_count_shows_in_the_doctor_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sessions, _, _ = self._stuck(monkeypatch)
         for _ in range(STARVED_AFTER):
@@ -821,6 +822,7 @@ class TestACensusCallThatKeepsFailing:
             assert f"census stalled at {names[5]} for {expected} sessions" in rung.detect().pending_detail
         assert engine.censused == names[:5], "the readings before the failing collection were kept, not re-read"
 
+    @pytest.mark.t2_tenant  # the doctor row reads the deferral log of a pending rung (nexus-0sm1t)
     def test_the_stall_shows_in_the_doctor_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sessions, _, names = self._sessions(monkeypatch)
         for _ in range(STALLED_AFTER):
@@ -1033,6 +1035,7 @@ class TestNoteTextIsBoundedAndEscaped:
         assert "census stalled at" in out and "STARVED" in out
         assert len(out) < 2_000, f"the printed note text is capped, got {len(out)} characters"
 
+    @pytest.mark.t2_tenant  # the doctor row reads the deferral log of a pending rung (nexus-0sm1t)
     def test_the_doctor_row_is_bounded_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
         clock = FakeClock()
         sessions = Sessions(monkeypatch, SlowEngine(clock, _names(2), cost=1.0), clock)

@@ -87,6 +87,8 @@ import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
 // nexus-p89h4 / nexus-6pfgb.25 (vectors-041): the one search function that also tests an EXISTS on the catalog
 // manifest, serving plain search, the dense text gate and the selective chash set.
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ADMITS_CHUNK;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_QUALIFYING_HITS;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_768;
@@ -1536,7 +1538,7 @@ public final class PgVectorRepository {
 
         Result<? extends Record> result = runPlainSearchStatement(
             tenant, model, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false, null,
-            chashAllow != null, chashAllow == null && wherePlan.manifest() != null);
+            chashAllow != null, chashAllow == null && wherePlan.manifest() != null ? wherePlan : null);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
@@ -1650,7 +1652,7 @@ public final class PgVectorRepository {
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
         return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
-                                       rebindBeforeExactRerun, null, false, false);
+                                       rebindBeforeExactRerun, null, false, null);
     }
 
     /**
@@ -1659,9 +1661,10 @@ public final class PgVectorRepository {
      * @param forceExact when true the cardinality router is bypassed and the statement runs the exact route
      *        (index scans off), whatever the collections hold: the {@code chash_allow} search, whose statement
      *        {@code fn} ranks a named set of rows and must not walk the HNSW index (nexus-jypmj)
-     * @param manifestPredicate when true {@code fn} is {@code manifest_search_<dim>} with a predicate (a label,
-     *        title, content_type or catalog-meta filter inside the scan): a page the HNSW walk fills only in part is
-     *        then re-run exact, see {@link #exactOnUnderReturn} (nexus-6pfgb.61)
+     * @param manifestWhere non-null when {@code fn} is {@code manifest_search_<dim>} with a predicate (a label,
+     *        title, content_type or catalog-meta filter inside the scan), the plan it was built from: a page the HNSW
+     *        walk fills only in part is then re-run exact unless the manifest count shows it complete, see {@link
+     *        #exactOnUnderReturn} (nexus-6pfgb.61, nexus-8ptg4)
      */
     private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
                                                              int dim, String[] colls,
@@ -1670,7 +1673,7 @@ public final class PgVectorRepository {
                                                              boolean rebindBeforeExactRerun,
                                                              ArmPhases phases,
                                                              boolean forceExact,
-                                                             boolean manifestPredicate) {
+                                                             WherePlan manifestWhere) {
         final long setupStartNanos = System.nanoTime();
         // RDR-227 Step 1: a statement over exactly one collection that has no valid per-collection index walks
         // the shared leaf index, filtered down to that collection, and stops at the first rows the filter
@@ -1764,7 +1767,10 @@ public final class PgVectorRepository {
                     // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
                     // exactOnUnderReturn for the nexus-bq06h exact fallback.
                     result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
-                                             manifestPredicate, tenant, String.join(",", colls));
+                                             manifestWhere != null, tenant, String.join(",", colls),
+                                             manifestWhere == null ? null
+                                                 : manifestQualifying(ctx, colls, manifestWhere, model, tenant,
+                                                                      true, null));
                 }
                 completed = true;
                 return result;
@@ -3186,7 +3192,8 @@ public final class PgVectorRepository {
                 run.limiter = bound.limiter();
                 run.boundMs = bound.timeoutMs();
                 return bound.timeoutMs();
-            }, true, run.phases, chashAllow != null, chashAllow == null && wherePlan.manifest() != null));
+            }, true, run.phases, chashAllow != null,
+                chashAllow == null && wherePlan.manifest() != null ? wherePlan : null));
         } finally {
             armGate.release();
         }
@@ -3734,7 +3741,9 @@ public final class PgVectorRepository {
         if (wherePlan.manifest() != null) {
             return exactSelectFrom(ctx, nResults,
                 manifestSearchFn(dim, queryVec, gateQueryText, null, colls, wherePlan, nResults, model, tenant),
-                rebind ? statementTimeoutMs : null, true, tenant, String.join(",", colls));
+                rebind ? statementTimeoutMs : null, true, tenant, String.join(",", colls),
+                manifestQualifying(ctx, colls, wherePlan, model, tenant, true,
+                                   gateQueryText));
         }
         org.jooq.Table<?> hnswFirstFn = switch (dim) {
             case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
@@ -3974,6 +3983,9 @@ public final class PgVectorRepository {
      * loud with 400 rather than silently matching nothing; compound
      * {@code $and}/{@code $or} remains untranslated.
      *
+     * <p>A key {@link ManifestLabelStage} answers is not compared on the chunk row but per owning document from the
+     * catalog (nexus-u9dc5, {@link #getWhereCondition}).
+     *
      * @param where metadata equality predicates (ANDed); null/empty returns the
      *              collection paginated (the {@code store-get}-without-ids shape)
      * @return Chroma-style envelope {@code {ids, documents, metadatas}} aligned by
@@ -4009,22 +4021,21 @@ public final class PgVectorRepository {
                                         boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
-        if (where != null) {
-            for (Map.Entry<String, Object> e : where.entrySet()) {
-                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
-            }
-        }
-        org.jooq.Condition finalCond = cond;
+        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
 
         if (includeNonLive) {
-            var nonLiveResult = tenantScope.withTenant(tenant, ctx ->
-                ctx.select(ch.chash(), ch.metadata())
+            var nonLiveResult = tenantScope.withTenant(tenant, ctx -> {
+                // nexus-u9dc5: a custom plan per execution, so the bound path of the where stays a constant of the
+                // plan (see getWhereCondition) and pgjdbc's switch to a generic plan after five executions cannot
+                // put the per-chunk guards back.
+                PgSession.setSearchPlanCacheMode(ctx);
+                return ctx.select(ch.chash(), ch.metadata())
                    .from(ch.table())
                    .where(finalCond)
                    .orderBy(ch.chash().asc())
                    .limit(limit).offset(offset)
-                   .fetch());
+                   .fetch();
+            });
             List<String> nonLiveIds = new ArrayList<>(nonLiveResult.size());
             List<Map<String, Object>> nonLiveMetas = new ArrayList<>(nonLiveResult.size());
             for (var rec : nonLiveResult) {
@@ -4035,16 +4046,20 @@ public final class PgVectorRepository {
             return new LinkedHashMap<>(Map.of("ids", nonLiveIds, "metadatas", nonLiveMetas));
         }
 
-        var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
+        org.jooq.Condition driver = manifestDriverCondition(ch, tenant, collection, where);
+        var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-u9dc5: a custom plan per execution, as in the physical-scan branch above.
+            PgSession.setSearchPlanCacheMode(ctx);
+            return ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
                // this fetch-by-where read was structurally invisible to the
                // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
-               .where(finalCond.and(liveChunksCondition(ctx, ch)))
+               .where(finalCond.and(liveChunksCondition(ctx, ch)).and(driver))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
-               .fetch());
+               .fetch();
+        });
 
         List<String> outIds = new ArrayList<>(result.size());
         List<String> outDocs = new ArrayList<>(result.size());
@@ -4059,6 +4074,120 @@ public final class PgVectorRepository {
         return enrichGetEnvelope(tenant, collection,
             new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
             includeSourceUri);
+    }
+
+    /**
+     * The {@code where} condition of the two where-taking get routes ({@link #getWhere}, {@link #getAllMetadata}),
+     * both branches of each (nexus-u9dc5, the route (c) half, RDR-236 Phase 3). Every key {@link ManifestLabelStage}
+     * answers leaves the chunk-row comparison and is judged per OWNING DOCUMENT from the catalog by {@code
+     * nexus.manifest_admits_chunk} (vectors-051): the chunk is admitted when any live owner's own value passes, and a
+     * chunk with no live owner is judged on its own row, as the stage judges a hit with no manifest row. The
+     * predicates are compiled by {@link ManifestPushdown#ofExact}, the form route (b) runs, so every operator is
+     * answered on every key. A key outside the answered set (a chunk key such as {@code source_key} or {@code
+     * content_hash}) is the {@link #metadataCondition} comparison on the row, unchanged.
+     *
+     * <p>Why evaluate and not refuse. After RDR-236 Phase 4 Step 1 the writers stop stamping the document keys and the
+     * position labels on the shared row, and a {@code where} on one of them read from the row would return nothing
+     * and say nothing. A split that the stage refuses (an unknown operator, a non-scalar operand) is a 400 here as on
+     * the searches.
+     *
+     * <p>The same condition serves {@code includeNonLive}: that mode skips only the liveness predicate, so it still
+     * answers a key per owning document, and a chunk whose owners are all tombstoned is judged on its own row.
+     */
+    static org.jooq.Condition getWhereCondition(DimTables.ChunkTable ch, Map<String, Object> where) {
+        if (where == null || where.isEmpty()) {
+            return DSL.trueCondition();
+        }
+        ManifestLabelStage.Split split = ManifestLabelStage.split(where);
+        org.jooq.Condition cond = DSL.trueCondition();
+        Map<String, Object> rest = split.rest();
+        if (rest != null) {
+            for (Map.Entry<String, Object> e : rest.entrySet()) {
+                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
+            }
+        }
+        if (split.active()) {
+            cond = cond.and(manifestAdmitsCondition(ch, ManifestPushdown.ofExact(split.labels())));
+        }
+        return cond;
+    }
+
+    /**
+     * {@code EXISTS (SELECT 1 FROM nexus.manifest_admits_chunk(tenant, collection, chash, metadata, NULL, path) WHERE
+     * admitted)} over the row of {@code ch}. The function is a one-row SQL function called in FROM so that it
+     * inlines, as {@code nexus.chunk_live_owners} does: the bound path is then a constant of the plan, the guards of
+     * the keys it does not name fold away and the jsonpath is parsed once, not per chunk.
+     */
+    private static org.jooq.Condition manifestAdmitsCondition(DimTables.ChunkTable ch, ManifestPushdown.Plan plan) {
+        Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
+        var admits = MANIFEST_ADMITS_CHUNK.call(ch.tenantId(), ch.collection(), rawChash, ch.metadata(),
+            DSL.val((JSONB) null, SQLDataType.JSONB), DSL.val(plan.jsonPath()));
+        return DSL.exists(DSL.selectOne().from(admits).where(admits.ADMITTED));
+    }
+
+    /**
+     * The superset driver of the LIVE get reads (nexus-u9dc5 review r1, the cost remedy): for a positive {@code $eq} or
+     * {@code $in} on {@code title} or {@code source_author}, a conjunct that lets PostgreSQL start from the catalog
+     * (hundreds of documents) instead of testing {@link #manifestAdmitsCondition} on every chunk (tens of thousands):
+     *
+     * <pre>chash IN (SELECT m.chash FROM catalog_document_chunks m JOIN catalog_documents d ON ...
+     *               WHERE m.tenant_id = ? AND m.collection = ? AND d.deleted_at IS NULL
+     *                 AND (d.title IN (?...) OR d.title !~ '\S'))</pre>
+     *
+     * <p>It may admit more than the function keeps, never less, and the function stays the exact judge. For a chunk
+     * with a live owner the function takes the owner's {@code title} (or {@code author}) when it is not blank and the
+     * chunk row's value otherwise, so an owner can pass only if its own value is one of the operands or is blank. The
+     * blank owners are kept in the driver because their answer is the row's, which the driver cannot see. A chunk with
+     * no live owner is judged on its own row by the function, and the live reads never return one
+     * ({@link #liveChunksCondition}); the physical-scan mode does, so it takes no driver, and neither does a where that
+     * names neither key positively. The operands compare by their text, as {@link ManifestPushdown#exactPath} does
+     * ({@code String.valueOf}); an operand with a NUL, which PostgreSQL text cannot hold, takes no driver.
+     */
+    static org.jooq.Condition manifestDriverCondition(DimTables.ChunkTable ch, String tenant, String collection,
+                                                      Map<String, Object> where) {
+        if (where == null || where.isEmpty()) {
+            return DSL.trueCondition();
+        }
+        Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
+        org.jooq.Condition cond = DSL.trueCondition();
+        java.util.Set<String> driven = new java.util.HashSet<>();
+        for (ManifestLabelStage.Predicate p : ManifestLabelStage.split(where).labels()) {
+            Field<String> column = switch (p.key()) {
+                case "title" -> CATALOG_DOCUMENTS.TITLE;
+                case "source_author" -> CATALOG_DOCUMENTS.AUTHOR;
+                default -> null;
+            };
+            if (column == null || !("$eq".equals(p.operator()) || "$in".equals(p.operator()))) {
+                continue;
+            }
+            List<String> values = new ArrayList<>();
+            if ("$in".equals(p.operator())) {
+                if (!(p.operand() instanceof List<?> items)) {
+                    continue;
+                }
+                for (Object item : items) {
+                    values.add(String.valueOf(item));
+                }
+            } else {
+                values.add(String.valueOf(p.operand()));
+            }
+            if (values.isEmpty() || values.stream().anyMatch(v -> v.indexOf('\u0000') >= 0) || !driven.add(p.key())) {
+                continue;
+            }
+            org.jooq.Condition ownValue = column.in(values)
+                .or(DSL.coalesce(column, "").notLikeRegex("\\S"));
+            cond = cond.and(rawChash.in(
+                DSL.select(CATALOG_DOCUMENT_CHUNKS.CHASH)
+                   .from(CATALOG_DOCUMENT_CHUNKS)
+                   .join(CATALOG_DOCUMENTS)
+                       .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                       .and(ownValue))));
+        }
+        return cond;
     }
 
     /** Backward-compat 5-arg overload of {@link #getWhere} (source_uri not included). */
@@ -4100,6 +4229,9 @@ public final class PgVectorRepository {
      * are same-process and cheap; client-to-server round trips pay real
      * network latency each time.
      *
+     * <p>A {@code where} on a key {@link ManifestLabelStage} answers is judged per owning document from the catalog
+     * (nexus-u9dc5, {@link #getWhereCondition}); any other key is compared on the chunk row.
+     *
      * <p>Capped at {@value #GET_ALL_METADATA_MAX_ROWS} rows — above that the
      * caller should fall back to the paginated path rather than have the
      * server materialize an unbounded result set in memory. Throws {@link
@@ -4132,14 +4264,13 @@ public final class PgVectorRepository {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
-        org.jooq.Condition cond = chunkScope(ch, tenant, collection);
-        if (where != null) {
-            for (Map.Entry<String, Object> e : where.entrySet()) {
-                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
-            }
-        }
-        org.jooq.Condition finalCond = cond;
+        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
+        org.jooq.Condition driver = includeNonLive
+            ? DSL.trueCondition()
+            : manifestDriverCondition(ch, tenant, collection, where);
         var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-u9dc5: a custom plan per execution (see getWhereCondition).
+            PgSession.setSearchPlanCacheMode(ctx);
             // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
             // this staleness-cache-build read was structurally invisible to the
             // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
@@ -4147,7 +4278,7 @@ public final class PgVectorRepository {
             // see the method javadoc.
             org.jooq.Condition scanCond = includeNonLive
                 ? finalCond
-                : finalCond.and(liveChunksCondition(ctx, ch));
+                : finalCond.and(liveChunksCondition(ctx, ch)).and(driver);
             return ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
                .where(scanCond)
@@ -4269,8 +4400,11 @@ public final class PgVectorRepository {
      * @param corpus      catalog corpus filter; null = no filter
      * @param subtree     tumbler-prefix scope — DESCENDANTS only (root-exclusive, matching
      *                    {@code cat.descendants()}); also filters alias rows; null = no filter
-     * @param where       chunk-metadata equality predicates (JSONB containment); null/empty
-     *                    = no filter
+     * @param where       predicates; null/empty = no filter. Every key {@link ManifestLabelStage} answers (a
+     *                    document key or a label key: {@code source_author}, {@code title}, {@code section_type},
+     *                    {@code bib_year}, {@code indexed_at} and the rest), with any operator, is answered per
+     *                    OWNING DOCUMENT from the catalog manifest (nexus-6pfgb.41, nexus-qpt52, {@link
+     *                    #routeBWhere}); every other key is JSONB containment on the chunk row, as before
      */
     /** 8-arg back-compat (nexus-889ff): delegates with null subtree/where; discards tokens. */
     public List<Map<String, Object>> searchMetadataScoped(
@@ -4313,19 +4447,26 @@ public final class PgVectorRepository {
         String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
-        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        RouteBWhere rb = routeBWhere(where);
+        JSONB whereJsonb = rb.containment();
+        JSONB manifestWhere = rb.manifestContainment();
+        String manifestPath = rb.manifestPath();
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_METADATA_SCOPED_384.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 768  -> SEARCH_METADATA_SCOPED_768.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
+                             embed.tokens(), skippedCollections);
     }
 
     /**
@@ -4385,8 +4526,8 @@ public final class PgVectorRepository {
      * @param pattern       substring to match (ILIKE) within {@code field}; ignored
      *                      when {@code field} is null
      * @param minConfidence aspects confidence floor (inclusive); null = no floor
-     * @param where         chunk-metadata equality predicates (JSONB containment);
-     *                      null/empty = no filter
+     * @param where         equality predicates, split as in {@link #searchMetadataScoped}
+     *                      (nexus-6pfgb.41); null/empty = no filter
      */
     public Tokened<List<Map<String, Object>>> searchAspectScopedWithTokens(
             String tenant, String queryText, List<String> collectionNames,
@@ -4413,19 +4554,27 @@ public final class PgVectorRepository {
         String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
-        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        RouteBWhere rb = routeBWhere(where);
+        JSONB whereJsonb = rb.containment();
+        JSONB manifestWhere = rb.manifestContainment();
+        String manifestPath = rb.manifestPath();
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_ASPECT_SCOPED_384.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 768  -> SEARCH_ASPECT_SCOPED_768.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
+        // countable = false: the aspect join can give one occurrence several rows (runCombinedQueryWithChash).
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false),
+                             embed.tokens(), skippedCollections);
     }
 
     /**
@@ -4522,9 +4671,10 @@ public final class PgVectorRepository {
     /**
      * Token-aware sibling of {@link #searchGraphHop} (bead nexus-ehc4q).
      *
-     * <p>{@code where} (bead nexus-7ndh3, RDR-156 H2 residual) is a chunk-metadata
-     * equality map applied as JSONB containment ({@code c.metadata @> p_where}) in the
-     * post-BFS rank — byte-for-byte the {@link #searchMetadataScoped} semantics. Null or
+     * <p>{@code where} (bead nexus-7ndh3, RDR-156 H2 residual) is an equality map applied
+     * in the post-BFS rank — the {@link #searchMetadataScoped} semantics: document and label
+     * keys per owning document from the catalog (nexus-6pfgb.41), the rest as JSONB
+     * containment ({@code c.metadata @> p_where}). Null or
      * empty means no filter. This retires the {@code query} tool's follow_links+where
      * app-side fallback (the {@code _skip_service} arm).
      */
@@ -4554,20 +4704,27 @@ public final class PgVectorRepository {
         String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
-        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        RouteBWhere rb = routeBWhere(where);
+        JSONB whereJsonb = rb.containment();
+        JSONB manifestWhere = rb.manifestContainment();
+        String manifestPath = rb.manifestPath();
         String[] seedArr = seeds.toArray(String[]::new);
         String[] colls = collectionNames.toArray(String[]::new);
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_GRAPH_HOP_384.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 768  -> SEARCH_GRAPH_HOP_768.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             case 1024 -> SEARCH_GRAPH_HOP_1024.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
+                nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
+                             embed.tokens(), skippedCollections);
     }
 
     /**
@@ -4767,9 +4924,36 @@ public final class PgVectorRepository {
      * Like {@link #runCombinedQuery} but also maps the matched chunk's {@code chash}
      * column (graph-hop + metadata-scoped, bead nexus-houg9). Kept separate because the
      * topic function does not expose chash — {@code rec.get("chash", ...)} would throw.
+     *
+     * <p>{@code rb} (nexus-6pfgb.41) carries the route (b) manifest predicate when {@code fn} has one ({@link
+     * RouteBWhere#hasManifest}): the predicate runs on the joined row inside the HNSW scan, which stops at {@code
+     * hnsw.max_scan_tuples}, so a rare document or label key whose rows rank past the cap yields a SHORT page. Such a
+     * statement is wrapped in {@link #exactOnUnderReturn} with {@code rerunWhenShort}, the repair route (a) applies to
+     * {@code manifest_search_<dim>} (nexus-6pfgb.61), and with the bounded manifest count that skips the re-run for a
+     * page that already holds every qualifying row (nexus-8ptg4, {@link #manifestQualifying}); a statement without a
+     * manifest predicate runs once, as it always did. Route (b) has no cardinality router, so a short page whose
+     * count shows more qualifying rows than the page holds pays one exact re-run over all the collections.
+     *
+     * <p>The count is {@code manifest_qualifying_hits}, which counts one row per (manifest occurrence, chunk row) pair
+     * and so has the grain of a route (b) row; it applies route (a)'s {@code content_type} words, a superset of
+     * route (b)'s exact ones, and none of the function's own narrowing (type, author, year, corpus, subtree, the aspect
+     * join, the graph hop), so it can over-count, which only costs a re-run, and never under-counts, for a function
+     * that returns at most one row per (manifest occurrence, chunk row). The aspect family does not: it inner-joins
+     * {@code document_aspects} on (tenant_id, doc_id), which nothing makes unique, so a document with two aspect rows
+     * yields two route (b) rows per occurrence and the count could fall below the page. Its caller passes
+     * {@code countable = false}, and a short aspect page always pays the exact re-run (nexus-6pfgb.41 review r2).
+     *
+     * @param colls the collection names, which also name the statement in the re-run's log line
+     * @param model the collections' embedding model, for the count
+     * @param countable whether {@code fn} returns at most one row per (manifest occurrence, chunk row), so the
+     *        bounded count may skip the re-run; also false, through {@link RouteBWhere#countable}, for a predicate
+     *        whose count could fall below the rows (a negative operator on {@code content_type}, see
+     *        {@link #routeBWhere})
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
-            String tenant, org.jooq.Table<?> fn, int nResults) {
+            String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, String[] colls, String model,
+            boolean countable) {
+        boolean manifestPredicate = rb.hasManifest();
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement first (see runCombinedQuery), so the GUC round
             // trips below run under its network bound too (nexus-u9zkn).
@@ -4783,7 +4967,14 @@ public final class PgVectorRepository {
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            return ctx.selectFrom(fn).fetch();
+            return manifestPredicate
+                ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", colls),
+                                  countable && rb.countable()
+                                      ? manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null,
+                                                                                     rb.manifest()), model, tenant,
+                                                                          false, null)
+                                      : null)
+                : ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -6156,7 +6347,11 @@ FROM scope s
      * What {@link #quarantineRestore} reports: one {@link Row} per distinct requested chash, in request order.
      * {@code outcome} is one of {@code restored}, {@code would_restore} (dry run), {@code present} (the origin
      * already has the chash: never overwritten, any quarantine copy left for expiry), {@code dim_conflict} (as
-     * present, and the origin row and the quarantine copy hold embeddings of different widths) or {@code missing}
+     * present, and the origin row and the quarantine copy hold embeddings of different widths), {@code kept} (the
+     * reattach plan refused the chunk as a {@code rival} (another stored chunk names the same document position) or
+     * because its owner is mid index run ({@code indexing}) or failed its last run ({@code failed}): the chunk is NOT
+     * moved and stays in quarantine with its keys whatever {@code reattach} says, which keeps a rival refused across
+     * pages, calls and busy retries and lets a rerun after the run has ended attach the other two; nexus-l003p) or {@code missing}
      * (neither this origin's quarantine sibling nor the origin has it). For a {@code restored} row,
      * {@code noManifest} says the chunk has no own-collection manifest row AFTER the call (false when reattach
      * wrote one) and {@code reapableAfter} is the instant the reaper may take it again (restore time plus the
@@ -6173,7 +6368,11 @@ FROM scope s
      * {@code chunkTitle} the chunk's own metadata title, for the operator's re-put recipe. {@code reason} says
      * why a {@code superseded} verdict was reached ({@code indexing}, {@code complete}, {@code failed}, {@code version},
      * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, or
-     * {@code race} for an attach that lost a race) and is null for every other verdict. {@code ownerRows} and
+     * {@code race} for an attach that lost a race) and is null for every other verdict, except one: an
+     * {@code attach} verdict of a call with reattach off (or its dry run) reads {@code owner_link_dropped} for a chunk
+     * whose owner was named by its own {@code catalog_doc_id}/{@code doc_id} on the quarantine copy. The restored row
+     * holds the CHUNK keys only (vectors-053, nexus-l003p), so that link goes with the copy and a later call cannot
+     * attach the chunk; {@code owner} and {@code position} name what is lost. {@code ownerRows} and
      * {@code ownerChunks} are the owner's manifest rows in the origin after the call (before it, on a dry run)
      * and its registered chunk count, so a partial attach reads as M of N; null when no owner resolved
      * ({@code ownerChunks} also when the owner registers no count).
@@ -6221,6 +6420,8 @@ FROM scope s
         public List<String> present() { return chashesWith("present"); }
         public List<String> dimConflict() { return chashesWith("dim_conflict"); }
         public List<String> missing() { return chashesWith("missing"); }
+        /** The chashes the call kept in quarantine because another stored chunk names their document position. */
+        public List<String> kept() { return chashesWith("kept"); }
         /** The chashes whose manifest row this call wrote. */
         public List<String> attached() { return rows.stream().filter(Row::attached).map(Row::chash).toList(); }
         /** The chashes the reattach step judged with {@code verdict} (see {@link Row}). */
@@ -6628,6 +6829,11 @@ FROM scope s
      * trips on a later sibling leaves the earlier ones committed; the {@link QuarantineRestoreBusyException} then
      * carries their audit ids and chashes, and the same call sent again finishes the rest (a chash already restored
      * reads {@code present}).
+     *
+     * <p>A chunk a sibling's plan refuses as {@code rival} reads {@code kept} and stays in its quarantine sibling
+     * with its keys (nexus-l003p), so the other version, wherever it sits, still sees it as a rival on this call, on a
+     * later page, in a separate call and on the retry of a busy one; no cross-sibling pre-pass is needed. A
+     * {@code kept} row is final for the call (it is not {@code missing}, so no later sibling is asked about it).
      */
     private QuarantineRestoreOutcome restoreAcross(String tenant, String originCollection, List<String> siblings,
                                                     String[] hex, String actor, boolean dryRun, boolean reattach,
@@ -6755,7 +6961,7 @@ FROM scope s
                 : reason + "; an earlier quarantine sibling of this call had already committed ("
                     + movedChashes.size() + " chunk(s) restored or attached, gc_audit row(s) "
                     + auditIds + "), the rest were not moved. Send the same call again: a chunk already "
-                    + "restored reads present", cause);
+                    + "restored reads present, and a chunk kept in quarantine (a rival, an owner mid index run or with a failed run) is kept again", cause);
             this.reason = reason;
             this.auditIds = List.copyOf(auditIds);
             this.movedChashes = List.copyOf(movedChashes);
@@ -7637,15 +7843,22 @@ FROM scope s
      * predicate ({@code manifest_search_<dim>}): there the predicate runs inside the HNSW scan, which stops at
      * {@code hnsw.max_scan_tuples} (or its memory budget), so a rare label whose chunks rank past the cap yields the
      * ones the walk reached and silently drops the rest. A page that is short because the filter genuinely matches
-     * fewer rows is indistinguishable from it at this point, so it pays the re-run too: ONE exact statement over a
-     * collection the router sent down the HNSW route (more than the router threshold, 20,000 rows by default), the
-     * same cost class as the walk that came up short, which had to run to the cap to learn it could not fill the
-     * page. Below the threshold the router already ran the exact plan and this is never reached.
+     * fewer rows looks the same at this point, so a bounded manifest count tells them apart (nexus-8ptg4, {@link
+     * #manifestQualifying}): if the chunks the predicate admits are no more than the rows already on the page, the
+     * page is complete and the re-run is skipped. Otherwise the re-run is ONE exact statement over a collection the
+     * router sent down the HNSW route (more than the router threshold, 20,000 rows by default), the same cost class
+     * as the walk that came up short. Measured at 220,000 chunks: the re-run 3.6-4.0 s, the count 610 ms when the
+     * filter admits a few chunks and under 12 ms when it admits more than the cap. Below the threshold route (a)'s
+     * router already ran the exact plan and this is never reached. The route (b) functions have no router
+     * (nexus-6pfgb.41): the planner picks the plan, so a short page can reach this on a small collection too, and then
+     * the count, not the collection size, decides whether the re-run is paid.
      *
      * <p>The empty case keeps its contract (the re-run's failure propagates). The short-page re-run is a
      * REPAIR of a page that is already usable, so it runs under a savepoint and a failure of it (a statement timeout
      * on a very large collection, most likely) returns the page in hand and logs, instead of turning a partial
-     * answer into an error.
+     * answer into an error. The one failure it does not absorb is a fan-out arm's deadline (nexus-8ptg4): with a
+     * {@code rebindTimeoutMs}, a re-run (or manifest count) that the arm's bound cancels, or that the supplier refuses
+     * because the budget is spent, propagates, so the fan-out marks the arm timed out instead of serving the short page.
      */
     private static <R extends Result<? extends Record>> R exactOnUnderReturn(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
@@ -7661,13 +7874,34 @@ FROM scope s
     static <R extends Result<? extends Record>> R exactOnUnderReturn(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
             java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection) {
+        return exactOnUnderReturn(ctx, nResults, fetch, rebindTimeoutMs, rerunWhenShort, tenant, collection, null);
+    }
+
+    /**
+     * As above; {@code qualifyingUpTo} (nexus-8ptg4) tells a page that is short because the filter genuinely matches
+     * few rows from one the scan cut short. Given a cap it returns how many chunks the statement's manifest predicate
+     * admits, counted only up to the cap, and it must never under-count (it may over-count). The short page is re-run
+     * only if that count exceeds the rows already on the page; at or below it the page holds every qualifying chunk
+     * and the O(collection) re-run has nothing to add. Null keeps the re-run unconditional. See {@link
+     * #manifestQualifying}.
+     */
+    static <R extends Result<? extends Record>> R exactOnUnderReturn(
+            DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
+            java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection,
+            java.util.function.IntUnaryOperator qualifyingUpTo) {
         R first = fetch.get();
         boolean empty = first.isEmpty();
         if (!empty && !(rerunWhenShort && first.size() < nResults)) {
             return first;
         }
         if (!empty) {
-            return shortPageRerun(ctx, nResults, fetch, rebindTimeoutMs, first, tenant, collection);
+            return shortPageRerun(ctx, nResults, fetch, rebindTimeoutMs, first, tenant, collection, qualifyingUpTo);
+        }
+        if (qualifyingUpTo != null
+                && manifestAdmitsNothing(ctx, nResults, rebindTimeoutMs, tenant, collection, qualifyingUpTo)) {
+            // nexus-zk7rw (nexus-bq06h): the manifest admits no chunk at all, so the exact re-run, which can only return
+            // rows the manifest admits, has nothing to find either; the empty page is the answer.
+            return first;
         }
         PgSession.disableIndexScanForExactFallback(ctx);
         if (rebindTimeoutMs != null) {
@@ -7683,10 +7917,32 @@ FROM scope s
     /** The exact re-run of a short, non-empty page; see {@link #exactOnUnderReturn}. */
     private static <R extends Result<? extends Record>> R shortPageRerun(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
-            java.util.function.IntSupplier rebindTimeoutMs, R first, String tenant, String collection) {
+            java.util.function.IntSupplier rebindTimeoutMs, R first, String tenant, String collection,
+            java.util.function.IntUnaryOperator qualifyingUpTo) {
         java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
         ctx.connection(conn -> taken[0] = conn.setSavepoint());
+        // True while the manifest count (not the re-run) is the statement in flight, so an arm deadline is counted
+        // against the one that met it.
+        boolean counting = false;
         try {
+            if (qualifyingUpTo != null) {
+                // nexus-8ptg4: ask the manifest, bounded, whether the page already holds every chunk the predicate
+                // admits. The count runs BEFORE index scans are turned off, so it reads the manifest by its keys.
+                counting = true;
+                if (rebindTimeoutMs != null) {
+                    PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
+                }
+                int hits = qualifyingHits(ctx, qualifyingUpTo, first.size() + 1, taken[0], rebindTimeoutMs != null,
+                                          tenant, collection);
+                if (hits <= first.size()) {
+                    SHORT_PAGE_SKIPS.incrementAndGet();
+                    log.info("event=vector_short_page_complete tenant={} collection={} page_rows={} qualifying={} n_results={}",
+                             tenant, collection, first.size(), hits, nResults);
+                    ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
+                    return first;
+                }
+                counting = false;
+            }
             PgSession.disableIndexScanForExactFallback(ctx);
             if (rebindTimeoutMs != null) {
                 PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
@@ -7699,6 +7955,20 @@ FROM scope s
             ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
             return exact.size() >= first.size() ? exact : first;
         } catch (RuntimeException e) {
+            if (rebindTimeoutMs != null && isArmDeadline(e)) {
+                // nexus-8ptg4: a fan-out arm hands in a rebind supplier, and the bound it sets is the arm's remaining
+                // request or fan-out budget. A re-run that bound cancelled, or that the supplier refused because the
+                // budget was already spent, means the arm ran out of time, and the short page in hand is not that
+                // arm's answer: it propagates, and the fan-out settles it as the arm timing out (settleArmFailure),
+                // the same as a first attempt the bound cancels. The transaction is the arm's own and ends with it.
+                // The count and the re-run keep separate counters: they cost different things and a bound that
+                // cancels the count says the arm had no room for even the cheap statement.
+                (counting ? SHORT_PAGE_COUNT_DEADLINES : SHORT_PAGE_RERUN_DEADLINES).incrementAndGet();
+                log.warn("event={} tenant={} collection={} indexed_rows={} n_results={} error={}",
+                         counting ? "vector_short_page_count_deadline" : "vector_short_page_rerun_deadline",
+                         tenant, collection, first.size(), nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
+                throw e;
+            }
             try {
                 ctx.connection(conn -> {
                     conn.rollback(taken[0]);
@@ -7713,6 +7983,129 @@ FROM scope s
                      tenant, collection, first.size(), nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
             return first;
         }
+    }
+
+    /**
+     * Whether the manifest predicate admits no chunk at all, asked of an EMPTY page before its exact re-run
+     * (nexus-zk7rw, nexus-bq06h). The count is bounded at one: it stops at the first chunk the predicate admits. A count
+     * of zero means the re-run, whose rows are a subset of what the count admits, would be empty too. A count that fails
+     * for a reason other than a fan-out arm's deadline is "unknown" and the re-run runs, as it did before the count; the
+     * arm's deadline propagates, as it does for a short page. The count runs under a savepoint so its failure does not
+     * leave the transaction aborted for the re-run that follows.
+     */
+    private static boolean manifestAdmitsNothing(DSLContext ctx, int nResults,
+                                                 java.util.function.IntSupplier rebindTimeoutMs, String tenant,
+                                                 String collection,
+                                                 java.util.function.IntUnaryOperator qualifyingUpTo) {
+        java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
+        ctx.connection(conn -> taken[0] = conn.setSavepoint());
+        try {
+            if (rebindTimeoutMs != null) {
+                PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
+            }
+            int hits = qualifyingHits(ctx, qualifyingUpTo, 1, taken[0], rebindTimeoutMs != null, tenant, collection);
+            if (hits == 0) {
+                SHORT_PAGE_SKIPS.incrementAndGet();
+                log.info("event=vector_short_page_complete tenant={} collection={} page_rows=0 qualifying=0 n_results={}",
+                         tenant, collection, nResults);
+            }
+            ctx.connection(conn -> conn.releaseSavepoint(taken[0]));
+            return hits == 0;
+        } catch (RuntimeException e) {
+            if (rebindTimeoutMs != null && isArmDeadline(e)) {
+                SHORT_PAGE_COUNT_DEADLINES.incrementAndGet();
+                log.warn("event=vector_short_page_count_deadline tenant={} collection={} indexed_rows=0 n_results={} error={}",
+                         tenant, collection, nResults, String.valueOf(e.getMessage()).replace('\n', ' '));
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * The bounded qualifying count for a short page, or {@link Integer#MAX_VALUE} (unknown: re-run) when the count
+     * itself failed for a reason other than the arm's deadline. A failed statement leaves the transaction aborted, so
+     * the savepoint is rolled back after the failure is logged; if the rollback fails too, that failure escapes with the
+     * count's failure attached as suppressed.
+     */
+    private static int qualifyingHits(DSLContext ctx, java.util.function.IntUnaryOperator qualifyingUpTo, int cap,
+                                      java.sql.Savepoint taken, boolean fanOutArm, String tenant, String collection) {
+        try {
+            return qualifyingUpTo.applyAsInt(cap);
+        } catch (RuntimeException e) {
+            if (fanOutArm && isArmDeadline(e)) {
+                throw e;
+            }
+            // Log the count's own failure first, so it is on record whatever the rollback does.
+            log.warn("event=vector_short_page_count_failed tenant={} collection={} cap={} error={}",
+                     tenant, collection, cap, String.valueOf(e.getMessage()).replace('\n', ' '));
+            try {
+                ctx.connection(conn -> conn.rollback(taken));
+            } catch (RuntimeException rollbackFailure) {
+                // The transaction is unusable and this failure escapes; the count's failure rides along as suppressed.
+                rollbackFailure.addSuppressed(e);
+                throw rollbackFailure;
+            }
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    /**
+     * The bounded count of chunks a manifest predicate admits for {@link #exactOnUnderReturn}'s short-page check
+     * (nexus-8ptg4): {@code manifest_qualifying_hits} (vectors-047, -052) over the statement's own collections, model,
+     * tenant, chunk-row where and manifest predicate, counted only up to the cap it is given. It never under-counts, so
+     * a page with as many rows as this count has every qualifying chunk. {@code queryText}, the text gate of a hybrid
+     * statement's dense branch, is applied as {@code manifest_search_<dim>} applies it (nexus-zk7rw), so a page the gate
+     * leaves short is not read as one the scan cap cut short; null (every other statement) applies none, which can only
+     * raise the count. The route (b) and plain route (a) statements pass null.
+     *
+     * <p>{@code distinctChunks} says what grain the page it is compared with has. A route (a) page
+     * ({@code manifest_search_<dim>}) is one row per chunk, so the count is of distinct (collection, chash) and a chunk
+     * with several qualifying owners counts once (nexus-zk7rw). A route (b) page is one row per owner, so its count stays
+     * a count of occurrences: a distinct count there could fall below the page and skip a re-run it needs. The function
+     * is streaming and cannot dedupe without reading every qualifying occurrence, so the distinct count is taken over at
+     * most twice the cap: if the function returns fewer rows than that it has run out, and the distinct count is exact;
+     * if it fills the bound, the chunks seen are a lower bound, and a lower bound under the cap is raised to the cap (an
+     * over-count, which only costs a re-run).
+     */
+    private static java.util.function.IntUnaryOperator manifestQualifying(DSLContext ctx, String[] colls,
+                                                                         WherePlan wherePlan, String model,
+                                                                         String tenant, boolean distinctChunks,
+                                                                         String queryText) {
+        ManifestPushdown.Plan m = wherePlan.manifest();
+        return cap -> {
+            // A cap of 1 (the empty-page probe) needs no distinct read: any row is at least one chunk, which is the cap.
+            int fetchCap = distinctChunks && cap > 1 && cap <= Integer.MAX_VALUE / 2 ? 2 * cap : cap;
+            Result<?> rows = ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
+                colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
+                fetchCap, model, tenant, queryText)).fetch();
+            if (!distinctChunks) {
+                return rows.size();
+            }
+            java.util.Set<String> chunks = new java.util.HashSet<>();
+            for (Record r : rows) {
+                chunks.add(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_COLLECTION) + "/"
+                           + java.util.HexFormat.of().formatHex(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_CHASH)));
+            }
+            return rows.size() < fetchCap ? chunks.size() : Math.max(chunks.size(), cap);
+        };
+    }
+
+    /**
+     * Whether {@code t} is a fan-out arm's deadline: the statement bound cancelling a statement (SQLSTATE 57014), or
+     * the arm's budget refused in its typed shape ({@link FanoutBudgetSpentException}, {@link
+     * RequestDeadlineExceededException}), found anywhere in the cause chain.
+     */
+    private static boolean isArmDeadline(Throwable t) {
+        int depth = 0;
+        for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof FanoutBudgetSpentException || c instanceof RequestDeadlineExceededException) {
+                return true;
+            }
+            if (c instanceof java.sql.SQLException sql && QUERY_CANCELED.equals(sql.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -7746,8 +8139,15 @@ FROM scope s
     private static <R extends Record> Result<R> exactSelectFrom(
             DSLContext ctx, int nResults, org.jooq.Table<R> fn,
             java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection) {
+        return exactSelectFrom(ctx, nResults, fn, rebindTimeoutMs, rerunWhenShort, tenant, collection, null);
+    }
+
+    private static <R extends Record> Result<R> exactSelectFrom(
+            DSLContext ctx, int nResults, org.jooq.Table<R> fn,
+            java.util.function.IntSupplier rebindTimeoutMs, boolean rerunWhenShort, String tenant, String collection,
+            java.util.function.IntUnaryOperator qualifyingUpTo) {
         return exactOnUnderReturn(ctx, nResults, () -> ctx.selectFrom(fn).fetch(), rebindTimeoutMs, rerunWhenShort,
-                                  tenant, collection);
+                                  tenant, collection, qualifyingUpTo);
     }
 
     /** Count of exact re-runs of a short, non-empty page that carried a manifest predicate (nexus-6pfgb.61). */
@@ -7757,6 +8157,39 @@ FROM scope s
     /** Package-visible for tests, same shape as {@link #exactFallbackCount()}. */
     public static long shortPageRerunCount() {
         return SHORT_PAGE_RERUNS.get();
+    }
+
+    /**
+     * Count of short pages NOT re-run because the manifest count showed the page already held every qualifying chunk
+     * (nexus-8ptg4).
+     */
+    private static final java.util.concurrent.atomic.AtomicLong SHORT_PAGE_SKIPS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
+    public static long shortPageSkipCount() {
+        return SHORT_PAGE_SKIPS.get();
+    }
+
+    /** Count of short-page exact re-runs that hit a fan-out arm's deadline and failed the arm (nexus-8ptg4). */
+    private static final java.util.concurrent.atomic.AtomicLong SHORT_PAGE_RERUN_DEADLINES =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
+    public static long shortPageRerunDeadlineCount() {
+        return SHORT_PAGE_RERUN_DEADLINES.get();
+    }
+
+    /**
+     * Count of short-page manifest counts (or their bound rebind) that hit a fan-out arm's deadline and failed the arm
+     * (nexus-8ptg4); apart from {@link #shortPageRerunDeadlineCount()}, which counts the re-run's.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong SHORT_PAGE_COUNT_DEADLINES =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
+    public static long shortPageCountDeadlineCount() {
+        return SHORT_PAGE_COUNT_DEADLINES.get();
     }
 
     /** Count of exact re-runs (nexus-bq06h): an absorption counter, so the belt is measurable. */
@@ -7912,6 +8345,69 @@ FROM scope s
             throw new IllegalArgumentException(
                 operator + " for field '" + key + "' got a non-finite numeric operand: " + n);
         }
+    }
+
+    /**
+     * nexus-6pfgb.41: a route (b) {@code where} split into the part the chunk row answers and the part the catalog
+     * answers. {@code containment} is bound as {@code p_where} ({@code c.metadata @> p_where}); {@code manifest} is
+     * bound as {@code p_manifest_where} / {@code p_manifest_path} and tested on the joined row's per-occurrence
+     * object ({@code vectors-048}, the object {@code manifest_search_<dim>} builds).
+     */
+    record RouteBWhere(JSONB containment, ManifestPushdown.Plan manifest, boolean countable) {
+
+        RouteBWhere(JSONB containment, ManifestPushdown.Plan manifest) {
+            this(containment, manifest, true);
+        }
+
+        boolean hasManifest() {
+            return manifest != null;
+        }
+
+        JSONB manifestContainment() {
+            return manifest == null ? null : manifest.containment();
+        }
+
+        String manifestPath() {
+            return manifest == null ? null : manifest.jsonPath();
+        }
+    }
+
+    /**
+     * Split a route (b) {@code where} (nexus-6pfgb.41, completed by nexus-qpt52). Every key {@link ManifestLabelStage}
+     * answers leaves the containment and becomes the manifest plan, EXACTLY: {@link ManifestPushdown#ofExact} compiles
+     * each predicate, a negative operator and a range on any answered key included, to the jsonpath that is true on an
+     * occurrence's object when {@link ManifestLabelStage#testValue} is. Route (b) has no stage after the search that
+     * could judge a key, which is why it cannot hand one off the way route (a) does; before nexus-qpt52 a key the SQL
+     * did not compile (a negative operator, {@code indexed_at}, {@code bib_year}, {@code bib_venue}, {@code
+     * bib_authors}, {@code bib_citation_count}) stayed in the containment, where it matched the last writer's chunk row
+     * or, as an operator map, nothing at all. A key outside the answered set (a chunk-row key) stays in the
+     * containment, as before.
+     *
+     * <p>{@code countable} is false when the bounded count of {@code manifest_qualifying_hits} could fall below the
+     * rows the function returns: the count builds route (a)'s {@code content_type} array, which lists more words than
+     * route (b)'s, so a negative operator on {@code content_type} admits fewer occurrences there than here (an
+     * under-count would skip a re-run a starved page needs).
+     *
+     * <p>The split reads the where as route (a) does ({@link ManifestLabelStage#split}), so an operator the stage
+     * refuses is refused here with the same {@link IllegalArgumentException}.
+     */
+    static RouteBWhere routeBWhere(Map<String, Object> where) {
+        if (where == null || where.isEmpty()) {
+            return new RouteBWhere(null, null);
+        }
+        var split = ManifestLabelStage.split(where);
+        if (!split.active()) {
+            return new RouteBWhere(JSONB.jsonb(toJson(where)), null);
+        }
+        ManifestPushdown.Plan plan = ManifestPushdown.ofExact(split.labels());
+        Map<String, Object> rest = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : where.entrySet()) {
+            if (!ManifestLabelStage.ANSWERED_KEYS.contains(e.getKey())) {
+                rest.put(e.getKey(), e.getValue());
+            }
+        }
+        return new RouteBWhere(rest.isEmpty() ? null : JSONB.jsonb(toJson(rest)), plan,
+            !ManifestPushdown.negatesContentType(split.labels()));
     }
 
     /**
@@ -8417,13 +8913,17 @@ FROM scope s
      *
      * @param tenant               the tenant whose catalog rows to query (RLS-scoped)
      * @param chashesByCollection  the 64-hex chashes of the window, by the collection they were read from
+     * @param markShared           true when the caller reads the owner's SPAN (a search row): one more
+     *                             statement then asks which owners' chunks another document holds
+     *                             ({@link ManifestLabelStage#firstOwners}); false for a caller that reads only
+     *                             the {@code source_uri} (the get-envelope), which runs no such statement
      * @return owner per {@link ManifestLabelStage#ownerKey}
      */
     private Map<String, ManifestLabelStage.Occurrence> ownersByChash(
-            String tenant, Map<String, Set<String>> chashesByCollection) {
+            String tenant, Map<String, Set<String>> chashesByCollection, boolean markShared) {
         ownerLookupCalls.incrementAndGet();
         if (chashesByCollection.isEmpty()) return Map.of();
-        return labelStage().firstOwners(tenant, chashesByCollection);
+        return labelStage().firstOwners(tenant, chashesByCollection, markShared);
     }
 
     /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
@@ -8488,14 +8988,20 @@ FROM scope s
      * #ownersByChash}) whether or not {@code source_uri} was asked for: {@code doc_id} and {@code position}
      * of the owner's first live manifest row in the row's own collection, and that row's span ({@code
      * line_start}, {@code line_end}, {@code chunk_start_char}, {@code chunk_end_char}) where the manifest
-     * has a value, so the document, the file and the lines on a citation are one owner's. A chunk with no
+     * has a value, and for a NULL field the same rule as the expanded path below ({@link
+     * ManifestLabelStage#putSpan}), so the document, the file and the lines on a citation are one owner's.
+     * A former holder leaves no manifest trace, so the write side clears the chunk row's field when the
+     * sole holder left lacks it ({@code DepartedWriterSpans}); the cases it does not reach are listed on
+     * putSpan. A chunk with no
      * live owner keeps its own span and gets neither key.
      *
      * <p>{@code labelStageFollows}: a {@link ManifestLabelStage} pass will expand each row to its owning
      * documents, and writes each copy's own {@code doc_id}, {@code position}, {@code source_uri} and span,
-     * falling back, for a NULL manifest field, to the CHUNK ROW's value. This method then runs NO owner
-     * lookup and leaves those fields as the chunk row has them (a null {@code source_uri} when asked for),
-     * or an owner without a recorded span would inherit the first owner's.
+     * falling back, for a NULL manifest field, to the CHUNK ROW's value when no other document holds the
+     * chunk and to no value when one does, tombstoned or not (nexus-pvkbv,
+     * {@link ManifestLabelStage#putSpan}). This method then runs NO owner lookup and leaves those fields as
+     * the chunk row has them (a null {@code source_uri} when asked for), or an owner without a recorded span
+     * would inherit the first owner's.
      *
      * <p>Field-presence contract:
      * <ul>
@@ -8527,7 +9033,7 @@ FROM scope s
                     chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(s);
                 }
             }
-            owners = ownersByChash(tenant, chashesByCollection);
+            owners = ownersByChash(tenant, chashesByCollection, true);
         }
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
@@ -8551,7 +9057,8 @@ FROM scope s
                 ? owners.get(ManifestLabelStage.ownerKey(c, chashStr)) : null;
             if (owner != null) {
                 // The row names its owner, and that owner's span replaces the shared chunk row's (the last
-                // writer's); a NULL manifest field keeps the row's value (a legacy manifest row).
+                // writer's); a NULL manifest field keeps the row's value (a legacy manifest row) unless another
+                // document holds the chunk, when it is dropped (nexus-pvkbv, ManifestLabelStage#putSpan).
                 row.put("doc_id", owner.docId());
                 row.put("position", owner.position());
                 ManifestLabelStage.putSpan(row, owner);
@@ -8609,7 +9116,7 @@ FROM scope s
             for (String id : ids) {
                 if (id != null && HEX64.matcher(id).matches()) hexes.add(id);
             }
-            owners = ownersByChash(tenant, hexes.isEmpty() ? Map.of() : Map.of(collection, hexes));
+            owners = ownersByChash(tenant, hexes.isEmpty() ? Map.of() : Map.of(collection, hexes), false);
         }
 
         List<String> chashes   = new ArrayList<>(ids.size());

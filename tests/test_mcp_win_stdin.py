@@ -172,5 +172,5 @@ def test_the_sdk_stdio_server_reads_the_rebound_sys_stdin() -> None:
     finally:
         sys.stdin = saved
         swapped.close()
-    assert getattr(getattr(msg, "message", None), "root", None) is not None, msg
-    assert msg.message.root.method == "ping"  # type: ignore[union-attr]
+    assert getattr(msg, "message", None) is not None, msg
+    assert msg.message.method == "ping"  # type: ignore[union-attr]

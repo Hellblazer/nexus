@@ -23,7 +23,14 @@ from nexus.upgrade_ladder.protocol import (
     ProgressReporter,
     RungStatus,
 )
-from nexus.upgrade_ladder.registry import LadderRegistry
+from nexus.upgrade_ladder.registry import (
+    RUNG_MANIFEST_SECTION_LABELS,
+    RUNG_ORDER,
+    RUNG_RDR192_MANIFEST_BACKFILL,
+    LadderOrderError,
+    LadderRegistry,
+    default_registry,
+)
 from nexus.upgrade_ladder.runner import (
     LadderRunner,
     LadderRunReport,
@@ -202,21 +209,89 @@ def test_stuck_resumable_rung_exhausts_step_budget(store: InMemoryLedger) -> Non
     assert store.verified_rungs() == frozenset()
 
 
-def test_deferred_rung_stops_walk_without_failing(store: InMemoryLedger) -> None:
-    """RDR-142 would-defer class: a deferred rung records nothing and stops
-    the walk (hard edges), but the report is NOT hard-failed — deferral is
-    designed to retry on a later run, never to fail the trigger."""
+def test_a_deferred_rung_holds_back_only_its_dependents(store: InMemoryLedger) -> None:
+    """RDR-142 would-defer class: a deferred rung records nothing and is NOT hard-failed (it retries on a later
+    run). It holds back the rungs with a hard edge from it; an independent later rung still runs (nexus-dfemn: a
+    persistently deferring census starved note-tags-array and manifest-section-labels on every upgrade)."""
     deferred = ScriptedRung("deferred", defer=True)
-    later = ScriptedRung("later")
-    report = _runner((deferred, later), store).run()
+    dependent = ScriptedRung("dependent")
+    on_dependent = ScriptedRung("on-dependent")
+    independent = ScriptedRung("independent")
+    registry = LadderRegistry(
+        (deferred, dependent, on_dependent, independent),
+        edges=(("deferred", "dependent"), ("dependent", "on-dependent")),
+    )
+    report = LadderRunner(registry, store, package_version_fn=lambda: "6.12.0").run()
     assert _outcomes(report) == [
         ("deferred", RungOutcome.DEFERRED),
-        ("later", RungOutcome.NOT_ATTEMPTED),
+        ("dependent", RungOutcome.NOT_ATTEMPTED),
+        ("on-dependent", RungOutcome.NOT_ATTEMPTED),
+        ("independent", RungOutcome.RECORDED),
     ]
-    assert store.verified_rungs() == frozenset()
+    assert "waits on deferred" in report.runs[1].detail
+    assert dependent.converge_calls == 0 and on_dependent.converge_calls == 0
+    assert store.verified_rungs() == frozenset({"independent"})
+    assert report.position == 0, "the position is the verified prefix: it never passes the deferred rung"
     assert not report.converged
     assert not report.hard_failed
     assert deferred.verify_calls == 0  # deferral bypasses verify: nothing claims completion
+
+
+def test_with_no_edges_a_deferral_stops_nothing_after_it(store: InMemoryLedger) -> None:
+    deferred = ScriptedRung("deferred", defer=True)
+    later = ScriptedRung("later")
+    report = _runner((deferred, later), store).run()
+    assert _outcomes(report) == [("deferred", RungOutcome.DEFERRED), ("later", RungOutcome.RECORDED)]
+
+
+def test_the_production_edges_hold_section_labels_behind_the_backfill_only() -> None:
+    """The section-labels rung fills the rows the RDR-192 backfill adds and then reads converged for good, so it waits
+    on the backfill; the other rungs depend on nothing (nexus-dfemn review r1)."""
+    registry = default_registry()
+    assert [r.name for r in registry] == list(RUNG_ORDER)
+    assert registry.prerequisites(RUNG_MANIFEST_SECTION_LABELS) == frozenset({RUNG_RDR192_MANIFEST_BACKFILL})
+    others = [n for n in RUNG_ORDER if n != RUNG_MANIFEST_SECTION_LABELS]
+    assert all(registry.prerequisites(n) == frozenset() for n in others)
+
+
+def test_a_deferred_backfill_holds_section_labels_and_lets_the_others_run(store: InMemoryLedger) -> None:
+    """The production edge set, with stand-ins under the production names."""
+    rungs = tuple(ScriptedRung(n, defer=(n == RUNG_RDR192_MANIFEST_BACKFILL)) for n in RUNG_ORDER)
+    report = LadderRunner(LadderRegistry(rungs), store, package_version_fn=lambda: "6.12.0").run()
+    outcomes = dict(_outcomes(report))
+    assert outcomes[RUNG_RDR192_MANIFEST_BACKFILL] is RungOutcome.DEFERRED
+    assert outcomes[RUNG_MANIFEST_SECTION_LABELS] is RungOutcome.NOT_ATTEMPTED
+    assert all(outcomes[n] is RungOutcome.RECORDED for n in RUNG_ORDER
+               if n not in (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS))
+
+
+def test_an_edge_against_the_order_is_refused() -> None:
+    a, b = ScriptedRung("a"), ScriptedRung("b")
+    with pytest.raises(LadderOrderError):
+        LadderRegistry((b, a), edges=(("a", "b"),))
+
+
+def test_a_raise_after_a_deferral_is_a_deferral_and_stops_the_walk(store: InMemoryLedger) -> None:
+    """An unreachable engine defers the backfill and makes the next rung's detect raise; that must stay the
+    non-fatal retry it was (CI red on 7b85c02cb: `nx upgrade` with no service exited 1)."""
+    deferred = ScriptedRung("deferred", defer=True)
+    boom = ScriptedRung("boom", fail_converge=True)
+    later = ScriptedRung("later")
+    report = _runner((deferred, boom, later), store).run()
+    assert _outcomes(report) == [
+        ("deferred", RungOutcome.DEFERRED),
+        ("boom", RungOutcome.DEFERRED),
+        ("later", RungOutcome.NOT_ATTEMPTED),
+    ]
+    assert "failed after deferred deferred this run" in report.runs[1].detail and "converge exploded" in report.runs[1].detail
+    assert not report.hard_failed
+
+
+def test_a_raise_with_no_earlier_deferral_is_still_a_failure(store: InMemoryLedger) -> None:
+    boom = ScriptedRung("boom", fail_converge=True)
+    report = _runner((ScriptedRung("ok"), boom), store).run()
+    assert _outcomes(report)[-1] == ("boom", RungOutcome.FAILED)
+    assert report.hard_failed
 
 
 # ── Crash resume: converged-but-unrecorded heals by verify-then-record ──────

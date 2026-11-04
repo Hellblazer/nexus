@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
+from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
 from nexus.mcp_infra import (
     get_catalog_writer as _get_catalog_writer,
@@ -22,9 +23,9 @@ from nexus.mcp_infra import (
     t2_ctx as _t2_ctx,
 )
 
-mcp = FastMCP("nexus-catalog")
+mcp = MCPServer("nexus-catalog", version=_server_version())
 
-# nexus-2nxoo: this server's own FastMCP is not the one core wraps, so it gets
+# nexus-2nxoo: this server's own MCPServer is not the one core wraps, so it gets
 # its own per-call `mcp_tool_call` hook, and main() reports ITS status, not
 # core's. Import-time SDK patches stay transitive (core applies them).
 from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server

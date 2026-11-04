@@ -197,6 +197,17 @@ public final class Main {
             System.exit(1);
         }
 
+        // nexus-3s5r1: the PostgreSQL 17 floor, before the singleton lock and the schema migration. Below it the
+        // engine fails late and cryptically (jsonpath .number() in ManifestPushdown, the numeric ranges); a clear
+        // refusal here names the version found and the floor. See PgVersionFloor.
+        try {
+            dev.nexus.service.db.PgVersionFloor.verifyAtBoot(ds);
+        } catch (dev.nexus.service.db.PgVersionFloor.FloorException e) {
+            ds.close();
+            log.error("event=pg_version_below_floor error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
+
         // ── One engine per database (nexus-5tykh) ────────────────────────────────
         // A session advisory lock on a connection of its own, taken BEFORE the schema migration so a second engine
         // never migrates either. Waits up to NX_ENGINE_SINGLETON_LOCK_WAIT_SECONDS (30) for a holder that is still
@@ -237,6 +248,18 @@ public final class Main {
         } catch (dev.nexus.service.db.ChunksIsolationCheck.IsolationException e) {
             ds.close();
             log.error("event=chunks_isolation_check_failed error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
+
+        // nexus-b1adx: the service role must not be BYPASSRLS. vectors-039-1's partition_copy_access skips BYPASSRLS
+        // grantees, so such a role would get no DML on any tenant leaf or model partition made after it, and RLS
+        // would not bind it. Not part of ChunksIsolationCheck, whose contract passes a BYPASSRLS role on purpose.
+        // Runs on the SERVICE pool after the migration. See ServiceRoleBypassRlsCheck.
+        try {
+            dev.nexus.service.db.ServiceRoleBypassRlsCheck.verifyAtStartup(ds);
+        } catch (dev.nexus.service.db.ServiceRoleBypassRlsCheck.BypassRlsException e) {
+            ds.close();
+            log.error("event=service_role_bypassrls_refused error=\"{}\"", e.getMessage());
             System.exit(1);
         }
 
@@ -553,6 +576,8 @@ public final class Main {
                 leafBloatSweep.status(), leafBloatSweep.periodSeconds()));
         // nexus-i827c: the same cache, named, on the operator-only GET /v1/admin/chunks-leaves.
         service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds);
+        // nexus-6pfgb.43: the chunk CHECK add/validate routes run DDL on the admin connection; nothing calls them.
+        service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
 
         log.info("event=service_ready port={}", service.getPort());
 

@@ -318,6 +318,11 @@ throw. Inside it, in order:
    zero, apply both plan-counter updates: `use_count + 1` and `last_used =
    now()`, then `success_count + 1` or `failure_count + 1`.
 
+   Post-close note (nexus-i1eb4, 2026-11-04): `last_used = now()` now applies
+   only while the plan is inside its TTL; a run on an expired plan still
+   counts `use_count` and its outcome but keeps `last_used`, so it stays
+   expired.
+
 Any failure at any step rolls back all of it. A step row that violates the
 `nx_answer_steps_source_chk` CHECK takes the run row and both counter updates
 with it, which is the outcome `recordNxAnswerRun` already chose for the parent

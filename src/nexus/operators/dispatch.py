@@ -1409,6 +1409,9 @@ class CliBackend:
         # release it, including on a spawn failure where ``contain()`` is
         # never reached and this stays None.
         _dispatch_job: int | None = None
+        # nexus-xzorj: the group id recorded at spawn. asyncio's child watcher reaps the child on its
+        # own schedule, so a kill after a timeout or cancel must not resolve the group from the pid.
+        _dispatch_pgid: int | None = None
         try:
             from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
@@ -1432,6 +1435,7 @@ class CliBackend:
             # spawn. No-op (None) on POSIX -- start_new_session=True above
             # already makes the child a killable group.
             _dispatch_job = contain(proc)
+            _dispatch_pgid = proc.pid if isinstance(proc.pid, int) and not isinstance(proc.pid, bool) else None
 
             # nexus-h33x8.6 a3: NOT proc.communicate(). See _drain_stream's
             # docstring for why -- communicate()'s internal read(-1) loop
@@ -1531,7 +1535,7 @@ class CliBackend:
                 # same tree, stop the drain tasks, then re-raise: cancellation is never swallowed.
                 from nexus.util.process_group import kill_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-                if not kill_tree(proc, _dispatch_job):
+                if not kill_tree(proc, _dispatch_job, pgid=_dispatch_pgid):
                     try:
                         proc.kill()
                     except Exception:  # noqa: BLE001 - best-effort process reap during cancel cleanup; non-fatal
@@ -1562,7 +1566,7 @@ class CliBackend:
                 # tests/test_process_group_safety.py.
                 from nexus.util.process_group import kill_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-                if not kill_tree(proc, _dispatch_job):
+                if not kill_tree(proc, _dispatch_job, pgid=_dispatch_pgid):
                     try:
                         proc.kill()
                     except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal

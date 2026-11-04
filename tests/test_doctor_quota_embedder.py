@@ -26,6 +26,16 @@ MINILM = "minilm-l6-v2-384"
 
 
 @pytest.fixture(autouse=True)
+def _engine_not_probed(monkeypatch: pytest.MonkeyPatch):
+    """The local-mode report reads the engine's /version (nexus-9oplr); tests that are not about
+    that read get a fixed 'not read' answer instead of a network call."""
+    monkeypatch.setattr(
+        "nexus.commands.doctor._engine_embedding_posture",
+        lambda: {"error": "not probed in this test"},
+    )
+
+
+@pytest.fixture(autouse=True)
 def _fresh_window_cache():
     embed_window.window_for_model.cache_clear()
     yield
@@ -120,3 +130,55 @@ def test_retry_line_says_it_covers_this_process_only() -> None:
     )
     assert "no transient backoffs observed in this process" in line, line
     assert "earlier nx runs are not counted" in line, line
+
+
+
+# ── nexus-9oplr: the engine's boot posture, not only the client's intent ──────────────────
+
+
+def _local_report(monkeypatch, *, profile: str, engine: dict, key: str = "") -> tuple[dict, str]:
+    monkeypatch.setattr("nexus.commands.doctor._engine_embedding_posture", lambda: engine)
+    with (
+        patch("nexus.config.is_local_mode", return_value=True),
+        patch("nexus.config.local_embed_profile", return_value=profile),
+        patch("nexus.config.get_credential", return_value=key),
+    ):
+        report = _collect_quota_report()
+    return report, _format_quota_report(report)
+
+
+def test_the_report_names_what_the_engine_serves(client_ef_is_minilm, bge_tokenizer, monkeypatch) -> None:
+    engine = {"embedding_profile": "bge", "embedding_models": [BGE]}
+    report, text = _local_report(monkeypatch, profile="bge", engine=engine)
+    assert report["voyage"]["engine"] == engine
+    line = next(ln for ln in text.splitlines() if "engine serves" in ln)
+    assert BGE in line, text
+    assert "does not serve" not in text, text
+
+
+def test_a_config_the_running_engine_does_not_serve_is_a_warning_naming_the_restart(monkeypatch) -> None:
+    """RDR-210: one posture per boot. After a local.embed_model edit with no restart the config names
+    voyage while the engine still embeds bge; the report must say so, not present the config as fact."""
+    engine = {"embedding_profile": "bge", "embedding_models": [BGE]}
+    report, text = _local_report(monkeypatch, profile="voyage", engine=engine, key="sk-test")
+    flagged = [ln for ln in text.splitlines() if "does not serve" in ln]
+    assert flagged, text
+    assert BGE in flagged[0] and corpus._SERVICE_RESTART_COMMAND in flagged[0], flagged[0]
+
+
+def test_an_unreadable_engine_is_said_plainly_and_never_read_as_served(client_ef_is_minilm, bge_tokenizer, monkeypatch) -> None:
+    report, text = _local_report(
+        monkeypatch, profile="bge", engine={"error": "ServiceEndpointUnresolvableError: no lease"},
+    )
+    line = next(ln for ln in text.splitlines() if "engine" in ln and "not read" in ln)
+    assert "no lease" in line, line
+    assert "does not serve" not in text, text
+
+
+@pytest.mark.parametrize("key, expected", [("sk-real", True), ("", False)])
+def test_local_mode_reports_the_real_key_state(client_ef_is_minilm, bge_tokenizer, monkeypatch, key, expected) -> None:
+    """nexus-9oplr's second half: api_key_set reflects the credential in local mode too."""
+    report, _ = _local_report(
+        monkeypatch, profile="bge", engine={"embedding_profile": "bge", "embedding_models": [BGE]}, key=key,
+    )
+    assert report["voyage"]["api_key_set"] is expected

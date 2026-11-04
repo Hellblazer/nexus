@@ -20,6 +20,8 @@ classifier died with the sweep).
 """
 from __future__ import annotations
 
+from typing import Any
+
 import click
 import structlog
 
@@ -246,7 +248,10 @@ def _task_identity(row) -> dict | None:  # noqa: ANN001 — a TupleRow
     return body if isinstance(body, dict) and body.get("doc_id") else None
 
 
-def _dead_aspect_tasks(tuples, collection: str | None) -> list:  # noqa: ANN001 — an HttpTupleStore
+_CENSUS_UNREAD: Any = object()
+
+
+def _dead_aspect_tasks(tuples, collection: str | None, *, census: Any = _CENSUS_UNREAD) -> list:  # noqa: ANN001 — an HttpTupleStore
     """Dead tasks of the ``aspects`` subspace, oldest first, optionally those of
     one collection (read from the body: the queue is one per tenant).
 
@@ -257,7 +262,8 @@ def _dead_aspect_tasks(tuples, collection: str | None) -> list:  # noqa: ANN001 
     has none (RDR-235)."""
     from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE, aspects_census  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    census = aspects_census(tuples)
+    if census is _CENSUS_UNREAD:  # a caller that already read it passes it in
+        census = aspects_census(tuples)
     if census is None or census.dead == 0:
         return []
     dead: list = []
@@ -310,8 +316,9 @@ def aspects_requeue_failed(
     nexus-j67ix.2). Once the operator fixes the
     root cause (restored API quota, repaired source identity), this verb
     re-enqueues each failed row at its ``(collection, source_path)`` key,
-    resetting it to ``pending`` with ``retry_count=0`` (the exhaustion depth
-    shown in ``--dry-run`` is discarded) so the worker picks it up again.
+    as an ``aspects`` tuple task (a fresh attempt count; the exhaustion depth
+    shown in ``--dry-run`` is discarded) and deletes the failed table row, so the
+    worker picks it up again. A row with no ``doc_id`` is skipped and reported.
     The write is daemon-routed (nexus-zir76); reads use the active backend
     (SQLite or the PG service).
 
@@ -326,7 +333,9 @@ def aspects_requeue_failed(
     its retention clock restarted. ``--limit`` caps the two sides together: the
     table's failed rows first, then dead tasks oldest first. ``--collection``
     matches a task by the collection in its body. An engine with no ``aspects``
-    template has no dead tasks, and the verb reads the table alone.
+    template has no dead tasks; if the table still holds failed rows the verb
+    says the engine must be upgraded and exits 1 before writing anything, as a
+    failed row can only become a task.
 
     \b
     Examples:
@@ -350,12 +359,28 @@ def aspects_requeue_failed(
     """
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE, aspect_queue_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2.http_aspect_queue import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        ASPECTS_ENGINE_RELEASE,
+        ASPECTS_KEYS,
+        ASPECTS_SUBSPACE,
+        AspectQueueTableModeRetiredError,
+        aspect_queue_mode,
+        aspects_census,
+    )
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     if limit is not None and limit <= 0:
         click.echo("--limit must be a positive integer.", err=True)
         raise SystemExit(1)
+
+    # The re-enqueue below is the tuple producer, the only one left (nexus-bpikw step A):
+    # a stale NX_ASPECT_QUEUE=table is refused here, before any read or write, with the
+    # retirement message, not as a traceback out of the first enqueue.
+    try:
+        aspect_queue_mode()
+    except AspectQueueTableModeRetiredError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1) from exc
 
     # No local-file existence gate: the queue is engine-side (HttpAspectQueue
     # is the only queue since nexus-i711w Stage 2 sub-stage A), so the local
@@ -370,7 +395,8 @@ def aspects_requeue_failed(
     with T2Database(mem_path) as db:  # boundary-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
         failed = db.aspect_queue.list_failed(collection)
         try:
-            dead = _dead_aspect_tasks(db.tuples, collection)
+            census = aspects_census(db.tuples)
+            dead = _dead_aspect_tasks(db.tuples, collection, census=census)
         except Exception as exc:  # noqa: BLE001 — fail loud before any write: reporting the table alone would hide the dead tasks
             click.echo(
                 f"Could not read the dead tasks of the 'aspects' queue: {exc}. "
@@ -379,12 +405,24 @@ def aspects_requeue_failed(
             )
             raise SystemExit(1) from exc
 
+    if failed and census is None:
+        # A failed table row can only become an `aspects` task, and this engine has no
+        # such template (it predates ASPECTS_ENGINE_RELEASE): every enqueue would raise
+        # part way through the loop, after earlier rows were already moved. Say so
+        # before any write, dry run included, so it does not promise a re-enqueue.
+        click.echo(
+            f"{len(failed)} failed row(s) in the aspect queue table cannot be re-enqueued: "
+            f"the engine has no 'aspects' tuple template, because it predates "
+            f"{ASPECTS_ENGINE_RELEASE}. Upgrade the engine, then re-run. Nothing was re-enqueued.",
+            err=True,
+        )
+        raise SystemExit(1)
+
     # --limit caps the two sides together: table rows first, then dead tasks.
     if limit is not None:
         failed = failed[:limit]
         dead = dead[: max(limit - len(failed), 0)]
 
-    tuples_mode = aspect_queue_mode() == "tuples"
     scope = f" in {collection}" if collection else ""
     if not failed and not dead:
         click.echo(f"aspect_extraction_queue: no failed rows{scope}.")
@@ -395,7 +433,7 @@ def aspects_requeue_failed(
             click.echo(f"Would re-enqueue {len(failed)} failed row(s){scope}:")
             for row in failed:
                 note = ""
-                if tuples_mode and not row.doc_id:
+                if not row.doc_id:
                     # The tuples re-enqueue needs the doc_id as its nonce; the real
                     # run skips this row and says so, so the preview says so too.
                     note = "  [would skip: no doc_id]"
@@ -414,7 +452,7 @@ def aspects_requeue_failed(
     requeued = 0
     skipped = 0
     for row in failed:
-        if tuples_mode and not row.doc_id:
+        if not row.doc_id:
             # A legacy row with no doc_id cannot be a task (the doc_id is the
             # task's identity); report it and go on with the rest.
             click.echo(
@@ -424,11 +462,10 @@ def aspects_requeue_failed(
             )
             skipped += 1
             continue
-        # Daemon-routed write (nexus-zir76); INSERT OR REPLACE resets the row
-        # to pending / retry_count=0 / clears any stale next_retry_at backoff.
-        # Under NX_ASPECT_QUEUE=tuples (the default) enqueue writes a TASK and never touches
-        # the table, so the failed row is deleted afterwards (nexus-5r2sc.3.10):
-        # left behind, the doctor counts it forever and every run re-extracts it.
+        # Daemon-routed write (nexus-zir76). The enqueue writes an ``aspects`` TASK
+        # and never touches the table, so the failed row is deleted afterwards
+        # (nexus-5r2sc.3.10): left behind, the doctor counts it forever and every
+        # run re-extracts it.
         t2_index_write(
             lambda db, _r=row: db.aspect_queue.enqueue(
                 _r.collection, _r.source_path,
@@ -436,12 +473,11 @@ def aspects_requeue_failed(
                 doc_id=_r.doc_id,
             )
         )
-        if tuples_mode:
-            # By (collection, source_path), the key the upgrade rung uses; never
-            # by doc_id, which deletes every row sharing it (failed siblings).
-            t2_index_write(
-                lambda db, _r=row: db.aspect_queue.mark_done(_r.collection, _r.source_path)
-            )
+        # By (collection, source_path), the key the upgrade rung uses; never
+        # by doc_id, which deletes every row sharing it (failed siblings).
+        t2_index_write(
+            lambda db, _r=row: db.aspect_queue.mark_done(_r.collection, _r.source_path)
+        )
         requeued += 1
     revived = 0
     for task in dead:

@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-8ptg4 (RDR-236 assumption A8, follow-up of nexus-6pfgb.61): nexus.manifest_qualifying_hits, a bounded
+    count of the chunks a manifest predicate admits, so a SHORT page that is genuinely complete is not re-run exact.
+
+    WHY. A statement that carries a manifest predicate over a collection above the router threshold walks the HNSW
+    index, which stops at hnsw.max_scan_tuples; a short non-empty page is re-run exact (nexus-6pfgb.61) because a page
+    cut by the cap cannot be told from a page the filter genuinely left short. Measured on 220,000 chunks (chas
+    lab-l, bead comment 2026-11-03): the re-run is one exact statement of 3.6-4.0 s, the walk to the cap 3.3 s, so a
+    filter that matches only 30 chunks paid 7.2 s for a page that was already complete.
+
+    WHAT. SETOF one row per qualifying (manifest occurrence, chunk row) pair, at most p_cap rows. The caller passes the
+    page size plus one: if the function returns no more rows than the page holds, every qualifying chunk is on the
+    page, and the re-run has nothing to find. It is driven from the manifest, not from the chunk scan, so a filter that
+    admits more than the cap stops after p_cap hits (0-11 ms measured), and one that admits fewer reads the collection's
+    manifest once (610 ms measured on 220,000 rows, about a sixth of the exact re-run).
+
+    THE CONTRACT: IT MUST NEVER UNDER-COUNT. A count smaller than the qualifying chunks would skip a re-run a starved
+    page needs, which is a silent recall loss. It may over-count, which only costs a re-run. So it applies the SAME
+    per-occurrence object and tests as manifest_search_<dim> (vectors-045: the effective value of each key the predicate
+    names, the same fallbacks, the same containment and jsonpath), the same tenant, model, collection and chunk-row
+    where, and the soft-delete test on the document; it leaves out the conjuncts that only narrow further (the live(c)
+    owner test, the text gate, the chash allow-list and the embedding-not-null test), and it counts an occurrence, not a
+    distinct chunk, so a chunk with two qualifying owners counts twice. ManifestQualifyingHitsTest pins the count
+    against manifest_search_<dim> over a matrix of predicates.
+
+    KEEP IN STEP. The object below is a copy of manifest_search_<dim>'s (vectors-045); a key added there must be added
+    here. ManifestObjectParityTest compares the stored text of the object block, ignoring comments and layout, across
+    manifest_search_384/768/1024 and manifest_qualifying_hits, and fails when they differ. The block runs from the
+    CROSS JOIN LATERAL that derives the source format to the end of the lateral that builds eff.
+    ManifestQualifyingHitsTest fails when the two functions disagree on a pushed predicate. Any new function that
+    carries a copy of the object is added to ManifestObjectParityTest's FUNCTIONS list.
+
+    A table function, not a scalar, so the engine inlines it into the calling statement, with the compiled predicate a constant at plan time
+    (the engine sets plan_cache_mode = force_custom_plan) and manifest_names_key folding as it does in the search.
+
+    No DATA EFFECT: one function definition and a grant. After vectors-046, before the runAlways grants blocks.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-047-1" author="nexus-8ptg4">
+        <comment>manifest_qualifying_hits (nexus-8ptg4): a bounded, never-under-counting hit count of the chunks a manifest predicate admits, driven from the manifest, so the short-page exact re-run is skipped when the page already holds every qualifying chunk. One new table function and its nexus_svc grant; no existing function changes. No data effect: a function definition and a grant only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.manifest_qualifying_hits(
+    p_collections     text[],
+    p_where           jsonb,
+    p_where_path      text,
+    p_manifest_where  jsonb,
+    p_manifest_path   text,
+    p_cap             int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(hit int)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT 1
+      FROM nexus.catalog_document_chunks m
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.chunks c
+        ON c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash
+             CROSS JOIN LATERAL (
+                   SELECT nexus.catalog_source_format(d.content_type, d.file_path) AS fmt
+                 ) f
+             CROSS JOIN LATERAL (
+                   SELECT jsonb_build_object(
+                       'section_title', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'section_title')
+                            THEN CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_title, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END END,
+                       'section_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'section_type')
+                            THEN CASE WHEN m.labels_written
+                           THEN to_jsonb(COALESCE(m.section_type, ''))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END END,
+                       'page_number', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'page_number')
+                            THEN CASE WHEN m.labels_written
+                           THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END END,
+                       'title', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'title')
+                            THEN CASE WHEN d.title ~ '\S'
+                           THEN to_jsonb(d.title)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END END,
+                       'source_author', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'source_author')
+                            THEN CASE WHEN COALESCE(d.author, '') ~ '\S'
+                           THEN to_jsonb(d.author)
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END END,
+                       'bib_doi', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_doi')
+                            THEN to_jsonb(d.bib_doi) END,
+                       'bib_openalex_id', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_openalex_id')
+                            THEN to_jsonb(d.bib_openalex_id) END,
+                       'bib_semantic_scholar_id', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_semantic_scholar_id')
+                            THEN to_jsonb(d.bib_semantic_scholar_id) END,
+                       'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
+                            THEN to_jsonb(array_remove(ARRAY[
+                           CASE WHEN d.content_type ~ '\S' THEN d.content_type END,
+                           f.fmt,
+                           CASE WHEN f.fmt IS NULL OR NOT (COALESCE(d.content_type, '') ~ '\S')
+                                THEN COALESCE(c.metadata ->> 'content_type', '') END
+                       ], NULL)) END,
+                       'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
+                            THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
+                           THEN nexus.catalog_tag_set(CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'tags'), 'null') <> 'null'
+                                                           THEN d.metadata -> 'tags' ELSE c.metadata -> 'tags' END)
+                           ELSE '[""]'::jsonb END END,
+                       'category', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'category')
+                            THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'category'), 'null') <> 'null' THEN d.metadata -> 'category'
+                           ELSE COALESCE(NULLIF(c.metadata -> 'category', 'null'::jsonb), '""'::jsonb) END END,
+                       'ttl_days', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'ttl_days')
+                            THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'ttl_days'), 'null') <> 'null' THEN d.metadata -> 'ttl_days'
+                           ELSE COALESCE(NULLIF(c.metadata -> 'ttl_days', 'null'::jsonb), '""'::jsonb) END END,
+                       'source_agent', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'source_agent')
+                            THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'source_agent'), 'null') <> 'null' THEN d.metadata -> 'source_agent'
+                           ELSE COALESCE(NULLIF(c.metadata -> 'source_agent', 'null'::jsonb), '""'::jsonb) END END,
+                       'extraction_method', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'extraction_method')
+                            THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'extraction_method'), 'null') <> 'null' THEN d.metadata -> 'extraction_method'
+                           ELSE COALESCE(NULLIF(c.metadata -> 'extraction_method', 'null'::jsonb), '""'::jsonb) END END,
+                       'quality_gate_overridden', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'quality_gate_overridden')
+                            THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'quality_gate_overridden'), 'null') <> 'null' THEN d.metadata -> 'quality_gate_overridden'
+                           ELSE COALESCE(NULLIF(c.metadata -> 'quality_gate_overridden', 'null'::jsonb), '""'::jsonb) END END,
+                       'extraction_source', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'extraction_source')
+                            THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'extraction_source'), 'null') <> 'null' THEN d.metadata -> 'extraction_source'
+                           ELSE COALESCE(NULLIF(c.metadata -> 'extraction_source', 'null'::jsonb), '""'::jsonb) END END,
+                       'frecency_score', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'frecency_score')
+                            THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'frecency_score'), 'null') <> 'null' THEN d.metadata -> 'frecency_score'
+                           ELSE COALESCE(NULLIF(c.metadata -> 'frecency_score', 'null'::jsonb), '""'::jsonb) END END
+                   ) AS eff
+                 ) e
+     WHERE m.tenant_id        = p_tenant
+       AND m.collection       = ANY(p_collections)
+       AND c.embedding_model  = p_embedding_model
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+       AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
+     LIMIT p_cap
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.manifest_qualifying_hits(text[], jsonb, text, jsonb, text, int, text, text) TO nexus_svc;
+
+DO $post$
+DECLARE
+    n int;
+BEGIN
+    SELECT count(*) INTO n
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname = 'manifest_qualifying_hits'
+       AND p.prosrc LIKE '%nexus.manifest_names_key(%';
+    IF n <> 1 THEN
+        RAISE EXCEPTION 'vectors-047-1: expected exactly 1 manifest_qualifying_hits function naming its keys through manifest_names_key, found %', n;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.manifest_qualifying_hits(text[], jsonb, text, jsonb, text, int, text, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

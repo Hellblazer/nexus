@@ -228,19 +228,23 @@ class TestRequeueFailedAgainstTheEngine:
 
     @staticmethod
     def _failed_table_row(db, collection: str, source_path: str, doc_id: str) -> None:  # noqa: ANN001
+        from tests._aspect_table_producer import table_producer
+
         q = db.aspect_queue
-        q.enqueue(collection, source_path, content="c", doc_id=doc_id)
+        with table_producer():  # the table producer is retired (nexus-bpikw step A): the seam writes the row
+            q.enqueue(collection, source_path, content="c", doc_id=doc_id)
         assert q.claim_next() is not None
         q.mark_failed(collection, source_path, "boom")
 
-    def test_the_failed_table_row_journey_table_mode_tuples_mode_and_the_doctor(
+    def test_the_failed_table_row_journey_refusal_requeue_and_the_doctor(
         self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Three steps over one tenant: the verb in table mode reports a table
-        failure beside a dead task; in tuples mode it clears the failed table
-        row and the doctor goes green; and with a legacy blank-doc_id row in the
-        listing it reports and skips that row, never aborts (nexus-5r2sc.3.10
-        Critical 2, Test Plan scenario 23's tail)."""
+        """Three steps over one tenant: a stale NX_ASPECT_QUEUE=table makes the verb
+        refuse before it reads or writes (nexus-bpikw step A), and with it unset the
+        verb reports a table failure beside a dead task and re-enqueues both; it
+        clears the failed table row and the doctor goes green; and with a legacy
+        blank-doc_id row in the listing it reports and skips that row, never aborts
+        (nexus-5r2sc.3.10 Critical 2, Test Plan scenario 23's tail)."""
         import click
 
         from nexus.commands.doctor import _report_aspect_queue_service
@@ -251,16 +255,21 @@ class TestRequeueFailedAgainstTheEngine:
 
         store = HttpTupleStore()
 
-        # Step 1, table mode (explicit: the unset default is "tuples" since nexus-lnwn1):
-        # a table failed row and a dead task are both reported.
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+        # Step 1: a table failed row and a dead task. A stale NX_ASPECT_QUEUE=table is
+        # refused by the verb, dry run included, and nothing is read or written.
         with T2Database(_t2) as db:
-            q = db.aspect_queue
-            q.enqueue("knowledge__a", "x.pdf", content="c", doc_id=register_real_doc_id())
-            assert q.claim_next() is not None
-            q.mark_failed("knowledge__a", "x.pdf", "boom")
+            self._failed_table_row(db, "knowledge__a", "x.pdf", register_real_doc_id())
         self._make_dead(store, "docs__nx235r-g__bge-base-en-v15-768__v1")
         assert self._drain_cli() == 0, "step 1: drain: a failed table row and a dead task never block"
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+        for args in (["requeue-failed"], ["requeue-failed", "--dry-run"]):
+            refused = CliRunner().invoke(aspects_group, args)
+            assert refused.exit_code == 1, f"step 1: {args}: {refused.output}"
+            assert "retired" in refused.output and "nexus-bpikw" in refused.output, refused.output
+        with T2Database(_t2) as db:
+            assert len(db.aspect_queue.list_failed()) == 1, "step 1: the refusal wrote nothing"
+        assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"], "step 1: nor the tuple space"
+        monkeypatch.delenv("NX_ASPECT_QUEUE")
         dry =CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert dry.exit_code == 0, dry.output
         assert "Would re-enqueue 1 failed row(s)" in dry.output, f"step 1: {dry.output}"
@@ -273,10 +282,7 @@ class TestRequeueFailedAgainstTheEngine:
         # Step 2, tuples mode, no blank row: the doctor exits 0 after the verb and a
         # second run has nothing to do.
         with T2Database(_t2) as db:
-            # step 1 re-enqueued its failed row as a pending table row; clear it so the
-            # claim below is the failed row's own
-            while (pending := db.aspect_queue.claim_next()) is not None:
-                db.aspect_queue.mark_done(pending.collection, pending.source_path)
+            assert db.aspect_queue.claim_next() is None, "step 1 deleted its table row; none is pending"
             self._failed_table_row(db, "knowledge__nx235rt2", "only.pdf", register_real_doc_id())
         monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
@@ -288,7 +294,6 @@ class TestRequeueFailedAgainstTheEngine:
         # Step 3, tuples mode with a blank-doc_id row. Nothing available first, so the
         # dead task made below is the one the claim returns.
         self._drain(store)
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")  # the table rows below are written in table mode
         with T2Database(_t2) as db:
             pending_before = db.aspect_queue.pending_count()
         good_doc = register_real_doc_id()
@@ -298,7 +303,10 @@ class TestRequeueFailedAgainstTheEngine:
             self._failed_table_row(db, coll, "good.pdf", good_doc)
             self._failed_table_row(db, coll, "sibling.pdf", other_doc)
             # a PENDING row sharing good_doc's doc_id: deleting by doc_id would take it too
-            db.aspect_queue.enqueue(coll, "pending.pdf", content="c", doc_id=good_doc)
+            from tests._aspect_table_producer import table_producer
+
+            with table_producer():
+                db.aspect_queue.enqueue(coll, "pending.pdf", content="c", doc_id=good_doc)
         monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
         # The engine refuses a table row with no doc_id, so the legacy blank row
         # is injected into the listing (the shape an old failed row would have).
@@ -422,9 +430,7 @@ class TestRequeueWithStubs:
                 return False
 
         def build(tuples: _StubTuples, failed=()):
-            # The stub db re-enqueues through the TABLE queue; the unset default is
-            # "tuples" since nexus-lnwn1, so the mode is explicit.
-            monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+            monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
             db = _Db(tuples, list(failed))
             monkeypatch.setattr("nexus.db.t2.T2Database", lambda *a, **k: db)
             monkeypatch.setattr(
@@ -436,6 +442,22 @@ class TestRequeueWithStubs:
             return db
 
         return build
+
+    def test_a_stale_table_value_is_refused_before_anything_is_read_or_written(
+        self, run, monkeypatch,
+    ) -> None:
+        """nexus-bpikw step A: ``NX_ASPECT_QUEUE=table`` ends the verb with the retirement
+        message and exit 1, before the failed rows or the dead tasks are read."""
+        stub = _StubTuples([_row(1, "dead")])
+        db = run(stub)
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
+        opened: list[str] = []
+        monkeypatch.setattr("nexus.db.t2.T2Database", lambda *a, **k: opened.append("opened") or db)
+        for args in (["requeue-failed"], ["requeue-failed", "--dry-run"]):
+            res = CliRunner().invoke(aspects_group, args)
+            assert res.exit_code == 1, res.output
+            assert "retired" in res.output and "nexus-bpikw" in res.output, res.output
+        assert opened == [] and stub.rd_calls == 0 and stub.out_calls == [], "nothing was read or written"
 
     def test_paging_past_a_read_cap_smaller_than_the_page(self, run, monkeypatch) -> None:
         """The engine clamps ``n``: a page shorter than requested is not the
@@ -472,8 +494,14 @@ class TestRequeueWithStubs:
         assert "no failed rows" in res.output
         assert stub.rd_calls == 0, "the census says dead=0, so no rd scan"
 
-    def test_a_table_only_engine_behaves_as_before(self, run) -> None:
-        """No ``aspects`` template: the tuple side reads as nothing, no error."""
+    @pytest.mark.parametrize("args", [["requeue-failed"], ["requeue-failed", "--dry-run"]])
+    def test_failed_rows_on_an_engine_without_the_template_say_upgrade_and_write_nothing(
+        self, run, args,
+    ) -> None:
+        """nexus-bpikw D3: a failed table row can only become an ``aspects`` task. On an
+        engine that predates the template the verb says so, naming the release, and
+        exits 1 before anything is written; the dry run says the same instead of
+        promising a re-enqueue that the real run could not do."""
         from nexus.db.t2.records import QueueRow
 
         failed = [QueueRow(
@@ -481,11 +509,22 @@ class TestRequeueWithStubs:
             retry_count=3, doc_id="1.1.1",
         )]
         stub = _StubTuples([], unknown=True)
-        run(stub, failed)
+        db = run(stub, failed)
+        writes: list[str] = []
+        db.aspect_queue.enqueue = lambda *a, **k: writes.append("enqueue")  # type: ignore[attr-defined]
+        db.aspect_queue.mark_done = lambda *a, **k: writes.append("mark_done")  # type: ignore[attr-defined]
+        res = CliRunner().invoke(aspects_group, args)
+        assert res.exit_code == 1, res.output
+        assert "engine-service-v0.1.169" in res.output and "Upgrade the engine" in res.output, res.output
+        assert "Would re-enqueue" not in res.output, "the dry run must not promise a re-enqueue"
+        assert writes == [] and stub.out_calls == [], "nothing was written"
+
+    def test_no_template_and_no_failed_rows_is_not_an_error(self, run) -> None:
+        """Only a failed table row triggers the upgrade message: without the template
+        there are no dead tasks, and nothing to say."""
+        run(_StubTuples([], unknown=True))
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
-        assert res.exit_code == 0, res.output
-        assert "Would re-enqueue 1 failed row(s)" in res.output
-        assert "dead task" not in res.output
+        assert res.exit_code == 0 and "Upgrade the engine" not in res.output, res.output
 
     def test_a_table_only_engine_with_nothing_failed(self, run) -> None:
         run(_StubTuples([], unknown=True))
@@ -503,10 +542,13 @@ class TestRequeueWithStubs:
         stub = _StubTuples([_row(5, "dead"), _row(6, "dead")])
         db = run(stub, failed)
         enq: list[str] = []
+        done: list[str] = []
         db.aspect_queue.enqueue = lambda c, s, **k: enq.append(s)
+        db.aspect_queue.mark_done = lambda c, s: done.append(s)
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "3"])
         assert res.exit_code == 0, res.output
         assert enq == ["f0.pdf", "f1.pdf"]
+        assert done == enq, "each re-enqueued table row is deleted by its own key"
         assert len(stub.out_calls) == 1
 
 

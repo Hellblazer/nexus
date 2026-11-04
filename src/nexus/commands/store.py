@@ -20,6 +20,7 @@ from nexus.corpus import (
 )
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
+from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
@@ -63,6 +64,12 @@ def store() -> None:
 @click.option("--category", default="", help="Category label")
 @click.option("--ttl", default="permanent", show_default=True,
               help="TTL: Nd, Nw, or permanent")
+@click.option("--entity-key", default="",
+              help="Stable identifier this document names, such as CUST-0018, stamped into the "
+                   "catalog document's metadata (never a chunk's). At most 256 characters, no "
+                   "control characters, refused on a code__ collection. Unset: a collection "
+                   "configured with an entity-key pattern stamps the title when the whole title "
+                   "matches it. A re-put without it removes the stored key.")
 @click.option("--session-id", default="", hidden=True)
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
@@ -72,6 +79,7 @@ def put_cmd(
     tags: str,
     category: str,
     ttl: str,
+    entity_key: str,
     session_id: str,
     agent: str,
 ) -> None:
@@ -166,9 +174,12 @@ def put_cmd(
         outcome = put_note(
             content=content, collection=col_name, title=title, tags=tags,
             category=category, source_agent=agent,
-            ttl_days=ttl_days,
+            ttl_days=ttl_days, entity_key=entity_key,
         )
-    except (PutOversizedError, NoteUriEngineTooOldError) as exc:
+    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError) as exc:
+        # EntityKeyError: an --entity-key the put refuses (a code collection, a control character,
+        # over 256 characters; nexus-fai28), raised before any register or write. EntityConfigError
+        # names its config file and key. Any other ValueError keeps its traceback.
         # put_note refuses an over-quota note, or one the serving engine is too old to hold
         # (RDR-231, nexus-bivz3.13), before it mints a catalog row.
         raise click.ClickException(str(exc)) from exc

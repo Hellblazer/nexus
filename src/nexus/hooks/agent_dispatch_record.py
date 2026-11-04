@@ -45,6 +45,13 @@ _REQUEST_TIMEOUT_S: float = 2.0
 #: The child's whole life, imports and token step included, in seconds.
 _CHILD_LIFETIME_S: float = 8.0
 
+#: Most time the data-token mint may spend in sleeps (a wait on the shared
+#: gateway hold, a retry backoff), in seconds: what is left of the child's life
+#: after the request and 2 s for the imports and the resolve. Passed as the
+#: mint's deadline so a mint under another process's hold gives up before the
+#: watchdog ends the child.
+_MINT_DEADLINE_S: float = _CHILD_LIFETIME_S - _REQUEST_TIMEOUT_S - 2.0
+
 # Windows creation flags, as _session_end_launcher sets them for its detached
 # child (CREATE_NO_WINDOW, not DETACHED_PROCESS: see that module).
 _CREATE_NO_WINDOW: int = 0x08000000
@@ -113,7 +120,7 @@ def _record(payload: dict) -> None:
     # evidence-gated resolution and its lease wait never run (the
     # _session_end_launcher summary pattern).
     base_url, token = resolve_service_endpoint()
-    data_token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT)
+    data_token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT, deadline_s=_MINT_DEADLINE_S)
     if data_token is not None:
         token = data_token
     store = HttpTelemetryStore(base_url=base_url, _token=token)

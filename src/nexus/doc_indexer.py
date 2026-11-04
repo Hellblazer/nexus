@@ -1690,7 +1690,10 @@ def _write_chunks_with_owner_rows(
     import sys  # noqa: PLC0415 — branch-local, matches this file's convention
 
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
-    from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+    from nexus.catalog.multi_batch_write import (  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+        MultiBatchDocumentWriter,
+        stamp_registered_content_hash,
+    )
     from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the oversize fallbacks (nexus-z0o2p.14)
     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
     from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
@@ -1705,6 +1708,10 @@ def _write_chunks_with_owner_rows(
     total = len(ids)
     size = batch_size if 0 < batch_size < total else max(total, 1)
     raw_cat = make_catalog_writer()
+    # nexus-ypgbz: the document's own registration carries the file hash the fence is about to take as its
+    # key, stamped before the writer begins (so before the completion stamp). The caller's content_hash is
+    # the file's sha256 on every path that reaches here; the exporter's key_registered reads it.
+    stamp_registered_content_hash(raw_cat, doc_id, content_hash)
     cat = MetadataMergingCatalog(
         raw_cat, collection_name, rewrite_delete_keys(metadatas), on_request=on_request)
     w = MultiBatchDocumentWriter(

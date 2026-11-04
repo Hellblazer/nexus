@@ -87,7 +87,9 @@ class ManifestNamesKeyTest {
     void everyKeyThePushdownCompilesIsNamed() throws Exception {
         List<String> keys = List.of("section_title", "section_type", "page_number", "title", "source_author", "bib_doi",
             "bib_openalex_id", "bib_semantic_scholar_id", "content_type", "tags", "category", "ttl_days", "source_agent",
-            "extraction_method", "quality_gate_overridden", "extraction_source", "frecency_score");
+            "extraction_method", "quality_gate_overridden", "extraction_source", "frecency_score",
+            // nexus-qpt52
+            "bib_year", "bib_authors", "bib_venue", "bib_citation_count", "indexed_at");
         List<String> missed = new ArrayList<>();
         int checked = 0;
         try (Connection su = pg.createConnection("")) {
@@ -105,6 +107,11 @@ class ManifestNamesKeyTest {
                         var plan = ManifestPushdown.of(List.of(predicate));
                         String where = plan.containment() == null ? null : plan.containment().data();
                         checked++;
+                        // a numeric range on a string key is never true (the stage finds it not comparable): the
+                        // constant names no key, and no object is read
+                        if (plan.jsonPath() != null && plan.jsonPath().equals("(1 == 2)")) {
+                            continue;
+                        }
                         if (!names(ctx, where, plan.jsonPath(), key)) {
                             missed.add(key + " " + predicate.operator() + " " + operand + " -> " + where + " | " + plan.jsonPath());
                         }
@@ -113,6 +120,39 @@ class ManifestNamesKeyTest {
             }
         }
         assertThat(missed).as("pushed predicates whose key manifest_names_key does not name").isEmpty();
-        assertThat(checked).as("pushed predicates examined").isGreaterThanOrEqualTo(40);
+        assertThat(checked).as("pushed predicates examined").isGreaterThanOrEqualTo(60);
+    }
+
+    /**
+     * nexus-qpt52: the exact form route (b) runs ({@link ManifestPushdown#ofExact}) compiles every operator on every
+     * answered key, and each path must make {@code manifest_names_key} name the key the object builds for it. A
+     * {@code content_type} range reads {@code content_type_shown}, which the object builds under its own name.
+     */
+    @Test
+    void everyKeyTheExactFormCompilesIsNamed() throws Exception {
+        List<String> missed = new ArrayList<>();
+        int checked = 0;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (String key : ManifestLabelStage.ANSWERED_KEYS) {
+                for (String operator : List.of("$eq", "$ne", "$in", "$nin", "$gte", "$gt", "$lte", "$lt")) {
+                    for (Object operand : List.of("v", 7)) {
+                        Object value = operator.equals("$in") || operator.equals("$nin") ? List.of(operand, "w") : operand;
+                        var plan = ManifestPushdown.ofExact(List.of(new ManifestLabelStage.Predicate(key, operator, value)));
+                        // a range on content_type reads the text the row would show, which has its own object key
+                        boolean range = List.of("$gte", "$gt", "$lte", "$lt").contains(operator);
+                        String read = key.equals("content_type") && range ? ManifestPushdown.CONTENT_TYPE_SHOWN_KEY : key;
+                        // a numeric range on a string key is never true: it compiles to a constant and names no key
+                        boolean constant = plan.jsonPath().equals("(1 == 2)");
+                        checked++;
+                        if (!constant && !names(ctx, null, plan.jsonPath(), read)) {
+                            missed.add(key + " " + operator + " " + value + " -> " + plan.jsonPath());
+                        }
+                    }
+                }
+            }
+        }
+        assertThat(missed).as("exact predicates whose key manifest_names_key does not name").isEmpty();
+        assertThat(checked).as("exact predicates examined").isGreaterThanOrEqualTo(300);
     }
 }

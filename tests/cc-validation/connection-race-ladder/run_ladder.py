@@ -440,7 +440,7 @@ def summarise(records: list[dict]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", required=True)
-    ap.add_argument("--python", required=True, help="interpreter with mcp<2 for the probe")
+    ap.add_argument("--python", required=True, help="interpreter with mcp>=2.3,<3 for the probe")
     ap.add_argument("--hook-python", default="python3")
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
     ap.add_argument("--sock", default="veh77-ladder")

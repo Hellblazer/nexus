@@ -147,7 +147,7 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
         except UnicodeDecodeError:
             continue
         label = str(src_file.relative_to(PLUGIN_DIR))
-        for match in re.finditer(r"\$CLAUDE_PLUGIN_ROOT/([^\s'\"`)]+)", text):
+        for match in re.finditer(r"\$\{?CLAUDE_PLUGIN_ROOT\}?/([^\s'\"`)}\]]+)", text):
             results.append((label, match.group(1)))
     return results
 
@@ -1085,7 +1085,9 @@ class TestPluginLinksResolve:
         shared = _collect_shared_links()
         assert len(shared) >= 40, f"only {len(shared)} agent-shared links examined"
         for source_file, raw_path in shared:
-            resolved = (source_file.parent / raw_path.split("#")[0]).resolve()
+            target = raw_path.split("#")[0]
+            root = "${CLAUDE_PLUGIN_ROOT}/"
+            resolved = (PLUGIN_DIR / target[len(root):] if target.startswith(root) else source_file.parent / target).resolve()
             if not resolved.exists():
                 offenders.append(
                     f"agent-shared link: {source_file.relative_to(PLUGIN_DIR)}: "

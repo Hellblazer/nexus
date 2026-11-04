@@ -1270,9 +1270,13 @@ class TestETLFidelity:
         and returns the documents-updated count. No documents reference this collection
         so the count is 0 — but the collection itself is renamed.
         """
-        old = "code__rename_test__voyage-code-3__v1"
-        new = "code__rename_test__voyage-code-3__v2"
-        cat.register_collection(old, content_type="code")
+        # Both names carry the model the row is registered with: since
+        # nexus-ucagi the engine refuses (409 collection_model_mismatch) a
+        # rename whose new name names another model than the source row.
+        model = "bge-base-en-v15-768"
+        old = f"code__rename_test__{model}__v1"
+        new = f"code__rename_test__{model}__v2"
+        cat.register_collection(old, content_type="code", embedding_model=model)
         n = cat.rename_collection(old, new)
         assert n >= 0  # 0 = no documents moved; collection row itself was renamed
         assert cat.get_collection(new) is not None

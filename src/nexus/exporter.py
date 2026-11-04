@@ -55,7 +55,7 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.aspect_readers import FILE_ROUTED_PREFIXES, canonical_note_uri, uri_for
+from nexus.aspect_readers import FILE_ROUTED_PREFIXES, canonical_note_uri, is_note_uri, uri_for
 from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
@@ -848,23 +848,28 @@ def _resolve_owner_document(
 
 
 def _is_note_entry(entry: Any) -> bool:
-    """True when a catalog entry is a store_put-origin note (nexus-6pfgb.45): no file path, a note URI
-    (``nx-note://``, or the legacy ``chroma://`` spelling) or none, and a collection that is not
-    file-routed. A copy the import registers under ``nxexp://<target>/<original uri>`` (see
-    :func:`_resolve_owner_document`) is a note when the original is. Answers by
-    :func:`~nexus.catalog.recovery_bundle.classify_store_put_origin`, the shared note predicate that
-    knows the RDR-231 URI, on the unqualified identity."""
-    from types import SimpleNamespace  # noqa: PLC0415 — stdlib import kept branch-local
+    """True when a catalog entry is an imported NOTE (nexus-6pfgb.45, nexus-kg2fp). The registration an
+    import does sets a source URI and neither ``meta.doc_id`` (what
+    :func:`~nexus.indexer_utils.is_note_shaped` reads) nor a ``file_path``, so the test is the URI:
 
-    from nexus.catalog.recovery_bundle import classify_store_put_origin  # noqa: PLC0415 — deferred to avoid import cycle
+    - ``nx-note://`` in a collection that is not file-routed; the legacy ``chroma://`` spelling counts
+      (:func:`~nexus.aspect_readers.canonical_note_uri`), and a copy registered under
+      ``nxexp://<target>/<original uri>`` (see :func:`_resolve_owner_document`) is a note when the original is;
+    - or NO URI and no file path in a collection that is not file-routed (a ``knowledge__`` one today): a
+      knowledge document's identity is its ``source_uri`` and falls back to the title for an MCP-stored
+      note, which has no URI. That leg is :func:`~nexus.catalog.recovery_bundle.classify_store_put_origin`'s
+      ``knowledge_no_path``, so the collection-name rule lives in one place (RDR-204 parse census).
 
+    Anything else is not a note: ``https://`` and other schemes, a file-backed entry, an entry with no URI
+    in a file-routed collection."""
     uri = getattr(entry, "source_uri", "") or ""
     if uri.startswith("nxexp://"):
         uri = uri.split("/", 3)[3] if uri.count("/") >= 3 else ""
-    probe = SimpleNamespace(
-        file_path=getattr(entry, "file_path", "") or "",
-        physical_collection=getattr(entry, "physical_collection", "") or "", source_uri=uri)
-    return classify_store_put_origin(probe) is not None  # type: ignore[arg-type]
+    if uri:
+        return is_note_uri(canonical_note_uri(uri))
+    from nexus.catalog.recovery_bundle import classify_store_put_origin  # noqa: PLC0415 — deferred, as the module's other catalog imports
+
+    return classify_store_put_origin(entry) == "knowledge_no_path"
 
 
 @dataclass
@@ -938,8 +943,10 @@ def _note_source_evidence(group: dict, meta: dict, position: int) -> None:
       text and its ``content_hash`` is the LAST writer's, so this reads "some file has this hash",
       which cannot make a wrong key trusted, but a document whose chunks other documents wrote
       last has none left to show it (the document then gets the unique key: no same-as, never a
-      wrong one). Only the registration record above covers it, and a PDF or note registers
-      without a file hash, so for those the chunk evidence is all there is.
+      wrong one). Only the registration record above covers it. A repo file registers with its
+      file hash, and a PDF or markdown document indexed by ``nx index pdf`` / ``md`` records it
+      just before its run is stamped complete (nexus-ypgbz); one indexed before that, and a note,
+      has no such record, so for those the chunk evidence is all there is.
 
     Two records at one position mean the group is not one whole manifest (a live export can read
     a record twice and miss another), so the key is dropped."""
@@ -1352,12 +1359,12 @@ class _OwnerImport:
             except Exception as exc:  # noqa: BLE001 — retried once, then judged per document below
                 error = exc
         if entries is None:
-            _log.warning(
-                "import_note_keys_read_failed", collection=self.collection_name, docs=len(landed),
-                error=str(error))
             ready = []
             for d in landed:
                 if self._could_be_note(groups.get(d) if groups else None):
+                    _log.warning(
+                        "import_note_keys_failed", collection=self.collection_name, doc=d,
+                        error=f"its note keys could not be read: {error}")
                     self._report_stamp_failure(d, f"its note keys could not be read: {error}")
                 else:
                     ready.append(d)
@@ -1402,14 +1409,17 @@ class _OwnerImport:
                 if len(counts) != len(docs):
                     raise ValueError(f"update_many returned {len(counts)} counts for {len(docs)} updates")
             except Exception as exc:  # noqa: BLE001 — the whole call failed: every document stays indexing
-                _log.warning(
-                    "import_note_keys_failed", collection=self.collection_name, docs=len(docs), error=str(exc))
                 for d in docs:
+                    _log.warning(
+                        "import_note_keys_failed", collection=self.collection_name, doc=d, error=str(exc))
                     failed.add(d)
                     self._report_stamp_failure(d, f"its note keys could not be stamped: {exc}")
                 return failed
             for d, count in zip(docs, counts):
                 if not count:
+                    _log.warning(
+                        "import_note_keys_failed", collection=self.collection_name, doc=d,
+                        error="the catalog updated nothing")
                     failed.add(d)
                     self._report_stamp_failure(d, "its note keys could not be stamped: the catalog updated nothing")
             return failed

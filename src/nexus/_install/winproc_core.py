@@ -297,6 +297,21 @@ def process_command_line(pid: int, api: WinProcessInfoApi) -> str:
         api.close(handle)
 
 
+def process_argv(pid: int, api: WinProcessInfoApi) -> list[str]:
+    """The argv of *pid* as the kernel's command line splits it (so an argument
+    with spaces stays one element), or ``[]`` when the process is gone or its
+    command line cannot be read. The image path is not an argv, so it is not
+    offered as one here."""
+    handle = _open(api, pid)
+    if handle is None:
+        return []
+    try:
+        raw = api.command_line(handle)
+    finally:
+        api.close(handle)
+    return split_command_line(raw) if raw else []
+
+
 def process_command_name(pid: int, api: WinProcessInfoApi) -> str:
     """``comm`` equivalent: the executable's name without directory or
     ``.exe``, or ``""`` when unknown."""

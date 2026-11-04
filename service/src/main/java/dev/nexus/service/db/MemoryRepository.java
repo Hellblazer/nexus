@@ -723,7 +723,10 @@ public final class MemoryRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             List<Long> deleted = ctx.deleteFrom(MEMORY)
                                     .where(MEMORY.QUARANTINED_AT.isNotNull()
-                                        .and(MEMORY.ROLLED_UP_AT.isNotNull()))
+                                        .and(MEMORY.ROLLED_UP_AT.isNotNull())
+                                        // A replaced row (quarantined, ttl NULL) is never reaped, even
+                                        // if a rollup raced the replace and marked it (nexus-ov3zi).
+                                        .and(MEMORY.TTL_DAYS.isNotNull()))
                                     .returning(MEMORY.ID)
                                     .fetch(MEMORY.ID);
             if (!deleted.isEmpty()) {
@@ -772,9 +775,25 @@ public final class MemoryRepository {
     }
 
     /**
+     * nexus-ov3zi: a source id handed to {@link #insertSummary} names a row a replace quarantined
+     * (quarantined with {@code ttl_days} NULL; {@link #expire} stamps only rows that have a ttl, so
+     * only a replace leaves that shape). Such a row is never summarized or marked, so {@link #reap}
+     * never takes it. Extends {@link IllegalStateException} so the handler maps it to 409.
+     */
+    public static final class ReplacedSourceIdException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+
+        ReplacedSourceIdException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * Insert one rollup summary and mark every source row {@code rolled_up_at = now()}
      * in ONE transaction (RDR-207 § Technical Design). Refuses, writing nothing, if
-     * any source id does not exist in that tenant and project. A row already marked
+     * any source id does not exist in that tenant and project, or names a row that a
+     * replace quarantined (nexus-ov3zi: quarantined with a NULL ttl; see
+     * {@link ReplacedSourceIdException}). A row already marked
      * may be covered again; its mark timestamp moves.
      *
      * <p>{@code sourceIds} is stored as provenance (BIGINT[]), not a foreign key:
@@ -785,6 +804,7 @@ public final class MemoryRepository {
      *         is blank (400; the table's CHECKs refuse both anyway, this names the reason)
      * @throws UnknownSourceIdException when a source id is not a row of that tenant and
      *         project (409); the transaction rolls back, so no summary row and no mark
+     * @throws ReplacedSourceIdException when a source id is a replaced row (409); same rollback
      */
     public long insertSummary(String tenant,
                               String project,
@@ -811,6 +831,19 @@ public final class MemoryRepository {
                     + distinctIds.size() + " source id(s) do not exist in project '"
                     + project + "' for this tenant; nothing written");
             }
+            List<Long> replaced = ctx.select(MEMORY.ID)
+                                     .from(MEMORY)
+                                     .where(MEMORY.ID.in(distinctIds)
+                                         .and(MEMORY.QUARANTINED_AT.isNotNull())
+                                         .and(MEMORY.TTL_DAYS.isNull()))
+                                     .orderBy(MEMORY.ID)
+                                     .fetch(MEMORY.ID);
+            if (!replaced.isEmpty()) {
+                throw new ReplacedSourceIdException(
+                    "insertSummary refused: id(s) " + replaced + " were quarantined by a replace and are "
+                    + "never summarized or reaped; restore one with nx memory restore <id>, or delete it "
+                    + "by id (nothing written)");
+            }
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             var inserted = ctx.insertInto(MEMORY_SUMMARIES)
                               .set(MEMORY_SUMMARIES.TENANT_ID, tenant)
@@ -824,7 +857,10 @@ public final class MemoryRepository {
                               .fetchOne();
             ctx.update(MEMORY)
                .set(MEMORY.ROLLED_UP_AT, now)
-               .where(MEMORY.ID.in(distinctIds))
+               // The replaced-source check above is unlocked; a replace that lands after it
+               // leaves ttl NULL, and the UPDATE re-reads the row, so the mark skips it.
+               .where(MEMORY.ID.in(distinctIds)
+                   .and(MEMORY.TTL_DAYS.isNotNull()))
                .execute();
             long id = inserted != null ? inserted.getId() : -1L;
             log.info("event=memory_summary_inserted tenant={} project={} id={} sources={}",
@@ -939,6 +975,157 @@ public final class MemoryRepository {
                    .execute();
             }
             return null;
+        });
+    }
+
+    /**
+     * RDR-238 Phase 1 Step 1 (bead nexus-qo7ie.6, amended by nexus-ov3zi): what {@link #replaceMemory}
+     * returns. {@code id} is the written row; {@code replacedId}, {@code replacedTitle} and
+     * {@code replacedContent} are the quarantined row's id, title and the content it held. The row is
+     * restorable by {@code replacedId} ({@link #restore}).
+     */
+    public record ReplaceResult(long id, long replacedId, String replacedTitle, String replacedContent) {}
+
+    /**
+     * RDR-238 Phase 1 Step 1 (bead nexus-qo7ie.6, amended by nexus-ov3zi): write the new row and
+     * QUARANTINE the row whose title is {@code replacesTitle}, in ONE {@link TenantScope#withTenant}
+     * transaction, so there is no moment at which both rows, or neither, are visible. The target is not
+     * deleted: {@code quarantined_at} is stamped (the stamp an expired row gets), {@code rolled_up_at}
+     * stays NULL so {@link #reap} never removes it, and {@link #restore} brings it back by id. The new
+     * row goes through {@link #doUpsert} exactly as {@link #upsert} writes it (a plain put overwrites an
+     * incumbent at the title; this path refuses it).
+     *
+     * <p>{@code replacesTitle} is an exact title in the put's own tenant and project. It is never an
+     * id: a numeric title such as {@code 238} is a title, and a title that exists only in another
+     * project (or tenant) is missing.
+     *
+     * <p>REFUSES, writing nothing and changing nothing (the exception rolls the transaction back), and
+     * names the target and the reason in the message. The checks run in this order, so a row that
+     * fails several is reported once, for the first:
+     * <ol>
+     *   <li>{@code replacesTitle} blank, or equal to {@code title} (the row being written):
+     *       {@link IllegalArgumentException}.</li>
+     *   <li>No row has that title in this tenant and project: {@link IllegalStateException}.</li>
+     *   <li>The target is quarantined: {@link IllegalStateException}. The lookup deliberately omits
+     *       the read predicate (as {@link #mergeMemories} does) and refuses explicitly; with the
+     *       predicate a quarantined target would read as "missing" and hide why.</li>
+     *   <li>The target carries a tag in {@link AuditTags#AUDIT_TAGS}, matched as a whole tag:
+     *       {@link IllegalStateException}.</li>
+     *   <li>The target's title matches a pattern in {@link AuditTags#TITLE_PATTERN_SOURCES} (the
+     *       backstop for older audit rows that carry no tag), even with clean tags:
+     *       {@link IllegalStateException}.</li>
+     *   <li>A row (live or quarantined) already has the NEW title: {@link IllegalStateException}. The
+     *       upsert would overwrite it with no echo. The check locks that row {@code FOR UPDATE}; a row
+     *       inserted at the new title by another transaction between the check and the write is still
+     *       overwritten, as in a plain put.</li>
+     * </ol>
+     * The quarantine must affect exactly one row, else {@link IllegalStateException} and nothing is
+     * written. The target row is locked {@code FOR UPDATE}, so two replaces of one target cannot both
+     * succeed: the second finds it quarantined and is refused as such.
+     *
+     * <p>Known limit: the quarantined row keeps its title, so a later ordinary put (or replace) at that
+     * title overwrites it ({@link #doUpsert} clears the stamps, RDR-207). Restore it first, or
+     * pick another title.
+     *
+     * <p>Taxonomy assignments are not touched, as {@link #expire} does not touch them.
+     */
+    public ReplaceResult replaceMemory(String tenant,
+                                       String project,
+                                       String title,
+                                       String content,
+                                       String tags,
+                                       String session,
+                                       String agent,
+                                       Integer ttlDays,
+                                       String replacesTitle) {
+        if (replacesTitle == null || replacesTitle.isBlank()) {
+            throw new IllegalArgumentException("replaces refused: the target title is blank (nothing written)");
+        }
+        if (replacesTitle.equals(title)) {
+            throw new IllegalArgumentException(
+                "replaces refused: '" + replacesTitle + "' is the title being written; a row cannot replace "
+                + "itself (nothing written)");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            // No NOT_QUARANTINED predicate: a quarantined target must be refused by name, not read as missing.
+            MemoryRecord target = ctx.selectFrom(MEMORY)
+                                     .where(MEMORY.PROJECT.eq(project)
+                                         .and(MEMORY.TITLE.eq(replacesTitle)))
+                                     .forUpdate()
+                                     .fetchOne();
+            if (target == null) {
+                throw new IllegalStateException(
+                    "replaces refused: no row titled '" + replacesTitle + "' in project '" + project
+                    + "' (nothing written)");
+            }
+            if (target.getQuarantinedAt() != null) {
+                throw new IllegalStateException(
+                    "replaces refused: row '" + replacesTitle + "' is quarantined (a row already replaced or expired); "
+                    + "restore it first (nx memory restore " + target.getId() + "), then replace again "
+                    + "(nothing written)");
+            }
+            List<String> auditTags = AuditTags.auditTagsOf(target.getTags());
+            if (!auditTags.isEmpty()) {
+                throw new IllegalStateException(
+                    "replaces refused: row '" + replacesTitle + "' carries audit tag(s) " + auditTags
+                    + "; audit records are not replaced (nothing written)");
+            }
+            Optional<String> pattern = AuditTags.titlePatternOf(target.getTitle());
+            if (pattern.isPresent()) {
+                throw new IllegalStateException(
+                    "replaces refused: row '" + replacesTitle + "' looks like an audit record: its title "
+                    + "matches the audit-record title pattern " + pattern.get() + " (nothing written)");
+            }
+            // A row already at the NEW title would be overwritten by the upsert below with no echo of
+            // what it held, while the echo is the writer's only record of what was removed. Refuse
+            // (no NOT_QUARANTINED predicate: a quarantined incumbent is overwritten too). The target
+            // cannot be this row: replacesTitle differs from title (checked above).
+            var incumbent = ctx.select(MEMORY.ID, MEMORY.QUARANTINED_AT)
+                               .from(MEMORY)
+                               .where(MEMORY.PROJECT.eq(project)
+                                   .and(MEMORY.TITLE.eq(title)))
+                               .forUpdate()
+                               .fetchOne();
+            if (incumbent != null) {
+                long incumbentId = incumbent.get(MEMORY.ID);
+                // Restoring a quarantined incumbent would only make it a live incumbent, which blocks
+                // this replace the same way, so the way out is to delete it by id (a quarantined row
+                // is deleted outright, no restore first) or to pick another title.
+                String state = incumbent.get(MEMORY.QUARANTINED_AT) != null
+                    ? "is quarantined (id " + incumbentId + ") and restoring it would not help: it would "
+                      + "become a live incumbent. Delete it by id (nx memory delete --id " + incumbentId
+                      + "; its content is gone for good) or choose another title"
+                    : "exists (id " + incumbentId + "). Delete it first (nx memory delete --id "
+                      + incumbentId + "; its content is gone for good) or choose another title";
+                throw new IllegalStateException(
+                    "replaces refused: a row titled '" + title + "' already exists in project '" + project
+                    + "'; writing it would overwrite that row without echoing it. That row " + state
+                    + " (nothing written)");
+            }
+            String replacedContent = target.getContent();
+            int quarantined = ctx.update(MEMORY)
+                                 .set(MEMORY.QUARANTINED_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                                 // ttl NULL is the mark of a replaced row: expire() stamps only rows
+                                 // that HAVE a ttl, so "quarantined AND ttl NULL" can only be a replace.
+                                 // The rollup and insertSummary refuse such rows, so reap never takes them.
+                                 .set(MEMORY.TTL_DAYS, (Integer) null)
+                                 // A live row can already carry rolled_up_at (insertSummary marks any
+                                 // existing id); clear it, or reap would delete the row at once.
+                                 .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                                 .where(MEMORY.ID.eq(target.getId())
+                                     .and(MEMORY.QUARANTINED_AT.isNull()))
+                                 .execute();
+            if (quarantined != 1) {
+                // The row is locked FOR UPDATE, so 0 means an UPDATE policy or trigger hid it. Writing the
+                // new row now would echo a row as quarantined that was not: roll everything back.
+                throw new IllegalStateException(
+                    "replaces refused: quarantining '" + replacesTitle + "' affected " + quarantined
+                    + " rows, expected 1 (nothing written)");
+            }
+            long id = doUpsert(ctx, tenant, project, title, content, tags, session, agent, ttlDays);
+            log.info("event=memory_replace tenant={} project={} replaced_title={} replaced_id={} id={} title={}",
+                     tenant, project, replacesTitle, target.getId(), id, title);
+            return new ReplaceResult(id, target.getId(), replacesTitle, replacedContent);
         });
     }
 

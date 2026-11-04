@@ -4,7 +4,7 @@ description: Use when synthesising across prose and code corpora or ranking cand
 effort: medium
 ---
 
-**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; reuse a matching plan via `plan_search` before dispatching multiple agents. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
+**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; reuse a matching plan via `plan_search` before dispatching multiple agents. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
 
 # analyze
 
@@ -69,4 +69,4 @@ before synthesis.
 - **Using bare `criterion`.** "important" is not a criterion; pick
   an axis the ranker can actually sort by.
 
-See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and the plan authoring guide (https://github.com/Hellblazer/nexus/blob/main/docs/plan-authoring-guide.md).

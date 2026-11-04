@@ -176,7 +176,7 @@ class TestSignatureAcceptsKwargs:
     def test_empty_strings_treated_as_unspecified(
         self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """MCP defaults to '' (FastMCP serialises None weirdly).
+        """MCP defaults to '' (MCPServer serialises None weirdly).
         Empty string MUST translate to 'unspecified' so the
         MemoryStore fall-backs run, NOT persist as a literal empty
         string in the agent column."""

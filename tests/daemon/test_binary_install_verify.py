@@ -300,7 +300,7 @@ def test_cli_install_binary_happy_path(tmp_path, monkeypatch):
 
     from nexus.commands.daemon import service_install_binary_cmd
 
-    def _fake_install(tag, config_dir, *, installed_by=""):
+    def _fake_install(tag, config_dir, *, installed_by="", **_kw):
         return config_dir / "service" / "nexus-service", {
             "asset": "nexus-service-linux-amd64",
             "version": "0.1.3",
@@ -324,7 +324,7 @@ def test_cli_install_binary_fails_closed_exit_2(tmp_path, monkeypatch):
 
     from nexus.commands.daemon import service_install_binary_cmd
 
-    def _fake_install(tag, config_dir, *, installed_by=""):
+    def _fake_install(tag, config_dir, *, installed_by="", **_kw):
         raise binstall.BinaryVerificationError("sha256 mismatch")
 
     monkeypatch.setattr(binstall, "install_binary", _fake_install)
@@ -670,7 +670,7 @@ def _poison_result():
     )
 
 
-def _fake_install_ok(tag, config_dir, *, installed_by=""):
+def _fake_install_ok(tag, config_dir, *, installed_by="", **_kw):
     return config_dir / "service" / "nexus-service", {
         "asset": "nexus-service-linux-amd64", "version": "0.1.3",
         "sha256": "a" * 64, "source_url": "https://example/x",

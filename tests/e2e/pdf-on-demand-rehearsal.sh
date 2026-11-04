@@ -120,10 +120,21 @@ CACHE="$SANDBOX/uvcache"
 LOGS="$SANDBOX/logs"
 mkdir -p "$HOME_DIR" "$TOOLS" "$BIN" "$WHEELS" "$CACHE" "$LOGS"
 
+# The aspect worker an nx call spawned outlives the service by design
+# (nexus-wl9pk): stop it by its lease in the current leg's config dir. The leg's
+# installed nx may predate the verb (leg u installs the previous release), so the
+# CHECKOUT's nx does it: the verb reads the lease and signals by pid, which also
+# reaches a worker the older nx spawned. Best effort; a failure is not a verdict.
+_stop_aspect_worker() {
+    ( cd "$_repo" && env HOME="$HOME_DIR" NEXUS_CONFIG_DIR="$HOME_DIR/.config/nexus" NX_NO_TELEMETRY=1 \
+        uv run --no-sync nx daemon aspect-worker stop --config-dir "$HOME_DIR/.config/nexus" ) >/dev/null 2>&1 || true
+}
+
 cleanup() {
     local rc=$?
     # The sandbox holds no live process of ours unless --engine started one.
     if [ -x "$BIN/nx" ]; then
+        _stop_aspect_worker
         _nx daemon service stop >/dev/null 2>&1 || true
     fi
     if [ "${NX_REHEARSAL_KEEP:-0}" = "1" ] || [ "$rc" -ne 0 ]; then
@@ -380,7 +391,7 @@ leg_f() {
 leg_u() {
     HOME_DIR="$SANDBOX/u-home"; TOOLS="$SANDBOX/u-tools"; BIN="$SANDBOX/u-bin"
     mkdir -p "$HOME_DIR" "$TOOLS" "$BIN"
-    trap '_nx daemon service stop >/dev/null 2>&1 || true' EXIT
+    trap '_stop_aspect_worker; _nx daemon service stop >/dev/null 2>&1 || true' EXIT
     local schema extras
 
     # 1. the previous release, by its own bootstrap: pre-split receipt, stack present.

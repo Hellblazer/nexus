@@ -358,6 +358,7 @@ _BOUNDS = {
 # A hung docker must cost seconds, not the 300 s the fake sleeps: DOCKER_TIMEOUT 1 s (to 2 s granularity),
 # GRACE 1 s, FINAL 2 s, plus the report. 30 s is generous for that and far under the fake's stall.
 _HANG_BOUND_SECONDS = 30
+_STALL_REAP_GRACE_SECONDS: float = 5.0
 
 
 def _kept_state(stderr: str) -> Path:
@@ -369,12 +370,16 @@ def _assert_no_stalled_calls_left(world: dict[str, Path]) -> None:
     """The fake's stalled docker calls sit under command and process substitutions under the sampler loop: a
     kill that stops only the loop's own pid orphans them (they would sleep out their 300 s)."""
     sleep_arg = _env(world)["FAKE_SLEEP"]
-    leaked: list[str] = []
-    for _ in range(3):  # a killed process can take a moment to leave the table
+    # A killed process can take a moment to leave the table, longer on a loaded box (0.6 s was outrun on a CI
+    # shard at 14.8 of 18 GB); an orphan lives 300 s, so a 5 s deadline still tells the two apart.
+    deadline = time.monotonic() + _STALL_REAP_GRACE_SECONDS
+    while True:
         leaked = subprocess.run(["pgrep", "-f", f"sleep {sleep_arg}"], capture_output=True, text=True).stdout.split()
         if not leaked:
             return
-        time.sleep(0.2)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
     subprocess.run(["kill", *leaked], check=False)  # do not leave them behind
     raise AssertionError(f"stalled docker calls outlived the run: {leaked}")
 

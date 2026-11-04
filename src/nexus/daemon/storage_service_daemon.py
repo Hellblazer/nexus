@@ -373,7 +373,17 @@ class StorageServiceStartError(RuntimeError):
 
     Per the LOUD-failure contract: a service/PG outage blocks all storage
     and must surface clearly. Never silently degrade.
+
+    ``still_starting`` is True only when the raiser saw a live supervisor that
+    reported no error before its wait ran out (an engine that may still be
+    migrating), so a caller can report a warning instead of a failure; a crash,
+    an exit, or a supervisor that reported an error leaves it False
+    (nexus-86aaz r2: decided by the raiser, never from the message text).
     """
+
+    def __init__(self, *args: object, still_starting: bool = False) -> None:
+        super().__init__(*args)
+        self.still_starting = still_starting
 
 
 # ── Credential helpers ─────────────────────────────────────────────────────────
@@ -1982,7 +1992,9 @@ class StorageServiceSupervisor:
         if via == "job_object":
             self._release_engine_job()
         else:
-            safe_killpg(proc.pid)
+            # The handle, not proc.pid: safe_killpg refuses one whose returncode says it was reaped, whose
+            # pid the kernel may have given to another process (nexus-xzorj).
+            safe_killpg(proc)
 
     def _probe_service_health(self, port: int | None = None) -> "HealthProbe":
         """Classify ``GET /health`` into :class:`HealthProbe`.

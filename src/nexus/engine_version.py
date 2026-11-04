@@ -706,7 +706,14 @@ from __future__ import annotations
 #: routes and table, telemetry-018), RDR-239's additive registry doc and
 #: census template fields, and the GatedTokenizer shutdown fix
 #: (nexus-89lp5). The pin rises so a local install converges to it.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 175)
+#: 0.1.178 (conexus 7.95.0, nexus-b6h2q): pairs with engine-service-v0.1.178
+#: (tagged on 8096a1451), which carries the engine halves this release's client
+#: halves need: RDR-238 Phase 1's replace-quarantine (0.1.176), the rename
+#: model-token 409 (nexus-ucagi), the claim-first aspects fence (nexus-eyynd), the
+#: PG17 / BYPASSRLS boot refusals (0.1.177), and the section-label fillable count
+#: (nexus-l4hds), the chunk-keys admin routes (nexus-6pfgb.43) and the
+#: quarantine-restore chunk-key filter (nexus-l003p).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 178)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

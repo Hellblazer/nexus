@@ -144,6 +144,8 @@ def test_the_notice_opens_with_the_marker_names_each_unresolved_facet_then_gives
         assert f"{fid} " in head and texts[fid] in head
     assert "f1" not in head and "what was decided" not in head, "a covered facet is not listed as unresolved"
     assert "no supporting evidence" in head and "contradict" in head and "not assessed" in head
+    # nexus-dfrfp: "covered" reads as support, not completeness.
+    assert head.count("at least one supporting item that reached the answer; that does not make them complete") == 1
 
 
 def test_a_covered_facet_with_conflicting_evidence_is_named_apart_from_the_unresolved() -> None:

@@ -856,6 +856,7 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
 # reach up into commands/. The library version requires explicit
 # ``t3_db``; CLI callers within this module pass ``_t3()``.
 from nexus.collection_rename import rename_collection_data_plane as _rename_collection_data_plane  # noqa: E402
+from nexus.collection_rename import rename_summary_parts  # noqa: E402
 
 
 def rename_collection_data_plane(
@@ -865,6 +866,7 @@ def rename_collection_data_plane(
     t3_db=None,
     catalog: Any | None = None,
     on_warn: Callable[[str], None] | None = None,
+    check_model_token: bool = True,
 ) -> dict[str, int]:
     """CLI-shape wrapper: default ``t3_db=_t3()`` when omitted.
 
@@ -877,6 +879,7 @@ def rename_collection_data_plane(
         t3_db = _t3()
     return _rename_collection_data_plane(
         old, new, t3_db=t3_db, catalog=catalog, on_warn=on_warn,
+        check_model_token=check_model_token,
     )
 
 
@@ -992,7 +995,14 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
                 f"already {new_model!r}."
             )
 
-    counts = rename_collection_data_plane(old, new)
+    # nexus-ucagi: the data plane sends a conformant new name's model token
+    # and the engine refuses one that disagrees with the source row. The
+    # operator override above (--force-prefix-change) must keep working, so
+    # it withholds the token: the rename then keeps the row as it is.
+    if force_prefix_change:
+        counts = rename_collection_data_plane(old, new, check_model_token=False)
+    else:
+        counts = rename_collection_data_plane(old, new)
 
     parts: list[str] = []
     if counts["tax_topics"] or counts["tax_assignments"] or counts["tax_meta"]:
@@ -1005,6 +1015,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
         parts.append(f"{counts['chash']} chash rows")
     if counts["catalog_docs"]:
         parts.append(f"{counts['catalog_docs']} catalog docs")
+    parts.extend(rename_summary_parts(counts))
     if parts:
         click.echo(f"Renamed: {old} → {new} ({'; '.join(parts)})")
     else:

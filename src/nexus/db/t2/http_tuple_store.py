@@ -30,7 +30,7 @@ doctor-row bead and, for a session without the channel, ``nx tuple wait``
     ack(claim_id, claimant) ; nack(claim_id, claimant) ; release(claim_id, claimant)
     renew(claim_id, claimant, lease_s) -> datetime
     wait(specs: [WaitSpec], timeout_s) -> [WaitResult]
-    registry() -> {digest, sources, templates: [...]}
+    registry(doc=False) -> {digest, sources, templates: [...]}   (doc=True sends ?doc=1)
     subspace_list(prefix=None, *, limit=None, after=None) -> [SubspaceCensus]
         (with limit: -> ([SubspaceCensus], next_cursor | None) instead)
     subspace_stats(subspace) -> SubspaceCensus
@@ -545,6 +545,10 @@ def _body_to_census(body: dict[str, Any]) -> SubspaceCensus:
         delayed=int(body.get("delayed", 0)),
         oldest_claimable_created_at=body.get("oldest_claimable_created_at"),
         claimable_known="oldest_claimable_created_at" in body,
+        # nexus-mdbds.2.13 (RDR-239): the engine always writes the key (null when no template resolves);
+        # a missing key is an engine that predates it.
+        template=body.get("template"),
+        template_known="template" in body,
     )
 
 
@@ -1334,9 +1338,16 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── registry / census ────────────────────────────────────────────────
 
-    def registry(self) -> dict[str, Any]:
-        """The boot-loaded template set: ``{digest, sources, templates: [...]}``."""
-        return self._get("/registry")
+    def registry(self, doc: bool = False) -> dict[str, Any]:
+        """The boot-loaded template set: ``{digest, sources, templates: [...]}``.
+
+        With *doc* true the request carries ``?doc=1`` and each template that
+        declares one carries its ``doc`` block (RDR-239); the engine serves it
+        only on that flag, so the hot callers see the response they always did.
+        The digest is the same either way. An engine that predates the
+        dictionary ignores the flag and serves no ``doc``.
+        """
+        return self._get("/registry", {"doc": "1"} if doc else None)
 
     def subspace_list(
         self,
@@ -1375,14 +1386,25 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         return rows, (r or {}).get("next_cursor")
 
     def subspace_stats(
-        self, subspace: str, *, timeout: float | None = None,
+        self, subspace: str, *, timeout: float | None = None, single_shot: bool = False,
     ) -> SubspaceCensus:
         """The exact-name form of :meth:`subspace_list` for one subspace.
 
         *timeout* (RDR-235, additive): a per-request cap in seconds, for a
         caller that shares a longer-timeout client (the queue-depth hook shares
-        the index run's). ``None`` sends the request exactly as before."""
+        the index run's). ``None`` sends the request exactly as before.
+
+        *single_shot* (nexus-g6ic6): send the request ONCE. The default resends a
+        ``ReadTimeout`` once and backs a gateway 503 off (and a 503 writes the box-wide
+        gateway hold), so a census capped at *timeout* costs about twice the cap plus
+        backoff when the table is slow, and an engine ``CensusTimeout`` (its own statement
+        timeout; the engine is up) is retried as if it were a gateway fault. It rides the
+        mixin's ``idempotent=False`` path, which keeps only the one 401 re-mint. The price:
+        a connection error is not re-resolved and retried on this call. For a caller that
+        would rather say "unknown" than wait."""
         if not subspace:
             raise ValueError("subspace must not be empty")
-        r = self._get("/subspace_stats", {"subspace": subspace}, timeout=timeout)
+        r = self._get(
+            "/subspace_stats", {"subspace": subspace}, timeout=timeout, idempotent=not single_shot,
+        )
         return _body_to_census(r)

@@ -90,7 +90,7 @@ def _bead_id_hits(text: str) -> list[str]:
 
 def _iter_tool_fns() -> list[tuple[str, str, str, object]]:
     """Yield (server, tool_name, description, underlying_fn) for every
-    registered tool. ``fn`` is the plain callable FastMCP wraps -- the same
+    registered tool. ``fn`` is the plain callable MCPServer wraps -- the same
     object ``inspect.getsource``/``ast.parse`` can read (nexus-w9jxf)."""
     out: list[tuple[str, str, str, object]] = []
     for module_path, server_name in _SERVER_MODULES:

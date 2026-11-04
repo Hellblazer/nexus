@@ -57,6 +57,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   GET   /v1/catalog/manifest/section_label_fillable?limit=N  bounded count of legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds)
  *   GET   /v1/catalog/manifest/null_collection  read-only count of pre-backfill (collection IS NULL) manifest rows (T2 nexus/chroma-residue-plan-2026-08-10 §C2)
  *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
  *   GET   /v1/catalog/manifest/verify    per-doc referenced/present/missing (RUNFENCE, nexus-5xn3k.2)
@@ -188,6 +189,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/chash_positions" -> handleChashPositions(exchange, tenant, method);
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
+                case "/manifest/section_label_fillable" -> handleManifestSectionLabelFillable(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -2530,6 +2532,12 @@ public final class CatalogHandler implements HttpHandler {
         // present must be a non-blank string.
         String newContentType = optionalNonBlank(body, "content_type");
         String newOwnerId = optionalNonBlank(body, "owner_id");
+        // nexus-ucagi: the model token the client read off the new name. A rename keeps the source
+        // row's embedding_model, so a token that differs is refused 409 collection_model_mismatch
+        // inside the rename transaction (nothing written). The engine does not parse names (RDR-204),
+        // so the token is the client's, like content_type and owner_id above. Absent -- an older
+        // client, or a legacy new name with no token -- skips the check; present must be non-blank.
+        String newNameEmbeddingModel = optionalNonBlank(body, "embedding_model");
         // Guard 0 (nexus-mxzxs) — old == new. Mirrors handleCollectionSupersede's guard 0,
         // whose comment already claimed this verb refused the case. That was only ever
         // INCIDENTALLY true: collectionExists(newName) was true when newName == oldName, so
@@ -2648,7 +2656,7 @@ public final class CatalogHandler implements HttpHandler {
         // target is STILL a non-live tombstone at commit time, same as this handler's own
         // identityOk/empty gate above.
         Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded,
-            newContentType, newOwnerId);
+            newContentType, newOwnerId, newNameEmbeddingModel);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
 
@@ -3159,6 +3167,57 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("total", report.get("total"),
                    "backfillable", report.get("backfillable"))));
+    }
+
+    /** True when {@code t} or a cause (depth-bounded) is a {@link java.sql.SQLException} with SQLSTATE {@code state}. */
+    private static boolean hasSqlState(Throwable t, String state) {
+        int depth = 0;
+        for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof java.sql.SQLException sql && state.equals(sql.getSQLState())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * GET /v1/catalog/manifest/section_label_fillable?limit=N (nexus-l4hds): {@code {fillable, limit, capped}}.
+     *
+     * <p>{@code fillable} is how many legacy manifest rows (NULL labels, {@code labels_written} false) the
+     * manifest-section-labels rung could still fill from their chunk row, counted up to {@code limit} (default 1000,
+     * 1 to {@link CatalogRepository#FILLABLE_COUNT_MAX_LIMIT}; anything else is a 400); {@code capped} is true when
+     * the count stopped at {@code limit}, so {@code fillable} then means "at least". One tenant-scoped read-only
+     * query ({@link CatalogRepository#manifestSectionLabelFillable} has the predicate), bounded by a statement
+     * timeout: a count that outlasts it answers 503 {@code {"error":..., "reason":"statement_timeout"}}. A client
+     * that gets a 404 is on an engine before this route, and one that gets a 503 is on an engine that could not
+     * count in time; both must treat the answer as "cannot say", never as "none".
+     */
+    private void handleManifestSectionLabelFillable(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        int limit = 1000;
+        String raw = queryParam(exchange, "limit");
+        if (raw != null && !raw.isBlank()) {
+            try {
+                limit = Integer.parseInt(raw.trim());
+            } catch (NumberFormatException e) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"limit must be an integer (1.." + CatalogRepository.FILLABLE_COUNT_MAX_LIMIT + ")\"}"); return;
+            }
+            if (limit < 1 || limit > CatalogRepository.FILLABLE_COUNT_MAX_LIMIT) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"limit must be 1.." + CatalogRepository.FILLABLE_COUNT_MAX_LIMIT + "\"}"); return;
+            }
+        }
+        int fillable;
+        try {
+            fillable = repo.manifestSectionLabelFillable(tenant, limit);
+        } catch (RuntimeException e) {
+            if (!hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            // The count outlasted its statement bound. The client reads any 503 here as "cannot say" and does not
+            // retry this route (a retry would run the same query again).
+            log.warn("event=catalog_section_label_fillable_timeout tenant={} limit={}", tenant, limit);
+            HttpUtil.send(exchange, 503,
+                "{\"error\":\"section_label_fillable count exceeded its time bound\",\"reason\":\"statement_timeout\"}");
+            return;
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("fillable", fillable, "limit", limit, "capped", fillable >= limit)));
     }
 
     /**

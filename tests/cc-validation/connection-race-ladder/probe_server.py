@@ -34,13 +34,13 @@ the barrier round is to see whether the WAITING hook changes the outcome,
 not to make the probe depend on it.
 
 **Import ordering is load-bearing for the barrier round specifically.**
-``FastMCP`` is imported and ``mcp`` constructed BEFORE the delay/marker-
+``MCPServer`` is imported and ``mcp`` constructed BEFORE the delay/marker-
 publish logic below, not after -- mirroring the real ``nx-mcp``'s own
-shape, where ``mcp = FastMCP("nexus", lifespan=_t1_lifespan)`` is built at
+shape, where ``mcp = MCPServer("nexus", lifespan=_t1_lifespan)`` is built at
 IMPORT time and the marker publish happens INSIDE the lifespan coroutine
 ``mcp.run()`` later invokes, so by the time a real marker is published
 there is nothing left before serving except the transport loop itself
-starting. An earlier version of this probe imported ``FastMCP`` AFTER
+starting. An earlier version of this probe imported ``MCPServer`` AFTER
 publishing, so the publish briefly preceded the point the probe could
 actually serve; measured directly (round 2b re-verify, rep 0): the marker
 was visible ~135 ms after the barrier's poll (well within its 0.2 s poll
@@ -61,7 +61,7 @@ import time
 import uuid
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 LOG = os.environ["PROBE_LOG"]
 
@@ -106,7 +106,7 @@ def _publish_lease_if_configured() -> None:
 
 # Built BEFORE the delay/marker-publish/serve sequence below -- see the
 # module docstring's "import ordering is load-bearing" note.
-mcp = FastMCP("probe")
+mcp = MCPServer("probe")
 
 
 @mcp.tool()
@@ -127,7 +127,7 @@ if __name__ == "__main__":
         _log({"event": "start_delay_elapsed"})
     _publish_lease_if_configured()
     # Nothing left before serving except the transport loop itself starting
-    # -- FastMCP and `mcp` were already built above, matching the real
+    # -- MCPServer and `mcp` were already built above, matching the real
     # nx-mcp's shape (see the module docstring).
     _log({"event": "serving"})
     mcp.run()

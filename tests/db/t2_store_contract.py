@@ -327,6 +327,11 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'insert_summary': ['project', 'content', 'source_ids', 'model', 'produced_by'],
         'list_quarantined': ['project'],
         'list_summaries': ['project'],
+        # RDR-238 Phase 1 (nexus-qo7ie.6, nexus-ov3zi): a put that quarantines the
+        # row titled `replaces` in one engine transaction. Service-only by
+        # construction: no SQLite store had replaces. Production callers:
+        # T2Database.put_replacing, behind the memory_put MCP `replaces` parameter.
+        'put_replacing': ['project', 'title', 'content', 'replaces', 'tags', 'ttl', 'agent', 'session'],
         'reap': [],
         'restore': ['id'],
     },
@@ -440,6 +445,9 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # the read surface's first and only home, not a port of a SQLite
         # reader, so it needs the supplemental entry.
         'query_nx_answer_runs': ['since', 'limit'],
+        # nexus-1ss4n: the keyset walk behind `nx answer-runs --all`; same no-twin shape as
+        # query_nx_answer_runs (a read added long after the SQLite stores were deleted).
+        'query_nx_answer_runs_all': ['since'],
         # RDR-203 D1/P3 (nexus-dt2tu.3): POST /v1/telemetry/nx_answer_runs/complete
         # is a brand-new route added long after every SQLite store was
         # deleted (RDR-158 P4) — service-mode-only by construction, same

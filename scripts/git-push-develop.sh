@@ -466,8 +466,9 @@ fi
 # checkout's HEAD, scripts/tenant_delta.py counts the tests that mint a tenant
 # at the tip and at the remote branch and prints the difference as
 # PUSH_TENANT_HINT lines on stderr. A hint, never a refusal: the count has a 30 s
-# budget, and a count that fails or runs out prints one "not counted" line and the
-# push goes on. NX_PUSH_TENANT_CHECK=0 skips it.
+# budget, and a count it could not take (over budget, or a module the merge base
+# cannot collect) prints a "WARNING:" line and the push goes on.
+# NX_PUSH_TENANT_CHECK=0 skips it.
 _tenant_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 # The changed names are captured first, not piped to `grep -q`: under pipefail a
 # grep that exits on its first match SIGPIPEs git diff and reads as no match.

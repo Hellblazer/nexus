@@ -1,0 +1,46 @@
+lupa 2.8, Lua 5.4; opcode calibration ok
+PASS bad_G.lua                          expect=global          got=global          global: _G (line 2)
+PASS bad_collectgarbage.lua             expect=global          got=global          global: collectgarbage (line 2)
+PASS bad_control_char.lua               expect=bytes           got=bytes           bytes: byte 27 at offset 37 (line 2)
+PASS bad_coroutine_create.lua           expect=global          got=global          global: coroutine (line 2)
+PASS bad_coroutine_wrap.lua             expect=global          got=global          global: coroutine (line 2)
+PASS bad_debug_sethook.lua              expect=global          got=global          global: debug (line 2)
+PASS bad_debug_upvalue.lua              expect=global          got=global          global: debug (line 3)
+PASS bad_dofile.lua                     expect=global          got=global          global: dofile (line 2)
+PASS bad_dump_lib.lua                   expect=field-dump      got=field-dump      field-dump: string.dump (line 2)
+PASS bad_dump_meta.lua                  expect=field-dump      got=field-dump      field-dump: dump (line 2)
+PASS bad_dump_method.lua                expect=field-dump      got=field-dump      field-dump: dump (line 3)
+PASS bad_env_index.lua                  expect=env             got=env             env: _ENV used as a value (line 2)
+PASS bad_env_local.lua                  expect=env             got=env             env: local named _ENV
+PASS bad_env_nested.lua                 expect=env             got=env             env: _ENV used as a value (line 2)
+PASS bad_env_value.lua                  expect=env             got=env             env: _ENV used as a value (line 2)
+PASS bad_getmetatable_string.lua        expect=global          got=global          global: getmetatable (line 2)
+PASS bad_global_function.lua            expect=global-write    got=global-write    global-write: f (line 2)
+PASS bad_global_write.lua               expect=global-write    got=global-write    global-write: x (line 2)
+PASS bad_grant_unknown.lua              expect=verb-unknown    got=verb-unknown    verb-unknown: grant shell.run
+PASS bad_grant_unused.lua               expect=grant-unused    got=grant-unused    grant-unused: memory.list
+PASS bad_lib_dynamic.lua                expect=ns-dynamic      got=ns-dynamic      ns-dynamic: string[...] (line 3)
+PASS bad_lib_member.lua                 expect=ns-member       got=ns-member       ns-member: string.nosuch (line 2)
+PASS bad_load.lua                       expect=global          got=global          global: load (line 2)
+PASS bad_loadstring.lua                 expect=global          got=global          global: loadstring (line 2)
+PASS bad_nonascii.lua                   expect=bytes           got=bytes           bytes: byte 195 at offset 23 (line 2)
+PASS bad_ns_overwrite.lua               expect=ns-value        got=ns-value        ns-value: memory used as a value (line 3)
+PASS bad_ns_pairs.lua                   expect=ns-value        got=ns-value        ns-value: string used as a value (line 3)
+PASS bad_parse.lua                      expect=parse           got=parse           parse: script:3: <name> or '...' expected near <eof>
+PASS bad_rawget.lua                     expect=global          got=global          global: rawget (line 2)
+PASS bad_rawset_env.lua                 expect=global          got=global          global: rawset (line 2)
+PASS bad_require.lua                    expect=global          got=global          global: require (line 2)
+PASS bad_setmetatable_shared.lua        expect=global          got=global          global: setmetatable (line 2)
+PASS bad_verb_alias.lua                 expect=ns-value        got=ns-value        ns-value: memory used as a value (line 3)
+PASS bad_verb_dynamic.lua               expect=ns-dynamic      got=ns-dynamic      ns-dynamic: memory[...] (line 4)
+PASS bad_verb_ungranted.lua             expect=verb-ungranted  got=verb-ungranted  verb-ungranted: memory.list (line 4)
+PASS bad_verb_write.lua                 expect=verb-unknown    got=verb-unknown    verb-unknown: memory.put (line 3)
+PASS ok_layer2_dynamic_dump.lua         expect=ok              got=ok              -
+PASS ok_lib_const_bracket.lua           expect=ok              got=ok              -
+PASS ok_methods.lua                     expect=ok              got=ok              -
+PASS ok_pure.lua                        expect=ok              got=ok              -
+PASS ok_shadow.lua                      expect=ok              got=ok              -
+PASS ok_verbs.lua                       expect=ok              got=ok              memory.get,memory.search
+PASS inline_binary_chunk                expect=binary          got=binary          binary: binary chunk
+PASS inline_many_constants              expect=env             got=env             env: _ENV used as a value (line 3)
+44 cases, 0 unexpected; sha256 of this checker 95759be77a0f98af

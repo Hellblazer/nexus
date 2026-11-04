@@ -24,12 +24,13 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 import pytest
 
 from nexus import bounded_subprocess
 from nexus.util import process_group as pg
-from tests._child_process import kill_group
+from tests._child_process import kill_if_identity
 from tests._module_seam import delattr_in, setattr_in
 
 posix_only = pytest.mark.skipif(
@@ -256,17 +257,19 @@ def test_without_process_groups_the_single_process_is_terminated_and_a_group_is_
 # ── real children: a tracker-marked process survives, the others die ─────────
 
 
-def _spawn_group(marker_in_argv: str | None) -> tuple[subprocess.Popen, int, int]:
+def _spawn_group(marker_in_argv: str | None) -> tuple[subprocess.Popen, int, int, str]:
     """A group leader with two children in its group: one whose argv carries
-    *marker_in_argv* (None: a plain sleeper) and one plain sleeper. Returns
-    (leader, tracker_like_pid, plain_pid)."""
+    *marker_in_argv* (None: a plain sleeper) and one plain sleeper. Both carry a nonce path unique to this
+    spawn, so a cleanup that holds only their pids can tell them from every other ``time.sleep(120)`` on the
+    box (nexus-xzorj). Returns (leader, tracker_like_pid, plain_pid, nonce)."""
+    nonce = f"/nx-xzorj/{uuid.uuid4().hex}"
     src = (
         "import subprocess, sys, time\n"
         # Built at runtime: the leader's own argv is this source, and a literal
         # marker in it would make the leader itself look like a tracker.
         f"marker = {marker_in_argv!r}.replace('@', '') if {marker_in_argv!r} else None\n"
-        "a = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)  # ' + (marker or 'plain')])\n"
-        "b = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)  # plain-sibling'])\n"
+        f"a = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)  # ' + (marker or 'plain') + ' ' + {nonce!r}])\n"
+        f"b = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)  # plain-sibling ' + {nonce!r}])\n"
         "print(a.pid, b.pid, flush=True)\n"
         "time.sleep(120)\n"
     )
@@ -275,7 +278,7 @@ def _spawn_group(marker_in_argv: str | None) -> tuple[subprocess.Popen, int, int
     )
     assert leader.stdout is not None
     a, b = (int(x) for x in leader.stdout.readline().split())
-    return leader, a, b
+    return leader, a, b, nonce
 
 
 def _gone(pid: int, timeout: float = 10.0) -> bool:
@@ -297,12 +300,20 @@ def _gone(pid: int, timeout: float = 10.0) -> bool:
     return False
 
 
-def _reap_group(leader: subprocess.Popen, *pids: int) -> None:
-    for pid in (leader.pid, *pids):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+def _raw_group_kill(leader: subprocess.Popen) -> None:
+    """The control's whole-group SIGKILL that does NOT spare the tracker: the product's one raw ``killpg``
+    (``tests._child_process.kill_group`` goes through the sparing primitive now, nexus-xzorj)."""
+    assert pg._plain_killpg(os.getpgid(leader.pid), signal.SIGKILL), "the leader's group was not signalled"
+
+
+def _reap_group(leader: subprocess.Popen, nonce: str, *pids: int) -> None:
+    """Kill what a test left. The leader is ours: ``Popen.kill`` is a no-op once it is reaped, where a bare
+    ``os.kill(leader.pid)`` after a ``leader.wait()`` would hit whatever the kernel gave the number to. The
+    members are not our children (``_spawn_group``), so each is killed only while its live command line still
+    carries the nonce of the sleeper this test started (nexus-xzorj)."""
+    for pid in pids:
+        kill_if_identity(pid, nonce)
+    leader.kill()
     leader.wait(timeout=10)
 
 
@@ -333,26 +344,26 @@ _DOORS = [
 @posix_only
 @pytest.mark.parametrize("door", _DOORS, ids=lambda f: f.__name__.removeprefix("_kill_via_"))
 def test_a_real_group_loses_everything_but_its_tracker_marked_process(door) -> None:
-    leader, tracker_like, plain = _spawn_group("multiprocessing@.resource_tracker")
+    leader, tracker_like, plain, nonce = _spawn_group("multiprocessing@.resource_tracker")
     try:
         assert door(leader) is True
         leader.wait(timeout=10)
         assert _gone(plain), "an ordinary group member must be killed"
         os.kill(tracker_like, 0)  # still alive: the primitive spared it
     finally:
-        _reap_group(leader, tracker_like, plain)
+        _reap_group(leader, nonce, tracker_like, plain)
 
 
 @posix_only
 def test_control_a_raw_group_kill_takes_the_tracker_marked_process_too() -> None:
     """Non-vacuity of the test above: a raw ``killpg`` DOES reach it."""
-    leader, tracker_like, plain = _spawn_group("multiprocessing@.resource_tracker")
+    leader, tracker_like, plain, nonce = _spawn_group("multiprocessing@.resource_tracker")
     try:
-        kill_group(leader)  # a raw group SIGKILL, the pre-fix behaviour
+        _raw_group_kill(leader)  # a raw group SIGKILL, the pre-fix behaviour
         leader.wait(timeout=10)
         assert _gone(tracker_like) and _gone(plain)
     finally:
-        _reap_group(leader, tracker_like, plain)
+        _reap_group(leader, nonce, tracker_like, plain)
 
 
 # ── the real check: a spawn-context pool, killed, leaks no semaphore ─────────
@@ -427,22 +438,21 @@ def _run_pool_and_kill(killer, exists, unlink) -> tuple[list[str], list[str]]:
         for n in names:
             if exists(n):
                 unlink(n)
-        for pid in (m[0] for m in (pg._group_member_rows(leader.pid) or [])):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        try:
-            os.kill(leader.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        # The leader is ours: Popen.kill is a no-op once it is reaped (a raw os.kill(leader.pid) after the wait
+        # above would reach whoever the kernel gave the number to). The pool's members are not our children and
+        # carry no token of ours, so each is signalled only while its live command line is still the one the
+        # table showed when it was read as a member of this group (nexus-xzorj).
+        for pid, command in pg._group_member_rows(leader.pid) or []:
+            if "/" in command:  # a command line with no path cannot vouch for one process (pid_is refuses it)
+                kill_if_identity(pid, command)
+        leader.kill()
         leader.wait(timeout=10)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX named semaphores")
 def test_control_a_raw_whole_group_kill_leaks_the_pools_semaphores() -> None:
     exists, unlink = _sem_api()
-    names, leaked = _run_pool_and_kill(kill_group, exists, unlink)  # a raw group SIGKILL
+    names, leaked = _run_pool_and_kill(_raw_group_kill, exists, unlink)  # a raw group SIGKILL
     assert leaked, (
         f"control: a whole-group SIGKILL of a spawn pool should leak its semaphores "
         f"(made {len(names)}); if it no longer does, the tests below prove nothing"

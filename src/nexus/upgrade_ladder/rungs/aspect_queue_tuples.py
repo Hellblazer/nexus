@@ -4,8 +4,8 @@
 waiting rows to ``aspects`` tuples, one row at a time.
 
 WHY A RUNG. ``NX_ASPECT_QUEUE=tuples`` (the default since the RDR-235 Activation
-Step 1 flip, nexus-lnwn1; ``table`` is the opt-out) points the producer and the
-worker at the tuple space (RDR-235). Rows the old table already holds, written before the flip
+Step 1 flip, nexus-lnwn1; ``table`` is retired since nexus-bpikw step A) points the
+producer and the worker at the tuple space (RDR-235). Rows the old table already holds, written before the flip
 by this or an older client, would otherwise wait for the alternating table side
 of the worker to drain them, or strand if the table side is ever retired. The
 upgrade ladder (RDR-185) is the standing mechanism for a data transition that
@@ -26,7 +26,8 @@ WHAT IT DOES.
              between the two leaves the row in both places, never in neither;
              the re-run replaces the same task (nonce = ``doc_id``) and deletes.
              ``in_progress`` rows move as pending, with no delay: a worker may
-             still hold one, and a replace of a live claim only marks it dirty.
+             still hold one, and a replace of a claimed row (live or lapsed)
+             only marks it dirty.
              Batches of :data:`DEFAULT_BATCH_LIMIT` rows are RESUMABLE; the
              rung is COMPLETED when nothing movable is left.
   verify   : positive signal only. The read of the waiting rows SUCCEEDED and
@@ -46,7 +47,7 @@ WHAT STAYS IN THE TABLE.
     counts them; they do not keep the rung from converging.
 
 THE SKIPS ARE NOT RECORDED (plan-audit residual R2). Every reason this rung does
-not apply (flag still ``table``, engine without the template, engine without
+not apply (the retired ``table`` value set, engine without the template, engine without
 the route) is reported through ``detect()`` as ``applicable=False``. The runner
 records NOTHING for a not-applicable rung, so the rung is re-detected on every
 ``nx upgrade``, including the first one after the Phase 2 default flip to
@@ -78,6 +79,7 @@ from nexus.db.t2.http_aspect_queue import (
     ASPECTS_SUBSPACE,
     LIST_WAITING_ENGINE_RELEASE as LIST_WAITING_ENGINE_TAG,
     AspectQueueListWaitingUnsupportedError,
+    AspectQueueTableModeRetiredError,
     HttpAspectQueue,
     WaitingRow,
     _identity_body,
@@ -126,7 +128,9 @@ DETECT_READ_LIMIT = 50
 #: The request cap (seconds) on the ``aspects`` census ``detect()`` makes to learn whether the engine has the
 #: template (nexus-s72c5). The census counts the subspace's rows, and the answer used here is only "is there a
 #: template"; a census that runs past this, or that the engine's own statement timeout cuts, makes ``detect``
-#: say pending with the reason, not raise. ``converge`` and ``verify`` send it unchanged.
+#: say pending with the reason, not raise. ``converge`` and ``verify`` send it unchanged. The capped call is
+#: single-shot (nexus-g6ic6): the cap is per attempt, so a resent ``ReadTimeout`` or a backed-off 503
+#: ``CensusTimeout`` would cost about twice the cap plus backoff at every ``nx doctor``.
 DETECT_CENSUS_TIMEOUT_S = 10.0
 
 
@@ -151,12 +155,24 @@ def _default_record() -> object | None:
     return default_completion_record(RUNG_NAME)
 
 
+def _producer_mode() -> str:
+    """The flag as the rung reads it, through the strict reader. A stale ``table``
+    is retired (nexus-bpikw step A: the producer warns and queues on tuples, the
+    strict reader raises); here it is the answer "not tuples", so the rung reports
+    not applicable and sends nothing, as it did for the old opt-out, instead of
+    raising out of ``nx upgrade``."""
+    try:
+        return aspect_queue_mode()
+    except AspectQueueTableModeRetiredError:
+        return "table"
+
+
 def _default_queue() -> HttpAspectQueue:
     return HttpAspectQueue()
 
 
 def _default_tuples() -> Any:
-    from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: a table-mode install never loads it
+    from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: not loaded unless the rung applies
 
     return HttpTupleStore()
 
@@ -172,7 +188,7 @@ class AspectQueueTuplesRung:
     def __init__(
         self,
         *,
-        mode_fn: Callable[[], str] = aspect_queue_mode,
+        mode_fn: Callable[[], str] = _producer_mode,
         queue_factory: Callable[[], Any] = _default_queue,
         tuples_factory: Callable[[], Any] = _default_tuples,
         batch_limit: int = DEFAULT_BATCH_LIMIT,
@@ -198,9 +214,15 @@ class AspectQueueTuplesRung:
 
     def _skip_reason(self, queue: Any | None = None, tuples: Any | None = None) -> str:
         """The reason this rung does not apply, or ``""`` when it does. The flag
-        is checked before anything is built or sent, so a table-mode install
+        is checked before anything is built or sent, so an install with the retired value
         makes no request at all."""
-        if self._mode_fn() != "tuples":
+        mode = self._mode_fn()
+        if mode == "table":
+            return (
+                f"{ASPECT_QUEUE_ENV}=table is retired (nexus-bpikw); unset {ASPECT_QUEUE_ENV} "
+                "so this step can move the table's waiting rows to the tuple queue"
+            )
+        if mode != "tuples":
             return f"{ASPECT_QUEUE_ENV} is not 'tuples'"
         return ""
 
@@ -222,10 +244,12 @@ class AspectQueueTuplesRung:
         finally:
             _close(queue)
 
-    def _probe(self, limit: int | None = None) -> tuple[str, list[WaitingRow]]:
+    def _probe(self, limit: int | None = None, *, single_shot: bool = False) -> tuple[str, list[WaitingRow]]:
         """``(skip_reason, rows)``: a non-empty reason means not applicable (and
         no rows). Any other failure of a read propagates. *limit* bounds the
-        waiting-row read to its first rows (see :data:`DETECT_READ_LIMIT`)."""
+        waiting-row read to its first rows (see :data:`DETECT_READ_LIMIT`).
+        *single_shot* (nexus-g6ic6) sends an uncapped census once, for a caller that
+        defers on a timeout: a resend or a gateway backoff only delays that answer."""
         reason = self._skip_reason()
         if reason:
             return reason, []
@@ -233,8 +257,9 @@ class AspectQueueTuplesRung:
         try:
             try:
                 census = (
-                    aspects_census(tuples) if limit is None
-                    else aspects_census(tuples, timeout=DETECT_CENSUS_TIMEOUT_S)
+                    aspects_census(tuples, single_shot=True) if limit is None and single_shot
+                    else aspects_census(tuples) if limit is None
+                    else aspects_census(tuples, timeout=DETECT_CENSUS_TIMEOUT_S, single_shot=True)
                 )
             except (CensusTimeoutError, httpx.TimeoutException) as exc:
                 if limit is None:
@@ -321,7 +346,23 @@ class AspectQueueTuplesRung:
     # ── converge ─────────────────────────────────────────────────────────────
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
-        reason, rows = self._probe()
+        try:
+            reason, rows = self._probe(single_shot=True)
+        except (CensusTimeoutError, httpx.TimeoutException) as exc:
+            # nexus-g6ic6: the template census timed out, either the engine's own statement timeout or the
+            # client's request default, whichever fired first. The engine is up and the table is slow, which a
+            # later walk may find otherwise; FAILED would end this walk red on it. Only a timeout defers: any
+            # other failure of the census still raises. The census is one attempt (single_shot), so the
+            # deferral does not wait out the 2/5/10 s gateway backoff or write the box-wide gateway hold.
+            detail = str(exc) or type(exc).__name__
+            _log.warning("aspect_queue_rung_census_timeout", error=detail[:200])
+            return ConvergeResult(
+                ConvergeOutcome.DEFERRED,
+                detail=(
+                    f"the 'aspects' tuple census timed out ({detail}); "
+                    f"nothing moved, and the move resumes on the next `nx upgrade`"
+                ),
+            )
         if reason:
             # The runner converges only an applicable rung; this is the guard for
             # a caller that did not ask detect() first. Nothing moves.

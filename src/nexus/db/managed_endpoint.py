@@ -31,6 +31,7 @@ import httpx
 import structlog
 
 from nexus._log_safe_url import log_endpoint, require_no_userinfo, scrub_transport_error
+from nexus.db.request_gate import before_request
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _log = structlog.get_logger(__name__)
@@ -199,6 +200,7 @@ def probe_managed_service(
         def http_get(u: str, t: float) -> httpx.Response:
             return httpx.get(u, timeout=t)
 
+    before_request()  # nexus-ldf2s: the version probe is a request like any other
     try:
         resp = http_get(url, timeout)
     except (httpx.TransportError, httpx.TimeoutException) as exc:

@@ -87,6 +87,8 @@ def _expected(request: K, plan: K, provenance: str) -> bool:
     if provenance == "curated":
         return True  # "Unknown-kind builtin/curated plans remain eligible as in the compatibility matrix"
     # "Unknown-kind grown plans ... eligible only for lookup or discovery/listing requests"
+    if provenance == "unattested":
+        return False  # nexus-rflvp (Sam, 2026-11-03): a plan that declares nothing serves neither of them either
     return request in (L, D)
 
 
@@ -108,7 +110,8 @@ def test_the_table_has_every_cell_and_the_expected_side_is_not_all_one_way() -> 
     cells = list(product(_ALL_KINDS, _ALL_KINDS, _PROVENANCES))
     assert len(cells) == 7 * 7 * 3 == 147
     admitted = sum(_expected(*c) for c in cells)
-    assert 40 < admitted < 107, f"{admitted} of 147 admitted: the table has stopped discriminating"
+    # 42 admitted before nexus-rflvp (an unattested plan served lookups and listings): 28 now, 14 cells fewer
+    assert admitted == 28, f"{admitted} of 147 admitted: a matrix cell changed"
 
 
 def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
@@ -117,7 +120,7 @@ def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
     } - {None}
     assert reasons == {
         "kind_mismatch", "unknown_request_untrusted_plan", "unknown_request_narrow_plan",
-        "untrusted_unknown_plan",
+        "untrusted_unknown_plan", "unattested_plan",
     }
     assert reasons <= el.REASONS
 
@@ -152,8 +155,17 @@ def _pj(kind: K | None = None, provenance: str = "curated", route: str | None = 
         pytest.param("", _pj(L), U, "grown", "untrusted_curated_claim",
                      id="a-curated-declaration-without-the-builtin-tag-is-not-trusted"),
         pytest.param("ad-hoc", _pj(S), U, "grown", "untrusted_curated_claim", id="a-curated-claim-on-an-adhoc-row"),
-        pytest.param("builtin-template,grown", _pj(L), U, "grown", None, id="the-grown-tag-wins-over-a-curated-pair"),
-        pytest.param("ad-hoc,grown", _pj(), U, "grown", None, id="grown-tag-no-declaration"),
+        # nexus-3ihve: a grown TAG alone is not attestation. Without a valid grown declaration the row is
+        # unattested (it was read as grown before; plan 517 is such a row), whatever else it carries.
+        pytest.param("builtin-template,grown", _pj(L), U, "unattested", None,
+                     id="a-grown-tag-over-a-curated-declaration-is-unattested"),
+        pytest.param("ad-hoc,grown", _pj(), U, "unattested", None, id="grown-tag-no-declaration-is-unattested"),
+        pytest.param("grown", _pj(), U, "unattested", None, id="the-bare-grown-tag-is-unattested"),
+        pytest.param("builtin-template,grown", _pj(), U, "unattested", None,
+                     id="grown-and-builtin-tags-no-declaration-is-unattested-not-undeclared-builtin"),
+        pytest.param("ad-hoc,grown", json.dumps({"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "lookup"}}),
+                     U, "unattested", None, id="a-grown-tag-with-an-invalid-declaration-is-unattested"),
+        pytest.param("ad-hoc,grown", "{not json", U, "unattested", None, id="a-grown-tag-with-malformed-json"),
         pytest.param("ad-hoc,grown", _pj(U, "grown"), U, "grown", None, id="grown-unknown"),
         pytest.param("ad-hoc,grown", _pj(S, "grown", "explicit"), U, "grown", "unreviewed_route",
                      id="grown-with-an-explicit-route-reads-as-unknown-no-route-is-trusted-yet"),
@@ -180,23 +192,21 @@ def test_provenance_is_decided_from_the_row_and_fails_closed(tags, plan_json, ki
 
 @pytest.mark.parametrize(
     ("route", "honoured"),
-    [("explicit", False), ("heuristic", False), ("model-assisted", False), (None, False)],
-    ids=["explicit", "heuristic", "model-assisted", "none"],
+    [("explicit", False), ("heuristic", False), ("model-assisted", False)],
+    ids=["explicit", "heuristic", "model-assisted"],
 )
 def test_a_grown_plans_recorded_kind_counts_on_no_route_until_one_is_trusted(route, honoured) -> None:
     """RDR-232: recorded kind provenance relaxes the unknown-kind restriction "after review". No review has
     happened (nexus-jypmj.2.8), so ``TRUSTED_ROUTES`` ships empty and EVERY grown plan reads as unknown-kind,
     the caller's ``explicit`` hint included: it labels the request, and nothing checks it against the plan's
-    steps. ``None`` is a stored row that records no route (not producible by the grow site, and not a valid
-    declaration either: it decodes as no declaration)."""
-    plan_json = _pj(S, "grown", route) if route is not None else json.dumps(
-        {"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "synthesis", "provenance": "grown"}},
-    )
+    steps. (A row recording a kind with no route is not a valid declaration: it decodes as none, and since
+    nexus-3ihve a grown tag over it reads unattested, pinned in the provenance table above.)"""
+    plan_json = _pj(S, "grown", route)
     standing = el.classify_plan("ad-hoc,grown", plan_json)
     assert not honoured and el.TRUSTED_ROUTES == frozenset()
     assert standing.provenance == "grown"
     assert standing.kind is U
-    assert standing.flag == ("unreviewed_route" if route is not None else None)
+    assert standing.flag == "unreviewed_route"
     assert not el.eligibility(S, standing.kind, standing.provenance).eligible
     # either way the stored route is reported, so the envelope can say why
     assert standing.route == route
@@ -217,14 +227,17 @@ def test_adding_a_route_to_the_trusted_set_makes_that_route_count(route, monkeyp
 
 
 @pytest.mark.parametrize("route", ["explicit", "heuristic", "model-assisted"])
-def test_a_discounted_route_is_refused_with_its_own_reason_and_still_serves_lookup_and_listing(route) -> None:
+def test_a_discounted_route_is_refused_with_its_own_reason_and_still_serves_listing(route) -> None:
+    """A lookup is no longer served by it: the recorded synthesis kind narrows (nexus-indyo)."""
     row = _row(910, "grown-synth", kind=S, tags="ad-hoc,grown", provenance="grown", route=route)
     out, filt = _match([row], [(910, 0.05)], S)
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
-    for request in (L, D):
-        out, _ = _match([row], [(910, 0.05)], request)
-        assert _ids(out) == [910], request
+    out, _ = _match([row], [(910, 0.05)], D)
+    assert _ids(out) == [910]
+    out, filt = _match([row], [(910, 0.05)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
 
 
 @pytest.mark.parametrize("tags", [42, ["builtin-template"], MagicMock()], ids=["int", "list", "mock"])
@@ -621,6 +634,31 @@ def test_a_grown_plan_that_recorded_an_explicit_route_kind_is_unknown_until_the_
     assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
 
 
+# nexus-3ihve: a grown TAG with no grown declaration is unattested, refused for lookup and listing ---------------
+
+#: Plan 517 as it lives: tagged grown on 2026-10-22, before declarations existed, so it declares nothing.
+TAG_ONLY_GROWN = _row(517, "grown-tag-only", kind=None, tags="ad-hoc,grown", verb="lookup")
+#: A tag-only claim over a curated declaration (not producible by a writer, but a stored row can say it).
+TAG_OVER_CURATED = _row(518, "grown-tag-over-curated", kind=L, tags="builtin-template,grown", verb="lookup")
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+@pytest.mark.parametrize("row", [TAG_ONLY_GROWN, TAG_OVER_CURATED], ids=["tag-only", "tag-over-curated"])
+def test_a_tag_only_grown_row_is_refused_for_lookup_and_listing_as_unattested(row, request_kind: K) -> None:
+    out, filt = _match([row], [(row["id"], 0.05)], request_kind)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
+
+
+def test_the_declared_grown_row_beside_a_tag_only_one_still_serves_lookup_and_listing() -> None:
+    for request in (L, D):
+        out, filt = _match(
+            [TAG_ONLY_GROWN, GROWN_UNKNOWN], [(517, 0.04), (901, 0.05)], request,
+        )
+        assert _ids(out) == [901], request
+        assert filt.excluded_plan_ids == [517]
+
+
 # Scenario 5: unknown request with unknown-grown lookup history ------------------------------------------------
 
 
@@ -694,8 +732,11 @@ def test_a_legacy_builtin_without_a_declaration_is_not_curated_and_says_so() -> 
     out, filt = _match([LEGACY_BUILTIN], [(14, 0.2)], S)
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"undeclared_builtin": 1}
-    out, _ = _match([LEGACY_BUILTIN], [(14, 0.2)], L)
-    assert _ids(out) == [14], "it still serves a lookup, as any untrusted unknown plan does"
+    # nexus-rflvp (Sam, 2026-11-03): an undeclared plan no longer serves a lookup; the exclusion names the
+    # builtin's own defect, and the library precondition keeps the gate in shadow until the reseed (gate_defaults).
+    out, filt = _match([LEGACY_BUILTIN], [(14, 0.2)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"undeclared_builtin": 1}
 
 
 # Scenario 8: with the constant off, matching is unchanged ----------------------------------------------------
@@ -1264,3 +1305,132 @@ def test_the_tag_words_are_the_matchers() -> None:
 
     assert el.BUILTIN_TAG == matcher._CATEGORY_PLAN_TAG
     assert matcher._is_grown_plan_tags(el.GROWN_TAG) and not matcher._is_grown_plan_tags(el.BUILTIN_TAG)
+
+
+# ── nexus-indyo: a grown plan's recorded kind narrows, it never widens ────────────────────────────────────────────
+#: Grown plans that recorded a non-lookup kind: the request that grew them was not a lookup, so their steps were
+#: planned for something else (a synthesis plan answering a lookup is the H09 cost shape, nexus-jypmj.11).
+GROWN_SYNTHESIS = _row(904, "grown-synthesis", kind=S, tags="ad-hoc,grown", provenance="grown", route="model-assisted")
+GROWN_COMPARISON = _row(905, "grown-comparison", kind=C, tags="ad-hoc,grown", provenance="grown", route="heuristic")
+GROWN_DISCOVERY = _row(906, "grown-discovery", kind=D, tags="ad-hoc,grown", provenance="grown", route="explicit")
+
+
+@pytest.mark.parametrize("row", [GROWN_SYNTHESIS, GROWN_COMPARISON, GROWN_DISCOVERY], ids=lambda r: r["name"])
+def test_a_grown_plan_that_recorded_another_kind_does_not_serve_a_lookup(row) -> None:
+    out, filt = _match([row], [(row["id"], 0.05)], L)
+    assert out == [] and filt.excluded_plan_ids == [row["id"]]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
+
+
+@pytest.mark.parametrize("row", [GROWN_UNKNOWN, GROWN_LOOKUP, GROWN_LOOKUP_HEURISTIC], ids=lambda r: r["name"])
+def test_a_grown_plan_that_recorded_lookup_or_nothing_still_serves_a_lookup(row) -> None:
+    out, _ = _match([row], [(row["id"], 0.05)], L)
+    assert _ids(out) == [row["id"]]
+
+
+def test_the_recorded_kind_does_not_widen_a_grown_plan() -> None:
+    """The narrowing reads the recorded kind; it does not trust it. A grown plan that recorded synthesis is still
+    refused for a synthesis request (unreviewed route), as before nexus-indyo."""
+    out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], S)
+    assert out == [] and filt.excluded_plan_ids == [904]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
+
+
+def test_discovery_requests_are_unchanged_by_the_lookup_narrowing() -> None:
+    out, _ = _match([GROWN_SYNTHESIS], [(904, 0.05)], D)
+    assert _ids(out) == [904]
+
+
+def test_the_lookup_narrowing_runs_in_shadow_like_the_matrix() -> None:
+    out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], L, enforce=False)
+    assert _ids(out) == [904]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_not_lookup": 1}
+
+
+def test_the_lookup_narrowing_reason_is_in_the_closed_vocabulary() -> None:
+    assert "grown_route_not_lookup" in el.REASONS
+
+
+def test_a_grown_declaration_with_no_route_is_no_declaration_so_the_row_is_unattested_for_a_lookup() -> None:
+    # nexus-3ihve changed this contract: a kind with no route is not a valid declaration (it decodes as none),
+    # so the grown TAG stands alone and attests nothing. It served lookups before (recorded_kind None, grown).
+    row = _row(907, "grown-routeless", tags="ad-hoc,grown", verb="lookup")
+    row["plan_json"] = json.dumps(
+        {"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "synthesis", "provenance": "grown"}},
+    )
+    standing = el.classify_plan(row["tags"], row["plan_json"])
+    assert (standing.provenance, standing.recorded_kind) == ("unattested", None)
+    out, filt = _match([row], [(907, 0.05)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
+
+
+def test_a_trusted_route_is_judged_by_the_matrix_not_the_lookup_narrowing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once a route is trusted the recorded kind IS the plan's kind, so a synthesis plan is refused for a lookup by
+    the matrix (``kind_mismatch``), and the narrowing, which reads only discounted kinds, never fires."""
+    monkeypatch.setattr(el, "TRUSTED_ROUTES", frozenset({"model-assisted"}))
+    standing = el.classify_plan(GROWN_SYNTHESIS["tags"], GROWN_SYNTHESIS["plan_json"])
+    assert (standing.kind, standing.recorded_kind) == (S, None)
+    out, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], L)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
+
+
+# ── nexus-rflvp (Sam, 2026-11-03): an unattested plan serves neither a lookup nor a listing ─────────────────────
+#: A plan-save row: no builtin tag, no grown tag, no declaration. Plans 598 and 599 were this (user-saved beads
+#: plans) and won 31 of 77 lookups since the gate was enabled.
+USER_SAVED = _row(910, "user-saved-plan", tags="", verb="lookup")
+USER_SAVED["plan_json"] = json.dumps({"steps": [{"tool": "search", "args": {"query": "$intent"}}]})
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+def test_an_unattested_plan_is_refused_for_a_lookup_and_a_listing_with_its_own_reason(request_kind: K) -> None:
+    assert el.classify_plan(USER_SAVED["tags"], USER_SAVED["plan_json"]).provenance == "unattested"
+    out, filt = _match([USER_SAVED], [(910, 0.05)], request_kind)
+    assert out == [] and filt.excluded_plan_ids == [910]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
+
+
+def test_a_lookup_goes_to_the_curated_plan_when_a_user_saved_plan_outscores_it() -> None:
+    out, _ = _match([USER_SAVED, LOOKUP_473], [(910, 0.05), (473, 0.3)], L)
+    assert _ids(out) == [473]
+
+
+@pytest.mark.parametrize("request_kind", [S, C, A, B, U])
+def test_the_other_request_kinds_keep_their_unattested_reasons(request_kind: K) -> None:
+    out, filt = _match([USER_SAVED], [(910, 0.05)], request_kind)
+    assert out == []
+    reason = "unknown_request_untrusted_plan" if request_kind is U else "untrusted_unknown_plan"
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {reason: 1}
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+def test_the_unattested_refusal_runs_in_shadow_like_the_matrix(request_kind: K) -> None:
+    out, filt = _match([USER_SAVED], [(910, 0.05)], request_kind, enforce=False)
+    assert _ids(out) == [910], "shadow keeps the candidate"
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unattested_plan": 1}
+    assert filt.enforced_excluded_total == 0
+
+
+def test_the_unattested_refusal_holds_on_every_branch() -> None:
+    out, filt = _match([USER_SAVED], [], L, fts=[910], cache=False)
+    assert out == []
+    assert filt.to_wire()["branches"]["fts"]["reasons"] == {"unattested_plan": 1}
+
+
+@pytest.mark.parametrize("request_kind", [L, D])
+def test_grown_and_curated_plans_keep_serving_lookups_and_listings(request_kind: K) -> None:
+    curated = LOOKUP_473 if request_kind is L else DISC_13
+    out, _ = _match([GROWN_UNKNOWN, curated], [(901, 0.05), (curated["id"], 0.3)], request_kind)
+    assert _ids(out) == [901, curated["id"]]
+
+
+def test_an_undeclared_builtin_is_refused_under_the_builtins_own_reason_not_unattested_plan() -> None:
+    standing = el.classify_plan(LEGACY_BUILTIN["tags"], LEGACY_BUILTIN["plan_json"])
+    assert (standing.provenance, standing.flag) == ("unattested", "undeclared_builtin")
+    verdict = el._judge(L, LEGACY_BUILTIN["tags"], LEGACY_BUILTIN["plan_json"])[1]
+    assert (verdict.eligible, verdict.reason) == (False, "undeclared_builtin")
+
+
+def test_the_unattested_reason_is_in_the_closed_vocabulary() -> None:
+    assert "unattested_plan" in el.REASONS

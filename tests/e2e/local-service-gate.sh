@@ -400,6 +400,11 @@ RELEASE_PROPS_SNAPSHOT=""
 cleanup() {
   local rc=$?
   set +e
+  # The aspect worker an nx call spawned (spawn-if-absent) outlives the service by
+  # design and, left alone, keeps polling a dead engine as a ppid-1 orphan
+  # (nexus-wl9pk). Stop it by its lease in THIS config dir, before the service so
+  # its final reclaim sweep still has an engine; never by pattern.
+  NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon aspect-worker stop --config-dir "$SCRATCH" >/dev/null 2>&1
   # --with-pg: a plain stop leaves the supervisor's PostgreSQL running by
   # design, and the pg_ctl fallback below needs a pg_ctl on PATH, which
   # hellmini and chas lack. Without it the postmaster outlived the deleted

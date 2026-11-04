@@ -121,11 +121,11 @@ def test_console_script_target_resolves_to_the_intended_module_and_callable() ->
 
 
 def test_console_script_module_exposes_the_expected_fastmcp_server() -> None:
-    """The resolved module's ``mcp`` object is a FastMCP server with the
+    """The resolved module's ``mcp`` object is a MCPServer server with the
     server name .mcp.json's client-facing key implies (RDR-062 split)."""
     for server_name, module_path in _EXPECTED_MODULE.items():
         mod = importlib.import_module(module_path)
-        assert hasattr(mod, "mcp"), f"{module_path} has no module-level `mcp` FastMCP instance"
+        assert hasattr(mod, "mcp"), f"{module_path} has no module-level `mcp` MCPServer instance"
         assert mod.mcp.name == server_name, (
             f"{module_path}.mcp.name is {mod.mcp.name!r}, expected "
             f"{server_name!r} to match its .mcp.json server key"

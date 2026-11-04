@@ -40,8 +40,73 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5024
+provisioned_tests = 5128
 tolerance_tests = 0
+# 5126 -> 5128 (nexus-z7ddd, 2026-11-04): +2. tests/hooks/test_subagent_start_preflight_row.py drives the SubagentStart hook
+# as a child process in two throwaway git repos (with and without the worktree preflight script) and reads its real
+# injection; the hook's T2 scan reaches the engine, so each takes a tenant, as the hook module's own tests do.
+# 5124 -> 5126 (nexus-dm617, 2026-11-04): +2. tests/test_rename_vs_tuple_tasks.py is two real-engine tests of the default
+# (tuples) aspect producer across a collection rename: the deterministic journey and the threaded race. Both need a real
+# tenant, because the subject is what the engine's rename does to queued tasks while the Python producer writes them.
+# 5123 -> 5124 (nexus-6pfgb.43, 2026-11-03): +1. the chunk-keys sweep verb's new test runs it end to end against a real engine tenant (dry run, wrong-tenant refusal, apply, last_written_at, rerun).
+# 5122 -> 5123 (nexus-fai28 fix round 1, 2026-11-04): +1. tests/test_fai28_recovery_entity_key.py has one real-engine test: a recovery import stamps the
+# exported entity key into the catalog entry's meta, which needs a real catalog to read back.
+# 5117 -> 5122 (nexus-fai28, 2026-11-04): +5. tests/test_rdr147_entity_keys.py runs five store_put tests (explicit key, title stamp, unconfigured
+# collection, re-put, CLI/MCP parity) on a real engine tenant: the claim is that the key lands in the catalog document's meta and in no chunk's metadata.
+# 5115 -> 5117 (nexus-yr2um, 2026-11-04): +2. tests/test_rdr189_grown_plan_ttl.py gains a two-case real-engine test (a failed and an
+# unscored nx_answer run reset the disuse clock), which needs a tenant to grow, import and run plans.
+# 5114 -> 5115 (nexus-a0ksy, 2026-11-04): +1. tests/test_plan_match_expired_cache_hit.py has one real-engine test (backdated
+# plans imported, the matcher drops the expired cache hits); its five pure _is_expired tests carry no tenant mark.
+# 5103 -> 5114 (nexus-v9v5r, 2026-11-04): +11. tests/test_rdr147_resolve_step.py is new and 11 of its tests need the engine
+# (a real catalog, real manifests and chunk rows; the resolve plan runs through the default dispatcher). The
+# argument checks run over a stub catalog and the constant and confinement pins touch nothing, so none of them asks for a tenant.
+# 5097 -> 5103 (nexus-gie46, 2026-11-04): +6. The new tests/test_rdr147_link_deletion_pins.py pins how the catalog deletes links
+# (hard delete cascades, trash keeps and restore returns them, traverse skips a trashed endpoint, links_from/links_to still show one,
+# find_by_title_exact skips one) against the real engine: it purges aged tombstones and drops the link FKs, which a fake cannot do.
+# Measured locally (the guard in fail mode): 6 tests, provisioned 6.
+# 5096 -> 5097 (nexus-l003p, 2026-11-03): +1. tests/test_t3_quarantine_restore.py gains one real-engine test (a kept rival survives a
+# second restore call and the quarantine copy keeps its keys), which needs a real engine tenant to quarantine and restore through.
+# 5084 -> 5096 (nexus-0sm1t, 2026-11-03): +12. The ladder deferral log is a T2 note, and with no local flag file
+# (it disagreed with the per-tenant note across machines) the doctor row reads it whenever a rung is pending and a
+# walk writes it whenever a rung defers. tests/upgrade/test_deferral_log.py keeps 3 t2_tenant tests (the T2 round
+# trip, the _run_ladder wiring, the doctor row on the real note; its other tests run on an in-memory note), and 9
+# older tests that walk a deferring rung or build the doctor row with a pending rung now touch storage:
+# test_ladder_surfaces.py 6, test_census_progress.py 3.
+# 5063 -> 5084 (nexus-qo7ie.17, nexus-ypgbz, 2026-11-03): +21. tests/test_memory_curate.py adds 17 t2_tenant
+# tests: nx memory curate --t2 reads and writes real T2 rows (the replaced-row heuristic, the AUDIT_TAGS skip,
+# the census, the one report put and the never-deletes snapshot), which a fake store cannot prove.
+# tests/test_write_chunks_with_owner_rows.py adds 4 under its module-level t2_tenant mark; dropping the mark
+# was tried and 9 of the module's 10 tests touch storage unprovisioned, so the mark stays.
+# 5062 -> 5063 (nexus-1ss4n, 2026-11-03): +1 t2_tenant test, tests/db/test_eho3u_nx_answer_runs_read.py::
+# test_keyset_walk_reaches_past_the_300_row_clamp. It seeds 305 runs into the real engine and walks them by
+# before_id to prove the engine's 300-row clamp and keyset bound together; a fake server cannot prove the engine half.
+# 5059 -> 5062 (nexus-z1d0l.2.1, 2026-11-03): +3 t2_tenant tests in tests/test_rdr189_grown_plan_ttl.py, one journey each (grown
+# TTL and the ttl=0 opt-out, expiry on disuse, use resets the disuse clock). They need the live engine: the PG clock that
+# decides expiry cannot be faked, so they cannot be tenant-free. Merged from six to three to keep the rise down.
+# 5051 -> 5059 (nexus-ov3zi fix round 1, 2026-11-02): +8 t2_tenant tests against the real engine: tests/test_memory_replaces.py +5 (memory_get and
+# `nx memory get` name a quarantined title, the plain not-found, `nx memory list --quarantined` labels replaced and expired rows) and
+# tests/test_memory_rollup.py +3 (a replaced row survives rollup then reap, a replaced-only project has nothing to roll up, the engine
+# refuses a replaced summary source).
+# 5044 -> 5051 (nexus-qo7ie.7, rebased 2026-11-02): +7, the seven t2_tenant tests in tests/test_memory_replaces.py (the replaces
+# write path against the real engine). Was 5024 -> 5031, then 5042 -> 5049, before the rebases onto develop.
+# 5042 -> 5044 (7.94.0 shakedown, 2026-11-02): +2 in tests/upgrade/test_legacy_rows_walk_substrate.py: the note-tags-array and
+# manifest-section-labels rungs driven through the production ladder walk over seeded legacy rows on the engine (dry run pending,
+# real run converts exactly the legacy rows, second dry run converged); each fails with its rung's converge a no-op. They need
+# the engine's own legacy manifest and note rows, so they cannot be tenant-free. The batch's three new nx index rdr path tests
+# (tests/test_index_rdr_cmd.py) were made tenant-free with a pure collection-name fake instead, in the same commit.
+# 5040 -> 5042 (nexus-mdbds.2.24, 2026-11-02): +2 in tests/test_tuple_cmd.py's TestTupleDictionary (15 -> 17): the no-NAME view's
+# '(no template)' entry for orphan census rows (text and --json) and its negative control (no orphan rows, no entry). Each reads the
+# real engine's registry and census; the first fakes two extra census rows. Measured locally (the guard in fail mode): the file
+# ran 69 tests and provisioned 65, the two new ones among them.
+# 5033 -> 5040 (nexus-mdbds.2.17 fix round, 2026-11-02): +7, all in tests/test_tuple_cmd.py's TestTupleDictionary (8 -> 15): the
+# per-template census filter (2, engine field and old-engine resolver), the doc-less template on an engine that serves docs (1),
+# the no-NAME --json shape (2) and text totals (1), and the no-NAME listing on an engine without docs (1). Each posts to and reads
+# the real engine. The new lint (tests/test_tuple_template_doc_paths_lint.py) is marked lint and not in this suite. Measured
+# locally (the guard in fail mode): TestTupleDictionary ran 15 tests and provisioned 15.
+# 5024 -> 5033 (nexus-mdbds.2.17, 2026-11-02): +9. tests/test_tuple_cmd.py's TestTupleDictionary adds 8 (the verb reads the real
+# registry and census, and posts, claims and acks real rows) and tests/test_mcp_tuple_tools.py adds 1 (tuple_registry's doc
+# passthrough against the real engine). tests/test_tuple_templates.py (the resolver and the census parse) is pure and
+# provisions nothing. Measured locally (the guard in fail mode): the 14 new tests ran, provisioned 9.
 # 5020 -> 5024 (nexus-mtheb.9 fix round 1, 2026-11-01): +4, tests/mcp/test_t1_handoff_flush.py 20 -> 24 (module marked
 # t2_tenant): a newer session's row replaces an older T2 entry (real T1 ts and T2 timestamp), two rows to one destination
 # keep the newest, a raise in the new scope's bookkeeping after the swap still leaves the flagged row in T2, and the flush

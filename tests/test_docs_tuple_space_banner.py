@@ -80,3 +80,28 @@ def test_live_banner_tracks_tuple_verb_registration() -> None:
             "the RDR-205 not-yet-shipped banner is now wrong; add it back if `nx tuple` is "
             "still unshipped, or clear it (nexus-0miq7.2) now that it has shipped"
         )
+
+
+# nexus-mdbds.2.18 (RDR-239 gate S1 Q5): the meaning of each mailbox ``kind``
+# value lives in one place, the mailbox template's doc block, served by
+# ``nx tuple dictionary`` and the ``tuple_registry`` MCP tool. The pages that
+# carry mailbox procedure keep their call shapes and point at that source
+# instead of being the home of the meanings.
+KIND_POINTER_PAGES = [
+    REPO_ROOT / "conexus" / "skills" / "mailbox" / "SKILL.md",
+    REPO_ROOT / "conexus" / "skills" / "peer-messaging" / "SKILL.md",
+    REPO_ROOT / "docs" / "operations" / "tuple-space.md",
+]
+
+
+@pytest.mark.parametrize("page", KIND_POINTER_PAGES, ids=lambda p: p.parent.name + "/" + p.name)
+def test_mailbox_kind_pages_point_at_the_dictionary(page: Path) -> None:
+    text = page.read_text()
+    assert "nx tuple dictionary" in text, (
+        f"{page}: does not name `nx tuple dictionary` as the source of the "
+        "mailbox kind values (nexus-mdbds.2.18)"
+    )
+    assert "tuple_registry" in text, (
+        f"{page}: does not name the `tuple_registry` MCP tool as the source of the "
+        "mailbox kind values (nexus-mdbds.2.18)"
+    )

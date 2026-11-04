@@ -21,6 +21,10 @@ request kind          eligible declared plan kinds
 ``unknown``           curated synthesis and curated unknown only
 ====================  =========================================
 
+The ``unknown`` kind in the ``lookup`` and ``discovery/listing`` rows means a curated or a grown plan of unknown
+kind; a plan with no answer-kind declaration (``unattested``) is eligible for neither of those two rows, nor for
+any other (Sam, 2026-11-03, nexus-rflvp; see the provenance rules below).
+
 A ``lookup`` request admits no synthesis plan (Sam, 2026-10-30, nexus-jypmj.11): a synthesis plan outscored the
 lookup plan and cost 8.9 times as much on H09. The rows of the other kinds are unchanged.
 
@@ -41,27 +45,47 @@ untouched. The request is not left without a plan: the matcher offers its other 
 otherwise ``nx_answer`` plans inline.
 
 ``unknown`` plan kinds are limited by provenance, as the RDR says: a curated (reviewed builtin) unknown
-plan is eligible as the table reads; an unknown plan that is not curated (grown with no recorded route,
-or one that declares nothing) is eligible only for ``lookup`` and ``discovery/listing`` requests. An
+plan is eligible as the table reads; a grown unknown plan (grown with no recorded route, or whose recorded
+route is not trusted) is eligible only for ``lookup`` and ``discovery/listing`` requests; an unattested plan,
+one that declares nothing, is eligible for neither (Sam, 2026-11-03, nexus-rflvp: user-saved plans, which
+declare nothing, won 31 of 77 lookups since the gate was enabled, one of them another project's plan through
+the cosine branch, and answered with raw ids; the curated lookup plan answered the same questions; reason
+``unattested_plan``). No request kind admits an unattested plan. An
 ``unknown`` request admits curated plans only, so it never reaches a grown plan, whatever kind that
 plan recorded.
 
 Provenance is decided from the STORED row, failing closed (the rule ``answer_kind.py`` states):
 
 * ``curated``: the ``builtin-template`` tag AND a declaration that says ``curated``;
-* ``grown``: the ``grown`` tag OR a declaration that says ``grown``, whichever is the less trusted
-  reading. A ``curated`` declaration on a row without the builtin tag is not trusted: it reads as grown
+* ``grown``: a declaration that validates and says ``grown``. The ``grown`` TAG alone is not attestation
+  (nexus-3ihve, Sam's nexus-rflvp rule: no declaration means unattested): a row with the tag and no valid
+  grown declaration, a curated one included, reads ``unattested`` (plan 517, tagged before declarations
+  existed, is such a row). The tag still makes a row protected from a reseed (:data:`PROTECTED_TAGS`). A
+  ``curated`` declaration on a row without the builtin tag is not trusted: it reads as grown
   with kind ``unknown`` (``untrusted_curated_claim``). A grown plan's recorded kind counts only when its
   route is in :data:`TRUSTED_ROUTES`, which ships empty. Every recorded stamp (``explicit``,
   ``heuristic``, ``model-assisted``) is the request's label for the kind, not a property of the plan's steps
   (an ``explicit`` hint is the caller's, and the planner builds its steps without it), and the RDR relaxes
   the unknown-kind restriction for recorded provenance only "after review": until a reviewed decision
   (nexus-jypmj.2.8) adds a route, a grown plan reads as grown with kind ``unknown`` (``unreviewed_route``).
-  The route is still recorded at the grow site; only eligibility discounts it;
-* ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``,
-  and it is treated like any other untrusted unknown plan. A builtin seeded before nexus-jypmj.2.1 is
-  this until ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is
-  then ``undeclared_builtin``.
+  The route is still recorded at the grow site; only eligibility discounts it. A discounted recorded kind
+  never widens eligibility, but it does narrow it for a ``lookup`` request (nexus-indyo,
+  ``grown_route_not_lookup``): a grown plan that recorded any kind other than lookup was grown by a request
+  that was not a lookup, so its steps were planned for something else, the H09 cost shape the lookup row
+  exists to keep out (nexus-jypmj.11). A grown plan that recorded lookup, or no kind, still serves lookups,
+  and ``discovery/listing`` requests are unchanged. This is a guard, not a measured effect: replaying the 77
+  lookup runs since the gate was enabled against the live library (2026-11-03) changed no selection only
+  because none of its 5 grown plans matched a lookup; the one live case (run 775 took grown plan 584, a
+  non-answer) cannot be replayed, the row being deleted. Grown plans that recorded no kind still serve
+  lookups; that path and discovery requests are open in nexus-a4g2a;
+* ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``, and
+  every request kind refuses it (nexus-rflvp: ``unattested_plan`` for ``lookup`` and ``discovery/listing``,
+  the reasons it always had for the others). A builtin seeded before nexus-jypmj.2.1 is this until
+  ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is then
+  ``undeclared_builtin``, and the library precondition below keeps the whole gate in shadow while any
+  reseedable builtin is undeclared, so such a builtin keeps its lookups until the reseed (an orphan builtin no
+  reseed can fix is not counted by that check, and loses them). Plan save writing a declaration, the lasting
+  fix, is nexus-0vh80.
 
 The session cache's ``answer_provenance`` metadata is not read here: it is stale until a refresh.
 
@@ -135,6 +159,7 @@ __all__ = [
     "LIBRARY_REMEDY",
     "PROTECTED_TAGS",
     "REASONS",
+    "RESERVED_PROVENANCE_TAGS",
     "SHADOW_REASONS",
     "SINGLE_SOURCE_EXCLUDED_STRATEGIES",
     "TRUSTED_ROUTES",
@@ -152,6 +177,7 @@ __all__ = [
     "fallback_reason",
     "memoized_library_check",
     "reseedable_dimensions",
+    "strip_reserved_tags",
     "reset_library_memo",
     "warn_library_not_reseeded",
 ]
@@ -250,11 +276,38 @@ def warn_library_not_reseeded(check: "BuiltinCheck") -> None:
 BUILTIN_TAG = "builtin-template"
 GROWN_TAG = "grown"
 
+#: Tags only a writer that attests may set: the grow site stamps ``grown`` with a grown declaration, the seed
+#: loader stamps ``builtin-template`` with a curated one. ``plan_save`` removes both from a caller's tags
+#: (nexus-3ihve); the writers call the library directly and are not affected. ``ad-hoc`` is not here: it
+#: reads as nothing in :func:`classify_plan`.
+RESERVED_PROVENANCE_TAGS: frozenset[str] = frozenset({BUILTIN_TAG, GROWN_TAG})
+
+
+def strip_reserved_tags(tags: str | None) -> tuple[str, tuple[str, ...]]:
+    """*tags* without :data:`RESERVED_PROVENANCE_TAGS`, and the reserved tags removed (in order, once each).
+
+    Other tags keep their order; the result is comma-joined with each token stripped, so a tag string with
+    no reserved tag in it comes back as its tokens, normalised, never reworded.
+    """
+    kept: list[str] = []
+    removed: list[str] = []
+    for token in (t.strip() for t in (tags or "").split(",")):
+        if not token:
+            continue
+        if token in RESERVED_PROVENANCE_TAGS:
+            if token not in removed:
+                removed.append(token)
+        else:
+            kept.append(token)
+    return ",".join(kept), tuple(removed)
+
+
 #: The matcher branches that produce candidates.
 BRANCHES: tuple[str, ...] = ("cosine", "category_route", "fts")
 
 #: Why a plan was refused. ``undeclared_builtin`` and ``untrusted_curated_claim`` name the stored row's
-#: defect and replace the matrix reason when the row has one.
+#: defect and replace the matrix reason when the row has one. ``unattested_plan`` (nexus-rflvp) is the matrix
+#: reason for a plan that declares nothing, asked to serve a lookup or a listing.
 REASONS: frozenset[str] = frozenset({
     "kind_mismatch",
     "unknown_request_untrusted_plan",
@@ -264,6 +317,8 @@ REASONS: frozenset[str] = frozenset({
     "untrusted_curated_claim",
     "unreviewed_route",
     "single_source_synthesis",
+    "grown_route_not_lookup",
+    "unattested_plan",
     "judge_error",
 })
 
@@ -303,7 +358,7 @@ SINGLE_SOURCE_EXCLUDED_STRATEGIES: frozenset[str] = frozenset({"citation-travers
 #: single-source synthesis request unknown, and the unknown row admits curated synthesis plans).
 _SINGLE_SOURCE_REQUESTS = frozenset({_S, _U})
 
-#: Request kinds an untrusted unknown-kind plan may still serve.
+#: Request kinds a GROWN unknown-kind plan may still serve. An unattested plan serves none (nexus-rflvp).
 _UNKNOWN_PLAN_REQUESTS = frozenset({_L, _D})
 
 
@@ -323,13 +378,16 @@ class PlanStanding:
 
     ``route`` is the recorded route of a grown plan's declared kind (``explicit``, ``heuristic``,
     ``model-assisted``), whether or not it was honoured; ``None`` when the row records none. ``kind`` is the
-    EFFECTIVE kind: ``unknown`` when the declared one was discounted.
+    EFFECTIVE kind: ``unknown`` when the declared one was discounted. ``recorded_kind`` is the kind a grown plan
+    recorded when that kind was discounted (``unreviewed_route``); it never widens eligibility, it only narrows
+    it (the lookup rule, nexus-indyo). ``None`` everywhere else.
     """
 
     kind: PlanAnswerKind
     provenance: str  # "curated" | "grown" | "unattested"
     flag: str | None = None
     route: str | None = None
+    recorded_kind: PlanAnswerKind | None = None
 
 
 @dataclass(frozen=True)
@@ -353,15 +411,16 @@ def classify_plan(tags: str | None, plan_json: Any) -> PlanStanding:
     declared = decode_declaration(plan_json)
     if GROWN_TAG in tokens or declared.provenance == "grown":
         # A grown declaration that validated carries its route, so its kind is a recorded one. A grown
-        # TAG with a curated or absent declaration has no route: its kind is unknown.
+        # TAG with a curated or absent declaration attests nothing (nexus-3ihve): the tag is claimable text,
+        # the declaration is what a writer stamps. It reads unattested, so it serves no request kind.
         if declared.provenance != "grown":
-            return PlanStanding(_U, "grown")
+            return PlanStanding(_U, "unattested")
         if declared.kind is _U:
             return PlanStanding(_U, "grown")
         if declared.route in TRUSTED_ROUTES:
             return PlanStanding(declared.kind, "grown", route=declared.route)
         # the request's guessed kind is not the plan's shape: read it as unknown until reviewed
-        return PlanStanding(_U, "grown", "unreviewed_route", route=declared.route)
+        return PlanStanding(_U, "grown", "unreviewed_route", route=declared.route, recorded_kind=declared.kind)
     if declared.provenance == "curated":
         if BUILTIN_TAG in tokens:
             return PlanStanding(declared.kind, "curated")
@@ -520,7 +579,11 @@ def eligibility(request_kind: PlanAnswerKind, plan_kind: PlanAnswerKind, provena
         return _OK
     if plan_kind is not _U:
         return _OK if plan_kind in _COMPATIBLE[request_kind] else Verdict(False, "kind_mismatch")
-    if provenance == "curated" or request_kind in _UNKNOWN_PLAN_REQUESTS:
+    if provenance == "curated":
+        return _OK
+    if request_kind in _UNKNOWN_PLAN_REQUESTS:
+        if provenance == "unattested":
+            return Verdict(False, "unattested_plan")  # nexus-rflvp: it declared nothing, so it serves nothing
         return _OK
     return Verdict(False, "untrusted_unknown_plan")
 
@@ -550,6 +613,11 @@ def _judge(
         and declared_strategy(dimensions) in SINGLE_SOURCE_EXCLUDED_STRATEGIES
     ):
         verdict = Verdict(False, "single_source_synthesis")
+    if (
+        verdict.eligible and request_kind is _L and standing.recorded_kind is not None
+        and standing.recorded_kind is not _L
+    ):
+        verdict = Verdict(False, "grown_route_not_lookup")
     return standing, verdict
 
 

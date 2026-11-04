@@ -160,9 +160,9 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // (catalog_links, topics, topic_assignments) already have SELECT via the
             // helper's ALL TABLES IN SCHEMA nexus grant.
             PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_metadata_scoped_1024"
-                + "(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text)", SVC_ROLE);
+                + "(nexus.vector, text[], text, text, int, text, text, jsonb, jsonb, text, int, text, text)", SVC_ROLE);
             PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_graph_hop_768"
-                + "(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text)", SVC_ROLE);
+                + "(nexus.vector, text[], text[], text, int, text, jsonb, jsonb, text, int, text, text)", SVC_ROLE);
             PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_topic_scoped_384"
                 + "(nexus.vector, text, text, int, text, text)", SVC_ROLE);
         }
@@ -636,7 +636,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void searchMetadataScoped_shape_usesFullHnswIndex_1024() throws Exception {
         Table<?> fn = SEARCH_METADATA_SCOPED_1024.call(
-            queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, 10, MODEL_1024, TENANT);
+            queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, null, null, 10, MODEL_1024, TENANT);
         // Reachability, not the cost choice (explainIndexReachable's javadoc): what this pins is that the
         // guard does not defeat the bind. With the natural planner develop's CI runner picked a Seq Scan on
         // the leaf under load (b3a85d90b, nexus-h9zkm; an earlier red rerun green on f391a1a6c) while the
@@ -657,7 +657,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     void searchGraphHop_shape_usesFullHnswIndex_768() throws Exception {
         Table<?> fn = SEARCH_GRAPH_HOP_768.call(
             queryVec(768), new String[] {"planshape-graphhop-doc"}, new String[] {COL_768},
-            null, 1, "both", null, 10, MODEL_768, TENANT);
+            null, 1, "both", null, null, null, 10, MODEL_768, TENANT);
         // The qualifying set here is the whole leaf, so the planner may legitimately choose a sequential scan,
         // a hash join and a sort (it did on develop's CI runner): the pin is that the HNSW scan is reachable.
         String plan = explainIndexReachable(fn);

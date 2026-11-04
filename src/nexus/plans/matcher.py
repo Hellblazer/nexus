@@ -27,6 +27,7 @@ Side effect: every returned plan increments
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import structlog
@@ -179,6 +180,46 @@ def _is_always_failing(row: dict) -> bool:
     return successes == 0 and failures >= _ALWAYS_FAILING_MIN_FAILURES
 
 
+def _parse_utc(value: Any) -> datetime | None:
+    """Parse an engine ISO-8601 timestamp as an aware UTC datetime, or None."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _is_expired(row: dict, *, now: datetime | None = None) -> bool:
+    """True when *row* is past its TTL by the engine's own rule (nexus-a0ksy).
+
+    Mirrors ``PlanRepository.notExpiredCondition``: a row with a ``ttl`` is
+    expired once ``now - coalesce(last_used, created_at)`` exceeds ``ttl``
+    days. The T1 plan cache refreshes from ``list_active_plans`` only every
+    90 s and ``get_plan`` applies no TTL, so without this check nx_answer
+    would run an expired plan matched in that window. An engine before
+    nexus-i1eb4 also stamps ``last_used = now()`` at run start and brings it
+    back to life; a newer engine keeps the row expired, but the plan would
+    still have run, so the check stays either way. A row whose anchor
+    timestamp cannot be read is kept: the engine stays the authority.
+    The ages are in days, so clock skew between client and engine moves the
+    boundary by only that many seconds; the engine's row reads truncate to
+    the second.
+    """
+    ttl = row.get("ttl")
+    if ttl is None:
+        return False
+    # Same precedence as the engine's coalesce: a non-null last_used is the
+    # anchor even when it does not parse, and then the row is kept.
+    raw = row.get("last_used") or row.get("created_at")
+    anchor = _parse_utc(raw)
+    if anchor is None:
+        return False
+    age_days = ((now or datetime.now(UTC)) - anchor).total_seconds() / 86400
+    return age_days > float(ttl)
+
+
 #: Comma-token that marks a plan as CATEGORY-level: a hand-authored
 #: template describing a kind of work ("research any concept"), as
 #: opposed to an INSTANCE-level grown plan that memoizes one question.
@@ -221,6 +262,10 @@ def _is_grown_plan_tags(tags: str | None) -> bool:
     The plan-grow save path at ``nx_answer`` writes ``ad-hoc,grown``;
     we match the comma-token presence so future tag additions don't
     silently break the detection (RDR-090 P1.3 / nexus-zgko).
+
+    This reads the TAG only. A tag-only row with no grown declaration is
+    unattested to eligibility (nexus-3ihve) but still gets the grown
+    matcher treatment here, which is stricter, never looser.
     """
     if not tags:
         return False
@@ -747,6 +792,17 @@ def plan_match(
         raw_confidence_by_plan_id: dict[int, float] = {}
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
+            if row is not None and (row.get("disabled_at") or _is_expired(row)):
+                # nexus-a0ksy: the cache still holds a plan that
+                # list_active_plans no longer returns, because it expired
+                # or was disabled after the last cache refresh. Drop it
+                # before it can run (on an engine before nexus-i1eb4 the
+                # run start would also reset last_used) and evict it.
+                _log.info(
+                    "plan_match_inactive_cache_hit", plan_id=plan_id,
+                    reason="disabled" if row.get("disabled_at") else "expired",
+                )
+                row = None
             if row is None:
                 # Search review I-4: the plan was deleted from T2 but the
                 # T1 cache still carries its embedding. Evict it now so

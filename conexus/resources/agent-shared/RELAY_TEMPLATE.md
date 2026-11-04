@@ -4,7 +4,7 @@ All agent dispatches follow this standardized structure. **Relays are constructe
 
 ## Every Report Ends With a VERIFY Block (MANDATORY)
 
-An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cnzei.6: a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim, in the exact shape and with the exact checked/not-checked scope that `conexus/skills/orchestration/SKILL.md`'s "VERIFY Line Convention" section owns — read it there rather than here; this file states only that the requirement applies to every relay, not what it says.
+An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cnzei.6: a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim, in the exact shape and with the exact checked/not-checked scope that `${CLAUDE_PLUGIN_ROOT}/skills/orchestration/SKILL.md`'s "VERIFY Line Convention" section owns — read it there rather than here; this file states only that the requirement applies to every relay, not what it says.
 
 ## Required Fields
 
@@ -147,7 +147,7 @@ Skills should reference this template rather than inline it:
 ## Agent Invocation
 
 Use the Agent tool with standardized relay format.
-See [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
+See [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
 ```
 
 ## Usage in Agents

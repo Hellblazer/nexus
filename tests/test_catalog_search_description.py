@@ -11,6 +11,6 @@ def test_search_query_param_description_states_the_scope() -> None:
 
     tools = asyncio.run(catalog_mcp.list_tools())
     tool = next(t for t in tools if t.name == "search")
-    desc = tool.inputSchema["properties"]["query"]["description"]
+    desc = tool.input_schema["properties"]["query"]["description"]
     assert "title" in desc and "metadata" in desc
     assert "mcp__plugin_conexus_nexus__search" in desc

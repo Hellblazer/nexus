@@ -4,7 +4,7 @@
 No hook module is ported yet -- bead nexus-q02nx.4 is the first. Every test
 here drives the registration MECHANISM (``nexus.mcp.hooks``) through
 trivial in-test fixture specs, never a real hook, via the server's own
-in-process dispatch (``FastMCP.call_tool`` / ``FastMCP.list_tools``) -- the
+in-process dispatch (``MCPServer.call_tool`` / ``MCPServer.list_tools``) -- the
 same path a real ``tools/call``/``tools/list`` request takes.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult
 
 from nexus._hook_runtime._io import HookResult, permission_decision
@@ -29,8 +29,8 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _fresh_mcp() -> FastMCP:
-    return FastMCP("hook-tools-test")
+def _fresh_mcp() -> MCPServer:
+    return MCPServer("hook-tools-test")
 
 
 # ── field flattening / nesting ────────────────────────────────────────────
@@ -103,7 +103,7 @@ class TestRegisterHookTools:
         register_hook_tools(mcp, (spec,))
 
         tools = _run(mcp.list_tools())
-        properties = tools[0].inputSchema["properties"]
+        properties = tools[0].input_schema["properties"]
         assert set(properties) == {"session_id", "tool_input__command"}
 
     def test_dispatch_calls_run_with_the_nested_payload(self):
@@ -128,7 +128,7 @@ class TestRegisterHookTools:
 
         result = _run(mcp.call_tool("hook_probe", {}))
         assert isinstance(result, CallToolResult)
-        assert result.isError is False
+        assert result.is_error is False
         assert len(result.content) == 1
         assert result.content[0].text == '{"decision": "allow"}'
 
@@ -140,7 +140,7 @@ class TestRegisterHookTools:
         register_hook_tools(mcp, (spec,))
 
         result = _run(mcp.call_tool("hook_probe", {}))
-        assert result.isError is False
+        assert result.is_error is False
         assert result.content[0].text == ""
 
     def test_a_raised_exception_is_swallowed_as_empty_text_iserror_false(self):
@@ -157,7 +157,7 @@ class TestRegisterHookTools:
 
         result = _run(mcp.call_tool("hook_probe", {}))
         assert isinstance(result, CallToolResult)
-        assert result.isError is False
+        assert result.is_error is False
         assert result.content[0].text == ""
 
     def test_a_raised_exception_is_logged(self, monkeypatch):
@@ -293,7 +293,7 @@ class TestToolTierCarriesADeny:
         # isError stays False: a deny is a DECISION the event carries, not a
         # tool failure. Signalling it as an error would make a refusal
         # indistinguishable from a crash, which on this tier means allow.
-        assert result.isError is False
+        assert result.is_error is False
         assert result.content[0].text == deny
 
     def test_a_deny_is_distinguishable_from_a_crash(self):
@@ -337,7 +337,7 @@ class TestNonScalarPayloadFields:
     ``${background_tasks}`` as a ``list`` of ``dict``s carrying a mixed
     ``type: shell`` / ``type: subagent`` population with different key sets.
 
-    These drive FastMCP's ACTUAL argument validation through the server's own
+    These drive MCPServer's ACTUAL argument validation through the server's own
     in-process dispatch, so they fail against the ``str | None`` annotation
     the tier shipped with -- which is the point. Reverting
     ``_make_tool_function``'s annotation to ``str | None`` must turn both
@@ -451,7 +451,7 @@ class TestNonScalarPayloadFields:
             ),
         )
 
-        props = _run(mcp.list_tools())[0].inputSchema["properties"]
+        props = _run(mcp.list_tools())[0].input_schema["properties"]
         assert props["tool_name"].get("anyOf") == [{"type": "string"}, {"type": "null"}], (
             "a scalar field must keep its string/null type: " f"{props['tool_name']}"
         )

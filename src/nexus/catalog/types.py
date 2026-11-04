@@ -323,6 +323,37 @@ class ManifestRow:
     labels_written: bool = False
 
 
+def manifest_span(
+    line_start: int | None, line_end: int | None, char_start: int | None, char_end: int | None,
+) -> dict:
+    """The four manifest span fields (``line_start``, ``line_end``, ``char_start``, ``char_end``)
+    from a chunk's metadata values, with "not recorded" told apart from a real 0 (nexus-qe78r).
+
+    ``make_chunk_metadata`` defaults all four to 0, so 0 is the producers' "not recorded" as well as
+    a legitimate value, and the two are separated by what 0 can mean in each field. Lines are
+    1-indexed: 0 is never a line, so it is "not recorded". ``chunk_end_char`` is exclusive and a chunk
+    is never empty: 0 is never an end, so it is "not recorded". ``chunk_start_char`` is 0 for a chunk
+    at the head of its text, and then it is real exactly when the chunk's end is recorded; a 0 start
+    beside an unrecorded end is the factory default. ``None`` is "not recorded" everywhere. An
+    unrecorded field goes to the engine as null, never as a 0 that would read as a span. A value that
+    is not an ``int`` (a string span on a backfilled T3 row, a float) or is a ``bool`` is not a number
+    the engine can store: it reads as not recorded, and never raises.
+    """
+    def _num(v: object) -> int | None:
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    line_start, line_end, char_start, char_end = (
+        _num(line_start), _num(line_end), _num(char_start), _num(char_end))
+    end = char_end if char_end is not None and char_end > 0 else None
+    start = char_start if char_start is not None and (char_start > 0 or end is not None) else None
+    return {
+        "line_start": line_start if line_start is not None and line_start > 0 else None,
+        "line_end": line_end if line_end is not None and line_end > 0 else None,
+        "char_start": start,
+        "char_end": end,
+    }
+
+
 def manifest_row_wire(row: object) -> dict:
     """A manifest row (or a test double carrying a subset of its fields) as the wire dict a
     manifest write takes.

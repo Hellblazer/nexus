@@ -110,6 +110,23 @@ class MemoryRepositoryWritePathQuarantineTest {
     }
 
     @Test
+    void replaceMemory_onQuarantinedMarkedNewTitle_isRefused_theIncumbentStaysQuarantined() {
+        // RDR-238 (nexus-qo7ie.6): a replace refuses when any row, a quarantined one included, already
+        // holds the NEW title; the upsert would restore it and overwrite it with no echo.
+        String t = tenant(); String p = project();
+        long id = quarantinedMarked(t, p, "keep");
+        repo.upsert(t, p, "old-note", "old body", "t", null, null, 90);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> repo.replaceMemory(t, p, "keep", "new content", "t", null, null, 45, "old-note"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("already exists");
+
+        assertThat(repo.listQuarantined(t, p)).extracting(MemoryRecord::getId).containsExactly(id);
+        assertThat(repo.getAll(t, p)).extracting(MemoryRecord::getTitle).containsExactly("old-note");
+    }
+
+    @Test
     void importRow_onQuarantinedMarkedTitle_readableAgainWithFidelityFields_sameId() {
         String t = tenant(); String p = project();
         long id = quarantinedMarked(t, p, "keep");

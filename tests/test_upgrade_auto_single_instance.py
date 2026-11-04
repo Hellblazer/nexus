@@ -31,6 +31,7 @@ from nexus._hook_runtime._io import HookResult
 from nexus.cli import main
 from nexus.hooks import upgrade_auto
 from nexus.util import upgrade_auto_lock as lock_mod
+from nexus.upgrade_ladder.registry import LadderRegistry
 from nexus.util.upgrade_auto_lock import acquire_auto_lock, argv_is_auto_upgrade, auto_lock_held
 from tests._module_seam import setattr_in
 
@@ -189,7 +190,7 @@ def test_auto_dry_run_is_unattended_for_the_rungs_detect(monkeypatch) -> None:
             seen.append(is_unattended())
             return RungStatus(applicable=True, converged=True)
 
-    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: [_Rung()])
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((_Rung(),)))
     # upgrade() sets the signal around _run_ladder for --auto; the helper alone does not.
     with unattended_run():
         upgrade_mod._run_ladder(dry_run=True, auto_mode=True, deadline=Deadline(900))
@@ -333,6 +334,7 @@ def test_a_burst_of_session_starts_forks_one_child_at_most(config_dir: Path, mon
 
 from nexus.upgrade_ladder.rungs.note_tags_array import NoteTagsArrayRung  # noqa: E402
 from nexus.upgrade_ladder.unattended import UNATTENDED_ENV, is_unattended, unattended_run  # noqa: E402
+from nexus.lockstep_marker import UPGRADE_RETRY_MARKER, running_version  # noqa: E402
 from nexus.util.upgrade_auto_lock import argv_is_unattended_upgrade, env_unattended  # noqa: E402
 from tests.upgrade.conftest import InMemoryCompletionLedger  # noqa: E402
 
@@ -379,7 +381,7 @@ def _managed_note_tags_registry(monkeypatch) -> None:
         reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: True,
         record_fn=lambda: None,  # no completion on file (the default would ask the engine's ledger)
     )
-    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: [rung])
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
 
 
 def test_a_plain_upgrade_with_the_env_refuses_the_walk_and_holds_the_lock(plain_upgrade, monkeypatch) -> None:
@@ -405,15 +407,18 @@ def test_the_same_plain_upgrade_without_the_env_walks_and_takes_no_lock(plain_up
 
 
 def test_a_plain_unattended_upgrade_that_outlasts_the_holder_does_not_start_and_says_so(
-    plain_upgrade, monkeypatch,
+    plain_upgrade, monkeypatch, config_dir,
 ) -> None:
     """The lockstep child waits for the lock (the hook starts an `--auto` in the same instant) and, when the
-    holder outlasts the wait, exits 75; its detached starter wrote the marker at spawn, so the plain run's extra work waits for the
-    next session. A silent 0 would mark it done."""
+    holder outlasts the wait, exits 75; its detached starter wrote the version marker at spawn, so the run leaves the
+    retry sentinel there and the next session's hook starts it again (nexus-emiky). A silent 0 would mark it done."""
     _managed_note_tags_registry(monkeypatch)
     monkeypatch.setenv(UNATTENDED_ENV, "1")
     monkeypatch.setattr(lock_mod, "PLAIN_WAIT_S", 0.2)
     monkeypatch.setattr(lock_mod, "_PLAIN_POLL_S", 0.05)
+    marker = config_dir / "cli_lockstep_marker"
+    monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+    marker.write_text(running_version(), encoding="utf-8")  # what the action wrote at spawn (the plugin's pin, which the child runs)
     holder = acquire_auto_lock()
     try:
         result = CliRunner().invoke(main, ["upgrade"])
@@ -421,8 +426,97 @@ def test_a_plain_unattended_upgrade_that_outlasts_the_holder_does_not_start_and_
         holder.release()
     assert result.exit_code == 75
     assert "holds the lock" in result.output
+    # nexus-emiky: the lost run is retried by the next session, which reads the sentinel as skew.
+    assert marker.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
     assert plain_upgrade == {}, "the ladder never ran"
     assert _CountingReader.reads == []
+
+
+@pytest.fixture
+def marker_file(config_dir: Path, monkeypatch) -> Path:
+    marker = config_dir / "cli_lockstep_marker"
+    monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+    return marker
+
+
+def test_an_auto_upgrade_that_loses_the_lock_leaves_the_marker_alone(seams: list[str], marker_file: Path) -> None:
+    """nexus-emiky review I1. The sentinel belongs to the plain run that lost the lock (exit 75); an `--auto`
+    that loses exits 0 without work and has no claim on the marker. Red if the write moves above the
+    `--auto` branch, where it would fire at every session start that finds a holder."""
+    marker_file.write_text(running_version(), encoding="utf-8")
+    holder = acquire_auto_lock()
+    try:
+        result = CliRunner().invoke(main, ["upgrade", "--auto"])
+    finally:
+        holder.release()
+    assert result.exit_code == 0
+    assert marker_file.read_text(encoding="utf-8") == running_version()
+
+
+def test_a_plain_unattended_upgrade_that_gets_the_lock_leaves_the_version_marker_alone(
+    plain_upgrade, monkeypatch, marker_file: Path,
+) -> None:
+    """The control for the 75 pin: the same invocation that acquires the lock and completes writes no sentinel."""
+    _managed_note_tags_registry(monkeypatch)
+    monkeypatch.setenv(UNATTENDED_ENV, "1")
+    marker_file.write_text(running_version(), encoding="utf-8")
+    result = CliRunner().invoke(main, ["upgrade"])
+    assert result.exit_code == 0, result.output
+    assert marker_file.read_text(encoding="utf-8") == running_version()
+
+
+def test_a_plain_upgrade_that_completes_settles_a_sentinel_to_the_running_version(
+    plain_upgrade, monkeypatch, marker_file: Path,
+) -> None:
+    """nexus-emiky review: the sentinel is owed work, not a state. An `nx upgrade` that does that work
+    (interactive, or the unattended plain run) ends by putting the running version where the sentinel was,
+    so the next session does not start it all again."""
+    _managed_note_tags_registry(monkeypatch)
+    marker_file.write_text(UPGRADE_RETRY_MARKER, encoding="utf-8")
+    result = CliRunner().invoke(main, ["upgrade"])
+    assert result.exit_code == 0, result.output
+    assert marker_file.read_text(encoding="utf-8") == running_version()
+
+
+def test_an_auto_upgrade_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
+    """`--auto` skips plugin convergence, the agents and hooks refresh and the dimension advisory, which is
+    what the sentinel says is owed: finishing it does not discharge the debt."""
+    monkeypatch.setattr(sys, "argv", ["nx", "upgrade", "--auto"])
+    _managed_note_tags_registry(monkeypatch)
+    marker_file.write_text(UPGRADE_RETRY_MARKER, encoding="utf-8")
+    result = CliRunner().invoke(main, ["upgrade", "--auto"])
+    assert result.exit_code == 0, result.output
+    assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
+
+
+def test_a_dry_run_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
+    monkeypatch.setattr(sys, "argv", ["nx", "upgrade", "--dry-run"])
+    _managed_note_tags_registry(monkeypatch)
+    marker_file.write_text(UPGRADE_RETRY_MARKER, encoding="utf-8")
+    result = CliRunner().invoke(main, ["upgrade", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
+
+
+def test_a_skip_t3_upgrade_does_not_settle_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
+    """`--skip-t3` skips the engine install and the advisory the sentinel says are owed (review r2 B1)."""
+    monkeypatch.setattr(sys, "argv", ["nx", "upgrade", "--skip-t3"])
+    _managed_note_tags_registry(monkeypatch)
+    marker_file.write_text(UPGRADE_RETRY_MARKER, encoding="utf-8")
+    result = CliRunner().invoke(main, ["upgrade", "--skip-t3"])
+    assert result.exit_code == 0, result.output
+    assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
+
+
+def test_a_plain_upgrade_that_fails_keeps_the_sentinel(plain_upgrade, monkeypatch, marker_file: Path) -> None:
+    def _boom(**_k):
+        raise RuntimeError("the walk failed")
+
+    monkeypatch.setattr(upgrade_mod, "_run_ladder", _boom)
+    marker_file.write_text(UPGRADE_RETRY_MARKER, encoding="utf-8")
+    result = CliRunner().invoke(main, ["upgrade"])
+    assert result.exit_code != 0
+    assert marker_file.read_text(encoding="utf-8") == UPGRADE_RETRY_MARKER
 
 
 def test_a_plain_unattended_upgrade_waits_for_the_holder_and_then_runs(plain_upgrade, monkeypatch) -> None:
@@ -514,7 +608,7 @@ def test_the_callout_on_a_local_engine_still_detects(monkeypatch) -> None:
     """Positive control: local, the same rung reads (cheap there) and reports its state."""
     _CountingReader.reads = []
     rung = NoteTagsArrayRung(reader_factory=_CountingReader, writer_factory=lambda: None, managed_fn=lambda: False)
-    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: [rung])
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
     upgrade_finish.pending_data_rung_callout()
     assert _CountingReader.reads == ["collections"]
 
@@ -561,3 +655,12 @@ def test_the_hook_child_env_carries_the_unattended_signal(config_dir: Path, monk
     upgrade_auto.run({"hook_event_name": "SessionStart"})
     assert captured["argv"][-2:] == ["upgrade", "--auto"]
     assert captured["env"][UNATTENDED_ENV] == "1"
+
+
+def test_the_plain_wait_outlasts_the_auto_ceiling_with_room_for_what_the_ceiling_does_not_bound() -> None:
+    """nexus-emiky: an `--auto` holder stops starting new work at its ceiling, then still runs the finish
+    pass and the service cycle (about 60 s each). The wait must clear that, or the common loser is a run
+    whose holder was merely slow."""
+    from nexus.upgrade_ladder.deadline import DEFAULT_AUTO_DEADLINE_S
+
+    assert lock_mod.PLAIN_WAIT_S >= DEFAULT_AUTO_DEADLINE_S + 2 * 60

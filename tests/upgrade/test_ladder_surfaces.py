@@ -157,6 +157,7 @@ class _RefusingRung:
         raise AssertionError("verify must not run when detect refused")
 
 
+@pytest.mark.t2_tenant  # the doctor row reads the deferral log of a pending rung (nexus-0sm1t)
 def test_a_rung_that_cannot_answer_is_pending_not_green(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -175,6 +176,7 @@ def test_a_rung_that_cannot_answer_is_pending_not_green(
     assert "remap onto the same target" in result.detail  # the reason survives
 
 
+@pytest.mark.t2_tenant  # the doctor row reads the deferral log of a pending rung (nexus-0sm1t)
 def test_one_refusing_rung_does_not_blind_the_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,6 +197,7 @@ def test_one_refusing_rung_does_not_blind_the_others(
 # ── nx doctor: _check_pending_rungs ──────────────────────────────────────────
 
 
+@pytest.mark.t2_tenant  # the doctor row reads the deferral log of a pending rung (nexus-0sm1t)
 def test_doctor_reports_pending_rungs_as_soft_warn(monkeypatch: pytest.MonkeyPatch) -> None:
     rung = SurfaceRung("substrate-etl")
     monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
@@ -208,6 +211,7 @@ def test_doctor_reports_pending_rungs_as_soft_warn(monkeypatch: pytest.MonkeyPat
     assert any("nx upgrade" in fix for fix in result.fix_suggestions)
 
 
+@pytest.mark.t2_tenant  # the doctor row reads the deferral log of a pending rung (nexus-0sm1t)
 def test_doctor_check_is_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """The doctor surface reports from detect() only — zero work."""
     rung = SurfaceRung("substrate-etl")
@@ -408,6 +412,7 @@ def test_failed_walk_raises_for_interactive(
     assert ledger.verified_rungs() == frozenset()  # RDR-142: nothing recorded
 
 
+@pytest.mark.t2_tenant  # the walk defers, so the deferral log writes its T2 note (nexus-0sm1t)
 def test_deferred_walk_notices_but_exits_cleanly(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -517,3 +522,23 @@ def test_run_ladder_flushes_even_when_a_rung_hard_fails(
     assert ledger.verified_rungs() == frozenset({"t2-schema"}), (
         "the verified rung's fact flushed before the hard-failure surfaced"
     )
+
+
+class _DeferringRung(SurfaceRung):
+    def converge(self, report: ProgressReporter) -> ConvergeResult:
+        self.converge_calls += 1
+        return ConvergeResult(ConvergeOutcome.DEFERRED, detail="engine census unavailable")
+
+
+@pytest.mark.t2_tenant  # the walk defers, so the deferral log writes its T2 note (nexus-0sm1t)
+def test_a_failure_after_a_deferral_names_the_deferral_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Since nexus-dfemn the walk goes on past a deferral; a later rung failing on the same outage must not hide the
+    first cause in the operator's error."""
+    deferring = _DeferringRung("census")
+    failing = SurfaceRung("labels", verify_result=False)
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((deferring, failing)))
+    with pytest.raises(click.ClickException) as exc:
+        _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
+    message = exc.value.message
+    assert "census: deferred (engine census unavailable)" in message
+    assert "labels: verify-failed" in message

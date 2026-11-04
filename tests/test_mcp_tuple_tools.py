@@ -501,6 +501,27 @@ class TestTupleRegistryListStats:
         assert "ledger/<session_id>" not in names, "retired by nexus-onjvw"
         assert "directory/<name>" in names
 
+    def test_registry_serves_doc_only_on_request_and_returns_it_as_served(self, t2_service_env) -> None:
+        """RDR-239 S4 Q1 = B: ``doc`` rides the registry only on ``?doc=1``; the
+        tool passes the flag through and returns the engine's payload as is."""
+        plain = tuple_registry()
+        assert "error" not in plain
+        assert all("doc" not in t for t in plain["templates"])
+
+        with_doc = tuple_registry(doc=True)
+        assert "error" not in with_doc
+        store = HttpTupleStore()
+        try:
+            served = store.registry(doc=True)
+        finally:
+            store.close()
+        assert with_doc == served
+        docs = [t for t in with_doc["templates"] if "doc" in t]
+        assert docs, "the bundled templates carry a doc block"
+        assert all(isinstance(t["doc"]["summary"], str) for t in docs)
+        # the digest covers doc, and is the same with or without it
+        assert with_doc["digest"] == plain["digest"]
+
     def test_list_and_stats_reflect_a_written_tuple(self, t2_service_env) -> None:
         addr = _uniq("addr")
         tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "sender-d"}, "x", nonce=_uniq("nonce"))
@@ -586,6 +607,37 @@ class TestMailboxSend:
         rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
         assert len(rows) == 1
         assert rows[0]["dims"]["address_kind"] == "agent"
+
+    @pytest.mark.parametrize("body", [None, "", "   \n"])
+    def test_a_send_with_no_body_is_refused_and_writes_nothing(
+        self, body, monkeypatch,
+    ) -> None:
+        # nexus-eva4x: three sends that put the text in `message` (SendMessage's field)
+        # arrived as empty notes; the send must refuse instead of looking successful.
+        # No tenant on purpose: the storage-touch guard fails this test at teardown if
+        # the refusal reaches any storage client, which is the "writes nothing" proof
+        # (a tenant per case cost the pytest-gate provisioned ratchet four tenants).
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = "a" + uuid.uuid4().hex[:16]
+        result = mailbox_send(dest, body=body, kind="note")
+        assert "tuple_id" not in result
+        assert "body" in result["error"] and "message" in result["error"]
+
+    def test_the_text_passed_as_message_through_the_mcp_server_is_refused(
+        self, monkeypatch,
+    ) -> None:
+        # The real failure path: the MCP server drops the unknown `message` argument, so the
+        # tool sees body=None. The refusal must reach the caller through the server too.
+        # No tenant, as above: the storage-touch guard proves nothing was written.
+        import asyncio
+
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = "a" + uuid.uuid4().hex[:16]
+        out = asyncio.run(mcp_core.mcp.call_tool(
+            "mailbox_send", {"to": dest, "message": "the text, in the wrong field"},
+        ))
+        assert "tuple_id" not in str(out)
+        assert "body" in str(out)
 
     def test_name_with_one_live_holder_delivers_to_that_session(
         self, t2_service_env, monkeypatch,

@@ -24,6 +24,7 @@ before the build scripts pruned build-only files); the CI artifact is named
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import shutil
@@ -176,16 +177,29 @@ def locate_bundle_archive(*, search_dirs: list[Path] | None = None) -> Path | No
 
 
 def _archive_identity(archive: Path) -> str:
-    """Cheap identity of *archive* for the extraction marker (nexus-xzop6).
+    """Identity of *archive* for the extraction marker: its content, not its file.
 
-    Name plus size plus mtime, not a digest: this runs on the provisioning
-    path and a bundle is hundreds of megabytes, so hashing it on every call
-    would be a real cost to detect a case the download already gated. The
-    sha256 that matters is verified at download time by
-    ``binary_install`` and recorded in ``nexus-pg.meta.json``; this only has
-    to notice that the archive on disk is no longer the one that produced
-    the extracted tree.
+    ``sha256=<hex>`` of the archive's bytes (nexus-86aaz). The marker used to
+    record name, size and mtime (nexus-xzop6), which says "the file was touched",
+    not "the bytes changed": ``install-binary`` places the archive by a fresh
+    copy, so an identical bundle read as a different one and was swapped in, with
+    the stack stopped, on every run. A digest of the file itself answers the
+    question the marker exists for and costs one pass over the file (SHA-256 runs
+    at memory speed, a fraction of a second for a bundle), the same bytes
+    ``binary_install`` verified against the published ``.sha256`` at download time
+    and records in ``nexus-pg.meta.json``.
     """
+    sha = hashlib.sha256()
+    with archive.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            sha.update(block)
+    return f"sha256={sha.hexdigest()}\n"
+
+
+def _legacy_archive_identity(archive: Path) -> str:
+    """The marker text releases through nexus-xzop6 wrote for *archive*: source
+    path, name, size and mtime. Used only to recognise such a marker (see
+    :func:`extract_bundle`), never written."""
     stat = archive.stat()
     return f"source={archive}\nname={archive.name}\nsize={stat.st_size}\nmtime_ns={stat.st_mtime_ns}\n"
 
@@ -201,7 +215,11 @@ def extract_bundle(
 
     A complete prior extraction of THE SAME archive is a no-op — the existing
     tree is preserved, so a user-modified or already-provisioned bundle is never
-    clobbered on re-run. A bad archive (incomplete tree) raises ``RuntimeError``
+    clobbered on re-run. "The same" is the same bytes (a SHA-256 of the archive
+    recorded in the marker), not the same file: a copy of an identical archive made
+    later is a repeat, and swaps nothing. A marker an earlier release wrote (name,
+    size, mtime) is adopted in place when the archive on disk still matches it, and
+    otherwise counts as a different archive once. A bad archive (incomplete tree) raises ``RuntimeError``
     and leaves no marker.
 
     Being handed a DIFFERENT archive re-extracts (nexus-xzop6). The marker
@@ -218,17 +236,21 @@ def extract_bundle(
     silent corruption, but a real major bump additionally needs pg_upgrade or
     dump/restore. That is RDR-scale and deliberately out of scope here.
 
-    Windows (RDR-224, nexus-f9bgu.20): a running ``postgres.exe`` keeps its
-    bundle directory from being renamed, so the swap below runs inside
+    Every platform (RDR-224, nexus-f9bgu.20 for Windows, where a running
+    ``postgres.exe`` keeps its bundle directory from being renamed; macOS and
+    Linux nexus-86aaz, where the running postmaster would go on serving the old
+    binaries): the swap below runs inside
     :func:`nexus.daemon.replace_quiesce.quiesced` with ``replacing="pg_bundle"``:
     the storage service and the PostgreSQL cluster are stopped, the two renames
     run (each retried when a scan holds the tree), the marker is written, and
     PostgreSQL and the service are started again. Only a swap that happens
     stops anything: the extraction into the staging tree, which is the slow
     part, runs before the stop, and a first extraction or a repeat of the
-    extracted archive stops nothing. *quiesce* replaces that context manager and
-    *platform* (default ``sys.platform``) decides the stop and the retry; both
-    are test seams. On POSIX nothing is stopped.
+    extracted archive stops nothing. *quiesce* replaces that context manager (a
+    caller that makes other replacements in the same run passes the guard of a
+    :class:`~nexus.daemon.replace_quiesce.SharedQuiesce`, so the stack is stopped
+    and started once for all of them) and *platform* (default ``sys.platform``)
+    decides the retry; both are test seams.
     """
     bin_dir = bundle_bin_dir(extract_root)
     marker = extract_root / _EXTRACT_MARKER
@@ -238,13 +260,25 @@ def extract_bundle(
         if recorded == identity:
             _log.debug("pg_bundle_already_extracted", extract_root=str(extract_root))
             return bin_dir
-        # A pre-xzop6 marker carries only "source=..." and cannot be compared;
-        # treat it as a mismatch and re-extract once to adopt the new format.
+        if recorded and recorded == _legacy_archive_identity(archive):
+            # A marker from before this change names the file by name, size and
+            # mtime. The file on disk is still exactly the one that produced the
+            # tree (nothing has touched it since), so its content is the extracted
+            # content: adopt the new marker format in place. No swap, nothing is
+            # stopped, so an unchanged archive on an existing install costs
+            # nothing the first time it is seen either.
+            _write_marker(extract_root, identity)
+            _log.info("pg_bundle_marker_adopted", extract_root=str(extract_root))
+            return bin_dir
+        # A pre-xzop6 marker carries only "source=..." and cannot be compared, and
+        # a legacy marker whose file has since been rewritten (same name, new mtime)
+        # no longer proves anything; treat both as a mismatch and re-extract once
+        # to adopt the new format.
         _log.warning(
             "pg_bundle_archive_changed_reextracting",
             extract_root=str(extract_root),
             archive=str(archive),
-            had_identity=bool(recorded and "size=" in recorded),
+            had_identity=bool(recorded and ("size=" in recorded or "sha256=" in recorded)),
             note=(
                 "extracting a different PG bundle over an existing tree; if this "
                 "is a major-version change, an existing data directory will need "
@@ -266,7 +300,7 @@ def extract_bundle(
         # Swap: move the old tree aside (fast rename), move the proven tree
         # into place, then drop the old one. If the second rename fails the
         # backup is restored, so the window where neither exists is a single
-        # rename wide and is recoverable. On Windows the tree is first freed
+        # rename wide and is recoverable. The tree is first freed
         # of the running PostgreSQL and the marker is written before it starts
         # again, because the start finds the binaries through the marker.
         backup = extract_root.parent / (extract_root.name + ".replaced")

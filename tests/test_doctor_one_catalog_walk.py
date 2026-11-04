@@ -59,16 +59,6 @@ class CountingCatalog:
         pass
 
 
-class _NoMemo:
-    def load(self):
-        return None
-
-    def save(self, _note) -> None:
-        pass
-
-    def clear(self) -> None:
-        pass
-
 
 class _NoCollections:
     def list_collections(self, *a, **k) -> list:
@@ -92,7 +82,7 @@ def _doctor_over(monkeypatch: pytest.MonkeyPatch, cat: CountingCatalog, *, manag
 
     rung = ManifestSectionLabelsRung(
         reader_factory=reader_for_rung, writer_factory=lambda: None, t3_factory=lambda: None,
-        record_fn=lambda: None, memo_store=_NoMemo(), managed_fn=lambda: managed,
+        record_fn=lambda: None, managed_fn=lambda: managed, stale_zero_fn=lambda: False,
     )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
     results, _local = health.run_health_checks()
@@ -141,7 +131,7 @@ def test_a_local_engine_keeps_the_rung_scan_in_doctor(monkeypatch) -> None:
     cat = LocalCatalog(n=10)
     rung = ManifestSectionLabelsRung(
         reader_factory=lambda: cat, writer_factory=lambda: None, t3_factory=lambda: None,
-        record_fn=lambda: None, memo_store=_NoMemo(), managed_fn=lambda: False,
+        record_fn=lambda: None, managed_fn=lambda: False, stale_zero_fn=lambda: False,
     )
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry((rung,)))
     (row,) = health._check_pending_rungs()

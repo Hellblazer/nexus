@@ -73,7 +73,7 @@ Use the Agent tool with standardized relay format.
 See [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md) for required fields and examples.
 ```
 
-Do NOT inline the relay template. One source of truth: `resources/agent-shared/RELAY_TEMPLATE.md`.
+Do NOT inline the relay template. One source of truth: `${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md`.
 
 ### Storage Tier References
 

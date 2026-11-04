@@ -125,6 +125,7 @@ class TestSubagentStartHook:
         assert "NEVER git add/commit" in ctx
         assert "orchestrator commits pathspec-limited" in ctx
 
+
 class TestClaimantIdInjection:
     """RDR-205 "Identity and addressing" (bead nexus-em75s.11): this is the
     ONE line subagent-start.sh adds beyond its existing injection -- the

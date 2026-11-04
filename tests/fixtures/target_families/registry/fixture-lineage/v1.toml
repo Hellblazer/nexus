@@ -1,0 +1,41 @@
+# Test fixture only (nexus-z1d0l.2.3): not a production family.
+family_id = "fixture-lineage"
+family_version = 1
+status = "active"
+revision = "1111111111111111111111111111111111111111"
+facets = ["origin", "successor"]
+observed_refs = ["run:fixture-0001", "coverage:fixture-0001"]
+environment_capabilities = ["catalog", "t3-search"]
+
+[approval]
+reviewer = "fixture-reviewer"
+ref = "change:fixture-100"
+
+[[required_slots]]
+name = "decision"
+kind = "claim"
+
+[[required_slots]]
+name = "rationale"
+kind = "text"
+
+[[witness_obligations]]
+slot = "decision"
+kind = "quote"
+on_missing = "requiresReview"
+
+[[treatment_constraints]]
+name = "no-current-code-inference"
+rule = "Do not infer current code behaviour from a historical record."
+
+[[exemplars]]
+ref = "run:fixture-0001"
+note = "Positive: names the decision and cites its record."
+
+[[counterexamples]]
+ref = "run:fixture-0002"
+note = "Negative: a changelog summary is not a lineage answer."
+
+[[disagreements]]
+ref = "run:fixture-0003"
+note = "Reviewers disagree whether a pure timeline request belongs here."

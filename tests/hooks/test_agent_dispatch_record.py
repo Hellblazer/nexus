@@ -237,13 +237,18 @@ def test_a_minted_data_token_is_the_bearer(engine_env, monkeypatch: pytest.Monke
     eng = engine_env()
     import nexus.db.data_token as dt  # noqa: PLC0415 — the manager is replaced where the child reads it
 
+    deadlines: list[float | None] = []
+
     class _Mgr:
-        def bearer_for(self, _base_url: str, _tenant: str) -> str:
+        def bearer_for(self, _base_url: str, _tenant: str, *, deadline_s: float | None = None) -> str:
+            deadlines.append(deadline_s)
             return "minted-data-token"
 
     monkeypatch.setattr(dt, "get_data_token_manager", lambda: _Mgr())
     assert rec.main([json.dumps({"session_id": "s1", "agent_id": "a1", "t1_puts": 1})]) == 0
     assert eng.auth == ["Bearer minted-data-token"]
+    # the mint's sleeps end before the watchdog (8 s) could: 8 - 2 s request - 2 s for imports
+    assert deadlines == [rec._MINT_DEADLINE_S] and rec._MINT_DEADLINE_S == 4.0
 
 
 def test_the_endpoint_is_pinned_so_the_stores_own_resolution_never_runs(

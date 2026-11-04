@@ -471,6 +471,111 @@ class AspectTaskRefsRenameTest {
         assertThat(left).as("another collection's task is untouched").containsEntry("2.7.1", kept).hasSize(1);
     }
 
+    /**
+     * nexus-eyynd M4: the purge deletes a CLAIMED task too, so its holder learns at once. The holder's fenced
+     * aspect write and its ack both answer 404 {@code ClaimNotFound}, and the write puts nothing under the name.
+     */
+    @Test
+    void aHoldersWriteAndAckAfterAPurge_answerClaimNotFound() {
+        String tenant = freshTenant("purge-holder");
+        String doomed = coll("doomed");
+        register(tenant, doomed);
+        Seeded s = seedThree(tenant, doomed, "1.14");
+        assertThat(state(tenant, s.claimedDoc()).claimId()).as("positive control: the claim is live before the purge")
+            .isEqualTo(s.claimId());
+
+        catalog.deleteCollection(tenant, doomed);
+
+        Map<String, Object> write = new java.util.LinkedHashMap<>();
+        write.put("collection", doomed);
+        write.put("source_path", "p/" + s.claimedDoc() + ".md");
+        write.put("doc_id", s.claimedDoc());
+        write.put("confidence", 0.9);
+        write.put("extracted_at", "2026-11-03T00:00:00.000000Z");
+        write.put("model_version", "v1");
+        write.put("extractor_name", "scholarly-paper");
+        write.put("claim_id", s.claimId());
+        write.put("claimant", WORKER);
+        assertThatThrownBy(() -> aspects.upsertAspect(tenant, write)).isInstanceOf(ClaimNotFoundException.class);
+        assertThatThrownBy(() -> tuples.ack(tenant, s.claimId(), WORKER)).isInstanceOf(ClaimNotFoundException.class);
+        assertThat(aspects.getAspect(tenant, doomed, "p/" + s.claimedDoc() + ".md")).as("nothing was written").isEmpty();
+    }
+
+    /**
+     * nexus-eyynd M4: a re-enqueue whose body is byte-identical to the stored one still dirties a claimed task.
+     * The engine does not compare bodies, so the holder's ack returns the task to available and the document is
+     * extracted once more. That one extra extraction is the price of not diffing, and it is the same on the
+     * re-enqueue after a rename, whose rewritten body equals the producer's.
+     */
+    @Test
+    void anIdenticalBodyReplaceOnAClaimedTask_dirtiesIt_andTheAckRequeuesIt() {
+        String tenant = freshTenant("identical");
+        String a = coll("a");
+        register(tenant, a);
+        Seeded s = seedThree(tenant, a, "1.15");
+        String doc = s.claimedDoc();
+        String stored = su(ctx -> ctx.select(TUPLES.BODY).from(TUPLES)
+            .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.CLAIM_ID.eq(s.claimId())).fetchOne(TUPLES.BODY));
+        assertThat(stored).as("positive control: the replace below is byte-identical").isEqualTo(taskBody(a, doc));
+        assertThat(claimedRowDirty(tenant, s.claimId())).as("not dirty before").isFalse();
+
+        var res = reenqueue(tenant, a, doc);
+
+        assertThat(res.outcome()).isEqualTo(TupleRepository.OutOutcome.DIRTIED);
+        assertThat(claimedRowDirty(tenant, s.claimId())).as("dirtied although nothing changed").isTrue();
+        tuples.ack(tenant, s.claimId(), WORKER);
+        TaskState after = state(tenant, doc);
+        assertThat(after.claimState()).as("the ack of a dirty claim returns the task to available").isNull();
+        assertThat(after.claimId()).isNull();
+    }
+
+    boolean claimedRowDirty(String tenant, String claimId) {
+        return Boolean.TRUE.equals(su(ctx -> ctx.select(TUPLES.DIRTY).from(TUPLES)
+            .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.CLAIM_ID.eq(claimId)).fetchOne(TUPLES.DIRTY)));
+    }
+
+    // ── re-home: the source stays registered (nexus-eyynd M2) ──────────────
+
+    /**
+     * A re-home rewrites a claimed task to the target but leaves the source registered, so its holder's fenced
+     * write, which still names the source, is NOT refused: the fence compares the doc_id only. The aspect row
+     * lands under the source, a row a later re-home of the source moves. (A rename retires the old name, so
+     * the same write answers 409 there.) The RDR accepted this for a one-document move; this pins it for a
+     * re-home, as documented in the RDR and on {@link AspectTaskRefs}.
+     */
+    @Test
+    void aHoldersWriteAfterARehome_landsUnderTheStillRegisteredSource() {
+        String tenant = freshTenant("rehome-holder");
+        String a = coll("a");
+        String b = coll("b");
+        register(tenant, a);
+        register(tenant, b);
+        Seeded s = seedThree(tenant, a, "1.16");
+        // document_aspects.doc_id is a foreign key to the catalog: a bare catalog row, no chunks, is enough
+        catalog.upsertDocument(tenant, Map.of("tumbler", s.claimedDoc(), "title", "title-" + s.claimedDoc(),
+            "content_type", "knowledge", "corpus", "knowledge", "physical_collection", a, "chunk_count", 0));
+        catalog.rehomeCollection(tenant, a, b);
+        assertThat(state(tenant, s.claimedDoc()).collection()).as("the task now names the target").isEqualTo(b);
+        assertThat(registered(tenant, a)).as("the source stays registered").isTrue();
+
+        Map<String, Object> write = new java.util.LinkedHashMap<>();
+        write.put("collection", a); // what the holder read when it claimed
+        write.put("source_path", "p/" + s.claimedDoc() + ".md");
+        write.put("doc_id", s.claimedDoc());
+        write.put("confidence", 0.9);
+        write.put("extracted_at", "2026-11-03T00:00:00.000000Z");
+        write.put("model_version", "v1");
+        write.put("extractor_name", "scholarly-paper");
+        write.put("claim_id", s.claimId());
+        write.put("claimant", WORKER);
+
+        assertThat(aspects.upsertAspect(tenant, write)).as("not refused").isPositive();
+        assertThat(aspects.getAspect(tenant, a, "p/" + s.claimedDoc() + ".md")).as("the row sits under the source").isPresent();
+        assertThat(aspects.getAspect(tenant, b, "p/" + s.claimedDoc() + ".md")).as("and not under the target").isEmpty();
+        assertThat(catalog.rehomeStatus(tenant, a).remainingByTable()).as("the source still names a row")
+            .containsKey("document_aspects");
+    }
+
     // ── lock order: tuples first, then document_aspects ────────────────────
 
     /**

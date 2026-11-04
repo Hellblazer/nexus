@@ -184,6 +184,14 @@ _load_sandbox() {
 
 _stop_service() {
     [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ] || return 0
+    # The aspect worker an nx call spawned outlives the service by design
+    # (nexus-wl9pk): stop it by its lease in the sandbox config dir first. The
+    # installed nx comes from PyPI and may predate the verb, so the CHECKOUT's nx
+    # stops it: the verb reads the lease and signals by pid, which also reaches a
+    # worker the older nx spawned.
+    ( cd "$REPO_ROOT" && env HOME="$HOME_DIR" NEXUS_CONFIG_DIR="$HOME_DIR/.config/nexus" NX_NO_TELEMETRY=1 \
+        uv run --no-sync nx daemon aspect-worker stop --config-dir "$HOME_DIR/.config/nexus" ) \
+        >"$WORK/stop-aspect-worker.log" 2>&1 || true
     _nx daemon service stop --with-pg >"$WORK/stop.log" 2>&1 || true
 }
 

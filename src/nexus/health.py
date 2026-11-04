@@ -22,6 +22,7 @@ from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
+from nexus.tuple_templates import resolve_tuple_template
 from nexus.util.nx_argv import which_off_cwd
 
 if TYPE_CHECKING:
@@ -8126,37 +8127,18 @@ def _fmt_age(seconds: float) -> str:
 def _resolve_tuple_template(templates: list[dict], subspace: str) -> dict | None:
     """Resolve *subspace* against the ``registry()`` wire's ``templates``
     list and return the matching template dict, or ``None`` when nothing
-    resolves. Mirrors ``TemplateRegistry.resolve()``'s literal-before-
-    pattern rule (``service/src/main/java/dev/nexus/service/tuples/
-    TemplateRegistry.java``): a literal template name is checked before
-    any parameterised one, and a ``<param>`` segment matches anything in
-    the corresponding position.
+    resolves. The matching itself is :func:`nexus.tuple_templates.
+    resolve_tuple_template` (RDR-239 Phase 3, bead nexus-mdbds.2.17), the
+    one client-side resolver shared with ``nexus.mcp.subscriptions`` and
+    ``nx tuple dictionary``; it mirrors ``TemplateRegistry.resolve()``'s
+    literal-before-pattern rule.
 
-    Factored out of :func:`_template_take_enabled` (RDR-211 Phase 1 Step 3,
-    bead nexus-rplay.12) so the queue-depth doctor row can ask "which
-    template does this subspace belong to", not just "is it claimable" --
-    the same matching logic answers both questions.
+    Kept as a named wrapper (RDR-211 Phase 1 Step 3, bead nexus-rplay.12) so
+    the queue-depth doctor row can ask "which template does this subspace
+    belong to", not just "is it claimable" -- the same matching logic
+    answers both questions.
     """
-    segments = subspace.split("/")
-
-    def _matches(name: str) -> bool:
-        t_segments = name.split("/")
-        if len(t_segments) != len(segments):
-            return False
-        return all(
-            (ts.startswith("<") and ts.endswith(">")) or ts == ss
-            for ts, ss in zip(t_segments, segments)
-        )
-
-    literal = [t for t in templates if "<" not in t.get("name", "")]
-    patterned = [t for t in templates if "<" in t.get("name", "")]
-    for t in literal:
-        if t.get("name", "") == subspace:
-            return t
-    for t in patterned:
-        if _matches(t.get("name", "")):
-            return t
-    return None
+    return resolve_tuple_template(templates, subspace)
 
 
 def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
@@ -9595,7 +9577,13 @@ def _check_pending_rungs() -> list[HealthResult]:
     engine state (``rdr192-manifest-backfill`` reads its record and the
     residual note), so this row needs a reachable engine to be exact; an
     unreachable one degrades to a pending row that says why. Pending rungs are a
-    soft warning with `nx upgrade` (the single trigger) as the remedy.
+    soft warning with `nx upgrade` (the single trigger) as the remedy. A
+    pending rung that deferred on ``ESCALATE_AFTER`` consecutive runs over at
+    least ``ESCALATE_MIN_SPAN`` (``upgrade_ladder.deferral_log``, nexus-0sm1t)
+    is named first, as "REPEATEDLY DEFERRED:", with the count, the span, the
+    last detail and where to look; the row is still ``warn=True``, so the exit
+    code does not move. The log is read only when some rung is pending; a log
+    read failure leaves the row as it was.
     Crash-proof: any failure ABOVE the per-rung loop (deferred imports,
     ``default_registry()`` construction) degrades to a SOFT WARNING, never a
     silent ``ok=True`` — a check that could not even enumerate the ladder
@@ -9614,7 +9602,7 @@ def _check_pending_rungs() -> list[HealthResult]:
         # manifest-section-labels dry run lists every document and reads manifests and T3 per batch) must not
         # do that for a doctor row against a managed service: 43.7k documents did not finish in 30 minutes.
         # The same refusal `nx upgrade --auto` gets applies (auto_guard: managed service, no completion
-        # record, no remembered clean scan); a local engine keeps its scan. A refused rung is reported below
+        # record, and an engine that cannot count the fillable rows in one read); a local engine keeps its scan. A refused rung is reported below
         # as NOT CHECKED, never as converged.
         with unattended_run():
             statuses = pending_rungs(_ladder_registry.default_registry())
@@ -9651,12 +9639,38 @@ def _check_pending_rungs() -> list[HealthResult]:
         )]
     parts: list[str] = []
     fixes: list[str] = []
+    stuck: list[str] = []
     if pending:
         names = "; ".join(
             f"{name}: {status.pending_detail or 'pending'}" for name, status in pending[:6]
         )
         parts.append(f"{len(pending)} pending upgrade rung(s) — {names}")
         fixes.append("Run: nx upgrade")
+        # nexus-0sm1t: a pending rung that deferred on every one of the last runs, over a day or more, is not
+        # waiting its turn (or is too slow for the --auto budget), and `nx upgrade --auto` says nothing about it.
+        # The log is read guarded: a read failure leaves the row as it was.
+        from nexus.upgrade_ladder.census_progress import guarded  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.deferral_log import t2_deferral_log  # noqa: PLC0415 — deferred to avoid module-load cost
+
+        def _ledger_completions() -> dict:
+            from nexus.upgrade_ladder.http_store import DeferredLadderLedger  # noqa: PLC0415 — deferred to avoid module-load cost
+
+            ledger = DeferredLadderLedger()
+            try:
+                return dict(ledger.completions())
+            finally:
+                ledger.close()
+
+        def _escalated_text() -> list[str]:
+            # The ledger is read only when a streak would escalate: a rung that converged since its streak and went
+            # pending again (a client upgrade) is no repeated deferral. A failed read is no escalation (guarded).
+            log = t2_deferral_log()
+            escalated = log.escalated(_ledger_completions)
+            return [log.describe(escalated[name]) for name, _status in pending if name in escalated]
+
+        stuck = guarded("deferral_log_read", _escalated_text, [])
+        if stuck:
+            parts.insert(0, "REPEATEDLY DEFERRED: " + "; ".join(stuck))
     else:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:
@@ -9666,7 +9680,7 @@ def _check_pending_rungs() -> list[HealthResult]:
         )
         fixes.append(
             "Run `nx upgrade` interactively (not --auto): it makes that read and records each rung it verifies "
-            "(manifest-section-labels also keeps a remembered clean scan), and this row then answers from the "
+            "and this row then answers from the "
             "record without a read"
         )
     if record_note:
@@ -9674,6 +9688,8 @@ def _check_pending_rungs() -> list[HealthResult]:
     return [HealthResult(
         label="Upgrade ladder",
         ok=False,
+        # A repeatedly deferred rung is named up front but stays a warning: a deferral is non-fatal by design, and
+        # `nx doctor`'s exit code is read by scripts and gates that a slow census must not fail.
         warn=True,
         detail="; ".join(parts),
         fix_suggestions=fixes,
@@ -11588,10 +11604,18 @@ def _check_stale_indexing_runs(documents: list[Any] | _WalkFailed | None = None)
 #: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
 #: ``rdr__`` holds only RDR markdown; skipping both saves one request each.
 _PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
-#: Pages read per collection before the scan of that collection stops and
-#: is reported as partial. The filter matches only placeholder chunks
-#: (111 on the production tenant, 2026-09-24), so one page is the norm.
+#: Pages of chunk rows read per collection before the scan of that collection
+#: stops and is reported as partial. Only PDF documents whose catalog meta
+#: records no extraction_method are looked at (111 placeholder chunks in 2
+#: documents on the production tenant, 2026-09-24). Their chunks are all read
+#: while they fit under the bound; past it a sample of each document is read
+#: and only a document whose sample holds a placeholder is read in full
+#: (nexus-iho0e: a legacy collection holds many healthy method-less
+#: documents, 24,517 chunks in 244 on the local tenant, 2026-11-03).
 _PDF_STUB_MAX_PAGES = 20
+#: Chunks sampled per method-less document once a collection holds more of
+#: them than the bound: spread evenly, the first and the last included.
+_PDF_STUB_PROBES = 4
 #: Concurrent collection reads. Matches the search fan-out ceiling
 #: (``search_engine``); the round trip, not the query, is the cost.
 #: Measured 2026-09-25 against the managed service, 58 collections, during
@@ -11605,83 +11629,166 @@ _PDF_STUB_NO_URI = "content_hash "
 
 
 def _is_pdf_stub_metadata(meta: dict, *, document_has_method: bool) -> bool:
-    """True when a PDF chunk row still carries the streaming uploader's placeholder title (the engine
-    filter matches ``title == ""``) AND the document that owns it records no ``extraction_method`` in its
-    catalog ``meta`` -- the post-pass that fills both in never landed for that document.
+    """True when a PDF chunk row still carries the streaming uploader's placeholder title (the empty
+    string) AND the document that owns it records no ``extraction_method`` in its catalog ``meta`` -- the
+    post-pass that fills both in never landed for that document.
 
     Both halves are needed. A PDF whose extractor returned no title has an empty title but a recorded
     method, and is healthy. *document_has_method* is the OWNING document's own catalog fact
     (nexus-6pfgb.16, RDR-236 Phase 2): the chunk row's ``extraction_method`` is the last writer's, so a
     clean re-index of document B left the row saying "extracted" over a document A whose post-pass never
     landed. A document indexed before nexus-6pfgb.6 has no method in its meta until
-    ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run, and is named here until then.
+    ``nx catalog backfill-meta`` (nexus-6pfgb.10) or its next index run, and is named here until then
+    when its row title is empty.
     """
     return not meta.get("title") and not document_has_method
 
 
-def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], bool]:
+def _spread_sample(items: list[str], k: int) -> list[str]:
+    """Up to *k* of *items*, evenly spaced, the first and the last included."""
+    if len(items) <= k:
+        return list(items)
+    return [items[round(i * (len(items) - 1) / (k - 1))] for i in range(k)]
+
+
+@dataclass(frozen=True)
+class _StubScanCoverage:
+    """How far one collection's stub scan got. ``sampled`` is the number of method-less documents read
+    by sample (0 when every chunk was read, so the verdict is exact). ``samples_over`` is True when the
+    samples alone exceeded the read bound; ``stubs_over`` when the remaining chunks of the documents
+    whose sample held a placeholder did. Either makes the count a floor."""
+
+    sampled: int = 0
+    samples_over: bool = False
+    stubs_over: bool = False
+
+    @property
+    def truncated(self) -> bool:
+        return self.samples_over or self.stubs_over
+
+
+def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dict[str, int], _StubScanCoverage]:
     """Placeholder-metadata PDF chunks in one collection, keyed by owning document's source.
 
-    Returns ``(source -> chunk count, truncated)``. The source is the owning document's catalog source
-    URI (its path when it has none), or ``"content_hash <prefix>"`` when it has neither. Since RDR-192
-    Step 5 (nexus-wbfpw.10) every chunk this read returns has a live owner in its own collection -- a
-    chunk with no manifest row at all is invisible here, not merely unnamed -- so a null source means
-    the owning document was registered without a URI, never "no manifest names this chunk"; a
-    manifest-less stub is the RDR-192 reaper's business, not this check's. The engine filters on
-    ``content_type`` and the literal empty ``title`` the uploader writes; whether the post-pass ran is
-    judged per OWNING document from its catalog ``meta`` (``extraction_method``), because the row's is
-    the last writer's and the vector bridge has no absent-key predicate. A chunk two documents hold is
-    counted under each document that records no method. One owner lookup per page; a catalog that
-    cannot be read raises, so the collection is reported as NOT CHECKED, never as clean. Raises on a
-    read failure; the caller names it.
+    Returns ``(source -> chunk count, coverage)``. The source is the owning document's catalog source
+    URI (its file path when it has none), or ``"content_hash <prefix>"`` when it has neither.
+
+    The scan asks the CATALOG which documents to look at, then reads their chunk rows by id. It sends no
+    ``where`` to the vector routes: since nexus-u9dc5 (RDR-236 Phase 3) the engine judges ``title`` and
+    ``content_type`` on the owning document's catalog value, which every PDF has (pre-flight registers it
+    with its file stem), so a ``where={"title": ""}`` would name no stub on a current engine and the doctor
+    would read clean. The steps use only reads every engine has had (``/list?collection=``,
+    ``/manifest/get_many``, ``/v1/vectors/store-get``), so the same client answers the same on an engine
+    before and after that change.
+
+    1. The live documents the catalog places in *name* whose source format is PDF
+       (:func:`~nexus.catalog.indexed_meta.catalog_source_format`, the engine's own rule) and whose
+       catalog ``meta`` records no ``extraction_method``. That is the per-document fact; the chunk row's
+       is the last writer's and is not read.
+    2. Those documents' manifest chunks, read as rows by id. A row whose ``title`` is empty is the
+       placeholder; a titled row of a method-less document (indexed before nexus-6pfgb.6) is healthy.
+    A chunk two such documents hold is counted under each. A manifest chunk with no T3 row is skipped.
+    At most ``_PDF_STUB_MAX_PAGES * page_size`` distinct chunk rows are read (the bound). When the candidate
+    documents hold no more chunks than that, every chunk is read and the count is exact. When they hold more
+    (a large legacy corpus, mostly healthy titled rows indexed before nexus-6pfgb.6), ``_PDF_STUB_PROBES``
+    chunks spread across each document are read, and a document whose sample holds a placeholder is then
+    read in full: a stub document is named with its true chunk count within the bound, and a collection of
+    healthy documents is cleared in a few reads per document. A document stubbed only in chunks the sample
+    skips is missed on that path, and ``coverage.sampled`` says the verdict was reached that way. The coverage
+    is truncated only when the bound stopped the scan: the samples alone exceed it, or the stub documents'
+    remaining chunks do. A catalog that cannot be read
+    raises, so the collection is reported as NOT CHECKED, never as clean. Raises on a read failure; the
+    caller names it.
     """
-    from nexus.catalog.store_hook import live_owner_entries  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.indexed_meta import catalog_source_format  # noqa: PLC0415 — deferred, as above
+
+    try:
+        reader = make_catalog_reader()
+        if reader is None:
+            raise RuntimeError("no catalog reader")
+        try:
+            candidates = [
+                d for d in reader.list_by_collection(name)
+                if catalog_source_format(getattr(d, "content_type", ""), getattr(d, "file_path", "")) == "pdf"
+                and not (getattr(d, "meta", None) or {}).get("extraction_method")
+            ]
+            manifests = reader.get_manifests([str(d.tumbler) for d in candidates]) if candidates else {}
+        finally:
+            reader.close()
+    except Exception as exc:  # noqa: BLE001 — the caller reports the collection as NOT CHECKED
+        raise RuntimeError(
+            f"the catalog could not be read, so no document's extraction record can be judged: {exc}"
+        ) from exc
+
+    held: dict[str, list[str]] = {}
+    ordered: list[str] = []
+    for d in candidates:
+        chashes = [
+            r.chash for r in manifests.get(str(d.tumbler), [])
+            if (getattr(r, "collection", None) or name) == name
+        ]
+        chashes = list(dict.fromkeys(c for c in chashes if c))
+        held[str(d.tumbler)] = chashes
+        ordered.extend(chashes)
+    ordered = list(dict.fromkeys(ordered))
+    cap = _PDF_STUB_MAX_PAGES * page_size
 
     # Not get_collection(): that re-lists every collection in the tenant to
     # prove existence, one extra stats round trip per collection, and the
     # caller has just listed them.
     col = t3.get_or_create_collection(name)  # type: ignore[attr-defined]
+    rows: dict[str, dict] = {}
+
+    def _read(chashes: list[str]) -> None:
+        for start in range(0, len(chashes), page_size):
+            batch = chashes[start:start + page_size]
+            page = col.get(ids=batch, include=["metadatas"], limit=len(batch))
+            for chash, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
+                rows[chash] = meta or {}
+
+    coverage = _StubScanCoverage()
+    if len(ordered) <= cap:
+        _read(ordered)
+    else:
+        # More method-less chunks than the bound. Only the chunk row says whether a document is a stub (the
+        # catalog's title is its file stem), so reading all of them is the exact answer and is unbounded.
+        # Probe a spread sample of each document instead, then read in full only the documents whose sample
+        # held a placeholder, so a healthy legacy corpus costs a few reads per document, not its size.
+        # The bound counts ids REQUESTED, so a manifest chunk with no T3 row cannot overrun it.
+        probes = list(dict.fromkeys(
+            c for d in candidates for c in _spread_sample(held[str(d.tumbler)], _PDF_STUB_PROBES)
+        ))
+        samples_over = len(probes) > cap
+        requested = set(probes[:cap])
+        _read(probes[:cap])
+        stubs_over = False
+        for d in candidates:
+            chashes = held[str(d.tumbler)]
+            if not any(
+                c in rows and _is_pdf_stub_metadata(rows[c], document_has_method=False) for c in chashes
+            ):
+                continue
+            rest = [c for c in chashes if c not in requested]
+            budget = cap - len(requested)
+            if len(rest) > budget:
+                stubs_over = True
+                rest = rest[:budget]
+            requested.update(rest)
+            _read(rest)
+        coverage = _StubScanCoverage(len(candidates), samples_over, stubs_over)
+
     stubs: dict[str, int] = {}
-    for page_no in range(_PDF_STUB_MAX_PAGES):
-        page = col.get(
-            where={"content_type": "pdf", "title": ""},
-            include=["metadatas"],
-            limit=page_size,
-            offset=page_no * page_size,
-            include_source_uri=True,
-        )
-        metas = page.get("metadatas") or []
-        uris = page.get("source_uris") or []
-        ids = page.get("ids") or []
-        owners: dict[str, list] = {}
-        if metas:
-            looked_up = live_owner_entries(name, [c for c in ids if c])
-            if looked_up is None:
-                raise RuntimeError("the catalog could not be read, so no document's extraction record can be judged")
-            owners = looked_up
-        for i, meta in enumerate(metas):
-            meta = meta or {}
-            chash = ids[i] if i < len(ids) else ""
-            for owner in owners.get(chash, []):
-                owner_meta = getattr(owner, "meta", None) or {}
-                if not _is_pdf_stub_metadata(meta, document_has_method=bool(owner_meta.get("extraction_method"))):
-                    continue
-                source = (
-                    getattr(owner, "source_uri", "") or getattr(owner, "file_path", "")
-                    or (uris[i] if i < len(uris) else "")
-                ) or (_PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?"))
-                stubs[source] = stubs.get(source, 0) + 1
-        if len(metas) < page_size:
-            return stubs, False
-    # Every page was full. Truncated only if a row exists past the cap; an
-    # exact multiple of the page size ends here too.
-    beyond = col.get(
-        where={"content_type": "pdf", "title": ""},
-        include=[],
-        limit=1,
-        offset=_PDF_STUB_MAX_PAGES * page_size,
-    )
-    return stubs, bool(beyond.get("ids"))
+    for d in candidates:
+        for chash in held[str(d.tumbler)]:
+            meta = rows.get(chash)
+            if meta is None or not _is_pdf_stub_metadata(meta, document_has_method=False):
+                continue
+            source = (
+                getattr(d, "source_uri", "") or getattr(d, "file_path", "")
+            ) or (_PDF_STUB_NO_URI + (str(meta.get("content_hash", ""))[:12] or "?"))
+            stubs[source] = stubs.get(source, 0) + 1
+    return stubs, coverage
 
 
 def _check_pdf_stub_metadata() -> list[HealthResult]:
@@ -11697,9 +11804,10 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     chunks through the catalog document's manifest). Measured 2026-09-24: 111 chunks in 2
     documents, both of which this check names.
 
-    Blind spot: a PDF chunk with NO ``title`` key at all is not matched,
-    because the engine filter is the literal empty string. The uploader
-    always writes the key, so the known failure shapes carry it.
+    Which documents to look at is the catalog's answer (a PDF document in the collection whose ``meta``
+    records no ``extraction_method``), and the chunk rows are read by id, so the check holds on an engine
+    that judges ``title`` on the owning document (nexus-u9dc5) as on one that reads it from the row. A
+    chunk row with no ``title`` key counts as the placeholder, as does the empty string.
 
     Read-only; degrades to a skip when T3 is unreachable; a collection it
     could not read, or read only in part, is named, never counted as clean.
@@ -11726,19 +11834,21 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
 
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
 
-    def _scan(name: str) -> tuple[str, dict[str, int] | None, bool]:
+    def _scan(name: str) -> tuple[str, dict[str, int] | None, _StubScanCoverage]:
         try:
-            found, cut = _pdf_stubs_in_collection(t3, name, MAX_QUERY_RESULTS)
-            return name, found, cut
+            found, cover = _pdf_stubs_in_collection(t3, name, MAX_QUERY_RESULTS)
+            return name, found, cover
         except Exception as exc:  # noqa: BLE001 — one unreadable collection must not hide the rest
             _log.debug("doctor_pdf_stub_metadata_collection_failed", collection=name, error=str(exc))
-            return name, None, False
+            return name, None, _StubScanCoverage()
 
     with ThreadPoolExecutor(max_workers=_PDF_STUB_WORKERS) as pool:
         scanned = list(pool.map(_scan, names))
 
     unreadable = [n for n, found, _ in scanned if found is None]
-    partial = [n for n, found, cut in scanned if found is not None and cut]
+    samples_over = [n for n, found, cover in scanned if found is not None and cover.samples_over]
+    stubs_over = [n for n, found, cover in scanned if found is not None and cover.stubs_over]
+    sampled = [(n, cover.sampled) for n, found, cover in scanned if found is not None and cover.sampled and not cover.samples_over]
     stubs: dict[tuple[str, str], int] = {
         (n, src): count
         for n, found, _ in scanned if found
@@ -11750,11 +11860,28 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         shown = ", ".join(unreadable[:5])
         more = f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""
         gaps += f" NOT CHECKED: {len(unreadable)} collection(s) could not be read: {shown}{more}."
-    if partial:
+    if samples_over:
         gaps += (
-            f" PARTIAL: {len(partial)} collection(s) hit the "
-            f"{_PDF_STUB_MAX_PAGES}-page cap, so their count is a floor: "
-            f"{', '.join(partial[:5])}."
+            f" PARTIAL: {len(samples_over)} collection(s) hold more method-less PDF documents than the "
+            f"{_PDF_STUB_MAX_PAGES}-page read bound lets the scan sample ({_PDF_STUB_PROBES} chunks "
+            f"each), so their count is a floor: {', '.join(samples_over[:5])}. "
+            "`nx catalog backfill-meta` stamps extraction_method on legacy documents, which takes "
+            "them out of this scan."
+        )
+    if stubs_over:
+        gaps += (
+            f" PARTIAL: {len(stubs_over)} collection(s) hold placeholder documents with more chunks than "
+            f"the {_PDF_STUB_MAX_PAGES}-page read bound lets the scan read, so their count is a floor: "
+            f"{', '.join(stubs_over[:5])}. Re-index the documents named above (the commands below) to "
+            "clear them."
+        )
+    if sampled:
+        shown = ", ".join(f"{n} ({docs} documents)" for n, docs in sampled[:5])
+        gaps += (
+            f" SAMPLED: {len(sampled)} collection(s) hold more method-less PDF chunks than the "
+            f"{_PDF_STUB_MAX_PAGES}-page read bound, so each such document was probed at "
+            f"{_PDF_STUB_PROBES} chunks, not read in full: {shown}. A document stubbed only in chunks the "
+            "sample skips is not seen; `nx catalog backfill-meta` makes the scan exact."
         )
 
     if stubs:
@@ -11802,7 +11929,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             detail=" ".join(parts) + gaps,
             fix_suggestions=fixes,
         )]
-    if gaps:
+    if unreadable or samples_over or stubs_over:
         return [HealthResult(
             label=label,
             ok=False,
@@ -11814,6 +11941,7 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         detail=(
             f"{len(names)} knowledge/docs collection(s) checked, no PDF chunk "
             "carries placeholder metadata"
+            + (f"; clean on a sample.{gaps}" if sampled else "")
         ),
     )]
 

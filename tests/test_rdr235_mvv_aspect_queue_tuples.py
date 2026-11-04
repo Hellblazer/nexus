@@ -464,12 +464,15 @@ def test_mvv_journey_on_the_tuple_queue(
     docs = [_register_doc(f"d{i:02d}", coll) for i in range(N_DOCS)]
     table_docs = [_register_doc(f"t{i}", coll) for i in range(N_TABLE_DOCS)]
 
-    # The table's pending rows are written under the explicit opt-out (a producer
-    # on an older box still writes rows); the tuple tasks after, with the variable
-    # unset, which is the default and so the producer a user gets (nexus-lnwn1).
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
-    for i, d in enumerate(table_docs):
-        db.aspect_queue.enqueue(coll, f"/nx235/table-{i}.md", content_hash="t", doc_id=d)
+    # The table's pending rows are written through the test seam (the table producer
+    # is retired, nexus-bpikw step A; a producer on an older box still wrote rows);
+    # the tuple tasks after, with the variable unset, which is the default and so the
+    # producer a user gets (nexus-lnwn1).
+    from tests._aspect_table_producer import table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+    with table_producer():
+        for i, d in enumerate(table_docs):
+            db.aspect_queue.enqueue(coll, f"/nx235/table-{i}.md", content_hash="t", doc_id=d)
     assert db.aspect_queue.pending_count() == N_TABLE_DOCS
 
     monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)

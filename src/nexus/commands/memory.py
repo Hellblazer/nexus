@@ -134,6 +134,7 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
             click.echo(result["content"])
             return
         resolved, candidates = db.memory.resolve_title(project=project, title=title)
+        hint = "" if resolved is not None or candidates else _quarantined_hint(db, project, title)
     if resolved is not None:
         click.echo(resolved["content"])
         return
@@ -147,8 +148,22 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
         lines.append("Re-run with the full title or pass --id.")
         raise click.ClickException("\n".join(lines))
     raise click.ClickException(
-        "entry not found — use: nx memory list to see available entries",
+        "entry not found — use: nx memory list to see available entries" + hint,
     )
+
+
+def _quarantined_hint(db: T2Database, project: str | None, title: str | None) -> str:
+    """A not-found title that names a quarantined row: say so, with its id and the restore command.
+
+    Read only and best effort: a failed lookup leaves the plain not-found.
+    """
+    from nexus.db.t2.http_memory_store import quarantined_row_hint  # noqa: PLC0415 — deferred: keeps CLI startup light
+    try:
+        row = db.memory.find_quarantined(project=project, title=title)
+    except Exception:  # noqa: BLE001 — a hint must not turn a not-found into another error; logged
+        _log.debug("memory_get_quarantine_hint_failed", project=project, title=title, exc_info=True)
+        return ""
+    return "\n" + quarantined_row_hint(row) if row is not None else ""
 
 
 @memory.command("search")
@@ -184,15 +199,21 @@ def search_cmd(query: str, project: str | None) -> None:
     "--quarantined",
     is_flag=True,
     default=False,
-    help="List quarantined entries (expired, hidden from every other read) instead.",
+    help=(
+        "List quarantined entries (hidden from every other read) instead: "
+        "expired ones, and ones a replace quarantined (never reaped)."
+    ),
 )
 def list_cmd(project: str | None, agent: str | None, quarantined: bool) -> None:
     """List memory entries.
 
-    With ``--quarantined``, list the entries expiry has quarantined: past their
-    TTL, hidden from get, search and list, and kept until ``nx memory reap``
-    deletes them (only once a rollup marks them) or ``nx memory restore``
-    brings one back. A "rolled up" stamp means reap will delete that entry.
+    With ``--quarantined``, list the quarantined entries, hidden from get,
+    search and list. Two kinds: an expired entry (past its TTL), kept until
+    ``nx memory reap`` deletes it, which it does only once a rollup marks it,
+    and an entry a ``memory_put`` with ``replaces`` quarantined (shown as
+    "replaced"), which a rollup skips and reap never deletes. ``nx memory
+    restore`` brings either back. A "rolled up" stamp means reap will delete
+    that entry.
     """
     if quarantined:
         with t2_handle() as db, _needs_quarantine_routes("list --quarantined"):
@@ -204,9 +225,11 @@ def list_cmd(project: str | None, agent: str | None, quarantined: bool) -> None:
             return
         for e in entries:
             mark = f", rolled up {e['rolled_up_at']}" if e.get("rolled_up_at") else ""
+            # ttl None on a quarantined row is a replace: expiry stamps only rows that have a ttl.
+            kind = "replaced" if "ttl" in e and e["ttl"] is None else "quarantined"
             click.echo(
                 f"[{e['id']}] {e['project']}/{e['title']}  "
-                f"(quarantined {e['quarantined_at']}{mark})"
+                f"({kind} {e['quarantined_at']}{mark})"
             )
         return
     with t2_handle() as db:
@@ -317,6 +340,7 @@ def reap_cmd(yes: bool) -> None:
 
     Only an entry a rollup summary already covers is deleted. An unmarked
     quarantined entry is never touched, however long it has been quarantined.
+    An entry a replace quarantined is never marked, so it is never reaped.
     Each reaped entry's topic assignments are removed too, as ``nx memory
     delete`` does; the engine's reap runs no taxonomy cascade of its own.
     """
@@ -406,9 +430,10 @@ def summaries_cmd(summary_id: int | None, project: str | None) -> None:
 @click.option("--dry-run", is_flag=True, default=False,
               help="Print the groups and their summaries; write nothing")
 def rollup_cmd(project: str, dry_run: bool) -> None:
-    """Summarize a project's quarantined entries by month and mark them for reap.
+    """Summarize a project's expired entries by month and mark them for reap.
 
-    Attended: it runs when you run it and costs one summarizer call per group,
+    Entries a replace quarantined are skipped, never marked or reaped; restore
+    or delete them by id. Attended: it runs when you run it and costs one summarizer call per group,
     and it prints the groups before making any call. Groups are by the month
     of each entry's timestamp, which is its last write (a put or a merge
     refreshes it); no creation date is kept. A summary must name every source
@@ -639,3 +664,62 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             click.echo(
                 f"Promoted: {entry['project']}/{entry['title']} -> {collection} (id={doc_id}{split_note})"
             )
+
+
+@memory.command("curate")
+@click.option("--files", "do_files", is_flag=True, default=False,
+              help="Memory-file section: unindexed, oversized, dangling index entries, declared "
+                   "replaces still present, likely near-duplicates.")
+@click.option("--t2", "do_t2", is_flag=True, default=False,
+              help="T2 section: rows a later row names as replaced, and the gate-record census flag.")
+@click.option("--agents", "do_agents", is_flag=True, default=False,
+              help="Reviewer memory section: index length, entries with no repo, concurrent-write damage.")
+@click.option("--cold", "do_cold", is_flag=True, default=False,
+              help="Cold-state section (not available until RDR-240's transcript queries exist).")
+@click.option("--days", type=click.IntRange(min=1), default=30, show_default=True,
+              help="Window for the transcript-backed rows (--files read counts, --cold).")
+def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days: int) -> None:
+    """Report what to curate: memory files, T2 rows and reviewer memory.
+
+    With no section flag, runs --files, --t2 and --agents. Prints the report and stores
+    it in T2 as <repo>/curation-report-<date> with a 90-day TTL (RDR-238); a run of only
+    some sections stores <repo>/curation-report-<date>-<sections> instead, so it never
+    replaces the day's full report. Report only:
+    it deletes and changes nothing, never blocks, and exits 0 whatever it finds; a section
+    that cannot run prints one "not available" line and the others still run.
+    """
+    from nexus import memory_curate as mc  # noqa: PLC0415 — deferred: only this verb pays for the report module
+    from nexus._hook_runtime.memory_dir import claude_config_dir, memory_dir  # noqa: PLC0415 — deferred with the report module
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred: only this verb needs the repo name
+
+    if not (do_files or do_t2 or do_agents or do_cold):
+        do_files = do_t2 = do_agents = True
+    cwd = Path.cwd()
+    repo = _repo_identity(cwd)[0]
+    now = datetime.now(timezone.utc)
+    lines = [f"Curation report {now:%Y-%m-%d} (repo: {repo}, window: {days} days)", ""]
+
+    if do_files:
+        lines += mc.section("--files", lambda: mc.files_section(memory_dir(cwd)))
+    if do_t2:
+        def _t2_lines() -> list[str]:
+            closed = mc.closed_rdr_numbers(mc.repo_toplevel(cwd))
+            with t2_handle() as db:
+                return mc.t2_section(db, repo, closed_rdrs=closed, now=now)
+
+        lines += mc.section("--t2", _t2_lines)
+    if do_agents:
+        lines += mc.section("--agents", lambda: mc.agents_section(claude_config_dir() / "agent-memory"))
+    if do_cold:
+        lines += mc.section("--cold", mc.cold_lines)
+
+    title = mc.report_title(now, files=do_files, t2=do_t2, agents=do_agents, cold=do_cold)
+    report = "\n".join(lines).rstrip("\n") + "\n"
+    click.echo(report, nl=False)
+    try:
+        with t2_handle() as db:
+            db.put(project=repo, title=title, content=report, tags="curation-report", ttl=90)
+        click.echo(f"report stored: {repo}/{title} (ttl 90 days)")
+    except Exception as exc:  # noqa: BLE001 — the report never blocks a release step; the store failing is one line
+        _log.warning("curation_report_not_stored", error=str(exc))
+        click.echo(f"report not stored: not available: {exc}")

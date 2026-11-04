@@ -908,12 +908,9 @@ Both verbs are RETIRED and always raise a `click.UsageError` regardless of the f
 
 Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163), on a non-retryable error, or when a stale reclaim finds it already at the retry cap. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues the failed table rows and revives the dead tasks of the `aspects` tuple queue, so the worker picks them up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
 
-It reads both sides. Failed table rows are handled by `NX_ASPECT_QUEUE`, which defaults to `tuples` (see [Configuration](configuration.md)):
+It reads both sides. Each failed table row is enqueued as an `aspects` task, keyed by its `doc_id`, and the failed row is then deleted from the table, so the doctor does not count it again. A failed row with no `doc_id` cannot become a task. It is skipped, the message says to re-index the document, and the remaining rows still run. The table's in-place reset (`NX_ASPECT_QUEUE=table`) is retired (nexus-bpikw): with that value set the verb prints the retirement message and exits 1 before it reads or writes (see [Configuration](configuration.md)). On an engine older than `engine-service-v0.1.169` (no `aspects` template) a failed row cannot become a task: the verb, `--dry-run` included, says to upgrade the engine and exits 1 without writing.
 
-- `NX_ASPECT_QUEUE=tuples` (the default): each failed row is enqueued as an `aspects` task, keyed by its `doc_id`, and the failed row is then deleted from the table, so the doctor does not count it again. A failed row with no `doc_id` cannot become a task. It is skipped, the message says to re-index the document, and the remaining rows still run.
-- `NX_ASPECT_QUEUE=table`: each failed row is reset in place to `pending` with `retry_count=0` and any stale backoff cleared, as before RDR-235. No tuple task is written for it.
-
-Dead tasks of the `aspects` tuple queue are revived in both modes. A dead task is written back as available with its attempts reset and its retention clock restarted. An engine with no `aspects` template has no dead tasks, and the verb then reads the table alone.
+Dead tasks of the `aspects` tuple queue are revived too. A dead task is written back as available with its attempts reset and its retention clock restarted. An engine with no `aspects` template has no dead tasks, and the verb then reads the table alone.
 
 | Flag | Description |
 |------|-------------|
@@ -1657,10 +1654,10 @@ Captures the ETag for every `https://` catalog reference that lacks one (nexus-0
 ### nx catalog backfill-meta
 
 ```
-nx catalog backfill-meta [--apply] [--json]
+nx catalog backfill-meta [--apply] [--json] [--batch-size N] [--pause-ms M] [--max-rps R] [--stop-after-failed-rounds K] [--start-after TUMBLER]
 ```
 
-One-time, fill-only stamp of the catalog `meta` keys that the RDR-236 Phase 1 homes now write at index and put time, for documents written before them (nexus-6pfgb.10). Dry run by default. A key the entry already holds (a retraction `''` / `0` / `[]` included, tested by presence, not truthiness) and a non-empty catalog column are never touched, except an indexed document's `tags` and `category`, where an absent, `None`, `''` or `[]` value is filled as a re-index would fill it (nexus-3ax49) and only a non-empty value is kept, and a key is sent only with a real value (the catalog merges `meta`; an explicit empty overwrites). A run that examines no document exits 1.
+One-time, fill-only stamp of the catalog `meta` keys that the RDR-236 Phase 1 homes now write at index and put time, for documents written before them (nexus-6pfgb.10). Dry run by default. A key the entry already holds (a retraction `''` / `0` / `[]` included, tested by presence, not truthiness) and a non-empty catalog column are never touched, except an indexed document's `tags` and `category`, where an absent, `None`, `''` or `[]` value is filled as a re-index would fill it (nexus-3ax49) and only a non-empty value is kept, and a key is sent only with a real value (the catalog merges `meta`; an explicit empty overwrites). A run that examines no document exits 1. The first line counts every live non-alias document; each key line counts only its own kind (`note.*` keys the notes, `doc.*` keys every other document), so a catalog of one note and one file reads `Examined 2 documents` and `examined 1` on every key line, and a line says `note.* keys cover the N note(s); doc.* keys cover the M non-note document(s)`; M is every live document that is not a note, a placeholder with no chunks included. A key with residue lists its reasons in parentheses.
 
 - **Notes** (`knowledge`): `ttl_days` and `put_at` come only from a chunk row the note itself wrote (`row_written_by`: stamp and title), `put_at` being that row's `indexed_at`. `tags` (written as a JSON array, a legacy comma string split once), `category` and `source_agent` come from that row or, when there is none, from a row of a chunk the note solely owns that `row_may_give_tags` allows. A note recovered that way has no TTL to give: it gets `put_at` and `ttl_days` 0 and leaves the keyless count. An entry that already holds a note key is authoritative: only `put_at` may still be filled, and only from a row with the same TTL.
 - **Indexed documents**: `extraction_method`, `quality_gate_overridden` (only where the rows say `True`), `extraction_source` (only where a row carries a value), `frecency_score` with `frecency_computed_at` (the rows' latest `indexed_at`; a score of 0 is not sent) and the catalog `author` (from `source_author`, a plain string only; where the column is empty) are copied from chunks the document solely owns, when its sampled rows (64 at most, spread over the document) agree and are no later than the document plus five minutes. `source_format` (`pdf`, `markdown`, `code` or `prose`, nexus-6pfgb.23) is not read from a chunk at all: it is derived from the entry's own `content_type` and `file_path` by the rule of the engine's `nexus.catalog_source_format` (the extension is read first: `.pdf`, or type `pdf`/`paper`, is `pdf`; `.md`/`.markdown` is `markdown` whatever the type; type `code` is `code`; type `prose`/`rdr` is `prose`), so a document whose chunks are all shared gets it too. A pair the rule derives nothing for is residue, with the reason `no_rule` (it has a path, no rule matched) or `no_file_path` (it has none and its type is outside the rules). The `--json` report carries these under `keys.doc.source_format`. `tags` (a one-element JSON array) and `category` of an indexed document are derived the same way (nexus-9cstf), by the rules the indexers stamp at register (nexus-6pfgb.8), each key on its own (open when unset: absent, `None`, `''` or `[]`) and with no chunk read, so a document whose chunks are all shared gets them too. Code: `category` `code`, `tags` the lower-cased extension. Prose and RDR: `category` `prose`, `tags` `["markdown"]` for a `.md` or `.markdown` file. Type `paper` at a `.pdf` path is what `nx index pdf` registers (`["pdf"]`, `paper`) and type `pdf` what the repo PDF path registers (`["pdf"]`, `prose`); the catalog type is the discriminator the register-time stamp keys on, and the path is read as well. A key the entry cannot settle is residue with its reason: `ambiguous_indexer` (the `tags` of a prose or RDR file that is not `.md`/`.markdown`: `nx index repo` tags the extension, `nx index md` of the same file tags `markdown`, and nothing on the entry says which ran; its `category` is still stamped; for a prose or RDR file at a `.pdf` path both keys, because `nx index pdf` of the same file would stamp `paper`), `not_pdf_path` (both keys of a `paper` whose path is not `.pdf`), `no_extension` (code with no extension), `no_file_path` (both keys of a `paper` with no path too: it is an `nx catalog backfill` placeholder, not an `nx index pdf` document), `no_rule` (a content type no indexer writes in the repo or single-file paths; `markdown`, which only the `index_markdown` fallback can register, lands here). The `--json` report carries the counts under `keys.doc.tags` and `keys.doc.category`. A legacy `tags` string is never converted here; the `note-tags-array` upgrade rung does that.
@@ -1672,6 +1669,21 @@ The dry run prints, per key, how many documents were examined, already held it, 
 |------|-------------|
 | `--apply` | Write the keys (default: dry run, counts only) |
 | `--json` | Emit JSON instead of the human-readable report |
+| `--batch-size N` | Documents examined per round (default 50, at least 1) |
+| `--pause-ms M` | Milliseconds slept after each round's reads and again after its write (default 0). Spaces the rounds; it does not bound a rate (see `--max-rps`) |
+| `--max-rps R` | A hard limit of R HTTP requests a second (a number above 0; default no limit), on every request the command sends: the catalog listing, manifest, owner and store-get pages, the writes, each gateway retry and each per-document fallback of a failed write page. The guard for a shared or cloud service |
+| `--stop-after-failed-rounds K` | Stop cleanly after K rounds in a row with a failed lookup or write (default 3; 0 never stops) |
+| `--start-after TUMBLER` | Resume: skip the listing up to and including this tumbler (the stop message prints the exact command) |
+
+**Load on a shared service.** Every pass, dry run or `--apply`, lists the whole catalog and re-reads the chunk rows of most documents: a key is filled only where it is absent, and a dry run writes nothing, so the apply that follows (and a second dry run, and every restart) costs the same read again. A round reads every collection it needs once (the chunk rows of all its notes and documents in one `store-get` per collection, 300 ids a request, not one per document; the 2026-10-31 saturation of the cloud edge was 35,700 per-document requests), so a round of 50 documents is about seven requests: a manifest page, an owner page, a `store-get` per collection it touches, and one `update_many`. A pass over 42,000 documents is therefore about 6,000 requests plus the listing's 44; `--max-rps R` makes that at least 6,000 / R seconds (about 50 minutes at `--max-rps 2`). `--max-rps` is the guard; `--pause-ms` and `--batch-size` only shape the rounds. For a cloud catalog start with `--max-rps 2` and a small `--batch-size`.
+
+**Runbook.** Keep every other writer of catalog `meta` (indexers, hooks, `nx store put`, `nx enrich`) quiet for the whole of every pass, the dry runs included, not only the apply: the listing is taken once at the start, and the write merges a key into the entry's `meta` and overwrites a value a writer set after the listing was read, so on a pass of hours the window for that is the pass. Plan the window for several passes.
+
+A progress line per round goes to stderr (every round of a short run, about 300 lines for a long one): `backfill-meta: batch 12/860, 600/43000 documents, 91 requests (1.97/s since start, 1.99/s over the last 10 rounds), 0 lookups failed, 0 writes failed, 46.2s, 13.0 docs/s, at 1.4.52`. The request count is the HTTP requests the command has sent, counted where they leave the process (listing pages, retries and fallbacks included). Stdout carries only the report, so `--json` is unchanged. A failed `store-get` for a collection withholds the row-sourced keys of the round's documents that needed it, as a failed owner lookup does, and counts them; a rerun fills them.
+
+**Stopping and resuming.** Ctrl-C (SIGINT) or SIGTERM stops after the round in progress, prints the report of the finished rounds (`--json` adds `"interrupted": true`, `batches_done`, `batches_total`, `stop_reason` and `resume_after`) and prints the command to resume, which is the same command with `--start-after <the last document of the last finished round>`. The same stop happens after `--stop-after-failed-rounds` failing rounds in a row. The verb is fill-only, so running it again, resumed or not, is safe. `--start-after` skips by position in the catalog's own listing (`ORDER BY tumbler` in the database's collation, so `1.10` can come before `1.2`; tumblers are never compared), a tumbler the listing does not hold is refused before any read, and the skipped documents still count as owners of their chunks. A resume after the last document says so and exits 0. A second SIGINT aborts the round in progress at once: that round is not in the report, and a write it had already sent may have landed. A second SIGTERM ends the process.
+
+Exit codes: 0 finished; 1 a write failed, or the run stopped on failed rounds (a failure outranks an interrupt, so 130 never hides one); 130 stopped by Ctrl-C; 143 stopped by SIGTERM; 2 a usage error.
 
 ### nx catalog backfill-collections
 
@@ -1718,7 +1730,7 @@ Validation gates fire BEFORE any side effect:
 - old name must be in the collections projection
 - old name must not already be superseded
 - new name must not already exist in T3
-- the new name's `__<model>__` token must match the old collection's catalog-row `embedding_model` (nexus-7f4o4): the engine rename keeps the row's model, so a token that disagrees would name a model the vectors are not in. The model is read from the engine row the verb has already fetched, not from the stats-view cache, so a failed listing cannot let a mismatch through. A mismatch is refused, naming both models and the name that would be accepted. A legacy old name with no row, or a row with no model, has nothing to compare and is accepted; a `disputed` source (its bytes disagree with its row) is not compared and prints a warning. `nx collection rename --force-prefix-change` gets past the same guard; it renames and never changes the row. This verb has no override of its own.
+- the new name's `__<model>__` token must match the old collection's catalog-row `embedding_model` (nexus-7f4o4): the engine rename keeps the row's model, so a token that disagrees would name a model the vectors are not in. The model is read from the engine row the verb has already fetched, not from the stats-view cache, so a failed listing cannot let a mismatch through. A mismatch is refused, naming both models and the name that would be accepted. A legacy old name with no row, or a row with no model, has nothing to compare and is accepted; a `disputed` source (its bytes disagree with its row) is not compared and prints a warning. `nx collection rename --force-prefix-change` gets past the same guard; it renames and never changes the row. This verb has no override of its own. The client also sends the token to the engine (nexus-ucagi), which refuses a disagreement with 409 `collection_model_mismatch` and writes nothing, so the check holds even when the engine row is the only thing that knows the model. The summary line adds `N aspect tasks` and `N aspect queue rows` when the engine rewrote any (nexus-l0ai3).
 
 Default is report-only; both `--no-dry-run` AND `--yes` are required to actually rename.
 
@@ -2137,6 +2149,41 @@ Needs engine-service-v0.1.133 or later. Against an older engine the verb exits 4
 
 ---
 
+### nx t3 retire-keys
+
+```
+nx t3 retire-keys --tenant ID [--dry-run | --apply] [--accept NAME=N ...] [--collection NAME] [--batch-size N] [--max-rps R] [--json]
+nx t3 retire-keys --add-check [--replace] --apply [--max-rps R] [--json]
+nx t3 retire-keys --validate --apply [--max-rps R] [--json]
+```
+
+The sweep vehicle of RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): the operator's way into the engine's `POST /v1/admin/chunk-keys/sweep`, `/add-constraints` and `/validate-constraints`. Nothing calls those routes on its own; the upgrade-ladder rung that would run the sweep on every install is a later bead that ships after a cloud dry run has been read. The allowed keys, the bypass prefixes and the quarantine implication are rendered from the key table (`src/nexus/tables/chunk-metadata-keys.toml`) into every request, because the engine cannot name the ROW keys; the engine pins what it receives (the ROW keys by a digest generated from the table, the bypass set exactly the quarantine and taxonomy prefixes, the implication pair) and answers 400 to a plan that differs, since a dropped key would be stripped from every row and an extra prefix would exempt a collection from the CHECK for good.
+
+Order, per install: dry run for each tenant, `--apply` for each tenant, then `--add-check --apply` once, then `--validate --apply` once.
+
+**The sweep (`--tenant`).** Strips every metadata key the allow-list (the CHUNK and ROW keys) does not name from the chunk rows of the tenant the credential is bound to, in batches of up to 1000 rows. The verb reads the tenant back from the engine's answer and refuses (exit 2) when it is not `ID`: a token is bound to one tenant, so run it with that tenant's `NX_SERVICE_TOKEN`. The default is a dry run, which writes nothing, locks no row and runs no UPDATE (not even one that is rolled back); `--dry-run` spells that out and `--apply` writes. The dry run prints, per collection, the rows with a retired key, how many are swept and how many are left alone, then the preconditions and the time of the batch SELECT on up to three collections. That figure is the SELECT only, so the projected duration is a lower bound: the update half of a batch is not measured, and the first applied batch prints its real time. A `quarantine-` or `taxonomy` collection is never swept, a row whose chash is not 32 bytes is left alone (the width CHECK would refuse the update), a row whose metadata is not a JSON object is skipped and counted (`non_object_metadata_rows`), and a collection whose manifest-less census reads `legacy-unmanifested` above zero (or could not be read, `census_unread`) is skipped and reported as blocked. The sweep does not set `last_written_at`. It works in keyset order, so a row it could not take (locked by a writer) is not read again until the pass wraps; a run is done only when a pass from the start finds nothing, and rows still held by a lock are reported (`locked_skipped_rows`) with the run not done. The engine checks the preconditions and runs the census once per run, on the first apply call; the verb passes the continuation the engine returns to each later call, so a large tenant's 8-second budget is spent on batches.
+
+*Preconditions.* The engine counts, per tenant: `legacy_label_rows`, `keyless_notes`, `keyless_ttl_rows`, `homeless_documents`, `null_span_rows` (per manifest span column that is NULL while the row holds the matching key) and `generated_nulls` (printed by content type and by which of `source_format`, `tags`, `category` is missing), the residues the sweep would leave without a home. An operator accepts each with `--accept NAME=N`: up to N rows. Apply is refused with exit 3 while a live count is above what was accepted, so a count that grows between the dry run and the apply blocks it. For the constraint steps the engine also counts `chunk_text_hash_mismatch`, `embedding_model_mismatch`, `wrong_width_rows`, `row_keys_on_live_rows` and `quarantine_implication_violations`. `--collection` limits an apply to one collection; `--batch-size` sets the rows per batch.
+
+**The CHECKs (`--add-check`, `--validate`).** Table-wide and operator only (the root token); both write and need `--apply`, and without it exit 2 (they have no dry run: the sweep's is the rehearsal). The engine first reads every tenant with chunk rows on its admin connection, a tenant with no `service_tokens` row included, and names the tenants it checked. `--add-check` adds the allow-list CHECK, the `chunk_text_hash` equality, the `embedding_model` equality and the quarantine implication to `nexus.chunks`, all NOT VALID, and is refused (exit 1, the tenants named) while a tenant has rows the sweep can still take, a hash or model that differs from its column, a chash that is not 32 bytes, a half-stamped quarantine row, or retired-key rows the sweep's own view cannot account for. A constraint that already exists is compared with the definition the key table would add: `present` when equal, `present_differs` (with the expected definition) when not, and `--replace` drops and re-adds each in one statement, which is how a changed key table reaches the database; a constraint that was VALID is NOT VALID after `--replace` until `--validate` runs again, and the output says so. `--validate` validates those four and the existing `chunks_chash_octet_check`, reading `pg_constraint.convalidated` first, and is refused while any tenant still holds a retired key (blocked collections included) or breaks an equality or the width. Neither is ever run by a startup changeset. A run is several statements and none is rolled back: after a `lock_timeout` refusal an earlier constraint may already have landed, and a rerun is safe.
+
+`--max-rps` holds every request the verb sends to that rate (the request gate, nexus-ldf2s); against a managed service start with `--max-rps 2`. An apply goes through the production-write guard: from a development checkout it needs `NX_ALLOW_PROD_WRITE` with a reason. DATA EFFECT of an apply: each swept row loses its retired keys and nothing else on the row changes. DATA EFFECT of `--add-check`: a write that carries a key outside the allow-list, an unequal hash or model, or `quarantined_by` without `quarantined_at` is refused by the database (SQLSTATE 23514), and so is any UPDATE of a row that still holds a retired key, because a NOT VALID CHECK is evaluated on every new row version. Those are the rows the sweep leaves in a blocked collection; the output names them per tenant, and they stay frozen until fixed, and VALIDATE cannot pass while they stand.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Done (or a dry run reported). |
+| 1 | A call failed, or the engine refused a table-wide step and named the tenants. |
+| 2 | A usage error (a malformed `--accept`, `--add-check` or `--validate` without `--apply`), or the credential is bound to a tenant other than `--tenant`. |
+| 3 | A sweep precondition is non-zero and not accepted. |
+| 4 | The connected engine predates the routes. |
+| 5 | The apply stalled: three calls in a row swept nothing while rows remain. |
+
+Needs the engine release that carries nexus-6pfgb.43.
+
+---
+
 ### nx t3 quarantine restore
 
 ```
@@ -2155,27 +2202,27 @@ Moves chunks from a collection's `quarantine-` sibling back to the collection (R
 
 What happens, in one engine statement under the exclusive sweep gate (a manifest writer holding the collection's gate, or an owning document's index-run lock, makes it wait 2 seconds and then fail with nothing moved: exit 6):
 
-- The chunk MOVES: it leaves the quarantine sibling and becomes a row of the collection with its text, vector and `created_at` intact. The quarantine stamp (`quarantined_at`, `origin_collection`) and the reaper's own tags (`quarantined_by`, `reaper_quarantined_at`) are removed from its metadata. The collection must be live (not `dormant` or `disputed`).
+- The chunk MOVES: it leaves the quarantine sibling and becomes a row of the collection with its text, vector and `created_at` intact. Its metadata is reduced to the chunk keys of the key table (`chunk_text_hash`, `embedding_model`, derived from the row's columns): the quarantine stamp (`quarantined_at`, `origin_collection`), the reaper's own tags (`quarantined_by`, `reaper_quarantined_at`) and every document key (`catalog_doc_id`, `doc_id`, `chunk_index`, `title`, `content_hash`, ...) are removed on restore, because the collection's metadata allow-list (RDR-236 Phase 4) refuses them and the catalog is where a document key lives. The collection must be live (not `dormant` or `disputed`).
 - A chunk the collection already holds is skipped, never overwritten, and reported `present`; its quarantine copy is left for expiry. A second restore of the same chashes therefore reads `present` for all of them. A chunk that is nowhere in this collection's quarantine sibling, and not in the collection either, reports `missing`; so does a chunk another collection quarantined into the same sibling. `dim_conflict` is `present` with a different embedding width in the quarantine copy: nothing is overwritten, and it means the collection's model identity needs a look.
-- **Reattach (`--reattach`, the default).** A chunk with no live owning manifest row is hidden from search and get, so a restore that moved bytes only would hand back text nothing shows. When the restored chunk's metadata names a document that is still live in the collection (its `catalog_doc_id` or `doc_id`, or a single live note whose own `doc_id` is the chunk), the engine also writes that document's manifest row at the chunk's `chunk_index` (0 for a one-chunk document) and the chunk is returned by search and get again. **Reach:** only chunks that name their document: chunks written before RDR-108, chunks `nx store put` wrote, and single-chunk legacy notes. A chunk the indexer cut from a file (`docs__`, `code__`, `rdr__`) carries no key, reads `no_live_owner` even when its file's document is live, and returns as bytes; re-index the file. It writes nothing, and the row reads `superseded` with a `reason` (`complete`, `indexing`, `failed`, `version`, `position_taken`, `rival`, `other_collection`, `has_rows`, `past_end`), when the document is stamped complete (its manifest is authoritative, so a manifest-less chunk of it is stale), is mid index run or its last index run failed (its manifest is partial), was cut from another content hash, already holds a chunk at that position, has the position past its registered chunk count or manifest rows under another collection, or when another stored chunk, in the collection or in the quarantine sibling, names the same document and position (so two versions split across pages or calls are both refused). The manifest is never changed to make room, and the document's `chunk_count` is not touched, so a multi-chunk document can end up partly attached; the output says `M of N attached: restore the rest or re-index it`. `--no-reattach` moves the bytes only; the output still says what reattach would have done, and running the verb again with reattach on attaches the chunk (it reads `present`, `attached`).
-- **A chunk that is not attached stays hidden, and the output says what to do about it.** `no_live_owner` (no document named, tombstoned, registered under another collection, or ambiguous) and `no_position` (a live owner of several chunks and no `chunk_index` on the chunk) are restored as bytes only. In a `knowledge__` collection the output prints `nx store put - --collection C --title 'T'` with the owner's title and tumbler (or the chunk's own title when none is named): re-put your copy of the note under that title and the new chunk is manifested under the same document. In a `docs__`, `code__` or `rdr__` collection it says the owning file is probably still indexed but its chunks carry no key, and to re-index it (`nx index repo --force`, or `nx index pdf` / `md` / `rdr`); a re-put there would mint a stray note. A `superseded` chunk gets neither: its document's current text is live, so nothing is needed unless you want the old text (a mid-index-run document: run again when it finishes; a `rival`: compare the text and decide). The reaper may take a hidden chunk again 30 days after the restore; the output prints that date. `nx t3 backfill-manifest` does nothing for this class.
+- **Reattach (`--reattach`, the default).** A chunk with no live owning manifest row is hidden from search and get, so a restore that moved bytes only would hand back text nothing shows. When the restored chunk's metadata names a document that is still live in the collection (its `catalog_doc_id` or `doc_id`, or a single live note whose own `doc_id` is the chunk), the engine also writes that document's manifest row at the chunk's `chunk_index` (0 for a one-chunk document) and the chunk is returned by search and get again. **Reach:** only chunks that name their document: chunks written before RDR-108, chunks `nx store put` wrote, and single-chunk legacy notes. A chunk the indexer cut from a file (`docs__`, `code__`, `rdr__`) carries no key, reads `no_live_owner` even when its file's document is live, and returns as bytes; re-index the file. It writes nothing, and the row reads `superseded` with a `reason` (`complete`, `indexing`, `failed`, `version`, `position_taken`, `rival`, `other_collection`, `has_rows`, `past_end`), when the document is stamped complete (its manifest is authoritative, so a manifest-less chunk of it is stale), is mid index run or its last index run failed (its manifest is partial), was cut from another content hash, already holds a chunk at that position, has the position past its registered chunk count or manifest rows under another collection, or when another stored chunk, in the collection or in any quarantine collection of the origin, names the same document and position (`rival`). A `rival` chunk is **not restored**: it stays in quarantine with the keys it came with, its row reads outcome `kept` (reattach `superseded`, reason `rival`), and the verb exits 1. So is a chunk whose owning document is mid index run (reason `indexing`) or whose last index run failed (reason `failed`): those states end, and the remedy (run the verb again once the run has finished; for `failed`, re-index first) needs the keys a move would delete, so the rerun attaches the chunk. The other version is still a stored chunk naming the position, so it is refused the same way on the next page of a window or audit selection, in the next call, in either order, across quarantine collections and on the retry of a busy call; neither version is ever attached alone. The manifest is never changed to make room, and the document's `chunk_count` is not touched, so a multi-chunk document can end up partly attached; the output says `M of N attached: restore the rest or re-index it`. `--no-reattach` moves the bytes only; the output still says what reattach would have done. **A `--no-reattach` restore cannot be finished by running the verb again, except for a note:** the document keys that tell the verb where a chunk belongs live on the quarantine copy and go with it when the chunk moves, so a chunk whose owner was named by its own `catalog_doc_id` or `doc_id` loses that link; its row reads reason `owner_link_dropped` (reattach `attach`, `attached` false, owner and position naming what is lost), the output prints a warning that recommends the default, and a rerun reads `no_live_owner`. A live note that names the chunk by its own `doc_id` is still attached on a rerun. Restore with reattach, the default, to attach in the same call.
+- **A chunk that is not attached stays hidden, and the output says what to do about it.** `no_live_owner` (no document named, tombstoned, registered under another collection, or ambiguous) and `no_position` (a live owner of several chunks and no `chunk_index` on the chunk) are restored as bytes only. In a `knowledge__` collection the output prints `nx store put - --collection C --title 'T'` with the owner's title and tumbler (or the chunk's own title when none is named): re-put your copy of the note under that title and the new chunk is manifested under the same document. In a `docs__`, `code__` or `rdr__` collection it says the owning file is probably still indexed but its chunks carry no key, and to re-index it (`nx index repo --force`, or `nx index pdf` / `md` / `rdr`); a re-put there would mint a stray note. A `superseded` chunk gets neither: its document's current text is live, so nothing is needed unless you want the old text (a `rival`, a mid-index-run document and a failed run are not restored at all, see `kept` above: re-index the document or re-put the note, since `nx store get` does not read the quarantine copies; or, for a run in progress or failed, run again when the run has finished, within 14 days of the quarantine). The reaper may take a hidden chunk again 30 days after the restore; the output prints that date. `nx t3 backfill-manifest` does nothing for this class.
 - The restored chunk's `last_written_at` is set to the restore time, so the reaper's grace starts over and the next hourly pass does not take it. An attached chunk has an owner and is not the reaper's at all.
 - One `gc_audit` row per call that restores or attaches anything (`operation=quarantine_restore`, the collection, `actor` naming this verb and the login, the FULL list of chashes restored or attached, and `details` with the quarantine collection, the source audit id, the counts and chashes of each outcome, the reattach counts and the date the reaper may take unattached chunks again, in UTC). Read it with `nx catalog gc-audit list --operation quarantine_restore`. A dry run writes none.
 - Tenant-scoped under row-level security: another tenant's chunk reads `missing`, another tenant's audit id reads as no such row, and another tenant's document is never an owner.
 
-`--dry-run` classifies every chunk (`would restore`, `present`, `dim_conflict`, `missing`) and, for each, what reattach would do (`would attach`, `superseded`, `no_live_owner`, `no_position`), and moves nothing. The output is a table of chash, outcome and a note, then the totals, the reattach tally, the audit row ids and, for chunks that would stay hidden, the recipe and the date they become reapable. More than 100 rows print the first 100; `--json` carries every row (with `reattach`, `reason`, `attached`, `owner`, `owner_title`, `position`, `chunk_title`, `owner_rows`, `owner_chunks`), `reattach_totals`, `hidden` (how many restored or present chunks stay hidden), `owners` and `partial_owners` (per owner: `attached`, `manifest_rows`, `chunk_count`) and `reapable_again_after` (the earliest such date).
+`--dry-run` classifies every chunk (`would restore`, `present`, `dim_conflict`, `kept`, `missing`) and, for each, what reattach would do (`would attach`, `superseded`, `no_live_owner`, `no_position`), and moves nothing. The output is a table of chash, outcome and a note, then the totals, the reattach tally, the audit row ids and, for chunks that would stay hidden, the recipe and the date they become reapable. More than 100 rows print the first 100; `--json` carries every row (with `reattach`, `reason`, `attached`, `owner`, `owner_title`, `position`, `chunk_title`, `owner_rows`, `owner_chunks`), `reattach_totals`, `hidden` (how many restored or present chunks stay hidden), `owners` and `partial_owners` (per owner: `attached`, `manifest_rows`, `chunk_count`) and `reapable_again_after` (the earliest such date).
 
 Exit codes:
 
 | Code | Meaning |
 |------|---------|
 | 0 | Every requested chunk was restored or was already present, and is visible to search and get (attached, or already owned). |
-| 1 | A requested chunk is missing from quarantine, or its embedding width conflicts. The rest were still restored. A dry run exits 1 for the same reasons, since a real run would leave them too. Wins over 3. |
+| 1 | A requested chunk is missing from quarantine, its embedding width conflicts, or it was kept in quarantine (a `rival`, or an owner mid index run or with a failed run). The rest were still restored. A dry run exits 1 for the same reasons, since a real run would leave them too. Wins over 3. |
 | 2 | A bad option (no source, two sources, a malformed chash, a bad date); nothing was sent. |
 | 3 | Every requested chunk is back, but at least one stays hidden from search and get: no live owner names it, reattach refused it (`superseded`), or `--no-reattach` left it. A dry run exits 3 when a real run would leave it hidden. `--json` carries the count as `hidden`. |
 | 4 | The connected engine predates the route. Upgrade it (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`). |
 | 5 | The engine refused the request or failed: a sample-only audit row, an audit row for another collection or quarantine collection, a collection that is not registered or not live, a transient 5xx; or the client hit an unexpected error. One line on stderr says which. |
-| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held a lock for more than 2 seconds, or the call lost a deadlock with another writer. The busy statement rolled back. Each quarantine collection is restored in its own transaction, so the message says whether an earlier one had already committed (`nothing_moved: false` on the wire) and names its `gc_audit` ids, which `--json` also puts in `audit_ids`; a chunk it restored reads `present` on the rerun. Run the same command again. |
+| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held a lock for more than 2 seconds, or the call lost a deadlock with another writer. The busy statement rolled back. Each quarantine collection is restored in its own transaction, so the message says whether an earlier one had already committed (`nothing_moved: false` on the wire) and names its `gc_audit` ids, which `--json` also puts in `audit_ids`; a chunk it restored reads `present` on the rerun, and a chunk kept in quarantine (a `rival`, an `indexing` or a `failed` owner) is kept again. Run the same command again. |
 
 A failure on a later page (exit 4, 5 or 6) still prints the report, the totals and the `gc_audit` ids of the pages already committed, then the error; `--json` keeps its one document and adds an `error` key. The verb pages itself: chashes go in batches of 1000, an audit row by offset, a window by chash cursor. Needs the engine and the client from the same release (the route first ships in the engine that carries changeset `vectors-025`); against an older engine it exits 4.
 
@@ -2442,7 +2489,7 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 
 | Subcommand | Description |
 |------------|-------------|
-| `put FILE_OR_DASH` | Store document (use `-` for stdin) |
+| `put FILE_OR_DASH` | Store document (use `-` for stdin). `--entity-key KEY` stamps a stable identifier such as `CUST-0018` into the catalog document's metadata (see [Configuration](configuration.md#entity-keys)); refused on a `code__` collection, over 256 characters or with a control character |
 | `get DOC_ID` | Retrieve entry by 64-char hex ID (from `nx store list`) |
 | `list` | List stored entries |
 | `delete` | Delete a single entry by ID or title |
@@ -2703,19 +2750,20 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `get [ID]` | Read entry by numeric ID |
 | `get --project NAME --title NAME` | Read entry by project + title |
 | `search QUERY` | Keyword search (served by the engine's Postgres full-text index) |
-| `list` | List entries (`--quarantined`: the quarantined entries instead) |
+| `list` | List entries (`--quarantined`: the quarantined entries instead, expired and replaced) |
 | `delete` | Delete one or more entries, a quarantined one included |
 | `expire` | Quarantine expired entries (hidden, not deleted) |
 | `reap` | Delete the quarantined entries that carry a rollup mark |
 | `restore ID` | Bring a quarantined entry back as a permanent entry |
 | `summaries [ID]` | List rollup summaries, or show one by ID |
-| `rollup --project NAME` | Summarize a project's quarantined entries by month and mark them for `reap` |
+| `rollup --project NAME` | Summarize a project's expired entries by month and mark them for `reap` |
+| `curate [--files] [--t2] [--agents] [--cold] [--days N]` | Report what to curate: memory files, T2 rows, reviewer memory (report only; stored in T2) |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
-**Quarantine (RDR-207).** Expiry does not delete. An entry past its TTL is quarantined: `get`, `search` and `list` stop showing it, but the row stays in the table. That is why an entry you expected to be gone can still exist while nothing finds it.
+**Quarantine (RDR-207, RDR-238).** Expiry does not delete. An entry past its TTL is quarantined: `get`, `search` and `list` stop showing it, but the row stays in the table. That is why an entry you expected to be gone can still exist while nothing finds it. A `memory_put` with `replaces` quarantines the entry it names in the same way, in the same write as the new entry. The replaced entry is never rolled up and never reaped: it stays until you restore it or delete it by id. `nx memory list --quarantined` shows it as "replaced", and `nx memory get --project P --title T` on its old title says it is quarantined and gives the restore command.
 
-- `nx memory list --quarantined [--project NAME]` shows the quarantined entries with the time each was quarantined. An entry that also shows "rolled up" is covered by a rollup summary.
-- `nx memory reap` deletes only quarantined entries that carry a rollup mark, and removes their topic assignments. It has no age horizon: an unmarked entry stays quarantined however old it is. It lists what it will delete and asks first; `-y` / `--yes` skips the prompt.
+- `nx memory list --quarantined [--project NAME]` shows the quarantined entries with the time each was quarantined. An entry that also shows "rolled up" is covered by a rollup summary. An entry shown as "replaced" was quarantined by a replace and is never reaped.
+- `nx memory reap` deletes only quarantined entries that carry a rollup mark, and removes their topic assignments. A replaced entry never carries a mark. It has no age horizon: an unmarked entry stays quarantined however old it is. It lists what it will delete and asks first; `-y` / `--yes` skips the prompt.
 - `nx memory restore ID` brings an entry back as permanent. It does not re-enter its old TTL, and any rollup mark is cleared.
 - `nx memory delete --id ID` (or `--project` + `--title`) deletes one quarantined entry outright. You do not restore it first. `--all` covers only live entries.
 - `nx memory promote` reads the entry the way `get` does, so it reports a quarantined entry as not found. Restore the entry first, then promote it. Delete and promote differ because the design names delete as the way to remove a quarantined entry and names no promote for one.
@@ -2725,7 +2773,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 **`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
-**`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name), `--quarantined` (list quarantined entries instead)
+**`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name), `--quarantined` (list quarantined entries instead, expired and replaced)
 
 **`reap` flags:** `-y` / `--yes` (skip the confirmation prompt)
 
@@ -2733,7 +2781,16 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 **`rollup` flags:** `-p` / `--project NAME` (required), `--dry-run` (print the groups and their summaries; write nothing)
 
-`nx memory rollup` is the attended step that makes quarantined entries reapable. It groups one project's unmarked quarantined entries by month and prints the groups before doing anything; the cost is one summarizer call (`claude -p`, the same path `operator_summarize` uses) per group. The month is that of each entry's timestamp, which is its last write, since a put or a merge refreshes it and no creation date is kept. A summary must contain every source entry's title, or that group is reported and left unmarked; this is a floor, not a check that the summary is faithful. A group that passes is stored as a summary and its entries are marked, one group at a time. A group that fails (the summarizer errors, the title check fails, one of its entries was restored or re-put while its summary was being written, or the engine refuses the summary) is reported, the other groups still run, and the command exits nonzero. Marking deletes nothing: `nx memory reap` does that later, and `nx memory restore` still brings an entry back until then.
+`nx memory rollup` is the attended step that makes expired entries reapable. It groups one project's unmarked expired entries by month (entries a replace quarantined are skipped, and the engine refuses them as summary sources) and prints the groups before doing anything; the cost is one summarizer call (`claude -p`, the same path `operator_summarize` uses) per group. The month is that of each entry's timestamp, which is its last write, since a put or a merge refreshes it and no creation date is kept. A summary must contain every source entry's title, or that group is reported and left unmarked; this is a floor, not a check that the summary is faithful. A group that passes is stored as a summary and its entries are marked, one group at a time. A group that fails (the summarizer errors, the title check fails, one of its entries was restored or re-put while its summary was being written, or the engine refuses the summary) is reported, the other groups still run, and the command exits nonzero. Marking deletes nothing: `nx memory reap` does that later, and `nx memory restore` still brings an entry back until then.
+
+**`curate` flags:** `--files`, `--t2`, `--agents`, `--cold` (each selects a section; with none, the first three run), `--days N` (default 30; the window for the transcript-backed rows)
+
+`nx memory curate` (RDR-238) prints a curation report and stores it in T2 as `<repo>/curation-report-<YYYY-MM-DD>` with a 90-day TTL (tag `curation-report`; the repo name is the primary checkout's, so a worktree reports under it). A run that selects fewer than `--files`, `--t2` and `--agents` stores `<repo>/curation-report-<YYYY-MM-DD>-<sections>` (for example `-files` or `-t2-agents`) instead, so a partial run never replaces the day's full report. It only lists: it deletes, quarantines and edits nothing, and it exits 0 whatever it finds. A section that cannot run (T2 unreachable, no memory directory) prints one `not available: <reason>` line and the others still run. The 90-day TTL puts each report on RDR-207's quarantine path; only a rolled-up row is ever reaped, so old reports stay quarantined.
+
+- `--files` reads the repository's Claude Code memory directory. The directory is found by `nexus._hook_runtime.memory_dir.memory_dir`, the function the SessionStart curation hook shares: `autoMemoryDirectory` from `.claude/settings.local.json`, `.claude/settings.json` (in the working directory, then the primary checkout) or `<config dir>/settings.json` when one holds an absolute or `~/` path to an existing directory; otherwise `<config dir>/projects/<key>/memory`, where `<config dir>` is `$CLAUDE_CONFIG_DIR` or `~/.claude` and `<key>` is the primary checkout's absolute path with every non-alphanumeric character replaced by `-`. A linked worktree reports its primary's directory; the primary is found by reading `.git` (a directory, or a `gitdir:` file and its `commondir`), with no process spawned, and git is asked only when `GIT_DIR` or `GIT_COMMON_DIR` is set or the layout is unrecognised. The section lists: files named in neither `MEMORY.md` nor `MEMORY-ondemand.md` (the two index files are never listed, and are exempt from the size check); files over 8192 bytes; index links naming a missing file; files that another file names in its frontmatter `replaces:` and that still exist (the writer should delete the old file); and **likely near-duplicates**, for you to review and never acted on. There is no rule that infers a file was replaced without saying so (Sam's decision S-7); a file declares supersession with `replaces: <slug>` in its frontmatter, and the near-duplicate list is the only help for the ones that did not. The near-duplicate measure is the Jaccard overlap of the tokens of each file's frontmatter `name` (its file name if absent) and `description`: lowercase `[a-z0-9]+` words of two or more characters minus a short stopword list; a pair is listed at overlap 0.5 or more, and a file with fewer than four tokens is not compared. The row for unread files prints `not available` until RDR-240's `memory` query exists (nexus-qo7ie.18).
+- `--t2` reads every live row of the repository's T2 projects (the repo name and `<repo>_*`; one large read for a big project) and lists the rows that a later row names as replaced: a line in the later row's title or body of the form `replaces: <title>` or `supersedes <title>` (several titles separated by `,` or `;`, or in backticks), where the title matches a row of the same project exactly and is older than the row that names it. Rows carrying an audit tag from the AUDIT_TAGS table (`src/nexus/tables/audit-tags.toml`, whole-tag match) or matching its title backstop are skipped, and the count skipped is printed. A title that is only a number (`100`, `RDR-107`: an incidental number after `supersedes` names an RDR, not a row) is never a candidate, and neither is a row already tagged `superseded`. The read returns live rows only, so a quarantined row is never listed. It also prints the RDR-209 Phase 3 Step 4 census: gate records (tag `gate` or `kind:gate`, in `<repo>` and `<repo>_rdr`) older than 30 days, with no TTL, whose phase is closed. The phase is the RDR the record belongs to (its `rdr:<NNN>` tag, or the leading number of its title in `<repo>_rdr`), and "phase closed" is read as that RDR's frontmatter `status` being `closed` (a closed phase of a still-open RDR is not flagged; per-phase flagging is nexus-qo7ie.28), read from the working tree's RDR directory (`docs/rdr`, or the first `indexing.rdr_paths` entry in `.nexus.yml`). A gate record that maps to no RDR is counted and not judged.
+- `--agents` reads each `<config dir>/agent-memory/<agent>/` directory that holds a `MEMORY.md` (the reviewers' own memory). Per directory: index length (the reviewer definitions say to keep it under 40 lines, so 40 or more is flagged); entries (`- [title](file.md) ...`) whose line and linked file name no repo (one of `repo: <name>`, `learned in <name>` or `<name> repo`; a generic word such as `whole`, `this`, `any`, `git` or a language name like `Java` is not a name, so `whole repo` and `the Java repo` do not count); and four signs of concurrent-write damage, since two sessions running one reviewer edit one `MEMORY.md` and the last writer wins: a duplicate entry (an identical line, or two entries linking one file), a truncated last line (no final newline and a bullet that does not close, down to a line cut to just `-`), a dangling entry (links a file the directory lacks), and an orphan file (no index line names it).
+- `--cold` prints `not available` and the reason until RDR-238 Phase 3 Step 3.
 
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
 
@@ -2906,7 +2963,7 @@ The `reindex` command performs a pre-delete safety check before wiping the colle
 |------|-------------|
 | `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`) OR a same-prefix rename whose embedding-model segment differs (6.3.1, nexus-tcvpn). Rename never re-embeds, so either change leaves the vectors in the OLD model space under a name claiming the new one — use only when you know the vectors already match the target name (cross-model moves use `nx collection re-embed NAME --to MODEL` or a re-index into the new model's collection) |
 
-**Model-token guard (nexus-7f4o4).** The engine keeps the source collection's catalog-row `embedding_model` across a rename. When the new name is conformant, its `__<model>__` token is therefore compared with the SOURCE ROW's model, not with a model read from the old name; the old name of a legacy collection says nothing reliable (a bge-row `docs__foo` reads as voyage). A mismatch is refused with a message naming both models and the name that would be accepted, and `--force-prefix-change` overrides it. The flag only renames: the row keeps its model, so it is for a rename the operator knows is right, not a repair of the row. A `disputed` source (its bytes disagree with its row) is not compared and prints a warning. With no row behind the old name the comparison falls back to the models the two names derive, as before; a non-conformant new name carries no token and keeps the name-to-name comparison.
+**Model-token guard (nexus-7f4o4).** The engine keeps the source collection's catalog-row `embedding_model` across a rename. When the new name is conformant, its `__<model>__` token is therefore compared with the SOURCE ROW's model, not with a model read from the old name; the old name of a legacy collection says nothing reliable (a bge-row `docs__foo` reads as voyage). A mismatch is refused with a message naming both models and the name that would be accepted, and `--force-prefix-change` overrides it. The flag only renames: the row keeps its model, so it is for a rename the operator knows is right, not a repair of the row. A `disputed` source (its bytes disagree with its row) is not compared and prints a warning. The engine repeats the check (nexus-ucagi): the data plane sends the new name's token and the engine answers 409 `collection_model_mismatch` with nothing written; `--force-prefix-change` withholds the token, so it still overrides. The summary line adds `N aspect tasks` and `N aspect queue rows` when the engine rewrote any (nexus-l0ai3). With no row behind the old name the comparison falls back to the models the two names derive, as before; a non-conformant new name carries no token and keeps the name-to-name comparison.
 
 Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through every collection-scoped engine table — chunks, taxonomy (assignments, topics, meta, centroids), aspects, highlights, telemetry, and the catalog documents/collection registration (service-backed Postgres; `chash_index` is retired, RDR-187). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
 
@@ -3713,7 +3770,7 @@ nx doctor --check-quotas            # Vector-store limits + embedder caps + rera
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
-The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3` in cloud mode, the active local embedder in local mode); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3` in cloud mode, the active local embedder in local mode), and in local mode `voyage.engine`, what the running engine's `/version` says it serves; the engine embeds with the posture it booted with (RDR-210), so a model this config writes with that the engine does not serve is a warning naming the restart command (nexus-9oplr); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
 
 For a small-window local embedder (nexus-ajvjx, nexus-spujb), the `voyage` section also reports the model's token window: `max_tokens`, whether chunks are actually checked against it (`enforced`), and the tokenizer file that decides that. When the tokenizer cannot be loaded from disk, `enforced` is `false` and the human-readable report prints a warning line naming the missing tokenizer path — chunks past the model's token window are silently left out of the vector rather than refused, so this line is the visible backstop for that warn-and-skip behavior; the fix is to re-provision the local model (`nx init`).
 
@@ -3737,7 +3794,7 @@ nx doctor --check-index-failures     # Surface the durable index-failures backlo
 
 The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reads the live service queue, not the local file. It counts two sides. The table side is `aspect_extraction_queue`: its pending rows and its failed rows. The tuple side is the `aspects` tuple queue that `NX_ASPECT_QUEUE` moves work onto (RDR-235): its available tasks count as pending, its dead tasks count as failed, and its claimed tasks are in flight and count as neither. The report prints one `aspect_extraction_queue:` line with the combined pending and failed totals. It adds a `  tuple queue (aspects): N available, N claimed (in flight, not pending), N dead` line when the tuple side has any tasks, and `  dead tuple tasks: nx tuple stats aspects` when it has dead ones. Under the failed total it lists up to 20 failed table rows with their collection, source path and retry count, then points at `nx aspects requeue-failed`. The service list endpoint does not carry `last_error`, so the failure text is in the worker logs. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring.
 
-Exit codes. A pending backlog never fails the check. A WARN line on stderr says the worker is idle when rows are pending and `claude` is not on PATH with no `anthropic_api_key` set, and that does not change the exit code. A transport failure to the service prints `Queue depth UNKNOWN` on stderr and exits 0, so it reports neither pass nor fail. If the tuple side cannot be read, the report prints the table side's figures with `tuple queue (aspects) UNKNOWN` on stderr and no combined count, and the exit code follows the table side alone. Any failed count, meaning failed table rows plus tuple dead tasks, above zero exits 1 with a `✗ FAIL: N failed aspect-extraction row(s) in the queue.` marker on stderr, matching the other promoted supplementary checks (nexus-fylxo).
+Exit codes. A pending backlog never fails the check. A WARN line on stderr says the worker is idle when rows are pending and `claude` is not on PATH with no `anthropic_api_key` set, and that does not change the exit code. A second WARN, with the same exit code, says rows are pending, `claude` is available and no aspect worker holds a lease: a worker exits after an hour without the engine and only the next store or index starts another, so a backlog from before an outage sits until then; it names `nx daemon aspect-worker start` as the remedy. A transport failure to the service prints `Queue depth UNKNOWN` on stderr and exits 0, so it reports neither pass nor fail. If the tuple side cannot be read, the report prints the table side's figures with `tuple queue (aspects) UNKNOWN` on stderr and no combined count, and the exit code follows the table side alone. Any failed count, meaning failed table rows plus tuple dead tasks, above zero exits 1 with a `✗ FAIL: N failed aspect-extraction row(s) in the queue.` marker on stderr, matching the other promoted supplementary checks (nexus-fylxo).
 
 The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any UNACKNOWLEDGED failure — never the all-time total, and never a failure an operator has durably acknowledged. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Two rounds of scoping close two separate traps found in review: (1) an unscoped all-time gate turned the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever — fixed by gating on the latest run instead, with a failure older than 30 days no longer gating at all (self-heals over time with no operator action); (2) staleness alone did not self-heal a corpus re-indexed on a cadence SHORTER than that window, since every run mints a fresh run id for the identical recurring failure — fixed by `nx index failures --acknowledge`, a durable adjudication the gate excludes regardless of how many times it recurs under a new run id. `nx index failures --clear` remains the immediate one-time remedy for a failure an operator has already handled and does not want to wait out the staleness window for. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days), unacknowledged latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
 
@@ -4022,7 +4079,9 @@ and the RDR-200 continuation handoff) each issue their own deferred use-count
 bump paired with their own terminal write, so no path records an outcome
 without having counted its use. One consequence: `last_used` now moves at the
 end of a run rather than the start, later by the run's duration (up to about
-80 seconds at p50 — nothing reads it at finer resolution than that).
+80 seconds at p50 — nothing reads it at finer resolution than that). It moves
+only while the plan is inside its TTL: a run on an expired plan counts but
+leaves `last_used` alone, so the plan stays expired (nexus-i1eb4).
 
 ### nx plan delete
 
@@ -4171,7 +4230,7 @@ T2 daemon that exits instantly by design, forever. Each leg is
 independent — a failure in one (even a missing `ps` binary on minimal
 containers) never blocks the others.
 
-The engine leg prints one `engine:` line when it has no convergence action to report, and that line describes the running service as well as the disk (nexus-bivz3.25). It says `engine: converged` only when the running service reports the release's engine version. With the service down it prints `engine: installed engine is vX (the release dependency); the service is not running (<reason>). Start it with nx daemon service start (its output names the reason if the engine halts at startup).` A service that answers with another version prints `engine: not converged`, naming both versions. A service that answers without a version prints `convergence is unverified`. When a convergence cycle runs and the service does not come back on the release's engine, the verb prints one of these `NEEDS HUMAN` lines:
+The engine leg prints one `engine:` line when it has no convergence action to report, and that line describes the running service as well as the disk (nexus-bivz3.25). It says `engine: converged` only when the running service reports the release's engine version. With the service down it prints `engine: installed engine is vX (the release dependency); the service is not running (<reason>). Start it with nx daemon service start (its output names the reason if the engine halts at startup).` A service that answers with another version prints `engine: not converged`, naming both versions. A service that answers without a version prints `convergence is unverified`. Either of those two exits the verb 1 (nexus-n8gpr), after every other leg has run and only if the running service is still off the release's engine then, since the autostart leg can cycle it; a stopped service and a stack the leg does not apply to exit 0. When a convergence cycle runs and the service does not come back on the release's engine, the verb prints one of these `NEEDS HUMAN` lines:
 
 - `the storage service did not start (nx daemon service start exited N); the engine is NOT converged to vX. Its reason: <start output>`. An engine that halts at a schema migration and whose supervisor exits shows its reason here. The reason is the start output after its `Error:` marker, up to 1000 characters, so the migration RAISE and its runbook URL are shown.
 - `nx daemon service start returned N and nothing answers yet; the service may still be migrating, so convergence to vX is UNVERIFIED. Its output: <reason>`. This is used when the supervisor is alive but the engine has not answered within start's 60-second window.
@@ -4384,16 +4443,40 @@ workflow identity), then placed atomically. Verification **fails closed**:
 nothing is installed unless BOTH gates pass. One verified seam covers the
 binary and the PG bundle (RDR-161).
 
+On every platform the swap itself runs with the storage service stopped, under
+one stop and one start for the whole run. The first replacement that actually
+happens stops the service running from this config directory (the same stop as
+`nx daemon service stop`; a service of another config directory is never
+touched), and when the run ends the service is started again on the new files,
+so there is nothing to restart by hand. A service that was not running is left
+stopped, and a run that fails part way starts it again. The download and the
+verification run with the service up. An engine already at this release (the
+install receipt names the tag and asset and records the verified digest, and the
+files on disk match it) is not replaced, and a PostgreSQL bundle already
+extracted from the same bytes is not swapped, so a repeat run stops nothing. When
+the PostgreSQL bundle does change, the same stop also stops a running cluster and
+the same start brings it back first. If the stop could not rule out a running
+service (the process table could not be read), the swap goes ahead and the run
+prints a warning telling you to restart by hand. If the service was started again
+but has not answered within 60 seconds (the new engine may be migrating the
+database), the run prints a warning naming `nx daemon service status`, `nx doctor`
+and the engine log, and exits 0; a supervisor that exited, an autostart unit whose
+supervisor reported an error during the start (a crash loop or a halted migration),
+or a start that failed otherwise, exits 2. The bundle is downloaded after the engine is placed, so on a
+run that replaces the engine the service is down during that download. Before this
+change the stop applied to Windows only; on macOS and Linux the old engine kept
+serving until a manual `stop` and `start` (nexus-86aaz).
+
 | Flag | Description |
 |------|-------------|
-| `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on), and extract it into `~/.config/nexus/pg-bundle`, where the storage service finds PostgreSQL. The archive already extracted is left alone; a different one is extracted beside the running tree and swapped in (on Windows the stack stops only for the swap). Through 7.78.0 the archive was placed but not extracted, so the next start kept the old PostgreSQL (nexus-f9bgu.56). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
+| `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on), and extract it into `~/.config/nexus/pg-bundle`, where the storage service finds PostgreSQL. The archive already extracted is left alone (the same bytes, by SHA-256 recorded in the extraction marker, not the same file); a different one is extracted beside the running tree and swapped in (the service and PostgreSQL stop only for the swap and start again after it). Through 7.78.0 the archive was placed but not extracted, so the next start kept the old PostgreSQL (nexus-f9bgu.56). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
 | `--config-dir` | Config directory override. |
 | `--force` | Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). The gate classifies the store first: width-non-conformant rows REFUSE the install (re-index the affected collections and confirm `nx doctor` clears before swapping engines — see [migration-runbook.md](migration-runbook.md)); an unverifiable store (service/PG not up) proceeds with a loud UNVERIFIED warning — install-binary is the designated recovery tool for the will-not-boot class. Use `--force` ONLY after remediating. |
 
 ### nx daemon aspect-worker start
 
 ```
-nx daemon aspect-worker start [--config-dir DIR] [--tenant TENANT] [--stale-timeout-seconds N]
+nx daemon aspect-worker start [--config-dir DIR] [--tenant TENANT] [--stale-timeout-seconds N] [--engine-unreachable-exit-seconds N]
 ```
 
 Start the aspect-worker daemon in the foreground (runs until SIGTERM/SIGINT):
@@ -4408,6 +4491,11 @@ predecessor (one owner survives).
 | `--config-dir` | Config directory override (default: `~/.config/nexus/`) |
 | `--tenant` | Tenant scope for the lease (default `default`). Per-tenant only — per-host would need `BYPASSRLS`, forbidden by RDR-152 |
 | `--stale-timeout-seconds` | Reclaim staleness threshold (default `300`). MUST exceed the `claude -p` extraction budget (180s) or an in-flight row could be false-reclaimed |
+| `--engine-unreachable-exit-seconds` | Exit when the engine has not answered for this long (default `3600`; `0` turns it off; negative values are refused). The clock starts at a failed reclaim sweep and any later reclaim sweep or claim round trip that is answered clears it, so a worker whose claims work never exits on a failing reclaim route. The worker outlives `nx daemon service stop` by design, so the bound is far longer than a restart; the next enqueue spawns a new worker if the engine returns |
+
+The worker also exits within a few seconds of its config directory being
+removed (two consecutive heartbeats that find it gone), and does not re-create it: a gate's scratch directory deleted under a
+worker no longer leaves an orphan polling a dead engine.
 
 **Credential model (RDR-173):** this command MUST be spawned as a CHILD of a
 process that already has `claude -p` credentials, so it inherits the
@@ -4416,6 +4504,25 @@ context — a credential-bare invocation fails extraction. In normal
 operation you never run this manually: the `store_put` enqueue hook
 spawns it automatically (spawn-if-absent, single-flight) from the storing
 process precisely so that inheritance happens.
+
+### nx daemon aspect-worker stop
+
+```
+nx daemon aspect-worker stop [--config-dir DIR]
+```
+
+Stop the aspect-worker daemon leased in a config directory (default
+`~/.config/nexus/`) and drop its lease. The pid comes from the tier's own lease
+record and is re-checked against the process's live command line, which must
+be an aspect worker whose `--config-dir` is this directory (compared by real
+path), so a worker serving another config directory is never touched and
+nothing is found by matching process names. Idempotent: with no worker, prints
+`No aspect-worker running.` and exits 0. Exits 1 if a worker survives the stop,
+or if a lease names a live process that is not this directory's worker (a
+recycled pid): that process is not signalled, its lease is kept, and stderr
+names it. `nx daemon
+service stop` leaves the worker running by design (it belongs to the store
+path), so an e2e gate's cleanup calls this before it stops its scratch service.
 
 ---
 
@@ -5222,6 +5329,24 @@ The boot-loaded template registry: digest, source directories, and the registere
 |------|-------------|
 | `--json` | Output as JSON |
 
+### nx tuple dictionary
+
+```
+nx tuple dictionary [NAME] [--json]
+```
+
+The tuple-space dictionary (RDR-239): what each template is for. With no `NAME`, every template: its name with the one-line `summary` of its doc block, then a totals line over its live census (`subspaces`, `available`, `claimed`, `consumed`, `dead`), from one listing of every subspace grouped by template. Subspaces that outlived their template (the engine names no template for them, or one the registry no longer holds) are not left out: a final `(no template)` entry shows their totals line, and appears only when there are such rows. With `NAME`, the template's doc (`summary`, `writers`, `readers`, `fields`, `body`, `example`, `see_also`; only the parts it declares) and a census table with a row per concrete subspace under that template: `available`, `claimed`, `consumed`, `dead` and `newest_created_at`. The census reads `nx tuple list`, so a take-enabled template such as `queue/<name>` shows its acked rows under `consumed`.
+
+`NAME` is a template name (`'board/ci/<topic>'`; quote it, because the shell reads `<` as a redirection) or a concrete subspace (`board/ci/example-branch`), which resolves to its template. Resolution order: a registry template of exactly that name; else the template the engine names on the census row of exactly that subspace; else the client's literal-before-pattern match against the registry (a `<param>` segment matches one segment). A `NAME` nothing resolves is an error naming the argument (`NAME 'x' matches no template; run 'nx tuple dictionary' to list them`, exit 1).
+
+The doc is requested with `?doc=1` and is served only then. An engine that predates the dictionary serves no doc for any template: the doc part prints `engine predates the dictionary`, the census still shows, and the exit status is 0 (with no `NAME`, the line is printed once after the list). When other templates carry a doc and the named one does not (a template loaded from `NX_TUPLE_TEMPLATE_DIR` whose doc the engine dropped), the doc part prints `this template has no doc block` instead.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | With `NAME`: `{"template": "<name>", "doc": {...} or null, "census": [{"subspace", "available", "claimed", "consumed", "dead", "newest_created_at"}, ...]}`; `doc` is `null` when the engine serves none. With no `NAME`: a list of those same objects, one per template, its `census` the rows of the subspaces that resolve to it, then, only when some census row resolves to no registered template, a final `{"template": null, "doc": null, "census": [...]}` holding those rows |
+
+The `tuple_registry` MCP tool takes the same switch as `doc` (default false) and returns each template's doc block as the engine serves it.
+
 ### nx tuple list
 
 ```
@@ -5361,7 +5486,7 @@ In service mode the counts are read from the engine via `GET /v1/telemetry/tier_
 ## nx answer-runs
 
 ```
-nx answer-runs [--since ISO8601] [--limit N] [--steps] [--include-failed] [--derive-budget] [--json]
+nx answer-runs [--since ISO8601] [--limit N | --before-id N | --all] [--steps] [--include-failed] [--derive-budget] [--json]
 ```
 
 Reads the `nx_answer_runs` telemetry table: every `nx_answer` MCP call
@@ -5373,6 +5498,41 @@ session_id column, so unlike `nx tier-status` there is no per-session
 default — `--since` bounds the window (accepts `2026-08-01`, `2026-08-01T12:00:00`, or full offset forms; date-only means midnight UTC — nexus-spbay), `--limit` caps the listed page
 (default 20, does not affect the whole-set aggregates below), `--json`
 emits structured output.
+
+**Reading past the newest 300 runs (nexus-1ss4n).** The engine caps a page at
+300 rows, so `--limit` alone only ever sees the newest 300 of a `--since`
+window. `--before-id N` lists the runs with id below N, highest id first, and
+`--all` pages the whole window for you, 300 rows per request, to its oldest
+run (`--all` replaces `--limit` and cannot be combined with `--limit`,
+`--before-id` or `--derive-budget`). To page by hand, start with a `--before-id`
+above the newest id (or use `--all`), and take each next `--before-id` from the
+smallest `id` of a page that was itself read with `--before-id`; an empty page is
+the start of the window. Never take the cursor from an unbounded page: that page
+is `created_at`-ordered, so its smallest `id` can sit above ids it did not list
+and the walk would skip them. `--all` prints one progress line per page to
+stderr, never stdout, so `--json` stays one clean document. Any read failure
+under `--all` or `--before-id` (a transport error or HTTP 5xx on a page, a
+cursor that does not advance, a row without an `id`) exits 1; only an unbounded
+read keeps the exit-0 "service unreachable" message. When the `/version` probe
+itself fails, the message says the probe failed, not that the engine lacks the
+capability. Ids do not move while runs are recorded (a new run takes a higher id
+than every cursor), so the pages neither skip nor repeat, which an offset could
+not promise. Under `--before-id` and `--all` the rows are ordered by id; an
+unbounded call keeps its `created_at` order (the two agree for runs the engine
+stamped itself and can differ for imported ones). **The whole-set aggregates
+below do not change meaning: they cover the whole `--since`-filtered set on
+every page, never only the bounded window**, so a `--before-id` page reports the
+same `total` as the first page, and `--json` echoes `before_id` (or `all: true`)
+beside `since` and `limit` so a snapshot says which window its rows came from.
+Paging needs an engine that advertises `nx_answer_runs_before_id_supported` on
+`GET /version` (engine-service-v0.1.177 and later). Against an engine
+without it, both flags refuse with exit 1 and a message naming the flag: an older engine ignores
+the unknown `before_id` and would return the newest 300 again with HTTP 200. The
+public cloud edge trims `/version` to an allowlist, so a cloud client also reads
+the capability as absent, and refuses, until conexus lists
+`nx_answer_runs_before_id_supported` (engine-release pre-tag check 3e). Python:
+`HttpTelemetryStore.query_nx_answer_runs(before_id=N)` for one page and
+`query_nx_answer_runs_all()` for the walk.
 
 Reports, computed by the ENGINE over the WHOLE `--since`-filtered set
 independent of `--limit`, **including degenerate and failed rows**: total
@@ -5481,8 +5641,30 @@ every row is split three ways:
   recognizable as insufficient-evidence. The human report's `of the N row(s)
   shown` line counts the bucket as `insufficient-evidence N`.
 
+**How a row's class was decided.** A run's `final_text` is stored
+cut at 2000 characters, so a raw ids or extractions payload longer than that no
+longer parses on read-back and the text-only heuristic counts it as an answer.
+A client that records a run summary now classifies the FULL final text at write
+time with the same classifier and records `final_chars` (the full length),
+`answer_class` and `class_version` (the number of the classifier's rule) in the
+summary; the reader takes that class when it is one of the classifier's known
+names, and falls back to the heuristic on a row without one (a row written before
+this change, or by an engine that does not keep the run summary). A `trace=False`
+row takes its recorded class too, because the writer classified the real text
+before it was redacted and records only the class name and the length; a
+`trace=False` row with none recorded stays `redacted`. The report says how many
+rows each way: `classified: N by recorded class (full final text), M by read-time
+heuristic (stored text, cut at 2000 characters), K redacted with no recorded
+class`. While any heuristic row is counted the degenerate counts are not exact,
+and the report says so: a raw payload cut at 2000 characters reads as an answer on
+those rows (a miss), and the empty-hydration phrase match can count a real answer
+as degenerate on any row (an over-count; on a recorded row the phrase was matched
+anywhere in the full text). So the counts are not a lower bound.
+
 `--json` carries `executed_ok_count`, `executed_failed_count`,
 `degenerate_count`, `degenerate_breakdown: {class: count}`,
+`classification_basis: {recorded: N, heuristic: M, redacted: K}`,
+`degenerate_count_truncation_limited` (true while a heuristic row is counted),
 `insufficient_evidence_count`, plus a
 page-scoped, executed-ok-only latency view: `executed_ok_avg_duration_ms`
 and `executed_ok_latency_buckets` (same fixed edges as the whole-set
@@ -5584,7 +5766,8 @@ check found some requested parts supported and others not, so `final_text`
 opens `[insufficient-evidence: <n> unresolved]` (a count, no question text),
 names each unresolved part and why (no supporting evidence found, the evidence
 contradicts it, not assessed, or its named source was not found), then gives
-the prose for the rest. It counts as a plan success, and a run planned inline
+the prose for the rest. A part counted as covered has at least one supporting
+item that reached the answer; that does not mean it is complete. It counts as a plan success, and a run planned inline
 is never saved as a plan. Every other value is a non-answer: `final_text` is a
 one-line `[non-answer: <shape>]` notice (the raw payload is never returned as
 prose), the `chunks` list still carries what was retrieved, the run is
@@ -5799,8 +5982,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `traverse` walks under the document's address; a step on a route that takes no such filter (`search_metadata_scoped`,
   `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`, a `query` with `author`, `content_type`,
   `follow_links` or `subtree`) is not dispatched. `steps_not_run` when the engine does not advertise the flag (an
-  older engine, or an edge that trims `/version`; until `engine-service-v0.1.171` and the edge allowlist
-  (conexus-zvbp) are live that is every cloud request, and this fallback has not run live): no secondary retrieval step and no traversal is dispatched, and
+  older engine, or an edge that trims `/version`; the cloud is not one of these: its `/version` reports
+  `vector_search_chash_allow_supported` since `engine-service-v0.1.171` and the edge allowlist (conexus-zvbp),
+  so a cloud request runs `engine_filter`, and this fallback has not run live): no secondary retrieval step and no traversal is dispatched, and
   each skipped step is listed in `scope_diagnostics` with `scope_kind: document` and outcome `document_confined`
   (a step that carried the filter reports `document_filtered`, the traversal `document_scoped`). The coverage
   repair keeps only hits whose chunk hash is in the document's manifest (a verbatim chunk shared with a sibling
@@ -5955,9 +6139,14 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `unknown_request_untrusted_plan`, `unknown_request_narrow_plan`,
   `untrusted_unknown_plan`, `undeclared_builtin` (a builtin seeded before
   nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
-  `untrusted_curated_claim`, `unreviewed_route` (a grown plan whose recorded kind is discounted:
+  `untrusted_curated_claim`, `single_source_synthesis` (a request naming one source refusing
+  citation-traversal), `unreviewed_route` (a grown plan whose recorded kind is discounted:
   `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
-  names a route, so every grown plan reads as unknown-kind) or `judge_error`
+  names a route, so every grown plan reads as unknown-kind), `grown_route_not_lookup`
+  (a lookup request refusing a grown plan whose discounted recorded kind is not lookup: the
+  recorded kind never widens eligibility but does narrow it, nexus-indyo), `unattested_plan`
+  (a lookup or discovery/listing request refusing a plan that declares no answer kind, such as a
+  user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp) or `judge_error`
   (judging the candidate failed; kept when not enforcing, dropped when enforcing).
   The filter judges after every other drop (unmet binding, scope conflict,
   always-failing, FTS literal drop), so a count is "would have been returned, but for
@@ -6192,12 +6381,14 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and
   closed names only. `repair` also says why it ran (nexus-z6yvk): `reason` is `unsupported`
-  (a facet no held evidence bears on), `unread_tail` (a covered facet with more than half of
+  (a facet no held evidence bears on), `unread_tail` (a covered or contradicted facet with more than half of
   the ledger's anchors left unread by the assessment's per-call size cap, which the repair then
   reads) or `unsupported_and_unread_tail`, empty when no repair ran, and `unread_facet_ids` names the
-  facets of the second kind (`facet_ids` lists the unsupported ones first, then those). A covered
+  facets of the second kind (`facet_ids` lists the unsupported ones first, then the contradicted, then the covered). A covered
   facet stays covered whatever the unread anchors say: a supporting one adds to its evidence, a
-  contradicting one marks it `conflicted`. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
+  contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) is recorded as covered
+  with the reason `conflicted_from_contradicted` when an unread anchor supports it, and the run stays `partial` with its notice;
+  it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,

@@ -31,6 +31,14 @@ class _Cat:
         self.resp = resp
         self.calls: list[str] = []
         self.failed: list[str] = []
+        self.updates: list[tuple[str, dict]] = []
+        self.update_raises: BaseException | None = None
+
+    def update(self, tumbler, **fields):
+        self.calls.append("update")
+        if self.update_raises is not None:
+            raise self.update_raises
+        self.updates.append((str(tumbler), fields))
 
     def begin_index_run(self, doc_id, content_hash, run_id, collection, **kw):
         self.calls.append("begin")
@@ -168,7 +176,7 @@ def test_a_refused_stamp_is_recorded_and_propagates_without_marking_the_run_fail
     assert exc.value.doc_id == DOC_ID
     assert get_complete_refusals() == [DOC_ID]
     fence_fail.assert_not_called()
-    assert cat.calls == ["begin", "write"]
+    assert cat.calls == ["update", "begin", "write"]
     # The writer leaves the fence 'indexing' after a refusal: nothing marks it failed.
     assert cat.failed == []
 
@@ -191,6 +199,62 @@ def test_on_request_is_called_after_a_chunk_carrying_request_came_back() -> None
             COLLECTION, DOC_ID, "h" * 64, [chash], [text], [{"chunk_text_hash": chash}],
             on_request=lambda: seen.append(list(cat.calls)))
 
-    assert seen == [["begin", "write"]], "called once, after the fence begin and the write"
-    assert cat.calls == ["begin", "write"]
+    assert seen == [["update", "begin", "write"]], "called once, after the fence begin and the write"
+    assert cat.calls == ["update", "begin", "write"]
 
+
+
+def test_the_file_hash_is_stamped_on_the_document_before_the_fence_begins() -> None:
+    """nexus-ypgbz: the registration carries the file hash the run fences under, written before the writer
+    sends anything, so it is there when the completion stamp lands (the exporter's key_registered reads it)."""
+    cat = _Cat()
+
+    _write(cat)
+
+    assert cat.updates == [(DOC_ID, {"meta": {"content_hash": "h" * 64}})]
+    assert cat.calls == ["update", "begin", "write"], cat.calls
+
+
+def test_a_stamp_that_fails_does_not_fail_the_write() -> None:
+    """Advisory evidence: the document is then indexed without the registration witness, never refused."""
+    cat = _Cat()
+    cat.update_raises = RuntimeError("catalog down")
+
+    result = _write(cat)
+
+    assert result.completed or result.chunks_written == 1
+    assert cat.calls == ["update", "begin", "write"], cat.calls
+
+
+def test_positive_control_without_the_stamp_the_write_sends_no_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nexus.catalog.multi_batch_write.stamp_registered_content_hash", lambda *a, **k: False)
+    cat = _Cat()
+
+    _write(cat)
+
+    assert cat.calls == ["begin", "write"] and cat.updates == []
+
+
+def test_the_streaming_run_stamps_the_file_hash_before_its_writer_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-ypgbz, the streaming PDF route: ``UploadRun.open_writer`` stamps the PDF's hash on the document
+    before it builds the writer, whose first request begins the fence."""
+    import nexus.catalog.multi_batch_write as mbw
+    import nexus.pipeline_stages as ps
+
+    cat = _Cat()
+    events: list[str] = []
+    real_update = cat.update
+    cat.update = lambda t, **kw: (events.append("stamp"), real_update(t, **kw))[1]  # type: ignore[method-assign]
+
+    class _Writer:
+        def __init__(self, *a, **kw) -> None:
+            events.append("writer")
+
+    monkeypatch.setattr(ps, "_make_upload_catalog", lambda: cat)
+    monkeypatch.setattr(mbw, "MultiBatchDocumentWriter", _Writer)
+
+    ps.UploadRun().open_writer(
+        doc_id=DOC_ID, collection=COLLECTION, content_hash="p" * 64, force_re_embed=False, defer_completion=True)
+
+    assert events == ["stamp", "writer"]
+    assert cat.updates == [(DOC_ID, {"meta": {"content_hash": "p" * 64}})]

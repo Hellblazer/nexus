@@ -280,6 +280,38 @@ def test_a_lock_held_past_the_wait_skips_the_publish_and_still_returns_the_token
     assert 0.2 <= waited < 5.0, f"waited {waited:.2f}s: the bound was not honoured"
 
 
+def test_the_callers_deadline_bounds_the_publish_wait_on_a_held_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-wfmfi: a hook's ``bearer_for(deadline_s=...)`` spends no more than
+    its deadline waiting to publish the lease, though the publish wait is 10 s."""
+    monkeypatch.setattr(data_token, "_LEASE_PUBLISH_LOCK_WAIT_S", 10.0)
+    mgr = _manager(tmp_path)
+    lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
+    lock_path.write_text("{}\n")
+    holder = os.open(str(lock_path), os.O_WRONLY)
+    _locking.lock_fd(holder, blocking=False)  # lifecycle-gate-allow: test holder that never lets go (nexus-wfmfi)
+    real_open = data_token._open_mint_lock_logged
+    opened = {"n": 0}
+
+    def first_open_fails(*a: Any, **k: Any) -> int:
+        opened["n"] += 1
+        if opened["n"] == 1:
+            raise OSError("EMFILE (simulated)")
+        return real_open(*a, **k)
+
+    monkeypatch.setattr(data_token, "_open_mint_lock_logged", first_open_fails)
+    try:
+        started = time.monotonic()
+        assert mgr.bearer_for(BASE_URL, TENANT, deadline_s=0.5) == "tok-minted"
+        waited = time.monotonic() - started
+    finally:
+        _locking.unlock_fd(holder)  # lifecycle-gate-allow: test holder release
+        os.close(holder)
+    assert _lease_files(tmp_path) == []
+    assert waited < 3.0, f"waited {waited:.2f}s: the caller's deadline did not bound the publish wait"
+
+
 def test_a_refresh_against_a_lock_that_never_frees_returns_the_cached_token_without_minting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

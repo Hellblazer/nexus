@@ -605,6 +605,7 @@ def install_binary(
     quiesce: AbstractContextManager[object] | None = None,
     restart_after: bool = True,
     host_platform: str | None = None,
+    skip_if_current: bool = False,
 ) -> tuple[Path, dict]:
     """Download, verify, and atomically place the native binary for *tag*.
 
@@ -624,21 +625,34 @@ def install_binary(
 
     On Windows (*platform_tag* ``windows-x64``) the asset is one archive; both
     gates run on the ARCHIVE bytes, then ``nexus-service.exe`` and the four
-    runtime DLLs are placed side by side (RDR-224 P0.4). Windows refuses to
-    overwrite a running executable, so on a Windows HOST the placement runs
-    inside :func:`nexus.daemon.replace_quiesce.quiesced`: the storage service
-    is stopped, the set is placed as one unit (a failure puts every file back,
-    see :func:`~nexus.daemon.replace_guard.place_set_with_rollback`), and the
-    service is started again, or not when *restart_after* is False because the
-    caller restarts and verifies it itself. *quiesce* replaces that context
+    runtime DLLs are placed side by side (RDR-224 P0.4).
+
+    The placement runs inside :func:`nexus.daemon.replace_quiesce.quiesced` on
+    every platform (nexus-86aaz): the storage service of *config_dir* is stopped
+    (Windows will not overwrite a running executable; on macOS and Linux the
+    old process would go on serving the old file), the files are placed as one
+    unit (a failure puts every file back, see
+    :func:`~nexus.daemon.replace_guard.place_set_with_rollback`), and the service
+    is started again, only when it was running, or not when *restart_after* is
+    False because the caller restarts and verifies it itself. The download and
+    the extraction run with the service up. *quiesce* replaces that context
     manager and *host_platform* (default ``sys.platform``) is the platform the
-    stop and the retry are decided on; both are test seams. On POSIX nothing
-    is stopped and the placement is unchanged.
+    retry is decided on; both are test seams. A caller that makes other
+    replacements in the same run passes the guard of a
+    :class:`~nexus.daemon.replace_quiesce.SharedQuiesce` as *quiesce*, so the
+    stack is stopped and started once for all of them.
+
+    *skip_if_current* (``install-binary``): after both gates pass, when the
+    engine on disk already is this release's asset (the install receipt names this
+    tag and asset and records the verified digest, and
+    :func:`verify_installed_binary` finds the files matching it), nothing is
+    placed, the guard is never entered and so nothing is stopped; the receipt is
+    returned with ``"unchanged": True``. The default False places always, which is
+    what the upgrade's engine convergence relies on.
     """
     _validate_tag(tag)
     ptag = platform_tag if platform_tag is not None else current_platform_tag()
     windows = _is_windows_tag(ptag)
-    extra: dict = {}
 
     with tempfile.TemporaryDirectory(
         dir=str(download_dir) if download_dir else None, prefix="nx_install_binary_"
@@ -677,31 +691,51 @@ def install_binary(
         verify_signature(asset, bundle, checker=checker)
 
         dest = well_known_binary_path(config_dir, platform_tag=ptag)
+        if skip_if_current:
+            current = _current_receipt(config_dir, ptag, tag, name, digest)
+            if current is not None:
+                _log.info("service_binary_already_installed", dest=str(dest), tag=tag, sha256=digest[:12])
+                return dest, {**current, "unchanged": True}
+        # Every platform replaces the engine with the service stopped and starts it
+        # again after (nexus-86aaz; Windows since nexus-f9bgu.20): on POSIX the rename
+        # succeeds under a running binary, but the process keeps the old file and a
+        # following ``service start`` finds the live lease and starts nothing.
+        guard = quiesce if quiesce is not None else _engine_quiesce(
+            config_dir, restart_after=restart_after, host_platform=host_platform,
+        )
+        receipts: list[dict] = []
+
+        def _record(placed: dict) -> None:
+            """Write the receipt. Runs INSIDE the stop (the files are in, the service
+            is not started yet): the supervisor reads the receipt on start, and a
+            receipt over bytes it does not describe reads as no receipt at all."""
+            provenance = _provenance(tag, name, digest, asset_url, installed_by)
+            provenance.update(placed)
+            receipts.append(provenance)
+            try:
+                _atomic_write_json(binary_sidecar_path(config_dir), provenance)
+            except OSError as exc:
+                # The binary is already verified AND atomically in place; the sidecar is
+                # informational provenance, not a gate. Don't turn a disk-full/perms
+                # error into a traceback over a successful install (CRE M1).
+                _log.warning("service_binary_sidecar_write_failed", error=str(exc))
+
         if windows:
-            guard = quiesce if quiesce is not None else _engine_quiesce(
-                config_dir, restart_after=restart_after, host_platform=host_platform,
-            )
             # The archive is verified and extracted with the service still up; only
             # the swap runs inside the stop (nexus-f9bgu.49, as the PG bundle does).
-            extra = _place_engine_archive(asset, dest, platform=host_platform, guard=guard)
+            _place_engine_archive(
+                asset, dest, platform=host_platform, guard=guard, after_place=_record,
+            )
         elif archive_layout:
-            # POSIX replaces a running executable by rename, so nothing is stopped,
-            # exactly as for the single file below.
-            extra = _place_engine_archive(
-                asset, dest, support_names=(), platform=host_platform, guard=quiesce,
+            _place_engine_archive(
+                asset, dest, support_names=(), platform=host_platform, guard=guard,
+                after_place=_record,
             )
         else:
-            _atomic_copy(asset, dest, executable=True)
-
-    provenance = _provenance(tag, name, digest, asset_url, installed_by)
-    provenance.update(extra)
-    try:
-        _atomic_write_json(binary_sidecar_path(config_dir), provenance)
-    except OSError as exc:
-        # The binary is already verified AND atomically in place; the sidecar is
-        # informational provenance, not a gate. Don't turn a disk-full/perms
-        # error into a traceback over a successful install (CRE M1).
-        _log.warning("service_binary_sidecar_write_failed", error=str(exc))
+            with guard:
+                _atomic_copy(asset, dest, executable=True)
+                _record({})
+    provenance = receipts[0]
 
     _log.info(
         "service_binary_installed",
@@ -711,6 +745,33 @@ def install_binary(
         sha256=digest[:12],
     )
     return dest, provenance
+
+
+def _current_receipt(
+    config_dir: Path, platform_tag: str, tag: str, asset: str, digest: str,
+) -> dict | None:
+    """The install receipt when the engine on disk already is this release's asset.
+
+    The receipt must name *tag* and *asset* and record the verified *digest*, and
+    the files it describes must be there with the digests it records
+    (:func:`verify_installed_binary`, local bytes only). ``None`` otherwise,
+    including an absent, unreadable or older-format receipt: those install."""
+    from nexus.daemon.binary_lifecycle import read_installed_provenance  # noqa: PLC0415 - deferred to avoid import cycle
+
+    receipt = read_installed_provenance(config_dir)
+    if not receipt:
+        return None
+    recorded = receipt.get("sha256")
+    if not (
+        receipt.get("tag") == tag
+        and receipt.get("asset") == asset
+        and isinstance(recorded, str)
+        and recorded.strip().lower() == digest
+    ):
+        return None
+    if not verify_installed_binary(config_dir, provenance=receipt, platform_tag=platform_tag).ok:
+        return None
+    return dict(receipt)
 
 
 def _flat_member_name(raw: str) -> str | None:
@@ -762,6 +823,7 @@ def _place_engine_archive(
     optional_names: tuple[str, ...] | None = None,
     platform: str | None = None,
     guard: AbstractContextManager[object] | None = None,
+    after_place: Callable[[dict], None] | None = None,
 ) -> dict:
     """Extract an engine archive and place its files beside *exe_dest*.
 
@@ -781,9 +843,12 @@ def _place_engine_archive(
     place_set_with_rollback`): each file by one atomic replace, retried on
     Windows when a scan or a handle holds it, and a failure part way restores
     every file, so the set is never half old and half new. *guard* (the
-    service stop on a Windows host) is entered only for that move: reading,
+    service stop) is entered only for that move: reading,
     hashing and extracting the ~190 MB archive happen before it, with the
-    service still running (nexus-f9bgu.49). Returns the receipt fields
+    service still running (nexus-f9bgu.49). *after_place*, when given, is called
+    with the receipt fields inside the guard once the set is in place, so the
+    caller can write its receipt before the guard starts the service again
+    (nexus-86aaz). Returns the receipt fields
     ``installed_sha256`` (exe), ``support_files`` (DLL digests) and ``layout``.
 
     *optional_names* (default: :data:`WINDOWS_OPTIONAL_RUNTIME_DLLS` when there are
@@ -853,20 +918,23 @@ def _place_engine_archive(
             )
 
         placed_optional = tuple(n for n in optional_names if n in digests)
+        receipt = {
+            "layout": "archive",
+            "installed_sha256": digests[exe_name],
+            "support_files": {name: digests[name] for name in (*support_names, *placed_optional)},
+        }
         os.chmod(stage / exe_name, 0o755)
         with guard if guard is not None else contextlib.nullcontext():
             place_set_with_rollback(
                 stage, exe_dest.parent, (*support_names, *placed_optional, exe_name),
                 platform=platform,
             )
+            if after_place is not None:
+                after_place(receipt)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
-    return {
-        "layout": "archive",
-        "installed_sha256": digests[exe_name],
-        "support_files": {name: digests[name] for name in (*support_names, *placed_optional)},
-    }
+    return receipt
 
 
 def _provenance(
@@ -979,6 +1047,10 @@ def install_pg_bundle(
     (one verified seam, RDR-161 Open Question 2). Places
     ``nexus-pg-<platform>.txz`` at ``<config_dir>/service/`` with a provenance
     sidecar. Returns ``(installed_path, provenance)``.
+
+    An archive already in place with the same bytes is left alone (nexus-86aaz):
+    a fresh copy of identical bytes would carry a new mtime for no reason. The
+    sidecar is written either way.
     """
     _validate_tag(tag)
     name = pg_bundle_asset_name(platform_tag)
@@ -990,7 +1062,8 @@ def install_pg_bundle(
         asset, digest, asset_url = _fetch_verified(tag, name, tmp, checker)
 
         dest = pg_bundle_dest(config_dir, platform_tag=platform_tag)
-        _atomic_copy(asset, dest, executable=False)  # a tarball, not an executable
+        if not (dest.is_file() and compute_sha256(dest) == digest):
+            _atomic_copy(asset, dest, executable=False)  # a tarball, not an executable
 
     provenance = _provenance(tag, name, digest, asset_url, installed_by)
     try:

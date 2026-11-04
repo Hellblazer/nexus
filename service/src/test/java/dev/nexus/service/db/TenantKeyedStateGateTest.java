@@ -540,6 +540,29 @@ public class TenantKeyedStateGateTest {
                 "MintRateLimiter.tenantSustainedPerMinute")) {
                 notKeyed.put(f, CONSTANT);
             }
+            notKeyed.put("AuditTags.TITLE_PATTERNS", "compiled audit-title patterns built once from the generated "
+                + "AuditTags table (RDR-238 P1); the same for every tenant, never written after class init");
+            // nexus-6pfgb.43: the retire-keys routes hold nothing between requests.
+            for (String f : List.of("ChunkKeySweep.DryRun.tenant", "ChunkKeySweep.DryRun.collections",
+                "ChunkKeySweep.DryRun.preconditions", "ChunkKeySweep.DryRun.blocking", "ChunkKeySweep.Applied.tenant",
+                "ChunkKeySweep.Applied.blocked", "ChunkKeySweep.DryRun.details", "ChunkKeySweep.DryRun.accepted",
+                "ChunkKeySweep.DryRun.samples", "ChunkKeySweep.Preconditions.counts",
+                "ChunkKeySweep.Preconditions.details", "ChunkKeySweep.Resume.collections",
+                "ChunkKeySweep.Resume.blocked")) {
+                notKeyed.put(f, "a component of one sweep call's result record, built for that request and dropped "
+                    + "with its response; nothing keeps it between requests");
+            }
+            notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
+                + "tenant name beside its counts), built for that request and dropped with its response");
+            for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",
+                "ChunkKeyPlan.quarantineImplies")) {
+                notKeyed.put(f, "a component of one request's immutable plan (List.copyOf), built per request from "
+                    + "the key table the client rendered; the same for every tenant");
+            }
+            notKeyed.put("ChunkKeysAdminHandler.tenants", "a supplier of the known tenant names (TokenStore#"
+                + "listKnownTenants), read on each table-wide request; it caches nothing");
+            notKeyed.put("NexusService.chunkConstraintAdmin", "the admin-connection DDL object bound once at boot; "
+                + "table-wide, it opens a connection per call and holds no per-tenant state");
             notKeyed.put("NexusService.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("AuthFilter.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("TokenAdminHandler.cache", TOKEN_CACHE_REF);
@@ -611,7 +634,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, CONFIG);
             }
-            // COUNTER (42)
+            // COUNTER (46)
             for (String f : List.of(
                 "Bge768Embedder.onnxInvocationCount",
                 "CatalogRepository.vacuumInProgress",
@@ -643,7 +666,10 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.EXACT_FALLBACKS",
                 "PgVectorRepository.ROUTED_EXACT",
                 "PgVectorRepository.ROUTED_HNSW",
+                "PgVectorRepository.SHORT_PAGE_COUNT_DEADLINES",
                 "PgVectorRepository.SHORT_PAGE_RERUNS",
+                "PgVectorRepository.SHORT_PAGE_RERUN_DEADLINES",
+                "PgVectorRepository.SHORT_PAGE_SKIPS",
                 "PgVectorRepository.existenceSelectCalls",
                 "PgVectorRepository.ownerLookupCalls",
                 "RacedEmbedActivity.RACED_EMBEDS_TOTAL",

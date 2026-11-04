@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """pytest plugin for scripts/tenant_delta.py (nexus-g37hn): at collection, count the tests in
-each module that will mint a test tenant, and write ``{module: count}`` to ``$TENANT_CENSUS_OUT``.
+each module that will mint a test tenant, and write ``{"counts": {module: count}, "failed": {nodeid: reason}}``
+to ``$TENANT_CENSUS_OUT``, with ``"complete": true`` (written only once the census hook ran). ``failed`` holds every collector that failed to collect (a module, or a package or
+directory whose conftest or ``__init__`` failed; ``""`` is the session itself), with its first error line, so a
+run with ``--continue-on-collection-errors`` says which modules it could not count (nexus-l35bq).
 
 A test mints one under the default substrate (``optin``, nexus-j23ni) when it carries the
 ``t2_tenant`` marker (module ``pytestmark`` included), or its fixture closure holds
@@ -9,9 +12,10 @@ Measured 2026-10-22 against one CI run's reports: 5042 at collection against 494
 time, differing in 39 of 348 modules; the rest is inferred to be tests that skip at run time,
 which a delta between two collections cancels.
 
-The count runs last among the collection hooks, after ``-m`` deselection, so the
-integration/slow/lint tests the default selection drops are not counted (CI's python_unit
-shards drop them too). Not seen: a fixture other than the two named that requests the tenant
+The count is a trylast hook, so it runs after ``-m`` deselection and after the hooks registered before it,
+so the integration/slow/lint tests the default selection drops are not counted (CI's python_unit
+shards drop them too). A trylast hook registered later (a conftest's, or a splitting plugin's) runs after
+it; nothing in the census run deselects that way today. Not seen: a fixture other than the two named that requests the tenant
 at run time with ``request.getfixturevalue("t2_tenant")`` (on 2026-10-22 only a test double in
 tests/test_storage_touch_guard.py does).
 """
@@ -24,6 +28,21 @@ import os
 import pytest
 
 _TENANT_FIXTURES = ("t2_tenant", "t2_service_env")
+_FAILED: dict[str, str] = {}
+
+
+def _first_error(text: str) -> str:
+    """The first ``E   `` line of a failure, else its last line."""
+    lines = text.splitlines()
+    for line in lines:
+        if line.startswith("E   "):
+            return line[4:].strip()[:300]
+    return (lines[-1].strip() if lines else "")[:300]
+
+
+def pytest_collectreport(report) -> None:
+    if report.failed:
+        _FAILED[report.nodeid] = _first_error(report.longreprtext)
 
 
 @pytest.hookimpl(trylast=True)
@@ -39,5 +58,7 @@ def pytest_collection_modifyitems(session, config, items) -> None:
             except ValueError:
                 key = item.nodeid.split("::", 1)[0]
             counts[key] += 1
+    # Written here and only here, marked complete: a collection that ended before this hook (a UsageError, or an
+    # earlier modifyitems hook that raised) leaves no file, and the reader refuses it rather than reading zeros.
     with open(os.environ["TENANT_CENSUS_OUT"], "w", encoding="utf-8") as out:
-        json.dump(dict(counts), out)
+        json.dump({"complete": True, "counts": dict(counts), "failed": dict(_FAILED)}, out)

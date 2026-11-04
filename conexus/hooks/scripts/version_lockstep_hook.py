@@ -18,7 +18,9 @@ diverge it
 upgrade is in flight, and (b) dispatches a DETACHED action that performs
 the extras-preserving two-command upgrade. The hook returns immediately
 and NEVER wedges synchronous SessionStart (CA-4), NEVER writes the marker
-(the action owns that, on confirmed upgrade only), and NEVER raises
+(the action owns that: it writes the retry sentinel before it spawns the
+detached upgrade and the version when it has seen that child exit 0, so it
+confirms the marker itself and needs nothing from the CLI, nexus-rcngf), and NEVER raises
 (fail-safe exit 0).
 
 nexus-konsk (P0, 2026-09-11): a same-version plugin-only cut (RDR-197)
@@ -312,6 +314,13 @@ def known_plugins() -> tuple[str, ...]:
     debug(f"falling back to the built-in plugin set {_FALLBACK_PLUGINS}: {reason}")
     _warn_fallback(reason)
     return _FALLBACK_PLUGINS
+
+
+#: What ``nx upgrade`` leaves in the marker when it is this action's detached child and loses the upgrade lock
+#: (exit 75, nexus-emiky): the binary is current and the rest of the upgrade is owed. Not a version. Copied from
+#: ``nexus.lockstep_marker.UPGRADE_RETRY_MARKER`` and ``version_lockstep_action.UPGRADE_RETRY_MARKER`` (stdlib
+#: scripts import nothing from nexus or each other); a test keeps the three equal.
+UPGRADE_RETRY_MARKER = "retry-nx-upgrade"
 
 
 def read_marker() -> str | None:
@@ -796,8 +805,11 @@ def main() -> None:
         # cannot rewrite it on a pip or dev-tree install), the CLI's own
         # version stands in, judged by the action's rule (CLI >= plugin);
         # a CLI that is older, or unknown, is skew (nexus-ehg1y).
-        version_mismatch = bool(plugin_version) and read_marker() != plugin_version and not satisfies(
-            read_cli_version(), plugin_version  # type: ignore[arg-type]
+        # The retry sentinel (nexus-emiky) is skew whatever the CLI reports: the binary is current, and the
+        # upgrade the lost lock cut off is still owed.
+        marker = read_marker()
+        version_mismatch = bool(plugin_version) and marker != plugin_version and (
+            marker == UPGRADE_RETRY_MARKER or not satisfies(read_cli_version(), plugin_version)  # type: ignore[arg-type]
         )
         if version_mismatch:
             dispatch_action(plugin_version)  # type: ignore[arg-type]

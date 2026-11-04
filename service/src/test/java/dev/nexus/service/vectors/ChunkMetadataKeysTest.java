@@ -122,6 +122,30 @@ class ChunkMetadataKeysTest {
     }
 
     @Test
+    void theRowKeyDigestIsTheTablesRowClass_soTheEnginePinsTheExactSetWithoutNamingIt() throws IOException {
+        List<String> row = new ArrayList<>(parse().metadataKeysByClass().getOrDefault("ROW", Set.of()));
+        assertThat(row).as("the table's ROW metadata keys (non-vacuity: the pin below would hash nothing)")
+            .hasSizeGreaterThanOrEqualTo(4);
+        java.util.Collections.sort(row);
+        assertThat(ChunkMetadataKeys.ROW_KEYS_SHA256)
+            .as("ChunkMetadataKeys.ROW_KEYS_SHA256 must be the digest of the ROW rows of chunk-metadata-keys.toml; "
+                + "regenerate with scripts/gen_chunk_metadata_keys_java.py --write")
+            .isEqualTo(ChunkKeyPlan.digest(row));
+        assertThat(ChunkMetadataKeys.QUARANTINE_IMPLIES_SHA256)
+            .isEqualTo(ChunkKeyPlan.digest(List.of("quarantined_by", "quarantined_at")));
+    }
+
+    @Test
+    void theEnginesBypassSetIsTheTablesBypassPrefixes() throws IOException {
+        // The table's bypass_prefixes line is the only statement of the set outside the engine; the engine holds the
+        // same two prefixes, built from the collection grammar rather than written as literals.
+        Matcher m = Pattern.compile("^bypass_prefixes\\s*=\\s*\\[(.*)\\]\\s*$", Pattern.MULTILINE)
+            .matcher(Files.readString(TABLE));
+        assertThat(m.find()).as("bypass_prefixes line in the table").isTrue();
+        assertThat(strings(m.group(1))).containsExactlyInAnyOrderElementsOf(ChunkKeyPlan.BYPASS_PREFIXES);
+    }
+
+    @Test
     void theClassesAreDisjoint() {
         Set<String> seen = new HashSet<>();
         for (Set<String> keys : List.of(ChunkMetadataKeys.CHUNK, ChunkMetadataKeys.DOCUMENT,

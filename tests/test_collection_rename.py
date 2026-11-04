@@ -279,7 +279,12 @@ class TestRenameCLI:
             mock_cascade.assert_not_called()
         else:
             assert result.exit_code == 0, result.output
-            mock_cascade.assert_called_once_with(old, new)
+            # nexus-ucagi: --force-prefix-change also withholds the model
+            # token the data plane would send the engine.
+            if force:
+                mock_cascade.assert_called_once_with(old, new, check_model_token=False)
+            else:
+                mock_cascade.assert_called_once_with(old, new)
 
     # test_force_prefix_change_bypasses_gate retired (nexus-i711w terminal
     # deletion): same retired client-side fan-out pins as

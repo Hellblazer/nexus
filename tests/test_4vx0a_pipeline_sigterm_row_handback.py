@@ -309,15 +309,19 @@ def test_a_stopped_mineru_worker_and_one_started_after_the_stop_are_both_killed(
     its run was interrupted (a stage between batches at that moment) is killed as it registers:
     the thread's run is bound with ``bind_run_cancel``, and the binding goes with the thread."""
 
-    def _run(pid_file: Path, outcome: dict) -> None:
-        script = (
+    def _script(pid_file: Path) -> str:
+        return (
             "import os, time\n"
             f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
             "time.sleep(600)\n"
         )
+
+    def _run(outcome: dict) -> None:
+        # The worker-script patch is entered by the caller, on the test's own thread (nexus-9tmvy):
+        # entered here it would stay installed for the rest of the xdist worker if a stage thread
+        # outlived its join.
         try:
-            with patch.object(pdf_extractor, "_MINERU_WORKER_SCRIPT", script):
-                pdf_extractor.PDFExtractor()._mineru_run_subprocess(tmp_path / "x.pdf", 0, 1)
+            pdf_extractor.PDFExtractor()._mineru_run_subprocess(tmp_path / "x.pdf", 0, 1)
         except BaseException as exc:  # noqa: BLE001 — the test reads what the stage raised
             outcome["exc"] = exc
 
@@ -329,13 +333,22 @@ def test_a_stopped_mineru_worker_and_one_started_after_the_stop_are_both_killed(
 
     try:
         first_pid, first = tmp_path / "first.pid", {}
-        stage = threading.Thread(target=_run, args=(first_pid, first))
-        stage.start()
-        assert _wait_for(lambda: first_pid.exists() and first_pid.stat().st_size > 0, 60), "worker never started"
-        started = time.monotonic()
-        assert pdf_extractor.stop_mineru_workers() == 1
-        stage.join(10)
-        assert not stage.is_alive(), "the stage still waits on a killed worker"
+        with patch.object(pdf_extractor, "_MINERU_WORKER_SCRIPT", _script(first_pid)):
+            stage = threading.Thread(target=_run, args=(first,))
+            try:
+                stage.start()
+                assert _wait_for(lambda: first_pid.exists() and first_pid.stat().st_size > 0, 60), "worker never started"
+                started = time.monotonic()
+                assert pdf_extractor.stop_mineru_workers() == 1
+                stage.join(10)
+                assert not stage.is_alive(), "the stage still waits on a killed worker"
+            finally:
+                # On a failure path the stage may still be running with the patched script:
+                # stop its worker and join it before the patch unwinds (nexus-9tmvy).
+                pdf_extractor.stop_mineru_workers()
+                if stage.ident is not None:
+                    stage.join(10)
+                assert not stage.is_alive(), "the stage thread outlived the patch"
         assert time.monotonic() - started < 3.0
         assert isinstance(first.get("exc"), pdf_extractor.MineruWorkerStopped), first
         assert _wait_for(lambda: not _pid_alive(int(first_pid.read_text())), 5), "the worker outlived the stop"
@@ -344,7 +357,8 @@ def test_a_stopped_mineru_worker_and_one_started_after_the_stop_are_both_killed(
         interrupted.set()
         pdf_extractor.bind_run_cancel(interrupted)
         late_pid, late = tmp_path / "late.pid", {}
-        _run(late_pid, late)  # its run is already interrupted: killed as it registers, never waits its budget
+        with patch.object(pdf_extractor, "_MINERU_WORKER_SCRIPT", _script(late_pid)):
+            _run(late)  # its run is already interrupted: killed as it registers, never waits its budget
         assert isinstance(late.get("exc"), pdf_extractor.MineruWorkerStopped), late
     finally:
         pdf_extractor.bind_run_cancel(None)

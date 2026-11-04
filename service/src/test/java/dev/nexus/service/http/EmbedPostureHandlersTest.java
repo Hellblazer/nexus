@@ -323,6 +323,15 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheRunsBeforeIdCapability() throws Exception {
+        // nexus-1ss4n: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves
+        // the handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("nx_answer_runs_before_id_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void version_throughTheRealHandler_advertisesTheGraphScopeFilterCapability() throws Exception {
         // nexus-jypmj.1.13: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this
         // proves the handler's body actually calls it.
@@ -350,6 +359,25 @@ class EmbedPostureHandlersTest {
         JsonNode body = get("/version", new VersionHandler(refusingPool(),
                 router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
         assertThat(body.get("search_row_owner_span_supported").asBoolean()).isTrue();
+    }
+
+    @Test
+    void version_throughTheRealHandler_advertisesTheRouteBManifestKeysCapability() throws Exception {
+        // nexus-qpt52: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
+        // handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("route_b_manifest_keys_supported").asBoolean()).isTrue();
+    }
+
+    @Test
+    void version_throughTheRealHandler_advertisesTheRouteCManifestKeysCapability() throws Exception {
+        // nexus-u9dc5: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this proves the
+        // handler's body actually calls it, and that the flag is its own (the route (b) one is read beside it).
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("route_c_manifest_keys_supported").asBoolean()).isTrue();
+        assertThat(body.get("route_b_manifest_keys_supported").asBoolean()).isTrue();
     }
 
     @Test

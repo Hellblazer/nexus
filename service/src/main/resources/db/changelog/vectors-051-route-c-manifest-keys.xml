@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-u9dc5 (RDR-236 Phase 3, engine; the route (c) half): POST /v1/vectors/get and /v1/vectors/get-all-metadata
+    answer every key ManifestLabelStage answers per OWNING DOCUMENT, from the catalog.
+
+    WHY. The two get routes (PgVectorRepository#getWhere and #getAllMetadata) tested every key of a where on the shared
+    chunk row, whose metadata is whichever document wrote the chunk last. After Phase 4 Step 1 stops the writers
+    stamping the document keys and the position labels on the row, a where on one of them would return nothing, and
+    say nothing. A refusal was the other option; the design of record is to evaluate, because a refusal would leave the
+    same hole the route (b) work closed (nexus-qpt52).
+
+    WHAT. nexus.manifest_admits_chunk(p_tenant, p_collection, p_chash, p_metadata, p_manifest_where, p_manifest_path)
+    returns one row, admitted, which is true when the chunk is admitted by the compiled predicate:
+      - with a live owner (a catalog_document_chunks row whose catalog_documents row has deleted_at NULL) it is true
+        when ANY live occurrence's per-occurrence object passes. The object is the one the thirteen functions of
+        vectors-049 build, text for text, with route (b)'s exact content_type form (route (c) has no stage after the
+        read, so the SQL is the answer): ManifestObjectParityTest holds it to them as the 14th body.
+      - with no live owner (an orphan, or a chunk whose only owners are tombstoned) the predicate is judged on the
+        chunk row's own values, as ManifestLabelStage does for a hit with no manifest row. The object is then built
+        from p_metadata alone, key by key, with "" for a missing or null value.
+    p_metadata is the chunk row's metadata the caller already holds (c.metadata of the read), so the function judges the
+    same row the statement returns and does not read nexus.chunks again. p_manifest_where is accepted for the shared
+    object block (it is the argument the block's manifest_names_key calls read) and is NULL from the engine, which
+    compiles a jsonpath only (ManifestPushdown#ofExact).
+
+    A SET-RETURNING SQL function (one row) rather than a scalar one, deliberately. PostgreSQL inlines a SQL function
+    called in FROM, and does not inline a scalar one whose body holds a sub-select. Inlined, the bound path is a
+    constant at plan time (plan_cache_mode = force_custom_plan), so the guards of keys the predicate does not name
+    fold away and the jsonpath is parsed once; not inlined, both would run per chunk. This is the shape of
+    nexus.chunk_live_owners, which the get routes already call. ManifestSecondObjectPlanTest pins the fold.
+
+    A NULL p_manifest_where and NULL p_manifest_path admit everything (no predicate).
+
+    No DATA EFFECT: one new function and its grant. Rollback drops the function.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-051-1" author="nexus-u9dc5">
+        <comment>nexus.manifest_admits_chunk (nexus-u9dc5, RDR-236 Phase 3): the route (c) get and get-all-metadata read a where on every key ManifestLabelStage answers per owning document, from the catalog; the per-occurrence object is the one of vectors-049 (route (b)'s exact content_type form), an orphan chunk is judged on its own row. One new function and its GRANT EXECUTE. No data effect: function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.manifest_admits_chunk(
+    p_tenant         text,
+    p_collection     text,
+    p_chash          bytea,
+    p_metadata       jsonb,
+    p_manifest_where jsonb,
+    p_manifest_path  text
+) RETURNS TABLE(admitted boolean)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT CASE
+        WHEN p_manifest_where IS NULL AND p_manifest_path IS NULL THEN true
+        WHEN EXISTS (
+                SELECT 1
+                  FROM nexus.catalog_document_chunks lm
+                  JOIN nexus.catalog_documents ld
+                    ON ld.tenant_id = lm.tenant_id AND ld.tumbler = lm.doc_id
+                 WHERE lm.tenant_id  = p_tenant
+                   AND lm.collection = p_collection
+                   AND lm.chash      = p_chash
+                   AND ld.deleted_at IS NULL)
+        THEN EXISTS (
+            SELECT 1
+              FROM (SELECT p_metadata AS metadata) c
+              JOIN nexus.catalog_document_chunks m
+                ON m.tenant_id = p_tenant AND m.collection = p_collection AND m.chash = p_chash
+              JOIN nexus.catalog_documents d
+                ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     CROSS JOIN LATERAL (
+           SELECT nexus.catalog_source_format(d.content_type, d.file_path) AS fmt
+         ) f
+     CROSS JOIN LATERAL (
+           SELECT (jsonb_build_object(
+               'section_title', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'section_title')
+                    THEN CASE WHEN m.labels_written
+                   THEN to_jsonb(COALESCE(m.section_title, ''))
+                   ELSE COALESCE(NULLIF(c.metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END END,
+               'section_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'section_type')
+                    THEN CASE WHEN m.labels_written
+                   THEN to_jsonb(COALESCE(m.section_type, ''))
+                   ELSE COALESCE(NULLIF(c.metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END END,
+               'page_number', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'page_number')
+                    THEN CASE WHEN m.labels_written
+                   THEN COALESCE(to_jsonb(m.page_number), '""'::jsonb)
+                   ELSE COALESCE(NULLIF(c.metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END END,
+               'title', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'title')
+                    THEN CASE WHEN d.title ~ '\S'
+                   THEN to_jsonb(d.title)
+                   ELSE COALESCE(NULLIF(c.metadata -> 'title', 'null'::jsonb), '""'::jsonb) END END,
+               'source_author', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'source_author')
+                    THEN CASE WHEN COALESCE(d.author, '') ~ '\S'
+                   THEN to_jsonb(d.author)
+                   ELSE COALESCE(NULLIF(c.metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END END,
+               'bib_doi', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_doi')
+                    THEN to_jsonb(d.bib_doi) END,
+               'bib_openalex_id', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_openalex_id')
+                    THEN to_jsonb(d.bib_openalex_id) END,
+               'bib_semantic_scholar_id', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_semantic_scholar_id')
+                    THEN to_jsonb(d.bib_semantic_scholar_id) END,
+               'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
+                    THEN to_jsonb(array_remove(ARRAY[
+                   CASE WHEN f.fmt IS NOT NULL
+                        THEN CASE WHEN f.fmt IN ('pdf', 'markdown') THEN f.fmt END
+                        ELSE CASE WHEN c.metadata ->> 'content_type' IN ('pdf', 'markdown') THEN c.metadata ->> 'content_type' END END,
+                   CASE WHEN d.content_type ~ '\S'
+                        THEN CASE WHEN d.content_type NOT IN ('pdf', 'markdown') THEN d.content_type END
+                        ELSE CASE WHEN COALESCE(c.metadata ->> 'content_type', CASE WHEN f.fmt IS NULL THEN '' END) NOT IN ('pdf', 'markdown')
+                             THEN COALESCE(c.metadata ->> 'content_type', CASE WHEN f.fmt IS NULL THEN '' END) END END
+               ], NULL)) END,
+               'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
+                    THEN CASE WHEN p_manifest_path IS NOT NULL AND position('"tags"' in p_manifest_path) > 0
+                   THEN nexus.catalog_tag_set(CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'tags'), 'null') <> 'null'
+                                                   THEN d.metadata -> 'tags' ELSE c.metadata -> 'tags' END)
+                   ELSE '[""]'::jsonb END END,
+               'category', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'category')
+                    THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'category'), 'null') <> 'null' THEN d.metadata -> 'category'
+                   ELSE COALESCE(NULLIF(c.metadata -> 'category', 'null'::jsonb), '""'::jsonb) END END,
+               'ttl_days', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'ttl_days')
+                    THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'ttl_days'), 'null') <> 'null' THEN d.metadata -> 'ttl_days'
+                   ELSE COALESCE(NULLIF(c.metadata -> 'ttl_days', 'null'::jsonb), '""'::jsonb) END END,
+               'source_agent', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'source_agent')
+                    THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'source_agent'), 'null') <> 'null' THEN d.metadata -> 'source_agent'
+                   ELSE COALESCE(NULLIF(c.metadata -> 'source_agent', 'null'::jsonb), '""'::jsonb) END END,
+               'extraction_method', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'extraction_method')
+                    THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'extraction_method'), 'null') <> 'null' THEN d.metadata -> 'extraction_method'
+                   ELSE COALESCE(NULLIF(c.metadata -> 'extraction_method', 'null'::jsonb), '""'::jsonb) END END,
+               'quality_gate_overridden', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'quality_gate_overridden')
+                    THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'quality_gate_overridden'), 'null') <> 'null' THEN d.metadata -> 'quality_gate_overridden'
+                   ELSE COALESCE(NULLIF(c.metadata -> 'quality_gate_overridden', 'null'::jsonb), '""'::jsonb) END END,
+               'extraction_source', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'extraction_source')
+                    THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'extraction_source'), 'null') <> 'null' THEN d.metadata -> 'extraction_source'
+                   ELSE COALESCE(NULLIF(c.metadata -> 'extraction_source', 'null'::jsonb), '""'::jsonb) END END,
+               'frecency_score', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'frecency_score')
+                    THEN CASE WHEN COALESCE(jsonb_typeof(d.metadata -> 'frecency_score'), 'null') <> 'null' THEN d.metadata -> 'frecency_score'
+                   ELSE COALESCE(NULLIF(c.metadata -> 'frecency_score', 'null'::jsonb), '""'::jsonb) END END
+           )
+               || CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_year')
+                   OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_authors')
+                   OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_venue')
+                   OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_citation_count')
+                   OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'indexed_at')
+                   OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type_shown')
+                   THEN jsonb_build_object(
+                   'bib_year', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_year')
+                       THEN CASE WHEN COALESCE(d.bib_year, 0) <> 0 THEN to_jsonb(d.bib_year) ELSE '""'::jsonb END END,
+                   'bib_authors', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_authors')
+                       THEN to_jsonb(COALESCE(d.bib_authors, '')) END,
+                   'bib_venue', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_venue')
+                       THEN to_jsonb(COALESCE(d.bib_venue, '')) END,
+                   'bib_citation_count', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_citation_count')
+                       THEN CASE WHEN (d.bib_enriched_at IS NOT NULL OR COALESCE(d.bib_year, 0) <> 0 OR COALESCE(d.bib_citation_count, 0) <> 0
+                           OR COALESCE(d.bib_authors, '') <> '' OR COALESCE(d.bib_venue, '') <> '' OR COALESCE(d.bib_semantic_scholar_id, '') <> ''
+                           OR COALESCE(d.bib_openalex_id, '') <> '' OR COALESCE(d.bib_doi, '') <> '')
+                           THEN to_jsonb(COALESCE(d.bib_citation_count, 0)) ELSE '""'::jsonb END END,
+                   'indexed_at', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'indexed_at')
+                       THEN CASE WHEN d.indexed_at IS NOT NULL
+                           THEN to_jsonb(to_char(d.indexed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'))
+                           ELSE COALESCE(NULLIF(c.metadata -> 'indexed_at', 'null'::jsonb), '""'::jsonb) END END,
+                   'content_type_shown', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type_shown')
+                       THEN to_jsonb(CASE WHEN f.fmt IS NOT NULL THEN f.fmt WHEN d.content_type ~ '\S' THEN d.content_type
+                           ELSE COALESCE(c.metadata ->> 'content_type', '') END) END
+                   )
+                   ELSE '{}'::jsonb END) AS eff
+         ) e
+             WHERE d.deleted_at IS NULL
+               AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath))
+        ELSE COALESCE((
+            SELECT (p_manifest_where IS NULL OR o.eff @> p_manifest_where)
+               AND (p_manifest_path IS NULL OR o.eff @@ p_manifest_path::jsonpath)
+              FROM (SELECT (jsonb_build_object(
+                       'section_title', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'section_title')
+                            THEN COALESCE(NULLIF(p_metadata -> 'section_title', 'null'::jsonb), '""'::jsonb) END,
+                       'section_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'section_type')
+                            THEN COALESCE(NULLIF(p_metadata -> 'section_type', 'null'::jsonb), '""'::jsonb) END,
+                       'page_number', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'page_number')
+                            THEN COALESCE(NULLIF(p_metadata -> 'page_number', 'null'::jsonb), '""'::jsonb) END,
+                       'title', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'title')
+                            THEN COALESCE(NULLIF(p_metadata -> 'title', 'null'::jsonb), '""'::jsonb) END,
+                       'source_author', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'source_author')
+                            THEN COALESCE(NULLIF(p_metadata -> 'source_author', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_doi', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_doi')
+                            THEN COALESCE(NULLIF(p_metadata -> 'bib_doi', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_openalex_id', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_openalex_id')
+                            THEN COALESCE(NULLIF(p_metadata -> 'bib_openalex_id', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_semantic_scholar_id', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_semantic_scholar_id')
+                            THEN COALESCE(NULLIF(p_metadata -> 'bib_semantic_scholar_id', 'null'::jsonb), '""'::jsonb) END,
+                       'category', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'category')
+                            THEN COALESCE(NULLIF(p_metadata -> 'category', 'null'::jsonb), '""'::jsonb) END,
+                       'ttl_days', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'ttl_days')
+                            THEN COALESCE(NULLIF(p_metadata -> 'ttl_days', 'null'::jsonb), '""'::jsonb) END,
+                       'source_agent', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'source_agent')
+                            THEN COALESCE(NULLIF(p_metadata -> 'source_agent', 'null'::jsonb), '""'::jsonb) END,
+                       'extraction_method', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'extraction_method')
+                            THEN COALESCE(NULLIF(p_metadata -> 'extraction_method', 'null'::jsonb), '""'::jsonb) END,
+                       'quality_gate_overridden', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'quality_gate_overridden')
+                            THEN COALESCE(NULLIF(p_metadata -> 'quality_gate_overridden', 'null'::jsonb), '""'::jsonb) END,
+                       'extraction_source', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'extraction_source')
+                            THEN COALESCE(NULLIF(p_metadata -> 'extraction_source', 'null'::jsonb), '""'::jsonb) END,
+                       'frecency_score', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'frecency_score')
+                            THEN COALESCE(NULLIF(p_metadata -> 'frecency_score', 'null'::jsonb), '""'::jsonb) END,
+                       'tags', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'tags')
+                            THEN nexus.catalog_tag_set(p_metadata -> 'tags') END,
+                       'content_type', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type')
+                            THEN to_jsonb(ARRAY[COALESCE(p_metadata ->> 'content_type', '')]) END
+                   )
+                   || CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_year') OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_authors') OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_venue') OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_citation_count') OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'indexed_at') OR nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type_shown')
+                   THEN jsonb_build_object(
+                       'bib_year', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_year')
+                           THEN COALESCE(NULLIF(p_metadata -> 'bib_year', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_authors', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_authors')
+                           THEN COALESCE(NULLIF(p_metadata -> 'bib_authors', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_venue', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_venue')
+                           THEN COALESCE(NULLIF(p_metadata -> 'bib_venue', 'null'::jsonb), '""'::jsonb) END,
+                       'bib_citation_count', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'bib_citation_count')
+                           THEN COALESCE(NULLIF(p_metadata -> 'bib_citation_count', 'null'::jsonb), '""'::jsonb) END,
+                       'indexed_at', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'indexed_at')
+                           THEN COALESCE(NULLIF(p_metadata -> 'indexed_at', 'null'::jsonb), '""'::jsonb) END,
+                       'content_type_shown', CASE WHEN nexus.manifest_names_key(p_manifest_where, p_manifest_path, 'content_type_shown')
+                           THEN to_jsonb(COALESCE(p_metadata ->> 'content_type', '')) END
+                   )
+                   ELSE '{}'::jsonb END
+                   ) AS eff) o), false)
+    END AS admitted
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.manifest_admits_chunk(text, text, bytea, jsonb, jsonb, text) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.manifest_admits_chunk(text, text, bytea, jsonb, jsonb, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

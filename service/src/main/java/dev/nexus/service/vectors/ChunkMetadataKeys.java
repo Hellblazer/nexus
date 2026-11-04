@@ -79,4 +79,12 @@ public final class ChunkMetadataKeys {
         "git_remote_url",
         "source_path",
         "store_type");
+
+    /** SHA-256 (hex) of the ROW keys, sorted and joined by a newline: the engine holds the exact set without naming a key. A request whose engine-owned keys hash otherwise is refused. */
+    public static final String ROW_KEYS_SHA256 =
+        "17db997f36279dacacbe4a6c63ce7b9d3ad252cf2d590564eb768f6a04482111";
+
+    /** SHA-256 (hex) of the quarantine implication pair {@code by} then {@code at}, joined by a newline. */
+    public static final String QUARANTINE_IMPLIES_SHA256 =
+        "187d39ffdb07915b0a5d7de19fab810974ae75478e273aa5d6a9c30ab260d0b9";
 }

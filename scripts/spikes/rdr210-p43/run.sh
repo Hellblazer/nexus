@@ -146,6 +146,10 @@ echo "[p43] fenced: HOME is an empty scratch dir at $HOME; PATH shim active"
 cleanup() {
   local rc=$?
   set +e
+  # The aspect worker an nx call spawned outlives the service by design
+  # (nexus-wl9pk): stop it by its lease in THIS config dir, before the service so
+  # its final reclaim sweep still has an engine; never by pattern.
+  NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon aspect-worker stop --config-dir "$SCRATCH" >/dev/null 2>&1
   NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop --with-pg >/dev/null 2>&1
   if [ -f "$SCRATCH/pg_credentials" ]; then
     # shellcheck disable=SC1090,SC1091

@@ -171,7 +171,7 @@ Before each reviewer dispatch, write the round marker:
 nx scratch put "review-round bead=<id> n=<N> bar=<the acceptance bar, one line>" --tags "review,<id>"
 ```
 
-Include `round N of at most 2` in the reviewer's brief (the cap is `review-rounds.toml`'s, contract `code-review`; plan audits and RDR gates have their own rows there). A reviewer that knows
+Include `round N of at most 2` in the reviewer's brief (the cap is the `code-review` contract in the nexus wheel's `review-rounds.toml` table; plan audits and RDR gates have their own contracts there). A reviewer that knows
 it is a confirmation pass behaves like one (see § Review Gate above, confirmation-pass brief). N >= 3 requires the human to have asked for it in this
 session, by name; record the ask in the marker (`asked-by=human`). An
 orchestrator may not self-authorize round 3, with ONE carve-out: a
@@ -210,7 +210,7 @@ dispatch below.
 - Design gate first: when a plan marks an item DESIGN DECISION FIRST, the orchestrator locks the design-of-record in T1 before any code dispatch; deviations from a plan's recommendation need the human's nod, named fallbacks do not.
 - Review at every seam: each arc gets the stacked dual review independently; cross-arc integration points get named in reviewer briefs.
 - Commit order: arcs commit pathspec-limited in dependency order (lib contract before doc text referencing it), one arc per commit.
-- service/ builds: one builder at a time. Share a mutable build-output directory across agents and serialize around it, the way you would a database migration or a generated-code directory — parallelizing it corrupts the build mid-way, it doesn't just race harmlessly. This repo's own mechanics (a build-lease script, the exact env vars, which lint enforces coverage) are nexus-specific and live in this repo's own .claude/rules/releases-and-engine.md § Engine-service release, not restated here.
+- service/ builds: one builder at a time. Share a mutable build-output directory across agents and serialize around it, the way you would a database migration or a generated-code directory — parallelizing it corrupts the build mid-way, it doesn't just race harmlessly. If your project has its own build mechanics (a build-lease script, required env vars, a lint that checks coverage), its own rules or contributing docs carry them; follow those.
 
 ## Quick Routing
 

@@ -168,8 +168,11 @@ def auto_lock_held(config_dir: Path | None = None) -> bool:
 #: up with exit 75 (nexus-75w5d). It waits, where ``--auto`` exits at once, because it does work ``--auto``
 #: skips (plugin convergence, the engine install) and the SessionStart hook starts an ``--auto`` at the same
 #: moment as the lockstep action: an instant refusal would lose that work to a run that only reads. An
-#: ``--auto`` holder ends at its own time limit (default 900 s) at the latest, between rungs.
-PLAIN_WAIT_S = 600.0
+#: ``--auto`` holder stops starting new work at its own time limit (default 900 s), then still runs the
+#: finish pass and the service cycle (about 60 s each), so the wait clears 900 + 2 x 60 with a margin. It
+#: does not bound a census call or a collection's backfill already under way, so a holder can still outlast
+#: it: the 75 exit leaves the retry sentinel in the lockstep marker (``nexus.lockstep_marker``, nexus-emiky).
+PLAIN_WAIT_S = 1200.0
 _PLAIN_POLL_S = 1.0
 
 

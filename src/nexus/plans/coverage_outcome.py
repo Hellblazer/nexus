@@ -31,7 +31,12 @@ from nexus.plans.answer_shape import (
     AnswerShape,
     unread_phrase,
 )
-from nexus.plans.coverage_ledger import CONFLICTED_REASON, CoverageResult, counts_toward_a_usable_answer
+from nexus.plans.coverage_ledger import (
+    CONFLICTED_FROM_CONTRADICTED_REASON,
+    CONFLICTED_REASON,
+    CoverageResult,
+    counts_toward_a_usable_answer,
+)
 
 __all__ = [
     "NO_USABLE_ANSWER_REASON",
@@ -118,7 +123,9 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
     ``trace=False`` wherever the text is kept). Every facet that is not covered is named with why: unsupported,
     contradicted, not assessed, or its named source was not found.
     """
-    pending = [f for f in coverage.ledger.findings if f.state != "covered"]
+    # A facet that started contradicted and was turned conflicted by the unread tail (nexus-se11w, Sam's option b) is
+    # still listed as unresolved: the run is partial because of it.
+    pending = [f for f in coverage.ledger.findings if f.state != "covered" or f.reason == CONFLICTED_FROM_CONTRADICTED_REASON]
     conflicted = [f for f in coverage.ledger.findings if f.state == "covered" and f.reason == CONFLICTED_REASON]
 
     def clip(facet_id: str) -> str:
@@ -129,8 +136,14 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
         "The evidence did not settle these parts of the request; the answer below does not cover them:",
     ]
     for f in pending:
-        label = "the named source was not found" if f.reason == "source_missing" else _STATE_LABEL.get(f.state, f.state)
+        label = (
+            "the evidence conflicts: contradicted on the items read, supported in the unread ones"
+            if f.reason == CONFLICTED_FROM_CONTRADICTED_REASON
+            else "the named source was not found" if f.reason == "source_missing" else _STATE_LABEL.get(f.state, f.state)
+        )
         lines.append(f"  - {f.facet_id} ({label}): {clip(f.facet_id)}")
+    # nexus-dfrfp: what the parts NOT listed above rest on; "covered" is a statement about support, not completeness.
+    lines.append("Parts not listed have at least one supporting item that reached the answer; that does not make them complete.")
     unresolved = [r for r in coverage.ledger.sources if r.state == "unresolved"]
     if unresolved:
         # nexus-jypmj.3.17: an ambiguous or unlookable source blocked nothing; say that it was not read, and why.

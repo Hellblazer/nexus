@@ -168,6 +168,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     get_ops: list[str] = []          # ops seen by do_GET, in order
     post_ops: list[str] = []         # ops seen by do_POST, in order
     last_link_body: dict[str, Any] = {}
+    #: nexus-l4hds: how many fillable manifest rows /manifest/section_label_fillable counts (capped at its limit).
+    fillable_rows: int = 0
+    #: nexus-l4hds: when non-zero, /manifest/section_label_fillable answers this status (503: the engine's statement bound).
+    fillable_status: int = 0
+    #: nexus-l4hds: how many times /manifest/section_label_fillable was requested.
+    fillable_requests: int = 0
     #: from_tumbler value for which /link_query reports NO existing link (absent path).
     link_absent_from: str = "9.9.9"
     #: when set, /list returns this many docs for a content_type-filtered request
@@ -440,6 +446,16 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # /manifest/null_collection -> {total, backfillable} — mirrors
             # CatalogRepository.manifestNullCollectionReport's shape.
             self._send_json({"total": 0, "backfillable": 0})
+        elif op == "/manifest/section_label_fillable":
+            # nexus-l4hds: GET /manifest/section_label_fillable?limit=N -> {fillable, limit, capped} — mirrors
+            # CatalogHandler.handleManifestSectionLabelFillable. The fake holds `fillable_rows` fillable rows.
+            limit = int(self._query_params().get("limit", "1000"))
+            FakeCatalogHandler.fillable_requests += 1
+            if FakeCatalogHandler.fillable_status:
+                self._send_json({"error": "x", "reason": "statement_timeout"}, FakeCatalogHandler.fillable_status)
+                return
+            counted = min(FakeCatalogHandler.fillable_rows, limit)
+            self._send_json({"fillable": counted, "limit": limit, "capped": counted >= limit})
         elif op == "/chash/conformance":
             # RDR-180 (nexus-du2dw): GET /chash/conformance?dim= ->
             # {dim, tables: [{table_name, total, non_conformant, sample_chashes}]}
@@ -2976,6 +2992,97 @@ class TestManifestNullCollectionReport:
         c = self._client_get_returning(monkeypatch, None)
         report = c.manifest_null_collection_report()
         assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+
+class TestManifestSectionLabelFillable:
+    """nexus-l4hds: ``manifest_section_label_fillable`` over the live fake (the wire: request, envelope) and with the
+    transport stubbed (every way the answer can be "cannot say", which is ``None``, never a count)."""
+
+    def test_the_count_and_the_limit_travel_the_wire(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.fillable_rows = 7
+        try:
+            assert client.manifest_section_label_fillable(1000) == {"fillable": 7, "limit": 1000, "capped": False}
+            assert client.manifest_section_label_fillable(5) == {"fillable": 5, "limit": 5, "capped": True}
+            assert client.manifest_section_label_fillable(7) == {"fillable": 7, "limit": 7, "capped": True}
+        finally:
+            FakeCatalogHandler.fillable_rows = 0
+        assert client.manifest_section_label_fillable() == {"fillable": 0, "limit": 1000, "capped": False}
+
+    def test_the_request_is_one_attempt_with_a_bound_of_its_own(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Recorded, not asserted inside the stub: the method swallows an exception from ``_get``, which would turn a
+        failed assertion there into the ``None`` the other tests expect."""
+        c = object.__new__(HttpCatalogClient)
+        calls: list[tuple[str, dict]] = []
+
+        def record(path, **kw):
+            calls.append((path, kw))
+            return {"fillable": 3, "capped": False}
+
+        monkeypatch.setattr(c, "_get", record, raising=False)
+        assert c.manifest_section_label_fillable() == {"fillable": 3, "limit": 1000, "capped": False}
+        ((path, kw),) = calls
+        assert path == "/manifest/section_label_fillable" and kw["limit"] == 1000
+        assert kw["idempotent"] is False, "sent once: a resend of a timed-out count would run it again"
+        assert 0 < kw["timeout"] < 30, "a bound of its own, under the client-wide default"
+
+    def test_a_503_is_sent_once_and_read_as_cannot_say(self, client: HttpCatalogClient) -> None:
+        """The engine's statement bound answers 503 (nexus-l4hds). A gateway retry would run the same bounded query
+        again (the mixin's 503 loop: three more sends and 17 s of sleep), so the request goes out exactly once."""
+        from nexus.db import gateway_hold
+
+        FakeCatalogHandler.fillable_status, FakeCatalogHandler.fillable_requests = 503, 0
+        hold = gateway_hold._hold_path()
+        held_before = hold.read_bytes() if hold.exists() else None
+        try:
+            assert client.manifest_section_label_fillable(1000) is None
+            assert FakeCatalogHandler.fillable_requests == 1
+            # A statement-timeout 503 holds no other caller: the single attempt neither writes nor
+            # rewrites the shared gateway hold (review r2).
+            assert (hold.read_bytes() if hold.exists() else None) == held_before
+        finally:
+            FakeCatalogHandler.fillable_status = 0
+
+    @staticmethod
+    def _client(monkeypatch: pytest.MonkeyPatch, body: Any = None, *, status: int = 0) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+
+        def fake_get(path, *, idempotent=True, timeout=None, **params):
+            assert path == "/manifest/section_label_fillable" and params == {"limit": 1000}
+            if status:
+                request = httpx.Request("GET", "http://svc/v1/catalog/manifest/section_label_fillable")
+                raise httpx.HTTPStatusError(
+                    "boom", request=request, response=httpx.Response(status, json={"error": "x"}, request=request))
+            return body
+
+        monkeypatch.setattr(c, "_get", fake_get, raising=False)
+        return c
+
+    def test_an_engine_before_the_route_is_cannot_say_not_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._client(monkeypatch, status=404).manifest_section_label_fillable() is None
+
+    def test_a_failing_engine_is_cannot_say(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._client(monkeypatch, status=500).manifest_section_label_fillable() is None
+
+    def test_an_engine_statement_timeout_503_is_cannot_say(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The engine cancels a count that outlasts its bound and answers 503 (nexus-l4hds): None, never a count."""
+        assert self._client(monkeypatch, status=503).manifest_section_label_fillable() is None
+
+    def test_a_transport_failure_is_cannot_say(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = object.__new__(HttpCatalogClient)
+
+        def down(path, **params):  # absorbs idempotent= and timeout= into params; the answer is the same
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(c, "_get", down, raising=False)
+        assert c.manifest_section_label_fillable() is None
+
+    @pytest.mark.parametrize("body", [
+        None, [], "x", {}, {"capped": False}, {"fillable": 2}, {"fillable": True, "capped": False},
+        {"fillable": -1, "capped": False}, {"fillable": "2", "capped": False}, {"fillable": 2, "capped": "no"},
+    ])
+    def test_a_body_without_a_usable_count_is_cannot_say(self, monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+        """A stripped ``fillable`` must not read as a clean zero (the rung would call the catalog converged)."""
+        assert self._client(monkeypatch, body).manifest_section_label_fillable() is None
 
 
 # ── RDR-204 (nexus-ft04v.33): embedding_profile accessor ─────────────────────

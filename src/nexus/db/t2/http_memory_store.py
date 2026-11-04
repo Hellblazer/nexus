@@ -120,6 +120,95 @@ class MemoryExpireResult:
         return f"{deleted}."
 
 
+def with_lineage_line(content: str, replaces: str) -> str:
+    """Return *content* ending with the line ``replaces: <old title>`` (RDR-238).
+
+    Deterministic, and idempotent: content whose last line already is that line is
+    returned unchanged (a trailing newline after it included). Otherwise the line
+    is appended after the content as given, with one ``\n`` inserted unless the
+    content is empty or already ends with a newline. Nothing is stripped, so the
+    stored content equals what was sent and the writer's own text is untouched.
+    """
+    line = f"replaces: {replaces}"
+    body = content.rstrip("\n")
+    if body == line or body.endswith("\n" + line):
+        return content
+    if not content or content.endswith("\n"):
+        return content + line
+    return content + "\n" + line
+
+
+@dataclass(frozen=True)
+class ReplacePutResult:
+    """What a replacing put did (RDR-238 P1 S2): the new row and the quarantined one.
+
+    ``sent_content`` is the content actually posted, lineage line included;
+    ``_verify_t2_write_landed`` compares the re-read row against it, not against
+    the writer's argument (K1). ``replaced_id``, ``replaced_title`` and
+    ``replaced_content`` are the engine's echo of the row it quarantined (nexus-ov3zi):
+    the row is hidden from every read, kept by ``reap``, and ``restore(replaced_id)``
+    (``nx memory restore <id>``) brings it back.
+    """
+
+    id: int
+    sent_content: str
+    replaced_id: int
+    replaced_title: str
+    replaced_content: str
+
+
+def quarantined_row_hint(row: dict[str, Any]) -> str:
+    """One line saying why a title that reads as not found is quarantined, and the way back.
+
+    ``row`` is a ``list_quarantined`` / ``find_quarantined`` record. A quarantined row
+    with ``ttl`` None can only be one a replace quarantined (expiry stamps only rows
+    that have a ttl), so it is never reaped; one that still has its ``ttl`` expired,
+    and ``nx memory reap`` deletes it once a rollup has marked it.
+    """
+    name = f"{row['project']}/{row['title']}"
+    if row.get("ttl") is None:
+        why = "replaced by a later put; it is kept for good (never reaped)"
+    else:
+        why = "expired (past its TTL); `nx memory reap` deletes it once a rollup has marked it"
+    return (
+        f"{name} is quarantined, not deleted (id {row['id']}), {why}. "
+        f"Bring it back with: nx memory restore {row['id']}"
+    )
+
+
+class ReplacesEchoMissingError(RuntimeError):
+    """A put that sent ``replaces`` got no echo: the engine does not know the field."""
+
+    def __init__(self, project: str, title: str, replaces: str) -> None:
+        super().__init__(
+            f"the engine lacks replaces: it answered without the replaced_id, replaced_title and "
+            f"replaced_content echo. The new row {project}/{title} WAS written; the old "
+            f"row {project}/{replaces} may still be alive (an engine with no replaces ignores the "
+            f"field and leaves it; an engine built before quarantine replaced it without an id). "
+            f"Check with memory_get. Upgrade the engine, then delete "
+            f"{project}/{replaces} by hand if it is alive and should go."
+        )
+
+
+class ReplacesOutcomeUnknownError(RuntimeError):
+    """The response to a replacing put was lost: the replace may or may not have landed."""
+
+    def __init__(self, project: str, title: str, replaces: str) -> None:
+        super().__init__(
+            f"the outcome of the replace is unknown: the request to replace "
+            f"{project}/{replaces} with {project}/{title} got no usable answer. A replacing "
+            f"put is never retried. Check with memory_get whether {project}/{title} exists "
+            f"and {project}/{replaces} is gone from reads; if {project}/{replaces} is still there, put again. "
+            f"If {project}/{title} is present and {project}/{replaces} is gone from reads, the replace "
+            f"landed and the old row is quarantined, not deleted: `nx memory list --quarantined` shows "
+            f"its id and `nx memory restore <id>` brings it back. Its id was in the lost response."
+        )
+
+
+#: Gateway statuses that mean "the answer was lost", not "the engine refused".
+_GATEWAY_LOST_STATUSES = frozenset({502, 503, 504})
+
+
 class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """MemoryStore drop-in that delegates to the RDR-152 Java HTTP service.
 
@@ -181,6 +270,74 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         resp = self._post("/v1/memory/put", payload)
         return int(resp["id"])
+
+    def put_replacing(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        replaces: str,
+        tags: str = "",
+        ttl: int | None = None,
+        agent: str | None = None,
+        session: str | None = None,
+    ) -> ReplacePutResult:
+        """Write ``title`` and quarantine the row titled ``replaces`` in one engine
+        transaction (RDR-238 Technical Design 1; quarantine, not delete: nexus-ov3zi).
+        Returns a :class:`ReplacePutResult`.
+
+        Kept apart from :meth:`put` so a plain put still returns the row id.
+
+        * ``replaces`` is an exact title in the same project, never an id. The line
+          ``replaces: <title>`` becomes the content's last line (:func:`with_lineage_line`).
+        * K5: the post is ``idempotent=False``. Under the retrying post a lost
+          response followed by a retry finds the target already quarantined and is
+          refused, so the writer would see a refusal for a replace that landed.
+          A lost response raises :class:`ReplacesOutcomeUnknownError` instead.
+        * An engine refusal (missing, quarantined, audit-record target; the row
+          itself) is a definitive ``httpx.HTTPStatusError``: nothing was written.
+        * A response without the echo raises :class:`ReplacesEchoMissingError`:
+          an engine without ``replaces`` ignores the field and has already
+          written the new row.
+        """
+        if not replaces or not replaces.strip():
+            raise ValueError("replaces must name the exact title of the row to replace.")
+        sent = with_lineage_line(content, replaces)
+        agent, session = resolve_attribution(agent, session)
+        payload: dict[str, Any] = {
+            "project": project,
+            "title": title,
+            "content": sent,
+            "tags": tags or "",
+            "ttl": ttl,
+            "replaces": replaces,
+        }
+        if agent is not None:
+            payload["agent"] = agent
+        if session is not None:
+            payload["session"] = session
+
+        try:
+            resp = self._post("/v1/memory/put", payload, idempotent=False)
+        except httpx.TransportError as exc:
+            raise ReplacesOutcomeUnknownError(project, title, replaces) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _GATEWAY_LOST_STATUSES:
+                raise ReplacesOutcomeUnknownError(project, title, replaces) from exc
+            raise
+
+        echo_id = resp.get("replaced_id")
+        echo_title = resp.get("replaced_title")
+        echo_content = resp.get("replaced_content")
+        if echo_id is None or echo_title is None or echo_content is None:
+            raise ReplacesEchoMissingError(project, title, replaces)
+        return ReplacePutResult(
+            id=int(resp["id"]),
+            sent_content=sent,
+            replaced_id=int(echo_id),
+            replaced_title=str(echo_title),
+            replaced_content=str(echo_content),
+        )
 
     def import_entry(
         self,
@@ -711,7 +868,10 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         ``POST /v1/memory/summaries``, one engine transaction. The engine
         refuses with 409 (``"code": "unknown_source_id"``), writing nothing,
-        when a source id is not a row of *project*.
+        when a source id is not a row of *project*, and with 409
+        (``"code": "replaced_source_id"``) when one is a row a replace
+        quarantined (quarantined with ``ttl`` None): such a row is never marked,
+        so ``reap`` never deletes it.
         """
         payload: dict[str, Any] = {
             "project": project,

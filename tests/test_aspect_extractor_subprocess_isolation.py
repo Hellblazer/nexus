@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import signal
 import json
 import subprocess
 import sys
@@ -37,6 +36,7 @@ import pytest
 
 import nexus.aspect_extractor as ax
 import nexus.pdeathsig as pdeathsig
+from tests._child_process import kill_if_identity
 from tests._module_seam import delattr_in, setattr_in
 from tests.test_win_job import live_children, reap_live_children
 
@@ -147,7 +147,9 @@ def test_timeout_kills_grandchild_not_just_direct_child(tmp_path) -> None:
     pidfile = tmp_path / "grandchild.pid"
     child_prog = (
         "import subprocess, sys, time\n"
-        "gc = subprocess.Popen(['sleep', '30'])\n"          # grandchild in child's group
+        # grandchild in child's group; its command line ends in this test's pid-file path, so the cleanup below
+        # can tell it from every other sleeper on the box (nexus-xzorj)
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', sys.argv[1]])\n"
         "open(sys.argv[1], 'w').write(str(gc.pid))\n"
         "time.sleep(30)\n"                                   # keep the group alive
     )
@@ -166,8 +168,9 @@ def test_timeout_kills_grandchild_not_just_direct_child(tmp_path) -> None:
             f"grandchild {gc_pid} survived the group kill — killpg only reached the direct child"
         )
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(gc_pid, signal.SIGKILL)
+        # The number came from a file that outlives the process: signalled only while it is still the sleeper
+        # this test started, never a bare os.kill (nexus-xzorj).
+        kill_if_identity(gc_pid, str(pidfile))
 
 
 @pytest.mark.skipif(
@@ -186,7 +189,7 @@ def test_pdeathsig_kills_child_when_parent_is_sigkilled(tmp_path) -> None:
         "import subprocess, sys, time\n"
         "from nexus.pdeathsig import set_pdeathsig_preexec, LIBC\n"
         "child = subprocess.Popen(\n"
-        "    ['sleep', '60'], start_new_session=True,\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[1]], start_new_session=True,\n"
         "    preexec_fn=set_pdeathsig_preexec if LIBC is not None else None,\n"
         ")\n"
         "open(sys.argv[1], 'w').write(str(child.pid))\n"
@@ -209,8 +212,8 @@ def test_pdeathsig_kills_child_when_parent_is_sigkilled(tmp_path) -> None:
         with contextlib.suppress(Exception):
             parent.kill()
         if pidfile.exists():
-            with contextlib.suppress(ProcessLookupError, ValueError):
-                os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
+            with contextlib.suppress(ValueError):
+                kill_if_identity(int(pidfile.read_text().strip()), str(pidfile))  # nexus-xzorj: not a bare kill of a number from a file
 
 
 def test_run_claude_isolated_arms_pdeathsig_preexec(monkeypatch) -> None:

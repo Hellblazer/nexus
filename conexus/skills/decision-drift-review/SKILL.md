@@ -75,4 +75,4 @@ RDRs against a change set and extract drift claims.
   verbs differ on what drives the walk (`review` starts from a
   diff, `debug` starts from a failing path).
 
-See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and the plan authoring guide (https://github.com/Hellblazer/nexus/blob/main/docs/plan-authoring-guide.md).

@@ -174,6 +174,10 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      small to exercise gzip is a failure, not a skip; below it an engine that does not serve a surface
 #      passes with the sentinel line saying "new engine surfaces NOT served".
 #      NX_EXPECTED_ENGINE_SURFACES=served forces the strict reading, =absent asserts the old engine.
+#      KNOWN-EDGE (nexus-qbszl): an uncompressed M1 answer that carries CloudFront's own headers
+#      (x-amz-cf-id, or a via ending "(CloudFront)") is not a violation: CloudFront does not forward
+#      Accept-Encoding to the origin (conexus-c4i2; kept by Sam in conexus-lgz3, 2026-11-02). The leg
+#      passes and the sentinel line says "M1 gzip KNOWN-EDGE ... engine compression NOT asserted".
 #   N  the test-only tenant-reset route is ABSENT (nexus-0bl77, rtg20 phase A). POST /v1/_test/tenant-reset is
 #      registered only when NX_TEST_TENANT_RESET_ROUTE=1, which must never be set on the cloud engine. Two
 #      checks, and the leg FAILS CLOSED on both: (N1) /v1/status (the body leg B fetched) must not report
@@ -665,6 +669,18 @@ encodings = [ln.split(":", 1)[1].strip().lower() for ln in last.split("\n")
 if len(ident) < GZIP_MIN_BYTES:
     not_served("the routing listing is %d bytes, below the engine's %d-byte compression threshold, so no read-only route "
                "exercises gzip for this tenant" % (len(ident), GZIP_MIN_BYTES))
+via_cloudfront = any(ln.lower().startswith("x-amz-cf-id:")
+                     or (ln.lower().startswith("via:") and "(cloudfront)" in ln.lower())
+                     for ln in last.split("\n"))
+if "gzip" not in encodings and via_cloudfront and mode != "absent":
+    # nexus-qbszl: CloudFront never forwards Accept-Encoding to the origin and does not compress itself
+    # (conexus-c4i2; Sam kept that tradeoff in conexus-lgz3, 2026-11-02), so on the CloudFront path no
+    # engine can pass M1. Named and reported on the sentinel line, never silent. Without CloudFront's own
+    # headers an uncompressed answer is still the engine's failure, as before.
+    print("KNOWN-EDGE [M1]: a %d-byte response asked for with Accept-Encoding: gzip came back uncompressed through "
+          "CloudFront, which does not forward Accept-Encoding to the origin (conexus-c4i2, kept in conexus-lgz3); "
+          "the engine's compression is not observable on this path" % len(ident))
+    sys.exit(4)
 if "gzip" not in encodings:
     not_served("a %d-byte response asked for with Accept-Encoding: gzip came back without Content-Encoding: gzip "
                "(Content-Encoding: %s): the engine does not compress, or the edge strips the header" % (len(ident), encodings or "absent"))
@@ -1537,6 +1553,7 @@ fi
 _leg_enter M "gzip, the routing listing and include_embeddings through the edge (served from the engine release that carries them; read-only)"
 M_DIR="$(mktemp -d)"
 M_NOT_SERVED=0
+M_KNOWN_EDGE=0
 M_MODE="$(_surfaces_mode "$VERSION_BODY" "$NX_EXPECTED_ENGINE_SURFACES" "$ENGINE_SURFACES_MIN")"
 echo "  mode: $M_MODE (engine release_version floor for the surfaces: $ENGINE_SURFACES_MIN)"
 _surface_judge() {
@@ -1545,6 +1562,7 @@ _surface_judge() {
     case "$rc" in
         0) echo "  $line" ;;
         3) echo "  $line"; M_NOT_SERVED=1 ;;
+        4) echo "  $line"; M_KNOWN_EDGE=1 ;;
         *) echo "  VIOLATION [${line%%:*}]:${line#*:}" >&2; return 1 ;;
     esac
 }
@@ -1642,6 +1660,9 @@ if [ "$L_ROUTE_NOT_SERVED" = 1 ]; then
 fi
 if [ "$M_NOT_SERVED" = 1 ]; then
     PASS_NOTE="${PASS_NOTE:+$PASS_NOTE; }new engine surfaces NOT served: M saw an engine without gzip, the routing listing or include_embeddings"
+fi
+if [ "$M_KNOWN_EDGE" = 1 ]; then
+    PASS_NOTE="${PASS_NOTE:+$PASS_NOTE; }M1 gzip KNOWN-EDGE: CloudFront does not forward Accept-Encoding (conexus-c4i2, conexus-lgz3), engine compression NOT asserted"
 fi
 if [ -n "$PASS_NOTE" ]; then
     echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0 ($PASS_NOTE)"

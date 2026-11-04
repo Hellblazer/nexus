@@ -50,7 +50,7 @@ source "$SCRIPT_DIR/../lib/lock.sh"
 # Per-USER root (nexus-c6lsu): the uid is in the name, because /tmp is shared across Unix users and a
 # root another user created is unwritable here (lock_acquire fails). $(id -u) is context-independent,
 # so the cross-context contention above is unchanged for one user.
-LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/gc-ab.lock"
+LOCKDIR="$(e2e_lock_root)/gc-ab.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
 # nexus-c00dw: the docker-run native build below writes service/target on

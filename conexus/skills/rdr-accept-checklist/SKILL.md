@@ -34,6 +34,13 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 
 - RDR ID (required) — e.g., `003`
 
+## Path Detection
+
+`{rdr_dir}` below is the RDR directory: `.nexus.yml` `indexing.rdr_paths[0]`, default `docs/rdr` (the Step 0 snippet of the rdr-create skill, stored as `RDR_DIR`).
+
+`<RDR dir>` is the absolute path of the RDR directory: `$RDR_DIR` joined to the repository root of the worktree in use.
+In any brief or relay, put the absolute path itself where `<RDR dir>` stands, never the placeholder or the shell variable: a dispatched agent cannot expand either.
+
 ## Behavior
 
 0. **T2 idempotency and self-healing** — compare the File Status (RDR frontmatter `status:`) against the T2 metadata status:
@@ -60,7 +67,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
    - **If no:** Continue — no beads created
    - **If yes — execute the full chain (3 sequential dispatches + catalog enrichment, orchestrated by this skill):**
      1. Write T1 scratch entry tagged `rdr-planning-context`: mcp__plugin_conexus_nexus__scratch(action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"
-     2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.** The dispatch brief includes the prose register (`$RDR_DIR/REGISTER.md`, fallback `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`): the plan is read by the people who execute it; each step says one thing; no step needs interpreting.
+     2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.** The dispatch brief includes the prose register (`<RDR dir>/REGISTER.md`, fallback `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md`): the plan is read by the people who execute it; each step says one thing; no step needs interpreting.
      3. **Call `mcp__plugin_conexus_nexus__nx_plan_audit`** — audit the plan against codebase. T1 scratch has rdr-planning-context tag.
      4. **Call `mcp__plugin_conexus_nexus__nx_enrich_beads`** once for each implementation bead (not the epic, phase containers, review beads or decision beads), with the bead's title and description as `bead_description` and its audit findings as `context`. The tool returns text and writes nothing. If the text is empty, report that bead as not enriched and go on. Otherwise write the text unchanged with the Write tool to a file and run `bd update <id> --append-notes "$(cat <file>)"`. Never use `--description` or `--body-file`: both replace the description. Then set `epic_bead:` in the RDR's T2 record (`{repo}_rdr`, title `{id}`) to the epic's id.
      5. **Catalog links** (if catalog initialized): Search for related RDRs and create `relates` links:

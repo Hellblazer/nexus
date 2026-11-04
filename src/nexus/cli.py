@@ -90,10 +90,13 @@ class _StorageBackendGuardGroup(click.Group):
     def invoke(self, ctx: click.Context):
         import urllib.error  # noqa: PLC0415 — deferred: keep CLI import surface light
 
+        import httpx  # noqa: PLC0415 — deferred: keep CLI import surface light
+
         from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.config import PdfConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
+        from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.t2.http_token_store import TokenAdminAuthError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -120,12 +123,18 @@ class _StorageBackendGuardGroup(click.Group):
             # nexus-sis0m.1: the service answered with an error mid-run (a 5xx,
             # a refusal); its message already carries any remedy.
             raise click.ClickException(f"the nexus service returned an error: {exc}") from exc
-        except (urllib.error.URLError, ConnectionError) as exc:
+        except (urllib.error.URLError, ConnectionError, httpx.ConnectError, httpx.ConnectTimeout) as exc:
             # nexus-sis0m.1: the other shape of a stopped service, a lease or
             # endpoint naming a port nothing answers on. The vector client
             # re-raises the raw error on purpose (its retry keys on the
-            # type), so the process boundary is where it becomes one line.
+            # type), so the process boundary is where it becomes one line. The catalog and T2 clients
+            # are httpx, whose connect errors are not ConnectionError: shakedown 7.94.0, `nx index pdf`
+            # with the engine stopped ended in a raw httpx.ConnectError traceback.
             notes = "; ".join(getattr(exc, "__notes__", []) or [])
+            # The traceback is gone from the screen; keep the cause (which layer raised, which request)
+            # recoverable with `nx -v`.
+            import structlog  # noqa: PLC0415 — deferred import
+            structlog.get_logger(__name__).debug("service_did_not_answer", error=str(exc), exc_info=True)
             raise click.ClickException(
                 f"a service this command needs did not answer ({exc}"
                 + (f"; {notes}" if notes else "")
@@ -136,6 +145,12 @@ class _StorageBackendGuardGroup(click.Group):
             # nexus-xzeml: a refused token-admin call is a credential problem
             # the operator has to act on, not a crash.
             raise click.ClickException("\n".join(exc.lines)) from exc
+        except EntityConfigError as exc:
+            # RDR-147 Step 1 (nexus-fai28): entity.collections holds a bad regex or a non-map.
+            # load_config raises it from every verb that reads the config (nx doctor, nx store
+            # list, nx config get); the message names the config file and the key, a traceback
+            # buried both.
+            raise click.ClickException(str(exc)) from exc
         except PdfConfigError as exc:
             # RDR-237 (nexus-tr1rj.2): a [pdf] integer setting holds no integer. Any verb that
             # reads the pdf config (nx index pdf, nx dt index, nx dt capture) gets here; the
@@ -182,9 +197,11 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # child per session start; on 2026-10-31 nineteen walked the cloud catalog at once because the only lock in
     # the path was a rung's, taken after detect(). A second `--auto` exits 0 here, silently. A PLAIN unattended
     # `nx upgrade` (the lockstep child) does work `--auto` skips, so it WAITS for a holder (PLAIN_WAIT_S) and
-    # only then exits 75; its detached starter already wrote the version marker at spawn, so the plain run's
-    # extra work (plugin convergence, agents and hooks refresh) waits for the next version or ref drift or a
-    # manual `nx upgrade` (bead: PLAIN_WAIT_S is below the 900 s --auto ceiling). The kernel drops
+    # only then exits 75. Its detached starter wrote the retry sentinel into the marker before it spawned the child
+    # (nexus-rcngf) and settles it to the version only on a clean exit, so on that exit the sentinel is there
+    # and the child leaves it (nexus-emiky): the next session's hook reads it as skew and the
+    # action starts the upgrade again, instead of the plain run's extra work (plugin convergence, agents and
+    # hooks refresh, the engine install) waiting for the next version or ref drift. The kernel drops
     # the lock with the process, so a killed holder never wedges the next run.
     if argv_is_unattended_upgrade(sys.argv[1:]):
         _auto_lock = acquire_auto_lock() if argv_is_auto_upgrade(sys.argv[1:]) else acquire_auto_lock_waiting()
@@ -200,6 +217,9 @@ def main(ctx: click.Context, verbose: bool) -> None:
                 "another unattended `nx upgrade` still holds the lock; this run did not start and is retried later",
                 err=True,
             )
+            from nexus.lockstep_marker import mark_upgrade_retry, running_version  # noqa: PLC0415 — deferred import, the 75 path only
+
+            mark_upgrade_retry(running_version())
             ctx.exit(75)
         ctx.call_on_close(_auto_lock.release)
 
@@ -212,8 +232,8 @@ def main(ctx: click.Context, verbose: bool) -> None:
         from nexus.upgrade_finish import spawn_tripwire  # noqa: PLC0415 — deferred import
 
         spawn_tripwire()
-    except Exception:  # noqa: BLE001 — the tripwire must never break CLI startup
-        pass
+    except Exception as exc:  # noqa: BLE001 — the tripwire must never break CLI startup
+        _reraise_config_error(exc)
 
     # nexus-gynt2: stranded-install detector. Disarmed (a pure constant
     # check, no filesystem access) on every migration-capable release; at
@@ -242,7 +262,8 @@ def main(ctx: click.Context, verbose: bool) -> None:
             click.echo(
                 f"[stranded-install] {_stranded.message_for(_hop)}", err=True
             )
-    except Exception:  # noqa: BLE001 — the detector must never break CLI startup
+    except Exception as exc:  # noqa: BLE001 — the detector must never break CLI startup
+        _reraise_config_error(exc)
         import structlog  # noqa: PLC0415 — deferred import
         structlog.get_logger(__name__).warning(
             "stranded_install_check_failed", exc_info=True,
@@ -260,11 +281,26 @@ def main(ctx: click.Context, verbose: bool) -> None:
         _summary = check_version_transition(nexus_config_dir())
         if _summary:
             click.echo(f"[upgrade-finish] {_summary}", err=True)
-    except Exception:  # noqa: BLE001 — the trigger must never break CLI startup
+    except Exception as exc:  # noqa: BLE001 — the trigger must never break CLI startup
+        _reraise_config_error(exc)
         import structlog  # noqa: PLC0415 — deferred import
         structlog.get_logger(__name__).warning(
             "upgrade_finish_trigger_failed", exc_info=True,
         )
+
+
+
+def _reraise_config_error(exc: BaseException) -> None:
+    """Let a bad user config past the startup checks' catch-alls (nexus-fai28).
+
+    Those checks may never break CLI startup over their own faults, but a bad
+    ``entity.collections`` entry in a config file is the user's to fix: it must reach
+    the group's one-line error, not be logged as a traceback and then raised again
+    by the subcommand."""
+    from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
+
+    if isinstance(exc, EntityConfigError):
+        raise exc
 
 
 main.add_command(catalog)

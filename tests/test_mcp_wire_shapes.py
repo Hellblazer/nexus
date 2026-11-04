@@ -10,9 +10,10 @@ annotation and NO explicit ``structured_output=`` kwarg silently emits
 (bare ``str``, a ``str | dict`` union, ``list[str]``, ``list[dict]``) that
 means an accidental, wrongly-shaped ``{"result": <value>}`` wrap that
 nobody designed and no client is documented to rely on
-(``mcp/server/fastmcp/utilities/func_metadata.py::_try_create_model_and_schema``).
+(``mcp/server/fastmcp/utilities/func_metadata.py::_try_create_model_and_schema`` on 1.x;
+``mcp/server/mcpserver/utilities/func_metadata.py::func_metadata`` on the 2.x we run).
 A bare, unparameterized ``-> dict`` annotation is a partial exception --
-FastMCP's own model-building falls through to ``None`` for it today (no
+MCPServer's own model-building falls through to ``None`` for it today (no
 schema, no wrap) -- but that is an accident of the CURRENT SDK's type
 matching, not a guarantee; leaving it undeclared still lets a future
 signature edit (``dict`` -> ``dict[str, Any]``) silently reintroduce a
@@ -32,7 +33,7 @@ Two layers:
    must carry an explicit ``structured_output=`` keyword.
 2. Call-through spot-checks (default loop) -- for a representative subset
    (search, query, memory_search, store_get_many, scratch), actually
-   invoke the tool through FastMCP's own ``ToolManager``/``convert_result``
+   invoke the tool through MCPServer's own ``ToolManager``/``convert_result``
    machinery (``mcp.call_tool(name, arguments)``, the same path a real
    ``tools/call`` request drives) and assert the wire-level
    structuredContent shape: absent for all of them.
@@ -104,7 +105,7 @@ def _iter_tool_decorator_calls(path: pathlib.Path):
 @pytest.mark.lint
 def test_every_mcp_tool_registration_has_explicit_structured_output():
     """nexus-r90ao registration census: no ``@mcp.tool()`` may rely on
-    FastMCP's implicit auto-detect. A future tool that omits
+    MCPServer's implicit auto-detect. A future tool that omits
     ``structured_output=`` fails THIS test, not silently ships an
     accidental wire shape.
     """
@@ -133,14 +134,14 @@ def test_every_mcp_tool_registration_has_explicit_structured_output():
     )
     assert implicit == [], (
         "@mcp.tool() registration(s) with no explicit structured_output= "
-        f"(silently inheriting FastMCP's auto-detect): {implicit}"
+        f"(silently inheriting MCPServer's auto-detect): {implicit}"
     )
 
 
 # ── Layer 2: call-through spot-checks (default loop, mocked substrate) ─────
 
 async def _call_tool(name: str, **kwargs):
-    """Invoke a registered tool through FastMCP's real ToolManager/
+    """Invoke a registered tool through MCPServer's real ToolManager/
     convert_result path -- the same conversion a live ``tools/call``
     request drives -- without a live transport or session.
     """
@@ -177,12 +178,12 @@ def test_search_wire_call_has_no_structured_content():
     ), patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         result = asyncio.run(_call_tool("search", query="vector database", corpus="code__test"))
 
-    assert not isinstance(result, CallToolResult)
-    assert not isinstance(result, tuple), (
-        "convert_result returns (content, structuredContent) only when "
-        "output_schema is set -- a tuple here means a wrap is back"
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is None, (
+        "structured_content is set only when the tool has an output schema -- "
+        "a value here means a wrap is back"
     )
-    assert "vector database internals" in result[0].text.lower()
+    assert "vector database internals" in result.content[0].text.lower()
 
 
 def test_query_wire_call_has_no_structured_content():
@@ -199,11 +200,10 @@ def test_query_wire_call_has_no_structured_content():
     ), patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         result = asyncio.run(_call_tool("query", question="small", corpus="code__test"))
 
-    assert not isinstance(result, CallToolResult)
-    assert not isinstance(result, tuple), (
-        "convert_result returns (content, structuredContent) only when "
-        "output_schema is set -- a tuple here means the accidental wrap "
-        "is back"
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is None, (
+        "structured_content is set only when the tool has an output schema -- "
+        "a value here means the accidental wrap is back"
     )
 
 
@@ -211,8 +211,8 @@ def test_memory_search_wire_call_has_no_structured_content(t2_path):
     memory_put(content="chromadb vector embeddings", project="testproj", title="vectors.md")
     result = asyncio.run(_call_tool("memory_search", query="chromadb"))
 
-    assert not isinstance(result, CallToolResult)
-    assert not isinstance(result, tuple)
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is None
 
 
 def test_store_get_many_wire_call_has_no_structured_content():
@@ -227,12 +227,12 @@ def test_store_get_many_wire_call_has_no_structured_content():
     with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
         result = asyncio.run(_call_tool("store_get_many", ids="id1", collections="knowledge"))
 
-    assert not isinstance(result, CallToolResult)
-    assert not isinstance(result, tuple)
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is None
 
 
 def test_scratch_wire_call_has_no_structured_content(t1):
     result = asyncio.run(_call_tool("scratch", action="put", content="scratch note"))
 
-    assert not isinstance(result, CallToolResult)
-    assert not isinstance(result, tuple)
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is None

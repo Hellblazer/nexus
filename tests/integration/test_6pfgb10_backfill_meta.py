@@ -18,11 +18,17 @@ The dry run writes nothing, ``--apply`` writes, and a second ``--apply`` stamps 
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import http.client
 import json
+import re
+import sys
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -58,6 +64,25 @@ def _run(*args: str) -> dict:
     result = CliRunner().invoke(main, ["catalog", "backfill-meta", "--json", *args])
     assert result.exit_code == 0, result.output
     return json.loads(result.output[result.output.index("{"):])
+
+
+@contextlib.contextmanager
+def _count_wire_requests():
+    """Every request that leaves this process, counted independently of the request gate: the pooled urllib
+    transport's ``putrequest`` and httpx's ``handle_request`` are the two places a request is put on a socket."""
+    sent = {"n": 0}
+    put, handle = http.client.HTTPConnection.putrequest, httpx.HTTPTransport.handle_request
+
+    def counted_put(self, *a, **kw):
+        sent["n"] += 1
+        return put(self, *a, **kw)
+
+    def counted_handle(self, *a, **kw):
+        sent["n"] += 1
+        return handle(self, *a, **kw)
+
+    with patch.object(http.client.HTTPConnection, "putrequest", counted_put), patch.object(httpx.HTTPTransport, "handle_request", counted_handle):
+        yield sent
 
 
 def test_backfill_meta_journey(t2_service_env):
@@ -142,6 +167,21 @@ def test_backfill_meta_journey(t2_service_env):
     # nexus-9cstf: tags and category are derived the same way (type paper: nx index pdf's stamp)
     for key in ("doc.tags", "doc.category"):
         assert dry["keys"][key]["stamped"] == 9 and dry["keys"][key]["residue"] == 0, dry["keys"][key]
+
+    # ── nexus-ldf2s round 1: --max-rps holds EVERY request, counted on the wire independently of the gate ──
+    with _count_wire_requests() as wire:
+        started = time.monotonic()
+        paced_run = CliRunner().invoke(main, ["catalog", "backfill-meta", "--json", "--max-rps", "2", "--batch-size", "4"])
+        elapsed = time.monotonic() - started
+    assert paced_run.exit_code == 0, paced_run.output
+    paced = json.loads(paced_run.stdout)
+    assert {k: v for k, v in paced.items() if k != "keys"} == {k: v for k, v in dry.items() if k != "keys"} and paced["keys"] == dry["keys"], \
+        "pacing changes no count"
+    shown = int(re.findall(r", (\d+) requests \(", paced_run.stderr)[-1])
+    rate = wire["n"] / elapsed
+    sys.stdout.write(f"MEASURED --max-rps 2: {wire['n']} requests on the wire in {elapsed:.2f}s = {rate:.3f} requests/s (progress line says {shown})\n")
+    assert shown == wire["n"], "the progress line's request count is the requests the process put on the wire"
+    assert wire["n"] >= 10 and rate <= 2.0, f"{wire['n']} requests in {elapsed:.2f}s is {rate:.3f}/s at --max-rps 2"
 
     # ── apply ──
     applied = _run("--apply")

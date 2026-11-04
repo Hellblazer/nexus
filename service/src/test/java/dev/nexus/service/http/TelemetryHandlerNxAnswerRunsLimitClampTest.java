@@ -126,6 +126,67 @@ class TelemetryHandlerNxAnswerRunsLimitClampTest {
             .hasSize(300);
     }
 
+    // ── keyset bound (nexus-1ss4n) ──────────────────────────────────────────
+
+    @Test
+    void beforeId_pagesTheWholeSetWithoutGapOrOverlap() throws Exception {
+        // 305 rows, 300-row clamp: the first call sees 300, the bound moves the window to the
+        // remaining 5. Paging by id, newest first, must visit every row exactly once.
+        var seen = new java.util.ArrayList<Long>();
+        Long cursor = Long.MAX_VALUE;
+        int pages = 0;
+        while (true) {
+            var page = rows(query("limit=99999&before_id=" + cursor));
+            if (page.isEmpty()) break;
+            pages++;
+            assertThat(page.size()).as("no page may exceed the 300 clamp").isLessThanOrEqualTo(300);
+            for (var r : page) seen.add(((Number) r.get("id")).longValue());
+            cursor = seen.get(seen.size() - 1);
+            assertThat(pages).as("paging must terminate").isLessThan(10);
+        }
+        assertThat(seen).hasSize(305).doesNotHaveDuplicates();
+        assertThat(seen).as("newest (highest id) first, strictly descending").isSortedAccordingTo(java.util.Comparator.reverseOrder());
+        assertThat(pages).isEqualTo(2);
+    }
+
+    @Test
+    void beforeId_isExclusive() throws Exception {
+        var all = rows(query("limit=10&before_id=" + Long.MAX_VALUE));
+        long boundary = ((Number) all.get(3).get("id")).longValue();
+        var below = rows(query("limit=300&before_id=" + boundary));
+        assertThat(below).isNotEmpty();
+        assertThat(below.stream().mapToLong(r -> ((Number) r.get("id")).longValue()).max().orElseThrow())
+            .as("rows with id < before_id only; the boundary row itself is excluded")
+            .isLessThan(boundary);
+        assertThat(below.get(0).get("id"))
+            .as("the window starts at the next id below the bound")
+            .isEqualTo(all.get(4).get("id"));
+    }
+
+    @Test
+    void beforeId_doesNotChangeTheWholeSetAggregates() throws Exception {
+        var unbounded = query("limit=1");
+        var bounded = query("limit=1&before_id=" + Long.MAX_VALUE);
+        var narrow = query("limit=1&before_id=1");
+        assertThat(unbounded.get("total")).isEqualTo(305);
+        assertThat(bounded.get("total")).as("aggregates cover the whole since-filtered set, not the window").isEqualTo(305);
+        assertThat(narrow.get("total")).isEqualTo(305);
+        assertThat(rows(narrow)).as("nothing has id < 1").isEmpty();
+    }
+
+    @Test
+    void beforeId_notANumber_isA400NotAnUnboundedPage() throws Exception {
+        CapturingExchange ex = get("/v1/telemetry/nx_answer_runs/query?before_id=abc");
+        RequestContext.set(new RequestContext.Principal(TENANT, null, false, false, "tenant", "test-credential-hash"));
+        try {
+            handler.handle(ex);
+        } finally {
+            RequestContext.clear();
+        }
+        assertThat(ex.status).as("a malformed bound must not silently page from the newest row again").isEqualTo(400);
+        assertThat(ex.bodyString()).contains("before_id");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")

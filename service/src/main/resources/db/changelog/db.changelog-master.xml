@@ -1972,6 +1972,14 @@
     <include file="db/changelog/vectors-046-request-ledger-tenants.xml"/>
 
     <!--
+        Bead nexus-8ptg4 (RDR-236 A8): nexus.manifest_qualifying_hits, a bounded never-under-counting count of the chunks a
+        manifest predicate admits, so a genuinely short page is not re-run exact. One table function and its nexus_svc
+        grant, no DATA EFFECT. After vectors-046 (the vectors tail), before tuples-012 and the grants-nexus-svc.xml runAlways
+        block.
+    -->
+    <include file="db/changelog/vectors-047-manifest-qualifying-hits.xml"/>
+
+    <!--
         Bead nexus-onjvw: tuples-012-1 deletes every ledger/* tuple (the retired RDR-205 v1 session ledger) with its
         nexus.tuple_deliveries and nexus.tuple_claim_log rows, across all tenants, FORCE RLS toggled around the
         DELETEs. DATA EFFECT, irreversible (stated in the changeset). After vectors-046 (current tail), before the
@@ -1985,6 +1993,60 @@
         tail), before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/telemetry-018-agent-dispatches.xml"/>
+
+    <!--
+        Bead nexus-6pfgb.41 (RDR-236 Phase 3, with the route (b) half of nexus-u9dc5): the nine route (b) functions
+        (search_metadata_scoped, search_aspect_scoped, search_graph_hop at 384, 768 and 1024) gain p_manifest_where and
+        p_manifest_path and test them on the joined row's per-occurrence object, the manifest_search_<dim> object. The old
+        signatures are dropped and the new ones granted; FUNCTION definitions and grants only, no DATA EFFECT. After
+        telemetry-018 (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-048-route-b-manifest-prefilter.xml"/>
+
+    <!--
+        Bead nexus-qpt52 (RDR-236 Phase 3, engine; follow-up of nexus-6pfgb.41): the per-occurrence object of the thirteen functions
+        that carry it gains bib_year, bib_authors, bib_venue, bib_citation_count, indexed_at and content_type_shown, so route (b)
+        answers every key ManifestLabelStage answers, positive and negative, in SQL. Thirteen CREATE OR REPLACE FUNCTION, signatures
+        and grants kept, no DATA EFFECT. After vectors-048 (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-049-route-b-exact-keys.xml"/>
+
+    <!--
+        Bead nexus-6pfgb.40 (RDR-236 Phase 3, engine): nexus.gc_restore_rereferenced and nexus.gc_restore_rereferenced_bounded
+        restore a quarantined row with metadata holding only the CHUNK keys (chunk_text_hash, embedding_model), so none of the
+        four quarantine keys, nor a retired document key, comes back into the live collection; see the included file's own
+        header. Two CREATE OR REPLACE FUNCTION, signatures and grants kept, no DATA EFFECT. After vectors-049 (current tail),
+        before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-050-gc-restore-chunk-keys-only.xml"/>
+
+    <!--
+        Bead nexus-u9dc5 (RDR-236 Phase 3, engine; the route (c) half): nexus.manifest_admits_chunk admits a chunk when any
+        live owner's per-occurrence object passes the compiled predicate (an orphan is judged on its own row), so POST
+        /v1/vectors/get and /get-all-metadata answer every stage-answered key per owning document; see the included file's
+        own header. One new function and its grant, no DATA EFFECT. After vectors-050 (current tail), before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-051-route-c-manifest-keys.xml"/>
+
+    <!--
+        Bead nexus-zk7rw (follow-up of nexus-8ptg4): nexus.manifest_qualifying_hits returns the (collection, chash) of each hit,
+        so a route (a) page is compared with the count of distinct chunks and a route (b) page with the count of owners; see
+        the included file's own header. One function dropped and created, and its grant, no DATA EFFECT. After vectors-051
+        (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-052-manifest-qualifying-hits-chunk-keys.xml"/>
+
+    <!--
+        Bead nexus-l003p (RDR-236 Phase 4 gate, engine): nexus.quarantine_restore_chunks restores a chunk with only the CHUNK keys
+        and judges the reattach plan from the quarantine copy before the move, so a restore with reattach still attaches in the
+        same call; a restore with reattach off marks a dropped forward owner link in the verdict row (reason owner_link_dropped);
+        a chunk refused as a rival is no longer moved (it stays in quarantine with its keys, outcome kept), so the refusal holds
+        across pages, calls, siblings and a busy retry; see the included file's own header. One function replaced (signature and
+        grants kept), no DATA EFFECT. After
+        vectors-052 (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-053-quarantine-restore-chunk-keys-only.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

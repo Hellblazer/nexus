@@ -1033,7 +1033,8 @@ def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mo
 def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_mode_write):
     """nexus-sis0m.5: a chunk row carries its last writer's title, so a hit
     or a get by id named only the second of two notes with the same text.
-    Both now show the live catalog documents holding the chunk."""
+    A get by chash shows the live catalog documents holding the chunk; a search hit shows
+    the one it is attributed to."""
     text = "sis0m5 identical body for the title display check"
     store_put(content=text, collection="fixture-subject", title="title-a")
     store_put(content=text, collection="fixture-subject", title="title-b")
@@ -1048,7 +1049,9 @@ def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_m
 
     hits = search(query=text, corpus="knowledge__fixture-subject")
     line = next((ln for ln in hits.splitlines() if "title-a" in ln or "title-b" in ln), "")
-    assert "title-a · title-b" in line, hits
+    # nexus-fv2u4 (shakedown 7.94.0 class B): a search hit names the document it is attributed
+    # to alone (the smallest doc_id, title-a), never a join of every holder.
+    assert "title-a" in line and "title-b" not in line, hits
 
 
 @pytest.mark.t2_tenant
@@ -2940,9 +2943,9 @@ async def test_mcp_catalog_server_round_trip():
             # skill passes. For three weeks it was backed by a private
             # two-argument helper and only an in-process import was tested.
             tools = {t.name: t for t in (await session.list_tools()).tools}
-            assert "query" in tools["search"].inputSchema.get("properties", {})
+            assert "query" in tools["search"].input_schema.get("properties", {})
             r = await session.call_tool("search", {"query": "nexus"})
-            assert not r.isError, r.content
+            assert not r.is_error, r.content
 
 
 def test_mcp_shim_imports():

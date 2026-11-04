@@ -23,14 +23,9 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
-
-try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
-    from mcp.server.fastmcp.server import Settings as _FastMCPSettings
-except ImportError:  # pragma: no cover — future SDK restructure
-    _FastMCPSettings = None
 
 from nexus.corpus import (
     CollectionNotRegisteredError,
@@ -58,6 +53,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 # with hook_auto_approve (bead nexus-q02nx.4). See nexus/mcp/hooks.py's
 # module docstring for the full contract.
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
+from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.plans.evidence import EvidenceRequest
@@ -132,6 +128,8 @@ from nexus.mcp import subscriptions as _subscriptions
 from nexus.mcp import channel as _channel
 
 if TYPE_CHECKING:
+    from nexus.db.t2 import T2Database
+    from nexus.db.t2.http_memory_store import ReplacePutResult
     from nexus.plans.lifecycle_stream import LifecycleStream
     from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
     from nexus.plans.request_coverage import RequestCoverage
@@ -2806,10 +2804,20 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
 def _install_exit_handlers(
     register: Callable[[Callable[[], None]], Any] | None = None,
     set_signal: Callable[[int, Any], Any] | None = None,
+    get_signal: Callable[[int], Any] | None = None,
 ) -> None:
     """Register :func:`_exit_teardown` with :mod:`atexit` and
-    :func:`_sigterm_handler` for SIGTERM and SIGINT. Called once by
-    :func:`main`; see the comment there for why all three are needed.
+    :func:`_sigterm_handler` for SIGTERM, SIGINT and, where the platform
+    has it, SIGHUP. Called once by :func:`main`; see the comment there for
+    why all of them are needed. SIGHUP is a terminal hangup: a tmux
+    ``kill-server``, a closed terminal window or a dropped ssh session
+    hangs up the session's pty, and the kernel sends SIGHUP to its
+    foreground process group, this server included. Its default action
+    ends the process with no teardown, so the T1 token, its lease file and
+    the peer-directory name were left behind until they lapsed (measured in
+    the restart sandbox, nexus-xwijj). An inherited ignore is kept: a
+    session started under ``nohup`` ignores SIGHUP, and this server, its
+    child, must outlive a hangup with it rather than die alone.
     *register* and *set_signal* default to ``atexit.register`` and
     ``signal.signal``; a test passes its own instead of patching the
     stdlib modules for the whole process."""
@@ -2818,36 +2826,20 @@ def _install_exit_handlers(
 
     register = register or atexit.register
     set_signal = set_signal or signal.signal
+    get_signal = get_signal or signal.getsignal
     register(_exit_teardown)
     set_signal(signal.SIGTERM, _sigterm_handler)
     set_signal(signal.SIGINT, _sigterm_handler)
+    hangup = getattr(signal, "SIGHUP", None)  # POSIX only; Windows has no SIGHUP
+    if hangup is not None and get_signal(hangup) is not signal.SIG_IGN:
+        set_signal(hangup, _sigterm_handler)
 
 
-# nexus-20iee: the upstream mcp SDK's FastMCP Settings model (a Generic[
-# LifespanResultT] BaseSettings) declares its `lifespan` field with a
-# forward reference to `FastMCP` that is unresolved at class-definition
-# time (`Settings` is defined earlier in the same module than `FastMCP`,
-# in mcp/server/fastmcp/server.py), and the SDK never calls
-# `model_rebuild()` itself. pydantic-settings 2.15.0 added
-# IncompleteFieldDefinitionWarning, which fires from this unresolved
-# reference every time a `Settings()` instance is constructed -- i.e.
-# every `FastMCP(...)` call, including the one directly below. Rebuilding
-# here, now that `FastMCP` is fully defined (its module finished importing
-# above), resolves the forward reference process-wide before our own
-# instantiation. No-op on pydantic-settings versions that predate the
-# warning class. Guarded (nexus-vc5yb/nexus-3hc9z): Settings is an
-# UNEXPORTED SDK internal under an unbounded mcp>=1.0,<2 pin — a future
-# SDK refactor must degrade this cosmetic fix to a logged warning, never
-# crash nx-mcp startup.
-if _FastMCPSettings is not None:
-    try:
-        _FastMCPSettings.model_rebuild()
-    except Exception as _rebuild_exc:  # noqa: BLE001 — boundary fallback: cosmetic-warning fix must never kill startup
-        structlog.get_logger(__name__).debug(
-            "fastmcp_settings_model_rebuild_failed", error=str(_rebuild_exc)
-        )
-else:  # pragma: no cover — future SDK restructure
-    structlog.get_logger(__name__).debug("fastmcp_settings_symbol_unavailable")
+# nexus-20iee (retired by nexus-sgmyl): mcp 1.x's FastMCP Settings model was a
+# pydantic-settings BaseSettings with an unresolved forward reference, so it
+# needed a model_rebuild() here to silence IncompleteFieldDefinitionWarning.
+# mcp 2.x's Settings is a plain pydantic BaseModel; the warning cannot fire and
+# tests/test_mcp_settings_warnings.py keeps watching for it.
 
 # nexus-rjmyk: correct the SDK's cancellation response BEFORE the server
 # exists, so no request can be cancelled through the unpatched path. Answering
@@ -2863,12 +2855,13 @@ else:  # pragma: no cover — future SDK restructure
 #: did not: the level changed, the timing did not (nexus-dgvsz).
 _SDK_PATCH_RESULTS: dict[str, str] = _apply_sdk_patches()
 
-mcp = FastMCP("nexus", lifespan=_t1_lifespan)
+mcp = MCPServer("nexus", version=_server_version(), lifespan=_t1_lifespan)
 
-# nexus-2nxoo: FastMCP bound its call_tool handler inside __init__, so the
-# per-call `mcp_tool_call` event (tool name + sorted `_meta` keys; INFO the first
-# time a key-set is seen in this process, DEBUG after) wraps the constructed
-# server's registry. Never raises; main() reports the status.
+# nexus-2nxoo: the per-call `mcp_tool_call` event (tool name + sorted `_meta`
+# keys; INFO the first time a key-set is seen in this process, DEBUG after) is a
+# `tools/call` entry in the constructed server's middleware chain (nexus-sgmyl:
+# mcp 2.x; it wrapped `request_handlers` on 1.x). Never raises; main() reports
+# the status.
 from nexus.mcp._tool_call_log import install_tool_call_log as _install_tool_call_log  # noqa: E402 — needs the constructed server
 
 _SDK_PATCH_RESULTS["tool_call_log"] = _install_tool_call_log(mcp)
@@ -5860,6 +5853,15 @@ def store_put(
     session: Annotated[str, Field(
         description="Optional explicit session_id override. Falls back to the NX_SESSION_ID env var.",
     )] = "",
+    entity_key: Annotated[str, Field(
+        description=(
+            "Optional stable identifier this document names, such as \"CUST-0018\", stamped into the "
+            "catalog document's metadata (never a chunk's). At most 256 characters, no control "
+            "characters, and refused on a code__ collection. Unset: a collection configured with an "
+            "entity-key pattern stamps the title when the whole title matches it. A re-put without "
+            "it removes the stored key."
+        ),
+    )] = "",
 ) -> str:
     """Store content as a permanent T3 knowledge document.
 
@@ -5884,6 +5886,7 @@ def store_put(
       untitled document; a repeated untitled put of the same text reuses
       it, and it never adopts a titled note.
     - `ttl` accepts "Nd", "Nw", or "permanent" (default).
+    - `entity_key` is optional and never changes the stored chunks.
     """
     try:
         if not content:
@@ -5958,7 +5961,7 @@ def store_put(
             outcome = put_note(
                 content=content, collection=col_name, title=title, tags=tags,
                 category=category, source_agent=agent_arg,
-                ttl_days=ttl_days,
+                ttl_days=ttl_days, entity_key=entity_key,
             )
         except NoteUriEngineTooOldError as exc:
             # RDR-231 (nexus-bivz3.13): the serving engine cannot hold a note's nx-note:// URI. Raised
@@ -7327,6 +7330,15 @@ def memory_put(
     session: Annotated[str, Field(
         description="Optional explicit session_id override. Falls back to the parent's session resolution chain.",
     )] = "",
+    replaces: Annotated[str, Field(
+        description=(
+            "Exact title of an entry in the same project to quarantine in the same write "
+            "(not deleted: `nx memory restore <id>` brings it back, id in the result). "
+            "Its content is returned and a `replaces: <old title>` line is appended. "
+            "Audit records (by tag or title) are refused. A later plain put to the old "
+            "title overwrites the quarantined row. Empty means none."
+        ),
+    )] = "",
 ) -> str:
     """Store a T2 memory entry; upserts by (project, title).
 
@@ -7341,6 +7353,8 @@ def memory_put(
     - `ttl=None` (the default) is permanent; `ttl<=0` is rejected.
     - `memory_get` shows the stored ttl on its `TTL:` line.
     """
+    # RDR-238: bound before the try so the error path below can tell whether a replace landed.
+    replaced: ReplacePutResult | None = None
     try:
         if not content:
             return _fail("Error: content is required")
@@ -7360,20 +7374,38 @@ def memory_put(
         else:
             import os as _os  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
             session_arg = _os.environ.get("NX_SESSION_ID", "").strip() or None
+        # RDR-238 K1: the store appends the lineage line, so the row that lands is
+        # not ``content``. ``landed_content`` is what was actually sent, and is what
+        # the read-back below compares against.
+        landed_content = content
         with _t2_ctx() as db:
-            row_id = db.put(
-                project=project,
-                title=title,
-                content=content,
-                tags=tags,
-                # nexus-tk070.p6a: no coercion — ttl flows verbatim. A ttl<=0
-                # is rejected by the engine's own boundary validation
-                # (MemoryHandler.requirePositiveOrNullTtl -> 400), surfaced to
-                # the caller via _mcp_tool_error below, never swallowed here.
-                ttl=ttl,
-                agent=agent_arg,
-                session=session_arg,
-            )
+            if replaces:
+                replaced = db.put_replacing(
+                    project=project,
+                    title=title,
+                    content=content,
+                    replaces=replaces,
+                    tags=tags,
+                    ttl=ttl,
+                    agent=agent_arg,
+                    session=session_arg,
+                )
+                row_id = replaced.id
+                landed_content = replaced.sent_content
+            else:
+                row_id = db.put(
+                    project=project,
+                    title=title,
+                    content=content,
+                    tags=tags,
+                    # nexus-tk070.p6a: no coercion — ttl flows verbatim. A ttl<=0
+                    # is rejected by the engine's own boundary validation
+                    # (MemoryHandler.requirePositiveOrNullTtl -> 400), surfaced to
+                    # the caller via _mcp_tool_error below, never swallowed here.
+                    ttl=ttl,
+                    agent=agent_arg,
+                    session=session_arg,
+                )
         _record_tier_write(
             tool="memory_put", tier="T2",
             agent=agent_arg, project=project, target_title=title,
@@ -7383,7 +7415,7 @@ def memory_put(
         # returned row id is not evidence and why "unreachable" is its own
         # verdict rather than a pass.
         verdict, detail = _verify_t2_write_landed(
-            project=project, title=title, content=content, row_id=row_id,
+            project=project, title=title, content=landed_content, row_id=row_id,
         )
         if verdict == "unreachable":
             return (
@@ -7392,6 +7424,7 @@ def memory_put(
                 f"verification path is unavailable ({detail}). This is neither "
                 f"a confirmed success nor a confirmed failure — re-read before "
                 f"relying on this entry."
+                + _replaced_note(project, replaced)
             )
         if verdict != "verified":
             # Raised, not returned, so it funnels through _mcp_tool_error and
@@ -7402,9 +7435,42 @@ def memory_put(
                 f"memory_put reported success but the row did not land "
                 f"({verdict}): {detail}"
             )
-        return f"Stored: [{row_id}] {project}/{title} (ttl: {_render_ttl(ttl)})"
+        return (
+            f"Stored: [{row_id}] {project}/{title} (ttl: {_render_ttl(ttl)})"
+            + _replaced_note(project, replaced)
+        )
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("memory_put", e)
+        # Once put_replacing returned, the target is quarantined. Whatever fails after that (a verify
+        # verdict, the tier-write record) must still tell the writer which row it quarantined and how
+        # to restore it. A failure inside put_replacing leaves `replaced` None.
+        return _mcp_tool_error("memory_put", e) + _replaced_note(project, replaced)
+
+
+def _quarantined_hint(db: T2Database, project: str, title: str) -> str:
+    """When no live row has *title*, say so if a quarantined row has that exact title.
+
+    A replace or an expiry hides a row from every read, so a later reader holding its
+    old title sees a plain not-found. The hint names the id and the restore command.
+    Read only, and best effort: a failed lookup leaves the plain not-found.
+    """
+    from nexus.db.t2.http_memory_store import quarantined_row_hint  # noqa: PLC0415 — deferred: keeps the MCP server's import cost off the startup path
+    try:
+        row = db.memory.find_quarantined(project=project, title=title)
+    except Exception:  # noqa: BLE001 — a hint must not turn a not-found into an error; logged
+        _log.debug("memory_get_quarantine_hint_failed", project=project, title=title, exc_info=True)
+        return ""
+    return "\n" + quarantined_row_hint(row) if row is not None else ""
+
+
+def _replaced_note(project: str, replaced: ReplacePutResult | None) -> str:
+    """Which row a replace quarantined, how to restore it, and what it held (RDR-238)."""
+    if replaced is None:
+        return ""
+    return (
+        f"\nReplaced (quarantined, not deleted): {project}/{replaced.replaced_title} [{replaced.replaced_id}]"
+        f"\nRestore it: nx memory restore {replaced.replaced_id}"
+        f"\nIts content:\n{replaced.replaced_content}"
+    )
 
 
 def _render_ttl(ttl: object) -> str:
@@ -7465,7 +7531,7 @@ def memory_get(
                         "Re-call with the full title or a longer prefix.",
                     )
                     return "\n".join(lines)
-                return f"Not found: {project}/{title}"
+                return f"Not found: {project}/{title}" + _quarantined_hint(db, project, title)
             else:
                 entries = db.list_entries(project=project)
                 if not entries:
@@ -7887,7 +7953,10 @@ def plan_save(
     )] = "",
     project: Annotated[str, Field(description="Project namespace for scoping (e.g. \"nexus\").")] = "",
     outcome: Annotated[str, Field(description="Plan outcome: \"success\" or \"partial\".")] = "success",
-    tags: Annotated[str, Field(description="Comma-separated tags (e.g. operation types used).")] = "",
+    tags: Annotated[str, Field(description=(
+        "Comma-separated tags (e.g. operation types used). The provenance tags `grown` and "
+        "`builtin-template` are removed: only the grow site and the seed loader set them."
+    ))] = "",
     ttl: Annotated[int | None, Field(description="Time-to-live in days. None (default) is permanent.")] = None,
     scope_tags: Annotated[str, Field(
         description=(
@@ -7917,6 +7986,13 @@ def plan_save(
       `$name` in a step's args, is refused.
     - An `answer_kind` key in `plan_json` is removed before the save, and
       the reply says so: only seeded templates declare an answer kind.
+    - The provenance tags `grown` and `builtin-template` are removed from
+      `tags` before the save (they are logged and the reply names them):
+      only the plan-grow site and the seed loader earn them. A plan saved
+      here declares nothing and reads as unattested, so `nx_answer` does
+      not serve it for a lookup or a listing when the eligibility gate
+      enforces (it runs in shadow on a failed or skipped extraction, an
+      unreseeded library, or the kill switch).
     """
     try:
         if not query or not plan_json:
@@ -7988,6 +8064,17 @@ def plan_save(
             stripped_plan, _declaration_removed = strip_declaration(parsed_plan)
             if _declaration_removed:
                 plan_json_to_store = json.dumps(stripped_plan)
+        # nexus-3ihve: the provenance tags are claims only the grow site and the seed loader may make
+        # (both call the plan library directly, never this tool). A caller's `grown` would read as
+        # grown provenance to anything keyed on the tag, so it is removed, logged and named in the reply.
+        from nexus.plans.eligibility import strip_reserved_tags  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        tags_to_store, _tags_removed = strip_reserved_tags(tags)
+        if _tags_removed:
+            _log.warning(
+                "plan_save_reserved_tags_removed",
+                removed=list(_tags_removed), kept=tags_to_store, query=query[:80],
+            )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
         # writer, eliminating the "database is locked" races seen 2026-06-11).
@@ -7997,7 +8084,7 @@ def plan_save(
                 query=query,
                 plan_json=plan_json_to_store,
                 outcome=outcome,
-                tags=tags,
+                tags=tags_to_store,
                 project=project,
                 ttl=ttl,
                 scope_tags=_sc_tags,
@@ -8011,6 +8098,8 @@ def plan_save(
         saved = f"Saved plan: [{row_id}] {query[:80]}"
         if _declaration_removed:
             saved += " (answer_kind field removed: only seeded templates declare an answer kind)"
+        if _tags_removed:
+            saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them; the plan reads as unattested and serves no lookup or listing)"
         return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_save", e)
@@ -8580,17 +8669,20 @@ def tuple_release(
     # can't silently reintroduce a wrap with no test noticing.
     structured_output=False,
 )
-def tuple_registry() -> dict:
+def tuple_registry(
+    doc: Annotated[bool, Field(description="Also return each template's doc block (summary, writers, readers, fields, body, example).")] = False,
+) -> dict:
     """The boot-loaded tuple-space template set (RDR-205).
 
     Use `tuple_list` instead to see which concrete subspaces currently
     hold rows. Returns `{digest, sources, templates: [...]}`; `digest`
     changes whenever a template file changes, `sources` names the
-    directories loaded.
+    directories loaded. With `doc` true each template that has one
+    carries its `doc` block, as the engine serves it.
     """
     try:
         with _t2_ctx() as db:
-            return db.tuples.registry()
+            return db.tuples.registry(doc=doc)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _fail({"error": _mcp_tool_error("tuple_registry", e).removeprefix("Error: ")})
 
@@ -8680,7 +8772,7 @@ def mailbox_send(
         ),
     )],
     body: Annotated[str | None, Field(
-        description="Optional message payload; same size limit as tuple_out's body.",
+        description="The message text (required; not `message`); same size limit as tuple_out's body.",
     )] = None,
     kind: Annotated[str | None, Field(
         description="Optional message kind dimension, passed through unchanged to the mailbox tuple.",
@@ -8712,8 +8804,16 @@ def mailbox_send(
     agent id or this server's own session id (any other session id is
     refused; `from` is a claim, JDR-002). With no `from_address`, the sender
     defaults to this MCP server's own current session, and is refused
-    when that cannot be resolved. Either refusal writes nothing.
+    when that cannot be resolved. A missing or blank `body` is refused too.
+    Each refusal writes nothing.
     """
+    if body is None or not body.strip():
+        # nexus-eva4x: the MCP server drops an unknown argument, so text sent as `message`
+        # (SendMessage's field) arrives here as body=None and used to go out as an empty note.
+        return _fail({"error": (
+            "mailbox_send needs a body: put the message text in `body` "
+            "(an argument named `message` is ignored); nothing was sent"
+        )})
     try:
         from_id = (
             check_from_address_is_own(from_address) if from_address
@@ -10702,9 +10802,14 @@ def _nx_answer_record_run(
     out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
     summary_outcome: str = "recorded",
+    answer_text: str | None = None,
 ) -> None:
     """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
     via the telemetry store. Redacts when ``trace=False``.
+
+    *answer_text* (nexus-ix3fj) is the run's FULL final text when the caller cuts *final_text* before this call; the
+    summary records its length and class, so a payload cut at 2000 characters is still classified whole. ``None``
+    means *final_text* is the whole text.
 
     *run_summary* (RDR-232 Phase 3, nexus-jypmj.3.5) is the call's summary recorder: when given, the run
     summary rides on the same ``/record`` write (with the stamp that finds the row again), under the store's
@@ -10746,6 +10851,7 @@ def _nx_answer_record_run(
         summary = run_summary.prepare(
             telemetry, outcome=summary_outcome, plan_id=plan_id, step_count=step_count,
             duration_ms=duration_ms, cost_usd=cost_usd,
+            answer_text=final_text if answer_text is None else answer_text,
         )
         if summary is not None:
             created_at = _utc_now_iso()
@@ -11667,6 +11773,7 @@ def _nx_answer_record_complete(
     early_bump_fired: bool,
     out_of_step_cost_usd: float | None = None,
     run_summary: "RunSummaryRecorder | None" = None,
+    answer_text: str | None = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
     outcome-counter bump for ONE converting arm, issued as ONE function
@@ -11759,6 +11866,10 @@ def _nx_answer_record_complete(
     hygiene and the always-failing skip. The composite route carries a verdict, so a verdictless
     run takes the per-call record path on either capability, as the 404 fallback does.
 
+    **answer_text** (nexus-ix3fj): the run's FULL final text when the caller cuts *final_text* to 2000 characters
+    before this call. The run summary records its length and class (``final_chars``, ``answer_class``), so a raw
+    payload over the cut is still classified whole. ``None`` means *final_text* is the whole text.
+
     **run_summary** (RDR-232 Phase 3, nexus-jypmj.3.5): the call's summary recorder. The summary rides on
     the SAME write (``/complete``, or ``/record`` on the degradation path and the 404 fallback), prepared
     once so both attempts carry the one object and one stamp; the store sends it only to an engine that
@@ -11804,6 +11915,7 @@ def _nx_answer_record_complete(
         summary = run_summary.prepare(
             db.telemetry, outcome="unscored" if success is None else "success" if success else "failure",
             plan_id=plan_id, step_count=step_count, duration_ms=duration_ms, cost_usd=cost_usd,
+            answer_text=final_text if answer_text is None else answer_text,
         )
 
     if composite_supported_at_start and success is not None:
@@ -13494,7 +13606,7 @@ async def nx_answer(
                 _nx_answer_record_complete(
                     db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=len(result.steps),
-                    final_text=budget_final_text[:2000], step_records=_step_records,
+                    final_text=budget_final_text[:2000], answer_text=budget_final_text, step_records=_step_records,
                     duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
                     success=False,
                     composite_supported_at_start=composite_supported_at_start,
@@ -14319,7 +14431,7 @@ async def nx_answer(
                     _nx_answer_record_complete(
                         db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=str(result_text)[:2000], step_records=[],
+                        final_text=str(result_text)[:2000], answer_text=str(result_text), step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
                         # a scope conflict is the caller's error: the run counts no outcome
                         success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
@@ -15031,7 +15143,7 @@ async def nx_answer(
                     db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
-                    final_text=no_match[:2000], step_records=_result_step_records,
+                    final_text=no_match[:2000], answer_text=no_match, step_records=_result_step_records,
                     duration_ms=elapsed_ms, trace=trace,
                     success=_nx_answer_empty_retrieval_outcome(result.steps),
                     composite_supported_at_start=composite_supported_at_start,
@@ -15111,7 +15223,7 @@ async def nx_answer(
                     db, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
-                    final_text=notice[:2000], step_records=_result_step_records,
+                    final_text=notice[:2000], answer_text=notice, step_records=_result_step_records,
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
@@ -15300,7 +15412,7 @@ async def nx_answer(
             lambda db: _nx_answer_record_complete(
                 db, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
-                final_text=final_text[:2000], step_records=_result_step_records,
+                final_text=final_text[:2000], answer_text=final_text, step_records=_result_step_records,
                 duration_ms=elapsed_ms, trace=trace, success=True,
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,
@@ -15904,7 +16016,7 @@ ALWAYS_LOAD_TOOLS: frozenset[str] = frozenset(
 _ALWAYS_LOAD_META_KEY = "anthropic/alwaysLoad"
 
 
-def _apply_always_load(server: FastMCP, names: frozenset[str]) -> None:
+def _apply_always_load(server: MCPServer, names: frozenset[str]) -> None:
     """Flag each tool in *names* ``alwaysLoad`` in its wire ``_meta``.
 
     Runs once, after every ``@mcp.tool()`` has registered. A name that is not
@@ -16052,9 +16164,9 @@ def main():
     # found, so a surface that never runs the plugin's session-start hook (a
     # Desktop conversation) still learns that the setup tool fixes it.
     apply_setup_notice(mcp)
-    # The FastMCP lifespan finally is the design's primary cleanup
+    # The MCPServer lifespan finally is the design's primary cleanup
     # path; the signal handlers below are belt-and-braces for the
-    # cases where the lifespan does not fire. Empirically, FastMCP's
+    # cases where the lifespan does not fire. Empirically, the SDK's
     # stdio transport on macOS does NOT have anyio install a
     # SIGTERM handler that propagates cancellation through the
     # lifespan async finally (RDR-094 spike, 2026-04-25). Without
@@ -16062,7 +16174,8 @@ def main():
     # atexit does NOT run (Python only fires atexit on clean exit),
     # and chroma orphans. The watchdog covers it eventually but
     # the MCP-owned cleanup path simply doesn't run. So we install
-    # the signal handlers for SIGTERM and SIGINT to run
+    # the signal handlers for SIGTERM, SIGINT and SIGHUP (a terminal
+    # hangup, as a tmux kill-server sends; nexus-xwijj) to run
     # _exit_teardown (the name release alongside _t1_shutdown,
     # nexus-tu84w) directly. atexit stays as the third
     # belt-and-braces for clean exits via stdin EOF / SystemExit.
@@ -16073,10 +16186,10 @@ def main():
         check_version_compatibility()
         # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): mcp.run(transport=
         # "stdio") -- anyio.run(mcp.run_stdio_async) -- declares no
-        # experimental capabilities (FastMCP calls
+        # experimental capabilities (MCPServer calls
         # create_initialization_options() bare). channel.
         # run_stdio_with_channel drives the exact same low-level
-        # Server.run() call FastMCP would have, plus the
+        # Server.run() call MCPServer would have, plus the
         # "claude/channel" capability that makes Claude Code register a
         # channel listener (Phase 1 Step 0 spike). Every other transport
         # (SSE, streamable-http) is untouched -- this substitution is

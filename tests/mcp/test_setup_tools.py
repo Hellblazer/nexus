@@ -24,7 +24,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from nexus.mcp import setup_tools
 from nexus.mcp.core import mcp as core_mcp
@@ -123,7 +123,7 @@ def _service(monkeypatch: pytest.MonkeyPatch, usable: bool) -> None:
 
 def _call(name: str, **arguments: Any) -> str:
     result = asyncio.run(core_mcp.call_tool(name, arguments))
-    return "".join(block.text for block in result if getattr(block, "type", "") == "text")
+    return "".join(block.text for block in result.content if getattr(block, "type", "") == "text")
 
 
 def _tools() -> dict[str, Any]:
@@ -143,7 +143,7 @@ def test_the_real_server_registers_both_tools_always(monkeypatch: pytest.MonkeyP
 
 def test_the_schema_takes_a_mode_an_autostart_and_a_slim_and_status_takes_nothing() -> None:
     tools = _tools()
-    schema = tools["setup"].inputSchema
+    schema = tools["setup"].input_schema
     assert sorted(schema["properties"]) == ["autostart", "mode", "slim"]
     # nexus-w8ug5: tri-state, so no false default; null is "omitted".
     assert schema["properties"]["slim"]["anyOf"] == [{"type": "boolean"}, {"type": "null"}]
@@ -152,17 +152,17 @@ def test_the_schema_takes_a_mode_an_autostart_and_a_slim_and_status_takes_nothin
     assert schema["properties"]["mode"]["type"] == "string"
     assert schema["properties"]["autostart"]["type"] == "boolean"
     assert schema["properties"]["autostart"]["default"] is False
-    assert tools["setup_status"].inputSchema.get("properties") in ({}, None)
+    assert tools["setup_status"].input_schema.get("properties") in ({}, None)
 
 
 def test_the_setup_tool_offers_cloud_and_says_the_token_is_typed_into_a_page() -> None:
     """The Cloud choice arrived with the credentials page (nexus-sv2wx.18). The description names it with its
     size, and tells the model never to take the token itself."""
     tools = _tools()
-    text = json.dumps([tools["setup"].title, tools["setup"].description, tools["setup"].inputSchema]).lower()
+    text = json.dumps([tools["setup"].title, tools["setup"].description, tools["setup"].input_schema]).lower()
     assert "cloud" in text
     assert "never ask for the token" in tools["setup"].description
-    assert "cloud" in tools["setup"].inputSchema["properties"]["mode"]["description"]
+    assert "cloud" in tools["setup"].input_schema["properties"]["mode"]["description"]
 
 
 def test_the_descriptions_tell_the_model_to_ask_first_and_name_both_fixes() -> None:
@@ -200,7 +200,7 @@ def test_the_descriptions_give_the_disk_sizes_beside_the_download_sizes() -> Non
 
 class _Server:
     def __init__(self, instructions: str | None = None) -> None:
-        self._mcp_server = type("Low", (), {"instructions": instructions})()
+        self._lowlevel_server = type("Low", (), {"instructions": instructions})()
 
 
 def test_no_usable_service_is_said_through_the_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,7 +209,7 @@ def test_no_usable_service_is_said_through_the_instructions(monkeypatch: pytest.
     _service(monkeypatch, False)
     server = _Server()
     assert apply_setup_notice(server) is True
-    text = server._mcp_server.instructions
+    text = server._lowlevel_server.instructions
     assert "no usable" in text.lower() and "setup" in text and "/conexus:setup" in text
     assert "act only on the user's answer" in text
 
@@ -220,7 +220,7 @@ def test_a_usable_service_leaves_the_instructions_alone(monkeypatch: pytest.Monk
     _service(monkeypatch, True)
     server = _Server("existing")
     assert apply_setup_notice(server) is False
-    assert server._mcp_server.instructions == "existing"
+    assert server._lowlevel_server.instructions == "existing"
 
 
 def test_the_notice_is_appended_after_an_existing_instructions_text(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,7 +229,7 @@ def test_the_notice_is_appended_after_an_existing_instructions_text(monkeypatch:
     _service(monkeypatch, False)
     server = _Server("existing")
     assert apply_setup_notice(server) is True
-    assert server._mcp_server.instructions.startswith("existing\n\n")
+    assert server._lowlevel_server.instructions.startswith("existing\n\n")
 
 
 def test_a_broken_check_never_blocks_the_server_start(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -794,7 +794,7 @@ def test_not_now_promises_nothing_this_server_does_not_do(monkeypatch: pytest.Mo
     assert "/conexus:setup" in text
     server = _Server()
     assert apply_setup_notice(server) is True, "the notice is unchanged after not-now"
-    assert "no usable service" in server._mcp_server.instructions
+    assert "no usable service" in server._lowlevel_server.instructions
 
 
 def test_an_error_view_is_an_error_result(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
@@ -1345,7 +1345,7 @@ async def test_the_stand_in_and_the_real_server_offer_the_same_two_tools(tmp_pat
         assert a.name == b.name
         assert a.title == b.title, name
         assert a.description == b.description, f"{name}: the descriptions differ"
-        assert _comparable_schema(a.inputSchema) == _comparable_schema(b.inputSchema), f"{name}: the argument schemas differ"
+        assert _comparable_schema(a.input_schema) == _comparable_schema(b.input_schema), f"{name}: the argument schemas differ"
         assert (a.annotations or None) == (b.annotations or None), f"{name}: the annotations differ"
 
 

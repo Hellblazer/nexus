@@ -29,10 +29,17 @@ import java.util.Set;
  * the chunk row's). The function ADMITS A CHUNK when any live occurrence passes; the stage still names the
  * qualifying owner and is the exact judge of every operator. So what is compiled here has one rule: it may admit
  * more than the stage keeps, never less. That is why a missing value is the empty string in the object (the stage
- * counts a missing value as {@code ""}), and why only the POSITIVE operators are compiled: {@code $eq}, {@code $in}
- * and, on the numeric keys ({@code page_number}, {@code ttl_days}, {@code frecency_score}), the numeric ranges. A negative operator keeps what it does not reject, so it
- * prunes little; it, {@code indexed_at}, {@code bib_year}, {@code bib_venue}, {@code bib_authors} and {@code
- * bib_citation_count} stay with the stage alone (the RDR's own split).
+ * counts a missing value as {@code ""}), and why route (a) compiles only the POSITIVE operators: {@code $eq}, {@code $in}
+ * and the ranges the keys have. A negative operator keeps what it does not reject, so it prunes little, and over the
+ * {@code content_type} array below, which lists more words than the stage accepts for one operand, a negation would
+ * admit LESS than the stage keeps. So on route (a) a negative operator stays with the stage alone (the RDR's own split).
+ *
+ * <p><b>Route (b) (nexus-qpt52).</b> Route (b) has no stage after the search, so the SQL is the answer and {@link
+ * #ofExact} compiles EVERY predicate, negative operators and ranges included, to the jsonpath that is true on the
+ * object exactly when {@link ManifestLabelStage#testValue} is. {@code ManifestRouteBDifferentialTest} runs a matrix of
+ * predicates through the stage and the SQL on one fixture and requires identical sets. The numeric keys and the keys
+ * nexus-qpt52 added ({@link #EXACT_KEYS}) use that exact form on route (a) as well for their positive operators and
+ * ranges, which keeps the superset rule (an exact test admits exactly what the stage keeps).
  *
  * <p>{@code content_type} is the one key whose answer depends on the operand, so the object holds an ARRAY of every
  * word the document answers to (its catalog type, the format the catalog derives, and the chunk row's value where
@@ -54,30 +61,49 @@ import java.util.Set;
  * reached, a SHORT page that is not empty, which the empty-page re-run (nexus-bq06h) never repaired. Measured on 21,000
  * chunks with the cap at its 1,000 minimum: 1 of 3 rows found. The repair is {@code
  * PgVectorRepository#exactOnUnderReturn} with {@code rerunWhenShort}: a statement that carries this predicate and
- * returns fewer rows than asked is re-run once exact. The EXISTS is a correlated SubPlan per HNSW candidate (pinned
- * in PlainSearchTextGatedSearchExplainTest), about 17 microseconds a candidate measured against 3 for the chunk-row
- * filter it replaced. The cost is the per-occurrence object, not the plan shape: building it in the WHERE, which does
- * let PostgreSQL convert the EXISTS to a semi-join, did not change the time and doubled the plan time of a search
- * (the engine inlines the function body on every call). vectors-045 builds only the keys the predicate names, which
- * cuts the cost by about a third; a predicate written as a column test the planner has statistics for would let it
- * drive from the manifest and find a rare label in milliseconds, and is a larger change to the function interface.
+ * returns fewer rows than asked is re-run once exact, unless a bounded manifest count ({@code
+ * manifest_qualifying_hits}, vectors-047, nexus-8ptg4) shows the page already holds every chunk the predicate admits.
+ * The EXISTS is a correlated SubPlan per HNSW candidate (pinned in PlainSearchTextGatedSearchExplainTest), about 17
+ * microseconds a candidate measured against 3 for the chunk-row filter it replaced. The cost is the per-occurrence
+ * object, not the plan shape: building it in the WHERE, which does let PostgreSQL convert the EXISTS to a semi-join,
+ * did not change the time and doubled the plan time of a search (the engine inlines the function body on every call).
+ * vectors-045 builds only the keys the predicate names, which cuts the cost by about a third; a predicate written as a
+ * column test the planner has statistics for would let it drive from the manifest and find a rare label in
+ * milliseconds, and is a larger change to the function interface.
  *
- * <p>The compiled form reuses {@link PgVectorRepository#planWhere}, so the operators, the tolerant number-or-text
- * equality and the three-valued jsonpath rules are the search's own, with one exception: a NUMERIC range on
- * a numeric key ({@code page_number}, nexus-6pfgb.64; {@code ttl_days} and {@code frecency_score}, nexus-6pfgb.29) is compiled here. {@link PgVectorRepository#planWhere} keeps the retired
- * type-strict range (a numeric operand never matches a stored string), but the stage's {@code comparable} accepts a
- * numeric string on a numeric key, so a legacy chunk row that stored {@code page_number} as {@code "5"} is KEPT by
- * the stage for {@code page_number >= 3}. The pushed range therefore reads the stored value as a number whichever
- * JSON form it has: {@code exists($."page_number" ? (@.number() >= 3))}. {@code .number()} turns a JSON number or
- * a numeric string into an exact {@code numeric}; a value that is not numeric (the empty string a missing page is
- * counted as, text such as {@code "abc"}) is an error inside the filter, which jsonpath turns into "unknown" and so
- * into "no match", the stage's {@code comparable == false}. It needs PostgreSQL 17 (the engine's floor). Residual:
- * the stage parses with {@link java.math.BigDecimal}, which also reads non-ASCII digits; PostgreSQL does not, so a
- * legacy page stored as such text is kept by the stage and rejected by the EXISTS. A STRING operand on a range
- * keeps the strict string comparison on both sides (the stage compares a string label lexically and treats a
- * number as not comparable), so nothing differs there. EQUALITY on a numeric key keeps the planner's two literal
- * forms ({@code 5} or {@code "5"}), so a stored {@code "5.0"}, which the stage reads as 5, is rejected by the
- * EXISTS; the writers store numbers, and the page-number case predates this class.
+ * <p>The other keys' positive forms reuse {@link PgVectorRepository#planWhere}, so their operators, tolerant
+ * number-or-text equality and three-valued jsonpath rules are the search's own. The exact form (see {@link
+ * #exactPath}) reads a numeric key as a number whichever JSON form it has: {@code exists($."page_number" ? (@.number()
+ * >= 3))}. {@code .number()} turns a JSON number or a numeric string into an exact {@code numeric}; a value that is not
+ * numeric (the empty string a missing page is counted as, text such as {@code "abc"}) is an error inside the filter,
+ * which jsonpath turns into "unknown" and so into "no match", the stage's {@code comparable == false}. It needs
+ * PostgreSQL 17 (the engine's floor).
+ *
+ * <p>Residuals between the SQL and the stage, none produced by the writers (which store plain labels, ASCII-digit
+ * numbers and, in the catalog meta, scalars of the type each key names). Where the SQL is narrower than the stage a
+ * route (b) row goes missing and a route (a) chunk could be dropped before the stage sees it; where it is wider route
+ * (b) returns an extra row and route (a) merely admits a chunk the stage then drops.
+ * <ul>
+ *   <li>Digits and numeric text. The stage parses with {@link java.math.BigDecimal} after {@link String#trim}; both
+ *       differ from PostgreSQL's {@code .number()}. BigDecimal reads non-ASCII digits and PostgreSQL does not (SQL
+ *       narrower); {@code trim} strips every control character up to U+0020 and PostgreSQL strips only its own
+ *       whitespace (SQL narrower); PostgreSQL 17 reads {@code 0x10} and {@code 1_000} as numbers and BigDecimal does
+ *       not (SQL wider).</li>
+ *   <li>Numbers compared as text. A catalog meta number held on a STRING key (a numeric {@code category}, say) is
+ *       compared by its text. The stage gets it from Jackson through {@link Double#toString}, which prints an exponent
+ *       form at 1e7 and above and below 1e-3 and keeps a decimal's trailing zeros as written ({@code 0.5} against
+ *       PostgreSQL's {@code 0.50}); the SQL reads the stored numeric's own text.</li>
+ *   <li>Arrays and objects in the catalog meta on a scalar key. PostgreSQL's lax jsonpath mode unwraps an array under
+ *       {@code .string()} and {@code .number()}, so {@code ["a"]} matches {@code "a"} through its member, where the
+ *       stage compares the value's JSON text; an object under {@code .string()} is an error, so nothing matches. A
+ *       positive operator and its negation can therefore differ between the two ({@code $ne} flips).</li>
+ *   <li>String range order. The stage orders strings by UTF-16 code unit and jsonpath by code point (UTF-8 bytes); they
+ *       differ only between a supplementary character and U+E000 to U+FFFF. On route (b) that is a difference in the
+ *       answer; on route (a) a range over a string label ({@code section_type}, say) is not pushed for this reason, but
+ *       a string range on {@code bib_authors}, {@code bib_venue} or {@code indexed_at} is (they are in {@link
+ *       #EXACT_KEYS}), and there a supplementary-plane value against an operand in U+E000 to U+FFFF could be dropped
+ *       before the stage, breaking the superset rule. Rare.</li>
+ * </ul>
  */
 final class ManifestPushdown {
 
@@ -88,19 +114,12 @@ final class ManifestPushdown {
      * Keys whose effective value is one scalar and whose equality and {@code $in} compile. The catalog-meta ones
      * (nexus-6pfgb.29) are scalars too: {@code quality_gate_overridden} is a boolean, so {@link PgVectorRepository#planWhere}'s
      * tolerant form gives its equality both the JSON literal and the text one, as the stage's text compare does;
-     * {@code ttl_days} and {@code frecency_score} are numbers and also take ranges ({@link #NUMERIC_RANGE_KEYS}).
+     * the numeric ones ({@code ttl_days}, {@code frecency_score}) are in {@link #EXACT_KEYS}.
      */
     private static final Set<String> STRING_KEYS = Set.of(
         "section_title", "section_type", "title", "source_author",
         "bib_doi", "bib_openalex_id", "bib_semantic_scholar_id",
-        "category", "source_agent", "extraction_method", "extraction_source", "quality_gate_overridden",
-        "ttl_days", "frecency_score");
-
-    /**
-     * The numeric keys whose ranges compile: the stored value is read as a number whether it is a JSON number or a
-     * numeric string, see the class comment ({@code .number()}).
-     */
-    private static final Set<String> NUMERIC_RANGE_KEYS = Set.of("page_number", "ttl_days", "frecency_score");
+        "category", "source_agent", "extraction_method", "extraction_source", "quality_gate_overridden");
 
     /**
      * Keys whose effective value is a SET of words, held in the object as an array: {@code content_type} (every word
@@ -110,6 +129,24 @@ final class ManifestPushdown {
 
     private static final Set<String> RANGE_OPERATORS = Set.of("$gte", "$gt", "$lte", "$lt");
 
+    /**
+     * The keys compiled by {@link #exactPath} on route (a) too: the numeric keys ({@link
+     * ManifestLabelStage#NUMERIC_KEYS}: {@code page_number}, {@code bib_year}, {@code bib_citation_count}, {@code
+     * ttl_days}, {@code frecency_score}), which compare as numbers across a number and its text where {@link
+     * PgVectorRepository#planWhere}'s two literal forms miss a stored {@code "5.0"} or an operand {@code " 5 "}, and
+     * the string keys nexus-qpt52 added ({@code bib_authors}, {@code bib_venue}, {@code indexed_at}). Equality,
+     * {@code $in} and ranges; a negative operator is route (b)'s alone ({@link #ofExact}).
+     */
+    private static final Set<String> EXACT_KEYS = Set.of(
+        "page_number", "bib_year", "bib_citation_count", "ttl_days", "frecency_score",
+        "bib_authors", "bib_venue", "indexed_at");
+
+    /** The object key that holds the text a {@code content_type} range reads, see {@link #exactRange}. */
+    static final String CONTENT_TYPE_SHOWN_KEY = "content_type_shown";
+
+    /** Refuse a numeric operand whose plain rendering would be absurdly long (an exponent of a million). */
+    private static final int MAX_NUMERIC_DIGITS = 1000;
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private ManifestPushdown() {}
@@ -118,7 +155,7 @@ final class ManifestPushdown {
     static boolean pushable(ManifestLabelStage.Predicate p) {
         String op = p.operator();
         boolean positive = "$eq".equals(op) || "$in".equals(op);
-        if (NUMERIC_RANGE_KEYS.contains(p.key())) {
+        if (EXACT_KEYS.contains(p.key())) {
             return positive || RANGE_OPERATORS.contains(op);
         }
         if (STRING_KEYS.contains(p.key()) || ARRAY_KEYS.contains(p.key())) {
@@ -138,12 +175,12 @@ final class ManifestPushdown {
             if (!pushable(p)) {
                 continue;
             }
-            if (ARRAY_KEYS.contains(p.key())) {
-                own.add(memberPath(p));
+            if (EXACT_KEYS.contains(p.key())) {
+                own.add(exactPath(p));
                 continue;
             }
-            if (isNumericPageRange(p)) {
-                own.add(pageNumberRangePath(p));
+            if (ARRAY_KEYS.contains(p.key())) {
+                own.add(memberPath(p));
                 continue;
             }
             Map<String, Object> op = new LinkedHashMap<>();
@@ -161,25 +198,110 @@ final class ManifestPushdown {
         return new Plan(plan.containment(), paths.isEmpty() ? null : String.join(" && ", paths));
     }
 
-    /** A range on a numeric key with a numeric operand: the one range this class compiles itself. */
-    private static boolean isNumericPageRange(ManifestLabelStage.Predicate p) {
-        return NUMERIC_RANGE_KEYS.contains(p.key()) && RANGE_OPERATORS.contains(p.operator())
-            && p.operand() instanceof Number;
+    /**
+     * The route (b) form of {@code predicates} (nexus-qpt52): EVERY predicate compiled, positive and negative, each to
+     * the jsonpath that is true on a per-occurrence object exactly when {@link ManifestLabelStage#testValue} is true on
+     * the same value. Route (b) has no stage after the search, so this is the answer, not a pre-filter: it may neither
+     * admit more nor less than the stage keeps. No containment is produced (a containment is type-strict, the stage
+     * is not), and the result is never {@code null} for a non-empty list.
+     *
+     * <p>Only route (b) uses it for the keys route (a) already pushes in the superset form ({@link #of}), because a
+     * NEGATIVE test over route (a)'s {@code content_type} array, which lists more words than the stage accepts for any
+     * one operand, would admit less than the stage keeps. Route (b)'s own array is exact (vectors-048, vectors-049).
+     */
+    static Plan ofExact(List<ManifestLabelStage.Predicate> predicates) {
+        if (predicates.isEmpty()) {
+            return null;
+        }
+        List<String> paths = new ArrayList<>(predicates.size());
+        for (ManifestLabelStage.Predicate p : predicates) {
+            paths.add(exactPath(p));
+        }
+        return new Plan(null, String.join(" && ", paths));
+    }
+
+    /** Whether any of {@code predicates} is a negative operator on {@code content_type}, see {@link #ofExact}. */
+    static boolean negatesContentType(List<ManifestLabelStage.Predicate> predicates) {
+        for (ManifestLabelStage.Predicate p : predicates) {
+            if (ManifestLabelStage.CONTENT_TYPE_KEY.equals(p.key()) && ("$ne".equals(p.operator()) || "$nin".equals(p.operator()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private enum Kind { STRING, NUMERIC, SET }
+
+    private static Kind kindOf(String key) {
+        if (ARRAY_KEYS.contains(key)) {
+            return Kind.SET;
+        }
+        return ManifestLabelStage.NUMERIC_KEYS.contains(key) ? Kind.NUMERIC : Kind.STRING;
     }
 
     /**
-     * {@code exists($."page_number" ? (@.number() >= N))}: the stored page read as a number whether it is a JSON
-     * number or a numeric string (see the class comment). The operand is rendered as plain numeric text, as {@link
-     * PgVectorRepository#planWhere} renders a numeric operand; a value that is not finite is refused with the same
-     * 400-shaped error the search's own planner gives it.
+     * The jsonpath predicate that is true on an occurrence's object exactly when the stage's {@code testValue} is,
+     * for one predicate. Every piece is built from {@code exists(...)}, which is true or false and never unknown, so a
+     * negative operator is plain {@code !}: {@code $ne} and {@code $nin} are the stage's {@code !equals} and {@code
+     * noneMatch}, the negation of {@code $eq} and {@code $in} in every branch of {@code testValue} (an unlabelled
+     * value included: the object holds {@code ""} for a missing value, and {@code "" == ""} is the stage's "an
+     * explicit empty operand names the unlabelled value").
+     *
+     * <p>The three kinds. A STRING key (the labels but {@code page_number}, {@code title}, {@code source_author}, the
+     * id and text {@code bib_*} keys, {@code indexed_at}, the string meta keys) compares {@code String.valueOf} of
+     * both sides: {@code @.string()} gives a number or a boolean its text, as Java does. A NUMERIC key
+     * ({@link ManifestLabelStage#NUMERIC_KEYS}) compares as numbers when both sides read as numbers
+     * ({@code @.number()} reads a JSON number or a numeric string, and is an error, hence "no match", for anything
+     * else), and as text otherwise; which of the two applies is known from the operand when the path is built.
+     * A SET key ({@code tags}, {@code content_type}) is membership of the array the object holds.
      */
-    private static String pageNumberRangePath(ManifestLabelStage.Predicate p) {
-        BigDecimal operand;
-        try {
-            operand = new BigDecimal(p.operand().toString());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(
-                p.operator() + " for field '" + p.key() + "' expects a finite numeric operand, got " + p.operand(), e);
+    static String exactPath(ManifestLabelStage.Predicate p) {
+        String key = p.key();
+        return switch (p.operator()) {
+            case "$eq" -> exactEquals(key, p.operand());
+            case "$ne" -> "!" + exactEquals(key, p.operand());
+            case "$in" -> exactAny(key, (List<?>) p.operand());
+            case "$nin" -> "!" + exactAny(key, (List<?>) p.operand());
+            case "$gte", "$gt", "$lte", "$lt" -> exactRange(p);
+            default -> throw new IllegalArgumentException("unsupported where operator '" + p.operator() + "' for field '" + key + "'");
+        };
+    }
+
+    private static String exactAny(String key, List<?> operands) {
+        if (operands.isEmpty()) {
+            return "(1 == 2)";
+        }
+        List<String> any = new ArrayList<>(operands.size());
+        for (Object operand : operands) {
+            any.add(exactEquals(key, operand));
+        }
+        return "(" + String.join(" || ", any) + ")";
+    }
+
+    private static String exactEquals(String key, Object operand) {
+        String text = String.valueOf(operand);
+        return switch (kindOf(key)) {
+            case SET -> "exists($." + stringLiteral(key) + "[*] ? (@ == " + stringLiteral(text) + "))";
+            case STRING -> "exists($." + stringLiteral(key) + " ? (@.string() == " + stringLiteral(text) + "))";
+            case NUMERIC -> {
+                if (operand instanceof String s && s.isEmpty()) {
+                    // the unlabelled value, which the object holds as ""
+                    yield "exists($." + stringLiteral(key) + " ? (@ == \"\"))";
+                }
+                BigDecimal n = ManifestLabelStage.asNumber(operand);
+                yield n != null
+                    ? "exists($." + stringLiteral(key) + " ? (@.number() == " + plainNumber(key, operand, n) + "))"
+                    : "exists($." + stringLiteral(key) + " ? (@.string() == " + stringLiteral(text) + "))";
+            }
+        };
+    }
+
+    private static String exactRange(ManifestLabelStage.Predicate p) {
+        // content_type has no range meaning of its own: the stage reads the value the row would show.
+        String key = ManifestLabelStage.CONTENT_TYPE_KEY.equals(p.key()) ? CONTENT_TYPE_SHOWN_KEY : p.key();
+        Kind kind = kindOf(p.key());
+        if (kind == Kind.SET && !ManifestLabelStage.CONTENT_TYPE_KEY.equals(p.key())) {
+            return "(1 == 2)";  // a range over a set of names has no meaning
         }
         String cmp = switch (p.operator()) {
             case "$gte" -> ">=";
@@ -187,7 +309,29 @@ final class ManifestPushdown {
             case "$lte" -> "<=";
             default -> "<";
         };
-        return "exists($." + stringLiteral(p.key()) + " ? (@.number() " + cmp + " " + operand.toPlainString() + "))";
+        if (p.operand() instanceof Number) {
+            if (kind != Kind.NUMERIC) {
+                return "(1 == 2)";  // a numeric operand compares only on a numeric key
+            }
+            BigDecimal n = ManifestLabelStage.asNumber(p.operand());
+            if (n == null) {
+                throw new IllegalArgumentException(
+                    p.operator() + " for field '" + p.key() + "' expects a finite numeric operand, got " + p.operand());
+            }
+            return "exists($." + stringLiteral(key) + " ? (@.number() " + cmp + " " + plainNumber(p.key(), p.operand(), n) + "))";
+        }
+        // A string operand compares lexically against a label that is not a number and not unlabelled.
+        String text = String.valueOf(p.operand());
+        return "exists($." + stringLiteral(key) + " ? (@.type() != \"number\" && @.string() != \"\" && @.string() "
+            + cmp + " " + stringLiteral(text) + "))";
+    }
+
+    private static String plainNumber(String key, Object operand, BigDecimal n) {
+        if (Math.abs((long) n.scale()) > MAX_NUMERIC_DIGITS || (long) n.precision() - n.scale() > MAX_NUMERIC_DIGITS) {
+            throw new IllegalArgumentException(
+                "where operand for field '" + key + "' is a number out of range: " + operand);
+        }
+        return n.toPlainString();
     }
 
     /** {@code $eq} / {@code $in} on a set-valued key: some word in the document's array equals the operand. */

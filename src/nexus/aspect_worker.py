@@ -272,16 +272,8 @@ def _self_fault_reason(exc: BaseException) -> str | None:
     return None
 
 
-#: Wait after a failed tuple claim in ``tuples`` mode (see ``_run_loop``).
+#: Wait after a failed tuple claim (see ``_run_loop``).
 _TUPLE_CLAIM_RETRY_S: float = 30.0
-
-
-def _aspect_queue_mode() -> str:
-    """``NX_ASPECT_QUEUE`` (``tuples`` by default, or ``table``), read at call time. A seam
-    for the loop; the rule itself is ``http_aspect_queue.aspect_queue_mode``."""
-    from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415 — deferred: heavy import, service-side
-
-    return aspect_queue_mode()
 
 
 def _backoff_interval_seconds(retry_count: int, *, rng=random.random) -> int:
@@ -377,6 +369,9 @@ class AspectExtractionWorker:
         self._batch_size = batch_size
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # Threads a stop() asked to exit and has not yet seen exit (nexus-8sqfs): a repeated stop re-joins them and
+        # reports the truth instead of finding ``_thread`` already cleared and answering True.
+        self._stopping: list[threading.Thread] = []
         self._lock = threading.Lock()
         # nexus-yg70j: the host's stand-down hook. A worker running loose in an
         # nx-mcp process has no host and simply stops claiming; a worker hosted
@@ -385,6 +380,9 @@ class AspectExtractionWorker:
         self._on_self_fault: Callable[[str], None] | None = on_self_fault
         self._self_fault: str | None = None
         self._self_fault_lock = threading.Lock()
+        # nexus-wl9pk: the host's "the engine answered" hook (see
+        # ``set_engine_contact_handler``); None for a loose in-process worker.
+        self._on_engine_contact: Callable[[], None] | None = None
         # nexus-59611 stage 2: mtime baseline for the local wake file, so a
         # touch is consumed exactly once. None means "no wake file observed
         # yet" (absent, or not yet baselined by start()).
@@ -452,6 +450,26 @@ class AspectExtractionWorker:
         """
         self._on_self_fault = handler
 
+    def set_engine_contact_handler(self, handler: Callable[[], None] | None) -> None:
+        """Install the host's "the engine answered" hook (nexus-wl9pk).
+
+        Called after each claim round trip the engine answered, empty or not,
+        from this worker's thread. ``AspectWorkerDaemon`` uses it to tell a
+        reachable engine from a dead one: its own reclaim sweep is one route,
+        and that route failing alone (a rotated credential, an older engine
+        without it) while claims work is not a reason to leave.
+        """
+        self._on_engine_contact = handler
+
+    def _note_engine_contact(self) -> None:
+        handler = self._on_engine_contact
+        if handler is None:
+            return
+        try:
+            handler()
+        except Exception:  # noqa: BLE001 — a host hook must not kill the claim loop
+            _log.warning("aspect_worker_engine_contact_handler_failed", exc_info=True)
+
     def self_fault(self) -> str | None:
         """The reason this worker stood down, or ``None`` if it is healthy."""
         with self._self_fault_lock:
@@ -459,9 +477,18 @@ class AspectExtractionWorker:
 
     def start(self) -> None:
         """Spawn the daemon thread. Idempotent — calling twice does
-        not spawn a second thread."""
+        not spawn a second thread.
+
+        Refused, with a warning, while a thread an earlier :meth:`stop` could
+        not join is still alive (nexus-22out): the stop event is shared, so
+        clearing it here would set that thread claiming again beside the new
+        one, and :meth:`is_running` would count only one of them."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                return
+            self._stopping = [t for t in self._stopping if t.is_alive()]
+            if self._stopping:
+                _log.warning("aspect_worker_start_refused_stuck_thread", stuck=len(self._stopping))
                 return
             self._stop_event.clear()
             # A latched fault would otherwise survive the restart and suppress
@@ -480,32 +507,47 @@ class AspectExtractionWorker:
             )
             self._thread.start()
 
-    def stop(self, timeout: float = 10.0) -> None:
+    def stop(self, timeout: float = 10.0) -> bool:
         """Signal the worker to stop and join the thread.
 
         Idempotent — calling on a stopped worker is a no-op. Returns
         when the thread exits or after ``timeout``; failure to join
         is logged but not raised (a stuck worker is recoverable on
-        process exit since the thread is a daemon).
+        process exit since the thread is a daemon). Returns ``True``
+        when no thread is left running, ``False`` when the join timed out
+        (nexus-8sqfs: a test fixture must not wipe a tenant under a worker
+        that is still writing). A thread that outlived one stop stays on
+        record, so a repeated stop re-joins it and answers ``False`` until
+        it has actually exited.
         """
         with self._lock:
-            thread = self._thread
-            self._thread = None
-        if thread is None:
-            return
+            if self._thread is not None:
+                self._stopping.append(self._thread)
+                self._thread = None
+            threads = list(self._stopping)
+        if not threads:
+            return True
         self._stop_event.set()
-        thread.join(timeout=timeout)
-        if thread.is_alive() and self._tuple_side.parked:
+        for thread in threads:
+            thread.join(timeout=timeout)
+        alive = [t for t in threads if t.is_alive()]
+        if alive and self._tuple_side.parked:
             # RDR-235: slot 0's parked ``in`` cannot be cancelled, and a claim it
             # returns after this process is gone would sit live until its lease
             # lapsed (an attempt counted). Wait out the park: the loop releases
             # what the park returns once it sees the stop.
-            thread.join(timeout=self._tuple_side._park_timeout_s + 5.0)
-        if thread.is_alive():
+            for thread in alive:
+                thread.join(timeout=self._tuple_side._park_timeout_s + 5.0)
+            alive = [t for t in threads if t.is_alive()]
+        with self._lock:
+            self._stopping = [t for t in self._stopping if t.is_alive()]
+        if alive:
             _log.warning(
                 "aspect_worker_stop_timeout",
                 timeout=timeout,
             )
+            return False
+        return True
 
     def is_running(self) -> bool:
         """True iff the worker thread exists and is alive."""
@@ -632,22 +674,21 @@ class AspectExtractionWorker:
                 continue
 
             # RDR-235 gate S1 (decided): this worker drains BOTH queues whenever
-            # the engine has the ``aspects`` template, whatever its own
-            # NX_ASPECT_QUEUE value; only the producer is flagged. So a flip back
-            # to ``table`` strands nothing: a table-mode worker still claims what
-            # is left on the tuple queue. The flag decides one thing here, the
-            # cadence: ``tuples`` parks slot 0's ``in`` (a claim in under a
-            # second) and checks the table on the poll interval or a wake-file
-            # touch (the default since nexus-lnwn1); ``table`` keeps the old poll cadence
-            # for both queues.
+            # the engine has the ``aspects`` template, whatever NX_ASPECT_QUEUE
+            # says; the variable no longer reaches the worker at all (nexus-bpikw
+            # step A retired the producer's table mode), so a table row an older
+            # client left behind is still claimed. The cadence follows the tuples
+            # path whenever the template is supported: slot 0's ``in`` parks (a
+            # claim in under a second) and the table is checked on the poll
+            # interval or a wake-file touch. On an engine with no template the
+            # table is polled alone.
             tuples_ok = side.supported()
-            tuples_mode = tuples_ok and _aspect_queue_mode() == "tuples"
             claim_failed = False
 
             # Table turn.
             rows: list = []
             table_due = (
-                not tuples_mode
+                not tuples_ok
                 or table_busy
                 or self._wake_touched()
                 or time.monotonic() >= next_table_check
@@ -655,6 +696,7 @@ class AspectExtractionWorker:
             if table_due:
                 try:
                     rows = self._claim_table_rows()
+                    self._note_engine_contact()
                 except Exception:  # noqa: BLE001 — best-effort claim loop: must not crash worker thread, logged + retried
                     _log.warning("aspect_worker_claim_failed", exc_info=True)
                     claim_failed = True
@@ -673,8 +715,10 @@ class AspectExtractionWorker:
             parked = False
             tuple_failed = False
             if tuples_ok and not self._stop_event.is_set():
-                park = tuples_mode and not table_busy
+                park = not table_busy
                 claims, failed = side.claim_batch(park=park)
+                if not failed:
+                    self._note_engine_contact()
                 claim_failed = claim_failed or failed
                 tuple_failed = failed
                 parked = park and side.supported() and not failed and not claims
@@ -688,11 +732,11 @@ class AspectExtractionWorker:
                 continue
             if parked and not claim_failed:
                 continue  # the park was the wait
-            # A failed tuple claim in ``tuples`` mode is the main path blipping, not
+            # A failed tuple claim is the main path blipping, not
             # an idle queue: retry within half a minute, not a poll interval.
             retry_s = (
                 min(self._poll_interval, _TUPLE_CLAIM_RETRY_S)
-                if tuple_failed and tuples_mode else self._poll_interval
+                if tuple_failed else self._poll_interval
             )
             self._wait_for_wake_or_timeout(retry_s)
 
@@ -1350,7 +1394,7 @@ def ensure_worker_started(
     return _worker
 
 
-def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> None:
+def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> bool:
     """Stop the singleton worker if running. Idempotent.
 
     Note: leaves the singleton instance in place (stopped) so a
@@ -1359,23 +1403,28 @@ def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> None:
     instance should call ``reset_worker_for_tests`` instead.
 
     Removes the process-scoped lock file (SIG-5) when the worker stops.
+    Returns ``False`` when the worker thread outlived *timeout*
+    (see :meth:`AspectExtractionWorker.stop`), else ``True``.
     """
     global _worker
     with _worker_lock:
         worker = _worker
-    if worker is not None:
-        worker.stop(timeout=timeout)
+    stopped = True if worker is None else worker.stop(timeout=timeout)
     _remove_worker_lock(_locks_dir)
+    return stopped
 
 
-def reset_worker_for_tests() -> None:
+def reset_worker_for_tests(timeout: float = 5.0) -> bool:
     """Test helper: tear down the worker singleton so the next
-    ``ensure_worker_started`` call rebuilds with fresh state.
+    ``ensure_worker_started`` call rebuilds with fresh state. Returns
+    ``False`` when the old worker's thread was still running after the stop
+    (the singleton is dropped regardless).
     """
     global _worker
-    stop_worker(timeout=5.0)
+    stopped = stop_worker(timeout=timeout)
     with _worker_lock:
         _worker = None
+    return stopped
 
 
 def drain_worker(
@@ -1509,6 +1558,10 @@ def drain_worker(
             return
         thread.join(timeout=2.0)
         if thread.is_alive():
+            # nexus-22out: kept on the worker's record, so a later start() refuses beside it, as after a
+            # stop() that timed out; dropped, start() would clear the shared stop event under it.
+            with w._lock:
+                w._stopping.append(thread)
             _log.warning(
                 "drain_worker_thread_join_timeout",
                 thread_id=thread.ident,

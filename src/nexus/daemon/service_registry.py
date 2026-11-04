@@ -512,6 +512,25 @@ class ServiceRegistry:
     def _election_path(self, scope_key: str) -> Path:
         return self._dir / f"{self._tier}_elect.{scope_key}.lock"
 
+    def dir_exists(self) -> bool:
+        """Whether the lease directory is still there (nexus-wl9pk).
+
+        ``_ensure_dir`` re-creates the directory on every publish, heartbeat and
+        election, which is right for a healthy owner and wrong for an orphan: a
+        daemon whose config directory was deleted under it (a gate's scratch
+        dir) would otherwise bring the directory back on its next tick and
+        carry on. Only a definite "not there" answers False; any other stat
+        error (permissions, I/O) reads as present, so a transient failure never
+        stands a live owner down.
+        """
+        try:
+            os.stat(self._dir)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError:
+            return True
+        return True
+
     def _ensure_dir(self) -> None:
         try:
             make_user_dir(self._dir, platform="win32" if self._windows else None)
@@ -1064,6 +1083,13 @@ class ServiceRegistry:
 # for T1 any more.
 
 
+#: Consecutive heartbeat ticks that must find the lease directory gone before a
+#: supervisor built with ``stand_down_when_dir_gone`` sets ``orphaned``
+#: (nexus-wl9pk). A tick is one heartbeat interval, so a real removal is seen
+#: within two intervals and a single transient ENOENT is not an exit.
+DIR_GONE_TICKS: int = 2
+
+
 class ServiceSupervisor:
     """Owns one scope's heartbeat cadence and version-cycle.
 
@@ -1083,6 +1109,7 @@ class ServiceSupervisor:
         endpoint_provider: Callable[[], dict[str, Any]],
         payload: Optional[dict[str, Any]] = None,
         owner_token: Optional[str] = None,
+        stand_down_when_dir_gone: bool = False,
     ) -> None:
         self._registry = registry
         self._scope_key = scope_key
@@ -1092,6 +1119,16 @@ class ServiceSupervisor:
         self._owner_token = owner_token or mint_owner_token()
         self._record: Optional[LeaseRecord] = None
         self.fenced: bool = False
+        #: nexus-wl9pk: opt-in. When True, ``DIR_GONE_TICKS`` consecutive ticks
+        #: that find the lease directory gone set ``orphaned`` and write nothing
+        #: (a heartbeat would re-create the directory and the lease). One miss
+        #: is not enough: a remote or automounted filesystem can answer ENOENT
+        #: once, and a rename-swap of the directory shows it missing for a
+        #: moment. The tier's run loop owns the exit, exactly as it does for
+        #: ``fenced``.
+        self._stand_down_when_dir_gone = stand_down_when_dir_gone
+        self._dir_gone_ticks = 0
+        self.orphaned: bool = False
 
     @property
     def owner_token(self) -> str:
@@ -1114,9 +1151,28 @@ class ServiceSupervisor:
 
     def heartbeat_tick(self) -> None:
         """Re-stamp the lease once. If we have been fenced by a newer
-        owner, set ``fenced`` and stop trying (the loser-quiet-exit)."""
-        if self._record is None or self.fenced:
+        owner, set ``fenced`` and stop trying (the loser-quiet-exit). A
+        supervisor built with ``stand_down_when_dir_gone`` whose lease
+        directory has been removed sets ``orphaned`` instead and stamps
+        nothing (nexus-wl9pk)."""
+        if self._record is None or self.fenced or self.orphaned:
             return
+        if self._stand_down_when_dir_gone:
+            if self._registry.dir_exists():
+                self._dir_gone_ticks = 0
+            else:
+                # Stamp nothing on a miss either: a heartbeat would bring the
+                # directory back, and the next tick would then find it present.
+                self._dir_gone_ticks += 1
+                if self._dir_gone_ticks >= DIR_GONE_TICKS:
+                    self.orphaned = True
+                    _log.warning(
+                        "service_supervisor_orphaned",
+                        scope=self._scope_key,
+                        owner_token=self._owner_token,
+                        hint="the lease directory is gone; standing down instead of re-creating it",
+                    )
+                return
         try:
             self._record = self._registry.heartbeat(self._record)
         except StaleOwnerError:
@@ -1567,6 +1623,34 @@ def process_command(
     except (FileNotFoundError, subprocess.SubprocessError):
         return ""
     return probe.stdout.strip()
+
+
+def process_argv(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> list[str]:
+    """The argv of *pid* as a list, or ``[]`` when it is gone or this platform
+    cannot give one. :func:`process_command` joins the arguments with spaces, so
+    an argument that holds a space (a config directory) cannot be told from
+    two; a caller that must compare one argument exactly reads this instead.
+    ``/proc/<pid>/cmdline`` is NUL-separated; Windows splits the kernel's
+    command line by the C runtime rules. ``ps`` (macOS) offers only the joined
+    text, so there the answer is ``[]`` and the caller falls back to
+    :func:`process_command`."""
+    if _is_windows(platform):
+        return winproc_core.process_argv(pid, _win_info(win_info_api))
+    if _procfs_available():
+        try:
+            raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
+        except OSError:
+            return []
+        parts = raw.split(b"\x00")
+        if parts and parts[-1] == b"":
+            parts.pop()
+        return [part.decode("utf-8", "replace") for part in parts]
+    return []
 
 
 #: Win32 values :func:`pid_alive`'s Windows branch reads (winnt.h, winerror.h,
@@ -2026,6 +2110,9 @@ def stop_tier_holders(
     platform: str | None = None,
     console_api: "win_console.WinConsoleApi | None" = None,
     command: Callable[[int], str] | None = None,
+    keep_foreign_leases: bool = False,
+    is_ours_argv: Callable[[list[str]], bool] | None = None,
+    argv_of: Callable[[int], list[str]] | None = None,
 ) -> HolderStopResult:
     """Stop every process a tier's lease records name, and drop the records.
 
@@ -2040,9 +2127,18 @@ def stop_tier_holders(
     ``payload[pid_key]`` (the storage service records ``supervisor_pid`` in its
     payload, the aspect worker ``pid`` in its endpoint). A record is relinquished unless its pid is
     still running our command afterwards, so a dead holder's lease goes too.
+    A pid that is alive but runs something else (``foreign``) is a recycled
+    pid, so by default its record goes as well; a caller whose stop must not
+    read as done while a live process stays unexplained passes
+    ``keep_foreign_leases=True`` and the record stays (nexus-wl9pk). A caller
+    whose identity test must compare one argument exactly (a directory that
+    holds a space is one argv element, two tokens of the joined text) passes
+    *is_ours_argv*: it decides when the pid's argv can be read (*argv_of*,
+    default :func:`process_argv`), and *is_ours* decides when it cannot.
     Never raises for a missing or unreadable registry directory.
     """
     read_command = command or (lambda pid: process_command(pid, platform=platform))
+    read_argv = argv_of or (lambda pid: process_argv(pid, platform=platform))
     registry = ServiceRegistry(dir=dir, tier=tier)
     records = registry.records()
     targets: list[int] = []
@@ -2062,7 +2158,9 @@ def stop_tier_holders(
             if pid_running(pid):
                 unreadable.append(pid)
             continue
-        if is_ours(cmd):
+        argv = read_argv(pid) if is_ours_argv is not None else []
+        ours = is_ours_argv(argv) if is_ours_argv is not None and argv else is_ours(cmd)
+        if ours:
             targets.append(pid)
         elif pid_running(pid):
             foreign.append(pid)
@@ -2076,6 +2174,8 @@ def stop_tier_holders(
         else []
     )
     held = set(survivors) | set(unreadable)
+    if keep_foreign_leases:
+        held |= set(foreign)
     for record in records:
         if _pid_of(record) in held:
             continue

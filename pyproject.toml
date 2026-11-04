@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.94.1"
+version = "7.95.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -114,15 +114,15 @@ dependencies = [
     # verification failed closed there (the win-release runner's ghwin, 2026-10-06).
     # tuf 7.0.1 falls back to a hard link (python-tuf #2980 / PR #2981).
     "tuf>=7.0.1,<8",
-    # <2 is load-bearing: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp,
-    # and the uv TOOL venv re-resolves fresh at install (uv.lock does not
-    # protect it) — an unbounded floor shipped 4 days of dead MCP servers to
-    # every fresh install (nexus-l2ku5). Raise only with a deliberate 2.0
-    # API migration, gated by the MVV's installed-venv handshake probe.
-    # Floor 1.19 (nexus-6b6hq): the first release whose
-    # FuncMetadata.convert_result passes a returned CallToolResult through,
-    # which is how a tool failure reaches the client as isError.
-    "mcp>=1.19,<2",
+    # <3 is load-bearing: the uv TOOL venv re-resolves fresh at install
+    # (uv.lock does not protect it) — an unbounded floor shipped 4 days of
+    # dead MCP servers to every fresh install (nexus-l2ku5, mcp 2.0.0 removed
+    # mcp.server.fastmcp). The servers are now on mcp.server.mcpserver
+    # (nexus-sgmyl, migrated against 2.3.0); the SDK internals we reach into
+    # (_lowlevel_server, the session send path) are private, so raise the cap
+    # only with a deliberate migration, gated by the MVV's installed-venv
+    # handshake probe. Floor 2.3: the release the migration was written against.
+    "mcp>=2.3,<3",
     "fastapi>=0.115,<1.0",
     # nexus-l2ku5 sibling (2026-08-14, gap 3 of T2
     # nexus/release-protocol-gap-audit-2026-08-14 [22511]): was fully

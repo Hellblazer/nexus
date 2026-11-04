@@ -32,6 +32,19 @@ The cut ladder drops ``coverage.assessment_call_log`` before ``eligibility`` and
 until ``coverage`` itself goes. All of it is closed names and counts: no question, facet or evidence text, with or
 without ``trace``.
 
+**Answer text facts (nexus-ix3fj), additive to version 1.** ``final_chars`` is the character count of the run's FULL final
+text, ``answer_class`` the class :func:`nexus.plans.answer_text_class.classify_answer_text` (the classifier ``nx answer-runs``
+reads with, so there is one rule) gives that text and the run's step count, and ``class_version`` the
+:data:`~nexus.plans.answer_text_class.CLASS_VERSION` of the rule that gave it. The row's ``final_text`` is cut at 2000
+characters, so a raw ids or extractions payload over that length no longer parses when ``nx answer-runs`` reads it back; the
+reader takes the recorded class instead, for a ``trace=False`` row too (the class is computed from the real text before it is
+redacted, and only a class name and a length are recorded). All three are a count, a closed name and a number, kept with or
+without ``trace`` and by the last-resort cut. A summary built without the text (the continuation report row) carries none of
+them; a class that could not be computed (the classifier raised, ``RecursionError`` on a deeply nested payload included, or
+named something outside :data:`~nexus.plans.answer_text_class.ANSWER_CLASSES`) is left out with ``final_chars`` kept, and the
+rest of the summary is unharmed. A row from an engine that does not keep the run summary has none: the reader falls back to
+its heuristic there.
+
 **Redaction.** The question never appears. ``trace=False`` also drops facet text, source hints, the topic
 sentence and every source label; ids, counts and closed names stay. The summary is built from the same
 objects the envelope reports and takes the same ``trace`` the run log does.
@@ -62,6 +75,8 @@ from datetime import datetime
 from typing import Any, Literal
 
 import structlog
+
+from nexus.plans.answer_text_class import ANSWER_CLASSES, CLASS_VERSION, classify_answer_text
 
 _log = structlog.get_logger(__name__)
 
@@ -114,7 +129,7 @@ _CUT_LADDER: tuple[str, ...] = (
 #: What survives the last-resort cut.
 _KEEP_ALWAYS = (
     "version", "kind", "outcome", "trace", "coverage_complete", "coverage_partial", "coverage_unavailable",
-    "coverage_unassessed", "coverage_state", "run",
+    "coverage_unassessed", "coverage_state", "run", "final_chars", "answer_class", "class_version",
 )
 
 
@@ -296,10 +311,12 @@ def _streams_block(diagnostics: Mapping[str, Any] | None) -> dict[str, Any] | No
 def build_run_summary(
     inputs: RunSummaryInputs, *, outcome: str, plan_id: int | None, step_count: int, duration_ms: int,
     cost_usd: float | None, trace: bool, coverage: Any, terminal_reached: bool, kind: str = "nx_answer",
+    answer_text: str | None = None,
 ) -> dict[str, Any]:
     """The version-1 summary for one run. *coverage* is the run's terminal ``CoverageResult`` or ``None``;
     *terminal_reached* says the run got as far as its terminal reduction, which decides whether a missing
-    coverage is ``unassessed`` (reached, not assessed) or ``none`` (never reached). Always JSON plain and
+    coverage is ``unassessed`` (reached, not assessed) or ``none`` (never reached). *answer_text* is the run's FULL
+    final text (nexus-ix3fj): when given, the summary records its length and its class. Always JSON plain and
     under :data:`RUN_SUMMARY_MAX_BYTES`."""
     state = coverage.state if coverage is not None else ("unassessed" if terminal_reached else "none")
     attempts = max(coverage.ledger.rounds - 1, 0) if coverage is not None else 0
@@ -317,8 +334,8 @@ def build_run_summary(
         "streams": _streams_block(inputs.diagnostics),
         "scope": {"conflicts": conflicts, "diagnosed_steps": len(inputs.scope_diagnostics)},
         # ``facets_repairable``: unsupported facets of the FINAL ledger that a retrieval could still help (those the repair
-        # did not fix, when it ran). It never counts covered facets: the covered facets a repair reassessed for an unread
-        # tail (nexus-z6yvk) are ``unread_tail_facets``, so ``entered`` true with ``facets_repairable`` 0 reads as a
+        # did not fix, when it ran). It never counts covered facets: the covered and contradicted facets a repair reassessed
+        # for an unread tail (nexus-z6yvk, nexus-se11w) are ``unread_tail_facets``, so ``entered`` true with ``facets_repairable`` 0 reads as a
         # tail-only repair, whose ``reason`` is ``unread_tail`` (``""`` when no repair ran; ``reason`` and
         # ``unread_tail_facets`` are additive).
         "repair": {
@@ -333,7 +350,25 @@ def build_run_summary(
             "cost_usd": _num(cost_usd, places=6),
         },
     }
+    if answer_text is not None:
+        summary["final_chars"] = len(answer_text)
+        answer_class = _answer_class_or_none(answer_text, step_count)
+        if answer_class is not None:
+            summary["answer_class"] = answer_class
+            summary["class_version"] = CLASS_VERSION
     return fit_summary(summary)
+
+
+def _answer_class_or_none(answer_text: str, step_count: int) -> str | None:
+    """The class of *answer_text*, or ``None`` when it cannot be recorded: the classifier raised (a payload nested
+    deeply enough to overflow the JSON parser raises ``RecursionError``, an ``Exception``) or named something the
+    reader would refuse. Its own failure domain: a class that cannot be had never costs the rest of the summary."""
+    try:
+        answer_class = classify_answer_text(answer_text, step_count=step_count)
+    except Exception as exc:  # noqa: BLE001 — the class is an extra; the summary is still worth recording without it
+        _log.warning("nx_answer_run_summary_classify_failed", error=type(exc).__name__)
+        return None
+    return answer_class if answer_class in ANSWER_CLASSES else None
 
 
 def _drop(summary: dict[str, Any], path: str) -> bool:
@@ -534,10 +569,11 @@ class RunSummaryRecorder:
 
     def prepare(
         self, telemetry: Any, *, outcome: str, plan_id: int | None, step_count: int, duration_ms: int,
-        cost_usd: float | None,
+        cost_usd: float | None, answer_text: str | None = None,
     ) -> dict[str, Any] | None:
         """The summary to put on the write, or ``None``: the engine cannot take it (``unsupported``, logged)
-        or it could not be built (``not_recorded``). Never raises."""
+        or it could not be built (``not_recorded``). *answer_text* is the run's full final text, whose length and
+        class the summary records (nexus-ix3fj). Never raises."""
         if not _telemetry_supports(telemetry):
             self._set("unsupported", "engine does not advertise nx_answer_run_summary_supported")
             global _unsupported_warned  # noqa: PLW0603 — once-per-process latch, see its declaration
@@ -554,7 +590,7 @@ class RunSummaryRecorder:
             summary = build_run_summary(
                 inputs, outcome=outcome, plan_id=plan_id, step_count=step_count, duration_ms=duration_ms,
                 cost_usd=cost_usd, trace=self.trace, coverage=self._coverage, terminal_reached=self._terminal,
-                kind=self.kind,
+                kind=self.kind, answer_text=answer_text,
             )
             self.digest = summary_digest(summary)
         except Exception as exc:  # noqa: BLE001 — a summary that cannot be built is dropped, never a retrieval failure

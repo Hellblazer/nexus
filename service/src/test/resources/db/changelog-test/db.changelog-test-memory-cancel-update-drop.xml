@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-ov3zi: drops the trigger and function db.changelog-test-memory-cancel-update-install.xml put on
+    nexus.memory, in Liquibase XML instead of Java SQL strings (Sam's rule, nexus-zrcj7). IF EXISTS, so the
+    test's finally block can run it whether or not the install ran. Run by MemoryRepositoryReplacesTest
+    directly; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+    <changeSet id="memory-cancel-update-drop-trigger" author="nexus-ov3zi" runAlways="true">
+        <sql>DROP TRIGGER IF EXISTS cancel_update_for_test ON nexus.memory</sql>
+    </changeSet>
+    <changeSet id="memory-cancel-update-drop-function" author="nexus-ov3zi" runAlways="true">
+        <sql>DROP FUNCTION IF EXISTS nexus.cancel_update_for_test()</sql>
+    </changeSet>
+</databaseChangeLog>

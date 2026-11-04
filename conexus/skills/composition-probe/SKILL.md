@@ -63,20 +63,21 @@ In the project root, check for build files in order:
 
 ```
 if pyproject.toml present:    runner = "uv run pytest /tmp/probe-<id>.py -xvs"
-elif pom.xml present:         runner = "scripts/mvnw-leased.sh test -Dtest=<classname> --no-transfer-progress"
+elif pom.xml present:         runner = "<mvn> test -Dtest=<classname> --no-transfer-progress"
 elif package.json present:    runner = "npm test -- /tmp/probe-<id>.ts"
 else:                         surface language-detection failure to the user; halt
 ```
 
-`scripts/mvnw-leased.sh` (nexus-c00dw) takes the single-builder lease before running the wrapped `./mvnw` — never dispatch a bare `mvn`/`./mvnw` here, this subagent's probe run can collide with a concurrent service build.
+`pom.xml` counts when it sits at the root or under `service/`. `<mvn>` is `scripts/mvnw-leased.sh` when the project has that script (the nexus repo, nexus-c00dw, where Maven lives under `service/` and the script wraps `service/mvnw`). The script takes the single-builder lease before it runs Maven, so a probe run cannot collide with a concurrent service build; never use a bare `mvn` or `./mvnw` there. In any other project `<mvn>` is `./mvnw` when it exists, else `mvn`.
 
-Map the runner to a file extension: `pytest` → `.py`, `mvnw-leased.sh` → `.java`, `npm` → `.ts`.
+Map the runner to a file extension: `pytest` → `.py`, `<mvn>` → `.java`, `npm` → `.ts`. Fill the `<id>` and `<classname>` in the chosen runner; that command line is `<runner>` in Step 4.
 
 ### Step 4: Dispatch Subagent
 
 Use the Agent tool with `subagent_type="general-purpose"`. Populate the prompt below verbatim,
-substituting `<entry_point>` with the coordinator bead's entry point and `{list of dep bead IDs + their
-declared outputs}` with the map from Step 2.
+substituting `<entry_point>` with the coordinator bead's entry point, `{list of dep bead IDs + their
+declared outputs}` with the map from Step 2, and `<runner>` with the full runner command line from Step 3
+(for a Maven project that is the `<mvn>` form, so the lease guard reaches the subagent).
 
 ---
 
@@ -89,8 +90,8 @@ declared outputs}` with the map from Step 2.
 > - Fail fast on any exception
 > - Print which dependency's contract was violated if the composition fails
 >
-> Write the test to `/tmp/probe-{bead_id}.{ext}` and run it. Report pass/fail + which dependency (if
-> any) violated its declared output shape.
+> Write the test to `/tmp/probe-{bead_id}.{ext}` and run it with exactly `<runner>`, never another
+> build or test command. Report pass/fail + which dependency (if any) violated its declared output shape.
 >
 > If you cannot attribute the failure to a specific dependency bead, say so explicitly rather than
 > guessing.

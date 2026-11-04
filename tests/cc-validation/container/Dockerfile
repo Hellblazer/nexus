@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # package every stub scenario (11, 14, ...) reads "server never spawned" and
 # nexus-spwp2's 14b could not tell a plugin agent's mcpServers from a stub that
 # cannot start. Version = uv.lock's.
-RUN pip3 install --no-cache-dir --break-system-packages uv mcp==1.27.1
+RUN pip3 install --no-cache-dir --break-system-packages uv mcp==2.3.0
 RUN useradd -m -s /bin/bash nexus
 USER nexus
 WORKDIR /home/nexus

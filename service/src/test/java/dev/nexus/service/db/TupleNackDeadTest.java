@@ -422,6 +422,82 @@ class TupleNackDeadTest {
                 .containsExactly("claim", "expire", "claim");
     }
 
+    // ── nexus-7h2jj: a replace on a LAPSED, unswept claim dirties it, so the 7rwaj requeue covers it ───
+    // Controls: the same lapse without a replace still dead-letters (claimOfALapsedCleanClaimAtMaxAttempts_stillDeadLetters,
+    // sweepLapseAtMaxAttempts_onACleanClaim_stillDeadLetters).
+
+    /** The replace lands after the lease lapsed and before any sweep or claimer took the row. */
+    private void replaceAfterLapse(Q q, String body) throws Exception {
+        var r = repo.outReplace(TENANT, q.subspace(), q.pattern(), q.dims(), body, "n-1", null, null, null);
+        assertThat(r.outcome()).as("a lapsed, unswept claim is still a claimed row: dirtied")
+                .isEqualTo(TupleRepository.OutOutcome.DIRTIED);
+        assertThat(content(q).dirty()).isTrue();
+    }
+
+    @Test
+    void claimOfAClaimReplacedAfterItsLeaseLapsed_atMaxAttempts_requeuesTheNewBody_notDeadLetters() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);   // the lapse counts attempt 3 == max_attempts
+        lapseLease(q);
+        replaceAfterLapse(q, "fixed-after-lapse");
+
+        var again = claimOrFail(q, "w2");
+
+        assertThat(again.tuple().body()).as("the new body, extracted once more, not a dead row")
+                .isEqualTo("fixed-after-lapse");
+        assertThat(again.tuple().attempts()).as("7rwaj: reset to 0").isZero();
+        Content c = content(q);
+        assertThat(c.claimState()).isEqualTo("claimed");
+        assertThat(c.claimant()).isEqualTo("w2");
+        assertThat(c.dirty()).as("a new claim starts clean").isFalse();
+        assertThat(transitions(id)).as("expire, then the new claim; no dead row")
+                .containsExactly("claim", "expire", "claim");
+    }
+
+    @Test
+    void sweepOfAClaimReplacedAfterItsLeaseLapsed_atMaxAttempts_requeuesTheNewBody_notDeadLetters() throws Exception {
+        Q q = newQueue();
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        setAttempts(q, 2);
+        lapseLease(q);
+        replaceAfterLapse(q, "fixed-after-lapse");
+
+        var result = repo.releaseLapsedClaimsBatch(TENANT, 10, Duration.ofSeconds(30));
+
+        assertThat(result.deadLettered()).as("a body nobody extracted is not dead-lettered").isZero();
+        assertThat(result.released()).isEqualTo(1);
+        assertRequeuedWithNewBody(q, "fixed-after-lapse");
+        assertThat(transitions(id)).containsExactly("claim", "expire");
+    }
+
+    @Test
+    void sweepOfAClaimReplacedAfterItsLeaseLapsed_belowMaxAttempts_releasesItWithTheMarkCleared_andTheNewBody()
+            throws Exception {
+        Q q = newQueue();   // max_attempts 3
+        byte[] id = out(q);
+        claimOrFail(q, "w1");
+        lapseLease(q);
+        replaceAfterLapse(q, "fixed-after-lapse");
+
+        var result = repo.releaseLapsedClaimsBatch(TENANT, 10, Duration.ofSeconds(30));
+
+        assertThat(result.released()).isEqualTo(1);
+        assertThat(result.deadLettered()).isZero();
+        Content c = content(q);
+        assertThat(c.claimState()).as("released to available").isNull();
+        assertThat(c.dirty()).as("the mark is cleared by the release").isFalse();
+        assertThat(c.attempts()).as("the lapse counts an attempt, as for any lapse").isEqualTo(1);
+        assertThat(c.body()).as("the new body is intact").isEqualTo("fixed-after-lapse");
+        assertThat(c.claimId()).isNull();
+        assertThat(c.claimant()).isNull();
+        assertThat(c.leaseUntil()).isNull();
+        assertThat(transitions(id)).containsExactly("claim", "expire");
+        assertThat(claimOrFail(q, "w2").tuple().body()).isEqualTo("fixed-after-lapse");
+    }
+
     @Test
     void claimOfALapsedCleanClaimAtMaxAttempts_stillDeadLetters() throws Exception {
         Q q = newQueue();

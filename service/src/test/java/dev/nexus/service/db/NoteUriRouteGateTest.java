@@ -117,7 +117,7 @@ class NoteUriRouteGateTest {
         listed(CAT, "doImportDocument", "import/document single: identity guard and insert take sourceUriOf(d)"),
         listed(CAT, "sourceUriOf", "the one helper the document routes above share: canonical form of a row map's source_uri"),
         // ── LISTED: AspectRepository ──────────────────────────────────────
-        listed(ASP, "upsertAspect", "aspects/upsert: the stored source_uri is the canonical form"),
+        listed(ASP, "writeAspect", "aspects/upsert: the stored source_uri is the canonical form (the write half of upsertAspect since nexus-eyynd moved the claim fence ahead of the payload gates)"),
         listed(ASP, "importAspectsBatch", "aspects/import batch: the stored source_uri is the canonical form"),
         listed(ASP, "doImportAspect", "aspects/import single: the stored source_uri is the canonical form"),
         listed(ASP, "upsertHighlight", "highlights/upsert: the stored source_uri is the canonical form"),

@@ -1098,8 +1098,8 @@ def _report_aspect_queue_service() -> None:
     matching the 4 sibling supplementary checks (resources / plan-library /
     taxonomy / t1) that already signal failure this way.
 
-    RDR-235 F18: the queue has two sides while ``NX_ASPECT_QUEUE`` moves it from
-    the table onto the ``aspects`` tuple template. Pending is the table's
+    RDR-235 F18: the queue has two sides while rows the retired table producer
+    wrote (nexus-bpikw) drain, and new work goes to the ``aspects`` tuple template. Pending is the table's
     pending plus the tuple side's ``available``; failed is the table's failed
     plus the tuple side's ``dead``. ``claimed`` is in flight and counts as
     neither. A tuple side that cannot be read is reported UNKNOWN and no combined
@@ -1174,6 +1174,28 @@ def _report_aspect_queue_service() -> None:
                 "extracted once a worker can run.",
                 err=True,
             )
+        else:
+            # nexus-wl9pk: a worker exits after an hour without an engine, and
+            # only the next store or index starts another, so a backlog from
+            # before an outage sits with nobody draining it.
+            from nexus import config as _config  # noqa: PLC0415 — deferred to keep CLI startup fast; the module attribute, so a test or caller that rebinds the resolver is seen (nexus-78blw)
+            from nexus.daemon.aspect_worker_daemon import aspect_worker_running  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+            try:
+                worker_up = aspect_worker_running(_config.nexus_config_dir())
+            except Exception:  # noqa: BLE001 — an unreadable lease says nothing; stay quiet rather than guess
+                worker_up = True
+            if not worker_up:
+                click.echo(
+                    f"  WARN: aspect extraction is idle: {pending} pending and no aspect worker is "
+                    "running (a worker exits after an hour without the engine; the next store or "
+                    "index starts one). Start one now with `nx daemon aspect-worker start` "
+                    "(foreground; run it from a shell where `claude` works), or store or index "
+                    "anything. (This reads this machine's worker leases only: against a cloud "
+                    "tenant, a worker on another machine is not seen and may be draining the "
+                    "queue.)",
+                    err=True,
+                )
     if n_failed:
         if failed:
             click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
@@ -4134,6 +4156,28 @@ def _run_check_wal_retention() -> None:
 # ── --check-quotas (nexus-c590) ──────────────────────────────────────────────
 
 
+def _engine_embedding_posture() -> dict:
+    """What the running engine embeds, read from its ``/version`` (nexus-9oplr).
+
+    RDR-210: the engine takes one embedding posture per boot, so after a ``local.embed_model``
+    edit with no restart the client's config names one model while the engine still embeds
+    another. Returns ``{"embedding_profile", "embedding_models"}`` as the engine reports them, or
+    ``{"error": ...}`` when ``/version`` cannot be read. Best effort, short timeout; never raises.
+    """
+    try:
+        from nexus.db.http_vector_client import _get, _process_default_tenant  # noqa: PLC0415 — deferred; doctor loads per-check dependencies lazily
+
+        body = _get("/version", tenant=_process_default_tenant(), timeout=3.0)
+    except Exception as exc:  # noqa: BLE001 — best-effort probe; the report says it was not read
+        return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    if not isinstance(body, dict):
+        return {"error": "the engine's /version body is not an object"}
+    return {
+        "embedding_profile": body.get("embedding_profile"),
+        "embedding_models": body.get("embedding_models"),
+    }
+
+
 def _collect_quota_report() -> dict:
     """Build the structured quota-headroom report (nexus-c590).
 
@@ -4246,6 +4290,9 @@ def _collect_quota_report() -> dict:
         }
         if _embed_error:
             voyage_limits["embed_model_error"] = _embed_error
+        # nexus-9oplr: the models above are what THIS config writes with; the engine embeds with
+        # the posture it booted with. Report both so a config edit without a restart shows.
+        voyage_limits["engine"] = _engine_embedding_posture()
     else:
         voyage_limits = {
             "mode": "cloud",
@@ -4353,6 +4400,29 @@ def _format_quota_report(report: dict) -> str:
     lines.append(f"    target rpm (indexer rate limiter):        {v['target_rpm']}")
     if v.get("embed_model_error"):
         lines.append(f"  {_WARN} embedding model: {v['embed_model_error']}")
+    engine = v.get("engine")
+    if isinstance(engine, dict):
+        if "error" in engine:
+            lines.append(f"    engine embedding posture: not read ({engine['error']})")
+        else:
+            served = engine.get("embedding_models")
+            if isinstance(served, list) and all(isinstance(m, str) for m in served):
+                lines.append(
+                    f"    engine serves (its /version, the posture it booted with): "
+                    f"{', '.join(served) or 'no model'}"
+                )
+                missing = [m for m in v["models"] if m not in served]
+                if missing:
+                    from nexus.corpus import _SERVICE_RESTART_COMMAND  # noqa: PLC0415 — deferred; avoids an import cycle at module load
+
+                    lines.append(
+                        f"  {_WARN} this config writes with {', '.join(missing)}, which the running "
+                        f"engine does not serve: it embeds with the posture it booted with "
+                        f"({', '.join(served) or 'no model'}). Restart it to apply the config: "
+                        f"{_SERVICE_RESTART_COMMAND}"
+                    )
+            else:
+                lines.append("    engine embedding posture: not read (/version does not list embedding_models)")
     for model, caps in v["models"].items():
         lines.append(
             f"    {model:20} tokens={caps['max_tokens']:>6,}  "

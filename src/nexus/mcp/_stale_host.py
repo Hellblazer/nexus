@@ -11,15 +11,15 @@ interpreter (the GH #1414 incident chain, verified). Nothing in the failing
 tool call pointed at staleness: ``detect_stale_processes()`` skips
 ``pid == me`` by construction, so the host must self-detect.
 
-This hook wraps the CallToolRequest handler (the same FastMCP-internals
+This hook is a tools/call middleware (the same SDK-internals
 patch pattern the now-deleted RDR-126 §3 first-run banner dispatch hook
-used, verified against mcp 1.27.1) and, per Hal's g6vb4 decision
+used, verified against mcp 2.3.0) and, per Hal's g6vb4 decision
 (2026-07-21):
 
 - **warns once** (structlog) the first time a per-call check finds the
   install newer than this process's startup baseline;
 - **decorates import-shaped failures** — raised ``ImportError`` /
-  ``AttributeError`` AND FastMCP ``isError`` results whose text carries an
+  ``AttributeError`` AND MCPServer ``isError`` results whose text carries an
   import-failure signature — with an actionable "stale MCP host … restart"
   message, ONLY when actually stale (a fresh host's import bug surfaces
   undecorated);
@@ -52,6 +52,7 @@ that host previously read fresh forever, so it was never decorated either.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -59,7 +60,7 @@ from nexus import install_layout, upgrade_finish
 
 _log = structlog.get_logger(__name__)
 
-#: Substrings identifying an import-shaped failure text (FastMCP renders the
+#: Substrings identifying an import-shaped failure text (MCPServer renders the
 #: exception's ``str`` into the isError content block).
 _IMPORT_MARKERS: tuple[str, ...] = (
     "ImportError",
@@ -104,13 +105,14 @@ def install_stale_host_hook(server: object) -> bool:
     check, in whichever regime this host's layout calls for (module
     docstring). Returns False (logged at debug) when the LEGACY regime's
     baseline cannot be captured (source checkout without dist-info) or the
-    FastMCP internals moved — MCP boot is never blocked. A generation host
+    SDK's middleware list moved — MCP boot is never blocked. A generation host
     needs no dist-info and so installs regardless.
 
-    FRAGILE COUPLING: reaches into ``server._mcp_server`` and patches
-    ``request_handlers[CallToolRequest]`` — private FastMCP internals,
-    verified against mcp 1.27.1. ``tests/test_stale_host.py`` exercises the
-    real FastMCP path and goes red if they move.
+    COUPLING: appends a ``(ctx, call_next)`` entry to ``server.middleware``
+    (mcp 2.x ``MCPServer.middleware``, which the SDK documents as provisional
+    for 2.x minors; verified against mcp 2.3.0, nexus-sgmyl). It acts only on
+    ``tools/call``. ``tests/test_stale_host.py`` exercises the real MCPServer
+    path and goes red if that moves.
     """
     generation = upgrade_finish.running_generation()
     baseline_mtime, baseline_version = 0.0, ""
@@ -131,13 +133,9 @@ def install_stale_host_hook(server: object) -> bool:
             return False
     baseline = (baseline_mtime, baseline_version)
     try:
-        from mcp import types  # type: ignore[import-not-found]  # noqa: PLC0415 — deferred heavy dep; mcp SDK loaded only when patching handler
-
-        low = server._mcp_server  # type: ignore[attr-defined]
-        key = types.CallToolRequest
-        original = low.request_handlers.get(key)
-        if original is None:
-            return False
+        middleware = server.middleware  # type: ignore[attr-defined]
+        if any(getattr(m, "_nx_stale_host", False) for m in middleware):
+            return True
 
         state = {  # per-install, not module-global
             "stale": None, "warned": False, "noted": False,
@@ -212,7 +210,7 @@ def install_stale_host_hook(server: object) -> bool:
             except Exception:  # noqa: BLE001 — the check must never break a tool call
                 return None
 
-        async def _wrapped_generation(req: object) -> object:
+        async def _wrapped_generation(ctx: Any, call_next: Any) -> Any:
             """Generation regime: note once, decorate NEVER, refuse never.
 
             No decoration here is the whole point (module docstring): this
@@ -232,6 +230,8 @@ def install_stale_host_hook(server: object) -> bool:
             generation path would not converge; that is outside how this
             project launches its servers.
             """
+            if ctx.method != "tools/call":
+                return await call_next(ctx)
             current = _check_skew()
             if current is not None and not state["noted"]:
                 state["noted"] = True
@@ -245,9 +245,11 @@ def install_stale_host_hook(server: object) -> bool:
                         f"converges when the session next respawns it."
                     ),
                 )
-            return await original(req)
+            return await call_next(ctx)
 
-        async def _wrapped(req: object) -> object:
+        async def _wrapped(ctx: Any, call_next: Any) -> Any:
+            if ctx.method != "tools/call":
+                return await call_next(ctx)
             st = _check()
             if st is not None and st.stale and not state["warned"]:
                 state["warned"] = True
@@ -256,26 +258,37 @@ def install_stale_host_hook(server: object) -> bool:
                     installed_version=st.installed_version,
                 )
             try:
-                result = await original(req)
+                result = await call_next(ctx)
             except (ImportError, AttributeError) as exc:
-                # Handler-level import failure (rare; tool-body failures are
-                # normally converted to isError results by FastMCP below).
+                # Handler-level import failure (rare; MCPServer's call handler
+                # converts tool-body failures to isError results itself).
                 fresh = _fresh_verdict()
                 if fresh is not None:
                     raise type(exc)(f"{exc} {_stale_note(fresh)}") from exc
                 raise
             if st is not None and st.stale:
                 try:
-                    inner = getattr(result, "root", result)
-                    if getattr(inner, "isError", False):
-                        content = getattr(inner, "content", None) or []
-                        first = content[0] if content else None
-                        text = getattr(first, "text", None)
+                    # The chain hands back the wire dict (``isError`` and
+                    # ``content[0]["text"]``); a model result is read the same
+                    # way through its attributes.
+                    if isinstance(result, dict):
+                        is_error = result.get("isError", False)
+                        content = result.get("content") or []
+                    else:
+                        is_error = getattr(result, "is_error", False)
+                        content = getattr(result, "content", None) or []
+                    if is_error and content:
+                        first = content[0]
+                        text = first.get("text") if isinstance(first, dict) else getattr(first, "text", None)
                         if isinstance(text, str) and any(
                             m in text for m in _IMPORT_MARKERS
                         ):
                             fresh = _fresh_verdict() or st
-                            first.text = f"{text}\n\n{_stale_note(fresh)}"
+                            decorated = f"{text}\n\n{_stale_note(fresh)}"
+                            if isinstance(first, dict):
+                                first["text"] = decorated
+                            else:
+                                first.text = decorated
                 except Exception as exc:  # noqa: BLE001 — never corrupt a tool result
                     _log.debug(
                         "stale_host_decorate_failed",
@@ -283,9 +296,9 @@ def install_stale_host_hook(server: object) -> bool:
                     )
             return result
 
-        low.request_handlers[key] = (
-            _wrapped_generation if generation is not None else _wrapped
-        )
+        chosen = _wrapped_generation if generation is not None else _wrapped
+        chosen._nx_stale_host = True  # type: ignore[attr-defined]
+        middleware.append(chosen)
         return True
     except Exception as exc:  # noqa: BLE001 — never block boot on the staleness hook
         _log.debug(

@@ -104,10 +104,10 @@ def _redact(arguments: Mapping[str, Any]) -> dict[str, Any]:
 def _parse_result(result: Any) -> dict[str, Any] | None:
     """Coerce a ``CallToolResult`` into a plain dict, or ``None`` if not parseable.
 
-    Preference order: ``structuredContent`` (already a dict) → the first text
+    Preference order: ``structured_content`` (already a dict) → the first text
     content block parsed as JSON → a ``{"text": ...}`` wrapper of joined text.
     """
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         return structured
 
@@ -149,7 +149,7 @@ async def call_tool(
         )
         return None
 
-    if getattr(result, "isError", False):
+    if getattr(result, "is_error", False):
         log.warning("mcp_call_tool_is_error", tool=name, args=_redact(args))
         return None
 
@@ -168,15 +168,15 @@ async def open_session(endpoint: MCPEndpoint) -> AsyncIterator[Any]:
     are local so importing this module never costs the ``mcp`` SDK transport
     machinery until a connection is actually opened.
     """
-    import httpx  # noqa: PLC0415 — deferred heavy dep; avoids mcp SDK transport cost at import time
     from mcp import ClientSession  # noqa: PLC0415 — deferred heavy dep; only loaded when a connection opens
     from mcp.client.streamable_http import streamable_http_client  # noqa: PLC0415 — deferred heavy dep
     from mcp.shared._httpx_utils import create_mcp_http_client  # noqa: PLC0415 — deferred heavy dep
 
-    http_client = create_mcp_http_client(
-        headers=dict(endpoint.headers) or None,
-        timeout=httpx.Timeout(endpoint.timeout_s),
-    )
+    http_client = create_mcp_http_client(headers=dict(endpoint.headers) or None)
+    # mcp 2.x builds this client on its own ``httpx2`` (not ``httpx``), so a
+    # ``httpx.Timeout`` cannot be passed in; the client's ``timeout`` setter
+    # takes the float and builds the matching ``Timeout`` itself.
+    http_client.timeout = endpoint.timeout_s
     # ``streamable_http_client`` does NOT own a caller-provided client's
     # lifecycle (it skips its own ``aclose`` when ``http_client`` is passed in).
     # Close it ourselves so the long-running Layer A' server does not leak one
@@ -185,7 +185,6 @@ async def open_session(endpoint: MCPEndpoint) -> AsyncIterator[Any]:
         async with streamable_http_client(endpoint.url, http_client=http_client) as (
             read_stream,
             write_stream,
-            _get_session_id,
         ):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()

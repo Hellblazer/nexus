@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -164,6 +165,69 @@ def test_plan_groups_skips_rows_already_marked() -> None:
     ]
     groups = plan_groups(rows)
     assert [(g.month, g.source_ids) for g in groups] == [("2026-08", [1]), ("2026-09", [3])]
+
+
+def test_plan_groups_skips_a_replaced_row_and_keeps_an_expired_one() -> None:
+    """nexus-ov3zi B1: quarantined with ttl None is the shape only a replace produces."""
+    rows = [
+        {"id": 1, "title": "expired", "timestamp": "2026-08-03T00:00:00Z", "rolled_up_at": None, "ttl": 1},
+        {"id": 2, "title": "replaced", "timestamp": "2026-08-20T00:00:00Z", "rolled_up_at": None, "ttl": None},
+        {"id": 3, "title": "handbuilt", "timestamp": "2026-08-21T00:00:00Z", "rolled_up_at": None},
+    ]
+    groups = plan_groups(rows)
+    assert [(g.month, g.source_ids) for g in groups] == [("2026-08", [1, 3])], (
+        "the replaced row (ttl None) is out; an expired row and a row with no ttl key stay"
+    )
+
+
+def _replace(db: T2Database, old: str, new: str) -> int:
+    """Replace ``old`` with ``new`` through the facade; return the quarantined row's id."""
+    db.put(project=PROJECT, title=old, content=f"body of {old}")
+    return db.put_replacing(project=PROJECT, title=new, content=f"body of {new}", replaces=old).replaced_id
+
+
+@pytest.mark.t2_tenant
+def test_a_replaced_row_survives_rollup_then_reap_and_restores_with_its_content(db: T2Database) -> None:
+    """nexus-ov3zi B1, end to end on the engine: the attended path must not take a replaced row."""
+    replaced = _replace(db, "old-plan.md", "new-plan.md")
+    expired = _quarantine(db, "stale.md", days=2)
+    stub = StubSummarizer()
+
+    outcomes = _run(db, stub)
+
+    assert [g.titles for g in stub.calls] == [["stale.md"]], "the summarizer saw the expired row only"
+    assert [o.status for o in outcomes] == ["marked"]
+    assert _marked(db) == {expired}, "the replaced row carries no mark"
+    assert db.memory.reap() == [expired], "reap deletes the expired row and leaves the replaced one"
+    assert {r["id"] for r in db.memory.list_quarantined(project=PROJECT)} == {replaced}
+    assert db.memory.restore(replaced) is True
+    assert db.get(project=PROJECT, title="old-plan.md")["content"] == "body of old-plan.md"
+
+
+@pytest.mark.t2_tenant
+def test_a_project_holding_only_a_replaced_row_has_nothing_to_roll_up(db: T2Database) -> None:
+    replaced = _replace(db, "old-plan.md", "new-plan.md")
+    stub = StubSummarizer()
+
+    assert _run(db, stub) == []
+    assert stub.calls == [], "no summarizer call is spent on a replaced row"
+    assert db.memory.list_summaries(project=PROJECT) == []
+    assert {r["id"] for r in db.memory.list_quarantined(project=PROJECT)} == {replaced}
+
+
+@pytest.mark.t2_tenant
+def test_the_engine_refuses_a_replaced_row_as_a_summary_source(db: T2Database) -> None:
+    """The refusal holds for a client that does not skip it: a direct POST marks nothing."""
+    replaced = _replace(db, "old-plan.md", "new-plan.md")
+
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        db.memory.insert_summary(PROJECT, "covers old-plan.md", [replaced], "stub-model")
+
+    assert exc.value.response.status_code == 409
+    assert exc.value.response.json()["code"] == "replaced_source_id"
+    assert db.memory.list_summaries(project=PROJECT) == []
+    assert _marked(db) == set()
+    assert db.memory.reap() == []
 
 
 @pytest.mark.parametrize(

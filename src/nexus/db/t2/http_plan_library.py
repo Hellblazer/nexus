@@ -437,7 +437,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         self._post("/v1/plans/metrics/match", payload)
 
     def increment_run_started(self, plan_id: int) -> None:
-        """Bump ``use_count`` and stamp ``last_used``."""
+        """Bump ``use_count``; the engine stamps ``last_used`` only while the plan is inside its TTL (nexus-i1eb4)."""
         self._post("/v1/plans/metrics/run_start", {"id": plan_id})
 
     def increment_run_outcome(self, plan_id: int, *, success: bool) -> None:

@@ -65,6 +65,7 @@ from typing import Any
 import structlog
 
 from nexus.db.t2.http_tuple_store import SchemaViolationError
+from nexus.tuple_templates import resolve_tuple_template
 
 _log = structlog.get_logger(__name__)
 
@@ -352,36 +353,17 @@ def _take_enabled(templates: list[dict[str, Any]], subspace: str) -> bool:
     """Resolve *subspace* against the ``registry()`` wire's ``templates``
     list and return the matching template's ``take.enabled``.
 
-    Deliberately a local copy of ``nexus.health._template_take_enabled``'s
-    literal-before-pattern algorithm (mirrors ``TemplateRegistry.resolve()``:
-    a literal template name is checked before any parameterised one, and a
-    ``<param>`` segment matches anything in the corresponding position) --
-    duplicated rather than imported so an MCP tool call never pulls in
-    ``nexus.health``, a large module with its own import cost, for a
-    fifteen-line pure function. Defaults to ``True`` (assume claimable) when
-    nothing resolves, matching that function's own default: an unmatched
-    subspace must never be silently treated as safe to subscribe.
+    The matching is :func:`nexus.tuple_templates.resolve_tuple_template`, the
+    one client-side resolver shared with ``nexus.health`` and ``nx tuple
+    dictionary`` (it lives in a standard-library-only module so an MCP tool
+    call never pulls in ``nexus.health``). Defaults to ``True`` (assume
+    claimable) when nothing resolves, matching ``nexus.health``'s own default:
+    an unmatched subspace must never be silently treated as safe to subscribe.
     """
-    segments = subspace.split("/")
-
-    def _matches(name: str) -> bool:
-        t_segments = name.split("/")
-        if len(t_segments) != len(segments):
-            return False
-        return all(
-            (ts.startswith("<") and ts.endswith(">")) or ts == ss
-            for ts, ss in zip(t_segments, segments)
-        )
-
-    literal = [t for t in templates if "<" not in t.get("name", "")]
-    patterned = [t for t in templates if "<" in t.get("name", "")]
-    for t in literal:
-        if t.get("name", "") == subspace:
-            return bool(t.get("take", {}).get("enabled", True))
-    for t in patterned:
-        if _matches(t.get("name", "")):
-            return bool(t.get("take", {}).get("enabled", True))
-    return True
+    template = resolve_tuple_template(templates, subspace)
+    if template is None:
+        return True
+    return bool(template.get("take", {}).get("enabled", True))
 
 
 @dataclass

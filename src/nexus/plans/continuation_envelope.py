@@ -378,7 +378,11 @@ def _harvest_hydrated_bundles(
         if not isinstance(ids, list) or not ids:
             continue
         hashes = step_out.get("chunk_text_hash", []) or []
-        tumblers = step_out.get("tumblers", []) or []
+        # A per-id ``chunk_tumblers`` (the ``resolve`` step's) wins over ``tumblers``, which a
+        # resolve step lists once per DOCUMENT and so does not line up with ``ids``.
+        chunk_tums = step_out.get("chunk_tumblers")
+        tumblers = (chunk_tums if isinstance(chunk_tums, list) and len(chunk_tums) == len(ids)
+                    else step_out.get("tumblers", []) or [])
         per_chunk_colls = step_out.get("chunk_collections") or []
         dedup_colls = step_out.get("collections", []) or []
         dists = step_out.get("distances", []) or []

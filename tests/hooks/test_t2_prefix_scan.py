@@ -858,3 +858,34 @@ def test_strengthened_lint_catches_the_reviewer_probe(tmp_path: Path) -> None:
     reasons = _python_offenders(probe)
     assert any("from sqlite3 import" in r for r in reasons), reasons
     assert any("t2_local_cache.db" in r for r in reasons), reasons
+
+
+def test_the_store_is_built_and_read_inside_the_mint_deadline_of_the_scan_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-3zreb: the hook has a hard timeout above the scan budget, and the store mints its data
+    token (at construction and per request) through bearer_for. No sleep of that mint may outlast the
+    budget, so the scan runs inside a mint deadline of the budget, and the deadline ends with it."""
+    from nexus.db import data_token
+
+    seen: list[float | None] = []
+
+    class _Store:
+        def __init__(self, *, timeout: float) -> None:
+            seen.append(data_token._mint_deadline.get())
+
+        def get_projects_with_prefix(self, project: str) -> list[dict]:
+            seen.append(data_token._mint_deadline.get())
+            return []
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mod, "HttpMemoryStore", _Store)
+    monkeypatch.setenv("NX_T2_SCAN_BUDGET_S", "6")
+    assert data_token._mint_deadline.get() is None
+    assert mod.scan("proj") == ""
+    assert len(seen) == 2 and all(d is not None for d in seen)
+    now = time.monotonic()
+    assert all(now < d <= now + 6.0 for d in seen if d is not None)  # a deadline of 6 s from the scan's start
+    assert data_token._mint_deadline.get() is None

@@ -71,10 +71,19 @@ def _dead_pid() -> int:
 
 
 def _spawn_sleeper() -> subprocess.Popen:
-    """A real, live child process this test fully owns and cleans up."""
-    return subprocess.Popen(
+    """A real, live child process this test fully owns and cleans up.
+
+    Returned only once its command line shows the sleeper's own argv: read in the
+    instant before the exec lands, it is the parent's argv, and a test that reads it
+    twice (the expected line, then the identifier's own read) sees two different
+    lines and a ``mismatch`` (develop red on c0d0df325, nexus-yu65a)."""
+    proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
     )
+    settle_by = time.monotonic() + 10.0
+    while "time.sleep(30)" not in process_command(proc.pid) and time.monotonic() < settle_by:
+        time.sleep(0.01)
+    return proc
 
 
 def _cmdline_of(proc: subprocess.Popen) -> str:
@@ -394,6 +403,32 @@ class TestIdentifyLeg:
     def test_already_dead_pid_is_dead(self) -> None:
         assert _identify_leg(_dead_pid(), "anything") == "dead"
 
+    def test_a_live_pid_whose_first_cmdline_read_is_empty_is_re_read(self, owned_children, monkeypatch) -> None:
+        """nexus-yu65a: a live pid can read an empty command line for the instant between its exec's
+        pipe close and its new argv. The first empty read must not classify a live leg as dead (the
+        sweep would then reap its cluster); a second read settles it."""
+        import nexus.daemon.service_registry as registry
+
+        proc = _spawn_sleeper()
+        owned_children.append(proc)
+        real = registry.process_command
+        reads: list[str] = []
+
+        def flaky(pid: int) -> str:
+            reads.append("x")
+            return "" if len(reads) == 1 else real(pid)
+
+        monkeypatch.setattr(registry, "process_command", flaky)
+        assert _identify_leg(proc.pid, _cmdline_of(proc)) == "ok"
+        assert len(reads) == 2
+
+    def test_a_pid_that_stays_empty_after_the_re_read_is_dead(self, monkeypatch) -> None:
+        import nexus.daemon.service_registry as registry
+
+        monkeypatch.setattr(registry, "pid_alive", lambda pid: True)
+        monkeypatch.setattr(registry, "process_command", lambda pid: "")
+        assert _identify_leg(12345, "anything") == "dead"
+
 
 class TestKillEngineLegUsesProcessGroup:
     """Round-2 review, Important: the engine leg must signal its PROCESS
@@ -418,7 +453,7 @@ class TestKillEngineLegUsesProcessGroup:
             killpg_calls.append((pgid, sig))
             return real_killpg(pgid, sig)
 
-        setattr_in(monkeypatch, "tests._engine_substrate", "os.killpg", _tracking_killpg)
+        setattr_in(monkeypatch, "nexus.util.process_group", "os.killpg", _tracking_killpg)
 
         _kill_engine_leg(proc.pid, grace_s=1.0)
 

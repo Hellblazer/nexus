@@ -83,7 +83,7 @@ that says whether the curation helped.
 The same drift reaches beyond memory, to anything that keeps running or
 keeping after its purpose ends with nobody assigned to notice. Found on
 2026-10-31 alone: the main `MEMORY.md` injected into every subagent (about
-15M tokens in 60 days, research 5); thirteen plugins unused for 30 days (about
+15M tokens over about 32 days of transcripts, research 5); thirteen plugins unused for 30 days (about
 4K tokens per session start); 19 detached `nx upgrade --auto` walkers
 saturating the cloud edge (nexus-75w5d); about 2,500 permanent gate records;
 and the RDR-205 session ledger, whose writer and readers 7.70.0 deleted while
@@ -210,6 +210,136 @@ here are the ones each pass found on a named page or table.
 - **Assumed:** moving a rule out of the always-loaded index into an
   on-demand tier does not lower compliance with it. No paper measures this
   for rules over a long session. This is A3, measured in Phase 2.
+- **2026-11-01, Implementation (Phase 1):** the K4 title-pattern backstop was
+  chosen by Sam as option (a). `replaces` also refuses a target whose title
+  carries one of thirteen tokens: `review`, `code-review`, `commit-review`,
+  `critique`, `critic`, `gate`, `fix-check`, `fixcheck`, `confirm`,
+  `confirmation`, `rereview`, `codereview`, `audit`, or the series suffix
+  `-research-N` at the end of the title or before `.`, `:` or a space. A token is a whole word bounded by the
+  start or end of the title or by `-`, `_`, `.`, `:` or a space; `reviewer-notes`
+  and `preview` do not match. Matching is case-insensitive and ASCII-only, a
+  search not a full match, and the one list lives in
+  `src/nexus/tables/audit-tags.toml`, from which the engine's `AuditTags.java`
+  is generated. The K5 limit: a replace is never retried, so a response lost to a
+  replace that landed loses the echo; the new row exists and the old one is
+  quarantined (see the 2026-11-02 entry below), so its id comes from
+  `nx memory list --quarantined`.
+  Review round 1 added two refusals: a replace whose new title already names
+  another row (live or quarantined) is 409, because overwriting it would remove
+  a row without echoing it; a present but blank `replaces` is 400. Two replaces
+  that swap titles can deadlock on the row locks; PostgreSQL aborts one, and
+  nothing is written by the aborted one.
+- **2026-11-02, A2 measured, then Phase 1 changed to quarantine (nexus-qo7ie.8,
+  nexus-ov3zi):** *A2 outcome.* Sam could not judge the rows, so Step 3 was run
+  as a measurement and an agent read (T2 `nexus/rdr-238-a2-measure-2026-11-02`).
+  The population was 460 earlier chain members, 81 of them replaceable (no audit
+  tag, no audit title). An agent read the cards of the first 20 replacement-type
+  rows: 6 yes (the earlier row held content the newest lacks and wanted), 11
+  maybe, 3 no. By Step 3's stop rule, one "needed" stops the feature, so the gate
+  tripped. Transcript fetches by name: 408 ever for earlier members, 23 after the
+  newest row existed, on 19 of the 460 rows; of the 81 replaceable rows, 2 were
+  real replacements fetched after the newest existed (`224-continuation` fetched
+  by its bare title from a bead pointer, and `224-win-guest-walk-followups`).
+  *Caveats:* the first 20 are not a random sample; the yes/maybe/no marks are an
+  agent's first pass, not Sam's; the transcripts are the laptop's only (not
+  chas, hellmini or other harnesses); and use through search is unmeasured, which
+  is the channel a hidden row closes. Reading: content in earlier rows is often
+  unique and rarely fetched by name; A2 is neither confirmed nor refuted, and the
+  loss it risks is irreversible under delete. *Decision, Sam, 2026-11-02:* a
+  replace QUARANTINES its target instead of deleting it (Alternative 1 was not
+  taken). This entry rules for Phase 1; the sections below that say "deletes"
+  are superseded as listed at its end.
+  *What was built.* The engine, in the replace transaction, stamps
+  `quarantined_at` on the target and sets its `ttl_days` and `rolled_up_at` to
+  NULL, so every read hides the row. `nx memory restore <id>` brings it back with
+  its content, tags and title, permanent, as for an expired row. The response
+  gains `replaced_id` beside `replaced_title` and `replaced_content`, and the
+  `memory_put` result names the quarantined row, its id and the restore command.
+  The refusals, the audit backstop, the lineage line, the FOR UPDATE locks, no
+  Liquibase changeset and no CLI flag stand; a quarantine that affects other than
+  one row is a 409. *Rollup rule.* `reap` deletes only rows that are quarantined
+  and rolled up, and the attended `nx memory rollup` would have marked a replaced
+  row with the rest of the project's quarantined rows. So a replaced row is
+  distinguishable: it is quarantined with `ttl_days` NULL, a shape only a replace
+  produces, because expiry stamps only rows that have a ttl and every other
+  writer of `quarantined_at` clears it. `plan_groups` skips such rows, and
+  `POST /v1/memory/summaries` refuses any id of such a row with 409 and code
+  `replaced_source_id`, writing nothing. A replaced row is therefore never
+  summarized, marked or reaped; it leaves only by `restore` or an explicit
+  `delete` by id. The check and the mark take no row lock, so `reap` itself
+  also skips a quarantined row with `ttl_days` NULL, and the mark skips one: a
+  rollup that races a replace cannot delete the replaced row. *Taxonomy:* the facade does not purge the replaced title's
+  topic assignments, because expiry quarantine does not either (`expire` runs no
+  taxonomy cascade; only `delete` purges); the taxonomy tables hold no reference
+  to the memory table, so no taxonomy read filters quarantined rows, as for an
+  expired row today; and, unlike an expired row, a replaced row is never reaped,
+  so its topic membership and `doc_count` stay until it is restored or deleted
+  (nexus-xs3jy). *Known limit, not changed:* the quarantined row keeps its
+  title, so a later plain put at the old title overwrites it in place (RDR-207
+  behaviour: the write clears the stamps and reuses the row's id), and the
+  `replaced_id` the replacing writer was given then names that new live row, not
+  the content it replaced. A replace whose new title is a replaced row's title
+  (A to B, then B to A) is 409; restoring does not help, and the way out is to
+  delete the quarantined row by id. A second replace of the same target is 409
+  (quarantined). A reader who fetches the old title gets not-found plus a line
+  naming the quarantined row, its id and `nx memory restore`.
+  *Supersedes for Phase 1,* where it disagrees with this entry: the title and the
+  Approach ("supersession by deletion"), A2, Technical Design 1 and Steps 1 and 2
+  ("deletes", "the deleted row's content"), Step 3 (its stop rule is the measure
+  above), the Problem Statement ("the replaced entry is deleted"), the Decision
+  Rationale, the Trade-offs, Risks and Failure Modes, the Minimum Viable
+  Validation ("A is gone"), the Phase 1 heading ("replacement by deletion") and
+  body, the Test Plan engine bullet ("old row gone") and client bullet, the
+  Finalization Gate answers, the Cross-Cutting "Irreversibility" bullet (a
+  replaced row is restorable), Performance ("one delete"), the Day 2
+  Operations table row "List: none; the row is gone" (List is
+  `nx memory list --quarantined`, Backup is `nx memory restore <id>`), the
+  Contradiction Check, and the RDR-207 and RDR-074 rows of the prior-RDR table
+  (a replace now quarantines, and naming a permanent row quarantines it). This entry rules for Phase 1.
+- **2026-11-03, a T2 memory row has no topic membership (nexus-xs3jy closed).**
+  The *Taxonomy* clause of the 2026-11-02 entry is wrong in its premise: a
+  replaced row has no topic membership or `doc_count` to keep.
+  `nexus.topic_assignments.doc_id` is a chunk chash with a foreign key to
+  `nexus.chunks` (`taxonomy-012-doc-id-chunk-fk.xml`, RDR-194 D1), every
+  assignment writer clusters T3 collections only, and T2 memory is never a
+  source, so no assignment can name a memory row. Quarantine, replace, restore
+  and reap therefore change no taxonomy count. Clustering T2 memory would need
+  its own design (an assignment that can name a memory row); none is planned.
+- **2026-11-03, Sam's answers to S-7 and K6 (nexus-qo7ie.5 closed).** *S-7:* a
+  memory file that supersedes another says `replaces: <slug>` in its
+  frontmatter, and the writer learns this from an always-loaded line in Sam's
+  global CLAUDE.md. `nx memory curate --files` gets no heuristic for a file
+  replaced without saying so; it reports a declared target that is still
+  present, and lists likely near-duplicate files for Sam to review, never acting
+  on them. *K6:* always-loaded items (`MEMORY.md` as a whole, CLAUDE.md, tool
+  definitions) are excluded from `--cold`, and the "never used" claim is dropped
+  for them; a `MEMORY.md` index line counts as used when its linked file is
+  read. Where Phase 3 Steps 1-3 or Technical Design 4 say otherwise, this entry
+  rules.
+- **2026-11-03, Sam's S-8 minimum (nexus-qo7ie.4 closed).** Phase 2's
+  compliance test counts only measured rules whose index line moved out of the
+  always tier. At least 3 of the 5 must move; with fewer, Phase 2 Step 3
+  records A3 as still assumed rather than tested.
+- **2026-11-03, S-10 mapping and the near-duplicate measure as built
+  (nexus-qo7ie.17).** The memory directory comes from one stdlib-only function,
+  `nexus._hook_runtime.memory_dir.memory_dir` (stdlib at call time too: no
+  process is spawned), shared by `nx memory curate --files` and the SessionStart
+  check. A custom path wins: `autoMemoryDirectory`
+  from `.claude/settings.local.json` or `.claude/settings.json` (working
+  directory, then the primary checkout) or `<config dir>/settings.json`, when it
+  is an absolute or `~/` path to an existing directory. Otherwise it is
+  `<config dir>/projects/<key>/memory`, with `<config dir>` = `$CLAUDE_CONFIG_DIR`
+  or `~/.claude` and `<key>` the primary checkout's absolute path with every
+  non-alphanumeric character replaced by `-`; the primary is the parent of the
+  git common directory, found by reading `.git` (a directory, or a `gitdir:`
+  file and its `commondir`), and by `git rev-parse --git-common-dir` only when
+  `GIT_DIR` or `GIT_COMMON_DIR` is set or the layout is unrecognised. A missing
+  directory, a non-repository or a failed fallback git call gives nothing. Near-duplicates (S-7) are file pairs whose
+  frontmatter name and description tokens overlap at Jaccard 0.5 or more; files
+  with fewer than 4 tokens are skipped. The `--t2` census reads "phase closed" as
+  the RDR's frontmatter `status: closed`, so a closed phase of a still-open RDR
+  is not flagged; per-phase flagging is nexus-qo7ie.28. Technical Design 3's
+  mapping sentence is read with this entry.
 
 ### Critical Assumptions
 
@@ -752,3 +882,4 @@ so the rest does not wait for them.
 | 2026-11-01 | Gate round 2: PASSED (0 Critical, 17 Significant, 0 ship-blockers); commit `0e6eab59c`; critique `nexus_rdr/238-gate-critique-2026-11-01-r2`. |
 | 2026-11-01 | Gate round 3: PASSED (0 Critical, 10 Significant, 0 ship-blockers); commit `3f66127f0`; critique `nexus_rdr/238-gate-critique-2026-11-01-r3`. |
 | 2026-11-01 | Accept residual dispositions (gate round 3): K1, K2, K3, K4, K5 -> nexus-qo7ie.3; S-8, S-9 -> nexus-qo7ie.4; S-7, K6, S-10 -> nexus-qo7ie.5. |
+| 2026-11-02 | Sam reversed the 2026-10-31 "supersession becomes deletion" for Phase 1: replace quarantines. A2 was measured (first 20 replacement-type rows: 6 yes, 11 maybe, 3 no by an agent read), which trips Step 3's stop rule; Sam chose quarantine instead of deletion on the A2 read; Alternative 1 was not taken. A replaced row is quarantined with `ttl_days` NULL: the rollup skips it, the engine refuses it as a summary source, and `reap` never deletes it. A later plain put at the old title overwrites the quarantined row in place, and the `replaced_id` the writer was given then names that new live row. Key Discoveries 2026-11-02 rules for Phase 1; decision sections not rewritten (nexus-ov3zi). |

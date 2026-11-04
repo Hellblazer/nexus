@@ -78,6 +78,17 @@ class _StubReader:
         self.state.resolve_calls += 1
         return {t: self.state.entries[t] for t in tumblers if t in self.state.entries}
 
+    def list_by_collection(self, collection):
+        self.state.list_calls += 1
+        return list(self.state.entries.values())
+
+    def get_manifests(self, doc_ids):
+        self.state.manifest_calls += 1
+        return {
+            d: [SimpleNamespace(chash=c, collection=None) for c, ts in self.state.owners.items() if d in ts]
+            for d in doc_ids
+        }
+
     def close(self) -> None:
         pass
 
@@ -90,7 +101,8 @@ def _entry(tumbler: str, title: str, meta: dict, **kw) -> SimpleNamespace:
 @pytest.fixture
 def world(monkeypatch):
     t3 = _StubT3()
-    state = SimpleNamespace(owners={}, entries={}, t3=t3, owner_calls=0, resolve_calls=0, title_hits={})
+    state = SimpleNamespace(owners={}, entries={}, t3=t3, owner_calls=0, resolve_calls=0, title_hits={},
+                            list_calls=0, manifest_calls=0)
     monkeypatch.setattr(mcp_infra, "_collections_cache", mcp_infra._collections_cache)
     mcp_infra.prime_collections_cache(t3.rows)
     monkeypatch.setattr(store_cmd, "_t3", lambda **_: t3)
@@ -237,19 +249,17 @@ def test_an_empty_value_for_a_key_with_no_default_still_matches_itself() -> None
 
 
 class _Col:
-    """``col.get`` over canned pages, as the engine answers ``where={"content_type": "pdf", "title": ""}``."""
+    """``col.get(ids=...)`` over canned chunk rows; it refuses a ``where``, which the scan must not send."""
 
-    def __init__(self, ids, metas, uris) -> None:
-        self.ids, self.metas, self.uris = ids, metas, uris
-        self.calls = 0
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.reads: list[list[str]] = []
 
-    def get(self, *, where=None, include=None, limit=300, offset=0, include_source_uri=False):
-        self.calls += 1
-        sl = slice(offset, offset + limit)
-        out = {"ids": self.ids[sl], "metadatas": self.metas[sl]}
-        if include_source_uri:
-            out["source_uris"] = self.uris[sl]
-        return out
+    def get(self, *, ids=None, where=None, include=None, limit=None):
+        assert where is None, "the scan reads the rows its catalog names, by id"
+        self.reads.append(list(ids))
+        hit = [c for c in ids if c in self.rows]
+        return {"ids": hit, "metadatas": [self.rows[c] for c in hit]}
 
 
 class _T3:
@@ -260,37 +270,61 @@ class _T3:
         return self.col
 
 
-def _scan(world, ids, metas):
-    col = _Col(ids, metas, ["file:///engine/one.pdf"] * len(ids))
-    return health._pdf_stubs_in_collection(_T3(col), world.t3.name, 300)
+def _scan(world, rows):
+    col = _Col(rows)
+    return health._pdf_stubs_in_collection(_T3(col), world.t3.name, 300), col
 
 
 def test_the_scan_judges_each_owner_by_its_own_meta_when_the_row_is_a_shared_placeholder(world) -> None:
     """A's stub upload wrote the shared row last (empty title, no method); B's catalog meta records its method."""
     world.entries["1.1.1"].meta.pop("extraction_method")  # A's post-pass never landed
-    stubs, cut = _scan(world, [H_S], [{"content_type": "pdf", "title": "", "content_hash": "h" * 64}])
+    (stubs, cut), col = _scan(world, {H_S: {"content_type": "pdf", "title": "", "content_hash": "h" * 64}})
     assert stubs == {"file:///papers/Paper A.pdf": 1}, "A is the stub; B (method in its meta) is not named"
-    assert cut is False
+    assert not cut.truncated and cut.sampled == 0, cut
+    assert col.reads == [[H_S, H_A, H_K, H_K2]], "the method-less documents' chunks, once each, in one batch"
 
 
 def test_a_catalog_method_clears_a_sole_owner_whose_row_still_looks_like_a_stub(world) -> None:
-    stubs, _ = _scan(world, [H_A], [{"content_type": "pdf", "title": ""}])
+    for tumbler in ("1.1.3", "1.1.4", "1.1.5"):
+        world.entries[tumbler].meta["extraction_method"] = "mineru"  # leave A (and B) as the only documents
+    (stubs, _), col = _scan(world, {H_A: {"content_type": "pdf", "title": ""}})
     assert stubs == {}, "A's own meta says extraction ran"
+    assert col.reads == [], "a document that records its method is never read"
 
 
 def test_a_document_with_no_catalog_method_is_named_whatever_the_row_says(world) -> None:
     """A PDF indexed before nexus-6pfgb.6 has no method in its meta until ``nx catalog backfill-meta`` or
     its next index run; the row's method is the last writer's and does not clear it."""
-    stubs, _ = _scan(world, [H_K], [{"content_type": "pdf", "title": "", "extraction_method": "pymupdf_normalized"}])
+    (stubs, _), _col = _scan(
+        world, {H_K: {"content_type": "pdf", "title": "", "extraction_method": "pymupdf_normalized"}},
+    )
     assert stubs == {"file:///papers/Old Paper.pdf": 1}
 
 
-def test_the_scan_makes_one_owner_lookup_per_page_and_reads_no_catalog_for_an_empty_page(world) -> None:
-    _scan(world, [H_S, H_A, H_K], [{"content_type": "pdf", "title": ""}] * 3)
-    assert (world.owner_calls, world.resolve_calls) == (1, 1)
-    world.owner_calls = world.resolve_calls = 0
-    _scan(world, [], [])
-    assert (world.owner_calls, world.resolve_calls) == (0, 0)
+def test_a_titled_row_of_a_document_with_no_catalog_method_is_healthy(world) -> None:
+    """The legacy shape: no method in the catalog, a real title on the row. Not a stub."""
+    (stubs, _), col = _scan(world, {H_K: {"content_type": "pdf", "title": "Old Paper"}})
+    assert stubs == {}
+    assert H_K in col.reads[0], "it was read and judged, not skipped"
+
+
+def test_a_document_that_is_not_a_pdf_is_never_a_stub(world) -> None:
+    world.entries["1.1.3"].content_type = "markdown"
+    world.entries["1.1.3"].file_path = "/notes/old.md"
+    (stubs, _), _col = _scan(world, {H_K: {"title": ""}})
+    assert stubs == {}
+
+
+def test_the_scan_makes_one_listing_and_one_manifest_read_and_no_chunk_read_when_nothing_qualifies(world) -> None:
+    _scan(world, {H_S: {"title": ""}})
+    assert (world.list_calls, world.manifest_calls) == (1, 1)
+    for tumbler in ("1.1.3", "1.1.4", "1.1.5"):
+        world.entries[tumbler].meta["extraction_method"] = "mineru"
+    world.entries["1.1.1"].meta["extraction_method"] = "mineru"
+    world.list_calls = world.manifest_calls = 0
+    (stubs, _), col = _scan(world, {H_S: {"title": ""}})
+    assert stubs == {} and col.reads == []
+    assert (world.list_calls, world.manifest_calls) == (1, 0), "no candidate, no manifest read"
 
 
 def test_an_unreadable_catalog_makes_the_collection_not_checked_never_clean(world, monkeypatch) -> None:
@@ -299,7 +333,7 @@ def test_an_unreadable_catalog_makes_the_collection_not_checked_never_clean(worl
 
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", boom)
     with pytest.raises(RuntimeError, match="catalog"):
-        _scan(world, [H_S], [{"content_type": "pdf", "title": ""}])
+        _scan(world, {H_S: {"title": ""}})
 
 
 @pytest.mark.parametrize(

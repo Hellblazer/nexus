@@ -44,7 +44,7 @@ class TestClassifyStdinClose:
     * ``mcp_owned_lifespan`` -- stdin EOF cleanly drove the lifespan
       finally; the wild silent-death observation has another root cause.
     * ``watchdog_mcp`` -- nx-mcp crashed, watchdog cleaned chroma; the
-      crash event signature confirms FastMCP's reader raised on EOF.
+      crash event signature confirms MCPServer's reader raised on EOF.
     * ``watchdog_unknown`` -- chroma is dead but no mcp lifecycle event
       ever fired. This is the fifth-mode silent-death signature.
     """

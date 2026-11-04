@@ -259,6 +259,12 @@ _find_all_by_file_paths_404_warned: bool = False
 # NOT this fix.
 _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
 
+#: The per-request timeout of ``manifest_section_label_fillable`` (nexus-l4hds), in seconds. The engine bounds the
+#: count itself (``CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS``, 10 s) and answers 503 when it is exceeded, so
+#: this one is longer: the client reads the engine's answer instead of timing out first, and a hung peer is
+#: still cut off well under the 30 s client-wide default.
+_SECTION_LABEL_FILLABLE_TIMEOUT_S = 15.0
+
 #: The engine's caps on the RDR-223 append routes (Phase 1, P1.3/P1.4). Refused here, locally and
 #: before any round trip, so a violation reads as a client bug naming the cap instead of a 400
 #: that arrives after an embed budget was set aside. ``sweep_chashes`` at most this many per
@@ -628,16 +634,25 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # rather than touching ``self._client`` directly, so every call site
     # gets self-heal for free with no signature changes.
 
-    def _get(self, path: str, *, idempotent: bool = True, **params: Any) -> Any:
+    def _get(self, path: str, *, idempotent: bool = True, timeout: float | None = None, **params: Any) -> Any:
         """``idempotent`` (nexus-ll31n sibling, T2 review-wave2-daemon):
         forwarded to the mixin's ``_get`` unchanged — default ``True``
         preserves every existing call site (a GET is ordinarily safe to
-        retry). No current call site passes ``False``; added so this
+        retry). ``manifest_section_label_fillable`` passes ``False``: the
+        request is then sent once (no gateway backoff loop, no
+        read-timeout resend), because a retry of a bounded-cost query
+        that timed out would run it again. Added so this
         override is not the next ``HttpCatalogClient._post``-shaped trap
         (missing the kwarg entirely) the moment one needs to.
+
+        ``timeout`` (nexus-l4hds): the mixin's per-request override,
+        forwarded unchanged; ``None`` (the default) rides the client-wide
+        timeout exactly as before. It is a named keyword, so a query
+        parameter called ``timeout`` can no longer be passed through
+        ``**params`` (none exists).
         """
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
-        return super()._get(f"/v1/catalog{path}", params=filtered, idempotent=idempotent)
+        return super()._get(f"/v1/catalog{path}", params=filtered, idempotent=idempotent, timeout=timeout)
 
     def _post(
         self,
@@ -1022,6 +1037,41 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "backfillable": int(result.get("backfillable", 0) or 0),
             "unavailable": False,
         }
+
+    def manifest_section_label_fillable(self, limit: int = 1000) -> dict | None:
+        """How many legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds): one
+        bounded, tenant-scoped, read-only engine query (``GET /manifest/section_label_fillable``) in place of the
+        rung's walk of every document.
+
+        Returns ``{"fillable": n, "limit": limit, "capped": bool}``; ``capped`` means the count stopped at
+        *limit*, so ``fillable`` is then "at least". ``None`` is "cannot say", never "none": the engine predates
+        the route (404), failed (a 503 is the engine's own statement timeout), or sent a body without a usable
+        ``fillable``. The request is sent once, with a 15 s timeout. A caller that needs the answer
+        falls back to its own scan on ``None``. The engine's predicate is the rung's, with one deliberate
+        difference in the safe direction (``CatalogRepository.manifestSectionLabelFillable``): it may count a row
+        the scan would leave legacy, never the reverse.
+        """
+        try:
+            # One shot with a bound of its own (nexus-l4hds): the engine cancels the count at its statement bound
+            # (10 s) and answers 503, which is read below as "cannot say"; a gateway or read-timeout resend would
+            # run the same query again. idempotent=False is the mixin's single-attempt mode.
+            result = self._get(
+                "/manifest/section_label_fillable", idempotent=False,
+                timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.info("http_catalog_client.manifest_section_label_fillable_unavailable", status=status)
+            return None
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller scans instead
+            _log.info("http_catalog_client.manifest_section_label_fillable_unavailable", error=str(exc))
+            return None
+        if not isinstance(result, dict):
+            return None
+        fillable, capped = result.get("fillable"), result.get("capped")
+        if isinstance(fillable, bool) or not isinstance(fillable, int) or fillable < 0 or not isinstance(capped, bool):
+            _log.warning("http_catalog_client.manifest_section_label_fillable_malformed", keys=sorted(result))
+            return None
+        return {"fillable": fillable, "limit": limit, "capped": capped}
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
@@ -3582,13 +3632,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         expire_cached_registration(old_name)
         return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
-    def rename_collection(self, old: str, new: str) -> int:
+    def rename_collection(
+        self, old: str, new: str, *, check_model_token: bool = True,
+    ) -> int:
         # RDR-164 P3: the consolidated endpoint returns {"renamed": {per-table counts}}.
         # The int contract reports the re-homed catalog_documents count.
-        renamed = self.rename_collection_cascade(old, new)
+        renamed = self.rename_collection_cascade(
+            old, new, check_model_token=check_model_token,
+        )
         return int(renamed.get("catalog_documents", 0))
 
-    def rename_collection_cascade(self, old: str, new: str) -> dict[str, int]:
+    def rename_collection_cascade(
+        self, old: str, new: str, *, check_model_token: bool = True,
+    ) -> dict[str, int]:
         """RDR-164 P3: atomically re-home a collection X->Y and all its in-Postgres
         derived state via the service's single transactional renameCollection.
 
@@ -3607,6 +3663,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         The service rejects an existing ``new`` with 409: a rename onto an existing
         collection is a collision. The RDR-162 ``cross_model`` COPY repoint is gone
         from both halves (nexus-avjrb).
+
+        nexus-ucagi: a conformant ``new`` also sends its model token as
+        ``embedding_model``. A rename keeps the source row's model, so the
+        engine answers 409 ``collection_model_mismatch`` (nothing written)
+        when the token disagrees with it. This is the guard for every caller
+        of this method and of ``rename_collection``. A legacy ``new`` has no
+        token and sends none. ``check_model_token=False`` omits it (the
+        ``nx collection rename --force-prefix-change`` override). An engine
+        predating the field ignores it.
         """
         body: dict[str, Any] = {"old_name": old, "new_name": new}
         # nexus-sis0m.3: the new row's content_type/owner_id, derived from
@@ -3620,6 +3685,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             body["content_type"], body["owner_id"] = collection_type_and_owner(new)
         except ValueError:
             pass
+        if check_model_token:
+            from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            token = embedding_model_for_collection_name(new)
+            if token is not None:
+                body["embedding_model"] = token
         # idempotent=False (nexus-ll31n sibling): a cascade rename over
         # EVERY row matching `old` across a dozen tables is a
         # population-discovery sweep, not a caller-supplied-id mutation. A

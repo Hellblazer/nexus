@@ -227,6 +227,22 @@ taxonomy:
 | `local_exclude_collections` | `["code__*"]` | Glob patterns for collections to skip in local mode. Cloud mode (Voyage embeddings) ignores this — set to `[]` to enable all collections locally. |
 | `collection_prefixes` | `["docs", "code", "knowledge", "rdr"]` | Prefix whitelist for `nx taxonomy validate-refs`. Extend this when your project adds a new user-facing collection prefix (e.g. `"custom"`). Internal-prefix collections (`taxonomy__*`, `plans__*`) are implementation-fixed and intentionally excluded. |
 
+## Entity keys
+
+An entity key is a stable identifier such as `CUST-0018` that names one record and appears verbatim in other artifacts (RDR-147 Step 1). A collection opts in by naming a pattern:
+
+```yaml
+entity:
+  collections:
+    "knowledge__herb-*": "CUST-\\d{4}|eid_[0-9a-f]{8}"   # collection glob -> regex; default {} (none)
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `entity.collections` | `{}` | Map of collection-name glob to regex. The glob is matched against the FULL collection name (`knowledge__herb-core__<model>__v1`); set it in the global config or the per-repo `.nexus.yml`. The first matching glob in merged order wins, and the merge puts the global file's globs before the repo file's: a repo glob that differs from a global one does NOT override it when both match a collection, only the same glob text replaces its pattern. The glob serves two roles: it picks which collections get a title stamped at `store_put`, and (RDR-147 Step 4) which collections' text the resolution repair scans for keys, so list the anchor collections too, the ones whose text names the keys. Matching is by whole token, with `\w`-based boundaries: `CUST-0018-ARCHIVE` and `CUST-0018.` both yield `CUST-0018`, `CUST-00180` and `xCUST-0018` yield nothing. A pattern-wide inline flag must be scoped to the group, `(?i:cust-\\d{4})`, because a leading `(?i)` is an error once the pattern sits inside the token group. A malformed entry (a bad regex, or a value that is not a map, `[]` and `false` included) fails when the config loads, and the error names the config file and the key (`entity.collections["<glob>"]`); the `nx` commands print it as one line. Each file is checked on its own before the merge, so a bad entry in the global file is refused even where the repo file would override it. `code__` collections never have a pattern, whatever the glob. |
+
+What reads it: `store_put` (MCP) and `nx store put` stamp `entity_key` into the catalog document's `meta` (never a chunk's metadata). The caller can set it (`entity_key` on `store_put`, `--entity-key` on the CLI; at most 256 characters, no control characters, and a `ValueError` or CLI error on a `code__` collection, where it would be dropped); when it is unset and the collection has a pattern, the title is stamped if the whole title matches the pattern (`CUST-0018` is a key; `Customer CUST-0018` is not). A re-put replaces the key like the other note keys: one that gives none removes it. `nexus.entity_keys` holds `classify_entity` and `find_key_tokens` (whole-token matches only). Key extraction for `nx index md` / `nx index pdf` and a `where entity_key=` filter are not built.
+
 ## Aspects
 
 Which `docs__` collections get aspect extraction (nexus-kk4ut). `knowledge__` and `rdr__` collections are always extracted; `docs__` collections are extracted only when opted in, because every document costs an LLM call each time it changes.
@@ -252,11 +268,11 @@ Every write path — `--enable`/`--disable`, and `--from-config` when it would a
 
 | Env var | Default | Description |
 |---|---|---|
-| `NX_ASPECT_QUEUE` | `tuples` | Where the producer queues documents for aspect extraction. `tuples` (the default since nexus-lnwn1, RDR-235 Activation Step 1) writes one task per document to the engine's `aspects` tuple queue (`out` with `mode=replace`; keys `{queue: aspects}`, nonce = the document's tumbler), so a re-enqueue replaces the task and never adds a second. The task body is the document's identity (`collection`, `source_path`, `doc_id`, `content_hash`) and never its text. `tuples` needs engine-service-v0.1.169 or later; against an engine without the `aspects` template it refuses with a message naming that release (set `NX_ASPECT_QUEUE=table` to go back). `table` is the original aspect-queue table and the rollback: set it on the producer hosts and the worker, which drains both queues whatever the variable says, keeps draining tasks already queued. Read on every call. An unrecognised value logs one warning per process and means `table`, not the default: `table` is the path every released engine supports. |
+| `NX_ASPECT_QUEUE` | `tuples` | Where the producer queues documents for aspect extraction. `tuples` (the default since nexus-lnwn1, RDR-235 Activation Step 1) writes one task per document to the engine's `aspects` tuple queue (`out` with `mode=replace`; keys `{queue: aspects}`, nonce = the document's tumbler), so a re-enqueue replaces the task and never adds a second. The task body is the document's identity (`collection`, `source_path`, `doc_id`, `content_hash`) and never its text. `tuples` needs engine-service-v0.1.169 or later; against an engine without the `aspects` template it refuses with a message naming that release. `table`, the original aspect-queue table, is retired (nexus-bpikw, RDR-235). A stale `NX_ASPECT_QUEUE=table` does not stop ingest: the indexer's, the MCP server's and the single-document hook's enqueue log one warning per process (`aspect_queue_table_mode_retired_using_tuples`) and queue the document on `tuples`. `nx aspects requeue-failed` refuses it (exit 1, before it reads or writes), and the `aspect-queue-tuples` upgrade rung reports itself not applicable. Unset it or set `tuples`. Read on every call. An unrecognised value (`tuple`, say) logs one warning per process and means `tuples`, the only producer left. |
 
-With `NX_ASPECT_QUEUE=table` (or an unrecognised value), the producer sends nothing to the tuple space. With the variable unset or `tuples` a batch (the indexer's flush) is one `out` per document, at most eight at a time, because the tuple space has no batch `out`; a batch that meets the tenant's `max_live_rows` ceiling (10,000 live and dead `aspects` tasks together) stops, logs `aspect_enqueue_many_aborted` at error level with the counts, and raises `MaxLiveRowsExceededError`. Tasks that already landed stay. A `source_path` too long for the 4,096-byte body is skipped with a warning naming the document. A write to a retired collection name is refused before anything is sent.
+A batch (the indexer's flush) is one `out` per document, at most eight at a time, because the tuple space has no batch `out`; a batch that meets the tenant's `max_live_rows` ceiling (10,000 live and dead `aspects` tasks together) stops, logs `aspect_enqueue_many_aborted` at error level with the counts, and raises `MaxLiveRowsExceededError`. Tasks that already landed stay. A `source_path` too long for the 4,096-byte body is skipped with a warning naming the document. A write to a retired collection name is refused before anything is sent.
 
-**The worker drains both queues, whatever the flag says** (nexus-5r2sc.3.3). Only the producer is flagged. The aspect worker claims from the old table and from the `aspects` tuple queue whenever the engine has the `aspects` template, so setting the producer back to `table` strands no queued task: a worker with the variable unset still claims what is left on the tuple queue (probing it with one `inp` per claimant slot, five per poll interval, with no parked call). With `tuples` set the worker parks one `in` (25 s a call, under its slot-0 claimant string) and looks at the table once per poll interval, or at once when a producer touches the wake file; while the table has rows the two queues alternate one batch each. On an engine without the template the worker logs `aspect_worker_tuples_unsupported_by_engine` once, skips the tuple queue and tries again after an hour. A task that fails a retryable way (including a T3 outage, and a transport failure while reading T3, the catalog manifest or an HTTP source, which the reader reports as `transport`) is `nack`ed with the RDR-163 backoff and dead-lettered by the engine at six attempts; a task whose catalog document is not there on its FIRST claim is `nack`ed once on the ladder's first interval (about 30 s, logged `aspect_task_doc_not_visible_yet`), because the tuple queue has no foreign key to refuse a task whose catalog row has not landed yet and a producer's wake can arrive before that row commits (nexus-1o3ft); a document still missing on the second claim, a missing source file, a malformed URI and an empty read are acked as dropped. A catalog lookup that cannot answer is not a missing document and is never retried or dropped on that ground. The table path takes the same split: a `transport` read failure there is a backed-off `mark_retry`, not a `mark_done`.
+**The worker drains both queues, whatever the variable says** (nexus-5r2sc.3.3, nexus-bpikw). The variable does not reach the worker. It claims from the old table and from the `aspects` tuple queue whenever the engine has the `aspects` template, so a table row an older client left behind is still claimed. The worker parks one `in` (25 s a call, under its slot-0 claimant string) and looks at the table once per poll interval, or at once when a producer touches the wake file; while the table has rows the two queues alternate one batch each. On an engine without the template the worker logs `aspect_worker_tuples_unsupported_by_engine` once, skips the tuple queue and tries again after an hour. A task that fails a retryable way (including a T3 outage, and a transport failure while reading T3, the catalog manifest or an HTTP source, which the reader reports as `transport`) is `nack`ed with the RDR-163 backoff and dead-lettered by the engine at six attempts; a task whose catalog document is not there on its FIRST claim is `nack`ed once on the ladder's first interval (about 30 s, logged `aspect_task_doc_not_visible_yet`), because the tuple queue has no foreign key to refuse a task whose catalog row has not landed yet and a producer's wake can arrive before that row commits (nexus-1o3ft); a document still missing on the second claim, a missing source file, a malformed URI and an empty read are acked as dropped. A catalog lookup that cannot answer is not a missing document and is never retried or dropped on that ground. The table path takes the same split: a `transport` read failure there is a backed-off `mark_retry`, not a `mark_done`.
 
 ## Daemon environment variables
 
@@ -289,7 +305,21 @@ T2 and T3 both route through the single native `nexus-service` (`nx daemon servi
 
 The Java storage service (RDR-152/RDR-155) applies its Liquibase changelog at
 startup using the `NX_DB_ADMIN_*` credentials (falling back to `NX_DB_*` in
-single-role development setups). When you bring your own Postgres, two
+single-role development setups).
+
+**Server version floor: PostgreSQL 17** (nexus-3s5r1). The engine reads
+`server_version_num` at boot, before the singleton lock and the schema
+migration, and refuses to start below `170000` (PostgreSQL 17.0), logging
+`event=pg_version_below_floor` with the version it found and the floor, then
+exiting 1. Older servers lack the jsonpath `.number()` method the manifest
+pushdown uses and fail at the first query that needs it, so the refusal
+replaces a late, cryptic error with an early one. Every supported deployment
+runs PostgreSQL 17 (the bundled cluster, the managed cloud, the test image).
+If you restore a backup or fork a point-in-time copy to bring up a second
+engine, check `SELECT version()` on the target first. A version that cannot
+be read also refuses.
+
+When you bring your own Postgres, two
 prerequisites must be satisfied by a DBA (superuser) before the first migration
 run:
 
@@ -299,7 +329,17 @@ run:
    `vectors-001-1` fails without this pre-step. Once the extensions exist the
    changeset is an idempotent no-op.
 2. **Roles.** Create `nexus_admin` (schema owner, NOSUPERUSER) and `nexus_svc`
-   (NOSUPERUSER NOBYPASSRLS NOINHERIT LOGIN data role). `NOINHERIT` is
+   (NOSUPERUSER NOBYPASSRLS NOINHERIT LOGIN data role). The engine refuses
+   to boot (`event=service_role_bypassrls_refused`, exit 1) when the role it
+   connects as (`NX_DB_USER`) has `BYPASSRLS` and is not a superuser
+   (nexus-b1adx): the changelog's `partition_copy_access` skips `BYPASSRLS`
+   grantees, so a `BYPASSRLS` service role would get no DML grant on any
+   tenant leaf or model partition created afterwards, and row-level security
+   would not bind it. The message names the fix, `ALTER ROLE <role>
+   NOBYPASSRLS`. A superuser passes (single-role development setups) with a `WARN`
+   (`event=service_role_superuser_isolation_not_enforced`, naming the role): row-level
+   security does not bind a superuser either, so tenant isolation is not enforced for a
+   superuser service role. `NOINHERIT` is
    REQUIRED, not optional decoration — a bring-your-own-Postgres cluster has
    no `bootstrap_superuser` to self-heal it later (unlike the local bundle's
    `_backfill_svc_noinherit`), so a DBA who leaves it off here bakes in the
@@ -439,7 +479,7 @@ Highly-accessed entries survive longer than their nominal TTL. Unaccessed entrie
 
 **Note**: This differs from the paper (Memory in the LLM Era) which uses division for relevance-decay. Nexus uses multiplication for heat-based survival — entries agents keep touching stick around longer. If you need strict time-bounded expiry regardless of access, use `ttl=None` (permanent) and explicit `memory_delete` instead.
 
-Expiry quarantines; it does not delete (RDR-207). `T2Database.expire(relevance_log_days=90)`, which the session-end hook and `nx memory expire` run, hides every entry past its effective TTL from get, search and list, and keeps the row. `nx memory reap` deletes a quarantined entry only once a rollup summary covers it, and `nx memory restore ID` brings one back as permanent; see [nx memory](cli-reference.md#nx-memory). The same call also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days, and those rows are deleted.
+Expiry quarantines; it does not delete (RDR-207). `T2Database.expire(relevance_log_days=90)`, which the session-end hook and `nx memory expire` run, hides every entry past its effective TTL from get, search and list, and keeps the row. `nx memory reap` deletes a quarantined entry only once a rollup summary covers it, and `nx memory restore ID` brings one back as permanent; see [nx memory](cli-reference.md#nx-memory). A `memory_put` with `replaces` quarantines the row it names the same way, but that row is never rolled up or reaped (restore or delete it by id). The same call also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days, and those rows are deleted.
 
 ## File Locations
 

@@ -20,9 +20,9 @@ def _log(payload: dict) -> None:
 
 
 _log({"event": "process_launched", "python": sys.executable, "name": "plugin_sn_serena"})
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.mcpserver import MCPServer  # noqa: E402
 
-mcp = FastMCP("plugin_sn_serena")
+mcp = MCPServer("plugin_sn_serena")
 
 
 @mcp.tool()

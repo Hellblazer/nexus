@@ -17,6 +17,7 @@ import io
 import json
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -24,6 +25,7 @@ from click.testing import CliRunner
 from nexus.commands import init as init_mod
 from nexus.commands.daemon import service_install_binary_cmd
 from nexus.daemon import binary_install as b
+from nexus.daemon import replace_quiesce as rq
 from nexus.daemon.binary_lifecycle import (
     WINDOWS_ENGINE_EXE,
     WINDOWS_RUNTIME_DLLS,
@@ -37,6 +39,26 @@ _PAYLOADS = {
     WINDOWS_ENGINE_EXE: b"MZ-engine-exe\n",
     **{dll: f"MZ-{dll}\n".encode() for dll in WINDOWS_RUNTIME_DLLS},
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_real_service_stop(monkeypatch):
+    """nexus-86aaz: an install now quiesces the service on every host, and this file installs on
+    whatever host runs it. Without this stub the default guard runs the real
+    ``stop_storage_service`` (a process-table scan) on a POSIX host. These tests are about placement,
+    not the stop, so the guard sees an install with nothing running."""
+    nothing = SimpleNamespace(pids=(), stubborn=(), refused=(), source="none", sweep_verified=True, unreadable=())
+
+    def _ops(_config_dir):
+        return rq.QuiesceOps(
+            stop_service=lambda: nothing,
+            pg_running=lambda: False,
+            stop_pg=lambda: None,
+            start_pg=lambda: None,
+            start_service=lambda: None,
+        )
+
+    monkeypatch.setattr(rq, "default_ops", _ops)
 
 
 class _OkChecker:

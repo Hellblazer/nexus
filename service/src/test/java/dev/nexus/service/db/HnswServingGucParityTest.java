@@ -68,6 +68,15 @@ class HnswServingGucParityTest {
         java.util.Map.of("PgVectorRepository.java", 1);
 
     /**
+     * Deliberate {@code setSearchPlanCacheMode(} calls beyond one per iterative-scan site, per file: the three
+     * {@code withTenant} blocks of the where-taking get reads ({@code PgVectorRepository#getWhere}, both branches,
+     * and {@code #getAllMetadata}, nexus-u9dc5). They scan no HNSW index, so they carry no other GUC of the group;
+     * {@link #everyWhereGetReadPinsACustomPlanBeforeItsFetch} holds them to their own pairing.
+     */
+    private static final java.util.Map<String, Integer> EXTRA_PLAN_MODE_PINS =
+        java.util.Map.of("PgVectorRepository.java", 3);
+
+    /**
      * Where a window the sweeps read begins: every {@code tenantScope.withTenant(} block, and the body of
      * {@code PgVectorRepository#hybridRank}, which runs {@code hybridSearch}'s statements (and the fan-out's
      * lexical arms) inside a transaction its callers open (nexus-xd2rc). Each window runs to the end of
@@ -107,6 +116,7 @@ class HnswServingGucParityTest {
                 }
                 iterativeSites += iter;
                 timeout -= EXTRA_STATEMENT_BOUNDS.getOrDefault(p.getFileName().toString(), 0);
+                planMode -= EXTRA_PLAN_MODE_PINS.getOrDefault(p.getFileName().toString(), 0);
                 if (iter != ef || iter != timeout || iter != planMode || iter != budget) {
                     unpaired.add(p.getFileName() + ": " + iter
                         + " iterative_scan site(s) vs " + ef + " setHnswEfSearch call(s) vs "
@@ -206,6 +216,53 @@ class HnswServingGucParityTest {
         assertThat(fetchingBlocks)
             .as("fetching withTenant blocks visible to the sweep")
             .isGreaterThanOrEqualTo(4);
+    }
+
+    /**
+     * nexus-u9dc5 (review r1, S2): the where-taking get reads ({@code getWhere} in both modes, {@code getAllMetadata})
+     * run {@code nexus.manifest_admits_chunk} per chunk, and the work of that function is cheap only while the bound
+     * jsonpath is a constant of the plan, so the guards of the keys the predicate does not name fold away and the path
+     * is parsed once. pgjdbc switches a prepared statement to a generic plan after five executions per connection
+     * ({@code prepareThreshold}), and {@code plan_cache_mode = auto} may then keep it. Each {@code withTenant} block of
+     * a method that builds {@code getWhereCondition} therefore calls {@code setSearchPlanCacheMode} before its first
+     * {@code .fetch()}. A method is a member chunk of the file (closing brace at member indent).
+     */
+    @Test
+    void everyWhereGetReadPinsACustomPlanBeforeItsFetch() throws IOException {
+        String body = Files.readString(Path.of("src", "main", "java", "dev", "nexus", "service", "vectors",
+            "PgVectorRepository.java"));
+        List<String> unpinned = new ArrayList<>();
+        int blocks = 0;
+        int methods = 0;
+        int from = 0;
+        while (true) {
+            int end = body.indexOf("\n    }\n", from);
+            if (end < 0) {
+                break;
+            }
+            String member = body.substring(from, end);
+            from = end + 1;
+            if (!member.contains("getWhereCondition(ch, where)") || !member.contains("tenantScope.withTenant(")) {
+                continue;
+            }
+            methods++;
+            for (int at = member.indexOf("tenantScope.withTenant("); at >= 0;
+                 at = member.indexOf("tenantScope.withTenant(", at + 1)) {
+                blocks++;
+                int fetch = member.indexOf(".fetch()", at);
+                int plan = member.indexOf("setSearchPlanCacheMode(", at);
+                if (fetch < 0 || plan < 0 || plan > fetch) {
+                    unpinned.add("withTenant block @line " + lineOf(body, body.indexOf(member) + at));
+                }
+            }
+        }
+        assertThat(unpinned)
+            .as("withTenant blocks of the where-taking get reads that fetch without first calling "
+                + "PgSession.setSearchPlanCacheMode (nexus-u9dc5)")
+            .isEmpty();
+        // Non-vacuity: getWhere (two blocks) and getAllMetadata (one) must be seen.
+        assertThat(methods).as("where-taking get methods visible to the sweep").isEqualTo(2);
+        assertThat(blocks).as("their withTenant blocks").isEqualTo(3);
     }
 
     /**

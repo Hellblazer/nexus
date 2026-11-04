@@ -686,7 +686,7 @@ class CatalogManifestSweepRepositoryTest {
 
     @Test @Order(17)
     void writeManifestMany_sweepTrue_beforeReadFails_countsAsSweepSkipped_manifestWriteStillCommits() throws Exception {
-        // code-review-expert Important-2: a FAILED before-read (currentManifestChashes)
+        // code-review-expert Important-2: a FAILED before-read (currentManifestRows)
         // was falling back to Set.of() indistinguishably from a legitimately
         // EMPTY manifest (a brand-new doc with nothing to drop) -- so a failed
         // read was silently absorbed: not in sweep_skipped, not in
@@ -694,7 +694,7 @@ class CatalogManifestSweepRepositoryTest {
         // (REVOKE-style, matching the delete-side fail-open test) that blocks
         // JUST the chash column read -- writeManifestRows's own DELETE/INSERT
         // on this table never SELECT chash, so the manifest write itself is
-        // unaffected; only currentManifestChashes's `SELECT chash ...` breaks.
+        // unaffected; only currentManifestRows's `SELECT collection, chash, line_start ...` breaks.
         String col = "code__swp9__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "swp.9", col);
         writeManifestManySeeded(TENANT_A, List.of(

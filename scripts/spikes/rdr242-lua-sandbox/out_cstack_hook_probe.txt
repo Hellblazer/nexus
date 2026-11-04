@@ -1,0 +1,7 @@
+== local function g() while true do pcall(g) end end g()
+rc=124
+== while true do pcall(function() while true do end end) end
+stack traceback:
+	[string "<python>"]:15: in function <[string "<python>"]
+elapsed 0.02
+rc=0

@@ -359,6 +359,27 @@ def test_the_command_dry_run_prints_per_key_counts_and_writes_nothing(monkeypatc
     assert w.updates == []
 
 
+def test_the_text_report_says_which_documents_each_key_family_covers_and_why_residue_is_residue(monkeypatch):
+    """7.94.0 shakedown (class H): a catalog of one note and one indexed document printed `Examined 2 documents`
+    and then `examined 1` on every key line, which read as 'examined 1 of 2'. Each family counts only its own
+    kind of document (note.* the notes, doc.* the indexed documents); the text now says so, and gives a key's
+    residue reasons beside its count (they were --json only)."""
+    w = _world_with_one_of_each()
+    result, _ = _invoke(monkeypatch, w)
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Examined 4 documents (1 notes)" in out
+    assert "note.* keys cover the 1 note(s); doc.* keys cover the 3 non-note document(s)" in out
+    json_result, _ = _invoke(monkeypatch, _world_with_one_of_each(), "--json")
+    keys = json.loads(json_result.stdout)["keys"]
+    with_residue = {k: v["residue_reasons"] for k, v in keys.items() if v["residue"]}
+    assert with_residue, "control: the fixture has residue to explain"
+    for key, reasons in with_residue.items():
+        rendered = ", ".join(f"{r} {n}" for r, n in sorted(reasons.items()))
+        line = next(line for line in out.splitlines() if line.strip().startswith(f"{key}:"))
+        assert line.endswith(f"residue {sum(reasons.values())} ({rendered})"), line
+
+
 def test_the_command_apply_writes_and_json_carries_the_reasons(monkeypatch):
     w = _world_with_one_of_each()
     result, closed = _invoke(monkeypatch, w, "--apply", "--json")

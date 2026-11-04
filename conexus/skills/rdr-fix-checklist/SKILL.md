@@ -22,7 +22,10 @@ The fix step of the RDR lifecycle: between a gate critique and the next gate. De
 
 Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`.
 
-Prose register: `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md` if the repo copy is not there yet.
+`<RDR dir>` is the absolute path of the RDR directory: `$RDR_DIR` joined to the repository root of the worktree in use.
+In any brief or relay, put the absolute path itself where `<RDR dir>` stands, never the placeholder or the shell variable: a dispatched agent cannot expand either.
+
+Prose register: `$RDR_DIR/REGISTER.md`, falling back to `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md` if the repo copy is not there yet.
 
 ## Behavior
 
@@ -54,13 +57,13 @@ Prose register: `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/res
 ```markdown
 ## Relay: substantive-critic
 
-**Task**: Fix check for RDR NNN: verify ONLY the diff `git diff <gated>..HEAD -- $RDR_DIR/NNN-*.md` against its sources and the rest of the file.
+**Task**: Fix check for RDR NNN: verify ONLY the diff `git diff <gated>..HEAD -- <RDR dir>/NNN-*.md` against its sources and the rest of the file.
 **Bead**: none
 
 ### Input Artifacts
 - nx store: none
 - nx memory: {repo}_rdr/NNN-research-* (the pre-edit entries the fix cites)
-- Files: $RDR_DIR/NNN-*.md and the diff range above
+- Files: <RDR dir>/NNN-*.md and the diff range above
 
 ### Deliverable
 One row per ADDED or CHANGED clause, PASS or FAIL with line numbers: (1) contradicted by any other line in this file; (2) an attribution, count or universal without an enumeration or quoted source, in the diff or in the research entry it cites; (3) a cited source that does not carry the claim as stated; (4) A `file:line` taken from a T3 search or query hit is a lead, not a citation: the store carries the line as of index time, and the clause passes only when the line was re-read from the working tree; (5) For every identifier whose meaning, bound, or owning phase this change alters (a column, a caller-supplied parameter, a typed error, a setting, a phase or step number), list every other occurrence in the file, and every check, bound or rule stated over the value it names under any other name, and say whether each still holds; (6) For every check, bound or rule this change adds, name the parameter, column or setting it constrains, and for every parameter, column or setting this change adds or alters, name every check, bound or rule that constrains it, whether or not they share a name, and a pair the previous check already named is not named again. Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING, and an OBSERVATION is never counted and never a residual). Each dispatch reads no sibling scratch and writes no T1 or T2, and ends with the line `FIX CHECK: PASS` or `FIX CHECK: FAIL — <n> BLOCKS-PLANNING rows`. Standard Verdict block.

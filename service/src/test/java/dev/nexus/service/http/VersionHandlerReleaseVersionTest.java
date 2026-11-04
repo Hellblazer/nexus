@@ -160,6 +160,17 @@ class VersionHandlerReleaseVersionTest {
             .doesNotContain("run_summary");
     }
 
+    // ── nexus-1ss4n: the nx_answer_runs keyset bound ──
+
+    @Test
+    void versionAdvertisesTheRunsBeforeIdBoundAsItsOwnFlag() {
+        // Its own flag: an engine without the bound ignores an unknown query parameter and returns the
+        // newest page again, so a client must know before it asks to page.
+        var body = new StringBuilder();
+        VersionHandler.appendNxAnswerRunsBeforeIdCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"nx_answer_runs_before_id_supported\":true");
+    }
+
     // ── RDR-232 (nexus-jypmj.1.13): the engine pre-cap graph-scope filter ──
 
     @Test
@@ -203,6 +214,24 @@ class VersionHandlerReleaseVersionTest {
         var body = new StringBuilder();
         VersionHandler.appendSearchRowOwnerSpanCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"search_row_owner_span_supported\":true");
+    }
+
+    // ── nexus-qpt52: route (b) answers every stage-answered key per owning document ──
+
+    @Test
+    void versionAdvertisesTheRouteBManifestKeysAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendRouteBManifestKeysCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"route_b_manifest_keys_supported\":true");
+    }
+
+    // ── nexus-u9dc5: route (c), the get routes, answers every stage-answered key per owning document ──
+
+    @Test
+    void versionAdvertisesTheRouteCManifestKeysAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendRouteCManifestKeysCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"route_c_manifest_keys_supported\":true");
     }
 
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──

@@ -17,7 +17,6 @@ Lifecycle (per-call vs daemon-held-open) is deliberately NOT decided here;
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -26,17 +25,25 @@ import structlog
 from nexus.mcp_client import core
 
 
-@dataclass
-class _FakeContent:
-    text: str
-    type: str = "text"
+def _FakeContent(text: str) -> Any:
+    from mcp.types import TextContent
+
+    return TextContent(type="text", text=text)
 
 
-@dataclass
-class _FakeResult:
-    structuredContent: dict[str, Any] | None = None
-    content: list[Any] | None = None
-    isError: bool = False
+def _FakeResult(**kw: Any) -> Any:
+    """The SDK's own ``CallToolResult``, not a look-alike.
+
+    A hand-written fake with camelCase attributes kept passing after mcp 2.x
+    renamed the model's attributes to snake_case, while the client code read the
+    old names off real results and silently saw ``None`` (nexus-sgmyl). The
+    constructor still accepts the wire aliases (``structuredContent``,
+    ``isError``), the attribute reads do not.
+    """
+    from mcp.types import CallToolResult
+
+    kw.setdefault("content", [])
+    return CallToolResult(**kw)
 
 
 class _FakeSession:

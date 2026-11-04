@@ -101,7 +101,7 @@ The audit entries are the measurement surface for CA-4: if `nexus_rdr/*-close-ov
 
 ### Step 2: Create Post-Mortem
 
-Prose register: the post-mortem's reader is the next person about to make the same mistake (see `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`). Before finishing it, apply the register's closing check: list undefined terms and define or cut them. Clear, simple, concise.
+Prose register: the post-mortem's reader is the next person about to make the same mistake (see `$RDR_DIR/REGISTER.md`, falling back to `${CLAUDE_PLUGIN_ROOT}/resources/rdr/REGISTER.md`). Before finishing it, apply the register's closing check: list undefined terms and define or cut them. Clear, simple, concise.
 
 Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. Populate:
 
@@ -190,7 +190,7 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 
 The main RDR is already in its `rdr__` collection from `nx index repo`, drafts included (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
-Per docs/collections.md Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
+Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md), Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
 
 **Correction (2026-09-23, nexus-vupim).** This step used to resolve the target via `nx catalog collection-name --content-type knowledge`, which renders the OWNER-ID-shaped name for the repo's own tumbler (e.g. `knowledge__1-7__...`) — exactly the non-subject shape Rule 1 forbids, and a name a curator-owned document (post-mortems are catalog-owned by the knowledge curator, not the repo) has no business landing in. Three post-mortems archived that way before the fix landed in `knowledge__1-1__...` on the nexus repo itself; see nexus-vupim for the re-home record.
 

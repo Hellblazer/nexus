@@ -88,7 +88,8 @@ COVERAGE_NOTE_STREAM = "coverage_note"
 
 @dataclass
 class ReducerInputRecorder:
-    """The list of texts the first evidence-consuming operator was handed, as the runner built it.
+    """The list of texts the first evidence-consuming operator was handed, as the runner built it (or, when the
+    runner names :attr:`target_steps`, the first of those: the answer step's closure).
 
     The runner marks the plan step it is about to hydrate (:func:`set_recorder_step`) and every
     hydration site that consumes retrieved evidence reports its final list (:func:`note_reducer_input`).
@@ -101,12 +102,17 @@ class ReducerInputRecorder:
     items: tuple[str, ...] | None = None
     step: int | None = None
     current_step: int | None = None
+    #: The plan steps whose input is recorded (nexus-dfrfp): the evidence-reading steps of the answer step's
+    #: closure, named by the runner. With none named (the default) the first step to report is the one.
+    target_steps: frozenset[int] = frozenset()
     _consumed: bool = False
 
     def set_step(self, index: int | None) -> None:
         self.current_step = index
 
     def note(self, items: Sequence[Any]) -> None:
+        if self.target_steps and self.current_step not in self.target_steps:
+            return
         if self._consumed and self.step != self.current_step:
             return
         self.items = tuple(i for i in items if isinstance(i, str))
@@ -116,6 +122,7 @@ class ReducerInputRecorder:
     def reset_run(self) -> None:
         """A whole-plan re-run (the continuation fallback) starts from a clean state."""
         self.items, self.step, self.current_step, self._consumed = None, None, None, False
+        self.target_steps = frozenset()
 
 
 _ACTIVE: ContextVar[ReducerInputRecorder | None] = ContextVar("nexus_reducer_input_recorder", default=None)

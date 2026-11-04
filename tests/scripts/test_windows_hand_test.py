@@ -6,14 +6,20 @@ repo go to the fake too, except where a test names a real repo.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
+import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+
+from tests._module_seam import setattr_in
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("windows_hand_test", REPO_ROOT / "scripts" / "windows_hand_test.py")
@@ -100,6 +106,7 @@ def test_the_remote_script_order_is_fetch_checkout_fixup_verify_run() -> None:
                                fixup="# fixup", floor=None)
     order = [script.index(part) for part in (
         "trap {",
+        "git remote set-url origin https://github.com/Hellblazer/nexus.git",
         "git fetch -q origin",
         "git fetch -q 'C:\\b\\w.bundle' '+refs/win-hand/wren:refs/win-hand/wren'",
         "Remove-Item -LiteralPath $rel -Recurse -Force",
@@ -116,7 +123,7 @@ def test_the_remote_script_order_is_fetch_checkout_fixup_verify_run() -> None:
 @pytest.mark.parametrize(
     "step",
     [
-        "clone", "git fetch origin", "bundle fetch", "git clean", "checkout", "checkout fixup",
+        "clone", "pointing origin at the repo", "git fetch origin", "bundle fetch", "git clean", "checkout", "checkout fixup",
         "normalising line endings (rm --cached)", "normalising line endings (reset --hard)",
         "applying the uncommitted changes", "staging the uncommitted changes", "committing the uncommitted changes",
     ],
@@ -182,7 +189,7 @@ class _Recorder:
                 Path(argv[argv.index("-q") + 1]).write_bytes(b"bundle")
         if argv[0] == "scp" and argv[2].endswith(".ps1"):
             self.scripts.append(Path(argv[2]).read_text(encoding="utf-8"))
-        if argv[0] == "ssh" and "pwsh" in argv[2]:
+        if argv[0] == "ssh" and "pwsh" in argv[-1]:
             return subprocess.CompletedProcess(argv, self.ssh_code, stdout="")
         return subprocess.CompletedProcess(argv, 0, stdout="")
 
@@ -246,7 +253,7 @@ def test_the_exit_code_comes_back_unchanged(code: int) -> None:
 def test_the_ssh_line_passes_the_exit_code_through_powershell_5() -> None:
     rec = _Recorder(on_origin=True)
     wht.main(["--session", "wren", "--", "t.py"], run=rec)
-    line = rec.calls[-1][2]
+    line = rec.calls[-1][-1]
     assert "if ($LASTEXITCODE -eq $null) { exit 97 } else { exit $LASTEXITCODE }" in line, (
         "pytest's code passes through, and pwsh that never ran is a setup failure, not exit 0"
     )
@@ -442,3 +449,217 @@ def test_the_scripts_own_steps_apply_a_patch_on_a_crlf_working_tree(tmp_path: Pa
         proc = subprocess.run(argv, cwd=clone, capture_output=True, text=True)
         assert proc.returncode == 0, (argv, proc.stderr)
     assert (clone / "a.py").read_text(encoding="utf-8") == "one\ntwo\n"
+
+
+# ---------------------------------------------------------------------------
+# A dead client takes its remote run with it (nexus-bj8e7)
+# ---------------------------------------------------------------------------
+
+
+def before(text: str, *needles: str) -> None:
+    """Each needle occurs in *text*, in this order."""
+    at = -1
+    for needle in needles:
+        found = text.find(needle, at + 1)
+        assert found > at, (needle, "is missing or out of order")
+        at = found
+
+
+def _watchdog_parts() -> tuple[str, str, str]:
+    """(the whole script, the watchdog block, the watchdog thread's script block)."""
+    script = wht.remote_script("wren", "abc", ["t.py"], bundle=None, fixup="", floor=None)
+    block = script[:script.index("trap {")]
+    thread = block[block.index("AddScript({"):block.index("}).AddArgument($PID)")]
+    return script, block, thread
+
+
+def test_the_watchdog_is_the_first_thing_the_script_does() -> None:
+    script, block, _ = _watchdog_parts()
+    assert script.startswith("# End this run when its client is gone")
+    assert script.index("BeginInvoke()") < script.index("git clone") < script.index("lab-run-win.cmd"), (
+        "setup's git calls and the slot wait run under the watchdog"
+    )
+    assert "trap {" not in block, "the setup trap must not turn a watchdog failure into a setup failure"
+
+
+def test_starting_the_watchdog_cannot_fail_the_run_and_needs_the_clients_opt_in() -> None:
+    """Armed only by the env var the heartbeat client sets in its ssh command: a plain ssh rerun of the script (or
+    ssh -n, whose stdin is empty) is never ended for a heartbeat nobody sends (live on qwent: ssh -n ran to the end)."""
+    _, block, _ = _watchdog_parts()
+    lines = block.splitlines()
+    assert lines[1] == "try {" and lines[-1] == "}" and lines[-4] == "} catch {", "the whole start is one try/catch"
+    assert "throw" not in block and "SSH_CONNECTION" not in block
+    before(block, f"if ($env:{wht.HEARTBEAT_ENV} -eq '1') {{", "OpenStandardInput()", "CreateRunspace()", "BeginInvoke()")
+
+
+def test_children_get_nul_stdin_once_the_watchdog_holds_the_heartbeat() -> None:
+    """A child reading stdin (git, cmd, a hook a test spawns) must neither take the beats nor block on the pipe. Live
+    on qwent without this, `cmd /c sort` hung the run on the pipe; with it, sort returned at once."""
+    _, block, _ = _watchdog_parts()
+    before(block, "$wdIn = [Console]::OpenStandardInput()", "CreateFileW('NUL', [uint32]3221225472, 3, [ref]$sa, 3",
+           "SetStdHandle(-10, $nul)", "AddArgument($wdIn)")
+    assert "$sa.inherit = $true" in block, "children inherit NUL only through an inheritable handle"
+    assert "if ($nul -eq [IntPtr]::new(-1) -or -not [WinHand.Std]::SetStdHandle(-10, $nul)) {" in block
+    before(block, "SetStdHandle(-10, $nul)) {", "NUL redirect failed", "Add-Content", "}")
+
+
+def test_without_a_heartbeat_runner_the_script_is_not_armed() -> None:
+    rec = _Recorder(on_origin=True)
+    wht.main(["--session", "wren", "--", "t.py"], run=rec)
+    (call,) = [c for c in rec.calls if c[0] == "ssh" and "pwsh -NoProfile -File" in c[-1]]
+    assert wht.HEARTBEAT_ENV not in call[-1], "nothing beats, so nothing may arm the watchdog"
+
+
+def test_the_watchdog_ends_the_tree_on_end_of_file_or_silence_and_never_on_its_own_error() -> None:
+    _, block, thread = _watchdog_parts()
+    before(thread, "ReadAsync(", "if (-not $read.Wait($silence * 1000))", "if ($read.Result -le 0)", "} catch {",
+           "return", "& taskkill.exe /T /F /PID $target")
+    assert thread.count("break }") == 2, "only silence and end of file leave the loop toward the kill"
+    catch = thread[thread.index("} catch {"):thread.index("return")]
+    assert "watchdog failed, run continues unwatched" in catch and "[Console]::Error.WriteLine" in catch
+    before(thread[thread.index("return"):], "ending the run", "Add-Content", "SilentlyContinue",
+           "[Console]::Error.WriteLine", "taskkill.exe")
+    assert f".AddArgument({wht.WATCHDOG_SILENCE_S})" in block
+    assert wht.WATCHDOG_SILENCE_S > 90, "longer than ssh's own 90 s dead-link tolerance (ServerAlive 30 x 3)"
+    assert r"C:\build\hand\wren\watchdog.log" in block
+
+
+def test_the_runs_ssh_call_goes_through_the_heartbeat() -> None:
+    seen: list[list[str]] = []
+
+    def beat(argv):
+        seen.append(list(argv))
+        return 7
+
+    rec = _Recorder(on_origin=True)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=rec, beat=beat) == 7
+    (call,) = seen
+    assert call[0] == "ssh" and "pwsh -NoProfile -File" in call[-1]
+    before(call[-1], f"$env:{wht.HEARTBEAT_ENV} = '1';", "pwsh -NoProfile -File")
+    assert not any("pwsh -NoProfile -File" in c[-1] for c in rec.calls if c[0] == "ssh"), "the run is not sent twice"
+
+
+def test_main_defaults_to_the_heartbeat_for_the_real_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the real subprocess.run and no beat, the run's ssh call goes through run_with_heartbeat."""
+    seen: list[list[str]] = []
+    rec = _Recorder(on_origin=True)
+
+    def real_run_standin(argv, *args, **kwargs):  # stands in for subprocess.run, which main() compares by identity
+        return rec(argv, *args, **kwargs)
+
+    setattr_in(monkeypatch, wht, "subprocess.run", real_run_standin)
+    monkeypatch.setattr(wht, "run_with_heartbeat", lambda argv: seen.append(list(argv)) or 3)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=real_run_standin) == 3
+    assert seen and "pwsh -NoProfile -File" in seen[0][-1]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="select on a pipe is POSIX")
+def test_the_heartbeat_reaches_the_child_and_its_exit_code_comes_back(tmp_path: Path) -> None:
+    got = tmp_path / "got"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os, select, sys, time\n"
+        "data = b''\n"
+        "end = time.monotonic() + 3\n"
+        "while len(data) < 3 and (left := end - time.monotonic()) > 0:\n"
+        "    if select.select([sys.stdin], [], [], left)[0]:\n"
+        "        chunk = os.read(sys.stdin.fileno(), 1)\n"
+        "        if not chunk:\n"
+        "            break\n"
+        "        data += chunk\n"
+        f"open({str(got)!r}, 'wb').write(data)\n"
+        "sys.exit(5)\n"
+    )
+    assert wht.run_with_heartbeat([sys.executable, str(child)], interval=0.05) == 5
+    assert got.read_bytes() == b"..."
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_a_sigkilled_client_closes_the_childs_stdin(tmp_path: Path) -> None:
+    """SIGKILL cannot be caught, and the ssh child outlives its client; its stdin still reaches end of file, which
+    is what the remote watchdog reads (measured on qwent: the remote run ended within 3 s)."""
+    eof = tmp_path / "eof"
+    pidfile = tmp_path / "child.pid"
+    standin = tmp_path / "standin.py"
+    standin.write_text(
+        "import os, sys\n"
+        f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+        "while sys.stdin.buffer.read(1):\n"
+        "    pass\n"
+        f"open({str(eof)!r}, 'w').write('eof')\n"
+    )
+    client_py = tmp_path / "client.py"
+    client_py.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(REPO_ROOT / 'scripts' / 'windows_hand_test.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); sys.modules['w'] = w; spec.loader.exec_module(w)\n"
+        f"w.run_with_heartbeat([sys.executable, {str(standin)!r}], interval=0.05)\n"
+    )
+    client = subprocess.Popen([sys.executable, str(client_py)])
+    deadline = time.monotonic() + 20
+    while not pidfile.exists() or not pidfile.read_text():
+        assert time.monotonic() < deadline, "the stand-in never started"
+        time.sleep(0.05)
+    time.sleep(0.5)
+    assert not eof.exists(), "the child saw end of file before the client died: its stdin is not the pipe"
+    client.kill()
+    client.wait(timeout=20)
+    deadline = time.monotonic() + 10
+    while not eof.exists():
+        assert time.monotonic() < deadline, "the orphaned child never saw end of file"
+        time.sleep(0.05)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_sigterm_ends_the_client_and_its_ssh_child(tmp_path: Path) -> None:
+    """A real child process: under end_on_signal a SIGTERM to the client also ends the process run_with_heartbeat is
+    waiting on (the ssh stand-in), where the default action would leave it running."""
+    pidfile = tmp_path / "child.pid"
+    standin = tmp_path / "standin.py"
+    standin.write_text(f"import os, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+    client_py = tmp_path / "client.py"
+    client_py.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(REPO_ROOT / 'scripts' / 'windows_hand_test.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); sys.modules['w'] = w; spec.loader.exec_module(w)\n"
+        "w.end_on_signal()\n"
+        f"w.run_with_heartbeat([sys.executable, {str(standin)!r}], interval=0.05)\n"
+    )
+    client = subprocess.Popen([sys.executable, str(client_py)])
+    deadline = time.monotonic() + 20
+    while not pidfile.exists() or not pidfile.read_text():
+        assert time.monotonic() < deadline, "the stand-in never started"
+        time.sleep(0.05)
+    child = int(pidfile.read_text())
+    client.send_signal(signal.SIGTERM)
+    assert client.wait(timeout=20) == 128 + signal.SIGTERM
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "the ssh stand-in outlived its client"
+        time.sleep(0.05)
+
+
+def test_end_on_signal_turns_sigterm_and_sighup_into_system_exit() -> None:
+    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        wht.end_on_signal()
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            handler = signal.getsignal(sig)
+            assert callable(handler), sig
+            with pytest.raises(SystemExit) as exc:
+                handler(sig, None)
+            assert exc.value.code == 128 + sig
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+
+
+def test_the_entry_point_installs_the_signal_handlers_before_main() -> None:
+    tree = ast.parse((REPO_ROOT / "scripts" / "windows_hand_test.py").read_text(encoding="utf-8"))
+    (block,) = [n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test)]
+    calls = [ast.unparse(s) for s in block.body]
+    assert calls[0] == "end_on_signal()" and "main()" in calls[1], calls

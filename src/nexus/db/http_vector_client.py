@@ -37,7 +37,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -606,6 +606,39 @@ def _pop_sent_bearer() -> str:
     return value
 
 
+#: The endpoint :func:`_request_once` resolved for its most recent attempt, for the
+#: shared gateway hold (nexus-cphvg). A thread-local for the same reason as
+#: :data:`_sent_bearer_capture`: ``_request_once`` keeps its signature and its
+#: return shape, and the retry loop reads the endpoint the attempt really used
+#: instead of resolving it a second time (a second resolution per attempt cost
+#: a lease read, and reached the service in every transport-faked test).
+_attempt_url_capture = threading.local()
+
+
+def _stash_attempt_url(url: str) -> None:
+    _attempt_url_capture.value = url
+
+
+def _attempt_url() -> str:
+    """The endpoint of this thread's most recent attempt, ``""`` before one."""
+    return getattr(_attempt_url_capture, "value", "")
+
+
+#: The ``(base_url, token)`` pair the gateway-hold wait resolved for the attempt about to
+#: be sent (nexus-3zreb review round 2): :func:`_request_once` takes it instead of
+#: resolving the endpoint a second time, so an attempt resolves at most once. Set only
+#: by :func:`_gateway_hold_url`, taken (and cleared) by :func:`_request_once`, and cleared
+#: by the retry loop around every attempt so a pair never outlives the attempt it was for.
+_prefetched_endpoint = threading.local()
+
+
+def _take_prefetched_endpoint() -> tuple[str, str] | None:
+    """The pair the hold wait resolved for this thread's next attempt, once; ``None`` when it did not."""
+    pair = getattr(_prefetched_endpoint, "value", None)
+    _prefetched_endpoint.value = None
+    return pair
+
+
 def _note_data_token_response(base_url: str, tenant: str, status_code: int) -> None:
     """Clear the manager's remint-futility flag for ``(base_url, tenant)``
     once a response (success or error) comes back non-401 (nexus-umue1,
@@ -743,7 +776,8 @@ def _request_once(
     """
     import urllib.request  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
-    base_url, token = _resolve_endpoint()
+    base_url, token = _take_prefetched_endpoint() or _resolve_endpoint()
+    _stash_attempt_url(base_url)
     # nexus-wrwb7 (RDR-005 2a self-minting): when a mint_token credential is
     # configured, present the manager's self-minted data token instead of
     # the static service_token/lease token resolved above. Inert (returns
@@ -1486,6 +1520,33 @@ def _wait_for_lease_republication() -> None:
             _lease_cache = discovered  # type: ignore[assignment]
 
 
+def _gateway_hold_url() -> str:
+    """The endpoint the first send goes to, for the shared gateway hold (nexus-cphvg).
+
+    Handed to ``wait_before_attempt`` as a function: it is called only when a
+    hold in force names an endpoint. Every later wait and every record uses the
+    endpoint the previous attempt reached (:func:`_attempt_url`). The pair it
+    resolves is left for ``_request_once`` (:func:`_take_prefetched_endpoint`), so
+    the attempt resolves the endpoint once, with or without a hold in force.
+
+    ``""`` when it cannot be resolved: the hold then applies as it did before
+    endpoints were compared, and ``_request_once`` resolves again and raises its own error."""
+    try:
+        pair = _resolve_endpoint()
+    except Exception:  # noqa: BLE001 — best effort: an unresolvable endpoint is _request_once's to report
+        return ""
+    _prefetched_endpoint.value = pair
+    return pair[0]
+
+
+def _error_body(exc: Any) -> bytes:
+    """An ``HTTPError``'s body, ``b""`` when it cannot be read. Read only on a path that resends."""
+    try:
+        return exc.read() or b""
+    except Exception:  # noqa: BLE001 — a closed or absent body is no body
+        return b""
+
+
 def _request(
     method: str, path: str, *, tenant: str, timeout: float, body: dict | None
 ) -> Any:
@@ -1539,11 +1600,18 @@ def _request(
 
     def _once_with_gateway_retry() -> Any:
         slept_until: float | None = None
+        sent_to = ""  # the endpoint the previous attempt reached
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             # nexus-v1929: another process's 503 holds this one too, before every send.
-            if (held_s := gateway_hold.wait_before_attempt(after=slept_until, max_wait=timeout)) > 0.0:
+            _prefetched_endpoint.value = None  # a pair left by an interrupted attempt is not this one's
+            if (
+                held_s := gateway_hold.wait_before_attempt(
+                    after=slept_until, max_wait=timeout, url=sent_to or _gateway_hold_url,
+                )
+            ) > 0.0:
                 _log.info("vector_gateway_hold_wait", path=path, attempt=i + 1, sleep_s=held_s)
                 time.sleep(held_s)
+            _stash_attempt_url("")
             try:
                 result = _request_once(
                     method, path, tenant=tenant, timeout=timeout, body=body
@@ -1551,6 +1619,7 @@ def _request(
             except urllib.error.HTTPError as exc:
                 if exc.code not in _GATEWAY_RETRY_CODES or delay is None or no_auto_retry:
                     raise
+                sent_to = _attempt_url()
                 # nexus-qajw7: an engine deadline ABORT discarded embedded work;
                 # a resend seconds later runs the request to its deadline again.
                 # Hand it straight to the caller's retry wrapper, which paces it
@@ -1562,8 +1631,11 @@ def _request(
                 # An engine deadline 503 is about this request, not an overloaded edge.
                 if exc.code == 503 and not (exc.headers or {}).get(DEADLINE_OUTCOME_HEADER):
                     # nexus-v1929: the hold is shared with every client on this config dir.
+                    # nexus-cphvg: an engine reason in the body (tenant_creation_busy) is
+                    # about one tenant, not the edge, so it holds no one else.
                     sleep_s = gateway_hold.record_503(
-                        sleep_s, retry_after=parse_retry_after(exc.headers),
+                        sleep_s, retry_after=parse_retry_after(exc.headers), url=sent_to,
+                        reason=gateway_hold.reason_from_body(_error_body(exc)),
                     )
                 _log.warning(
                     "vector_gateway_retry_embed_write_504" if floored else "vector_gateway_retry",
@@ -1575,7 +1647,7 @@ def _request(
                 slept_until = time.time() + sleep_s
                 time.sleep(sleep_s)
             else:
-                gateway_hold.record_success()
+                gateway_hold.record_success(url=_attempt_url())
                 return result
         raise AssertionError("unreachable")  # loop always returns or raises
 
@@ -1891,6 +1963,29 @@ def _request_deadline_ms_for(path: str) -> int | None:
         if path.endswith(suffix):
             return deadline_ms
     return None
+
+
+#: Socket timeout (seconds) of a retire-keys sweep call (nexus-6pfgb.43): the engine bounds one call by its own
+#: ``budget_seconds`` and by the census it runs first, so this is a ceiling above both.
+_CHUNK_KEYS_TIMEOUT_S = 300
+
+#: The validate route scans the whole chunk table (the engine allows it 30 minutes); the socket outlasts that.
+_CHUNK_KEYS_VALIDATE_TIMEOUT_S = 2100
+
+#: The add route runs, in the one request, a tenant-scoped count of each known tenant, the whole-table probe (a 10 minute
+#: statement bound), a census per collection with rows to sweep, and then the DDL (a 60 s bound). The 300 s sweep ceiling
+#: cut it off while the engine went on; it gets validate's.
+_CHUNK_KEYS_ADD_TIMEOUT_S = _CHUNK_KEYS_VALIDATE_TIMEOUT_S
+
+
+def _guard_chunk_keys_write() -> None:
+    """The production-write guard (nexus-a2qhz) for a retire-keys call that writes. The three routes share one
+    path prefix with their dry run, so :func:`_post`'s path-suffix guard cannot tell the two apart; the caller
+    that knows it is writing calls this first."""
+    from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: no circular import (service_endpoint imports no nexus.* modules)
+
+    base_url, _ = _resolve_endpoint()
+    guard_production_write(base_url)
 
 
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 120) -> Any:
@@ -5072,7 +5167,11 @@ class HttpVectorClient:
         "owner_chunks": int|None}], "source": {...}|None, "next_after":
         str|None}``. ``reason`` says why a ``superseded`` verdict was reached
         (``indexing``, ``complete``, ``failed``, ``version``, ``position_taken``,
-        ``rival``, ``other_collection``, ``has_rows``, ``past_end``, ``race``);
+        ``rival``, ``other_collection``, ``has_rows``, ``past_end``, ``race``), and
+        on an ``attach`` verdict of a call with ``reattach`` false (or its dry run) it reads
+        ``owner_link_dropped`` when the chunk's owner was named by its own ``catalog_doc_id`` /
+        ``doc_id``: a restored row keeps only the chunk keys (nexus-l003p), so ``owner`` and
+        ``position`` on that row are not kept and a later call cannot attach it;
         ``owner_rows`` / ``owner_chunks`` are the owner's manifest rows in the
         origin after the call against its registered chunk count. See the
         engine route's docstring (``VectorHandler#handleGcQuarantineRestore``) for
@@ -5180,6 +5279,103 @@ class HttpVectorClient:
         if after_chash:
             body["after_chash"] = after_chash
         return _post("/v1/vectors/reapable", body, tenant=self._tenant)
+
+    # ---- RDR-236 Phase 4 Step 3: retire the chunk-row metadata keys (nexus-6pfgb.43) -------------------------
+
+    def chunk_keys_sweep(
+        self, *, dry_run: bool = True, accept: Mapping[str, int] | None = None, collection: str | None = None,
+        batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
+        measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None,
+    ) -> dict:
+        """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant (nexus-6pfgb.43).
+
+        The allow-list, the bypass prefixes and the quarantine implication ride in the body, rendered from the key
+        table (:func:`nexus.tables.chunk_metadata_keys.engine_plan`): the engine cannot name the ROW keys, so it pins
+        them (the ROW keys by digest, exactly the quarantine and taxonomy prefixes, the implication pair) and answers
+        400 to a plan that differs. The default is a DRY RUN, which writes nothing, locks no row and runs no UPDATE: it
+        answers ``{"tenant", "collections": [{"collection", "retired_key_rows", "wrong_width_rows", "sweepable_rows",
+        "legacy_unmanifested", "blocked"}], "totals", "preconditions": {name: count}, "precondition_details"
+        (``generated_nulls`` by content type and by missing key, ``null_span_rows`` by column), "acceptable_residues",
+        "accepted", "blocking", "blocking_detail", "applicable", "batch_cost": {"samples": [{"collection", "rows",
+        "select_ms"}], "select_ms", "update_ms": null, "projected_seconds", "projection_is_lower_bound": true}}``: the
+        cost is the batch SELECT only, so the projection is a lower bound. ``dry_run=False`` sweeps up to
+        ``max_batches`` batches of ``batch_size`` rows or ``budget_seconds`` (counted after the checks) in keyset
+        order and answers ``{"tenant", "rows_swept", "batches", "done", "remaining_rows", "locked_skipped_rows",
+        "first_batch_ms", "elapsed_ms", "blocked_collections", "resume", "resume_ignored"}``; the caller calls again,
+        passing the ``resume`` object back unchanged (it is signed, ``sig`` included), while ``done`` is false. A call
+        with ``resume`` does not repeat the preconditions or the census (the first call of a run did them); a ``resume``
+        that does not verify (edited, another tenant's, or from before an engine restart) is ignored and the call runs
+        as a first call: ``resume_ignored`` is true. ``accept`` is ``{residue: rows}``: each residue of
+        ``acceptable_residues`` the operator accepts, up to that many rows; apply is refused (409, ``reason ==
+        "sweep_preconditions_not_met"``, the report in ``engine_body``) while a live count is above what was accepted.
+
+        An apply is a WRITE: it goes through the production-write guard
+        (:func:`~nexus.db.service_endpoint.guard_production_write`, ``NX_ALLOW_PROD_WRITE``) before the first
+        request; a dry run does not.
+
+        Raises :class:`VectorServiceError` (``code=404`` on an engine that predates the route).
+        """
+        from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
+
+        body: dict[str, Any] = {**engine_plan(), "dry_run": dry_run}
+        if accept:
+            body["accept"] = {str(name): int(rows) for name, rows in accept.items()}
+        if resume:
+            body["resume"] = dict(resume)
+        for key, value in (
+            ("collection", collection), ("batch_size", batch_size), ("max_batches", max_batches),
+            ("budget_seconds", budget_seconds), ("measure_batch", measure_batch),
+        ):
+            if value is not None:
+                body[key] = value
+        if not dry_run:
+            _guard_chunk_keys_write()
+        return _post("/v1/admin/chunk-keys/sweep", body, tenant=self._tenant, timeout=_CHUNK_KEYS_TIMEOUT_S)
+
+    def chunk_keys_add_constraints(self, *, replace: bool = False) -> dict:
+        """POST /v1/admin/chunk-keys/add-constraints: the table-wide add of the chunk CHECKs, NOT VALID (nexus-6pfgb.43).
+
+        Operator (root token) only. The engine first reads every tenant with chunk rows on its admin connection (a
+        tenant with no ``service_tokens`` row included) and refuses (409, ``reason`` ``tenant_unswept`` or
+        ``tenant_violates_constraint``, the tenants in ``engine_body["tenants"]``) while one has rows the sweep can
+        still take, a hash or model that differs from its column, a chash that is not 32 bytes, or a half-stamped
+        quarantine row. Answers ``{"tenants_checked": [names], "table_rows_examined", "left_behind": [{"tenant",
+        "blocked_collections": [{"collection", "retired_key_rows", "blocked"}]}], "constraints": [{"name", "action",
+        "present", "validated", "definition", "warning", "expected_definition"}]}`` where ``action`` is ``added``,
+        ``present`` (the stored definition is the plan's), ``present_differs`` (it is not; ``expected_definition``
+        says what the plan would add) or ``replaced`` (``warning`` when it was VALID and is NOT VALID now).
+        ``replace=True`` drops and re-adds each in one statement, which is how a changed key table reaches the
+        database. DATA EFFECT: a NOT VALID CHECK is evaluated on every new row version, so a row the sweep left
+        behind (``left_behind``) cannot be UPDATEd until it is fixed. A WRITE: guarded like the sweep's apply. The
+        socket timeout is validate's (:data:`_CHUNK_KEYS_ADD_TIMEOUT_S`); a timeout does not mean the add did not land,
+        and a rerun is idempotent (a constraint that exists is left alone).
+        """
+        from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
+
+        body: dict[str, Any] = {**engine_plan()}
+        if replace:
+            body["replace"] = True
+        _guard_chunk_keys_write()
+        return _post(
+            "/v1/admin/chunk-keys/add-constraints", body, tenant=self._tenant, timeout=_CHUNK_KEYS_ADD_TIMEOUT_S,
+        )
+
+    def chunk_keys_validate_constraints(self) -> dict:
+        """POST /v1/admin/chunk-keys/validate-constraints: VALIDATE the chunk CHECKs (nexus-6pfgb.43).
+
+        Operator only. Reads ``pg_constraint.convalidated`` first and validates only what is not yet valid
+        (``action`` ``validated``, ``already_valid`` or ``absent``). Refused (409, ``reason ==
+        "tenant_violates_constraint"``) while any tenant still holds a retired key, an unequal hash or model, a
+        quarantine implication breach or a wrong-width chash. The scan can run for minutes on a large table; the
+        socket timeout allows it. A WRITE: guarded like the sweep's apply.
+        """
+        from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
+
+        _guard_chunk_keys_write()
+        return _post(
+            "/v1/admin/chunk-keys/validate-constraints", {**engine_plan()}, tenant=self._tenant,
+            timeout=_CHUNK_KEYS_VALIDATE_TIMEOUT_S,
+        )
 
     def reapable_chunks(
         self, collection: str, *, grace_seconds: int | None = None, page_limit: int = 300,

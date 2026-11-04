@@ -305,6 +305,9 @@ for name, doc in (("routing", routing), ("full", full), ("small", small)):
     open("%s/%s.gz" % (d, name), "wb").write(gzip.compress(raw))
 open(d + "/hdr.gzip", "w").write("HTTP/2 200\r\ncontent-type: application/json\r\ncontent-encoding: gzip\r\n\r\n")
 open(d + "/hdr.plain", "w").write("HTTP/2 200\r\ncontent-type: application/json\r\n\r\n")
+open(d + "/hdr.cf", "w").write("HTTP/2 200\r\ncontent-type: application/json\r\nx-cache: Miss from cloudfront\r\nvia: 1.1 abc.cloudfront.net (CloudFront)\r\nx-amz-cf-id: Zm9v\r\n\r\n")
+open(d + "/hdr.cfvia", "w").write("HTTP/2 200\r\ncontent-type: application/json\r\nvia: 1.1 abc.cloudfront.net (CloudFront)\r\n\r\n")
+open(d + "/hdr.cfgzip", "w").write("HTTP/2 200\r\ncontent-type: application/json\r\ncontent-encoding: gzip\r\nx-amz-cf-id: Zm9v\r\n\r\n")
 open(d + "/other.gz", "wb").write(gzip.compress(json.dumps(routing[:5]).encode()))
 open(d + "/bad.gz", "wb").write(b"not gzip at all")
 open(d + "/page.html", "w").write("<html>403</html>")
@@ -314,6 +317,12 @@ run_m "M1: gzip served, decodes to the identity listing -> ok (0)" 0 "ok [M1]" _
 run_m "M1: ... also in auto-old mode (a new engine on an old floor)" 0 "ok [M1]" _surface_verdict gzip "$R" "$G" "$TMP/hdr.gzip" auto-old
 run_m "M1: strict, the response has no Content-Encoding -> violation (1): the engine must compress" 1 "must serve this" _surface_verdict gzip "$R" "$R" "$TMP/hdr.plain" strict
 run_m "M1: auto-old, no Content-Encoding -> NOT SERVED (3)" 3 "NOT SERVED [M1]" _surface_verdict gzip "$R" "$R" "$TMP/hdr.plain" auto-old
+run_m "M1: strict, uncompressed through CloudFront (x-amz-cf-id) -> KNOWN-EDGE (4), not a violation (nexus-qbszl)" 4 "KNOWN-EDGE [M1]" _surface_verdict gzip "$R" "$R" "$TMP/hdr.cf" strict
+run_m "M1: strict, uncompressed through CloudFront (via only) -> KNOWN-EDGE (4)" 4 "KNOWN-EDGE [M1]" _surface_verdict gzip "$R" "$R" "$TMP/hdr.cfvia" strict
+run_m "M1: auto-old, uncompressed through CloudFront -> KNOWN-EDGE (4)" 4 "KNOWN-EDGE [M1]" _surface_verdict gzip "$R" "$R" "$TMP/hdr.cf" auto-old
+run_m "M1: absent asserted, uncompressed through CloudFront -> NOT SERVED (3), the old-engine assertion holds" 3 "NOT SERVED [M1]" _surface_verdict gzip "$R" "$R" "$TMP/hdr.cf" absent
+run_m "M1: strict, gzip served through CloudFront -> ok (0), the known-edge branch never masks a pass" 0 "ok [M1]" _surface_verdict gzip "$R" "$G" "$TMP/hdr.cfgzip" strict
+run_m "M1: strict, CloudFront gzip over a body that does not gunzip -> violation (1)" 1 "does not gunzip" _surface_verdict gzip "$R" "$TMP/bad.gz" "$TMP/hdr.cfgzip" strict
 run_m "M1: strict, a body below 1 KiB cannot exercise gzip -> violation (1), never a skip" 1 "no read-only route" _surface_verdict gzip "$TMP/small.json" "$TMP/small.gz" "$TMP/hdr.gzip" strict
 run_m "M1: strict, Content-Encoding gzip over a body that does not gunzip -> violation (1)" 1 "does not gunzip" _surface_verdict gzip "$R" "$TMP/bad.gz" "$TMP/hdr.gzip" strict
 run_m "M1: strict, the gzip response decodes to a different listing -> violation (1)" 1 "different listing" _surface_verdict gzip "$R" "$TMP/other.gz" "$TMP/hdr.gzip" strict

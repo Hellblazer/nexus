@@ -1865,3 +1865,10 @@ def census_manifest_less_cmd(
 from nexus.commands.t3_cmds.quarantine import quarantine_group as _quarantine_group  # noqa: E402 — must follow the `t3` group definition above
 
 t3.add_command(_quarantine_group)
+
+# ── RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): `nx t3 retire-keys` ────────
+# The operator's way into the engine's /v1/admin/chunk-keys routes (sweep, add and validate the chunk CHECKs).
+# Defined in its own module for the reason `quarantine` is: it shares nothing with this file but the group.
+from nexus.commands.t3_cmds.retire_keys import retire_keys_cmd as _retire_keys_cmd  # noqa: E402 — must follow the `t3` group definition above
+
+t3.add_command(_retire_keys_cmd)

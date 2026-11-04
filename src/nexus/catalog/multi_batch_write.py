@@ -354,6 +354,35 @@ def complete_document(
                    "so the document was NOT stamped")
 
 
+def stamp_registered_content_hash(cat: Any, doc_id: str, content_hash: str) -> bool:
+    """Record *content_hash*, the file hash an index run is about to fence the document under, in the
+    document's own ``meta.content_hash`` (nexus-ypgbz). Call it BEFORE the writer begins, so the registration
+    carries the key by the time the run is stamped complete.
+
+    The exporter ships ``key_registered`` when ``meta.content_hash == index_content_hash`` on a complete
+    document (nexus-3ajpd): the catalog's own evidence that the fence key is a file hash, which no chunk row can
+    give (a row's ``content_hash`` is the last writer's). Only the repo pass stamped it at registration; the
+    single-file PDF and markdown indexers hold the hash only when they write, so they stamp it here. For callers
+    whose fence key IS the file's sha256 only: import and note writers fence under other keys and never call
+    this.
+
+    Advisory and fail-open: a failed write is logged and returns ``False``. The document then keeps whatever
+    ``meta.content_hash`` it held, which cannot equal the new key, so the exporter reports ``key_registered``
+    false (no same-as witness from the registration; never a wrong key). Returns ``True`` when the stamp was
+    sent. ``cat`` is the raw catalog writer (``update`` merges ``meta``)."""
+    from nexus.catalog.indexed_meta import content_hash_meta  # noqa: PLC0415 — deferred: indexed_meta is a leaf, kept out of this module's load path
+
+    meta = content_hash_meta(content_hash)
+    if not doc_id or not meta:
+        return False
+    try:
+        cat.update(doc_id, meta=meta)
+    except Exception:  # noqa: BLE001 — boundary catch: advisory evidence write, must never fail the index run it precedes
+        _log.warning("registered_content_hash_stamp_failed", doc_id=doc_id, exc_info=True)
+        return False
+    return True
+
+
 class RepeatedPositionError(ValueError):
     """A position was written twice in one run.
 

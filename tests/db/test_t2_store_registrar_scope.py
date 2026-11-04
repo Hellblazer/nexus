@@ -50,14 +50,20 @@ from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 def _aspect_queue_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Each aspect-queue case names the producer it drives, so it says so: the unset default is
     ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1), and the table producer
-    (``HttpAspectQueue`` case) is the opt-out. The tuples producer registers through its own
+    (``HttpAspectQueue`` case) is retired (nexus-bpikw step A), so the seam in
+    ``tests/_aspect_table_producer.py`` drives it. The tuples producer registers through its own
     ``ensure_collection_registered(..., registrar=self._catalog_registrar)`` call, a different
     site from the table's ``write_with_registration_retry`` (nexus-zqu6r); its batch form
     (``enqueue_many``, ``_enqueue_many_tuples``) registers at a third site of its own. Every other store is
     unaffected by the flag; they run with it at the table value, as before."""
     params = getattr(getattr(request.node, "callspec", None), "params", {})
     tuples = params.get("drive_write") in (_drive_aspect_queue_tuples, _drive_aspect_queue_tuples_enqueue_many)
-    monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples" if tuples else "table")
+    if tuples:
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+    else:
+        from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
+
+        use_table_producer(monkeypatch)
 
 
 OWN_TOKEN = "own-server-token-w1ip"

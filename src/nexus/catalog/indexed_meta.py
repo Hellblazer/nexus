@@ -64,6 +64,10 @@ FILL_ONLY_KEYS = ("tags", "category")
 #: The catalog ``meta`` key the derived format is stamped under.
 SOURCE_FORMAT_KEY = "source_format"
 
+#: The catalog ``meta`` key a document's FILE hash is registered under (nexus-ypgbz). The exporter ships
+#: ``key_registered`` when it equals the document's ``index_content_hash`` on a complete document.
+CONTENT_HASH_KEY = "content_hash"
+
 #: Every value :func:`catalog_source_format` can answer (the chunk vocabulary).
 SOURCE_FORMATS = frozenset({"pdf", "markdown", "code", "prose"})
 
@@ -108,6 +112,14 @@ def source_format_meta(content_type: str | None, file_path: str | None) -> dict[
     """``{"source_format": <derived>}``, or ``{}`` when the rule derives nothing."""
     derived = catalog_source_format(content_type, file_path)
     return {SOURCE_FORMAT_KEY: derived} if derived else {}
+
+
+def content_hash_meta(content_hash: str | None) -> dict[str, Any]:
+    """``{"content_hash": <file hash>}``, or ``{}`` for an empty hash (never sent: the catalog merges ``meta``
+    and an explicit empty overwrites). The one statement of the registration's file-hash stamp: the repo pass
+    (``indexer._register_time_meta``) and the single-file PDF / markdown writers
+    (:func:`nexus.catalog.multi_batch_write.stamp_registered_content_hash`) both build it here."""
+    return {CONTENT_HASH_KEY: content_hash} if content_hash else {}
 
 
 def is_unset(value: Any) -> bool:

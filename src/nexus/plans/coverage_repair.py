@@ -17,8 +17,9 @@ caller's explicit scope. The targets are therefore never wider than the scope th
 primary collection the caller's scope excludes is not asked (a corpus scope by collection, a catalog-subtree scope
 by the documents the named source holds), a subtree scope rides every query that can take one, a plan target
 carries the plan step's own ``where`` / ``content_type`` / ``author`` filters, and a retrieved hit outside the
-caller's scope is dropped (the coverage ledger does that). Contradicted facets are not repair targets
-(``CoverageResult.repair_facet_ids`` excludes them): a repair would be a search for agreement.
+caller's scope is dropped (the coverage ledger does that). Contradicted facets are not a retrieval target
+(``CoverageResult.repair_facet_ids`` excludes them: a query would be a search for agreement); the unread-tail reread
+can still read their tail (``CoverageResult.unread_tail_facet_ids``, nexus-se11w).
 
 **The bounds are starting points, not measurements** (Phase 3 step 4 owns re-fitting them), each a constant:
 
@@ -107,7 +108,8 @@ _MAX_QUERY_CHARS = 500
 _WS = re.compile(r"\s+")
 
 #: Why a repair ran (:attr:`RepairReport.reason`): a facet was assessed and nothing held bears on it (``unsupported``),
-#: a covered facet had most of its anchors left unread by the assessment's size cap (``unread_tail``, nexus-z6yvk), or
+#: a covered or contradicted facet had most of its anchors left unread by the assessment's size cap (``unread_tail``,
+#: nexus-z6yvk, nexus-se11w), or
 #: both. Empty when no repair ran.
 REPAIR_REASONS: tuple[str, ...] = ("unsupported", "unread_tail", "unsupported_and_unread_tail")
 
@@ -139,8 +141,8 @@ class RepairReport:
     brings nothing in; the outcome then names what the retrieval did (``retrieval_failed``, ``not_merged`` or
     ``no_new_evidence``, never ``completed``) and ``detail`` says the unread anchors were reassessed.
 
-    ``facet_ids`` are the facets the repair targeted: the unsupported ones first, then the covered facets whose
-    anchors were mostly unread (nexus-z6yvk); ``unread_facet_ids`` is the second group and ``reason`` names which
+    ``facet_ids`` are the facets the repair targeted: the unsupported ones first, then the contradicted and the
+    covered facets whose anchors were mostly unread (nexus-z6yvk, nexus-se11w); ``unread_facet_ids`` is the second group and ``reason`` names which
     groups there were (:data:`REPAIR_REASONS`; both empty when no repair ran). Both are additive to the wire shape.
     """
 
@@ -153,8 +155,8 @@ class RepairReport:
     detail: str = ""
     #: Unresolved facets named to the terminal generation by the coverage note (``0``: no note was delivered).
     noted_facets: int = 0
-    #: Why the repair ran (:data:`REPAIR_REASONS`), and which of ``facet_ids`` were covered facets with most of their
-    #: anchors unread (nexus-z6yvk).
+    #: Why the repair ran (:data:`REPAIR_REASONS`), and which of ``facet_ids`` were covered or contradicted facets with most
+    #: of their anchors unread (nexus-z6yvk, nexus-se11w).
     reason: str = ""
     unread_facet_ids: tuple[str, ...] = ()
 

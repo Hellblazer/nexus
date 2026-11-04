@@ -70,6 +70,7 @@ from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
 from nexus.db import gateway_hold
+from nexus.db.request_gate import before_request
 from nexus.db.gateway_backoff import (
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
     _GATEWAY_RETRY_CODES,
@@ -548,6 +549,21 @@ class _EndpointRegistrar:
             # nor closes an injected client (nexus-m20mf contract).
             client=getattr(self._store, "_client", None),
         )
+
+
+def _hook_deadline_left() -> float | None:
+    """Seconds left of the hook deadline the caller set (:func:`~nexus.db.data_token.mint_deadline`), or ``None``."""
+    from nexus.db.data_token import deadline_left  # noqa: PLC0415 — deferred to avoid circular import
+
+    return deadline_left()
+
+
+def _response_body(response: httpx.Response) -> bytes:
+    """A response's body, ``b""`` when it cannot be read (a streamed one that was never read)."""
+    try:
+        return response.content
+    except Exception:  # noqa: BLE001 — httpx.ResponseNotRead: no body to read
+        return b""
 
 
 def _numeric_timeout(value: Any) -> float | None:
@@ -1348,9 +1364,16 @@ class RefreshableHttpStoreMixin:
         slept_until: float | None = None
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             # nexus-v1929: another process's 503 holds this one too, before every send.
-            held_s = gateway_hold.wait_before_attempt(
-                after=slept_until, max_wait=_numeric_timeout(kwargs.get("timeout", getattr(getattr(self, "_client", None), "timeout", None))),
-            )
+            hold_url = getattr(self, "_base_url", "")
+            if not isinstance(hold_url, str):
+                hold_url = ""
+            max_wait = _numeric_timeout(kwargs.get("timeout", getattr(getattr(self, "_client", None), "timeout", None)))
+            hook_left = _hook_deadline_left()
+            if hook_left is not None:
+                # nexus-wfmfi: the hook's own deadline outranks the hold, and is passed
+                # in as the budget so a slot the hook could not use is never claimed.
+                max_wait = hook_left if max_wait is None else min(max_wait, hook_left)
+            held_s = gateway_hold.wait_before_attempt(after=slept_until, max_wait=max_wait, url=hold_url)
             if held_s > 0.0:
                 _log.info(
                     "refreshable_http_store.gateway_hold_wait",
@@ -1367,11 +1390,24 @@ class RefreshableHttpStoreMixin:
                 # An engine deadline 503 is about this request, not an overloaded edge.
                 if exc.response.status_code == 503 and not exc.response.headers.get(DEADLINE_OUTCOME_HEADER):
                     # nexus-v1929: the hold is shared with every client on this config dir.
+                    # nexus-cphvg: an engine reason in the body (tenant_creation_busy) is
+                    # about one tenant, not the edge, so it holds no one else.
                     sleep_s = gateway_hold.record_503(
                         sleep_s,
                         retry_after=parse_retry_after(exc.response.headers),
-                        url=self._base_url,
+                        url=hold_url,
+                        reason=gateway_hold.reason_from_body(_response_body(exc.response)),
                     )
+                hook_left = _hook_deadline_left()
+                if hook_left is not None and sleep_s >= hook_left:
+                    # nexus-wfmfi: a caller with a hard deadline (the SubagentStart T2 scan) cannot
+                    # use a retry that starts after it: hold plus slot reach about 60 s, so give up now.
+                    _log.warning(
+                        "refreshable_http_store.gateway_retry_past_deadline",
+                        store=type(self).__name__, path=path, code=exc.response.status_code,
+                        attempt=i + 1, sleep_s=sleep_s, left_s=hook_left,
+                    )
+                    raise
                 _log.warning(
                     "vector_gateway_retry_embed_write_504" if floored
                     else "refreshable_http_store.gateway_retry",
@@ -1385,7 +1421,7 @@ class RefreshableHttpStoreMixin:
                 slept_until = time.time() + sleep_s
                 time.sleep(sleep_s)
             else:
-                gateway_hold.record_success()
+                gateway_hold.record_success(url=hold_url)
                 return result
         raise AssertionError("unreachable")  # loop always returns or raises
 
@@ -1400,6 +1436,7 @@ class RefreshableHttpStoreMixin:
         nexus-bikit.4, when ``merge_memories`` was routed through ``_post``).
         """
         url = self._base_url + path
+        before_request()  # nexus-ldf2s: every attempt, retries included, passes the request gate
         resp = self._client.request(method, url, headers=self._auth_headers(), **kwargs)
         self._note_data_token_response(resp)
         self._raise_for_status(resp, path)

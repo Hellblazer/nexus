@@ -4,7 +4,7 @@
 ``nx doctor`` runs the pending-rungs sweep as unattended, so on a managed service a rung that can only answer
 from a whole-catalog or whole-table read reports "not checked", and the row names an interactive ``nx upgrade``
 as the way out. Round 1 tested that with a one-rung registry (manifest-section-labels, the one rung that checks
-its record and its memo before it refuses). ``note-tags-array`` and ``aspect-queue-tuples`` refused without
+its record before it refuses). ``note-tags-array`` and ``aspect-queue-tuples`` refused without
 looking, so on every managed install the row stayed a warning no interactive run could clear.
 
 These tests run the PRODUCTION registry (``default_registry()``, every rung built with its own defaults) on a
@@ -30,7 +30,8 @@ from nexus.upgrade_ladder.rungs.aspect_queue_tuples import DETECT_READ_LIMIT
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from tests.upgrade.conftest import InMemoryCompletionLedger
 
-#: The rungs that answer an unattended run on a managed service only from a record or a memo.
+#: The rungs that answer an unattended run on a managed service only from a record (or, on an engine with the route,
+#: manifest-section-labels from the engine's count; this install's fake engine has none).
 REFUSABLE = (RUNG_ASPECT_QUEUE_TUPLES, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS)
 
 

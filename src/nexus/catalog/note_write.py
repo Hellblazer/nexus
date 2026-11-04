@@ -97,6 +97,7 @@ from nexus.catalog.store_hook import (
     _read_manifest_rows_with_retry,
     note_manifest_metadata,
 )
+from nexus.catalog.types import manifest_span
 from nexus.catalog.write_outcome import (
     IN_FLIGHT,
     REFUSED_BY_CLIENT,
@@ -248,10 +249,11 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict], pieces: Sequence[str]
             "chash": m.get("chunk_text_hash", ""),
             "position": int(m.get("chunk_index", i)),
             "chunk_index": m.get("chunk_index"),
-            "line_start": m.get("line_start") or None,
-            "line_end": m.get("line_end") or None,
-            "char_start": m.get("chunk_start_char") or None,
-            "char_end": m.get("chunk_end_char") or None,
+            # nexus-qe78r: a note's span starts at 0, and that 0 is real (see manifest_span).
+            **manifest_span(
+                m.get("line_start"), m.get("line_end"),
+                m.get("chunk_start_char"), m.get("chunk_end_char"),
+            ),
             "section_title": labels[i] if i < len(labels) else "",
             "section_type": "",
             "page_number": None,
@@ -640,6 +642,7 @@ def put_note(
     ttl_days: int | None = None,
     content_type: str | None = None,
     cat: Any = None,
+    entity_key: str = "",
 ) -> PutNoteOutcome:
     """Register, fence, write and settle one note. The whole caller protocol in one place.
 
@@ -666,8 +669,15 @@ def put_note(
        exist.
        On any other exception: remove a minted row (or restore the stamp), ``_fence_fail``, re-raise.
 
+    *entity_key* (RDR-147 Step 1, nexus-fai28) is the caller's entity key for the document. It is
+    stamped into the catalog document's ``meta`` and never into a chunk's metadata (RDR-236). With
+    none, a collection whose ``entity.collections`` pattern matches the whole title stamps the title
+    (:func:`nexus.entity_keys.resolve_put_key`); a ``code__`` collection never stamps a title, and an
+    explicit key on one raises ``ValueError``.
+
     *collection* is the full T3 collection name. Raises ``PutOversizedError`` for an over-quota
-    note, ``ValueError`` for empty *content* or a bad ``ttl_days``, and
+    note, ``ValueError`` for empty *content*, a bad ``ttl_days`` or an *entity_key* the put refuses
+    (:func:`nexus.entity_keys.check_explicit_key`), and
     :class:`~nexus.errors.NoteUriEngineTooOldError` when the serving engine is below
     ``NOTE_URI_MIN_ENGINE_VERSION``, all before any side effect.
     """
@@ -680,6 +690,14 @@ def put_note(
     refuse_ttl_over_cap(ttl_days)
     if not content:
         raise ValueError("put_note: 'content' is required (an empty note has nothing to store)")
+    # The entity key (RDR-147 Step 1, nexus-fai28), resolved with the other argument checks: BEFORE
+    # any engine call, register or write, and outside the register's swallow below. An explicit key the
+    # put refuses (a code__ collection, a control character, over 256 characters) raises ValueError
+    # here with nothing touched, and a config that does not load (a bad entity.collections regex)
+    # is the operator's to fix, not a "catalog registration failed".
+    from nexus.entity_keys import resolve_put_key  # noqa: PLC0415 — deferred: reads config, only a put needs it
+
+    resolved_key = resolve_put_key(collection=collection, title=title, explicit=entity_key)
     # RDR-231 (nexus-bivz3.13): refuse a note write the serving engine cannot hold, BEFORE any engine
     # call: the piece split and the size check resolve the collection row, and the register and the
     # T3 write follow. Raised to the caller on purpose: the register below sits in an `except
@@ -704,7 +722,8 @@ def put_note(
     try:
         out.catalog_doc_id, out.minted = sh.catalog_store_hook_tracked(
             title=title, doc_id=first_chash, collection_name=collection, pre_call_doc_id_out=pre_call,
-            error_out=cause, tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent)
+            error_out=cause, tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent,
+            entity_key=resolved_key)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning and the NO_CATALOG outcome
         cause["error"] = f"{type(exc).__name__}: {exc}"
         _log.warning(

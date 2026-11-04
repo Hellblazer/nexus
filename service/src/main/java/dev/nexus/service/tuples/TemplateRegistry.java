@@ -88,8 +88,11 @@ public final class TemplateRegistry {
      * order here does not determine {@link #templates()} order — {@link
      * #load} sorts the final list by name — but is still the load order used
      * for "first defined in" duplicate-name diagnostics.
+     *
+     * <p>Package-private so {@code TemplateDocLintTest} (RDR-239 Phase 3, bead nexus-mdbds.2.19)
+     * can check that this hand-kept list and the templates directory name the same files.
      */
-    private static final List<String> RESOURCE_TEMPLATE_PATHS = List.of(
+    static final List<String> RESOURCE_TEMPLATE_PATHS = List.of(
             "/tuples/templates/aspects.yaml",
             "/tuples/templates/board.yaml",
             "/tuples/templates/board-ci.yaml",
@@ -527,10 +530,21 @@ public final class TemplateRegistry {
 
     /** Maps the bare field a shape refusal names back to where it sits in the example (and in
      *  the file): a key under {@code keys.}, a dimension under {@code dims.}, the nonce bare.
-     *  A size refusal arrives already qualified ({@code keys.k}). */
+     *  A size refusal arrives already qualified ({@code keys.k}). The validator checks the keys
+     *  half before the dimensions half, so a name that appears on both sides is a key fault only
+     *  when the example's key itself is the faulty one (declared and missing, blank or not an
+     *  allowed value, or undeclared); otherwise it is the stray dimension that was refused. */
     private static String shapeFieldPath(TemplateSchema t, TemplateDoc.Example ex, String field) {
-        if (t.keys().contains(field) || ex.keys().containsKey(field)) {
+        boolean declaredKey = t.keys().contains(field);
+        if (ex.keys().containsKey(field) && !declaredKey) {
             return "keys." + field;
+        }
+        if (declaredKey) {
+            String v = ex.keys().get(field);
+            List<String> allowed = t.keyValues().get(field);
+            if (v == null || v.isBlank() || (allowed != null && !allowed.contains(v))) {
+                return "keys." + field;
+            }
         }
         if (t.dimensions().containsKey(field) || ex.dims().containsKey(field)) {
             return "dims." + field;

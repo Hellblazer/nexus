@@ -29,7 +29,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _live_tool_counts() -> tuple[int, int]:
-    """(core count, catalog count) from the actual registered FastMCP
+    """(core count, catalog count) from the actual registered MCPServer
     tool managers -- not a re-parse of source, the same live object the
     MCP client itself would see."""
     from nexus.mcp.catalog import mcp as catalog_mcp

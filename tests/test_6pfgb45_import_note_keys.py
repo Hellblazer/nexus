@@ -6,7 +6,13 @@ is no longer keyless (``ttl unknown``) and its TTL is not silently dropped.
 Fill-only: an entry that holds any note key keeps them all; an indexed (file-backed) document gets none.
 The stamp goes through the writer put uses (``update`` with ``meta``), after the page's chains fired and
 before the document's completion stamp, so a kill between the two leaves the document ``indexing`` and the
-next run of the same file resumes it (the stamp is fill-only, so doing it twice is the same).
+next run of the same file resumes it (the stamp is fill-only, so doing it twice is the same). A failed
+stamp is logged as ``import_note_keys_failed`` naming the document (nexus-kg2fp).
+
+A note is recognised by its source URI alone, never by ``meta.doc_id`` (the import's registration sets none)
+and never by the origin classification: an ``nx-note://`` URI (or the legacy ``chroma://`` spelling) of a
+collection that is not file-routed, or NO URI on a ``knowledge__`` entry with no file path (a knowledge
+document's identity falls back to the title for an MCP-stored note). Anything else is not a note.
 
 The tests drive ``_OwnerImport.flush`` against fakes for the catalog and the import writer; the engine
 journey is ``tests/test_z0o2p19_nxexp_import_combined_write.py``.
@@ -15,6 +21,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+
+from structlog.testing import capture_logs
 
 from nexus.catalog.multi_document_write import PageWriteResult
 from nexus.catalog.note_ttl import has_own_keys, note_ttl_days
@@ -191,8 +199,11 @@ def test_a_note_copied_under_an_nxexp_qualified_uri_is_still_a_note():
 
 def test_a_failed_stamp_is_reported_and_the_document_is_left_for_the_next_run():
     entries = {"1.1.5": _entry("1.1.5")}
-    imp, log = _flush(entries, fail=True)
+    with capture_logs() as logs:
+        imp, log = _flush(entries, fail=True)
     assert ("complete", ["1.1.5"]) not in log
+    events = [e for e in logs if e["event"] == "import_note_keys_failed"]
+    assert [e["doc"] for e in events] == ["1.1.5"] and "engine said no" in events[0]["error"]
     assert imp.failures and imp.failures[0][0] == "document 1.1.5"
     assert "engine said no" in imp.failures[0][1]
 
@@ -224,11 +235,14 @@ def test_a_read_that_stays_down_holds_back_only_the_documents_that_could_be_note
         "1.1.5": _entry("1.1.5"),
         "1.1.6": _entry("1.1.6", source_uri="file:///repo/a.md"),
     }
-    imp, log = _flush(entries, fail_reads=2)
+    with capture_logs() as logs:
+        imp, log = _flush(entries, fail_reads=2)
     assert ("complete", ["1.1.6"]) in log
     assert all("1.1.5" not in e[1] for e in log if e[0] == "complete")
     assert [label for label, _ in imp.failures] == ["document 1.1.5"]
     assert "could not be read" in imp.failures[0][1]
+    named = [e["doc"] for e in logs if e["event"] == "import_note_keys_failed"]
+    assert named == ["1.1.5"]
 
 
 def test_a_document_whose_stamp_failed_is_reported_once_not_again_by_finish():
@@ -250,7 +264,9 @@ def test_the_pages_note_keys_go_in_one_batched_write():
 
 def test_a_zero_count_for_one_entry_leaves_that_document_indexing_and_completes_the_rest():
     entries = {"1.1.5": _entry("1.1.5"), "1.1.6": _entry("1.1.6")}
-    imp, log = _flush(entries, zero=frozenset({"1.1.5"}))
+    with capture_logs() as logs:
+        imp, log = _flush(entries, zero=frozenset({"1.1.5"}))
+    assert [e["doc"] for e in logs if e["event"] == "import_note_keys_failed"] == ["1.1.5"]
     assert ("complete", ["1.1.6"]) in log
     assert all("1.1.5" not in e[1] for e in log if e[0] == "complete")
     assert [label for label, _ in imp.failures] == ["document 1.1.5"]
@@ -263,3 +279,54 @@ def test_a_writer_without_update_many_stamps_one_document_at_a_time():
     imp, log = _flush(entries, writer_cls=_LegacyWriter)
     assert len([e for e in log if e[0] == "update"]) == 2
     assert entries["1.1.5"].meta["ttl_days"] == 0 and entries["1.1.6"].meta["ttl_days"] == 0
+
+
+# --- nexus-kg2fp: the note predicate is the source URI -----------------------------------------
+
+
+def test_an_imported_note_with_no_doc_id_is_recognised_by_its_note_uri():
+    # is_note_shaped keys on meta.doc_id, which the import's registration never sets
+    from nexus.indexer_utils import is_note_shaped  # noqa: PLC0415 - read only to show the keys differ
+
+    entries = {"1.1.5": _entry("1.1.5")}
+    assert "doc_id" not in entries["1.1.5"].meta and not is_note_shaped(entries["1.1.5"])
+    _flush(entries)
+    assert entries["1.1.5"].meta["ttl_days"] == 0
+
+
+def test_a_legacy_chroma_note_uri_is_recognised():
+    entries = {"1.1.5": _entry("1.1.5", source_uri=f"chroma://{_COLL}/a-note")}
+    _flush(entries)
+    assert entries["1.1.5"].meta["ttl_days"] == 0
+
+
+def test_a_title_identity_knowledge_note_with_no_source_uri_is_stamped():
+    # a knowledge document's identity is source_uri, falling back to the title for an MCP-stored note, so
+    # such a note has no URI at all; no file path, no doc_id either
+    entries = {"1.1.5": _entry("1.1.5", source_uri="")}
+    imp, log = _flush(entries)
+    assert entries["1.1.5"].meta["ttl_days"] == 0 and entries["1.1.5"].meta["put_at"]
+    assert [e[0] for e in log] == ["update", "complete"] and imp.failures == []
+
+
+def test_a_non_note_import_is_not_stamped_whatever_its_other_fields():
+    # a URI-less entry outside knowledge__, a file URI, a note URI of a file-routed collection and a URI-less
+    # file-backed knowledge entry are not notes, not even with a doc_id (the key is_note_shaped reads)
+    docs = "docs__art__bge-base-en-v15-768__v1"
+    entries = {
+        "1.1.6": _entry("1.1.6", source_uri="", collection="rdr__art__bge-base-en-v15-768__v1", meta={"doc_id": "a" * 64}),
+        "1.1.7": _entry("1.1.7", source_uri="https://example.org/a"),
+        "1.1.8": _entry("1.1.8", source_uri=f"nx-note://{docs}/x"),
+        "1.1.9": _entry("1.1.9", source_uri="file:///repo/a.md"),
+    }
+    imp, log = _flush(entries)
+    assert [e for e in log if e[0] == "update"] == []
+    assert all(e.meta.get("ttl_days") is None for e in entries.values()) and entries["1.1.6"].meta == {"doc_id": "a" * 64}
+    assert ("complete", list(entries)) in log and imp.failures == []
+
+
+def test_a_uri_less_knowledge_entry_with_a_file_path_is_not_a_note():
+    entries = {"1.1.5": _entry("1.1.5", source_uri="")}
+    entries["1.1.5"].file_path = "/repo/a.md"
+    _flush(entries)
+    assert entries["1.1.5"].meta == {}

@@ -17,7 +17,7 @@ _log = structlog.get_logger()
 
 
 @click.command("upgrade")
-@click.option("--dry-run", is_flag=True, help="Report pending upgrade-ladder rungs (read-only detect() walk) without executing. Writes nothing; the one write a rung's verify() makes (manifest-section-labels saves a cache note, never rung state) belongs to a real run.")
+@click.option("--dry-run", is_flag=True, help="Report pending upgrade-ladder rungs (read-only detect() walk) without executing. Writes nothing.")
 # --force REMOVED (RDR-158 P4 Stage 4, review Significant): it reset the
 # local-SQLite version gate so apply_pending re-ran every migration — the
 # machinery is deleted, the flag read nothing, and dead-but-documented
@@ -168,6 +168,15 @@ def upgrade(
         # filesystem write, not under --auto, never under --dry-run.
         if not auto_mode and not dry_run:
             _install_beads_prime_best_effort(no_beads_prime=no_beads_prime)
+
+        # nexus-emiky: a lockstep child that lost the upgrade lock left the retry sentinel in the lockstep
+        # marker, saying this work (plugin convergence, agents and hooks refresh, the engine install, the
+        # advisory) is owed. A run that did it settles the marker; `--auto` skips that work, `--skip-t3`
+        # skips the engine install and the advisory, and `--dry-run` does none.
+        if not auto_mode and not dry_run and not skip_t3:
+            from nexus.lockstep_marker import running_version, settle_upgrade_retry  # noqa: PLC0415 — deferred, keeps the cold start light
+
+            settle_upgrade_retry(running_version())
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -396,6 +405,20 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
         click.echo(f"VC++ runtime [client extension modules] pending: {result.detail}")
 
 
+def _record_deferrals(report: "LadderRunReport", completions: "Callable[[], dict[str, CompletionRecord]]") -> None:  # noqa: F821 — lazy imports (module keeps cold-start cheap)
+    """Fold one finished ladder walk into the per-rung deferral log (nexus-0sm1t). *completions* reads the ledger's
+    records and is called only when the walk has a counted deferral. Whatever goes wrong is a logged warning: the
+    log only informs `nx doctor`, it must never change the upgrade's outcome or exit code."""
+    from nexus.upgrade_ladder.census_progress import guarded  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.deferral_log import counted_deferrals, t2_deferral_log  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+    def _record() -> None:
+        if counted_deferrals(report):
+            t2_deferral_log().record(report, completions())
+
+    guarded("deferral_log_record", _record, None)
+
+
 def _run_ladder(
     *,
     dry_run: bool,
@@ -475,6 +498,10 @@ def _run_ladder(
         holder = InProcessCompletionHolder(ledger)
         report = LadderRunner(registry, holder, deadline=deadline).run()
         holder.flush()
+        # nexus-0sm1t: count each rung's consecutive deferrals so `nx doctor` can name one that defers on every run,
+        # which --auto otherwise leaves silent. Interactive and --auto alike; a log failure never changes the outcome.
+        # Inside the try: the completion records are read from the ledger, which closes below.
+        _record_deferrals(report, holder.completions)
     finally:
         close = getattr(ledger, "close", None)
         if callable(close):
@@ -492,9 +519,11 @@ def _run_ladder(
         # stated out loud, never inferred from the absence of output.
         click.echo("Upgrade ladder: converged and verified (no rungs registered).")
     if report.hard_failed:
+        # A deferral earlier in the walk is listed too: since nexus-dfemn the walk goes on past it, and a later
+        # rung failing on the same outage must not hide the first cause.
         failed = [
             run for run in report.runs
-            if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
+            if run.outcome in (RungOutcome.DEFERRED, RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
         ]
         summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
         raise click.ClickException(f"upgrade ladder did not converge — {summary}")

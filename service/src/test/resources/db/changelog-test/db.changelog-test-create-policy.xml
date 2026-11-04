@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE POLICY ${policy} ON ${table} AS ${kind} FOR ${command} TO ${role} USING (true).
-    jOOQ has no CREATE POLICY. A policy that admits every row, to put a table in a posture the chunks isolation
+    nexus-cbo4a batch 11 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): CREATE POLICY ${policy} ON ${table} AS ${kind} FOR ${command} TO ${role} USING (${qual}).
+    jOOQ has no CREATE POLICY. ${qual} is true or false (a closed list, nexus-gy3vq). A policy that admits every row (or none), to put a table in a posture the chunks isolation
     check must (or must not) flag. Run through PgContainerHelper#createPolicyUsingTrue, which renders ${table}
     from a jOOQ Table and takes ${kind} and ${command} from closed lists and ${policy} and ${role} as plain
     identifiers (or PUBLIC); runAlways, bookkeeping in its own table.
@@ -13,6 +13,6 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="create-policy" author="nexus-cbo4a" runAlways="true">
-        <sql>CREATE POLICY ${policy} ON ${table} AS ${kind} FOR ${command} TO ${role} USING (true)</sql>
+        <sql>CREATE POLICY ${policy} ON ${table} AS ${kind} FOR ${command} TO ${role} USING (${qual})</sql>
     </changeSet>
 </databaseChangeLog>

@@ -501,6 +501,13 @@ _fail() { echo "FRESH-INSTALL MVV FAILED: $*" >&2; exit 1; }
 cleanup() {
     # Stop the sandbox service + PG so nothing leaks past the gate.
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
+        # The aspect worker an nx call spawned outlives the service by design
+        # (nexus-wl9pk): stop it by its lease in the sandbox config dir first. The
+        # installed nx may predate the verb (--published installs the previous
+        # release), so the CHECKOUT's nx stops it: the verb reads the lease and
+        # signals by pid, which also reaches a worker the older nx spawned.
+        ( cd "$REPO_ROOT" && env HOME="$HOME_DIR" NEXUS_CONFIG_DIR="$HOME_DIR/.config/nexus" NX_NO_TELEMETRY=1 \
+            uv run --no-sync nx daemon aspect-worker stop --config-dir "$HOME_DIR/.config/nexus" ) >/dev/null 2>&1 || true
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
     fi
     if [ "$GATE_OK" != 1 ]; then
@@ -992,12 +999,15 @@ cat "$LOGS/mcp-entrypoints.log"
 SITE_PACKAGES="$("$PROBE_PYTHON" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
 MCP_DIST_INFO="$(find "$SITE_PACKAGES" -maxdepth 1 -name 'mcp-*.dist-info' 2>/dev/null | head -1)"
 [ -n "$MCP_DIST_INFO" ] \
-    || _fail "mcp dist-info not found under $SITE_PACKAGES — cannot verify the mcp<2 pin (nexus-l2ku5)"
+    || _fail "mcp dist-info not found under $SITE_PACKAGES — cannot verify the mcp>=2.3,<3 pin (nexus-sgmyl)"
 MCP_VERSION="$(basename "$MCP_DIST_INFO" | sed -E 's/^mcp-([0-9]+(\.[0-9]+)*).*/\1/')"
 MCP_MAJOR="${MCP_VERSION%%.*}"
 echo "  mcp dist-info version: $MCP_VERSION"
-if [ "$MCP_MAJOR" -ge 2 ]; then
-    _fail "mcp resolved to $MCP_VERSION (>=2) in the fresh install — the mcp>=1.0,<2 pin regressed (nexus-l2ku5: mcp 2.0.0 removed mcp.server.fastmcp, killing both MCP servers at import)"
+# nexus-sgmyl: the servers are ported to mcp 2.x (mcp.server.mcpserver), so the
+# fresh install must resolve major 2 exactly: major 1 has no MCPServer and
+# major 3 is untested against the SDK internals _sdk_patches/_stale_host reach.
+if [ "$MCP_MAJOR" -ne 2 ]; then
+    _fail "mcp resolved to $MCP_VERSION (major $MCP_MAJOR) in the fresh install — the mcp>=2.3,<3 pin regressed (nexus-sgmyl; nexus-l2ku5 was the unbounded-floor incident)"
 fi
 
 # nexus-1ktd5 item A: verify PyPI served the version EXPECTED, always -- not

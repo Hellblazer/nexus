@@ -153,6 +153,9 @@ _ORCH = (
     "wins |\n"
     "| Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees "
     "exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |\n"
+    "| Search scope | Search only under the roots your brief names, or your working "
+    "directory; never a whole-disk or whole-home search (`find /`, `find ~`, `grep -r /`, "
+    "`mdfind`). A file you cannot find: hand back naming it (nexus-egv6q) |\n"
 )
 
 _WORKTREE_PREFLIGHT = (
@@ -160,6 +163,21 @@ _WORKTREE_PREFLIGHT = (
     "`scripts/agent-worktree-preflight.sh [required-sha]` as your FIRST action; stop "
     "on any PREFLIGHT_FAIL line (nexus-5kwkf) |\n"
 )
+
+#: Relative to the project's main repo root. Only the nexus repo ships it.
+_WORKTREE_PREFLIGHT_SCRIPT: str = "scripts/agent-worktree-preflight.sh"
+
+
+def _worktree_preflight_row(repo_root: str) -> str:
+    """The Preflight row, only for a project that has the script.
+
+    nexus-z7ddd: the row used to go into every dispatch in every project, so a
+    worktree agent outside the nexus repo was told to run, as its first action, a
+    script its project does not have.
+    """
+    if repo_root and os.path.isfile(os.path.join(repo_root, _WORKTREE_PREFLIGHT_SCRIPT)):
+        return _WORKTREE_PREFLIGHT
+    return ""
 
 #: nexus-mtheb: the T1 contract, first in every injection, review and code-nav
 #: agents included. Five rounds of T1 design faded because the guidance was
@@ -569,7 +587,7 @@ def run(payload: dict | None) -> HookResult:
 
     parts.append(_RELAY)
     parts.append(_ORCH)
-    parts.append(_WORKTREE_PREFLIGHT)
+    parts.append(_worktree_preflight_row(repo_root))
 
     skip_storage_docs, skip_operators = _classify(agent_type, task_text)
 

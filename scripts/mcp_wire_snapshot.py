@@ -23,14 +23,14 @@ of registered names, never function identity or parameter schema:
       the one that happened to break, while the registered NAME stays the
       same (the name-SET tests pass unchanged);
   (c) duplicate ``name=`` registration where a later decorator silently
-      overwrites an earlier one in FastMCP's tool-manager dict (still one
+      overwrites an earlier one in MCPServer's tool-manager dict (still one
       name in the set; whichever function wins is invisible).
 
 Snapshot shape: ``{server_name: {tool_name: {"qualname": ..., "module":
 ..., "is_async": ..., "parameters": <JSON schema with every "description"
 and "title" key stripped, recursively>}}}``. The JSON-schema fields
 (properties, types, defaults via ``default``, ``required``) come straight
-from FastMCP's own generated ``tool.parameters`` — the exact structure a
+from MCPServer's own generated ``tool.parameters`` — the exact structure a
 wire client receives minus the two prose fields that churn independently
 of the actual contract.
 
@@ -65,7 +65,7 @@ _SERVER_MODULES = (
 def _strip_prose(node: Any) -> Any:
     """Recursively drop ``description`` and ``title`` keys from a JSON schema.
 
-    Deep-copies first so the live FastMCP registry objects are never
+    Deep-copies first so the live MCPServer registry objects are never
     mutated by a caller that inspects the schema afterward.
     """
     if isinstance(node, dict):
@@ -80,7 +80,7 @@ def _strip_prose(node: Any) -> Any:
 
 
 def build_snapshot() -> dict[str, dict[str, dict[str, Any]]]:
-    """Introspect both live FastMCP tool registries into the snapshot shape."""
+    """Introspect both live MCPServer tool registries into the snapshot shape."""
     import importlib
 
     result: dict[str, dict[str, dict[str, Any]]] = {}

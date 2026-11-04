@@ -367,6 +367,44 @@ class TestUnitStartTimeoutMessage:
         assert RAISE_URL in result.output
         assert "an_earlier_boot_error" not in result.output
 
+    @staticmethod
+    def _record_still_starting(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+        """Record ``still_starting`` on every StorageServiceStartError raised (nexus-86aaz r2)."""
+        seen: list[bool] = []
+        real_init = ssd.StorageServiceStartError.__init__
+
+        def init(self, *args, still_starting: bool = False):
+            seen.append(still_starting)
+            real_init(self, *args, still_starting=still_starting)
+
+        monkeypatch.setattr(ssd.StorageServiceStartError, "__init__", init)
+        return seen
+
+    def test_a_unit_whose_supervisor_reported_an_error_is_not_still_starting(
+        self, config_dir: Path, unit: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        """nexus-86aaz r2: a crash-looping unit (its supervisor wrote an error during this start) is a
+        failure for install-binary's restart, not a slow start that exits 0."""
+        err_log = tmp_path / "unit-logs" / "nexus-service.err"
+        err_log.parent.mkdir(parents=True)
+        self._never_publishes(config_dir, monkeypatch, err_log=err_log, new_error="pg_credentials missing")
+        seen = self._record_still_starting(monkeypatch)
+        result = _run_start(config_dir)
+        assert result.exit_code == 2
+        assert seen == [False], seen
+
+    def test_a_unit_that_reported_nothing_may_still_be_starting(
+        self, config_dir: Path, unit: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: None
+    ) -> None:
+        """nexus-86aaz r2: no new supervisor error and no lease yet is the may-still-be-migrating case."""
+        err_log = tmp_path / "unit-logs" / "nexus-service.err"
+        err_log.parent.mkdir(parents=True)
+        self._never_publishes(config_dir, monkeypatch, err_log=err_log)
+        seen = self._record_still_starting(monkeypatch)
+        result = _run_start(config_dir)
+        assert result.exit_code == 2
+        assert seen == [True], seen
+
     def test_an_error_from_before_this_start_is_not_reported(
         self, config_dir: Path, unit: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: None
     ) -> None:

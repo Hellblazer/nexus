@@ -452,6 +452,66 @@ def self_staleness(baseline: tuple[float, str]) -> SelfStaleness:
     )
 
 
+def _command_argv(command: str) -> list[str]:
+    """The argv of a process command line, as :func:`_classify` reads it (nexus-hx7r5).
+
+    A POSIX ``ps`` command line is argv joined by spaces and never quoted, so it splits on whitespace, as before.
+    A Windows command line is the raw ``CommandLine`` string, in which a path with a space is double-quoted
+    (``"C:\\Users\\John Smith\\...\\python.exe" -m ...``); a whitespace split cut it at the space and the
+    process read as ``other``. A command that contains a double quote is therefore tokenised with the
+    ``CommandLineToArgvW`` rules: a quote toggles quoting, 2n backslashes before a quote are n backslashes and the
+    quote toggles, 2n+1 are n backslashes and a literal quote, and a backslash anywhere else is literal.
+    """
+    if '"' not in command:
+        return command.split()
+    argv: list[str] = []
+    current: list[str] = []
+    in_token = False
+    quoted = False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            j = i
+            while j < n and command[j] == "\\":
+                j += 1
+            run = j - i
+            if j < n and command[j] == '"':
+                current.append("\\" * (run // 2))
+                if run % 2:
+                    current.append('"')
+                    i = j + 1
+                else:
+                    quoted = not quoted
+                    i = j + 1
+            else:
+                current.append("\\" * run)
+                i = j
+            in_token = True
+            continue
+        if c == '"':
+            if quoted and i + 1 < n and command[i + 1] == '"':
+                current.append('"')  # "" inside quotes is a literal quote (the post-2008 msvcrt rule)
+                i += 2
+                continue
+            quoted = not quoted
+            in_token = True
+            i += 1
+            continue
+        if c in " \t" and not quoted:
+            if in_token:
+                argv.append("".join(current))
+                current, in_token = [], False
+            i += 1
+            continue
+        current.append(c)
+        in_token = True
+        i += 1
+    if in_token:
+        argv.append("".join(current))
+    return argv
+
+
 def _classify(command: str) -> str:
     """What KIND of process this is, from its argv structure.
 
@@ -467,7 +527,7 @@ def _classify(command: str) -> str:
     Structural instead: the EXECUTABLE decides, and for `nx` the verb sequence
     decides. An argument is not a daemon.
     """
-    parts = command.split()
+    parts = _command_argv(command)
     if not parts:
         return "other"
 
@@ -1685,7 +1745,13 @@ def _sweep_surviving_stack(
     *, unreadable: Sequence[int] = (),
 ) -> str:
     """The note :func:`_sweep_surviving_stack_detail` produces, without the
-    refusals (kept for callers that only report)."""
+    refusals (kept for callers that only report).
+
+    nexus-86aaz: still needed. The engine install now stops the service itself
+    (``replace_quiesce.quiesced``), but :func:`_restart_and_verify` also serves the
+    restart-only branches (right file on disk, stale process) and ``nx daemon
+    restart-stale``, where no install and no quiesce run and its own ``service stop``
+    is the only stop."""
     return _sweep_surviving_stack_detail(config_dir, before, unreadable=unreadable)[0]
 
 
@@ -2421,10 +2487,11 @@ def converge_engine(
         ]
 
     try:
-        # restart_after=False: on Windows the install stops the service to free
-        # the executable (RDR-224, nexus-f9bgu.20); the cycle below starts it
-        # again AND verifies the version, so the install must not start it
-        # first. A failed install still restarts what it stopped.
+        # restart_after=False: the install stops a running service for the swap on
+        # every platform (RDR-224, nexus-f9bgu.20; macOS and Linux nexus-86aaz); the
+        # cycle below starts it again AND verifies the version, so the install must
+        # not start it first (one stop, one start per upgrade; the cycle's own stop
+        # then finds nothing). A failed install still restarts what it stopped.
         install_binary(
             tag, config_dir, installed_by="upgrade-finish engine convergence",
             restart_after=False,
