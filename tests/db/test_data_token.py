@@ -15,12 +15,14 @@ from typing import Any
 import pytest
 import structlog
 
+from nexus.db import gateway_hold
 from nexus.db.data_token import (
     DataTokenManager,
     DataTokenMintError,
     get_data_token_manager,
     reset_data_token_manager,
 )
+from tests._module_seam import patch_in, patch_time
 
 # nexus-9c7t9: every mint now also (best-effort) writes a cross-process
 # lease file under ``nexus_config_dir()``. The managers in this file never
@@ -619,9 +621,22 @@ def test_the_mint_deadline_context_reaches_a_mint_made_deep_inside_a_store() -> 
     poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
     sleep = _FakeSleep()
     mgr = _manager(poster, _FakeClock(), sleep=sleep, rng=_CeilingRng())  # the ceiling draw: a wait is the whole bound
-    with mint_deadline(2.0):
-        assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
-    assert sleep.calls == [pytest.approx(2.0, abs=0.05)]  # cut to what the deadline left
+    # The deadline is asserted as the value handed to the hold wait, with the module's
+    # monotonic clock frozen, so no load on the box can move it (it was a wall-clock approx(2.0, abs=0.05)).
+    real_wait = gateway_hold.wait_before_attempt
+    max_waits: list[float | None] = []
+
+    def spy(**kwargs: Any) -> float:
+        max_waits.append(kwargs.get("max_wait"))
+        return real_wait(**kwargs)
+
+    with patch_time("nexus.db.data_token", "monotonic", lambda: 5_000.0):
+        with patch_in("nexus.db.data_token", "gateway_hold.wait_before_attempt", spy):
+            with mint_deadline(2.0):
+                assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+    assert max_waits == [2.0]  # the whole deadline: 5002.0 - 5000.0, nothing spent
+    assert len(sleep.calls) == 1
+    assert sleep.calls[0] == pytest.approx(2.0, abs=1e-3)  # cut to what the deadline left; arithmetic only, no elapsed time
     # and the bound ends with the block: the next mint (another tenant) waits its full budget
     poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
     sleep.calls.clear()
