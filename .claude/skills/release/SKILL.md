@@ -135,12 +135,13 @@ release-blocking and deterministic (no service, no sandbox HOME).
 ### 1. Run unit + integration suite
 
 ```bash
-tests/e2e/release-battery.sh         # preflight, then the three legs below in ONE parallel run: per-leg logs, verdict table, exit 1 on any red; the unit suite still runs SERIAL to it
+tests/e2e/release-battery.sh         # preflight, then the legs below in ONE parallel run: per-leg logs, verdict table, exit 1 on any red; the unit suite still runs SERIAL to it
 uv run pytest -n auto && uv run pytest -m lint   # unit suite and the lint bucket (two runs)
 tests/e2e/local-service-gate.sh      # leg lsg: integration incl. the local-service functional gate
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
 tests/e2e/constraints-resolve-gate.sh   # leg resolve: the shipped constraints.txt + overrides.txt RESOLVE (uv pip compile, no install): 22 compiles on Linux x86_64/aarch64 py3.12/3.13 (cpu; [pdf] also cu130 and cu126), Windows x64 and macOS 14 arm64, default and [pdf], plus a macOS 13 negative control (nexus-2k66t.4.4); network; needs a uv that knows --torch-backend cu130 and cu126 (the gate probes and says so); offline self-test tests/e2e/constraints_resolve_gate_test.sh
+tests/e2e/plugin-out-of-repo-gate.sh --all   # leg plugins: the four plugin dirs run from a project outside any nexus checkout (nexus-z7ddd); the battery adds --static-only where claude is absent, and the row then reads "(static pass only)": run it again on the laptop; offline self-test tests/e2e/plugin_out_of_repo_gate_test.sh
 tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
 ```
 
@@ -576,14 +577,16 @@ pressure. Do it every release, zero-change releases included.
 
 ### 11c. Post-publish: published-bytes UPGRADE journey (nexus-86mx2, 2026-08-14)
 
-Both commands below drive the just-published PyPI bytes, not the working
+The first two commands below drive the just-published PyPI bytes, not the working
 tree — "identical tree" is an argument that the pre-tag battery already ran
-this; it is not a run of the actual published artifact. Run them once Step
+this; it is not a run of the actual published artifact. The third drives the
+published plugins as the marketplace installed them. Run them once Step
 11 confirms PyPI shows the new version.
 
 ```bash
 tests/e2e/fresh-install-mvv.sh --published X.Y.Z    # FRESH-install axis, published bytes
 NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade   # UPGRADE axis, published bytes
+tests/e2e/plugin-out-of-repo-gate.sh --installed X.Y.Z   # PLUGIN axis, installed marketplace copies (laptop: needs claude)
 ```
 
 The first (nexus-796zn) is the post-publish shakedown for a box that has
@@ -635,6 +638,34 @@ summary line reads `formula-PDF check (MinerU, published bytes): SKIPPED (reason
 copy that line and the reason into the ship record. A skip is a release decision: take
 it to Sam. The first release that carries RDR-237 also needs the Minimum Viable
 Validation done before the tag (see the prerequisite near the top of this file).
+
+**Plugin out-of-repo gate (nexus-z7ddd).** The pre-tag battery's `plugins` leg runs the
+four plugin directories of the checkout. Every plugin check before it ran inside the nexus
+checkout, where a relative `../resources` link, `conexus/registry.yaml` and the repo scripts all open; a
+user's project has none of them. `--installed X.Y.Z` runs the same gate on what the
+marketplace delivered, `~/.claude/plugins/cache/nexus-plugins/<plugin>/X.Y.Z` for
+`conexus`, `sn`, `conexus-tool-spill` and `conexus-prose-edit`. Update the marketplace
+first (`/plugin marketplace update nexus-plugins`, then update each of the four) so that
+all four directories exist at X.Y.Z; a plugin missing there fails the run, it is never
+skipped. It runs from a scratch project with no git repository above it, one `claude -p`
+per agent and per loadable skill (about 50 calls, a few minutes), and ends
+`PLUGIN OUT-OF-REPO GATE PASSED -- installed X.Y.Z: 2 passed, 2 not applicable`. Read it
+as follows:
+
+- `sn` and `conexus-tool-spill` report NOT-APPLICABLE: they have no agents, skills,
+  commands or resource markdown to census, and `sn`'s hook-injected sections get the
+  static pass. Two NOT-APPLICABLE and two passed is the expected shape; four
+  NOT-APPLICABLE is a failure (nothing was examined).
+- `(static pass only)` in the verdict means `claude` was absent. The static pass proves the
+  paths; it does not close the loop, so run it again on the laptop.
+- Exit 2 (`UNVERIFIED`) is not a pass.
+- A red result is a plugin defect in the published copy: fix forward as a plugin-only
+  patch release and take it to Sam. A reference that must stay as written goes in
+  `tests/e2e/plugin-out-of-repo-allowlist.txt` with a written reason; that file ships
+  empty, and a stale entry fails the gate.
+
+Logs for a run you want to keep: add `--out <dir>` (one subdirectory per plugin holds the
+stream-json events and `gate.log`).
 
 ### 12. Reinstall local tool and verify
 

@@ -4,17 +4,27 @@
 #   tests/e2e/release-battery.sh [--max-parallel N] [--only a,b,c] [--skip-preflight] [--plan]
 #                                [--plugin-only vX.Y.Z]
 #
-# Five legs and a preflight (cleanup step 11, nexus-0r1uz; dual nexus-oc2bk; resolve nexus-2k66t.4.4):
+# Six legs and a preflight (cleanup step 11, nexus-0r1uz; dual nexus-oc2bk; resolve nexus-2k66t.4.4;
+# plugins nexus-z7ddd):
 #   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
 #   pkgup  tests/e2e/migration-rehearsal/run.sh --package-upgrade    package-upgrade convergence
 #   lsg    tests/e2e/local-service-gate.sh                            the local-service gate
 #   dual   tests/e2e/dual-embedder-gate.sh                            the keyed bge + Voyage engine (needs a key)
 #   resolve tests/e2e/constraints-resolve-gate.sh                     the shipped lock resolves on every supported
 #                                                                     target (uv pip compile, off-host; network)
+#   plugins tests/e2e/plugin-out-of-repo-gate.sh --all                the four plugins (conexus, sn, tool-spill,
+#                                                                     prose-edit) run from a project outside any
+#                                                                     nexus checkout. The live pass needs the claude
+#                                                                     CLI (the laptop): where it is not on PATH the leg
+#                                                                     runs --static-only and its verdict line says
+#                                                                     "(static pass only)". NX_BATTERY_PLUGIN_GATE_LIVE=0
+#                                                                     asks for the static pass on purpose. Unlike the
+#                                                                     five above it also runs in --plugin-only mode:
+#                                                                     the plugin trees are what that mode changes.
 #
 # Serial first: tests/e2e/release-preflight.sh (the ci-evidence required-context
 # drift tests, the wire-contract ledger, the mandatory pins and the pin sweep).
-# Then the five legs in ONE parallel group, MAX_PARALLEL wide (default 4), each
+# Then the six legs in ONE parallel group, MAX_PARALLEL wide (default 4), each
 # leg in its own log, each verdict line captured verbatim with wall-clock
 # seconds. Reds never stop the battery; one table at the end; exit 1 on any
 # red. A leg that exits 0 without its verdict line is MISSING, never passed
@@ -227,8 +237,16 @@ define_leg dual       group  "DUAL-EMBEDDER GATE (PASSED|FAILED)"       tests/e2
 # macOS 13 negative control. Network, no install; release battery and by hand only,
 # never the default suite. Offline self-test: tests/e2e/constraints_resolve_gate_test.sh.
 define_leg resolve    group  "CONSTRAINTS RESOLVE GATE (PASSED|FAILED)" tests/e2e/constraints-resolve-gate.sh
+# nexus-z7ddd: the plugins as a user runs them, from a project that is not a nexus checkout. The live
+# pass is one claude call per agent and skill; where claude is absent (chas, CI pool) the static pass
+# runs alone and says so in its verdict line rather than skipping.
+PLUGINS_GATE_ARGS=(--all)
+if [ "${NX_BATTERY_PLUGIN_GATE_LIVE:-1}" = 0 ] || ! command -v "${NX_BATTERY_CLAUDE:-claude}" >/dev/null 2>&1; then
+  PLUGINS_GATE_ARGS+=(--static-only)
+fi
+define_leg plugins    group  "PLUGIN OUT-OF-REPO GATE (PASSED|FAILED)"  tests/e2e/plugin-out-of-repo-gate.sh "${PLUGINS_GATE_ARGS[@]}"
 
-# nexus-rbmja.3: the plugin-only fast lane. The five legs above stay in the table and are marked
+# nexus-rbmja.3: the plugin-only fast lane. The five legs above (all but plugins) stay in the table and are marked
 # SKIPPED, never omitted. What the eligibility gate above proved is that the diff from the last client
 # tag touches nothing the wheel or the engine are built from but the version strings, so the wheel and
 # engine are those of the tag; tests/ and the plugin trees DO differ, and the skipped legs are not pure
