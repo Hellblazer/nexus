@@ -533,9 +533,7 @@ class ManifestSectionLabelFillableTest {
         System.setProperty(dev.nexus.service.db.CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, "300");
         try (Connection holder = pg.createConnection("")) {
             holder.setAutoCommit(false);
-            try (var st = holder.createStatement()) {
-                st.execute("LOCK TABLE nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE");
-            }
+            PgContainerHelper.lockTable(holder, CATALOG_DOCUMENT_CHUNKS, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
             long t0 = System.nanoTime();
             var resp = get(TOKEN, TENANT, "/v1/catalog/manifest/section_label_fillable");
             long ms = (System.nanoTime() - t0) / 1_000_000;

@@ -8516,6 +8516,11 @@ public final class CatalogRepository {
     /** SQLSTATE query_canceled: the statement bound fired. */
     public static final String QUERY_CANCELED = "57014";
 
+
+    /** {@code pg_input_is_valid(text, 'timestamptz')} as a typed condition: true when the cast would not raise. */
+    private static Condition validTimestamptz(Field<String> text) {
+        return DSL.condition(DSL.function(DSL.name("pg_input_is_valid"), SQLDataType.BOOLEAN, text, DSL.val("timestamptz")));
+    }
     /**
      * How many manifest rows the manifest-section-labels rung could still fill, counted up to {@code limit}
      * (nexus-l4hds): one bounded, tenant-scoped, read-only query in place of the rung's client-side walk of
@@ -8585,10 +8590,10 @@ public final class CatalogRepository {
             // cast of an invalid stamp is not reached.
             Field<String> naiveAsUtc = DSL.concat(chunkStamp, DSL.inline("+00"));
             Field<OffsetDateTime> stampAt = DSL.when(chunkStamp.likeRegex(STAMP_WITH_OFFSET)
-                        .and(DSL.condition("pg_input_is_valid({0}, 'timestamptz')", chunkStamp)),
+                        .and(validTimestamptz(chunkStamp)),
                     DSL.cast(chunkStamp, SQLDataType.TIMESTAMPWITHTIMEZONE))
                 .when(chunkStamp.likeRegex(STAMP_NAIVE)
-                        .and(DSL.condition("pg_input_is_valid({0}, 'timestamptz')", naiveAsUtc)),
+                        .and(validTimestamptz(naiveAsUtc)),
                     DSL.cast(naiveAsUtc, SQLDataType.TIMESTAMPWITHTIMEZONE));
             // chunk - document <= 5 minutes (note_ttl.PUT_SKEW), compared as epoch seconds.
             Condition withinSkew = DSL.extract(stampAt, DatePart.EPOCH)
