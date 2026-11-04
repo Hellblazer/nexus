@@ -81,13 +81,16 @@ def _match(plan_id: int, question: str) -> Match:
     )
 
 
-async def _drive_nx_answer(db_path, question: str, *, plan_id: int, ttl_days: int | None = None) -> str:
+async def _drive_nx_answer(
+    db_path, question: str, *, plan_id: int, ttl_days: int | None = None, run_result: MagicMock | None = None,
+) -> str:
     """Run the real ``nx_answer`` over real T2, patching only the planner/LLM seams.
 
     ``plan_id == 0`` takes the plan-miss branch (the grow path); a non-zero
     ``plan_id`` makes ``plan_match`` return that library row (the use path).
     ``load_config`` is pinned to the shipped defaults so the user's own config, ``.nexus.yml`` and ``NX_*``
     environment cannot move the TTL under test; ``ttl_days`` overrides ``plans.ad_hoc_ttl`` on top of that.
+    ``run_result`` replaces the successful plan run (a run whose retrieval found nothing, for example).
     """
     from nexus.mcp.core import nx_answer
 
@@ -103,7 +106,7 @@ async def _drive_nx_answer(db_path, question: str, *, plan_id: int, ttl_days: in
             AsyncMock(return_value=_match(0, question)),
         ))
         stack.enter_context(patch(
-            "nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_success()),
+            "nexus.plans.runner.plan_run", AsyncMock(return_value=run_result or _plan_run_success()),
         ))
         stack.enter_context(patch(
             "nexus.mcp.core._generalize_grown_match_description", AsyncMock(return_value=None),
@@ -270,3 +273,66 @@ class TestGrownPlanSurvivesWithUse:
         assert abs((datetime.now(UTC) - used_last).total_seconds()) < 600, used["last_used"]
         assert used["created_at"] == before_used["created_at"]
         assert used["ttl"] == 30
+
+    # nexus-yr2um: the success test above drives a scored, successful run only. A failed run
+    # (success=False) and an unscored one (success=None) reset the disuse clock too, through
+    # different run-start branches: a verdict rides the composite record write
+    # (TelemetryRepository.recordNxAnswerRunComplete -> incrementRunStartedIn), while a verdictless
+    # run takes the per-call record path, where _nx_answer_ensure_run_started issues
+    # increment_run_started. The spies record which branch fired; the row shows the reset.
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("label", "steps", "failures", "via_composite"),
+        [
+            # A retrieval step that ran and found nothing: the empty-retrieval guard records a failure.
+            ("failed", [{"ids": [], "tumblers": []}, {"text": ""}], 1, True),
+            # Every retrieval step skipped for a scope conflict: the caller's error, no verdict counted.
+            ("unscored", [{"ids": [], "scope_conflict": {"plan_corpus": "code", "step_index": 0}}, {"text": ""}], 0, False),
+        ],
+    )
+    async def test_failed_and_unscored_runs_reset_the_disuse_clock(
+        self, tmp_path, label, steps, failures, via_composite,
+    ):
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+
+        db_path = tmp_path / "memory.db"
+        grown_q = f"ttlprobe {label} shape source"
+        await _drive_nx_answer(db_path, grown_q, plan_id=0)
+
+        with T2Database(db_path) as db:
+            imp = _importer(db, _grown_row(db, grown_q))
+            used_id = imp(f"ttlprobe {label} run", created_days=400, last_used_days=25)
+            before = _get(db, used_id)
+
+        result = MagicMock()
+        result.steps = steps
+        real_started = HttpPlanLibrary.increment_run_started
+        real_complete = HttpTelemetryStore.record_nx_answer_run_complete
+        started: list[int] = []
+        completed: list[object] = []
+
+        def _spy_started(self, plan_id):
+            started.append(plan_id)
+            return real_started(self, plan_id)
+
+        def _spy_complete(self, *args, **kwargs):
+            completed.append(kwargs.get("plan_id"))
+            return real_complete(self, *args, **kwargs)
+
+        with patch.object(HttpPlanLibrary, "increment_run_started", _spy_started), \
+                patch.object(HttpTelemetryStore, "record_nx_answer_run_complete", _spy_complete):
+            await _drive_nx_answer(db_path, f"ttlprobe {label} run", plan_id=used_id, run_result=result)
+
+        with T2Database(db_path) as db:
+            used = _get(db, used_id)
+
+        if via_composite:
+            assert completed == [used_id] and started == [], (completed, started)
+        else:
+            assert started == [used_id] and completed == [], (completed, started)
+        assert used["use_count"] == before["use_count"] + 1
+        assert used["failure_count"] == before["failure_count"] + failures
+        assert used["success_count"] == before["success_count"]
+        used_last = datetime.fromisoformat(str(used["last_used"]).replace("Z", "+00:00"))
+        assert abs((datetime.now(UTC) - used_last).total_seconds()) < 600, used["last_used"]
+        assert used["created_at"] == before["created_at"]
