@@ -4,7 +4,7 @@
 T2 is PostgreSQL behind the engine and memory_search is PostgreSQL full-text search with no query grammar; SQLite
 and ChromaDB are gone (RDR-158 P4, RDR-155 P4b). 7.95.0 still told users T2 was "per-project SQLite", that
 memory_search takes "FTS5 syntax", and that a store failure was a "ChromaDB connectivity failure". This sweeps the
-plugin markdown (less changelogs) and the mcpb manifest:
+plugin markdown (less the changelogs and the release ledger) and the mcpb manifest:
 
 * ``FTS5`` never appears: no surface uses it.
 * ``SQLite`` and ``ChromaDB`` appear only on a line that says they are retired or historical, or that names the
@@ -28,9 +28,13 @@ _HISTORY = re.compile(
 )
 
 
+#: Change records name the retired stores as history, on purpose.
+_RECORDS = frozenset({"CHANGELOG.md", "PENDING_RELEASE.md"})
+
+
 def _files() -> list[Path]:
-    md = [p for p in _REPO.glob("conexus/**/*.md") if p.name != "CHANGELOG.md"]
-    md += [p for p in _REPO.glob("sn/**/*.md") if p.name != "CHANGELOG.md"]
+    md = [p for p in _REPO.glob("conexus/**/*.md") if p.name not in _RECORDS]
+    md += [p for p in _REPO.glob("sn/**/*.md") if p.name not in _RECORDS]
     return sorted(md) + [_REPO / "mcpb" / "manifest.json"]
 
 
