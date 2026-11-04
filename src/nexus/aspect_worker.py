@@ -477,9 +477,18 @@ class AspectExtractionWorker:
 
     def start(self) -> None:
         """Spawn the daemon thread. Idempotent — calling twice does
-        not spawn a second thread."""
+        not spawn a second thread.
+
+        Refused, with a warning, while a thread an earlier :meth:`stop` could
+        not join is still alive (nexus-22out): the stop event is shared, so
+        clearing it here would set that thread claiming again beside the new
+        one, and :meth:`is_running` would count only one of them."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                return
+            self._stopping = [t for t in self._stopping if t.is_alive()]
+            if self._stopping:
+                _log.warning("aspect_worker_start_refused_stuck_thread", stuck=len(self._stopping))
                 return
             self._stop_event.clear()
             # A latched fault would otherwise survive the restart and suppress

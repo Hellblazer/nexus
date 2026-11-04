@@ -46,6 +46,35 @@ class ServiceRoleBypassRlsCheckTest {
         assertThat(ServiceRoleBypassRlsCheck.superuserWarning(facts("svc_x", false, true))).isEmpty();
     }
 
+    /** The WARN lines {@link ServiceRoleBypassRlsCheck#verify} logs for {@code f}. */
+    private static java.util.List<String> warnsFromVerify(ServiceRoleBypassRlsCheck.RoleFacts f) {
+        var logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(ServiceRoleBypassRlsCheck.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            ServiceRoleBypassRlsCheck.verify(() -> f);
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
+        return logs.list.stream()
+            .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .toList();
+    }
+
+    @Test
+    void verifyLogsTheSuperuserWarning_andNothingForARoleRlsBinds() {
+        // nexus-22out S-1: the text builder is tested above; this pins that verify actually emits it.
+        assertThat(warnsFromVerify(facts("postgres", true, true)))
+            .singleElement().asString()
+            .contains("event=service_role_superuser_isolation_not_enforced").contains("role=postgres")
+            .contains("tenant isolation is not enforced");
+        assertThat(warnsFromVerify(facts("nexus_svc", false, false))).as("no warning for a role RLS binds").isEmpty();
+    }
+
     @Test
     void verifyThrowsOnARefusal_returnsTheFactsOtherwise() {
         assertThatThrownBy(() -> ServiceRoleBypassRlsCheck.verify(() -> facts("svc_x", false, true)))

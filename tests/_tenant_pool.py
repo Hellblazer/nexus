@@ -265,16 +265,25 @@ def census(state: Mapping[str, Any], tenant: str, *, allow_token: str = "") -> N
 #: ``reset_client_caches`` keeps its bool return (test stubs return None or a bool), and :func:`_drain_or_leak` reads
 #: this to name the worker in the error it raises.
 _last_undrained: list[str] = []
+#: The bound each of those workers was given, in the same order ("telemetry drain bound 5.0 s"), so the error quotes
+#: the bound that applied to the worker it names, not always the telemetry one (nexus-22out).
+_last_undrained_bounds: list[str] = []
+
+#: How long reset_client_caches lets the aspect worker's stop join: aspect_worker.reset_worker_for_tests' default timeout
+#: (pinned equal by tests/test_tenant_pool.py), quoted in the leak error.
+ASPECT_STOP_SECONDS: float = 5.0
 
 
 def _drain_or_leak(subject: str, when: str) -> None:
     """Run :func:`reset_client_caches`; raise :class:`TenantLeakError` naming the worker that outlived its drain. Only
     an explicit False fails: a test stub of ``reset_client_caches`` returns None."""
     _last_undrained.clear()
+    _last_undrained_bounds.clear()
     if reset_client_caches() is False:
         named = " and ".join(_last_undrained) or "a client-side worker"
+        bounds = "; ".join(_last_undrained_bounds) or f"telemetry drain bound {TELEMETRY_DRAIN_SECONDS} s"
         raise TenantLeakError(
-            f"{subject}: {named} still writing {when} (telemetry drain bound {TELEMETRY_DRAIN_SECONDS} s); "
+            f"{subject}: {named} still writing {when} ({bounds}); "
             f"its row would land after the reset's census")
 
 
@@ -288,6 +297,7 @@ def reset_client_caches() -> bool:
     """
     mods = sys.modules
     undrained: list[str] = []
+    bounds: list[str] = []
     # MCP search and query queue a ``search_telemetry`` batch on a process-wide daemon worker and return; the worker
     # POSTs it later with this lease's bearer. The autouse ``_isolate_search_telemetry_sink`` closes the worker, but it
     # sets up before ``_pin_t2_substrate`` (or a test parameter) pulls in the tenant, so it tears down AFTER the
@@ -296,6 +306,7 @@ def reset_client_caches() -> bool:
     infra = mods.get("nexus.mcp_infra")
     if infra is not None and not infra.reset_search_telemetry_sink(TELEMETRY_DRAIN_SECONDS):
         undrained.append("the MCP search telemetry worker")
+        bounds.append(f"telemetry drain bound {TELEMETRY_DRAIN_SECONDS} s")
     # The aspect worker is the same kind of writer (nexus-8sqfs): a test that started it (``ensure_worker_started``,
     # or the enqueue hook with NX_ASPECT_WORKER_AUTOSTART=1) leaves it claiming tuple tasks and persisting through
     # ``t2_index_write`` with this lease's bearer, and the autouse ``_reset_aspect_worker_singleton`` stops it only
@@ -304,6 +315,7 @@ def reset_client_caches() -> bool:
     aw = mods.get("nexus.aspect_worker")
     if aw is not None and aw.reset_worker_for_tests() is False:
         undrained.append("the aspect worker")
+        bounds.append(f"aspect worker stop bound {ASPECT_STOP_SECONDS} s")
     hvc = mods.get("nexus.db.http_vector_client")
     if hvc is not None:
         hvc._invalidate_endpoint()
@@ -323,6 +335,7 @@ def reset_client_caches() -> bool:
     if pcr is not None:
         pcr.reset_plan_cache_registry_for_tests()
     _last_undrained[:] = undrained
+    _last_undrained_bounds[:] = bounds
     return not undrained
 
 

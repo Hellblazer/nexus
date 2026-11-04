@@ -583,7 +583,8 @@ def test_an_aspect_worker_that_outlives_its_stop_fails_the_lease(monkeypatch: py
     so the lease errors naming it, as a telemetry write past its bound does."""
     with pytest.raises(TenantLeakError, match="the aspect worker still writing") as excinfo:
         _ordered_lease(monkeypatch, lambda: False)
-    assert "telemetry" not in str(excinfo.value).split("(telemetry drain bound")[0], "it names the aspect worker alone"
+    assert "telemetry" not in str(excinfo.value), "it names the aspect worker alone, and its bound"
+    assert "aspect worker stop bound" in str(excinfo.value)
 
 
 def test_an_aspect_worker_that_outlives_its_stop_as_the_lease_starts_fails_the_setup_and_retires_the_tenant(
@@ -629,6 +630,26 @@ def test_aspect_worker_stop_reports_a_thread_that_outlived_the_join() -> None:
     assert worker.stop(timeout=1.0) is True, "once the thread has exited the stop is clean"
 
 
+def test_start_refuses_while_a_thread_an_earlier_stop_left_is_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-22out S-2: start() cleared the shared stop event while the stuck thread lived, so it ran on beside the new
+    one. Now start() leaves the event set and starts nothing until that thread has exited; then it starts as before."""
+    release = threading.Event()
+    worker, thread = _worker_with_a_thread_blocked_on(release)
+    ran = threading.Event()
+    monkeypatch.setattr(worker, "_run_loop", ran.set)  # a started loop does nothing but say it ran
+    try:
+        assert worker.stop(timeout=0.01) is False
+        worker.start()
+        assert worker._stop_event.is_set(), "the stuck thread still sees the stop"
+        assert worker._thread is None and not ran.is_set(), "no second thread"
+    finally:
+        release.set()
+        thread.join(5)
+    worker.start()
+    assert ran.wait(5), "once the stuck thread exited, start() runs the loop"
+    assert not worker._stop_event.is_set()
+
+
 def test_a_repeated_stop_still_reports_a_thread_that_has_not_exited() -> None:
     """nexus-8sqfs round 1 (C3): ``stop`` used to clear ``_thread`` before the join, so the second stop after a timeout
     found nothing and answered True with the thread alive. The second answer is False until the thread exits, and the
@@ -660,6 +681,13 @@ def test_stop_worker_reports_a_singleton_thread_that_outlived_the_stop(
         release.set()
         thread.join(5)
     assert aspect_worker.stop_worker(timeout=1.0, _locks_dir=tmp_path) is True, "control: once the thread exited"
+
+
+def test_the_quoted_aspect_stop_bound_is_the_one_reset_worker_for_tests_applies() -> None:
+    """nexus-22out S-3: the leak error quotes ASPECT_STOP_SECONDS for the aspect worker, so it must be that call's bound."""
+    import inspect
+    assert inspect.signature(aspect_worker.reset_worker_for_tests).parameters["timeout"].default == \
+        _tenant_pool.ASPECT_STOP_SECONDS
 
 
 def test_reset_worker_for_tests_reports_a_singleton_thread_that_outlived_the_stop(
