@@ -22,6 +22,12 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+#: The gate runs only on Linux: ci.yml's mcpb-resolve-gate job and release.yml's publish job are ubuntu-latest, and
+#: the fake uv below is a shebang script, which Windows cannot exec (OSError). Windows users never run the gate; the
+#: bundle's launcher is what runs there, tested in the Windows set by test_mcpb_bootstrap and test_mcpb_launcher_venv
+#: (nexus-01tnm). If a gate job moves to Windows, give the fake a Windows form and drop this.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="the mcpb resolve gate runs only on ubuntu-latest; the fake uv is a shebang script")
 GATE = REPO_ROOT / "scripts" / "check_mcpb_resolve.py"
 
 _FAKE_UV = '''#!{python}
