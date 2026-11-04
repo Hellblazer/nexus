@@ -94,9 +94,10 @@ no flag on a hit.
 `docs/privacy-policy.md` §2 lists the cloud tenant, Voyage, Semantic
 Scholar, Anthropic and an OpenAI-compatible endpoint. It omits OpenAlex,
 CrossRef through DEVONthink, and a MinerU server at a non-loopback URL, and
-it has no per-verb table. Indexing in cloud mode uploads chunk text and
-embeddings to the managed tenant without saying so at the moment of
-indexing.
+it has no per-verb table. Indexing a sensitive document in cloud mode
+uploads its chunk text and embeddings to the managed tenant without saying
+so at the moment of indexing (Sam, 2026-11-04: this gap covers the
+sensitive case only, not every cloud-mode index).
 
 ## Relationship to Prior RDRs
 
@@ -199,7 +200,7 @@ count" below refers to it.
 | 16 | `nx_enrich_beads` | mcp/core.py:15615 (dispatch 15654, with `mcp_servers`) | bead text, plus nx MCP tools in the child | posture exported to the child; the child's reads exclude |
 | 17 | `nx_plan_audit` | mcp/core.py:15682 (dispatch 15761, with `mcp_servers`) | plan text, plus MCP tools in the child | as row 16 |
 | 18 | Memory rollup / `memory_consolidate` | memory_rollup.py:152 | T2 notes to the LLM | `n/a-not-a-document`; recorded as an unprotected gap (a note quoting a sensitive document) |
-| 19 | Voyage embedding | engine `VoyageEmbedder.java` | chunk text to `api.voyageai.com` at index time | Q3, decided: an acknowledgement flag; local mode routes a sensitive document to a bge collection |
+| 19 | Voyage embedding | engine `VoyageEmbedder.java`; `CceEmbedder.java` (`/v1/contextualizedembeddings`, CceEmbedder.java:39) | chunk text to `api.voyageai.com` at index time | Q3, decided: an acknowledgement flag; local mode routes a sensitive document to a bge collection |
 | 20 | Voyage rerank | engine `VoyageReranker.java` | query plus candidate chunk text to Voyage | Q4, decided: sensitive candidates are kept from the reranker, engine-side |
 | 21 | MinerU remote | pdf_extractor.py:2787; config.py:623 | PDF bytes to `pdf.mineru_server_url`, possibly off the machine | `--sensitive` with a non-loopback URL falls to the local subprocess ladder, or refuses if none |
 | 22 | Cloud tenant storage | `HttpVectorClient` upserts in cloud mode | chunk text and embeddings to the managed tenant | `--sensitive` prints a one-line disclosure naming tenant and embedder; Q3, decided: an acknowledgement flag is required |
@@ -273,8 +274,11 @@ enforces one, because it is best effort.
 **Documented: a version-floor guard pattern exists.**
 `db/serving_engine_version.py` probes the serving engine's version and
 refuses note-URI writes on an engine below a floor
-(`require_note_uri_engine`). The fail-closed capability check in this RDR
-follows that pattern.
+(`require_note_uri_engine`). On an unknown version it logs
+`note_uri_engine_version_unknown` and allows the write
+(serving_engine_version.py:98-109, `nexus_rdr/243-research-16`), so it is
+not fail-closed. The capability check in this RDR takes only its
+probe-and-refuse shape.
 
 **Documented: DEVONthink is read through AppleScript.** `nx dt index`
 enumerates records with `_run_osascript` (devonthink.py:105), not through
@@ -344,8 +348,15 @@ Three layers, each closing a different hole.
    string and asserts the string never appears in any outbound payload.
 
 The output side (what the session model sees) and the external services
-(Voyage, MinerU, the cloud tenant) depend on Sam's decisions and come in
-phase 3.
+(Voyage, MinerU, the cloud tenant) come in phase 3, under Sam's decisions
+Q1 to Q4 and Q6.
+
+The flag protects against accidental exposure by tools and agents that
+behave as designed. It does not stop a model with shell access that sets
+out to bypass it, for example by changing `sensitivity.mcp_output` or
+running `nx search` with `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` unset
+(session.py:96 detects Claude Code by those variables; the bypass is
+inferred, not read).
 
 ### Technical Design
 
@@ -373,8 +384,9 @@ phase 3.
   change in the audit table. It never lowers it.
 - A new registration for a source URI whose most recent tombstoned row was
   sensitive inherits the flag, with an audit row naming the predecessor.
-  Delete-then-re-index keeps the protection; the audited route can still
-  clear it.
+  Delete-then-re-index keeps the protection while the tombstone exists
+  (`nx catalog purge-trash` removes it); the audited route can still clear
+  it.
 - `nx catalog merge` leaves the canonical document sensitive when either
   side was.
 - `.nxexp` export and the recovery bundle write the column; import reads
@@ -574,7 +586,11 @@ does not depend on callers telling the truth.
 ### Consequences
 
 - Positive: protection belongs to the document and survives rename,
-  import, merge and re-index.
+  import, merge and re-index at the same source URI.
+- Negative: inheritance is keyed on source URI, so the flag does not follow
+  a file moved or copied to a new path, and delete-then-re-index loses it
+  once `nx catalog purge-trash` has removed the tombstone
+  (`nexus_rdr/243-research-17`).
 - Positive: a new LLM surface cannot ship without a registry row, a scope,
   and a canary run.
 - Negative: every existing dispatch caller must be wrapped in the scope in
@@ -685,7 +701,7 @@ that carries the changeset precedes the client release.
 The MCP output posture (Q1); the CLI badge, `--json` field and Claude Code
 posture (Q2); the reader instruction line; Voyage index-time handling (Q3)
 and rerank exclusion (Q4); the remote-MinerU fallback; DEVONthink exclusion
-import and the `nexus-sensitive` writeback tag (Q7, A6); taxonomy discover
+import (Q7, A6; nexus writes nothing into DEVONthink, Sam 2026-11-04); taxonomy discover
 without sensitive members; the `sensitive_in_external_embedder` doctor row;
 `docs/sensitivity.md`.
 
@@ -783,8 +799,9 @@ the drafter's recommendations, the design having left them open.
 - **Q1.** Should the MCP read tools withhold sensitive content from the
   session model by default, or return it with a flag?
   *Decided (as recommended)*: withhold by default, with a config key
-  `sensitivity.mcp_output: withhold | flag` that only the operator can
-  change, never a tool argument. Every MCP response goes to Anthropic, so
+  `sensitivity.mcp_output: withhold | flag`, never a tool argument. Nothing
+  stops a process with shell access from changing the key (inferred, not
+  read). Every MCP response goes to Anthropic, so
   returning content contradicts "exempt from every LLM surface"; this is
   DEVONthink's behaviour.
 - **Q2.** Should `nx search` run from Claude Code's Bash tool (detected by
