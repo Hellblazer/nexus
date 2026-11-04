@@ -521,14 +521,14 @@ class TestAgentTypeClassification:
         result = _run_hook(stdin=self._payload("code-review-expert"))
         assert result.returncode == 0, result.stderr
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "## nx storage" not in ctx
+        assert "## Nexus storage" not in ctx
         assert "## Analytical operators" not in ctx
 
     def test_explore_agent_type_skips_storage_docs_with_no_task_text(self) -> None:
         result = _run_hook(stdin=self._payload("Explore"))
         assert result.returncode == 0, result.stderr
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "## nx storage" not in ctx
+        assert "## Nexus storage" not in ctx
         assert "## Analytical operators" not in ctx
 
     def test_unclassified_agent_type_keeps_storage_docs_with_no_task_text(self) -> None:
@@ -539,7 +539,7 @@ class TestAgentTypeClassification:
         result = _run_hook(stdin=self._payload("general-purpose"))
         assert result.returncode == 0, result.stderr
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "## nx storage" in ctx
+        assert "## Nexus storage" in ctx
         assert "## Analytical operators" in ctx
         # nexus-ivi4s: the operators are not MCP tools, so no injected
         # guidance may name an operator_* tool for a subagent to call.
@@ -559,4 +559,4 @@ class TestAgentTypeClassification:
         result = _run_hook(stdin=payload)
         assert result.returncode == 0, result.stderr
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "## nx storage" not in ctx
+        assert "## Nexus storage" not in ctx

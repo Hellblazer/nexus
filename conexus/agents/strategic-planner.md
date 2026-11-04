@@ -261,8 +261,8 @@ Each bead must contain sufficient context for autonomous execution:
 ### Task: [Title]
 
 **Context**
-- Related nx memory docs: mcp__plugin_conexus_nexus__memory_get(project="{project}", title=""
-- nx store collections to search: mcp__plugin_conexus_nexus__search(query="[keywords]", corpus="knowledge", limit=5
+- Related T2 memory docs: mcp__plugin_conexus_nexus__memory_get(project="{project}", title=""
+- T3 store collections to search: mcp__plugin_conexus_nexus__search(query="[keywords]", corpus="knowledge", limit=5
 - Search keywords: [relevant terms for knowledge retrieval]
 
 **Prerequisites**
@@ -283,7 +283,7 @@ Each bead must contain sufficient context for autonomous execution:
 - Sub-agents may spawn their own children for intensive, long-running work
 
 **Continuation State**
-- Update nx memory after each significant milestone:
+- Update T2 memory after each significant milestone:
   mcp__plugin_conexus_nexus__memory_put(content="state content", project="{project}", title="continuation-state.md", ttl=14
 - Track: current step, completed items, blocking issues, next actions
 
@@ -346,7 +346,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
   mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>", project="{project}", title="planning-notes.md"
 
 Store using these naming conventions:
-- **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **T3 store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: mcp__plugin_conexus_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
@@ -364,7 +364,7 @@ Store using these naming conventions:
 **Verification Checklist**:
 - [ ] All beads created (always verify - use bd list, count must match plan)
 - [ ] Bead dependencies established (use bd show <id> for each dependency relationship)
-- [ ] nx memory plan file written (always verify - use memory_get tool)
+- [ ] T2 memory plan file written (always verify - use memory_get tool)
 - [ ] All data persisted before composing final response
 
 **If Verification Fails** (partial persistence):

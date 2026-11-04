@@ -222,7 +222,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
   mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", project="{project}", title="critique-notes.md"
 
 Store using these naming conventions:
-- **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **T3 store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **T2 (memory_put)**: mcp__plugin_conexus_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
@@ -239,7 +239,7 @@ Store using these naming conventions:
 
 **Verification Checklist**:
 - [ ] T2 gate record written (verify with: memory_get tool: project="...")
-- [ ] nx store documents created (verify with: search tool: query="topic", corpus="knowledge")
+- [ ] T3 store documents created (verify with: search tool: query="topic", corpus="knowledge")
 - [ ] Beads created for critical issues (use bd list when flagging must-fix items)
 - [ ] All data persisted before composing final response
 
@@ -249,7 +249,7 @@ Store using these naming conventions:
 3. **Persist recovery notes**: Write failure details: mcp__plugin_conexus_nexus__memory_put(content="details", project="{project}", title="persistence-failure-{date}.md"
 4. **Continue with response**: Partial data is better than no data - include what succeeded
 
-Example: If nx store write fails but nx memory succeeds, note in response: "Critique persisted to nx memory. nx store write failed - retry with store_put tool manually."
+Example: If T3 store write fails but T2 memory succeeds, note in response: "Critique persisted to T2 memory. T3 store write failed - retry with store_put tool manually."
 
 **Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 

@@ -12,7 +12,7 @@ An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cn
 |-------|-------------|---------|
 | **Task** | 1-2 sentence summary | "Review code changes for security issues" |
 | **Bead** | Bead ID with status, or 'none' | "Delos-1234 (status: in_progress)" |
-| **Input Artifacts** | Context being provided | nx store docs, files, nx memory |
+| **Input Artifacts** | Context being provided | T3 store docs, files, T2 memory |
 | **Deliverable** | What the agent should produce | "Structured review with findings" |
 | **Quality Criteria** | Checklist for success | Checkboxes of requirements |
 

@@ -217,8 +217,8 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
     tombstoned-doc chunks with no live parent (chunk -> parent direction).
     See the module docstring's POPULATION section — RDR-191 Phase 6
     (nexus-o8dil.33) retired the counterpart population (`nx doctor`'s
-    former "dangling manifest chashes" warn / the former `nx catalog
-    manifest-verify --list`) this note used to disambiguate against; the
+    former "dangling manifest chashes" warn / the former catalog
+    manifest-verify listing) this note used to disambiguate against; the
     manifest-chunk FK makes that population unreachable.
     """
     if json_out and not dry_run:

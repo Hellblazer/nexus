@@ -480,8 +480,8 @@ When skills delegate to agents, they use a standardized relay format defined in 
 
 ### Storage Naming Conventions
 
-- **nx store titles**: hyphens — `decision-cache-strategy`, `research-auth-patterns`
-- **nx memory projects**: `{repo}` (general notes), `{repo}_rdr` (RDR metadata), `{repo}_knowledge` (findings)
+- **T3 store titles**: hyphens — `decision-cache-strategy`, `research-auth-patterns`
+- **T2 memory projects**: `{repo}` (general notes), `{repo}_rdr` (RDR metadata), `{repo}_knowledge` (findings)
 - **Bead IDs**: managed by `bd` CLI
 
 ### Permission Auto-Approval

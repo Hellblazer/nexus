@@ -244,7 +244,7 @@ Agents produce artifacts based on their specialization:
 
 ### Naming Conventions
 
-- **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **T3 store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: `project="{project}", title="{topic}.md"` (e.g., `project="ART", title="auth-implementation.md"`)
 
 ## Deliverable Length
@@ -414,7 +414,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 
 ### Agent-Specific PRODUCE
 - [Additional artifacts this agent produces]
-- [Custom nx store title patterns]
+- [Custom T3 store title patterns]
 
 ### Agent-Specific RELAY
 [Any modifications to standard relay format]

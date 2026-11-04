@@ -170,8 +170,8 @@ def hygiene_cmd(apply_: bool) -> None:
     `nx plan enable` — never deletes).
 
     Routes through HttpPlanLibrary, so it cleans the live engine-served
-    library (nexus-vtp8h). (Its one-time local-SQLite sibling, `nx plan
-    repair`, died with the SQLite store — nexus-i711w sub-stage A3.)
+    library (nexus-vtp8h). (Its one-time local-SQLite repair sibling
+    died with the SQLite store — nexus-i711w sub-stage A3.)
     """
     library = _open_plan_library()
     if library is None:
@@ -514,7 +514,7 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
     \b
     With --from-project, stamps scope_tags from the plan's own
     ``project`` column — the same recovery source as the automatic
-    #1069 fallback in ``save_plan`` (and the retired ``nx plan repair scope-tags``).
+    #1069 fallback in ``save_plan`` (and the retired SQLite scope-tags repair).
 
     \b
     Examples::

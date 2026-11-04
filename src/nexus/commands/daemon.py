@@ -481,7 +481,7 @@ def service_install_cmd(autostart: bool, force: bool) -> None:
     RDR-174 P2.1 (nexus-y2yj6): the service that serves every tier (engine
     binary + local Postgres) previously had no reboot-persistence. Thin wrapper
     over :func:`nexus.daemon.installer.install_autostart` with ``tier="service"``
-    (mirrors ``nx daemon t2 install`` — same structured-result translation).
+    (the same structured-result translation the retired T2 daemon installer used).
     The installed unit execs ``nx daemon service start --foreground``.
     """
     if not autostart:  # pragma: no cover — click enforces required=True
@@ -524,8 +524,8 @@ def service_uninstall_cmd(autostart: bool) -> None:
 
     RDR-174 P2.1: completes the install/uninstall pair so the unit a user
     installs can be cleanly removed via ``nx`` (not stranded). Thin wrapper over
-    :func:`nexus.daemon.installer.uninstall_autostart` with ``tier="service"``;
-    mirrors ``nx daemon t2 uninstall``.
+    :func:`nexus.daemon.installer.uninstall_autostart` with ``tier="service"``,
+    as the retired T2 daemon uninstaller did.
     """
     if not autostart:  # pragma: no cover — click enforces required=True
         raise click.UsageError("--autostart is required")
