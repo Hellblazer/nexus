@@ -256,12 +256,14 @@ outbound calls.** The bibliographic enrichers use module constants
 `aspect_readers.py` fetches a document's own `https` source URI. None is a
 literal at the call site. The registry lint below inverts the rule: every
 `httpx` request outside the engine-client modules must sit in a function
-the registry names. The lint reads Python only. Engine egress (rows 19, 20
-and 22, `EgressProxy`, and the `POST /v1/vectors/resolve` fetch of a stored
-source URI) stays a hand-kept list whose source is RDR-210's engine egress
-census (`nexus_rdr/210-research-10`, `nexus_rdr/243-research-21`). The
-local cross-encoder reranker sends nothing off the machine; Q4 concerns the
-Voyage reranker only.
+the registry names. The lint reads Python only. Engine egress (rows 19 and
+20, through `EgressProxy`) is already guarded by the engine's own source
+census, `EgressGuardCensus` and `EgressGuardCensusTest`, which pin every
+outbound construct per file (`nexus_rdr/243-research-24`); a new engine
+path fails that test. Row 22 is client egress from `HttpVectorClient`, so
+the Python registry covers it. The local cross-encoder reranker sends
+nothing off the machine (CrossEncoderReranker.java uses ONNX only,
+`nexus_rdr/243-research-15`); Q4 concerns the Voyage reranker only.
 
 **Documented, corrects the design: a `pg_proc` parity check misses reads
 that are not SQL functions.** Get-by-id in `PgVectorRepository.java` is a
@@ -282,8 +284,9 @@ refuses note-URI writes on an engine below a floor
 (`require_note_uri_engine`). On an unknown version it logs
 `note_uri_engine_version_unknown` and allows the write
 (serving_engine_version.py:99-110, `nexus_rdr/243-research-16`), so it is
-not fail-closed. The capability check in this RDR takes only its
-probe-and-refuse shape.
+not fail-closed. The capability checks in this RDR use the `GET /version`
+key probes instead (Technical Design item 3), where an absent answer reads
+as unsupported.
 
 **Documented: DEVONthink is read through AppleScript.** `nx dt index`
 enumerates records with `_run_osascript` (devonthink.py:105), not through
@@ -352,9 +355,10 @@ Three layers, each closing a different hole.
    surface over a corpus that holds a sensitive document carrying a unique
    string and asserts the string never appears in any outbound payload.
 
-The output side (what the session model sees) and the external services
-(Voyage, MinerU, the cloud tenant) come in phase 3, under Sam's decisions
-Q1 to Q4 and Q7.
+The output side (what the session model sees), rerank exclusion and the
+DEVONthink import come in phase 3, under Sam's decisions Q1, Q2, Q4 and
+Q7. The input-side external rules (MinerU, the Voyage acknowledgement, the
+cloud tenant disclosure) ship with phases 1 and 2.
 
 The flag protects against accidental exposure by tools and agents that
 behave as designed. It does not stop a model with shell access that sets
@@ -405,14 +409,22 @@ route returns `sensitive` per (chash, doc_id) row. The vector search
 routes accept `sensitivity=exclude` and return `sensitive` per hit,
 computed in one batched query over the result chashes after the search, so
 the `RETURNS TABLE` shapes of the search functions do not change. The
-engine advertises the capability (a `capabilities` entry on its status
-route, which is new engine work: the route has no such entry today). A
-client refuses a `--sensitive` write (index, `store put`, MCP `store_put`,
-`nx catalog sensitive`) before the register call when the engine does not
-advertise the capability, and also when the status probe fails or returns
-no capabilities: unlike `require_note_uri_engine`, an unknown answer
-refuses, because an engine without the column would drop the flag without
-an error (CatalogRepository.java reads register fields by key).
+get-by-id and store-get routes return `sensitive` per row the same way.
+The engine advertises two capabilities as boolean keys on `GET /version`,
+the mechanism already in use (`nexus_rdr/243-research-22`):
+`catalog_sensitivity_supported`, added with the catalog changeset in
+phase 1, and `vector_sensitivity_exclude_supported`, added with the
+vectors changeset in phase 2. The client reads them through cached probes
+like `supports_chash_allow`, where a failed or absent answer reads as
+unsupported. A `--sensitive` write (`index pdf`, `index md`, `dt index`,
+`dt capture`, `store put`, MCP `store_put`) refuses before the register
+call, and `nx catalog sensitive` before its route call, unless
+`catalog_sensitivity_supported` is true, because an engine without the
+column would drop the flag without an error (CatalogRepository.java reads
+register fields by key). The public conexus edge trims `/version` to an
+allowlist, so adding both keys there is paired conexus work that lands
+before the client release; without it a cloud client refuses `--sensitive`
+writes and `exclude` reads.
 
 **4. Read-side filter (phase 2).** Each search function family takes the
 parameter and, when it is `exclude`, adds `NOT EXISTS` over live sensitive
@@ -451,15 +463,19 @@ its helper thread; the taxonomy pool submits each batch through
 its own thread for each row it drains.
 
 **6. Reads under the scope.** The posture reaches a read as an explicit
-argument. The `HttpVectorClient` methods that return chunk text (`search`,
-`hybrid_search`, `search_per_collection`, `search_metadata_scoped`,
-`search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`,
-`get_by_id`, `list_store`, `list_chunks_with_metadata` and `chunk_rows`;
-`nexus_rdr/243-research-19`) take a keyword-only
+argument. The client calls that return chunk text (`HttpVectorClient`
+`search`, `hybrid_search`, `search_per_collection`,
+`search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`,
+`search_aspect_scoped`, `get_by_id` and `chunk_rows`, and
+`_ServiceCollectionStub.get`, which `get_collection` returns and
+`store_get_many` reaches through `_batched_get_by_ids`;
+`nexus_rdr/243-research-19`, `nexus_rdr/243-research-23`) take a keyword-only
 `sensitivity: Literal["exclude", "include"]` with no default, and so does
 every layer a posture flows through: `search_cross_corpus`, the
-`T3Database` facade, `InMemoryVectorClient` and the runner's
-`_hydrate_tumbler_ids`. A call site that omits it fails at call time.
+`T3Database` facade, `InMemoryVectorClient`, `_batched_get_by_ids` and the
+runner's `_hydrate_tumbler_ids`, which calls the internal helper behind
+`store_get_many` instead of the tool function it calls today
+(runner.py:2224). A call site that omits it fails at call time.
 `llm_bound` maps to `exclude` and `default` to `include`. Each entry point
 reads `current_posture()` once on its own thread and passes the value
 down; `search_cross_corpus` hands it to every pool task as an argument.
@@ -469,8 +485,8 @@ derives the value from the posture and calls an internal helper that takes
 it, so a model cannot pass `include`. `exclude` sends `sensitivity=exclude`;
 `include` sends nothing, which is the request made today. Every existing
 caller changes in the same release; non-LLM callers (indexing, dedupe,
-export) pass `include`. If the engine does not advertise the capability, an
-`exclude` read raises; it never falls back to an unfiltered read. Document-keyed pipelines check the catalog row
+export) pass `include`. If `vector_sensitivity_exclude_supported` is not
+true, an `exclude` read raises; it never falls back to an unfiltered read. Document-keyed pipelines check the catalog row
 before they read: aspect enqueue, the worker drain, `extract_aspects`, the
 bib and CrossRef selection, the validation sample frame, taxonomy sample
 names, and `aspect_readers` source reads (disk, DEVONthink, https) under
@@ -484,7 +500,8 @@ them.
 `session-model`, `none`), and behaviour (`refuse`, `skip`, `exclude`,
 `withhold`, `disclose`, `n/a-not-a-document`, `n/a-no-content`). The table
 is the source for the privacy-policy rows and for each `--sensitive` help
-text.
+text. Each row also names the phase that enforces it; generated text lists
+only rows enforced in the release being built.
 
 **8. Setting the flag.** `--sensitive` on `nx index pdf`, `nx index md`,
 `nx dt index`, `nx dt capture` and `nx store put`; `sensitive: bool =
@@ -510,7 +527,9 @@ terminal (Q2).
 Output posture (phase 3, Q1). Under `withhold`, the default, an MCP read
 tool reads with `include`, then replaces each hit whose `sensitive` field
 (item 3) is true with one line, `[sensitive] <tumbler>: content withheld`,
-with no title, and states the number of withheld hits in the result, so
+with no title (`<tumbler>` is the hit's sensitive owner from item 3, the
+first by tumbler order when there are several, or omitted when none
+resolves), and states the number of withheld hits in the result, so
 results do not thin without notice (Sam, 2026-11-04). The text never
 leaves the tool. Under `flag` the hit is returned with its content and a
 `[sensitive]` badge.
@@ -533,7 +552,7 @@ not-applicable, never a green pass.
 | Owner resolution on hits | `search_engine._attach_from_chash_positions` | Extend: carry `sensitive` per owner; enforcement stays in the engine |
 | Collection-level extraction gate | `aspect_extractor.select_config`, `docs_collection_opted_in` | Reuse for the doctor row; the document gate sits in front of it |
 | Dispatch environment | `operators/dispatch._build_dispatch_env` | Extend: export the posture |
-| Version-floor refusal | `db/serving_engine_version.require_note_uri_engine` | Reuse the pattern for the capability check |
+| Capability probe | `GET /version` `*_supported` keys; `HttpVectorClient.supports_chash_allow`, `HttpCatalogClient._version_flags` | Extend: two new keys and probes; the conexus edge allowlist (paired) |
 | Closed table | `src/nexus/tables/` (TOML plus loader, RDR-201) | Extend: new `llm-surfaces` table |
 | Catalog write surface | `catalog_protocol.CATALOG_WRITE_OPS` | Extend: add `set_sensitivity` (a write proxy that lacks it raises at call time, the nexus-kgos1 shape) |
 | Disclosure text | `docs/privacy-policy.md` §2 | Extend: per-verb table generated from the registry |
@@ -660,9 +679,9 @@ does not depend on callers telling the truth.
   (`nexus_rdr/243-research-18`), and asserts that a pool ran.
 - **Risk**: A client sends `sensitivity=exclude` to an engine that ignores
   unknown parameters and returns sensitive rows.
-  **Mitigation**: the client checks the capability first and raises when
-  it is absent; the engine changeset ships in an engine release before the
-  client release that depends on it.
+  **Mitigation**: the client reads `vector_sensitivity_exclude_supported`
+  first and raises when it is absent; both engine changesets and the edge
+  allowlist ship before the client release that depends on them.
 - **Risk**: The filter thins search results (A3).
   **Mitigation**: measure before phase 2 lands; the iterative scan already
   in use is the expected remedy.
@@ -676,9 +695,9 @@ does not depend on callers telling the truth.
   root; the fix is to wrap the surface and add its registry row.
 - A sensitive document skipped: a structured log line names the tumbler
   and the surface; the command summary counts skips.
-- An old engine: `exclude` reads and `--sensitive` writes raise with the
-  engine version and the minimum required, and so does a status probe that
-  fails or reports no capabilities.
+- An old engine, or a `/version` probe that fails: `exclude` reads and
+  `--sensitive` writes raise, naming the engine version and the minimum
+  required when the probe answered, or the probe failure when it did not.
 - A document that leaked before it was flagged: `nx catalog doctor` fails
   `sensitive_with_aspects` and prints the delete command.
 
@@ -701,7 +720,13 @@ payload. Deleting any one gate turns its row red. This runs in phase 1.
 
 Phases 1 and 2 ship in one release: `--sensitive` is not released until
 the read filter is in, so no release describes protection it does not
-give (Sam, 2026-11-04). Phase 3 can ship later.
+give (Sam, 2026-11-04). Phase 3 can ship later because each registry row
+carries the phase that enforces it, and the privacy-policy table and the
+`--sensitive` help text are generated only from rows enforced in the
+release being built. The input-side external rules ship with phases 1 and
+2, not phase 3: a sensitive PDF never goes to a MinerU URL (row 21), the
+Q3 acknowledgement and bge routing, and the MCP `store_put` cloud refusal
+(item 8) are Phase 1 Step 3 work.
 
 ### Phase 1: Minimal real protection (input side, document-keyed)
 
@@ -715,14 +740,19 @@ record the red runs on the bead. They are the pin.
 Changeset `catalog-0NN` (column, partial index, audit table,
 `chunk_sensitive` functions, grants); the write rules in Technical Design
 item 2; the audited route; `sensitive` in document JSON and in
-chash-positions rows. Java repository tests on PostgreSQL.
+chash-positions rows; the `catalog_sensitivity_supported` key on
+`GET /version`. Java repository tests on PostgreSQL.
 
 #### Step 3: Python flag and verbs
 
 `CatalogEntry.sensitive`; `set_sensitivity` in the client and in
 `CATALOG_WRITE_OPS`; `--sensitive` on `index pdf`, `index md`,
 `dt index`, `dt capture`, `store put`, and MCP `store_put`;
-`nx catalog sensitive`; `nx catalog list --sensitive`.
+`nx catalog sensitive`; `nx catalog list --sensitive`; the
+`catalog_sensitivity_supported` probe and the write refusal (item 3); the
+MinerU rule (row 21: `--sensitive` takes the local subprocess path); the
+Q3 `--ack-external-embedder` flag and bge routing, and the MCP `store_put`
+cloud refusal (item 8).
 
 #### Step 4: Scope and document gates
 
@@ -733,9 +763,10 @@ taxonomy sample names.
 
 #### Step 5: Registry, doctor, policy
 
-`llm-surfaces.toml` and loader with every census row; the doctor rows
-`sensitive_in_aspect_eligible` and `sensitive_with_aspects`; the
-privacy-policy §2 table.
+`llm-surfaces.toml` and loader with every census row and the phase that
+enforces it; the doctor rows `sensitive_in_aspect_eligible` and
+`sensitive_with_aspects`; the privacy-policy §2 table, generated from the
+rows enforced in the release.
 
 Exit: the canary is green for every `refuse` or `skip` row, and each pin
 has been seen to fail with its gate removed.
@@ -743,20 +774,22 @@ has been seen to fail with its gate removed.
 ### Phase 2: Read-side filtering for `nx_answer` and tool-access children
 
 Engine `sensitivity=exclude` in every search family and in get-by-id
-(a new `vectors-0NN` changeset), the route parity test, the capability
-entry. `HttpVectorClient` read methods take the explicit, default-less
+(a new `vectors-0NN` changeset), `sensitive` per row on the get-by-id and
+store-get routes, the route parity test, the
+`vector_sensitivity_exclude_supported` key; the conexus edge allowlist for
+both keys. `HttpVectorClient` read methods take the explicit, default-less
 `sensitivity` argument and fail closed; `search_cross_corpus` passes it to
 every pool task; every existing caller is updated. Runner and bundle
 hydration refusals. `NX_SENSITIVITY_POSTURE` exported to children and read
 by the nested MCP server. `nx_tidy` prefetch exclusion. The engine release
-that carries the changeset precedes the client release that carries
-phases 1 and 2.
+that carries both changesets, and the edge allowlist, precede the client
+release that carries phases 1 and 2.
 
 ### Phase 3: Output side and external services
 
 The MCP output posture (Q1); the CLI badge, `--json` field and Claude Code
-posture (Q2); the reader instruction line; Voyage index-time handling (Q3)
-and rerank exclusion (Q4); the remote-MinerU fallback; DEVONthink exclusion
+posture (Q2); the reader instruction line; rerank exclusion (Q4);
+DEVONthink exclusion
 import (Q7, A6; this RDR adds no write to DEVONthink, Sam 2026-11-04); taxonomy discover
 without sensitive members; the `sensitive_in_external_embedder` doctor row;
 `docs/sensitivity.md`.
@@ -813,9 +846,11 @@ None.
 - **Scenario**: Route parity (phase 2) — **Verify**: every engine route
   that returns chunk text accepts `sensitivity` and filters; the list is
   derived from the route table and `pg_proc`, not typed by hand.
-- **Scenario**: Old engine (phase 2) — **Verify**: an `exclude` read and a
-  `--sensitive` write raise, as they do when the status probe fails; an
-  `include` read works.
+- **Scenario**: Old engine (phase 1) — **Verify**: a `--sensitive` write
+  refuses when `catalog_sensitivity_supported` is absent or the probe fails.
+- **Scenario**: Old engine (phase 2) — **Verify**: an `exclude` read raises
+  when `vector_sensitivity_exclude_supported` is absent or the probe fails;
+  an `include` read works.
 - **Scenario**: `nx_answer` over a corpus with collections of at least two
   embedding models and a sensitive canary document (phase 2) — **Verify**: the canary is absent
   from every operator prompt and from the final answer.
@@ -823,7 +858,7 @@ None.
   — **Verify**: it raises at call time.
 - **Scenario**: Child process with MCP tools (phase 2) — **Verify**: its
   `search` returns no sensitive hits.
-- **Scenario**: MCP `store_put(sensitive=True)` — **Verify**: cloud mode
+- **Scenario**: MCP `store_put(sensitive=True)` (phase 1) — **Verify**: cloud mode
   refuses with the reason; local mode stores into the subject's bge
   collection.
 - **Scenario**: MCP `search` under `withhold` (phase 3) — **Verify**: a
@@ -927,8 +962,9 @@ the drafter's recommendations, the design having left them open.
 ### Cross-Cutting Concerns
 
 - **Versioning**: engine changesets ship in an engine release ahead of the
-  client release that sends `sensitivity=exclude`; the client checks the
-  capability and refuses on an older engine.
+  client release that sends `sensitivity=exclude`, with both `/version`
+  keys allowlisted on the conexus edge; the client probes each key and
+  refuses on an older engine.
 - **Build tool compatibility**: N/A
 - **Licensing**: N/A
 - **Deployment model**: same schema and code in local and cloud mode; the
@@ -969,3 +1005,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-04: Gate round 1 — BLOCKED (1 Critical, 9 Significant, 1 ship-blocker(s)); commit `d67b81f01`; critique `nexus_rdr/243-gate-critique-2026-11-03-r1`.
 - 2026-11-04: Gate round 2 — PASSED (0 Critical, 10 Significant, 0 ship-blocker(s)); commit `35b28ad48`; critique `nexus_rdr/243-gate-critique-2026-11-04-r2`.
 - 2026-11-04: Sam's rulings: remedy (a) for the round-1 Critical; Gap 5 narrowed to the sensitive case; no DEVONthink writeback tag. After the round-2 PASSED gate, Sam asked for all ten Significants: phases 1 and 2 ship together; MCP `store_put(sensitive=True)` refuses in cloud mode and routes to bge locally; withheld MCP hits are a stub with no title and a withheld count; a sensitive PDF never goes to a MinerU URL, loopback or not. Revision: these designs, the write-path capability check, the dispatch-side thread hops, the client read-method list, the canary's embedding-model condition, engine egress as a hand-kept list, and wording fixes.
+- 2026-11-04: fix round on the revision's fix check (`nexus_rdr/243-fix-check-bb08311f3`): two `GET /version` capability keys (catalog in phase 1, vectors in phase 2) with the conexus edge allowlist; the input-side external rules move into phase 1 and registry rows carry their enforcing phase; the stub `get` read path; engine egress under `EgressGuardCensus`; the stub's per-row field.
