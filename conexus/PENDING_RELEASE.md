@@ -91,7 +91,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/registry.yaml` (nexus-z7ddd): a rule's rationale and the schema note name the credentials wrapper and the routing directory by description, not by a repo path or a bare script name.
 - `conexus/skills/orchestration/reference.md` (nexus-z7ddd): the collection-rules line is a link, not a URL with the sentence's period glued on.
 - `sn/hooks/scripts/serena-tools.txt` (nexus-z7ddd): the generated header names the sync script instead of a repo path; the tool list is unchanged.
-- `conexus/README.md` (nexus-z7ddd): the docs and tests it names are GitHub links, and the commands and skills directories are named relative to the plugin.
+- `conexus/README.md` (nexus-z7ddd): the docs, tests and top-level README it names are GitHub links, and the commands and skills directories are named relative to the plugin.
+- `conexus/skills/orchestration/reference.md` (nexus-z7ddd): the nx_answer timing line no longer cites an operator-only T2 record.
 - `sn/README.md` (nexus-z7ddd): the developer agent is named relative to the conexus plugin, not as a repo path.
 - `conexus/plans/target_families/README.md` (nexus-z7ddd): the tables directory is a GitHub link, not a glob over a repo path.
 

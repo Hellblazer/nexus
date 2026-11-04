@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-10 agents, 39 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+10 agents, 39 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](https://github.com/Hellblazer/nexus/blob/main/README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
 

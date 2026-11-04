@@ -772,6 +772,76 @@ def test_a_plugin_root_variable_in_a_file_the_model_reads_is_flagged_fenced_or_n
     assert [b.split(":")[1] for b in bad] == ["1", "3", "5"], bad
 
 
+_MD_LINK_TARGET = re.compile(r"\]\(([^)\s]+)\)")
+
+
+def _escaping_link_violations(files: list[Path], repo_root: Path = REPO_ROOT) -> list[str]:
+    """Relative markdown links that resolve outside the plugin the file belongs to.
+
+    ``[Nexus CLI](../README.md)`` in ``conexus/README.md`` points at the repository README, which an installed plugin
+    does not have; the root-level-file rule cannot see it because a ``../`` prefix hides the name."""
+    import os  # noqa: PLC0415
+
+    bad = []
+    for path in files:
+        rel = path.relative_to(repo_root)
+        plugin = repo_root / rel.parts[0]
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for m in _MD_LINK_TARGET.finditer(line):
+                target = m.group(1).split("#", 1)[0]
+                if not target or "://" in target or target.startswith(("mailto:", "/")):
+                    continue
+                resolved = Path(os.path.normpath(path.parent / target))
+                if not resolved.is_relative_to(plugin):
+                    bad.append(f"{rel.as_posix()}:{i}: link {m.group(1)} leaves the plugin")
+    return bad
+
+
+def test_a_link_that_leaves_the_plugin_is_flagged(tmp_path: Path) -> None:
+    f = tmp_path / "conexus" / "README.md"
+    f.parent.mkdir()
+    (tmp_path / "conexus" / "skills").mkdir()
+    f.write_text(
+        "see [CLI](../README.md) and [skill](skills/x/SKILL.md) and [up](skills/../agents/a.md)\n"
+        "and [web](https://example.com/../x) and [anchor](#top) and [out](../docs/a.md#frag)\n",
+        encoding="utf-8",
+    )
+    bad = _escaping_link_violations([f], tmp_path)
+    assert bad == [
+        "conexus/README.md:1: link ../README.md leaves the plugin",
+        "conexus/README.md:2: link ../docs/a.md#frag leaves the plugin",
+    ], bad
+
+
+def test_no_plugin_markdown_links_outside_its_plugin() -> None:
+    files = _plugin_markdown()
+    bad = _escaping_link_violations(files)
+    assert len(files) >= 84
+    assert not bad, "\n".join(bad)
+
+
+#: A dated T2 record of the nexus project (``nexus/nx-answer-capability-analysis-2026-08-19``): the maintainers' own
+#: memory, which a user's install does not hold. State the point inline or leave it out.
+_OPERATOR_T2_RECORD = re.compile(r"`(?:nexus|nexus_rdr)/[a-z0-9][a-z0-9-]*-20\d\d-\d\d-\d\d`")
+
+
+def test_a_dated_operator_t2_record_citation_is_flagged() -> None:
+    assert _OPERATOR_T2_RECORD.search("(2026-08, T2 `nexus/nx-answer-capability-analysis-2026-08-19`): p50")
+    assert not _OPERATOR_T2_RECORD.search("write `nexus/your-note` or `myproject/decision-2026-08-19` to T2")
+
+
+def test_plugin_markdown_cites_no_dated_operator_t2_record() -> None:
+    files = _plugin_markdown()
+    bad = [
+        f"{p.relative_to(REPO_ROOT).as_posix()}:{i}: {m.group(0)}"
+        for p in files
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+        for m in _OPERATOR_T2_RECORD.finditer(line)
+    ]
+    assert len(files) >= 84
+    assert not bad, "\n".join(bad)
+
+
 def test_a_plugin_root_placeholder_block_names_one_concrete_file_for_the_real_spelling() -> None:
     """The resource files cannot carry the plugin-root variable, so their template blocks write ``<plugin-root>`` and
     say where to copy the real spelling from. A directory is not an answer (an agent opens it and still has to pick a
