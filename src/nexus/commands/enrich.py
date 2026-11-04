@@ -3444,7 +3444,7 @@ def enrich_aspects_promote_field(field_name: str | None, history: bool) -> None:
 
     Promoting a field is a Liquibase changeset, not a runtime command —
     invoking this with a FIELD_NAME prints the changeset recipe and exits
-    non-zero. See ``src/nexus/aspect_promotion.py`` for the full template.
+    non-zero. See the docstring of ``nexus.aspect_promotion`` for the full template.
 
     ``--history`` reads ``aspect_promotion_log`` on whichever
     ``document_aspects`` backend is configured.

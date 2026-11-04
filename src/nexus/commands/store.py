@@ -58,7 +58,7 @@ def store() -> None:
               help="Collection: the bare subject this note belongs to, such as "
                    "distributed-systems. Required: the placeholders default/knowledge/"
                    "notes/tmp/test are refused. Never a model token or version; see "
-                   "docs/collections.md.")
+                   "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md.")
 @click.option("--title", "-t", default="", help="Document title (required when SOURCE is -)")
 @click.option("--tags", default="", help="Comma-separated tags")
 @click.option("--category", default="", help="Category label")
@@ -234,7 +234,7 @@ from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
                    "knowledge, every knowledge collection). Never a model token or "
-                   "version; see docs/collections.md.")
+                   "version; see https://github.com/Hellblazer/nexus/blob/main/docs/collections.md.")
 @click.option("--limit", "-n", default=200, show_default=True,
               help="Maximum entries to show")
 @click.option("--offset", default=0, show_default=True,
@@ -419,7 +419,7 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
             raise click.ClickException(
                 "The connected engine predates POST /v1/vectors/reapable (RDR-192 Step 8, bead "
                 "nexus-wbfpw.17); upgrade to an engine tag that carries it (compare the deployed "
-                "engine's version against REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py)."
+                "engine's version against nexus.engine_version.REQUIRED_ENGINE_VERSION)."
             ) from exc
         raise click.ClickException(f"Failed to list reapable chunks for {col_name!r}: {exc}") from exc
     if shown == 0:
@@ -512,7 +512,7 @@ def _store_scope(collection: str, db: T3Database) -> tuple[list[str], list]:
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
                    "knowledge, every knowledge collection). Never a model token or "
-                   "version; see docs/collections.md.")
+                   "version; see https://github.com/Hellblazer/nexus/blob/main/docs/collections.md.")
 @click.option("--json", "json_out", is_flag=True, default=False,
               help="Output as JSON")
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:

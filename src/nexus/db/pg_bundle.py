@@ -390,7 +390,7 @@ def _extract_and_validate(archive: Path, dest: Path) -> None:
         raise RuntimeError(
             f"PG bundle '{archive}' is missing its '{_BUILD_PREFIX_MARKER}' "
             "relocation marker — not a genuine nexus PG bundle "
-            "(scripts/build_pg_bundle.sh stamps it at bundle/.build_prefix)."
+            "(the bundle build stamps it at bundle/.build_prefix)."
         )
 
 

@@ -5824,7 +5824,8 @@ def store_put(
             "\"distributed-systems\"), never a four-segment name or model "
             "token. Reuse an existing subject before minting one (see "
             "`nx collection list`); placeholders default/knowledge/notes/"
-            "tmp/test are refused. Rules: docs/collections.md."
+            "tmp/test are refused. Rules: "
+            "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md."
         ),
     )],
     title: Annotated[str, Field(

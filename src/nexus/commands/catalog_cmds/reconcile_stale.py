@@ -552,8 +552,8 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
         "status": "shipped-with-residuals",
         "guard": "SCOPED, not root-cause: this repo's OWN tracked host-run harnesses are "
                  "guarded from reintroducing this class, via an exact-allowlist lint over every "
-                 "nx index/nx store/nx collection/store_put site under tests/e2e/** and "
-                 "scripts/** (tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2 census: "
+                 "nx index/nx store/nx collection/store_put site in the nexus repo's end-to-end test and "
+                 "script trees (https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2 census: "
                  "all 34 existing files/150 sites are already read-only, container-isolated, or NX_LOCAL "
                  "under a sandboxed HOME/config dir — a NEW site must be reviewed rather than "
                  "silently joining the census). This does NOT address the OBSERVED live "
@@ -564,7 +564,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
                  "lint or anything else here. A future in-repo site that genuinely needs the "
                  "operator's live service has two conforming routes named in the lint's own "
                  "directive text: self-provision an engine and mint its own tenant "
-                 "(POST /v1/tenants/create under the boot bearer, the tests/_engine_substrate.py "
+                 "(POST /v1/tenants/create under the boot bearer, the nexus test suite's "
                  "mint_test_tenant precedent), or the throughput bench's marker-scoped-owner + "
                  "before/after collection-list snapshot + EXIT-time teardown shape. The API "
                  "delete/rename path IS cascaded (delete-path incompleteness, fixed); the sweep "
@@ -572,7 +572,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
                  "the still-unidentified external producer adds next — is "
                  "`nx catalog reconcile-stale --execute drop-orphan-collections`",
         "where": "write-time (this repo's own harnesses only): "
-                 "tests/test_host_harness_scratch_scope_lint.py; cascade: engine "
+                 "https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py; cascade: engine "
                  "CatalogDeleteCollectionCascadeTest / CatalogRenameCollectionTest; sweep "
                  "(symptom, any producer): reconcile_stale.py's drop-orphan-collections arm via "
                  "classify_t3_orphan_collections()",
@@ -602,7 +602,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
     "drop-orphan-collections": {
         "status": "shipped-with-residuals",
         "guard": "SCOPED, not root-cause (same honesty note as tombstone-vanished above): the "
-                 "same lint (tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2) prevents "
+                 "same lint (https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2) prevents "
                  "THIS repo's own tracked harnesses from creating new T3-orphan collections "
                  "(chunks present in T3, zero catalog documents — live or tombstoned — "
                  "referencing them). It does nothing about the observed live population's actual, "
@@ -613,8 +613,8 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
                  "consume. Never drops a tombstoned-only collection (nexus-8tnz2 fix-round "
                  "CRITICAL 2) — only a confirmed 'orphan' (zero live AND zero tombstoned docs).",
         "where": "write-time (this repo's own harnesses only): "
-                 "tests/test_host_harness_scratch_scope_lint.py; classification: "
-                 "src/nexus/commands/catalog_cmds/t3_orphans.py::classify_t3_orphan_collections",
+                 "https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py; classification: "
+                 "nexus.commands.catalog_cmds.t3_orphans.classify_t3_orphan_collections",
         "residual_beads": ["nexus-8tnz2"],
     },
 }

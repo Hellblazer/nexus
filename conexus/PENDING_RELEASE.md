@@ -73,5 +73,18 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/nexus/reference.md` (nexus-pplwc): memory_search is PostgreSQL full-text search with no query grammar, not FTS5; the separator cites RDR-103, not ChromaDB.
 - `conexus/skills/serena-code-nav/SKILL.md` (nexus-pplwc): names only the Serena tools sn exposes under the claude-code context.
 - `conexus/skills/upgrade/SKILL.md` (nexus-pplwc): no longer calls the removed guided-upgrade, migrate-to-service and migration-audit primitives callable, nor cites a rollback verb that no code prints.
+- `conexus/commands/continuation.md` (nexus-z7ddd): the commit-scope audit script is named with its GitHub link, as 'when the project has a `commit_scope_audit.sh`', so no agent reads it as a file it must open.
+- `conexus/commands/rdr-audit.md` (nexus-z7ddd): step 3 loads the canonical prompt from the shipped `AUDIT-PROMPT.md` resource, with the T2 entry as an override.
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-z7ddd): the canonical audit prompt is read from the shipped `resources/rdr_process/AUDIT-PROMPT.md`; T2 `nexus_rdr/067-canonical-prompt-v1`, which a user's install lacks, only overrides it.
+- `conexus/resources/rdr_process/AUDIT-PROMPT.md` (nexus-z7ddd): new: the RDR-067 canonical audit prompt (v1.2) as a plugin resource, with the stale `nx` tool names corrected to `conexus`.
+- `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md` (nexus-z7ddd): names the rdr-audit-checklist skill instead of a `${CLAUDE_PLUGIN_ROOT}` path that does not resolve in a file read with Read.
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-z7ddd): the orchestration skill is a link relative to the file, since `${CLAUDE_PLUGIN_ROOT}` is not substituted in a file an agent reads with Read.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-z7ddd): the orchestration skill is a link relative to the file, since `${CLAUDE_PLUGIN_ROOT}` is not substituted in a file an agent reads with Read.
+- `conexus/resources/agent-shared/MAINTENANCE.md` (nexus-z7ddd): sibling files are named relative to the file, not as repo paths.
+- `conexus/skills/writing-nx-skills/SKILL.md` (nexus-z7ddd): repo paths (the registry, the structure test, the SessionStart guidance and its budget tests) are GitHub links.
+- `conexus/skills/composition-probe/SKILL.md` (nexus-z7ddd): the worked example links the search engine and the leased Maven wrapper on GitHub instead of naming repo paths.
+- `conexus/skills/cli-controller/SKILL.md` (nexus-z7ddd): an HTML comment no longer names a nexus build directory.
+- `conexus/skills/catalog/SKILL.md` (nexus-z7ddd): the example file path is a neutral `src/app/scoring.py`.
+- `conexus/hooks/scripts/routing/README.md` (nexus-z7ddd): maintainer notes link the nexus tests on GitHub.
 
 ## Deferred to the next client release

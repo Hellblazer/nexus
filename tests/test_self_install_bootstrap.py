@@ -59,7 +59,7 @@ TODAYS_REFUSAL = (
     "Error: this nx is running from {host}, which is not a generation under "
     "{tools} — `nx self install` upgrades a generation install in "
     "place-safe fashion and has nothing to do from a dev checkout.\n"
-    "For a checkout, use: scripts/reinstall-tool.sh"
+    "For a checkout, run the reinstall-tool.sh script from the checkout's scripts directory."
 )
 
 _DRIVER = (

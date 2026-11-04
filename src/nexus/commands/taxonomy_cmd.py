@@ -2683,7 +2683,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     help=(
         "Cosine similarity threshold. When omitted, per-corpus-type "
         "defaults apply: code__* → 0.70, knowledge__* → 0.50, "
-        "docs__*/rdr__* → 0.55. See docs/exploration/taxonomy-projection-tuning.md."
+        "docs__*/rdr__* → 0.55. See https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md."
     ),
 )
 @click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
@@ -3115,7 +3115,7 @@ def hubs_cmd(
       nx taxonomy hubs --min-collections 5 --max-icf 1.2
       nx taxonomy hubs --warn-stale --explain
 
-    See docs/exploration/taxonomy-projection-tuning.md for guidance on interpreting
+    See https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md for guidance on interpreting
     the output and acting on flagged topics.
     """
     db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
@@ -3185,7 +3185,7 @@ def hubs_cmd(
         "Count projections whose raw cosine similarity falls below this "
         "value. Defaults to the per-corpus-type value "
         "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). See "
-        "docs/exploration/taxonomy-projection-tuning.md."
+        "https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md."
     ),
 )
 @click.option(
@@ -3224,7 +3224,7 @@ def audit_cmd(
       * pattern-pollution: receiving topics whose labels contain generic
         stopword tokens (`assert`, `class`, `exception`, ...).
 
-    See docs/exploration/taxonomy-projection-tuning.md for interpretation guidance.
+    See https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md for interpretation guidance.
 
     ``--fix-doc-count`` replaces the report above entirely with the
     doc_count-drift repair (bead nexus-c0g6e, GH #1529) — see that option's
@@ -3321,7 +3321,7 @@ def _run_fix_doc_count(collection: str, *, apply: bool) -> None:
                     "/topics/recount_doc_count route (bead nexus-c0g6e, GH #1529 — "
                     "needs the engine tag carrying "
                     "taxonomy-016-doc-count-drift-functions.xml; see "
-                    "docs/wire-contract-pending.md). Deploy an engine carrying it "
+                    "https://github.com/Hellblazer/nexus/blob/main/docs/wire-contract-pending.md). Deploy an engine carrying it "
                     "and re-run.",
                     err=True,
                 )

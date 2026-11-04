@@ -115,7 +115,7 @@ def test_legacy_directory_install_keeps_its_uv_vocabulary(tmp_path, monkeypatch)
 
     assert upgrade_finish.install_source() == (
         "local checkout (/legacy/checkout) — `uv tool upgrade` never "
-        "consults PyPI for this install; use scripts/reinstall-tool.sh "
+        "consults PyPI for this install; use /legacy/checkout/scripts/reinstall-tool.sh "
         "or reinstall from PyPI"
     )
 

@@ -393,7 +393,7 @@ def install_plan() -> InstallPlan:
             )
         if receipt.source_kind == "directory":
             return InstallPlan(
-                "directory", False, "NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh",
+                "directory", False, f"NX_REINSTALL_EXTRAS=pdf {receipt.source}/scripts/reinstall-tool.sh",
                 f"this install was built from the checkout {receipt.source}",
             )
         return InstallPlan("generation", True, INSTALL_COMMAND)
@@ -828,7 +828,7 @@ def _install_generation(*, carrying: bool = False, notes: list[str] | None = Non
                 raise PdfStackMissingError(
                     f"PDF support is not installed in the current generation ({receipt.version}, built from "
                     f"{receipt.source}), which is newer than this process ({version}); nothing was written. "
-                    "Run: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh"
+                    f"Run: NX_REINSTALL_EXTRAS=pdf {receipt.source}/scripts/reinstall-tool.sh"
                 )
             version = receipt.version
             extras = tuple(sorted({"pdf", *receipt.extras}))

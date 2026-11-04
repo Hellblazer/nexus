@@ -3755,7 +3755,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         "T3 collection: a bare SUBJECT (e.g. 'vector-search') becomes "
         "knowledge__<subject>; never type a model token or version. A subject "
         "is a durable topic area, not a document or a session; reuse an "
-        "existing one before creating (docs/collections.md). "
+        "existing one before creating (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md). "
         "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
         "collection so 'nx enrich aspects' can process it (GH #981). "
         "Aspect extraction routes each knowledge__ document by shape (a "

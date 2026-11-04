@@ -79,7 +79,8 @@ PROMOTION_RETIRED = (
     "schema statement to run.\n"
     "\n"
     "Promote {field!r} with ONE changeset under "
-    "service/src/main/resources/db/changelog/ that does all three phases:\n"
+    "the engine changelog (https://github.com/Hellblazer/nexus/tree/main/service/src/main/resources/db/changelog) "
+    "that does all three phases:\n"
     "  1. ALTER TABLE nexus.document_aspects ADD COLUMN {field} <TYPE>;\n"
     "  2. UPDATE nexus.document_aspects SET {field} = extras->>'{field}'\n"
     "      WHERE {field} IS NULL AND extras ? '{field}';\n"
@@ -87,8 +88,8 @@ PROMOTION_RETIRED = (
     "      so --history still shows it.\n"
     "\n"
     "Prune extras in a SEPARATE later changeset, once every reader "
-    "consumes the typed column. See src/nexus/aspect_promotion.py for the "
-    "full changeset template."
+    "consumes the typed column. See the docstring of nexus.aspect_promotion "
+    "for the full changeset template."
 )
 
 

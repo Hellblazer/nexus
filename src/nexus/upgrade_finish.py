@@ -1268,7 +1268,7 @@ def _uv_install_source() -> str:
         return (
             f"local checkout ({req['directory']}) — `uv tool upgrade` never "
             f"consults PyPI for this install; use "
-            f"{install_advice.upgrade_command('scripts/reinstall-tool.sh')} "
+            f"{install_advice.upgrade_command(req['directory'] + '/scripts/reinstall-tool.sh')} "
             f"or reinstall from PyPI"
         )
     spec = str(req.get("specifier", ""))

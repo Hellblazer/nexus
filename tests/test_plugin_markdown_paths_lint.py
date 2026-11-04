@@ -54,6 +54,7 @@ SHARED_DOCS_DIR = CONEXUS_DIR / "resources" / "agent-shared"
 #: a slash) or ``}``/``.``.
 _BARE_RESOURCES = re.compile(r"(?<![/\w}.])(?:\./)?resources/[\w./-]+")
 _UNBRACED_ROOT = re.compile(r"\$CLAUDE_PLUGIN_ROOT\b")
+_GITHUB_LINK = re.compile(r"\[[^\]]*\]\(https://github\.com/[^)]*\)")
 _RELATIVE_TARGET = re.compile(r"\]\((\.\.?/[^)]*)\)")
 
 #: ``$RDR_DIR`` and ``${RDR_DIR}``: a dispatched agent cannot expand either.
@@ -75,33 +76,10 @@ _REPO_PATH = re.compile(
     r"(?<![\w/.:-])(?:\.{1,2}/)*(?:tests|scripts|src/nexus|service|\.claude/rules)/[\w./*-]*[\w*-]"
 )
 
-#: Deliberate repo paths: file (from the repo root) -> {path: why it stays}.
-#: Add an entry only with a reason an agent in another project is not misled.
-_REPO_PATH_ALLOWED: dict[str, dict[str, str]] = {
-    "conexus/skills/writing-nx-skills/SKILL.md": {
-        path: "maintainer skill: it is how nexus's own plugin skills are written, read in this repo"
-        for path in (
-            "tests/test_plugin_structure.py",
-            "src/nexus/session_start_guidance.py",
-            "tests/test_session_start_guidance.py",
-            "tests/hooks/test_session_start_combined_budget.py",
-        )
-    },
-    "conexus/skills/catalog/SKILL.md": {
-        "src/nexus/scoring.py": "an example file path to look up in a catalog; any indexed file would do",
-    },
-    "conexus/skills/composition-probe/SKILL.md": {
-        "src/nexus/search_engine.py": "historical citation of the spike that verified the tool budget",
-        "scripts/mvnw-leased.sh": "named under 'when the project has that script' (the nexus repo)",
-        "service/mvnw": "named inside the same nexus-repo clause, as what the script wraps",
-    },
-    "conexus/skills/cli-controller/SKILL.md": {
-        "service/target": "inside an HTML comment saying the example is generic and the path is nexus's",
-    },
-    "conexus/commands/continuation.md": {
-        "tests/e2e/lib/commit_scope_audit.sh": "guarded: 'when the project has' the script, with a by-hand fallback",
-    },
-}
+#: Deliberate repo paths: file (from the repo root) -> {path: why it stays}. Empty since nexus-z7ddd: every site
+#: became a GitHub link or inline text, and ``tests/test_repo_only_references_lint.py`` now holds the wider rule
+#: (all plugin markdown, resource files, MCP and CLI text) with its own reasoned allowlist.
+_REPO_PATH_ALLOWED: dict[str, dict[str, str]] = {}
 
 #: Plugin file names an agent or command body might name bare (``registry.yaml``, ``reference.md``): with no base
 #: directory a bare name is unanchored. Common names any project has are left out.
@@ -154,10 +132,12 @@ def _violations(
             if bare_names is not None:
                 for m in bare_names.finditer(line):
                     found.append(f"{lineno}: bare plugin file name {m.group(0)!r} in a prompt with no base directory")
-        for m in _REPO_DOC.finditer(line):
+        # A GitHub link is the sanctioned spelling, and its label may show the path it links.
+        no_url_links = _GITHUB_LINK.sub(" ", line)
+        for m in _REPO_DOC.finditer(no_url_links):
             found.append(f"{lineno}: repo-only doc {m.group(0)!r} (link it on GitHub or state the rule inline)")
         if repo_path_allow is not None:
-            for m in _REPO_PATH.finditer(line):
+            for m in _REPO_PATH.finditer(no_url_links):
                 if m.group(0) not in repo_path_allow:
                     found.append(f"{lineno}: repo-only path {m.group(0)!r} (guard it, link it, or add it to _REPO_PATH_ALLOWED)")
         if _RDR_DIR.search(line) and (lineno - 1 in in_relay_block or _BRIEF_LINE.search(line)):
@@ -303,6 +283,8 @@ def test_a_repo_doc_in_any_spelling_is_flagged(text: str) -> None:
 
 
 def test_a_github_link_or_the_projects_rdr_dir_passes() -> None:
+    assert not _violations("[tests/x.py](https://github.com/Hellblazer/nexus/blob/main/tests/x.py)", repo_path_allow=frozenset())
+    assert not _violations("[docs/collections.md](https://github.com/Hellblazer/nexus/blob/main/docs/collections.md)")
     assert not _violations("Rules: https://github.com/Hellblazer/nexus/blob/main/docs/collections.md.")
     assert not _violations("Write the RDR to `docs/rdr/NNN-kebab-title.md`.")
     assert not _violations("Rules: https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md.")

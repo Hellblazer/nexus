@@ -2,8 +2,8 @@
 
 ## Quick Reference
 
-- **Context Protocol**: All agents reference `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md`
-- **Error Handling**: Common patterns in `conexus/resources/agent-shared/ERROR_HANDLING.md`
+- **Context Protocol**: All agents reference [CONTEXT_PROTOCOL.md](./CONTEXT_PROTOCOL.md) (beside this file)
+- **Error Handling**: Common patterns in [ERROR_HANDLING.md](./ERROR_HANDLING.md)
 - **Versions**: v2.0 standard, v2.1 for enhanced agents (strategic-planner)
 
 ## Adding a New Agent
@@ -40,7 +40,7 @@
 
 ## Updating the Shared Context Protocol
 
-1. Edit `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md`
+1. Edit [CONTEXT_PROTOCOL.md](./CONTEXT_PROTOCOL.md) (beside this file)
 2. All agents automatically use new version
 3. No per-agent edits needed
 
@@ -94,8 +94,11 @@ Update version in frontmatter when making significant changes to an agent.
 ## Troubleshooting
 
 **Agent not finding shared protocol**:
-- Check that `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` exists
-- Verify link syntax from an agent file: `[Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md)`
+- Check that [CONTEXT_PROTOCOL.md](./CONTEXT_PROTOCOL.md) exists beside this file
+- Verify the link syntax in an agent file:
+  ```markdown
+  [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md)
+  ```
 
 **PRODUCE section missing**:
 - Each agent should have `### Agent-Specific PRODUCE` section

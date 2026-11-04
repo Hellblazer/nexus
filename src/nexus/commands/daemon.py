@@ -63,6 +63,7 @@ def daemon_group() -> None:
 # RDR-174 P2.1 (nexus-y2yj6): the storage SERVICE tier (engine-service binary +
 # local Postgres; serves T2 + T3). Mirrors the T2/T3 autostart-unit identity.
 _SERVICE_PLIST_NAME = "com.nexus.service.plist"
+_MIGRATION_RUNBOOK_URL = "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
 _SERVICE_SERVICE_NAME = "nexus-service.service"
 # T2 autostart-unit IDENTITY. The T2 DAEMON is gone (nexus-i711w Stage 2
 # sub-stage B), but these OUTLIVE it deliberately: an install upgraded from a
@@ -1165,7 +1166,7 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     is_flag=True,
     default=False,
     help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
-    "ONLY after healing per docs/migration-runbook.md (re-index the "
+    "ONLY after healing per " + _MIGRATION_RUNBOOK_URL + " (re-index the "
     "affected collections, then re-run doctor and confirm the warning "
     "clears). The rows stay unhealed debt if you force past them; a "
     "pre-v0.1.48 char-era engine can still crash-loop on boot.",
