@@ -772,6 +772,22 @@ def test_a_plugin_root_variable_in_a_file_the_model_reads_is_flagged_fenced_or_n
     assert [b.split(":")[1] for b in bad] == ["1", "3", "5"], bad
 
 
+def test_a_plugin_root_placeholder_block_names_one_concrete_file_for_the_real_spelling() -> None:
+    """The resource files cannot carry the plugin-root variable, so their template blocks write ``<plugin-root>`` and
+    say where to copy the real spelling from. A directory is not an answer (an agent opens it and still has to pick a
+    file); one concrete agent file that carries the variable is."""
+    spelled_in = "agents/developer.md"
+    carriers = [p for p in _resource_files() if "<plugin-root>" in p.read_text(encoding="utf-8")]
+    assert len(carriers) >= 4, [p.name for p in carriers]
+    for p in carriers:
+        text = p.read_text(encoding="utf-8")
+        assert f"[{spelled_in}](../../{spelled_in})" in text, f"{p.name}: the placeholder block does not name {spelled_in}"
+        assert "[../../agents/](../../agents/)" not in text, f"{p.name}: points at a directory"
+    assert "${CLAUDE_PLUGIN_ROOT}" in (REPO_ROOT / "conexus" / spelled_in).read_text(encoding="utf-8"), (
+        f"{spelled_in} no longer spells the variable, so the pointer is stale"
+    )
+
+
 def test_the_unbraced_variable_is_flagged_and_the_braced_one_is_not(tmp_path: Path) -> None:
     f = tmp_path / "S.md"
     f.write_text("Run ${CLAUDE_PLUGIN_ROOT}/a.sh\nRun $CLAUDE_PLUGIN_ROOT/a.sh\nRun $CLAUDE_PLUGIN_ROOT_X\nuses $CLAUDE_PLUGIN_ROOT here\n", encoding="utf-8")
