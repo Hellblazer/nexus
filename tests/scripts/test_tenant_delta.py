@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "tenant_delta.py"
 
 _PYPROJECT = """[tool.pytest.ini_options]
@@ -229,7 +231,7 @@ def test_a_census_that_is_not_complete_is_refused(repo: Path, monkeypatch: pytes
             Path(kw["env"]["TENANT_CENSUS_OUT"]).write_text(json.dumps(written), encoding="utf-8")
         return proc
 
-    monkeypatch.setattr(td.subprocess, "run", run)
+    setattr_in(monkeypatch, td, "subprocess.run", run)
     with pytest.raises(td.CollectionFailed):
         td.census(repo, ["tests/test_a.py"], deadline=time.monotonic() + 60)
 
@@ -249,7 +251,7 @@ def test_a_failure_that_covers_no_module_asked_for_is_refused(repo: Path, monkey
                 {"complete": True, "counts": {}, "failed": {"tests/__init__.py": "E"}}), encoding="utf-8")
         return proc
 
-    monkeypatch.setattr(td.subprocess, "run", run)
+    setattr_in(monkeypatch, td, "subprocess.run", run)
     with pytest.raises(td.CollectionFailed):
         td.census(repo, ["tests/test_a.py"], deadline=time.monotonic() + 60)
 
