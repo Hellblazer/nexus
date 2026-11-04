@@ -55,7 +55,9 @@ import java.util.function.Supplier;
  * answers 409 {@code sweep_preconditions_not_met} with the counts when one stands in the way. The residues in {@link
  * ChunkKeySweep#ACCEPTABLE} may be accepted by naming each with the number of rows accepted, {@code "accept":
  * {"keyless_notes": 3}}: a live count above that number still blocks. A call that carries {@code resume} (the object the
- * previous call returned) does not repeat the checks or the census, and its time budget starts at once. The sweep never
+ * previous call returned, signature included) does not repeat the checks or the census, and its time budget starts at
+ * once; a {@code resume} whose signature does not verify (edited, another tenant's, or from before an engine restart)
+ * is ignored: the answer says {@code resume_ignored: true} and the call ran as a first call, checks and all. The sweep never
  * touches the bypass collections or a row whose chash is not 32 bytes, skips a collection whose census reads {@code
  * legacy-unmanifested} or could not be read, skips a row whose metadata is not an object, and does not set {@code
  * last_written_at}. A run is {@code done} only when a pass from the start finds nothing it can take and nothing is left;
@@ -63,9 +65,11 @@ import java.util.function.Supplier;
  * DATA EFFECT: the metadata of every swept row loses its retired keys; nothing else on the row changes.
  *
  * <p><b>Add and validate</b> are table-wide. Both begin with the probe ({@link ChunkConstraintAdmin#probe}): one pass over
- * {@code nexus.chunks} on the admin session, which sees every tenant, so a tenant with chunk rows and no {@code
- * service_tokens} row is checked too (the checked set is the default tenant, every known tenant, and every tenant the
- * probe found, named in the response). {@code add} refuses, naming the tenant, while a tenant has rows the sweep can still
+ * {@code nexus.chunks} on the admin session, so a tenant with chunk rows and no {@code service_tokens} row is checked
+ * too (the checked set is the default tenant, every known tenant, and every tenant the probe found, named in the
+ * response). The probe is only as good as the session: it answers 503 {@code admin_cannot_see_all_tenants} when the admin
+ * role is row filtered (neither superuser nor BYPASSRLS, and no permissive true-qual SELECT policy applies), and 503
+ * {@code admin_probe_undercount} when its row count for a known tenant is below that tenant's scoped count. {@code add} refuses, naming the tenant, while a tenant has rows the sweep can still
  * take, a {@code chunk_text_hash} or {@code embedding_model} that differs from the column, a chash that is not 32 bytes,
  * a half-stamped quarantine row, or retired-key rows the sweep's own view does not account for. {@code validate} refuses
  * while any tenant holds any of those or any retired key, blocked collections included. They run on the admin connection
@@ -197,6 +201,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         out.put("elapsed_ms", applied.totalMs());
         out.put("blocked_collections", blockedList(applied.blocked()));
         out.put("resume", applied.resume() == null ? null : resumeBody(applied.resume()));
+        out.put("resume_ignored", applied.resumeIgnored());
         HttpUtil.send(ex, 200, json(out));
     }
 
@@ -293,6 +298,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         m.put("collections", r.collections());
         m.put("blocked", blockedList(r.blocked()));
         m.put("remaining", r.remaining());
+        m.put("sig", r.sig());
         return m;
     }
 
@@ -313,11 +319,25 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         ChunkKeyPlan plan = plan(body);
 
-        // The authoritative look: every tenant with chunk rows, read on the admin session before any DDL.
-        List<ChunkConstraintAdmin.TenantProbe> probe = admin.probe(plan);
+        // The authoritative look: every tenant with chunk rows, read on the admin session before any DDL. The probe
+        // refuses a session that cannot see every row; and as a second line, a tenant-scoped count of each tenant the
+        // engine knows is taken FIRST (a concurrent insert then only makes the probe larger) and the probe may not be
+        // below it for any of them.
         Set<String> checked = new TreeSet<>();
         checked.add(TenantConstants.DEFAULT_TENANT);
         checked.addAll(tenants.get());
+        Map<String, Long> scoped = new LinkedHashMap<>();
+        for (String t : checked) {
+            scoped.put(t, sweep.rowCount(t));
+        }
+        List<ChunkConstraintAdmin.TenantProbe> probe = admin.probe(plan);
+        List<String> undercounted = undercounted(probe, scoped);
+        if (!undercounted.isEmpty()) {
+            throw new ChunkConstraintAdmin.Refused(503, "admin_probe_undercount",
+                "the table-wide probe counted fewer chunk rows than a tenant-scoped count for tenant(s) "
+                    + undercounted + ": the admin session is not reading every row, so no constraint check can be "
+                    + "trusted. Nothing was changed; if rows were deleted while this ran, retry");
+        }
         long rowsExamined = 0;
         for (var p : probe) {
             checked.add(p.tenant());
@@ -423,6 +443,21 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(out));
     }
 
+    /** The tenants whose probe row count is below their tenant-scoped count (a tenant the probe omits counts 0). */
+    static List<String> undercounted(List<ChunkConstraintAdmin.TenantProbe> probe, Map<String, Long> scoped) {
+        Map<String, Long> seen = new TreeMap<>();
+        for (var p : probe) {
+            seen.merge(p.tenant(), p.rows(), Long::sum);
+        }
+        List<String> out = new ArrayList<>();
+        for (var e : scoped.entrySet()) {
+            if (seen.getOrDefault(e.getKey(), 0L) < e.getValue()) {
+                out.add(e.getKey());
+            }
+        }
+        return out;
+    }
+
     // ---- request parsing ----------------------------------------------------------------------------------------
 
     private static Map<String, Object> readBody(HttpExchange ex) throws IOException {
@@ -496,7 +531,8 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             }
         }
         long remaining = r.get("remaining") instanceof Number n ? n.longValue() : 0L;
-        return new ChunkKeySweep.Resume(cursor, collections, blocked, remaining);
+        String sig = r.get("sig") instanceof String s ? s : null;
+        return new ChunkKeySweep.Resume(cursor, collections, blocked, remaining, sig);
     }
 
     private static boolean isHex(String s) {

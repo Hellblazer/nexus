@@ -139,6 +139,15 @@ class TestWire:
         assert post.call_args.kwargs["timeout"] == hv._CHUNK_KEYS_VALIDATE_TIMEOUT_S
         assert hv._CHUNK_KEYS_VALIDATE_TIMEOUT_S > 30 * 60, "the engine allows the VALIDATE 30 minutes"
 
+    def test_add_gets_the_same_long_socket_timeout_as_validate(self) -> None:
+        # The add runs the whole-table probe (10 min statement bound), a scoped count and a census per known tenant,
+        # then the DDL, inside the one request: the sweep's 300 s socket cut it off while the engine went on.
+        with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write"):
+            _client().chunk_keys_add_constraints()
+        assert post.call_args.kwargs["timeout"] == hv._CHUNK_KEYS_ADD_TIMEOUT_S
+        assert hv._CHUNK_KEYS_ADD_TIMEOUT_S >= hv._CHUNK_KEYS_VALIDATE_TIMEOUT_S
+        assert hv._CHUNK_KEYS_ADD_TIMEOUT_S > hv._CHUNK_KEYS_TIMEOUT_S
+
 
 # ── the CLI ──────────────────────────────────────────────────────────────────
 
@@ -423,6 +432,41 @@ class TestCli:
         )
         result = _run(FakeClient(_dry_report(), error=refusal), "--add-check", "--apply")
         assert "tenants checked (3): default, cc-a, cc-ghost" in result.output
+
+
+    def test_a_timed_out_add_says_it_may_have_landed_and_that_a_rerun_is_safe(self) -> None:
+        client = FakeClient(_dry_report(), error=TimeoutError("timed out"))
+        result = _run(client, "--add-check", "--apply")
+        assert result.exit_code == rk.EXIT_FAILED
+        assert "may have landed" in result.output
+        assert "rerun" in result.output.lower()
+
+    def test_a_timed_out_add_through_urllib_is_recognised_too(self) -> None:
+        import urllib.error
+
+        client = FakeClient(_dry_report(), error=urllib.error.URLError(TimeoutError("timed out")))
+        result = _run(client, "--add-check", "--apply")
+        assert result.exit_code == rk.EXIT_FAILED and "may have landed" in result.output
+
+    def test_a_timed_out_validate_says_the_engine_may_still_be_validating(self) -> None:
+        result = _run(FakeClient(_dry_report(), error=TimeoutError("timed out")), "--validate", "--apply")
+        assert result.exit_code == rk.EXIT_FAILED
+        assert "may still be running" in result.output and "validate" in result.output.lower()
+
+    def test_a_connection_refused_is_not_called_a_timeout(self) -> None:
+        import urllib.error
+
+        client = FakeClient(_dry_report(), error=urllib.error.URLError(ConnectionRefusedError("refused")))
+        result = _run(client, "--add-check", "--apply")
+        assert "may have landed" not in result.output
+        assert result.exception is not None   # unchanged: the original error propagates
+
+    def test_an_apply_whose_resume_the_engine_did_not_accept_says_so(self) -> None:
+        first = _apply(5, done=False, remaining=3)
+        second = {**_apply(3, done=True), "resume_ignored": True}
+        result = _run(FakeClient(_dry_report(), applies=[first, second]), "--tenant", TENANT, "--apply")
+        assert result.exit_code == 0
+        assert "resume not accepted" in result.output
 
 
 def test_the_verb_is_registered_under_t3() -> None:

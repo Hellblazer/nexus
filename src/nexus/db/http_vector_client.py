@@ -1972,6 +1972,11 @@ _CHUNK_KEYS_TIMEOUT_S = 300
 #: The validate route scans the whole chunk table (the engine allows it 30 minutes); the socket outlasts that.
 _CHUNK_KEYS_VALIDATE_TIMEOUT_S = 2100
 
+#: The add route runs, in the one request, a tenant-scoped count of each known tenant, the whole-table probe (a 10 minute
+#: statement bound), a census per collection with rows to sweep, and then the DDL (a 60 s bound). The 300 s sweep ceiling
+#: cut it off while the engine went on; it gets validate's.
+_CHUNK_KEYS_ADD_TIMEOUT_S = _CHUNK_KEYS_VALIDATE_TIMEOUT_S
+
 
 def _guard_chunk_keys_write() -> None:
     """The production-write guard (nexus-a2qhz) for a retire-keys call that writes. The three routes share one
@@ -5296,9 +5301,11 @@ class HttpVectorClient:
         cost is the batch SELECT only, so the projection is a lower bound. ``dry_run=False`` sweeps up to
         ``max_batches`` batches of ``batch_size`` rows or ``budget_seconds`` (counted after the checks) in keyset
         order and answers ``{"tenant", "rows_swept", "batches", "done", "remaining_rows", "locked_skipped_rows",
-        "first_batch_ms", "elapsed_ms", "blocked_collections", "resume"}``; the caller calls again, passing the
-        ``resume`` object back, while ``done`` is false. A call with ``resume`` does not repeat the preconditions or
-        the census (the first call of a run did them). ``accept`` is ``{residue: rows}``: each residue of
+        "first_batch_ms", "elapsed_ms", "blocked_collections", "resume", "resume_ignored"}``; the caller calls again,
+        passing the ``resume`` object back unchanged (it is signed, ``sig`` included), while ``done`` is false. A call
+        with ``resume`` does not repeat the preconditions or the census (the first call of a run did them); a ``resume``
+        that does not verify (edited, another tenant's, or from before an engine restart) is ignored and the call runs
+        as a first call: ``resume_ignored`` is true. ``accept`` is ``{residue: rows}``: each residue of
         ``acceptable_residues`` the operator accepts, up to that many rows; apply is refused (409, ``reason ==
         "sweep_preconditions_not_met"``, the report in ``engine_body``) while a live count is above what was accepted.
 
@@ -5339,7 +5346,9 @@ class HttpVectorClient:
         says what the plan would add) or ``replaced`` (``warning`` when it was VALID and is NOT VALID now).
         ``replace=True`` drops and re-adds each in one statement, which is how a changed key table reaches the
         database. DATA EFFECT: a NOT VALID CHECK is evaluated on every new row version, so a row the sweep left
-        behind (``left_behind``) cannot be UPDATEd until it is fixed. A WRITE: guarded like the sweep's apply.
+        behind (``left_behind``) cannot be UPDATEd until it is fixed. A WRITE: guarded like the sweep's apply. The
+        socket timeout is validate's (:data:`_CHUNK_KEYS_ADD_TIMEOUT_S`); a timeout does not mean the add did not land,
+        and a rerun is idempotent (a constraint that exists is left alone).
         """
         from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
 
@@ -5347,7 +5356,9 @@ class HttpVectorClient:
         if replace:
             body["replace"] = True
         _guard_chunk_keys_write()
-        return _post("/v1/admin/chunk-keys/add-constraints", body, tenant=self._tenant, timeout=_CHUNK_KEYS_TIMEOUT_S)
+        return _post(
+            "/v1/admin/chunk-keys/add-constraints", body, tenant=self._tenant, timeout=_CHUNK_KEYS_ADD_TIMEOUT_S,
+        )
 
     def chunk_keys_validate_constraints(self) -> dict:
         """POST /v1/admin/chunk-keys/validate-constraints: VALIDATE the chunk CHECKs (nexus-6pfgb.43).

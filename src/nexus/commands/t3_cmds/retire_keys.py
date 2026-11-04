@@ -25,6 +25,7 @@ the cloud, start with ``--max-rps 2``. An apply is a write and goes through the 
 from __future__ import annotations
 
 import json
+import urllib.error
 from typing import Any, NoReturn
 
 import click
@@ -211,7 +212,9 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
         click.echo(
             f"  call {calls}: swept {n}, {last.get('remaining_rows')} left"
             f"{f' ({locked} skipped: locked by a writer)' if locked else ''}"
-            f"{' (done)' if last.get('done') else ''}", err=True,
+            f"{' (done)' if last.get('done') else ''}"
+            f"{' (resume not accepted: the engine repeated the checks)' if last.get('resume_ignored') else ''}",
+            err=True,
         )
         if last.get("done"):
             break
@@ -261,11 +264,32 @@ def _render_constraints(result: dict, *, add: bool) -> None:
                 click.echo(f"    tenant {t['tenant']}: {c['collection']} ({c['blocked']}), {c['retired_key_rows']} rows")
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    """A socket timeout, bare or wrapped by urllib (``URLError.reason``)."""
+    return isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+
+
 def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) -> None:
     try:
         result = client.chunk_keys_add_constraints(replace=replace) if add else client.chunk_keys_validate_constraints()
     except VectorServiceError as exc:
         _engine_error(exc)
+    except (TimeoutError, urllib.error.URLError) as exc:
+        if not _is_timeout(exc):
+            raise
+        # The socket gave up; the engine does not. Say what that means rather than leave the operator to guess.
+        if add:
+            _fail(
+                "The add request timed out. The engine may still be running it, and the add may have landed (the "
+                "constraints go in one statement at a time and none is rolled back). Wait a minute, then rerun the "
+                "same command: an add is idempotent, a constraint that exists is left alone and the report says what "
+                "is there.", EXIT_FAILED,
+            )
+        _fail(
+            "The validate request timed out. The engine may still be running the VALIDATE (it keeps going after the "
+            "socket closes). Wait, then rerun the same command: a constraint that is already valid is skipped.",
+            EXIT_FAILED,
+        )
     if as_json:
         click.echo(json.dumps(result, indent=2, default=str))
         return

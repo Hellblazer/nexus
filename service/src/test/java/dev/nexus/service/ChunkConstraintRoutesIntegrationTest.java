@@ -264,6 +264,114 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         assertThat(tenantNames(v)).contains(GHOST, D);
     }
 
+    // ---- 1a. the admin session must see every row (round 2, F1) -----------------------------------------------
+
+    private static final String BLIND = "blind_admin";
+    private static final String BLIND_PASS = "blindadminpw";
+
+    private ChunkConstraintAdmin blindAdmin() {
+        return new ChunkConstraintAdmin(new AdminConnection(pg.getJdbcUrl(), BLIND, BLIND_PASS));
+    }
+
+    /** A login role with SELECT on the table, NOSUPERUSER NOBYPASSRLS, and no policy naming it: it reads nothing. */
+    private void createBlindRole() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.createLoginRole(su, BLIND, BLIND_PASS, false);
+            PgContainerHelper.grantSchemaUsage(su, "nexus", BLIND);
+            DSL.using(su, SQLDialect.POSTGRES).grant(DSL.privilege("SELECT")).on(CHUNKS).to(DSL.role(BLIND)).execute();
+        }
+    }
+
+    @Test
+    @Order(12)
+    void anAdminRoleThatCannotSeeEveryRowIsRefusedBeforeAnythingIsDone_notTrustedToReadZero() throws Exception {
+        createBlindRole();
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS)).as("fixture: the table has rows")
+                .isGreaterThan(0);
+        }
+        try (Connection blind = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), BLIND, BLIND_PASS)) {
+            assertThat(DSL.using(blind, SQLDialect.POSTGRES).fetchCount(CHUNKS))
+                .as("fixture: under FORCE RLS this role reads ZERO rows, which is what the old probe took for clean")
+                .isZero();
+        }
+        service.chunkConstraintAdmin(blindAdmin());
+        try {
+            for (HttpResponse<String> r : List.of(add(ROOT), validate(ROOT))) {
+                assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
+                assertThat(json(r).path("reason").asText()).isEqualTo("admin_cannot_see_all_tenants");
+                assertThat(json(r).path("error").asText()).contains(BLIND);
+            }
+            assertThat(presentConstraints()).as("nothing was added").containsExactly("chunks_chash_octet_check");
+        } finally {
+            service.chunkConstraintAdmin(admin());
+        }
+    }
+
+    @Test
+    @Order(13)
+    void anAdminRoleWithAnUnrestrictedSelectPolicyIsTrusted_aRestrictiveOrNarrowerPolicyDoesNotCount() throws Exception {
+        service.chunkConstraintAdmin(blindAdmin());
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // A RESTRICTIVE policy with a true qual grants nothing: restrictive policies only narrow.
+            PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "blind_restrictive", PgContainerHelper.PolicyKind.RESTRICTIVE,
+                "SELECT", BLIND);
+            try {
+                assertThat(add(ROOT).statusCode()).as("a restrictive policy is not a grant").isEqualTo(503);
+            } finally {
+                PgContainerHelper.dropPolicy(su, CHUNKS, "blind_restrictive");
+            }
+            PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "blind_read_all", PgContainerHelper.PolicyKind.PERMISSIVE,
+                "SELECT", BLIND);
+            try {
+                HttpResponse<String> r = add(ROOT);
+                assertThat(r.statusCode()).as("the policy lets it see every row, so it reaches the tenant check: "
+                    + r.body()).isEqualTo(409);
+                assertThat(json(r).path("reason").asText()).isEqualTo("tenant_unswept");
+                assertThat(json(r).path("table_rows_examined").asLong()).as("and it read the rows").isGreaterThan(0);
+            } finally {
+                PgContainerHelper.dropPolicy(su, CHUNKS, "blind_read_all");
+            }
+        } finally {
+            service.chunkConstraintAdmin(admin());
+        }
+    }
+
+    @Test
+    @Order(14)
+    void aProbeThatReadsFewerRowsThanATenantScopedCountIsRefused_evenWhenTheRoleLooksUnrestricted() throws Exception {
+        var conn = new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword());
+        var shortOne = new ChunkConstraintAdmin(conn) {
+            @Override
+            public List<TenantProbe> probe(dev.nexus.service.vectors.ChunkKeyPlan p) {
+                return super.probe(p).stream().map(t -> A.equals(t.tenant())
+                    ? new TenantProbe(t.tenant(), t.rows() - 1, t.retiredRows(), t.hashMismatch(), t.modelMismatch(),
+                        t.wrongWidth(), t.quarantineBreach()) : t).toList();
+            }
+        };
+        var missingOne = new ChunkConstraintAdmin(conn) {
+            @Override
+            public List<TenantProbe> probe(dev.nexus.service.vectors.ChunkKeyPlan p) {
+                return super.probe(p).stream().filter(t -> !B.equals(t.tenant())).toList();
+            }
+        };
+        for (var lying : List.of(shortOne, missingOne)) {
+            service.chunkConstraintAdmin(lying);
+            try {
+                for (HttpResponse<String> r : List.of(add(ROOT), validate(ROOT))) {
+                    assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
+                    assertThat(json(r).path("reason").asText()).isEqualTo("admin_probe_undercount");
+                    assertThat(json(r).path("error").asText()).contains(lying == shortOne ? A : B);
+                }
+            } finally {
+                service.chunkConstraintAdmin(admin());
+            }
+        }
+        assertThat(presentConstraints()).as("nothing was added").containsExactly("chunks_chash_octet_check");
+    }
+
     @Test
     @Order(20)
     void validateIsRefusedWhileATenantStillBreaksAConstraint_namingEach() throws Exception {

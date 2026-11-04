@@ -717,6 +717,190 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         assertThat(metadataOf(tenant, live, hex.get(0))).as("the unread collection was not swept").containsKey("title");
     }
 
+    // ---- the resume token is not trusted (round 2, F2) ----------------------------------------------------------
+
+    private static dev.nexus.service.vectors.ChunkKeyPlan enginePlan() {
+        @SuppressWarnings("unchecked")
+        var plan = dev.nexus.service.vectors.ChunkKeyPlan.of((List<String>) plan().get("allowed_keys"),
+            List.of(TAXONOMY_PREFIX, "quarantine-"), (List<String>) plan().get("quarantine_implies"));
+        return plan;
+    }
+
+    @Test
+    void aForgedResumeNamingTaxonomyQuarantineAndCensusBlockedCollectionsSweepsNoneOfThem() throws Exception {
+        String tenant = "sw-forged";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant + "-live");
+        String blocked = conformant(tenant + "-blocked");
+        String quarantine = "quarantine-" + live;
+        String taxonomy = TAXONOMY_PREFIX + tenant;
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCatalogDocument(DSL.using(su, SQLDialect.POSTGRES), tenant, "census.f");
+        }
+        List<String> liveRows = seed(tenant, live, rows("l1", legacy(keyed(tenant, live, "l1"))));
+        List<String> blockedRows = seed(tenant, blocked, rows(
+            "b1", legacy(keyed(tenant, blocked, "b1", "catalog_doc_id", "census.f"))));
+        List<String> quarantineRows = seed(tenant, quarantine, rows(
+            "q1", legacy(keyed(tenant, quarantine, "q1", "quarantined_at", "2026-01-02T00:00:00Z",
+                "origin_collection", live))));
+        List<String> taxonomyRows = seed(tenant, taxonomy, rows("t1", legacy(Map.of("anything", "goes"))));
+        Map<String, Object> forged = new LinkedHashMap<>();
+        forged.put("cursor", null);
+        forged.put("collections", List.of(taxonomy, quarantine, blocked));
+        forged.put("blocked", List.of());
+        forged.put("remaining", 99);
+
+        HttpResponse<String> r = sweep(token, applyBody("resume", forged,
+            "accept", accept("homeless_documents", 1, "generated_nulls", 1)));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.path("resume_ignored").asBoolean()).as("an unsigned token is not a continuation").isTrue();
+        assertThat(metadataOf(tenant, taxonomy, taxonomyRows.get(0))).containsKey("title");
+        assertThat(metadataOf(tenant, quarantine, quarantineRows.get(0))).containsKey("title");
+        assertThat(metadataOf(tenant, blocked, blockedRows.get(0))).as("the census-blocked collection is still "
+            + "blocked: the call checked it itself").containsKeys("title", "catalog_doc_id");
+        assertThat(metadataOf(tenant, live, liveRows.get(0))).as("the call did its own first-call work")
+            .doesNotContainKey("title");
+        assertThat(body.path("blocked_collections").get(0).path("collection").asText()).isEqualTo(blocked);
+    }
+
+    @Test
+    void aSignedResumeWhoseCollectionsWereEditedIsIgnored_aGenuineOneIsTaken() throws Exception {
+        String tenant = "sw-tamper";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        String taxonomy = TAXONOMY_PREFIX + tenant;
+        Map<String, Map<String, Object>> rows = new LinkedHashMap<>();
+        for (int i = 1; i <= 4; i++) rows.put("k" + i, legacy(keyed(tenant, live, "k" + i)));
+        seed(tenant, live, rows);
+        List<String> taxonomyRows = seed(tenant, taxonomy, rows("t1", legacy(Map.of("anything", "goes"))));
+
+        JsonNode first = json(sweep(token, applyBody("batch_size", 1, "max_batches", 1)));
+        assertThat(first.path("resume_ignored").asBoolean()).isFalse();
+        assertThat(first.path("resume").path("sig").asText()).as("the engine signs what it hands out").isNotBlank();
+        JsonNode second = json(sweep(token, applyBody("batch_size", 1, "max_batches", 1,
+            "resume", asMap(first.path("resume")))));
+        assertThat(second.path("resume_ignored").asBoolean()).as("an untouched token is a continuation").isFalse();
+        assertThat(second.path("done").asBoolean()).isFalse();
+
+        Map<String, Object> edited = asMap(second.path("resume"));
+        edited.put("collections", List.of(live, taxonomy));
+        JsonNode third = json(sweep(token, applyBody("resume", edited)));
+
+        assertThat(third.path("resume_ignored").asBoolean()).as("an edited token fails its signature").isTrue();
+        assertThat(metadataOf(tenant, taxonomy, taxonomyRows.get(0))).containsKey("title");
+    }
+
+    @Test
+    void aSignedResumeFromAnotherTenantIsIgnored() throws Exception {
+        String tenantA = "sw-xa";
+        String tenantB = "sw-xb";
+        String tokenA = tenantToken(tenantA);
+        String tokenB = tenantToken(tenantB);
+        for (String t : List.of(tenantA, tenantB)) {
+            Map<String, Map<String, Object>> three = new LinkedHashMap<>();
+            for (int i = 1; i <= 3; i++) three.put("k" + i, legacy(keyed(t, conformant(t), "k" + i)));
+            seed(t, conformant(t), three);
+        }
+        JsonNode firstA = json(sweep(tokenA, applyBody("batch_size", 1, "max_batches", 1)));
+
+        JsonNode asB = json(sweep(tokenB, applyBody("batch_size", 1, "max_batches", 1,
+            "resume", asMap(firstA.path("resume")))));
+
+        assertThat(asB.path("resume_ignored").asBoolean()).as("the signature binds the tenant").isTrue();
+    }
+
+    /** What a signed token that names bypass and blocked collections produced, and where the rows are. */
+    private record Belt(dev.nexus.service.vectors.ChunkKeySweep.Applied applied, String tenant, String live,
+                        String held, String quarantine, String taxonomy, String liveRow, String heldRow,
+                        String quarantineRow, String taxonomyRow) {}
+
+    /**
+     * A token the engine itself signed (so the signature holds) naming collections the first call would never have
+     * listed: the batch's own SQL and the token's blocked list must still keep them out.
+     */
+    private Belt signedTokenNamingBypassAndBlocked(String tenant) throws Exception {
+        String live = conformant(tenant + "-live");
+        String held = conformant(tenant + "-held");
+        String quarantine = "quarantine-" + live;
+        String taxonomy = TAXONOMY_PREFIX + tenant;
+        List<String> liveRows = seed(tenant, live, rows("l1", legacy(keyed(tenant, live, "l1"))));
+        List<String> heldRows = seed(tenant, held, rows("h1", legacy(keyed(tenant, held, "h1"))));
+        List<String> quarantineRows = seed(tenant, quarantine, rows(
+            "q1", legacy(keyed(tenant, quarantine, "q1", "quarantined_at", "2026-01-02T00:00:00Z",
+                "origin_collection", live))));
+        List<String> taxonomyRows = seed(tenant, taxonomy, rows("t1", legacy(Map.of("anything", "goes"))));
+        try (var superDs = PgContainerHelper.superuserDataSource(pg)) {
+            var sweep = new dev.nexus.service.vectors.ChunkKeySweep(new dev.nexus.service.db.TenantScope(superDs),
+                (t, c, bound) -> 0L);
+            var resume = sweep.issueResume(tenant, null, List.of(taxonomy, quarantine, live, held),
+                List.of(new dev.nexus.service.vectors.ChunkKeySweep.Blocked(held, "legacy_unmanifested", 1)), 4);
+            var applied = sweep.apply(tenant, enginePlan(), Map.of(), null, 1000, 5, java.time.Duration.ofSeconds(30),
+                resume);
+            assertThat(applied.resumeIgnored()).as("a token the instance signed is taken").isFalse();
+            return new Belt(applied, tenant, live, held, quarantine, taxonomy, liveRows.get(0), heldRows.get(0),
+                quarantineRows.get(0), taxonomyRows.get(0));
+        }
+    }
+
+    @Test
+    void aSignedResumeNamingBypassCollectionsStillLeavesThemAlone_theBatchExcludesThemInSql() throws Exception {
+        Belt b = signedTokenNamingBypassAndBlocked("sw-belt-bypass");
+
+        assertThat(metadataOf(b.tenant(), b.taxonomy(), b.taxonomyRow())).containsKey("title");
+        assertThat(metadataOf(b.tenant(), b.quarantine(), b.quarantineRow())).containsKey("title");
+        assertThat(metadataOf(b.tenant(), b.live(), b.liveRow())).as("and the live collection is swept")
+            .doesNotContainKey("title");
+    }
+
+    @Test
+    void aSignedResumeNamingBypassCollectionsIsStillDone_theFinalCountExcludesThemToo() throws Exception {
+        Belt b = signedTokenNamingBypassAndBlocked("sw-belt-done");
+
+        assertThat(b.applied().rowsSwept()).isEqualTo(1);
+        assertThat(b.applied().remainingRows()).as("the bypass rows are not counted as left to do").isZero();
+        assertThat(b.applied().done()).isTrue();
+    }
+
+    @Test
+    void aSignedResumeThatListsACollectionAsBlockedDoesNotSweepIt() throws Exception {
+        Belt b = signedTokenNamingBypassAndBlocked("sw-belt-held");
+
+        assertThat(metadataOf(b.tenant(), b.held(), b.heldRow())).as("named blocked in the token itself")
+            .containsKey("title");
+        assertThat(b.applied().blocked()).extracting(dev.nexus.service.vectors.ChunkKeySweep.Blocked::collection)
+            .containsExactly(b.held());
+    }
+
+    @Test
+    void theApplyBudgetStartsAfterTheChecks_aSlowCensusDoesNotSpendIt() throws Exception {
+        String tenant = "sw-budget";
+        String live = conformant(tenant);
+        Map<String, Map<String, Object>> three = new LinkedHashMap<>();
+        for (int i = 1; i <= 3; i++) three.put("k" + i, legacy(keyed(tenant, live, "k" + i)));
+        seed(tenant, live, three);
+        try (var superDs = PgContainerHelper.superuserDataSource(pg)) {
+            var slow = new dev.nexus.service.vectors.ChunkKeySweep(new dev.nexus.service.db.TenantScope(superDs),
+                (t, c, bound) -> {
+                    try {
+                        Thread.sleep(1_500);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return 0L;
+                });
+
+            var applied = slow.apply(tenant, enginePlan(), Map.of(), null, 1000, 5,
+                java.time.Duration.ofMillis(500), null);
+
+            assertThat(applied.totalMs()).as("fixture: the checks alone outlast the budget").isGreaterThan(1_400);
+            assertThat(applied.batches()).as("a batch still ran: the budget began after the census")
+                .isGreaterThanOrEqualTo(1);
+            assertThat(applied.rowsSwept()).isEqualTo(3);
+        }
+    }
+
     // ---- authorization and shape --------------------------------------------------------------------------------
 
     @Test

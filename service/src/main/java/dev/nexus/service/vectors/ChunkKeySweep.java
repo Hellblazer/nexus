@@ -28,6 +28,13 @@ import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -36,6 +43,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * The retire-keys sweep of RDR-236 Phase 4 Step 3 (nexus-6pfgb.43): strips every metadata key a chunk row may no longer
@@ -64,9 +73,14 @@ import java.util.Set;
  * change) is not read again until the pass wraps to the start. A pass that wraps and finds nothing is the end of the run;
  * if rows are still there, they were locked: {@code done} is then false and {@code locked_skipped_rows} says how many.
  *
- * <p><b>Once per run, not per call.</b> The preconditions, the per-collection census and the residue counts are
- * computed by the first apply call (or the dry run) only; a call that carries the {@link Resume} the previous one
- * returned goes straight to the batches, and its time budget starts after any checks.
+ * <p><b>Once per run, not per call, and the token is signed.</b> The preconditions, the per-collection census and the
+ * residue counts are computed by the first apply call (or the dry run) only; a call that carries the {@link Resume} the
+ * previous one returned goes straight to the batches, and its time budget starts after any checks. The census is a
+ * per-chunk join that cannot be repeated on every call, so the verdicts travel in the token, and the token is
+ * HMAC-signed with a key this instance made when it started, over the tenant and every field. A token whose signature
+ * does not verify (forged, edited, another tenant's, or issued before an engine restart) is IGNORED: the call is a first
+ * call and does its own checks. Whatever the token says, every batch and the final count also exclude the bypass
+ * collections in SQL and the collections the token itself lists as blocked.
  *
  * <p><b>By tenant, explicitly.</b> Every statement carries {@code tenant_id = ?} beside the RLS stamp: the owner role
  * sees every tenant's rows (RF-16), and a sweep run as that role must not depend on the stamp.
@@ -138,6 +152,8 @@ public final class ChunkKeySweep {
 
     private final TenantScope scope;
     private final CensusReader census;
+    /** Signs the {@link Resume} this instance hands out; random per instance, so a restart ends every continuation. */
+    private final byte[] resumeKey = newKey();
 
     public ChunkKeySweep(TenantScope scope, PgVectorRepository vectors) {
         this(scope, (tenant, collection, bound) -> vectors
@@ -147,6 +163,60 @@ public final class ChunkKeySweep {
     public ChunkKeySweep(TenantScope scope, CensusReader census) {
         this.scope = scope;
         this.census = census;
+    }
+
+    // ---- the signed continuation --------------------------------------------------------------------------------
+
+    private static byte[] newKey() {
+        byte[] key = new byte[32];
+        new SecureRandom().nextBytes(key);
+        return key;
+    }
+
+    /** The single point where a continuation is made: the fields, signed over the tenant. */
+    public Resume issueResume(String tenant, Cursor cursor, List<String> collections, List<Blocked> blocked,
+                              long remaining) {
+        return new Resume(cursor, List.copyOf(collections), List.copyOf(blocked), remaining,
+            sign(tenant, cursor, collections, blocked, remaining));
+    }
+
+    private boolean verified(String tenant, Resume r) {
+        if (r.sig() == null || r.collections() == null || r.blocked() == null) {
+            return false;
+        }
+        String expected = sign(tenant, r.cursor(), r.collections(), r.blocked(), r.remaining());
+        return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), r.sig().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** HMAC-SHA256 over a length-framed encoding of every field, hex. */
+    private String sign(String tenant, Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining) {
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(bytes);
+            out.writeUTF(tenant);
+            out.writeBoolean(cursor != null);
+            if (cursor != null) {
+                out.writeUTF(cursor.collection());
+                out.writeUTF(cursor.chash());
+            }
+            out.writeInt(collections.size());
+            for (String c : collections) {
+                out.writeUTF(c);
+            }
+            out.writeInt(blocked.size());
+            for (Blocked b : blocked) {
+                out.writeUTF(b.collection());
+                out.writeUTF(b.reason() == null ? "" : b.reason());
+                out.writeLong(b.retiredRows());
+            }
+            out.writeLong(remaining);
+            out.flush();
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(resumeKey, "HmacSHA256"));
+            return HexFormat.of().formatHex(mac.doFinal(bytes.toByteArray()));
+        } catch (IOException | GeneralSecurityException e) {
+            throw new IllegalStateException("could not sign the resume token: " + e.getMessage(), e);
+        }
     }
 
     // ---- reports ------------------------------------------------------------------------------------------------
@@ -204,15 +274,18 @@ public final class ChunkKeySweep {
     /**
      * What an apply call hands back so the next one skips the checks: where it stopped, the collections still to sweep,
      * the blocked ones (so the final report names them) and the rows still to sweep as the first call counted them less
-     * what was swept since. The engine trusts it as the operator's own continuation of a run whose first call did the
-     * checks; a call without it does them.
+     * what was swept since. {@code sig} signs every field (and the tenant) with this instance's key, so a token is a
+     * continuation only if this instance issued it ({@link #issueResume}); a call without a verifying one does the checks.
      */
-    public record Resume(Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining) {}
+    public record Resume(Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining, String sig) {}
 
-    /** The result of one apply call. {@code resume} is null once the run is done. */
+    /**
+     * The result of one apply call. {@code resume} is null once the run is done. {@code resumeIgnored} is true when the
+     * request carried a {@link Resume} whose signature did not verify: the call then ran as a first call.
+     */
     public record Applied(String tenant, long rowsSwept, int batches, boolean done, long remainingRows,
                           long lockedSkippedRows, long firstBatchMs, long totalMs, List<Blocked> blocked,
-                          Resume resume) {}
+                          Resume resume, boolean resumeIgnored) {}
 
     /** A refused apply: the preconditions that stood in the way and the counts. */
     public static final class PreconditionRefused extends RuntimeException {
@@ -470,6 +543,7 @@ public final class ChunkKeySweep {
         }
         return ctx.fetchCount(DSL.selectOne().from(CHUNKS)
             .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.in(collections))
+            .and(notBypass(CHUNKS.COLLECTION, plan))
             .and(retired(plan)).and(width(true)));
     }
 
@@ -557,7 +631,8 @@ public final class ChunkKeySweep {
      * row is left. The budget starts after the checks. Each batch is its own transaction.
      *
      * @param only   restricts the sweep to one collection when non-null
-     * @param resume the previous call's continuation, or null for the first call of a run
+     * @param resume the previous call's continuation, or null for the first call of a run; one that does not verify is
+     *               ignored and the call runs as a first call ({@link Applied#resumeIgnored})
      * @throws PreconditionRefused when a precondition is non-zero and not accepted up to its count
      */
     public Applied apply(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, String only, int batchSize,
@@ -568,6 +643,13 @@ public final class ChunkKeySweep {
         List<Blocked> blocked;
         long remaining;
         Cursor cursor;
+        boolean ignored = false;
+        if (resume != null && !verified(tenant, resume)) {
+            // Not a token this instance made for this tenant: take nothing from it, and do the checks.
+            log.warn("event=retire_keys_resume_ignored tenant={} reason=signature_not_verified", tenant);
+            resume = null;
+            ignored = true;
+        }
         if (resume == null) {
             DryRun report = dryRun(tenant, plan, accepted, size, false);
             if (!report.blocking().isEmpty()) {
@@ -584,6 +666,9 @@ public final class ChunkKeySweep {
             cursor = null;
         } else {
             sweepable = new LinkedHashSet<>(resume.collections());
+            for (Blocked b : resume.blocked()) {
+                sweepable.remove(b.collection());
+            }
             if (only != null) {
                 sweepable.retainAll(Set.of(only));
             }
@@ -639,11 +724,11 @@ public final class ChunkKeySweep {
             done = false;
             remainingOut = Math.max(0L, remaining - swept);
         }
-        Resume next = done ? null : new Resume(cursor, List.copyOf(sweepable), blocked, remainingOut);
+        Resume next = done ? null : issueResume(tenant, cursor, List.copyOf(sweepable), blocked, remainingOut);
         log.info("event=retire_keys_swept tenant={} rows={} batches={} remaining={} locked_skipped={} blocked_collections={}",
             tenant, swept, batches, remainingOut, lockedLeft, blocked.size());
         return new Applied(tenant, swept, batches, done, remainingOut, lockedLeft, firstMs,
-            Duration.ofNanos(System.nanoTime() - t00).toMillis(), blocked, next);
+            Duration.ofNanos(System.nanoTime() - t00).toMillis(), blocked, next, ignored);
     }
 
     private record Batch(long updated, long rows, long selectMs, long updateMs, Cursor last) {}
@@ -666,6 +751,7 @@ public final class ChunkKeySweep {
             .from(CHUNKS)
             .where(CHUNKS.TENANT_ID.eq(tenant))
             .and(CHUNKS.COLLECTION.in(collections))
+            .and(notBypass(CHUNKS.COLLECTION, plan))   // whatever the caller's set says: the exemption is the batch's own
             .and(width(true))
             .and(retired(plan))
             .and(keyset)
@@ -720,6 +806,14 @@ public final class ChunkKeySweep {
     }
 
     // ---- the table-wide view ------------------------------------------------------------------------------------
+
+    /** Every chunk row of {@code tenant}, counted through the tenant-scoped session: what the app role sees of it. */
+    public long rowCount(String tenant) {
+        return scope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
+            return (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant));
+        });
+    }
 
     /** Per-collection standing of one tenant, each collection with rows to sweep censused. */
     public List<CollectionCount> collectionsOf(String tenant, ChunkKeyPlan plan) {

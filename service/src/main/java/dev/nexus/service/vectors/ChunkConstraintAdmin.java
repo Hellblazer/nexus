@@ -57,9 +57,15 @@ import java.util.Properties;
  * never queues behind a long reader and, behind it, every writer; one run at a time on the {@link #ADVISORY_LOCK_KEY}
  * lock. A refusal is a {@link Refused} the handler answers with its status.
  *
- * <p><b>The table-wide probe.</b> {@link #probe} reads every tenant's counts in one pass on the admin session, which is
- * not row-filtered (RF-16: the owner role sees every tenant's rows), so a tenant with chunk rows and no
- * {@code service_tokens} row is seen. The routes use it to find the tenants to check and to refuse before any DDL.
+ * <p><b>The table-wide probe.</b> {@link #probe} reads every tenant's counts in one pass on the admin session, so a
+ * tenant with chunk rows and no {@code service_tokens} row is seen. It sees them ONLY when the session is not row
+ * filtered, and {@code nexus.chunks} is FORCE row-level-security: a role that is neither superuser nor BYPASSRLS reads
+ * every row only through a permissive SELECT policy whose qual is {@code true} that applies to it
+ * ({@code chunks_gate_probe_owner_read}, vectors-029, which names the MIGRATING role, so it does not reach a different
+ * {@code NX_DB_ADMIN_USER} and is skipped in the single-role posture). Without one the probe reads zero rows and nothing
+ * looks wrong, so {@link #probe} first checks the posture and refuses with {@code admin_cannot_see_all_tenants}
+ * ({@link #requireUnrestrictedView}); the handler also compares the probe with a tenant-scoped count for each tenant it
+ * knows. The routes use the probe to find the tenants to check and to refuse before any DDL.
  *
  * <p><b>DATA EFFECT of {@code add}.</b> No row is changed, but a NOT VALID CHECK is evaluated against every new row
  * version, including an UPDATE that touches no metadata: a row that already breaks a constraint can no longer be
@@ -73,7 +79,7 @@ import java.util.Properties;
  * <p><b>Capability flags.</b> The Phase 3 manifest-keyed read flags the sweep depends on are constants in this binary,
  * true by construction wherever this class exists; nothing here reads them from {@code /version}.
  */
-public final class ChunkConstraintAdmin {
+public class ChunkConstraintAdmin {
 
     private static final Logger log = LoggerFactory.getLogger(ChunkConstraintAdmin.class);
 
@@ -173,14 +179,17 @@ public final class ChunkConstraintAdmin {
     }
 
     /**
-     * The table-wide probe: every tenant's counts, read in one pass on the admin session (not row-filtered), so a tenant
-     * absent from {@code service_tokens} is seen. Per tenant: its rows, the rows outside every bypass prefix that hold a
+     * The table-wide probe: every tenant's counts, read in one pass on the admin session, so a tenant absent from
+     * {@code service_tokens} is seen. Refuses ({@code Refused} 503, {@code admin_cannot_see_all_tenants}) unless the
+     * session is not row filtered: superuser, BYPASSRLS, or a permissive SELECT policy with a {@code true} qual that
+     * applies to the role. Per tenant: its rows, the rows outside every bypass prefix that hold a
      * key outside the allow-list, the rows whose {@code chunk_text_hash} or {@code embedding_model} differs from the
      * column, the rows whose chash is not 32 bytes and the rows that break the quarantine implication (the last four over
      * every collection, as the CHECKs apply to all). Tenants with no rows do not appear.
      */
     public List<TenantProbe> probe(ChunkKeyPlan plan) {
         try (Session s = open(false)) {
+            s.requireUnrestrictedView();
             s.setSession("statement_timeout", PROBE_STATEMENT_TIMEOUT);
             return s.probe(plan);
         }
@@ -417,6 +426,55 @@ public final class ChunkConstraintAdmin {
                 out.add(found != null ? found : new State(name, false, null, null));
             }
             return out;
+        }
+
+        /**
+         * Refuse unless this session reads every row of {@code nexus.chunks}: the role is a superuser or has BYPASSRLS,
+         * or a PERMISSIVE policy FOR SELECT (or ALL) with the qual {@code true} applies to it (named, or PUBLIC, or a role
+         * it inherits). Anything else reads the rows its (unset) tenant stamp allows, which is none, and the probe would
+         * report an empty table as clean.
+         */
+        void requireUnrestrictedView() {
+            String role = ctx.select(DSL.currentUser()).fetchOne(0, String.class);
+            var attrs = ctx.select(DSL.field(DSL.name("r", "rolsuper"), Boolean.class),
+                    DSL.field(DSL.name("r", "rolbypassrls"), Boolean.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_roles")).as("r"))
+                .where(DSL.field(DSL.name("r", "rolname"), String.class).eq(role))
+                .fetchOne();
+            if (attrs != null && (Boolean.TRUE.equals(attrs.value1()) || Boolean.TRUE.equals(attrs.value2()))) {
+                return;
+            }
+            var policies = ctx.select(DSL.field(DSL.name("p", "roles"), SQLDataType.CLOB.array()),
+                    DSL.field(DSL.name("p", "qual"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_policies")).as("p"))
+                .where(DSL.field(DSL.name("p", "schemaname"), String.class).eq(CHUNKS.getSchema().getName()))
+                .and(DSL.field(DSL.name("p", "tablename"), String.class).eq(CHUNKS.getName()))
+                .and(DSL.field(DSL.name("p", "permissive"), String.class).eq("PERMISSIVE"))
+                .and(DSL.field(DSL.name("p", "cmd"), String.class).in("SELECT", "ALL"))
+                .fetch();
+            for (var p : policies) {
+                String qual = p.value2() == null ? "" : p.value2().replaceAll("[()\\s]", "");
+                if (!"true".equalsIgnoreCase(qual) || p.value1() == null) {
+                    continue;
+                }
+                for (String named : p.value1()) {
+                    if ("public".equalsIgnoreCase(named) || memberOf(named)) {
+                        return;
+                    }
+                }
+            }
+            throw new Refused(503, "admin_cannot_see_all_tenants",
+                "the admin session role " + role + " does not read every tenant's rows of nexus.chunks: it is neither "
+                    + "a superuser nor BYPASSRLS, and no permissive SELECT policy with a true qual applies to it, so "
+                    + "the table-wide probe would read zero rows and the constraint checks would pass over every "
+                    + "tenant. Point NX_DB_ADMIN_* at the role that owns the tables and carries "
+                    + "chunks_gate_probe_owner_read (vectors-029), or at a BYPASSRLS role");
+        }
+
+        /** True when the session role has the privileges of {@code named} (is it, or inherits it). */
+        private boolean memberOf(String named) {
+            return Boolean.TRUE.equals(ctx.select(DSL.function("pg_has_role", SQLDataType.BOOLEAN, DSL.currentUser(),
+                    DSL.cast(DSL.val(named), SQLDataType.VARCHAR), DSL.inline("USAGE"))).fetchOne(0, Boolean.class));
         }
 
         /** The probe query: one pass over {@code nexus.chunks}, grouped by tenant, typed jOOQ on the admin connection. */
