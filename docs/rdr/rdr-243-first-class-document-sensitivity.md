@@ -202,9 +202,9 @@ count" below refers to it.
 | 18 | Memory rollup / `memory_consolidate` | memory_rollup.py:152 | T2 notes to the LLM | `n/a-not-a-document`; recorded as an unprotected gap (a note quoting a sensitive document) |
 | 19 | Voyage embedding | engine `VoyageEmbedder.java`; `CceEmbedder.java` (`/v1/contextualizedembeddings`, CceEmbedder.java:39) | chunk text to `api.voyageai.com` at index time | Q3, decided: an acknowledgement flag; local mode routes a sensitive document to a bge collection |
 | 20 | Voyage rerank | engine `VoyageReranker.java` | query plus candidate chunk text to Voyage | Q4, decided: sensitive candidates are kept from the reranker, engine-side |
-| 21 | MinerU remote | pdf_extractor.py:2787; config.py:623 | PDF bytes to `pdf.mineru_server_url`, possibly off the machine | `--sensitive` with a non-loopback URL falls to the local subprocess ladder, or refuses if none |
+| 21 | MinerU remote | pdf_extractor.py:2787; config.py:623 | PDF bytes to `pdf.mineru_server_url`, possibly off the machine | `--sensitive` never sends the PDF to `pdf.mineru_server_url`, loopback or not, since a loopback URL can be a tunnel (Q6's reasoning, Sam 2026-11-04); it uses the local subprocess ladder, or refuses if none |
 | 22 | Cloud tenant storage | `HttpVectorClient` upserts in cloud mode | chunk text and embeddings to the managed tenant | `--sensitive` prints a one-line disclosure naming tenant and embedder; Q3, decided: an acknowledgement flag is required |
-| 23 | MCP read tools (output side) | mcp/core.py:3779 `search`, 5028 `query`, 6097 `store_get`, 6723 `store_get_many`; scoped searches; `traverse`; catalog `show`/`list` | content and titles to the session model | Q1, decided: withheld by default; the operator-only `sensitivity.mcp_output` key can switch to `flag` |
+| 23 | MCP read tools (output side) | mcp/core.py:3779 `search`, 5028 `query`, 6097 `store_get`, 6723 `store_get_many`; scoped searches; `traverse`; catalog `show`/`list` | content and titles to the session model | Q1, decided: withheld by default; the `sensitivity.mcp_output` config key can switch to `flag` |
 | 24 | CLI `nx search` / `query` | commands/search_cmd.py:217 | stdout, often read by Claude Code's Bash tool | Q2, decided: withheld under Claude Code, badged in a terminal |
 | 25 | Install ping | install_ping.py:191 | install id, version, mode; no content | `n/a`; listed so the census is complete |
 
@@ -228,7 +228,7 @@ has the same source URI and writes none of the request's fields. A
 `--sensitive` re-index of an already-indexed document would therefore never
 set the flag through an `OR` in the upsert. A tombstoned (soft-deleted)
 source URI is re-registered under a new tumbler, so delete-then-re-index
-would also drop the flag. The design below handles both.
+would also drop the flag. The design below handles both while a tombstone exists.
 
 **Documented, corrects the design: rename keeps tumblers.**
 `renameCollection` rewrites `physical_collection` in place, so a column on
@@ -256,7 +256,12 @@ outbound calls.** The bibliographic enrichers use module constants
 `aspect_readers.py` fetches a document's own `https` source URI. None is a
 literal at the call site. The registry lint below inverts the rule: every
 `httpx` request outside the engine-client modules must sit in a function
-the registry names.
+the registry names. The lint reads Python only. Engine egress (rows 19, 20
+and 22, `EgressProxy`, and the `POST /v1/vectors/resolve` fetch of a stored
+source URI) stays a hand-kept list whose source is RDR-210's engine egress
+census (`nexus_rdr/210-research-10`, `nexus_rdr/243-research-21`). The
+local cross-encoder reranker sends nothing off the machine; Q4 concerns the
+Voyage reranker only.
 
 **Documented, corrects the design: a `pg_proc` parity check misses reads
 that are not SQL functions.** Get-by-id in `PgVectorRepository.java` is a
@@ -276,7 +281,7 @@ enforces one, because it is best effort.
 refuses note-URI writes on an engine below a floor
 (`require_note_uri_engine`). On an unknown version it logs
 `note_uri_engine_version_unknown` and allows the write
-(serving_engine_version.py:98-109, `nexus_rdr/243-research-16`), so it is
+(serving_engine_version.py:99-110, `nexus_rdr/243-research-16`), so it is
 not fail-closed. The capability check in this RDR takes only its
 probe-and-refuse shape.
 
@@ -349,7 +354,7 @@ Three layers, each closing a different hole.
 
 The output side (what the session model sees) and the external services
 (Voyage, MinerU, the cloud tenant) come in phase 3, under Sam's decisions
-Q1 to Q4 and Q6.
+Q1 to Q4 and Q7.
 
 The flag protects against accidental exposure by tools and agents that
 behave as designed. It does not stop a model with shell access that sets
@@ -401,7 +406,13 @@ routes accept `sensitivity=exclude` and return `sensitive` per hit,
 computed in one batched query over the result chashes after the search, so
 the `RETURNS TABLE` shapes of the search functions do not change. The
 engine advertises the capability (a `capabilities` entry on its status
-route).
+route, which is new engine work: the route has no such entry today). A
+client refuses a `--sensitive` write (index, `store put`, MCP `store_put`,
+`nx catalog sensitive`) before the register call when the engine does not
+advertise the capability, and also when the status probe fails or returns
+no capabilities: unlike `require_note_uri_engine`, an unknown answer
+refuses, because an engine without the column would drop the flag without
+an error (CatalogRepository.java reads register fields by key).
 
 **4. Read-side filter (phase 2).** Each search function family takes the
 parameter and, when it is `exclude`, adds `NOT EXISTS` over live sensitive
@@ -416,30 +427,49 @@ filter.
 llm_bound(surface: str) -> ContextManager[None]
     sets a ContextVar posture = "llm_bound" and the surface name
 current_posture() -> Literal["default", "llm_bound"]
-    ContextVar first, then NX_SENSITIVITY_POSTURE in the environment;
-    read only on the thread that entered the scope
+    ContextVar first (visible on the thread that entered the scope and on
+    threads that copy its context), then NX_SENSITIVITY_POSTURE in the
+    environment (process-wide; set only in children)
 assert_llm_bound(root: str) -> None
     raises DispatchOutsideSensitivityScope(root, surface=None)
 class SensitiveDocumentRefused(Exception): tumbler, surface
 ```
 
-`claude_dispatch`, `run_text_sync`, `_run_claude_isolated` and
-`CliBackend` call `assert_llm_bound`. `_build_dispatch_env` always exports
+`claude_dispatch`, `run_text_sync` and `_run_claude_isolated` call
+`assert_llm_bound`. `_build_dispatch_env` always exports
 `NX_SENSITIVITY_POSTURE=llm_bound` to the child. The nx MCP server reads
 the variable at startup and runs every tool inside the scope (A5). The
 ContextVar decides the dispatch asserts and the value an entry point passes
 to its reads; no read consults it, because worker threads in the search
-fan-out do not inherit it (A7, refuted).
+fan-out do not inherit it (A7, refuted). Three dispatch paths run on a
+thread that copies no context (`nexus_rdr/243-research-20`):
+`run_text_sync`'s helper thread (llm_backend.py:541), the taxonomy
+labelling pool (taxonomy_cmd.py:2571) and the aspect worker thread
+(aspect_worker.py:499). `run_text_sync` asserts before it hands work to
+its helper thread; the taxonomy pool submits each batch through
+`contextvars.copy_context().run`; the aspect worker enters `llm_bound` on
+its own thread for each row it drains.
 
 **6. Reads under the scope.** The posture reaches a read as an explicit
-argument. `HttpVectorClient` search, query, get and get-many take a
-keyword-only `sensitivity: Literal["exclude", "include"]` with no default,
-so a call site that omits it fails at call time. Each LLM-bound entry point
+argument. The `HttpVectorClient` methods that return chunk text (`search`,
+`hybrid_search`, `search_per_collection`, `search_metadata_scoped`,
+`search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`,
+`get_by_id`, `list_store`, `list_chunks_with_metadata` and `chunk_rows`;
+`nexus_rdr/243-research-19`) take a keyword-only
+`sensitivity: Literal["exclude", "include"]` with no default, and so does
+every layer a posture flows through: `search_cross_corpus`, the
+`T3Database` facade, `InMemoryVectorClient` and the runner's
+`_hydrate_tumbler_ids`. A call site that omits it fails at call time.
+`llm_bound` maps to `exclude` and `default` to `include`. Each entry point
 reads `current_posture()` once on its own thread and passes the value
-down: `search_cross_corpus` takes `sensitivity` and hands it to every pool
-task as an argument, and `store_get_many` and the runner's
-`_hydrate_tumbler_ids` take it the same way. `exclude` sends
-`sensitivity=exclude`. If the engine does not advertise the capability, an
+down; `search_cross_corpus` hands it to every pool task as an argument.
+MCP tools (`search`, `query`, `store_get`, `store_get_many`, the scoped
+searches) carry no `sensitivity` parameter in their schema: the tool body
+derives the value from the posture and calls an internal helper that takes
+it, so a model cannot pass `include`. `exclude` sends `sensitivity=exclude`;
+`include` sends nothing, which is the request made today. Every existing
+caller changes in the same release; non-LLM callers (indexing, dedupe,
+export) pass `include`. If the engine does not advertise the capability, an
 `exclude` read raises; it never falls back to an unfiltered read. Document-keyed pipelines check the catalog row
 before they read: aspect enqueue, the worker drain, `extract_aspects`, the
 bib and CrossRef selection, the validation sample frame, taxonomy sample
@@ -461,12 +491,29 @@ text.
 False` on MCP `store_put` (Q5, decided; not through catalog `update`). `nx catalog sensitive
 <tumbler | --collection C | --path GLOB> [--clear --reason TEXT]` sets or
 clears after the fact. `nx catalog list --sensitive` lists. `nx index repo
---sensitive-glob PATTERN` is phase 3 (Q8, decided).
+--sensitive-glob PATTERN` is phase 3 (Q8, decided). Under Q3,
+`--sensitive` into a Voyage-embedded collection needs
+`--ack-external-embedder`; in local mode a sensitive document indexed
+without it goes to the bge collection of the same subject instead. MCP
+`store_put(sensitive=True)` has no way to acknowledge: in local mode it
+stores into the bge collection of the subject, and in cloud mode, where
+every collection embeds through Voyage, it refuses and says why (Sam,
+2026-11-04).
 
 **9. Carrying the flag to results.** `SearchResult.metadata["sensitive"]`
 comes from the engine, never from the chunk row. `sensitive_owners` comes
 from chash-positions. A reader instruction joins `READER_INSTRUCTION`
-(context_annotations.py:38) only when a sensitive hit is present.
+(context_annotations.py:38) only when a sensitive hit is shown with its
+content, which happens under `sensitivity.mcp_output: flag` and in a
+terminal (Q2).
+
+Output posture (phase 3, Q1). Under `withhold`, the default, an MCP read
+tool reads with `include`, then replaces each hit whose `sensitive` field
+(item 3) is true with one line, `[sensitive] <tumbler>: content withheld`,
+with no title, and states the number of withheld hits in the result, so
+results do not thin without notice (Sam, 2026-11-04). The text never
+leaves the tool. Under `flag` the hit is returned with its content and a
+`[sensitive]` badge.
 
 **10. Doctor rows** (`nx catalog doctor` and `nx doctor`):
 `sensitive_in_aspect_eligible` (warn: a sensitive document whose
@@ -495,9 +542,10 @@ not-applicable, never a green pass.
 
 A column is the only place where no existing writer can clear the flag by
 accident: every writer that omits it leaves the default, and the `OR`
-leaves an existing `true` alone. Checking at the three dispatch roots is
-complete by construction (A4), where a check per call site is complete
-only until the next surface. The scope makes the dispatch refuse rather
+leaves an existing `true` alone. Checking at the three dispatch roots
+covers every call that exists today (A4); the registry lint and the canary
+are what keep a new surface from shipping unchecked, where a check per
+call site is complete only until the next surface. The scope makes the dispatch refuse rather
 than trust a caller's declaration of what text it carries, which matters
 for `nx_answer`, where operator inputs arrive as `$stepN` text several hops
 from any id, and for the tool-access children, which declare nothing.
@@ -586,7 +634,8 @@ does not depend on callers telling the truth.
 ### Consequences
 
 - Positive: protection belongs to the document and survives rename,
-  import, merge and re-index at the same source URI.
+  import, merge and re-index at the same source URI while the row or its
+  tombstone exists.
 - Negative: inheritance is keyed on source URI, so the flag does not follow
   a file moved or copied to a new path, and delete-then-re-index loses it
   once `nx catalog purge-trash` has removed the tombstone
@@ -606,8 +655,9 @@ does not depend on callers telling the truth.
   reaches the engine without the argument.
   **Mitigation**: the `sensitivity` keyword has no default, so an omitted
   argument fails at call time; the posture never rides on thread state
-  (A7, refuted); the canary runs `nx_answer` retrieval over at least two
-  collections, so the search fan-out pools execute.
+  (A7, refuted); the canary runs `nx_answer` retrieval over collections of
+  at least two embedding models, so the search fan-out pools execute
+  (`nexus_rdr/243-research-18`), and asserts that a pool ran.
 - **Risk**: A client sends `sensitivity=exclude` to an engine that ignores
   unknown parameters and returns sensitive rows.
   **Mitigation**: the client checks the capability first and raises when
@@ -626,8 +676,9 @@ does not depend on callers telling the truth.
   root; the fix is to wrap the surface and add its registry row.
 - A sensitive document skipped: a structured log line names the tumbler
   and the surface; the command summary counts skips.
-- An old engine: posture-bound reads raise with the engine version and the
-  minimum required.
+- An old engine: `exclude` reads and `--sensitive` writes raise with the
+  engine version and the minimum required, and so does a status probe that
+  fails or reports no capabilities.
 - A document that leaked before it was flagged: `nx catalog doctor` fails
   `sensitive_with_aspects` and prints the delete command.
 
@@ -647,6 +698,10 @@ string; every surface in the registry whose behaviour is `refuse` or `skip`
 runs against a corpus that includes it, with a capturing fake LLM backend
 and an `httpx` mock transport, and the string appears in no captured
 payload. Deleting any one gate turns its row red. This runs in phase 1.
+
+Phases 1 and 2 ship in one release: `--sensitive` is not released until
+the read filter is in, so no release describes protection it does not
+give (Sam, 2026-11-04). Phase 3 can ship later.
 
 ### Phase 1: Minimal real protection (input side, document-keyed)
 
@@ -671,8 +726,8 @@ chash-positions rows. Java repository tests on PostgreSQL.
 
 #### Step 4: Scope and document gates
 
-`nexus.sensitivity`; the assert in the three roots and `CliBackend`; every
-current surface wrapped. Document gates in aspect enqueue, drain and
+`nexus.sensitivity`; the assert in the three roots; every current surface
+wrapped, with the three thread hops of Technical Design item 5 handled. Document gates in aspect enqueue, drain and
 extract, the validation sample frame, bib and CrossRef selection, and
 taxonomy sample names.
 
@@ -691,17 +746,18 @@ Engine `sensitivity=exclude` in every search family and in get-by-id
 (a new `vectors-0NN` changeset), the route parity test, the capability
 entry. `HttpVectorClient` read methods take the explicit, default-less
 `sensitivity` argument and fail closed; `search_cross_corpus` passes it to
-every pool task. Runner and bundle
+every pool task; every existing caller is updated. Runner and bundle
 hydration refusals. `NX_SENSITIVITY_POSTURE` exported to children and read
 by the nested MCP server. `nx_tidy` prefetch exclusion. The engine release
-that carries the changeset precedes the client release.
+that carries the changeset precedes the client release that carries
+phases 1 and 2.
 
 ### Phase 3: Output side and external services
 
 The MCP output posture (Q1); the CLI badge, `--json` field and Claude Code
 posture (Q2); the reader instruction line; Voyage index-time handling (Q3)
 and rerank exclusion (Q4); the remote-MinerU fallback; DEVONthink exclusion
-import (Q7, A6; nexus writes nothing into DEVONthink, Sam 2026-11-04); taxonomy discover
+import (Q7, A6; this RDR adds no write to DEVONthink, Sam 2026-11-04); taxonomy discover
 without sensitive members; the `sensitive_in_external_embedder` doctor row;
 `docs/sensitivity.md`.
 
@@ -725,15 +781,16 @@ None.
 
 - **Scenario**: Canary over the registry — **Verify**: for each row, the
   canary string is absent from every captured LLM payload and outbound
-  request; the corpus spans at least two collections, so the search fan-out
-  pools run; the test is parametrized over the table, so a new row brings
-  its own case.
+  request; the corpus spans collections of at least two embedding models,
+  so the search fan-out pools run, and the test asserts a pool ran; the
+  test is parametrized over the table, so a new row brings its own case.
 - **Scenario**: Registry lint — **Verify**: every call to
   `claude_dispatch` or `run_text_sync`, every `claude -p` argv, and every
   `httpx` request outside the engine-client modules sits in a function the
   table names; the non-vacuity floor is the count at landing.
 - **Scenario**: Dispatch outside the scope — **Verify**: each of the three
-  roots and `CliBackend` raises `DispatchOutsideSensitivityScope`.
+  roots raises `DispatchOutsideSensitivityScope`; each of the three thread
+  hops (item 5) dispatches inside the scope without raising.
 - **Scenario**: Re-register without the flag — **Verify**: the flag stays
   true (Java, PostgreSQL).
 - **Scenario**: Re-register an existing live document with the flag —
@@ -756,15 +813,22 @@ None.
 - **Scenario**: Route parity (phase 2) — **Verify**: every engine route
   that returns chunk text accepts `sensitivity` and filters; the list is
   derived from the route table and `pg_proc`, not typed by hand.
-- **Scenario**: Old engine (phase 2) — **Verify**: a posture-bound read
-  raises; a default read works.
-- **Scenario**: `nx_answer` over a corpus of at least two collections with
-  a sensitive canary document (phase 2) — **Verify**: the canary is absent
+- **Scenario**: Old engine (phase 2) — **Verify**: an `exclude` read and a
+  `--sensitive` write raise, as they do when the status probe fails; an
+  `include` read works.
+- **Scenario**: `nx_answer` over a corpus with collections of at least two
+  embedding models and a sensitive canary document (phase 2) — **Verify**: the canary is absent
   from every operator prompt and from the final answer.
 - **Scenario**: An `HttpVectorClient` read without `sensitivity` (phase 2)
   — **Verify**: it raises at call time.
 - **Scenario**: Child process with MCP tools (phase 2) — **Verify**: its
   `search` returns no sensitive hits.
+- **Scenario**: MCP `store_put(sensitive=True)` — **Verify**: cloud mode
+  refuses with the reason; local mode stores into the subject's bge
+  collection.
+- **Scenario**: MCP `search` under `withhold` (phase 3) — **Verify**: a
+  sensitive hit appears as the stub line with no title and the withheld
+  count; the canary string is absent from the response.
 - **Scenario**: Doctor rows on a tenant with no sensitive documents —
   **Verify**: not-applicable, not pass.
 - **Scenario**: Aspect drain after a late flag — **Verify**: a row queued
@@ -825,8 +889,9 @@ the drafter's recommendations, the design having left them open.
   `sensitive=True`), given that clearing stays CLI-only with a reason?
   *Decided (as the drafter recommended)*: yes for
   `store_put`, no through catalog `update`. Setting is the protective
-  direction and an operator can clear a wrong set; clearing remains a
-  human act.
+  direction and an operator can clear a wrong set; clearing stays a CLI
+  verb with no MCP tool, which a process with shell access can still run
+  (see the threat scope under Approach).
 - **Q6.** Should an LLM backend whose endpoint is loopback (a local
   OpenAI-compatible server) be exempt from the dispatch refusal?
   *Decided (as the drafter recommended)*: no exemption in
@@ -903,3 +968,4 @@ the drafter's recommendations, the design having left them open.
   decisions.
 - 2026-11-04: Gate round 1 — BLOCKED (1 Critical, 9 Significant, 1 ship-blocker(s)); commit `d67b81f01`; critique `nexus_rdr/243-gate-critique-2026-11-03-r1`.
 - 2026-11-04: Gate round 2 — PASSED (0 Critical, 10 Significant, 0 ship-blocker(s)); commit `35b28ad48`; critique `nexus_rdr/243-gate-critique-2026-11-04-r2`.
+- 2026-11-04: Sam's rulings: remedy (a) for the round-1 Critical; Gap 5 narrowed to the sensitive case; no DEVONthink writeback tag. After the round-2 PASSED gate, Sam asked for all ten Significants: phases 1 and 2 ship together; MCP `store_put(sensitive=True)` refuses in cloud mode and routes to bge locally; withheld MCP hits are a stub with no title and a withheld count; a sensitive PDF never goes to a MinerU URL, loopback or not. Revision: these designs, the write-path capability check, the dispatch-side thread hops, the client read-method list, the canary's embedding-model condition, engine egress as a hand-kept list, and wording fixes.
