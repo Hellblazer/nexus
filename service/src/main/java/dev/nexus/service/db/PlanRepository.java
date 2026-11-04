@@ -922,9 +922,12 @@ public final class PlanRepository {
      * The read-time expiry predicate shared by {@link #listActivePlans},
      * {@link #searchPlans}, and {@link #listPlans} — extracted to ONE place
      * (coordinator scope addition, hygiene-001 follow-on) so the read filter
-     * and {@link #deleteExpiredPlans} cannot diverge. Returns TRUE for a plan
-     * that is still active: {@code ttl_days IS NULL} (permanent) or its age
-     * since last use (falling back to creation) is within {@code ttl_days}.
+     * and {@link #deleteExpiredPlans} cannot diverge. One write path reads it
+     * too: {@link #incrementRunStartedIn} stamps {@code last_used} only where
+     * it holds (nexus-i1eb4), so a change here also changes which run starts
+     * reset a plan's disuse clock. Returns TRUE for a plan that is still
+     * active: {@code ttl_days IS NULL} (permanent) or its age since last use
+     * (falling back to creation) is within {@code ttl_days}.
      */
     private static Condition notExpiredCondition() {
         return PLANS.TTL_DAYS.isNull().or(
