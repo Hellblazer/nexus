@@ -1806,7 +1806,120 @@ class TestInitializedGateIsBounded:
         assert status["gate_stalled"] is False
         assert status["gate_stalled_since"] is None
         assert channel.read_channel_status(tmp_path, session_id)["gate_stalled"] is False
-        assert status["announced"] == 1 or status["pending"] == 1
+        # the row's first announce was refused and its re-announce got through:
+        # credited once, and still within its announce budget
+        assert status["announced"] == 1
+        assert status["pending"] == 1
+        assert len(sender.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_gate_that_opens_late_with_no_further_send_reads_healthy(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The handshake finishes after the bound and no row arrives afterwards
+        (a board-only idle subscription): nothing ever clears the stall by a
+        send. The status, and the record the doctor reads, must follow the gate."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        fake.seed(f"mailbox/{session_id}", "t1", "hello")
+        ev = asyncio.Event()
+        monkeypatch.setattr(channel, "_write_stream", object())
+        monkeypatch.setattr(channel, "_initialized_event", ev)
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=_GateSender(stalled=True),
+            state_dir=tmp_path, wait_timeout_s=1,
+        )
+        await waiter.tick()
+        assert waiter.status()["gate_stalled"] is True
+
+        ev.set()  # the client's notifications/initialized arrives; no row follows
+
+        assert waiter.status()["gate_stalled"] is False
+        assert waiter.status()["gate_stalled_since"] is None
+        await waiter.tick()  # an idle tick publishes the record the doctor reads
+        assert channel.read_channel_status(tmp_path, session_id)["gate_stalled"] is False
+
+    @pytest.mark.asyncio
+    async def test_while_the_gate_is_known_shut_later_sends_do_not_wait_again(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """One stall must not cost a tick 30 s per row: after the first timeout
+        the sender is not called again until the gate opens."""
+        calls = 0
+
+        async def sender(_content: str, _meta: dict[str, str]) -> bool:
+            nonlocal calls
+            calls += 1
+            raise channel.ChannelGateTimeout("gate shut")
+
+        monkeypatch.setattr(channel, "_write_stream", object())
+        monkeypatch.setattr(channel, "_initialized_event", asyncio.Event())
+        session_id = str(uuid.uuid4())
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(_FakeTupleStore()), _subs(session_id), sender=sender, state_dir=tmp_path,
+        )
+        results = [await waiter._send("c", {"subspace": "board/x"}) for _ in range(3)]  # noqa: SLF001
+        assert results == [False, False, False]
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_a_sender_that_reports_nothing_sent_is_not_a_delivery(self, tmp_path) -> None:
+        """`send_channel_notification` answers False with no live stream. That
+        is not sent: no credit, no recovery."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        fake.seed(f"mailbox/{session_id}", "t1", "hello")
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=_FakeSender(always_ok=False),
+            state_dir=tmp_path, wait_timeout_s=1,
+        )
+        await waiter.tick()
+        assert waiter.status()["announced"] == 0
+        assert waiter._last_seen == {}  # noqa: SLF001
+        # and it does not clear a stall a timed-out send published
+        waiter._gate_stalled_since = datetime.now(UTC)  # noqa: SLF001
+        assert await waiter._send("c", {}) is False  # noqa: SLF001
+        assert waiter._gate_stalled_since is not None  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_a_board_post_a_shut_gate_refused_is_sent_when_it_opens(self, tmp_path, monkeypatch) -> None:
+        session_id = str(uuid.uuid4())
+        ev = asyncio.Event()
+        monkeypatch.setattr(channel, "_write_stream", object())
+        monkeypatch.setattr(channel, "_initialized_event", ev)
+        sender = _GateSender(stalled=True)
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(_FakeTupleStore()), _subs(session_id), sender=sender, state_dir=tmp_path,
+            wait_timeout_s=1,
+        )
+        row = _FakeTupleStore().seed("board/x", "b1", "hi", dims={"from": "a"})
+        await waiter._deliver_board_rows("board/x", [row], None)  # noqa: SLF001
+        assert waiter.status()["board_batches"] == 0
+        assert sender.calls == []
+
+        sender.stalled = False
+        ev.set()
+        await waiter.tick()  # the next tick flushes what the shut gate held
+
+        assert [m["tuple_id"] for _c, m in sender.calls] == ["b1"]
+        assert waiter.status()["board_batches"] == 1
+        assert waiter._board_last_delivered["board/x"][1] == "b1"  # noqa: SLF001
+        assert waiter._held == []  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_held_board_posts_are_bounded_and_the_oldest_goes_first(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(channel, "_write_stream", object())
+        monkeypatch.setattr(channel, "_initialized_event", asyncio.Event())
+        monkeypatch.setattr(channel, "_HELD_BOARD_SENDS_MAX", 3)
+        session_id = str(uuid.uuid4())
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(_FakeTupleStore()), _subs(session_id),
+            sender=_GateSender(stalled=True), state_dir=tmp_path,
+        )
+        store = _FakeTupleStore()
+        for i in range(5):
+            await waiter._deliver_board_rows("board/x", [store.seed("board/x", f"b{i}", "x")], None)  # noqa: SLF001
+        assert [meta["tuple_id"] for _c, meta, _f in waiter._held] == ["b2", "b3", "b4"]  # noqa: SLF001
 
     @pytest.mark.asyncio
     async def test_a_board_send_into_a_shut_gate_is_not_credited(self, tmp_path) -> None:

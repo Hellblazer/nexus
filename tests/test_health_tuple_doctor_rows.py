@@ -1482,6 +1482,23 @@ class TestCheckTupleChannelDelivery:
         r = h._check_tuple_channel_delivery()[0]
         assert r.ok is True
 
+    def test_a_hard_killed_stalled_waiter_reads_stale_not_running(self, monkeypatch, tmp_path: Path) -> None:
+        """A SIGKILLed waiter leaves alive=True and gate_stalled=True on disk
+        with its last wake frozen. Its age is the truer signal: the row must
+        say the wake is stale (a warning), not 'running but the client never
+        initialized'."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        _write_status(
+            tmp_path, "sess-1", alive=True, last_wake=old, announced=0,
+            gate_stalled=True, gate_stalled_since=old,
+        )
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "stale" in r.detail
+        assert "notifications/initialized" not in r.detail
+
     def test_not_alive_is_warn(self, monkeypatch, tmp_path: Path) -> None:
         """Mutation-check target: dropping the `not alive` half of the
         WARN condition must fail this test."""
@@ -1686,15 +1703,37 @@ def test_new_channel_delivery_row_absent_from_fresh_install_mvv_allowlist() -> N
 # connection.
 
 
-def _mcp_log(root: Path, project_dir: str, server_dir: str, name: str, *lines: str) -> Path:
+def _mcp_log(
+    root: Path, project_dir: str, server_dir: str, name: str, *lines: str, session: str | None = None,
+) -> Path:
     d = root / project_dir / server_dir
     d.mkdir(parents=True, exist_ok=True)
     f = d / name
+    entry = {"timestamp": "2026-11-04T18:10:59.162Z"}
+    if session is not None:
+        entry["sessionId"] = session
     f.write_text(
-        "".join(json.dumps({"debug": line, "timestamp": "2026-11-04T18:10:59.162Z"}) + "\n" for line in lines),
+        "".join(json.dumps({"debug": line, **entry}) + "\n" for line in lines),
         encoding="utf-8",
     )
     return f
+
+
+_CONNECTED = "Successfully connected (transport: stdio) in 900ms"
+_REGISTERED = "Channel notifications registered"
+_MISSING = "Channel notifications skipped: server did not declare claude/channel capability"
+_FAILED = "Connection failed after 120ms: MCP error -32000: Connection closed"
+_NOT_LISTED = "Channel notifications skipped: server plugin:conexus:nexus not in --channels list for this session"
+_FILLER = "Calling MCP tool: memory_get"
+_DIR = "mcp-logs-plugin-conexus-nexus"
+_LOG = "2026-11-04T10-00-00-000Z.jsonl"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_claude_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row prefers this session's own log files when the environment names
+    the session; the tests that want that set it themselves."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 
 
 class TestCheckClaudeCodeMcpConnection:
@@ -1795,18 +1834,120 @@ class TestCheckClaudeCodeMcpConnection:
         )
         assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is True
 
-    def test_a_failure_line_past_the_read_bound_is_never_read(self, tmp_path: Path) -> None:
-        """The scan reads only the start of the file (a long session's log holds
-        thousands of tool-call lines)."""
-        filler = ["Calling MCP tool: memory_get"] * 5000
-        _mcp_log(
-            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
-            "Channel notifications registered", *filler,
-            "Connection failed: MCP error -32000: Connection closed",
-        )
+    @pytest.mark.parametrize(
+        ("lines", "ok"),
+        [
+            # the user's remedy: a reconnect appends to the SAME file
+            ([_MISSING, _CONNECTED, _REGISTERED], True),
+            ([_FAILED, _CONNECTED, _REGISTERED], True),
+            ([_MISSING, *[_FILLER] * 4000, _CONNECTED, _REGISTERED], True),
+            ([_REGISTERED, _MISSING], False),
+            ([_CONNECTED, _REGISTERED, _CONNECTED, _FAILED], False),
+            ([_REGISTERED, _CONNECTED, _MISSING], False),
+            # a failure the later connection did not repeat is over
+            ([_MISSING, _CONNECTED, _NOT_LISTED], True),
+        ],
+        ids=["N-S-R", "F-S-R", "N-filler-S-R", "R-N", "S-R-S-F", "R-S-N", "N-S-notlisted"],
+    )
+    def test_the_last_verdict_in_the_file_decides(self, tmp_path: Path, lines: list[str], ok: bool) -> None:
+        _mcp_log(tmp_path, "-w-p", _DIR, _LOG, *lines)
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is ok
+
+    def test_a_reconnect_with_no_verdict_yet_is_informational_not_the_old_failure(self, tmp_path: Path) -> None:
+        _mcp_log(tmp_path, "-w-p", _DIR, _LOG, _MISSING, _CONNECTED)
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0]
+        assert r.ok is True and "no channel verdict" in r.detail
+
+    def test_a_long_sessions_post_remedy_lines_at_the_tail_are_read(self, tmp_path: Path) -> None:
+        """The file is larger than the head and tail reads together: the
+        failure at the head is cleared by the reconnect at the tail, and a
+        failure at the tail is seen even though the head registered."""
+        pad = "x" * 1000
+        filler = [f"{_FILLER} {pad}"] * 3000  # ~3 MB, past head + tail
+        _mcp_log(tmp_path, "-w-p", _DIR, "2026-11-04T10-00-00-000Z.jsonl", _MISSING, *filler, _CONNECTED, _REGISTERED)
+        _mcp_log(tmp_path, "-w-q", _DIR, "2026-11-04T10-00-00-000Z.jsonl", _REGISTERED, *filler, _CONNECTED, _FAILED)
+        assert (tmp_path / "-w-p" / _DIR / _LOG).stat().st_size > h._CLAUDE_CODE_LOG_HEAD_BYTES + h._CLAUDE_CODE_LOG_TAIL_BYTES
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is True
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/q"))[0].ok is False
+
+    def test_a_verdictless_newer_sibling_does_not_hide_the_session_that_has_one(self, tmp_path: Path) -> None:
+        """A `claude -p` worker or subagent in the same directory writes a
+        newer log with no channel line; the interactive session's verdict
+        (here a failure) still decides."""
+        _mcp_log(tmp_path, "-w-p", _DIR, "2026-11-04T10-00-00-000Z.jsonl", _CONNECTED, _MISSING)
+        _mcp_log(tmp_path, "-w-p", _DIR, "2026-11-04T11-00-00-000Z.jsonl", "Starting connection with timeout of 30000ms")
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0]
+        assert r.ok is False and "10-00-00" in r.detail
+
+    def test_this_sessions_own_log_wins_over_a_newer_sibling_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _mcp_log(tmp_path, "-w-p", _DIR, "2026-11-04T10-00-00-000Z.jsonl", _MISSING, session="mine")
+        _mcp_log(tmp_path, "-w-p", _DIR, "2026-11-04T11-00-00-000Z.jsonl", _REGISTERED, session="other")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "mine")
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is False
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "other")
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is True
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "unknown-to-the-logs")  # falls back to the newest verdict
         assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is True
 
-    def test_the_row_is_wired_into_the_doctor_run(self) -> None:
-        import inspect
+    def test_claude_code_started_in_a_parent_directory_is_found_from_a_subdirectory(self, tmp_path: Path) -> None:
+        _mcp_log(tmp_path, "-w-p", _DIR, _LOG, _CONNECTED, _MISSING)
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p/src/deep"))[0]
+        assert r.ok is False
 
-        assert "_check_claude_code_mcp_connection()" in inspect.getsource(h.run_health_checks)
+    def test_a_cwd_name_past_200_characters_is_found_by_its_prefix(self, tmp_path: Path) -> None:
+        cwd = Path("/" + "/".join(["d" * 40] * 6))  # mangled name 241 characters
+        name = h._claude_code_project_dir_name(cwd)
+        assert len(name) > h._CLAUDE_CODE_PROJECT_NAME_MAX
+        _mcp_log(tmp_path, name[: h._CLAUDE_CODE_PROJECT_NAME_MAX] + "-a1b2c3", _DIR, _LOG, _CONNECTED, _MISSING)
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=cwd)[0].ok is False
+
+    def test_a_deleted_cwd_is_informational_not_a_crash(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        def gone() -> Path:
+            raise FileNotFoundError("cwd was deleted")
+
+        monkeypatch.setattr(h.Path, "cwd", staticmethod(gone))
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path)[0]
+        assert r.ok is True and "could not derive" in r.detail
+
+    def test_an_unresolvable_home_is_informational_not_a_crash(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def nohome() -> Path:
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.setattr(h.Path, "home", staticmethod(nohome))
+        r = h._check_claude_code_mcp_connection(cwd=Path("/w/p"))[0]
+        assert r.ok is True and "could not derive" in r.detail
+
+    def test_an_unreadable_log_is_informational_and_a_readable_sibling_still_counts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        bad = _mcp_log(tmp_path, "-w-p", _DIR, "2026-11-04T11-00-00-000Z.jsonl", _REGISTERED)
+        _mcp_log(tmp_path, "-w-p", _DIR, "2026-11-04T10-00-00-000Z.jsonl", _CONNECTED, _MISSING)
+        real = h._read_claude_code_log
+
+        def reader(path: Path) -> list[str]:
+            if path == bad:
+                raise PermissionError(13, "Permission denied")
+            return real(path)
+
+        monkeypatch.setattr(h, "_read_claude_code_log", reader)
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is False
+        bad_only = tmp_path / "only"
+        only = _mcp_log(bad_only, "-w-p", _DIR, _LOG, _REGISTERED)
+        monkeypatch.setattr(h, "_read_claude_code_log", lambda path: reader(bad) if path == only else real(path))
+        r = h._check_claude_code_mcp_connection(cache_root=bad_only, cwd=Path("/w/p"))[0]
+        assert r.ok is True and "could not read" in r.detail
+
+    def test_the_row_is_wired_into_the_doctor_run(self) -> None:
+        """The call is in the code, not in a comment or a string."""
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(h.run_health_checks)))
+        called = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_check_claude_code_mcp_connection"
+        ]
+        assert called, "run_health_checks must call _check_claude_code_mcp_connection()"

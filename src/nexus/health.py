@@ -9495,7 +9495,10 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     if pending and isinstance(oldest_pending_age_s, (int, float)):
         pending_desc += f" (oldest {oldest_pending_age_s:.0f}s)"
 
-    if alive and status.get("gate_stalled"):
+    if alive and not stale and status.get("gate_stalled"):
+        # A waiter whose last wake is stale reads as stale below, whatever else
+        # its record says (a hard-killed process leaves alive=True and
+        # gate_stalled=True on disk, and its age is the truer signal).
         # nexus-w4l00 follow-on: the waiter runs and ticks, but every send timed
         # out on the initialized gate, so no push is delivered. The client
         # connected in an era that sends no `notifications/initialized` (or has
@@ -9585,9 +9588,21 @@ _CLAUDE_CODE_MCP_CONNECTION_LABEL = "mcp.claude_code_connection"
 #: nexus server (the plugin install, and the ``server:nexus`` dev channel).
 _CLAUDE_CODE_NEXUS_LOG_DIRS = ("mcp-logs-plugin-conexus-nexus", "mcp-logs-nexus")
 
-#: The connect lines are the first few in a file; a long session's tail is
-#: thousands of tool-call lines nobody needs to read here.
-_CLAUDE_CODE_LOG_READ_BYTES = 128 * 1024
+#: A Claude Code MCP log is read from its head (the session id and the first
+#: connect) and its tail (the latest connect and channel verdict, which a long
+#: session's reconnects append to the SAME file); a file no larger than the two
+#: together is read whole. Real logs run to ~1.7 MB at most.
+_CLAUDE_CODE_LOG_HEAD_BYTES = 256 * 1024
+_CLAUDE_CODE_LOG_TAIL_BYTES = 2 * 1024 * 1024
+
+#: How many of the newest log files are opened looking for one that carries a
+#: verdict (a ``claude -p`` worker or subagent in the same directory writes
+#: verdict-less siblings).
+_CLAUDE_CODE_LOG_FILES_EXAMINED = 40
+
+#: Claude Code truncates a project directory name at this many characters and
+#: appends ``-<hash>``.
+_CLAUDE_CODE_PROJECT_NAME_MAX = 200
 
 
 def _claude_code_cache_root(platform: str, home: Path, env: "dict[str, str] | os._Environ[str]") -> Path | None:
@@ -9606,14 +9621,87 @@ def _claude_code_cache_root(platform: str, home: Path, env: "dict[str, str] | os
 
 def _claude_code_project_dir_name(cwd: Path) -> str:
     """Claude Code names a project's log directory after the cwd with every
-    non-alphanumeric character replaced by ``-``."""
+    non-alphanumeric character replaced by ``-``; a name past
+    :data:`_CLAUDE_CODE_PROJECT_NAME_MAX` characters is cut there and gets
+    ``-<hash>`` appended (see :func:`_claude_code_project_dirs`)."""
     return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def _claude_code_project_dirs(cache_root: Path, cwd: Path) -> list[Path]:
+    """The log directories that can belong to *cwd* or to a directory above it
+    (Claude Code may have been started in a parent of the directory the doctor
+    runs from). A long name is matched by its 200-character prefix, since the
+    hash suffix cannot be derived."""
+    dirs: list[Path] = []
+    for directory in (cwd, *cwd.parents):
+        name = _claude_code_project_dir_name(directory)
+        if len(name) > _CLAUDE_CODE_PROJECT_NAME_MAX:
+            prefix = name[:_CLAUDE_CODE_PROJECT_NAME_MAX]
+            try:
+                dirs.extend(sorted(d for d in cache_root.iterdir() if d.name.startswith(prefix + "-")))
+            except OSError:
+                continue
+        else:
+            dirs.append(cache_root / name)
+    return dirs
+
+
+def _read_claude_code_log(path: Path) -> list[str]:
+    """The lines of *path*: all of it, or its head and its tail when it is
+    larger than both bounds (the tail's first line is usually cut and fails to
+    parse, which the reader skips)."""
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        if size <= _CLAUDE_CODE_LOG_HEAD_BYTES + _CLAUDE_CODE_LOG_TAIL_BYTES:
+            return fh.read().decode("utf-8", errors="replace").splitlines()
+        head = fh.read(_CLAUDE_CODE_LOG_HEAD_BYTES)
+        fh.seek(size - _CLAUDE_CODE_LOG_TAIL_BYTES)
+        tail = fh.read()
+    return (
+        head.decode("utf-8", errors="replace").splitlines()
+        + tail.decode("utf-8", errors="replace").splitlines()
+    )
+
+
+def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, str | None]:
+    """``(verdict, failure_text, session_id)`` for one log. The LAST verdict
+    wins, because Claude Code appends every reconnect to the same file: a
+    ``Successfully connected`` line starts a new connection and clears what the
+    previous one left, so the user's own remedy (``/mcp``) turns a
+    ``did not declare`` file into a healthy one. *verdict* is ``"failed"``,
+    ``"missing"``, ``"registered"`` or ``None`` (no verdict for the latest
+    connection: still starting, ``not in --channels list``, or an older Claude
+    Code that logs none)."""
+    verdict: str | None = None
+    failure: str | None = None
+    session_id: str | None = None
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # a bound can cut the first line of the tail
+        if not isinstance(entry, dict):
+            continue
+        if session_id is None and isinstance(entry.get("sessionId"), str):
+            session_id = entry["sessionId"]
+        message = entry.get("debug") or entry.get("error")
+        if not isinstance(message, str):
+            continue
+        if message.startswith("Connection failed"):
+            verdict, failure = "failed", message[:160]
+        elif message.startswith("Successfully connected"):
+            verdict, failure = None, None
+        elif message.startswith("Channel notifications skipped: server did not declare claude/channel capability"):
+            verdict, failure = "missing", None
+        elif message.startswith("Channel notifications registered"):
+            verdict, failure = "registered", None
+    return verdict, failure, session_id
 
 
 def _check_claude_code_mcp_connection(
     *, cache_root: Path | None = None, cwd: Path | None = None,
 ) -> list[HealthResult]:
-    """Claude Code's own record of its newest connection to the nexus MCP
+    """Claude Code's own record of its latest connection to the nexus MCP
     server (nexus-w4l00 follow-on).
 
     ``nx-mcp`` serves the handshake era only: Claude Code probes the modern
@@ -9621,63 +9709,64 @@ def _check_claude_code_mcp_connection(
     path that carries the ``claude/channel`` capability. If Claude Code ever
     stops falling back, the server loses its channel (or every tool), and
     nothing on the server side can see it. This row reads the client's side:
-    a FAILURE when the newest connection logged "did not declare claude/channel
-    capability" or "Connection failed". "not in --channels list" is a launch
-    choice, not a fault, and a connection with neither line (still starting, or
-    an older Claude Code that logs nothing) is informational.
+    a FAILURE when the latest connection in the log logged "did not declare
+    claude/channel capability" or "Connection failed" and no later line
+    cleared it. "not in --channels list" is a launch choice, not a fault, and a
+    connection with no verdict (still starting, or an older Claude Code that
+    logs nothing) is informational.
 
-    Not applicable where no Claude Code log directory exists for the current
-    directory. *cache_root* and *cwd* are test seams.
+    The file is the newest one that carries a verdict (a ``claude -p`` worker
+    or subagent writes verdict-less siblings), or, when
+    ``CLAUDE_CODE_SESSION_ID`` names this session, the newest of this
+    session's own files. Not applicable where no Claude Code log directory
+    exists for the current directory or one above it. *cache_root* and *cwd*
+    are test seams.
     """
     label = _CLAUDE_CODE_MCP_CONNECTION_LABEL
     na = lambda why: [HealthResult(label=label, ok=True, detail=f"informational — {why}")]  # noqa: E731
-    if cache_root is None:
-        cache_root = _claude_code_cache_root(sys.platform, Path.home(), os.environ)
-    if cache_root is None:
-        return na("no Claude Code log location is known on this platform")
-    project = cache_root / _claude_code_project_dir_name(cwd if cwd is not None else Path.cwd())
+    try:
+        if cache_root is None:
+            cache_root = _claude_code_cache_root(sys.platform, Path.home(), os.environ)
+        if cache_root is None:
+            return na("no Claude Code log location is known on this platform")
+        directories = _claude_code_project_dirs(cache_root, cwd if cwd is not None else Path.cwd())
+    except (OSError, RuntimeError) as exc:  # a deleted cwd, or no resolvable home
+        return na(f"could not derive the Claude Code log location ({exc})")
     files = sorted(
-        (f for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (project / d).glob("*.jsonl")),
-        key=lambda f: f.name,
-    )
+        {f for p in directories for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (p / d).glob("*.jsonl")},
+        key=lambda f: f.name, reverse=True,
+    )[:_CLAUDE_CODE_LOG_FILES_EXAMINED]
     if not files:
         return na("no Claude Code MCP log for the nexus server under this directory")
-    newest = files[-1]
-    try:
-        with newest.open("rb") as fh:
-            raw = fh.read(_CLAUDE_CODE_LOG_READ_BYTES)
-    except OSError as exc:
-        return na(f"could not read {newest.name}: {exc.strerror or exc}")
 
-    channel_missing = False
-    registered = False
-    connect_failure: str | None = None
-    for line in raw.decode("utf-8", errors="replace").splitlines():
+    scanned: list[tuple[Path, str | None, str | None, str | None]] = []
+    unreadable: str | None = None
+    for f in files:
         try:
-            entry = json.loads(line)
-        except ValueError:
-            continue  # the read bound can cut the last line
-        message = entry.get("debug") or entry.get("error") if isinstance(entry, dict) else None
-        if not isinstance(message, str):
+            lines = _read_claude_code_log(f)
+        except OSError as exc:
+            unreadable = unreadable or f"could not read {f.name}: {exc.strerror or exc}"
             continue
-        if message.startswith("Connection failed"):
-            connect_failure = connect_failure or message[:160]
-        elif message.startswith("Channel notifications skipped: server did not declare claude/channel capability"):
-            channel_missing = True
-        elif message.startswith("Channel notifications registered"):
-            registered = True
+        scanned.append((f, *_claude_code_log_verdict(lines)))
+    if not scanned:
+        return na(unreadable or "no readable Claude Code MCP log for the nexus server")
 
-    if connect_failure is not None:
+    mine = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    candidates = [row for row in scanned if mine and row[3] == mine] or scanned
+    chosen = next((row for row in candidates if row[1] is not None), candidates[0])
+    newest, verdict, failure, _session = chosen
+
+    if verdict == "failed":
         return [HealthResult(
             label=label, ok=False,
-            detail=f"Claude Code's newest connection to the nexus MCP server failed: {connect_failure} (log {newest.name})",
+            detail=f"Claude Code's latest connection to the nexus MCP server failed: {failure} (log {newest.name})",
             fix_suggestions=["Run nx-mcp by hand to see why it exits, then restart the MCP server: /mcp"],
         )]
-    if channel_missing:
+    if verdict == "missing":
         return [HealthResult(
             label=label, ok=False,
             detail=(
-                "Claude Code's newest connection to the nexus MCP server skipped the channel: the server did not "
+                "Claude Code's latest connection to the nexus MCP server skipped the channel: the server did not "
                 f"declare claude/channel capability (log {newest.name}). Push delivery is off; mail still arrives "
                 "at the next prompt."
             ),
@@ -9686,12 +9775,12 @@ def _check_claude_code_mcp_connection(
                 "back to initialize, nexus-w4l00); if it still skips, Claude Code may have dropped that fallback: report it",
             ],
         )]
-    if registered:
+    if verdict == "registered":
         return [HealthResult(
             label=label, ok=True,
-            detail=f"Claude Code's newest connection to the nexus MCP server registered the channel (log {newest.name})",
+            detail=f"Claude Code's latest connection to the nexus MCP server registered the channel (log {newest.name})",
         )]
-    return na(f"Claude Code's newest nexus connection ({newest.name}) logged no channel verdict")
+    return na(f"Claude Code's latest nexus connection ({newest.name}) logged no channel verdict")
 
 
 _BEADS_PRIME_LABEL = "Beads PRIME.md (user-level)"

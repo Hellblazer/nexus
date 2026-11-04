@@ -337,6 +337,30 @@ class ChannelGateTimeout(Exception):
     :data:`GATE_WAIT_TIMEOUT_S`, so the notification was not sent."""
 
 
+def _gate_is_open() -> bool:
+    """``True`` once the live connection's ``notifications/initialized`` has
+    been seen. ``False`` with no connection at all."""
+    ev = _initialized_event
+    return ev is not None and ev.is_set()
+
+
+def _gate_is_shut() -> bool:
+    """``True`` on a live connection whose client has not yet sent
+    ``notifications/initialized``. ``False`` with no connection (a test, a
+    torn-down stdio session) so the injected sender decides."""
+    ev = _initialized_event
+    return ev is not None and not ev.is_set()
+
+
+#: Board posts a shut gate kept from going out, held in memory and sent when it
+#: opens. A board post is stamped delivered once per subscriber, so the engine
+#: never offers it again; without this a stall would lose it from the push.
+_HELD_BOARD_SENDS_MAX = 64
+
+#: Mailbox rows whose first announce is tracked until one gets through.
+_FIRST_ANNOUNCE_TRACKED_MAX = 1024
+
+
 async def _on_initialized(_ctx: Any, _params: Any) -> None:
     if _initialized_event is not None:
         _initialized_event.set()
@@ -881,6 +905,14 @@ class ChannelWaiter:
         #: nexus-w4l00 follow-on: when the first send to time out on the
         #: initialized gate did so, or `None` while sends get through.
         self._gate_stalled_since: datetime | None = None
+        #: Board sends a shut gate refused: ``(content, meta, on_sent)``, oldest
+        #: first, bounded by :data:`_HELD_BOARD_SENDS_MAX`. ``on_sent`` is the
+        #: bookkeeping the delivery owes once the send gets through.
+        self._held: list[tuple[str, dict[str, str], Callable[[], None]]] = []
+        #: ids of mailbox rows whose FIRST announce (``announce_count == 1``)
+        #: did not get through; the row's later re-announce is credited to
+        #: ``announced`` instead of the first, so the count is not short.
+        self._first_announce_failed: set[str] = set()
         self._stopped = False
         #: `None` while running, or the running (never alive-and-stopped)
         #: waiter's own stop cause once `_stopped` flips (review round,
@@ -947,6 +979,7 @@ class ChannelWaiter:
         seen, or `None` when `pending` is 0."""
         active = [seen for seen in self._last_seen.values() if seen[0] < self.max_announces]
         oldest_pending_age_s = (time.monotonic() - min(seen_at for _, seen_at in active)) if active else None
+        stalled = self._gate_stalled_since is not None and not _gate_is_open()
         return {
             "alive": self._alive,
             "stopped_reason": self._stopped_reason,
@@ -966,20 +999,40 @@ class ChannelWaiter:
             "board_since_supported": self._board_since_supported,
             # nexus-w4l00 follow-on: sends are timing out on the initialized
             # gate, so `alive` does not mean push delivery works.
-            "gate_stalled": self._gate_stalled_since is not None,
-            "gate_stalled_since": self._gate_stalled_since.isoformat() if self._gate_stalled_since else None,
+            # Stalled only while the gate is still shut: a gate that opens late
+            # with no later send reads healthy at once, not after the next row.
+            "gate_stalled": stalled,
+            "gate_stalled_since": self._gate_stalled_since.isoformat() if stalled and self._gate_stalled_since else None,
         }
 
-    async def _send(self, content: str, meta: dict[str, str]) -> bool:
-        """Call the sender; `False` when the initialized gate stayed shut
-        (nexus-w4l00 follow-on). The first such timeout logs one warning and
-        publishes the stall; the waiter keeps ticking, and the engine's own
-        re-announce cadence retries a MAILBOX row later. A board post is
-        stamped delivered once per subscriber (`max=1`), so one lost to a shut
-        gate is not re-pushed; it stays readable with `tuple_rd`. A send that
-        gets through clears the stall."""
+    def _clear_stall_if_open(self) -> None:
+        """Forget a stall once the gate has opened (the late handshake case)."""
+        if self._gate_stalled_since is not None and _gate_is_open():
+            self._gate_stalled_since = None
+            _log.info("channel_gate_recovered", session_id=self.session_id)
+            self._publish_status()
+
+    async def _send(
+        self, content: str, meta: dict[str, str], *, hold: Callable[[], None] | None = None,
+    ) -> bool:
+        """Call the sender; ``False`` when the notification did not go out.
+
+        That is a gate that stayed shut (nexus-w4l00 follow-on) or a sender
+        that answered ``False`` (no live stream). The first gate timeout logs
+        one warning and publishes the stall; the waiter keeps ticking, and while
+        the gate is known to be shut later sends return at once instead of
+        waiting out the bound again, so one stall does not cost a tick 30 s per
+        row. The engine's own re-announce cadence retries a MAILBOX row. A board
+        post is stamped delivered once per subscriber (``max=1``) and would be
+        lost from the push, so a caller passes *hold*, the bookkeeping the
+        delivery owes, and a gate refusal keeps the send in memory for
+        :meth:`_flush_held`. A send that gets through clears the stall."""
+        self._clear_stall_if_open()
+        if self._gate_stalled_since is not None and _gate_is_shut():
+            self._hold(content, meta, hold)
+            return False
         try:
-            await self.sender(content, meta)
+            sent = await self.sender(content, meta)
         except ChannelGateTimeout as exc:
             if self._gate_stalled_since is None:
                 self._gate_stalled_since = datetime.now(UTC)
@@ -988,12 +1041,41 @@ class ChannelWaiter:
                     hint="the client never sent notifications/initialized; push delivery is not happening",
                 )
                 self._publish_status()
+            self._hold(content, meta, hold)
             return False
+        if sent is False:
+            return False  # no live stream: nothing went out, so nothing is credited or cleared
         if self._gate_stalled_since is not None:
             self._gate_stalled_since = None
             _log.info("channel_gate_recovered", session_id=self.session_id)
             self._publish_status()
         return True
+
+    def _hold(self, content: str, meta: dict[str, str], on_sent: Callable[[], None] | None) -> None:
+        if on_sent is None:
+            return
+        self._held.append((content, meta, on_sent))
+        while len(self._held) > _HELD_BOARD_SENDS_MAX:
+            dropped = self._held.pop(0)
+            _log.warning(
+                "channel_held_board_send_dropped", session_id=self.session_id,
+                subspace=dropped[1].get("subspace"), held_max=_HELD_BOARD_SENDS_MAX,
+            )
+
+    async def _flush_held(self) -> None:
+        """Send the board posts a shut gate held, oldest first, once it opens.
+        Stops at the first send that does not get through and keeps the rest."""
+        if not self._held:
+            return
+        self._clear_stall_if_open()
+        if _gate_is_shut():
+            return
+        pending, self._held = self._held, []
+        for i, (content, meta, on_sent) in enumerate(pending):
+            if not await self._send(content, meta):
+                self._held = pending[i:] + self._held
+                return
+            on_sent()
 
     def _publish_status(self) -> None:
         """Best-effort refresh of the on-disk record (bead nexus-rplay.13)
@@ -1240,6 +1322,8 @@ class ChannelWaiter:
         # review): the subscribe/unsubscribe tools mutate the set from
         # worker threads, so the spec builder and the result processor
         # read the SAME list rather than two that may differ.
+        self._clear_stall_if_open()
+        await self._flush_held()
         entries = self.subs.entries()
         live_subspaces = {e["subspace"] for e in entries}
         for subspace in list(self._last_seen):
@@ -1279,6 +1363,7 @@ class ChannelWaiter:
         if self._engine_ignores_subscriber(results):
             self._stop_no_subscriber_support()
             return
+        await self._flush_held()  # a gate that opened during the wait
         await self._process_results(results, entries)
         self._last_wake = datetime.now(UTC)
         self._publish_status()
@@ -1483,6 +1568,13 @@ class ChannelWaiter:
             kept.append(row)
         if not kept:
             return
+        last = kept[-1]
+
+        def delivered() -> None:
+            self._board_batches += 1
+            if last.created_at:
+                self._board_last_delivered[subspace] = (last.created_at, last.id)
+
         if len(kept) == 1:
             row = kept[0]
             meta = {"subspace": subspace, "tuple_id": row.id}
@@ -1494,7 +1586,7 @@ class ChannelWaiter:
             content = _board_notification_content(
                 subspace, row.id, case=case, session=canonical_session(row.sender_session),
             )
-            if not await self._send(content, meta):
+            if not await self._send(content, meta, hold=delivered):
                 return
         else:
             first, last = kept[0], kept[-1]
@@ -1532,12 +1624,9 @@ class ChannelWaiter:
                 subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
                 unverified=unverified,
             )
-            if not await self._send(content, meta):
+            if not await self._send(content, meta, hold=delivered):
                 return
-        self._board_batches += 1
-        last = kept[-1]
-        if last.created_at:
-            self._board_last_delivered[subspace] = (last.created_at, last.id)
+        delivered()
 
     async def _reference_mailbox_row(self, subspace: str, row: TupleRow) -> None:
         """Send ONE reference for *row* (claimed or not -- the
@@ -1560,8 +1649,14 @@ class ChannelWaiter:
             session=canonical_session(row.sender_session),
         )
         if not await self._send(content, meta):
+            if row.announce_count == 1 and len(self._first_announce_failed) < _FIRST_ANNOUNCE_TRACKED_MAX:
+                self._first_announce_failed.add(row.id)
             return
-        if row.announce_count == 1:
+        # The row's first send, or the first to get through after its first
+        # announce was refused: credited once, never on a re-send of a row
+        # already counted.
+        if row.announce_count == 1 or row.id in self._first_announce_failed:
+            self._first_announce_failed.discard(row.id)
             self._announced_total += 1
         self._last_seen[subspace] = (row.announce_count or 0, time.monotonic())
 
