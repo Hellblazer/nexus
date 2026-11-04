@@ -3,9 +3,12 @@
 at the merge base, against a throwaway git repo with its own pytest config."""
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -161,8 +164,38 @@ def test_a_module_the_base_cannot_collect_is_named_and_the_rest_still_count(repo
     proc = _run(repo)
     assert proc.returncode == 0, proc.stderr
     assert "tests/test_a.py: 2 -> 1 (-1)" in proc.stdout
-    assert "tests/test_b.py: not counted at the merge base, 1 at head" in proc.stdout
-    assert "no_such_module_at_base" in proc.stdout
+    assert "WARNING: tests/test_b.py: not counted at the merge base, 1 at head" in proc.stdout
+    assert "(ModuleNotFoundError: No module named 'no_such_module_at_base')" in proc.stdout, proc.stdout
+    assert _run(repo, "--strict").returncode == 1, "a rise cannot be ruled out where the base was not counted"
+
+
+def test_a_base_unpacked_under_a_symlinked_temp_dir_attributes_a_failing_module(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On macOS the temp dir sits under /var, a symlink to /private/var. Unpacked there unresolved, pytest could not
+    relate a failing module to the rootdir and reported the failure against the whole session, so every module fell
+    back to a collection of its own (nexus-l35bq: 30 s and over the push budget). Resolved, the one pass names it."""
+    spec = importlib.util.spec_from_file_location("tenant_delta_under_test", SCRIPT)
+    td = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(td)
+    real = tmp_path / "real-tmp"
+    real.mkdir()
+    link = tmp_path / "link-tmp"
+    link.symlink_to(real)
+    monkeypatch.setattr(tempfile, "tempdir", str(link))
+    monkeypatch.setenv("NX_NO_TELEMETRY", "1")
+
+    def no_fallback(*_a, **_k):
+        raise AssertionError("the whole pass failed, so every module was collected alone")
+
+    monkeypatch.setattr(td, "_one_by_one", no_fallback)
+    _git(repo, "checkout", "-q", "develop")
+    _commit(repo, {"tests/test_b.py": "import no_such_module_at_base\n\ndef test_free():\n    pass\n"}, "bad base")
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    counts, failed = td.base_census(repo, base, ["tests/test_a.py", "tests/test_b.py"],
+                                    deadline=time.monotonic() + 120)
+    assert counts == {"tests/test_a.py": 2}
+    assert list(failed) == ["tests/test_b.py"] and "no_such_module_at_base" in failed["tests/test_b.py"]
 
 
 def test_a_count_over_its_budget_is_refused_and_says_so(repo: Path) -> None:

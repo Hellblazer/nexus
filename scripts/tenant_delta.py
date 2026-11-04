@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -34,6 +35,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = Path(__file__).resolve().parent
+#: The module name the census plugin is loaded under, copied from PLUGIN_DIR; no tree carries this name.
+_PLUGIN_AS = "_tenant_delta_census_now"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -50,77 +53,138 @@ def changed_test_modules(repo: Path, base: str) -> list[str]:
 
 
 class CollectionFailed(RuntimeError):
-    """Collection under a tree failed; ``reason`` is the first error line pytest printed."""
+    """A census run gave nothing to attribute: no census file, or the session itself failed to collect.
+    ``reason`` is the first error line."""
 
-    def __init__(self, root: Path, returncode: int, output: str) -> None:
-        self.reason = _first_error(output)
-        super().__init__(f"collection under {root} failed (rc {returncode}): {self.reason}")
+    def __init__(self, root: Path, returncode: int, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"collection under {root} failed (rc {returncode}): {reason}")
 
 
 def _first_error(output: str) -> str:
-    """The first line that says what failed (an ``E   `` line, or an exception line), else the tail."""
-    for line in output.splitlines():
-        text = line.strip()
-        if line.startswith("E   ") or (text.split(":", 1)[0].endswith(("Error", "Exception")) and ":" in text):
-            return text.removeprefix("E").strip()[:300]
+    """The first ``E   `` line pytest printed (the exception), else the last line that names an error, else the
+    tail. Never a banner ahead of the real error, and never a clipped line."""
+    lines = output.splitlines()
+    for line in lines:
+        if line.startswith("E   "):
+            return line[4:].strip()[:300]
+    for line in reversed(lines):
+        head = line.strip().split(":", 1)[0]
+        if ":" in line and head.endswith(("Error", "Exception")):
+            return line.strip()[:300]
     return output.strip()[-300:]
 
 
-def census(root: Path, modules: list[str], *, deadline: float) -> dict[str, int]:
-    """Tenant-minting tests per module, collected under *root* (only modules that exist there), against
-    *root*'s own ``src/`` first on the path, finishing before *deadline* (a time.monotonic() value) or
-    raising (CollectionFailed when a module will not collect)."""
+def _owner(module: str, failed: dict[str, str]) -> str | None:
+    """The failed collector that covers *module* (the module itself, or a package or directory above it)."""
+    for nodeid, reason in failed.items():
+        node = nodeid.split("::", 1)[0].rstrip("/")
+        if node and (module == node or module.startswith(node + "/")):
+            return reason
+    return None
+
+
+def census(root: Path, modules: list[str], *, deadline: float,
+           own_src: bool = False) -> tuple[dict[str, int], dict[str, str]]:
+    """One collection under *root* (only the modules that exist there), with collection errors allowed:
+    tenant-minting tests per module, and each module that failed to collect with its first error line.
+    *own_src* puts *root*'s ``src/`` first on the path, so its tests import its own code rather than the
+    installed package. Finishes before *deadline* (a time.monotonic() value) or raises; CollectionFailed when
+    nothing can be attributed (no census, or the session itself failed)."""
     present = [m for m in modules if (root / m).is_file()]
     if not present:
-        return {}
+        return {}, {}
     with tempfile.TemporaryDirectory(prefix="tenant-census-") as tmp:
         out = Path(tmp) / "census.json"
-        path = [str(root / "src")] if (root / "src").is_dir() else []
+        # The plugin is loaded under a name no tree has: a tree's pyproject puts its own scripts/ (and its own,
+        # perhaps older, _tenant_census_plugin) ahead of PYTHONPATH, which once made the base write the old format.
+        shutil.copyfile(PLUGIN_DIR / "_tenant_census_plugin.py", Path(tmp) / f"{_PLUGIN_AS}.py")
+        path = [str(root / "src")] if own_src and (root / "src").is_dir() else []
         env = dict(os.environ, TENANT_CENSUS_OUT=str(out), NX_TEST_T2_SUBSTRATE="none", NX_NO_TELEMETRY="1",
-                   PYTHONPATH=os.pathsep.join([*path, str(root), str(root / "scripts"), str(PLUGIN_DIR)]))
+                   PYTHONPATH=os.pathsep.join([*path, tmp, str(root), str(root / "scripts")]))
         remaining = deadline - time.monotonic()
         if remaining <= 1:
-            raise RuntimeError("out of time budget")
+            raise subprocess.TimeoutExpired("pytest --collect-only", 0)
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-             "-p", "_tenant_census_plugin", "--rootdir", str(root), "-c", str(root / "pyproject.toml"),
-             *present],
+             "--continue-on-collection-errors", "-p", _PLUGIN_AS,
+             "--rootdir", str(root), "-c", str(root / "pyproject.toml"), *present],
             cwd=root, env=env, capture_output=True, text=True, timeout=remaining,
         )
-        # rc 0 or 5 (nothing collected) is a census; anything else means a module failed to
-        # collect, which would read as zero tenant tests, so the count is refused instead.
-        if proc.returncode not in (0, 5) or not out.is_file():
-            raise CollectionFailed(root, proc.returncode, proc.stdout + proc.stderr)
-        return json.loads(out.read_text(encoding="utf-8"))
+        if not out.is_file():
+            raise CollectionFailed(root, proc.returncode, _first_error(proc.stdout + proc.stderr))
+        data = json.loads(out.read_text(encoding="utf-8"))
+        if not (isinstance(data, dict) and isinstance(data.get("counts"), dict) and isinstance(data.get("failed"), dict)):
+            # Never read an unexpected census as "no tenant tests" (an older plugin wrote a bare mapping).
+            raise CollectionFailed(root, proc.returncode, "the census plugin wrote an unexpected format")
+        failed_nodes: dict[str, str] = data["failed"]
+        if "" in failed_nodes:
+            raise CollectionFailed(root, proc.returncode, failed_nodes[""])
+        failed = {m: r for m in present if (r := _owner(m, failed_nodes)) is not None}
+        counts = {m: n for m, n in data["counts"].items() if m not in failed}
+        return counts, failed
+
+
+def _one_by_one(root: Path, modules: list[str], *, deadline: float,
+                own_src: bool) -> tuple[dict[str, int], dict[str, str]]:
+    """Each module alone, for a run whose failure could not be attributed: the counts it can take, and the
+    rest with a reason. Out of budget, the modules not yet tried are named as such and the counts kept."""
+    counts: dict[str, int] = {}
+    failed: dict[str, str] = {}
+    for i, module in enumerate(modules):
+        try:
+            c, f = census(root, [module], deadline=deadline, own_src=own_src)
+        except subprocess.TimeoutExpired:
+            for rest in modules[i:]:
+                failed[rest] = "not tried, over the time budget"
+            break
+        except CollectionFailed as exc:
+            f, c = {module: exc.reason}, {}
+        counts.update(c)
+        failed.update(f)
+    return counts, failed
+
+
+def _attempt(root: Path, modules: list[str], *, deadline: float,
+             own_src: bool) -> tuple[dict[str, int], dict[str, str]]:
+    try:
+        return census(root, modules, deadline=deadline, own_src=own_src)
+    except CollectionFailed:
+        return _one_by_one(root, modules, deadline=deadline, own_src=own_src)
 
 
 def base_census(repo: Path, base: str, modules: list[str], *,
                 deadline: float) -> tuple[dict[str, int], dict[str, str]]:
-    """The same count at *base*, over its whole tree unpacked from git archive (a test may read any file of
-    it while collecting, and imports the base's own src/). Returns the counts and, for each module that will
-    not collect there even alone, the first error line: one such module costs its own count, not all."""
+    """The same count at *base*, over its whole tree unpacked from git archive (a test may read any file of it
+    while collecting). First against the installed (HEAD's) code; a module that fails there is tried again
+    against the base's own src/ (an API HEAD has since changed); one that fails both is returned with its
+    reason. Measured at 64e2fe6da against its parent, the mcp 2.3 move: against HEAD's code 5 of 36 changed
+    modules could not be counted, against the base's src/ first 16 (nexus-l35bq review r1)."""
     with tempfile.TemporaryDirectory(prefix="tenant-base-") as tmp:
-        root = Path(tmp)
+        # Resolved: on macOS the temp dir is under /var, a symlink to /private/var. pytest resolves its rootdir
+        # and then saw the module arguments outside it, failing the whole session ("ERROR collecting test
+        # session", the ../../var/folders paths in the original report) instead of collecting.
+        root = Path(tmp).resolve()
         archive = subprocess.run(
             ["git", "-C", str(repo), "archive", "--format=tar", base],
             check=True, capture_output=True,
         ).stdout
         tar_path = root / "base.tar"
         tar_path.write_bytes(archive)
+        del archive
         with tarfile.open(tar_path) as tar:
             tar.extractall(root, filter="data")
         tar_path.unlink()
-        try:
-            return census(root, modules, deadline=deadline), {}
-        except CollectionFailed:
-            pass
-        counts: dict[str, int] = {}
-        failed: dict[str, str] = {}
-        for module in modules:
-            try:
-                counts.update(census(root, [module], deadline=deadline))
-            except CollectionFailed as exc:
-                failed[module] = exc.reason
+        counts, failed = _attempt(root, modules, deadline=deadline, own_src=False)
+        retry = [m for m, why in failed.items() if why != "not tried, over the time budget"]
+        if retry:
+            again, still = _attempt(root, retry, deadline=deadline, own_src=True)
+            counts.update(again)
+            for module in retry:
+                if module not in still:
+                    failed.pop(module, None)
+                else:
+                    failed[module] = still[module]
         return counts, failed
 
 
@@ -154,14 +218,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         deadline = time.monotonic() + args.budget_s
-        head = census(repo, modules, deadline=deadline)
+        # HEAD's own src/ is the installed code (an editable install); first on the path all the same.
+        head, head_failed = census(repo, modules, deadline=deadline, own_src=True)
+        if head_failed:
+            module, reason = next(iter(head_failed.items()))
+            # A module the branch itself cannot collect would read as zero tenant tests: refuse instead.
+            raise CollectionFailed(repo, 2, f"{module}: {reason}")
         base, uncounted = base_census(repo, merge_base, modules, deadline=deadline)
     except subprocess.TimeoutExpired:
-        _say(f"tenant delta: not counted, over the {args.budget_s:g} s budget "
+        _say(f"WARNING: tenant delta: not counted, over the {args.budget_s:g} s budget "
              f"({len(modules)} changed test module(s)); run scripts/tenant_delta.py by hand", err=True)
         return 2
-    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
-        _say(f"tenant delta: could not count ({str(exc)[:300]})", err=True)
+    except (RuntimeError, subprocess.SubprocessError, OSError, tarfile.TarError) as exc:
+        _say(f"WARNING: tenant delta: could not count ({str(exc)[:400]})", err=True)
         return 2
     rows = [(m, base.get(m, 0), head.get(m, 0)) for m in modules if m not in uncounted]
     delta = sum(h - b for _m, b, h in rows)
@@ -170,8 +239,10 @@ def main(argv: list[str] | None = None) -> int:
     for module, before, after in rows:
         if after != before:
             _say(f"  {module}: {before} -> {after} ({after - before:+d})")
-    for module, reason in uncounted.items():
-        _say(f"  {module}: not counted at the merge base, {head.get(module, 0)} at head ({reason})")
+    # An uncounted module with no tenant test at head cannot raise the count; only the others are named.
+    risky = {m: r for m, r in uncounted.items() if head.get(m, 0) > 0}
+    for module, reason in risky.items():
+        _say(f"  WARNING: {module}: not counted at the merge base, {head[module]} at head ({reason})")
     limit = ceiling(repo)
     not_counted = f", {len(uncounted)} not counted at the merge base" if uncounted else ""
     _say(f"tenant delta: {delta:+d} test(s) that mint a tenant across {len(modules)} changed module(s){not_counted}; "
@@ -181,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
               "pytest-gate's storage-touch fan-in: make the new test tenant-free, or raise the ceiling in "
               "the same commit with a reason (tests/AGENTS.md)")
         return 1 if args.strict else 0
+    if risky:
+        return 1 if args.strict else 0  # a rise cannot be ruled out where the base could not be counted
     return 0
 
 

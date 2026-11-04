@@ -315,7 +315,7 @@ def reset_client_caches() -> bool:
     aw = mods.get("nexus.aspect_worker")
     if aw is not None and aw.reset_worker_for_tests() is False:
         undrained.append("the aspect worker")
-        bounds.append(f"aspect worker stop bound {ASPECT_STOP_SECONDS} s")
+        bounds.append(f"aspect worker stop bound {ASPECT_STOP_SECONDS} s, more while a tuple park is outstanding")
     hvc = mods.get("nexus.db.http_vector_client")
     if hvc is not None:
         hvc._invalidate_endpoint()

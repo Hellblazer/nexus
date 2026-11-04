@@ -168,6 +168,45 @@ class TestServiceModeDrain:
         assert calls["http_is_drained"] >= 1, "must poll the SERVICE queue's is_drained()"
         assert calls["http_closed"] is True, "must close the http queue"
 
+    def test_a_thread_the_drain_cannot_join_stays_on_record_so_start_refuses_beside_it(
+        self, monkeypatch, locks_dir: Path, tmp_path: Path,
+    ) -> None:
+        """nexus-22out: drain dropped a thread that outlived its 2 s join from every record, so a later start()
+        cleared the shared stop event under it and two loops claimed. It is kept, as after a timed-out stop()."""
+        import threading
+
+        from nexus import aspect_worker
+        from nexus.aspect_worker import AspectExtractionWorker, drain_worker
+        from nexus.db.t2 import http_aspect_queue as hmod
+
+        class _Drained:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def is_drained(self) -> bool:
+                return True
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(hmod, "HttpAspectQueue", _Drained)
+        release = threading.Event()
+        worker = AspectExtractionWorker()
+        thread = threading.Thread(target=release.wait, args=(30,), daemon=True)
+        thread.start()
+        worker._thread = thread
+        monkeypatch.setattr(aspect_worker, "_worker", worker)
+        ran = threading.Event()
+        monkeypatch.setattr(worker, "_run_loop", ran.set)
+        try:
+            drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
+            assert worker._stopping == [thread], "the unjoined thread is on record"
+            worker.start()
+            assert worker._thread is None and not ran.is_set(), "start() refuses beside it"
+        finally:
+            release.set()
+            thread.join(5)
+
     def test_drain_timeout_raises_DrainTimeoutError_with_pending_count(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:

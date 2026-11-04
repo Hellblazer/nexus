@@ -1558,6 +1558,10 @@ def drain_worker(
             return
         thread.join(timeout=2.0)
         if thread.is_alive():
+            # nexus-22out: kept on the worker's record, so a later start() refuses beside it, as after a
+            # stop() that timed out; dropped, start() would clear the shared stop event under it.
+            with w._lock:
+                w._stopping.append(thread)
             _log.warning(
                 "drain_worker_thread_join_timeout",
                 thread_id=thread.ident,

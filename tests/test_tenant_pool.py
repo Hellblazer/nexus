@@ -15,6 +15,7 @@ file.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
 import subprocess
 import threading
@@ -685,7 +686,6 @@ def test_stop_worker_reports_a_singleton_thread_that_outlived_the_stop(
 
 def test_the_quoted_aspect_stop_bound_is_the_one_reset_worker_for_tests_applies() -> None:
     """nexus-22out S-3: the leak error quotes ASPECT_STOP_SECONDS for the aspect worker, so it must be that call's bound."""
-    import inspect
     assert inspect.signature(aspect_worker.reset_worker_for_tests).parameters["timeout"].default == \
         _tenant_pool.ASPECT_STOP_SECONDS
 
