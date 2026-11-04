@@ -85,6 +85,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/composition-probe/SKILL.md` (nexus-z7ddd): the worked example links the search engine and the leased Maven wrapper on GitHub instead of naming repo paths.
 - `conexus/skills/cli-controller/SKILL.md` (nexus-z7ddd): an HTML comment no longer names a nexus build directory.
 - `conexus/skills/catalog/SKILL.md` (nexus-z7ddd): the example file path is a neutral `src/app/scoring.py`.
+- `conexus/resources/agent-shared/README.md` (nexus-z7ddd): the note on where this directory moved from links the directory on GitHub instead of naming a repo path.
 - `conexus/hooks/scripts/routing/credential_print_guard.py` (nexus-z7ddd): the deny message links the nexus repo's `claude_credentials.py` wrapper on GitHub and says a project without it asks its operator for an equivalent, instead of telling every user to run a script only the nexus repo has.
 - `conexus/hooks/scripts/routing/README.md` (nexus-z7ddd): maintainer notes link the nexus tests on GitHub.
 

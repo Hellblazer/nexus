@@ -169,7 +169,7 @@ class TestPromotionVerbRetired:
         assert "Liquibase" in msg
         assert "ADD COLUMN" in msg
         assert "aspect_promotion_log" in msg
-        assert "aspect_promotion.py" in msg
+        assert "nexus.aspect_promotion" in msg
 
 
 # ── Audit-log read path (SQLite substrate) ──────────────────────────────────
