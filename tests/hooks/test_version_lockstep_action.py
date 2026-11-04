@@ -1443,6 +1443,12 @@ class TestBackgroundUpgrade:
     def _drive_main(self, mod, monkeypatch):
         """Run ``main`` with only the binary step faked; the ``nx upgrade`` step
         goes through the REAL ``start_background_upgrade`` and ``run_cmd``."""
+        self._patch_main(mod, monkeypatch)
+        mod.main(["action", "9.9.9"])
+
+    def _patch_main(self, mod, monkeypatch):
+        """The patches of :meth:`_drive_main`, applied on the calling (test) thread: a patch entered in a worker
+        thread outlives the test when the join times out (nexus-9tmvy)."""
         monkeypatch.setattr(mod, "uv_receipt_present", lambda: True)
         monkeypatch.setattr(mod, "generation_install_present", lambda: False)
         versions = ["1.0.0", "9.9.9"]
@@ -1453,7 +1459,6 @@ class TestBackgroundUpgrade:
             lambda cmd, timeout=300: True if cmd[0] == "uv" else real_run_cmd(cmd, timeout=timeout),
         )
         monkeypatch.setattr(mod, "_UPGRADE_START_WAIT_S", 0.5)
-        mod.main(["action", "9.9.9"])
 
     def test_the_action_waits_on_a_long_upgrade_and_then_settles_the_marker(
         self, mod, marker, log, tmp_path, monkeypatch,
@@ -1462,7 +1467,8 @@ class TestBackgroundUpgrade:
         sentinel while the child runs and the target once it has exited 0 (nexus-rcngf)."""
         done, calls, cfg = self._fake_cli(tmp_path, monkeypatch, mod, sleep=3)
         monkeypatch.setattr(mod, "_NX_UPGRADE_TIMEOUT", 1)  # the old cap, scaled down: it must not apply
-        runner = threading.Thread(target=self._drive_main, args=(mod, monkeypatch))
+        self._patch_main(mod, monkeypatch)
+        runner = threading.Thread(target=mod.main, args=(["action", "9.9.9"],))
         runner.start()
         try:
             deadline = time.monotonic() + 30

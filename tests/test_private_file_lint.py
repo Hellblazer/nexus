@@ -41,6 +41,7 @@ HELPER: dict[tuple[str, str], int] = {
 NON_CREDENTIAL: dict[tuple[str, str], int] = {
     # Lock files: empty, flocked, never read for content.
     ("conexus/hooks/scripts/mailbox_drain.py", "_pending_lock"): 1,
+    ("conexus/hooks/scripts/version_lockstep_action.py", "_lock_is_held_once"): 1,  # the upgrade-lock probe (nexus-rcngf)
     ("src/nexus/hooks/mailbox_drain.py", "_pending_lock"): 1,
     ("src/nexus/config.py", "_config_write_lock"): 1,
     ("src/nexus/daemon/service_registry.py", "_open"): 1,  # the election flock
