@@ -578,49 +578,73 @@ interrupted — the ETL paths are idempotent and re-converge on
 
 ## A local cluster older than PostgreSQL 17
 
-The engine refuses to start below PostgreSQL 17: the service log says
-`event=pg_version_below_floor`, and the service exits 1. A local cluster keeps
-the PostgreSQL that created it, so a data directory from before the bundled
-PostgreSQL (for example one made by a Homebrew PostgreSQL 16) stays at that
-version until it is upgraded. `nx doctor` names it in the "Local PostgreSQL
-version" row: a failure when it is the cluster in use, a warning when it is a
-leftover under `~/.config/nexus/postgres` on a machine in cloud mode (local
-provisioning would keep it).
+The engine refuses PostgreSQL below 17. With an older server already running,
+the service log says `event=pg_version_below_floor` and the service exits 1;
+started cold, the bundled PostgreSQL 17 refuses the data directory first
+(`pg_ctl` reports "database files are incompatible with server"). A local
+cluster keeps the PostgreSQL that created it, so a data directory from before
+the bundled PostgreSQL (for example one made by a Homebrew PostgreSQL 16) stays
+at that version until it is upgraded. `nx doctor` names it in the "Local
+PostgreSQL version" row.
 
-Upgrade it in place with the bundle's own `pg_upgrade`. You need the `bin/`
-directory of the PostgreSQL that created the cluster (`cat
-~/.config/nexus/postgres/PG_VERSION` names its major version). If that
+Upgrade it in place with the bundle's own `pg_upgrade`. These steps are for
+Linux and macOS. You need the `bin/` directory of the PostgreSQL that created
+the cluster (the cluster's `PG_VERSION` file names its major version); if that
 PostgreSQL is gone, install the same major version first (for example Homebrew
-`postgresql@16`). If you do not need the data, skip all of this: move the
+`postgresql@16`). If you do not need the data, skip all of this: move the data
 directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 
 ```bash
-nx daemon service stop
+CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
 OLD_BIN=/opt/homebrew/opt/postgresql@16/bin   # the PostgreSQL that created the cluster
-NEW_BIN=~/.config/nexus/pg-bundle/bundle/bin  # the bundle's PostgreSQL 17
-DATA=~/.config/nexus/postgres
+NEW_BIN="$CFG/pg-bundle/bundle/bin"           # the bundle's PostgreSQL 17
+DATA="$CFG/postgres"
+cat "$DATA/PG_VERSION"
+
+# 1. Stop everything. `nx daemon service stop` leaves PostgreSQL running, so
+#    stop the old server with its own pg_ctl and check that it is down.
+nx daemon service stop
+"$OLD_BIN/pg_ctl" -D "$DATA" -m fast stop
+"$OLD_BIN/pg_ctl" -D "$DATA" status           # "no server running"
+
+# 2. Move the old directory aside (refuse if a previous attempt left one).
+[ -e "$DATA.old" ] && echo "$DATA.old exists: move it away first"
 mv "$DATA" "$DATA.old"
-# A short working directory: pg_upgrade puts its sockets there, and macOS caps
-# a socket path at 103 bytes.
-mkdir -p /tmp/pgup && cd /tmp/pgup
-# The same initdb options nx uses, with trust auth for the upgrade; the next
-# service start converts it to scram-sha-256.
+
+# 3. A new cluster with the options nx creates its own with, trust auth for the
+#    upgrade (the next service start converts it to scram-sha-256). Run from a
+#    fresh short directory: pg_upgrade puts its sockets there, and macOS caps a
+#    socket path at 103 bytes.
+WORK="$(mktemp -d /tmp/pgup.XXXXXX)" && cd "$WORK"
 "$NEW_BIN/initdb" -D "$DATA" --no-locale -E UTF8 --auth=trust --username "$USER"
+
+# 4. The old cluster asks for a password once nx has converted it to
+#    scram-sha-256 (any nx release from nexus-ja4pq on does that on service
+#    start). pg_upgrade reads it from PGPASSWORD; set it without printing it.
+export PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")"
 "$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" --check
 "$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER"
+
+# 5. Start, then the follow-up pg_upgrade prints. The managed configuration
+#    turns the Unix socket off, so connect over TCP on the cluster's port.
 nx daemon service start
-nx doctor   # "Local PostgreSQL version" passes, and "Local PostgreSQL authentication" shows scram-sha-256
+PORT="$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")"
+[ -f update_extensions.sql ] && "$NEW_BIN/psql" -h 127.0.0.1 -p "$PORT" -U "$USER" -d postgres -f update_extensions.sql
+"$NEW_BIN/vacuumdb" -h 127.0.0.1 -p "$PORT" -U "$USER" --all --analyze-in-stages
+unset PGPASSWORD
+nx doctor   # "Local PostgreSQL version" passes; "Local PostgreSQL authentication" shows scram-sha-256
 ```
 
 Run `--check` first: it changes nothing and reports anything that would stop
 the upgrade. If it reports an encoding or locale mismatch, the old cluster was
-made with other options; delete the new `$DATA`, run `initdb` again with the
-old cluster's encoding and locale, and check again. `--username` is the
-superuser the old cluster was created with, normally the OS user that ran
-`nx init`. After the upgrade, `pg_upgrade` may print scripts to run (for
-example `update_extensions.sql` for the `vector` extension); run what it
-prints. Keep `$DATA.old` until the service is up and your data reads back,
-then remove it by hand.
+made with other options; remove the new `$DATA`, run `initdb` again with the old
+cluster's encoding and locale, and check again. `--username` is the superuser
+the old cluster was created with, normally the OS user that ran `nx init`.
+
+To back out before the service starts, the old directory is untouched
+(`pg_upgrade` copies by default): stop anything the upgrade started, remove the
+new `$DATA`, and `mv "$DATA.old" "$DATA"`. Keep `$DATA.old` until the service is
+up and your data reads back, then remove it by hand.
 
 ## If the RDR-231 note-URI backfill halts startup
 

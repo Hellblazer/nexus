@@ -8,6 +8,8 @@ directory's own ``PG_VERSION`` (no connection), as the auth row reads ``pg_hba.c
 """
 from __future__ import annotations
 
+import inspect
+import os
 import re
 from pathlib import Path
 
@@ -15,7 +17,8 @@ import pytest
 
 from nexus.health import PG_VERSION_FLOOR, _check_local_pg_version
 
-_JAVA_FLOOR = (Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "java" / "dev" / "nexus"
+_REPO = Path(__file__).resolve().parents[1]
+_JAVA_FLOOR = (_REPO / "service" / "src" / "main" / "java" / "dev" / "nexus"
                / "service" / "db" / "PgVersionFloor.java")
 
 
@@ -64,19 +67,41 @@ def test_no_row_without_a_bundled_cluster(tmp_path: Path) -> None:
     assert _check_local_pg_version(_cluster(tmp_path / "empty", None)) == []
 
 
-@pytest.mark.parametrize(("version", "rows"), [("16", 1), ("17", 0)])
-def test_an_old_cluster_left_behind_with_no_local_cluster_in_use_is_a_warning(
-    tmp_path: Path, version: str, rows: int,
-) -> None:
-    """A box that moved to cloud mode keeps its pre-bundle data directory: unused now, but local provisioning keeps
-    an existing cluster and the engine would refuse it. A warning, never a failure; nothing for a current one."""
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root reads a 000 file")
+def test_a_marker_the_doctor_cannot_open_is_a_failing_row_not_silence(tmp_path: Path) -> None:
+    config = _cluster(tmp_path, "16")
+    marker = config / "postgres" / "PG_VERSION"
+    marker.chmod(0)
+    try:
+        [row] = _check_local_pg_version(config)
+    finally:
+        marker.chmod(0o600)
+    assert row.ok is False and "could not be read" in row.detail
+
+
+def test_a_leftover_directory_with_no_cluster_in_use_has_no_row(tmp_path: Path) -> None:
+    """A machine with no local cluster in use (no PG_DATA) gets no row, whatever is left under the config dir."""
     config = tmp_path / "config"
     (config / "postgres").mkdir(parents=True)
-    (config / "postgres" / "PG_VERSION").write_text(version + "\n", encoding="utf-8")
-    found = _check_local_pg_version(config)
-    assert len(found) == rows
-    if rows:
-        assert found[0].ok is False and found[0].warn is True and "PostgreSQL 16" in found[0].detail
+    (config / "postgres" / "PG_VERSION").write_text("16\n", encoding="utf-8")
+    assert _check_local_pg_version(config) == []
+
+
+def test_the_row_is_registered_in_the_doctor_run() -> None:
+    import nexus.health as h
+
+    assert "_check_local_pg_version()" in inspect.getsource(h.run_health_checks)
+
+
+def test_the_runbook_s_initdb_options_are_the_ones_nx_provisions_with() -> None:
+    """The upgrade's new cluster must match what nx makes, or pg_upgrade --check refuses it."""
+    runbook = (_REPO / "docs" / "migration-runbook.md").read_text(encoding="utf-8")
+    section = runbook.split("## A local cluster older than PostgreSQL 17", 1)[1].split("\n## ", 1)[0]
+    provision = (_REPO / "src" / "nexus" / "db" / "pg_provision.py").read_text(encoding="utf-8")
+    assert '"--no-locale", "-E", "UTF8",' in provision, "_init_cluster's options moved: update the runbook too"
+    assert "--no-locale -E UTF8" in section
+    assert "pg-bundle/bundle/bin" in section and 'return extract_root / "bundle" / "bin"' in (
+        _REPO / "src" / "nexus" / "db" / "pg_bundle.py").read_text(encoding="utf-8")
 
 
 def test_the_floor_is_the_engine_s() -> None:
