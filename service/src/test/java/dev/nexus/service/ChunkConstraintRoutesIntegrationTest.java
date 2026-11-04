@@ -340,6 +340,32 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
     }
 
     @Test
+    @Order(13)
+    void aRestrictivePolicyThatIsNotTrueOverridesAnUnrestrictedSelectPolicy() throws Exception {
+        // nexus-gy3vq: Postgres ANDs an applicable restrictive policy onto the permissive ones, so the
+        // permissive true policy no longer means the role reads every row.
+        service.chunkConstraintAdmin(blindAdmin());
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.createPolicyUsingTrue(su, CHUNKS, "blind_read_all2", PgContainerHelper.PolicyKind.PERMISSIVE,
+                "SELECT", BLIND);
+            PgContainerHelper.createPolicy(su, CHUNKS, "blind_narrowed", PgContainerHelper.PolicyKind.RESTRICTIVE,
+                "SELECT", BLIND, false);
+            try {
+                HttpResponse<String> r = add(ROOT);
+                assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
+                assertThat(json(r).path("reason").asText()).isEqualTo("admin_cannot_see_all_tenants");
+                assertThat(r.body()).contains("blind_narrowed");
+            } finally {
+                PgContainerHelper.dropPolicy(su, CHUNKS, "blind_narrowed");
+                PgContainerHelper.dropPolicy(su, CHUNKS, "blind_read_all2");
+            }
+        } finally {
+            service.chunkConstraintAdmin(admin());
+        }
+    }
+
+    @Test
     @Order(14)
     void aProbeThatReadsFewerRowsThanATenantScopedCountIsRefused_evenWhenTheRoleLooksUnrestricted() throws Exception {
         var conn = new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword());

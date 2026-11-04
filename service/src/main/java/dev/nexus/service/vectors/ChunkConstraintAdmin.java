@@ -431,8 +431,10 @@ public class ChunkConstraintAdmin {
         /**
          * Refuse unless this session reads every row of {@code nexus.chunks}: the role is a superuser or has BYPASSRLS,
          * or a PERMISSIVE policy FOR SELECT (or ALL) with the qual {@code true} applies to it (named, or PUBLIC, or a role
-         * it inherits). Anything else reads the rows its (unset) tenant stamp allows, which is none, and the probe would
-         * report an empty table as clean.
+         * it inherits) and no RESTRICTIVE policy for SELECT (or ALL) with any other qual does (nexus-gy3vq: Postgres
+         * ANDs every applicable restrictive policy onto the permissive ones, so one that is not {@code true} can hide
+         * rows whatever the permissive policy admits). Anything else reads the rows its (unset) tenant stamp allows,
+         * which is none, and the probe would report an empty table as clean.
          */
         void requireUnrestrictedView() {
             String role = ctx.select(DSL.currentUser()).fetchOne(0, String.class);
@@ -444,23 +446,17 @@ public class ChunkConstraintAdmin {
             if (attrs != null && (Boolean.TRUE.equals(attrs.value1()) || Boolean.TRUE.equals(attrs.value2()))) {
                 return;
             }
-            var policies = ctx.select(DSL.field(DSL.name("p", "roles"), SQLDataType.CLOB.array()),
-                    DSL.field(DSL.name("p", "qual"), String.class))
-                .from(DSL.table(DSL.name("pg_catalog", "pg_policies")).as("p"))
-                .where(DSL.field(DSL.name("p", "schemaname"), String.class).eq(CHUNKS.getSchema().getName()))
-                .and(DSL.field(DSL.name("p", "tablename"), String.class).eq(CHUNKS.getName()))
-                .and(DSL.field(DSL.name("p", "permissive"), String.class).eq("PERMISSIVE"))
-                .and(DSL.field(DSL.name("p", "cmd"), String.class).in("SELECT", "ALL"))
-                .fetch();
-            for (var p : policies) {
-                String qual = p.value2() == null ? "" : p.value2().replaceAll("[()\\s]", "");
-                if (!"true".equalsIgnoreCase(qual) || p.value1() == null) {
-                    continue;
+            for (var p : selectPolicies("RESTRICTIVE")) {
+                if (!isTrue(p.value2()) && appliesToSession(p.value1())) {
+                    throw new Refused(503, "admin_cannot_see_all_tenants",
+                        "the admin session role " + role + " is narrowed by the RESTRICTIVE policy " + p.value3()
+                            + " on nexus.chunks, whose qual is not true, so the table-wide probe would not read every "
+                            + "tenant's rows. Point NX_DB_ADMIN_* at a superuser or BYPASSRLS role, or drop the policy");
                 }
-                for (String named : p.value1()) {
-                    if ("public".equalsIgnoreCase(named) || memberOf(named)) {
-                        return;
-                    }
+            }
+            for (var p : selectPolicies("PERMISSIVE")) {
+                if (isTrue(p.value2()) && appliesToSession(p.value1())) {
+                    return;
                 }
             }
             throw new Refused(503, "admin_cannot_see_all_tenants",
@@ -469,6 +465,37 @@ public class ChunkConstraintAdmin {
                     + "the table-wide probe would read zero rows and the constraint checks would pass over every "
                     + "tenant. Point NX_DB_ADMIN_* at the role that owns the tables and carries "
                     + "chunks_gate_probe_owner_read (vectors-029), or at a BYPASSRLS role");
+        }
+
+        /** The {@code nexus.chunks} policies of {@code kind} (PERMISSIVE or RESTRICTIVE) that govern SELECT: roles, qual, name. */
+        private org.jooq.Result<org.jooq.Record3<String[], String, String>> selectPolicies(String kind) {
+            return ctx.select(DSL.field(DSL.name("p", "roles"), SQLDataType.CLOB.array()),
+                    DSL.field(DSL.name("p", "qual"), String.class),
+                    DSL.field(DSL.name("p", "policyname"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_policies")).as("p"))
+                .where(DSL.field(DSL.name("p", "schemaname"), String.class).eq(CHUNKS.getSchema().getName()))
+                .and(DSL.field(DSL.name("p", "tablename"), String.class).eq(CHUNKS.getName()))
+                .and(DSL.field(DSL.name("p", "permissive"), String.class).eq(kind))
+                .and(DSL.field(DSL.name("p", "cmd"), String.class).in("SELECT", "ALL"))
+                .fetch();
+        }
+
+        /** True when a policy's qual, as pg_policies renders it, is the constant true. */
+        private static boolean isTrue(String qual) {
+            return "true".equalsIgnoreCase(qual == null ? "" : qual.replaceAll("[()\\s]", ""));
+        }
+
+        /** True when a policy naming {@code roles} applies to this session (PUBLIC, or a role it is or inherits). */
+        private boolean appliesToSession(String[] roles) {
+            if (roles == null) {
+                return false;
+            }
+            for (String named : roles) {
+                if ("public".equalsIgnoreCase(named) || memberOf(named)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /** True when the session role has the privileges of {@code named} (is it, or inherits it). */

@@ -793,6 +793,43 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
     }
 
     @Test
+    void aForgedResumeWithAStringOver65535BytesIsIgnored_notA500() throws Exception {
+        // nexus-gy3vq: writeUTF refused strings over 65535 bytes, so such a token made signing throw.
+        String tenant = "sw-huge";
+        String token = tenantToken(tenant);
+        String huge = "x".repeat(70_000);
+        Map<String, Object> cursor = new LinkedHashMap<>();
+        cursor.put("collection", huge);
+        cursor.put("chash", "0".repeat(64));
+        List<Object> collections = List.of(huge);
+        Map<String, Object> forged = new LinkedHashMap<>();
+        forged.put("cursor", cursor);
+        forged.put("collections", collections);
+        forged.put("blocked", List.of());
+        forged.put("remaining", 1);
+        forged.put("sig", "00");
+        HttpResponse<String> r = sweep(token, applyBody("resume", forged));
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(json(r).path("resume_ignored").asBoolean()).isTrue();
+    }
+
+    @Test
+    void aTokenNamingAStringOver65535BytesCanBeSignedAndVerifies() throws Exception {
+        // nexus-gy3vq: the signed encoding frames each string by its UTF-8 length, with no 64 KiB ceiling.
+        String tenant = "sw-huge-signed";
+        String huge = "y".repeat(70_000);
+        try (var superDs = PgContainerHelper.superuserDataSource(pg)) {
+            var sweep = new dev.nexus.service.vectors.ChunkKeySweep(new dev.nexus.service.db.TenantScope(superDs),
+                (t, c, bound) -> 0L);
+            var resume = sweep.issueResume(tenant, new dev.nexus.service.vectors.ChunkKeySweep.Cursor(huge, "0".repeat(64)),
+                List.of(huge), List.of(), 0);
+            var applied = sweep.apply(tenant, enginePlan(), Map.of(), null, 1000, 5, java.time.Duration.ofSeconds(30),
+                resume);
+            assertThat(applied.resumeIgnored()).as("a token the instance signed is taken").isFalse();
+        }
+    }
+
+    @Test
     void aSignedResumeFromAnotherTenantIsIgnored() throws Exception {
         String tenantA = "sw-xa";
         String tenantB = "sw-xb";

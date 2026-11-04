@@ -80,7 +80,11 @@ import javax.crypto.spec.SecretKeySpec;
  * HMAC-signed with a key this instance made when it started, over the tenant and every field. A token whose signature
  * does not verify (forged, edited, another tenant's, or issued before an engine restart) is IGNORED: the call is a first
  * call and does its own checks. Whatever the token says, every batch and the final count also exclude the bypass
- * collections in SQL and the collections the token itself lists as blocked.
+ * collections in SQL and the collections the token itself lists as blocked. A token that does verify can be sent
+ * again for as long as this instance runs, and a replay carries the first call's census verdicts, however old
+ * (nexus-gy3vq: accepted, by design): a replay re-sweeps from its cursor, and a row already swept no longer matches
+ * the retired-key predicate, so it repeats nothing; but a collection whose census would block it now and did not at
+ * the first call is still swept by the replay, until a call without a token runs the census again.
  *
  * <p><b>By tenant, explicitly.</b> Every statement carries {@code tenant_id = ?} beside the RLS stamp: the owner role
  * sees every tenant's rows (RF-16), and a sweep run as that role must not depend on the stamp.
@@ -184,8 +188,28 @@ public final class ChunkKeySweep {
         if (r.sig() == null || r.collections() == null || r.blocked() == null) {
             return false;
         }
-        String expected = sign(tenant, r.cursor(), r.collections(), r.blocked(), r.remaining());
+        String expected;
+        try {
+            expected = sign(tenant, r.cursor(), r.collections(), r.blocked(), r.remaining());
+        } catch (IllegalStateException e) {
+            return false;  // a token this instance could not even encode is not one it signed (nexus-gy3vq)
+        }
         return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), r.sig().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * One string of the signed encoding: its UTF-8 length as an int, then the bytes; -1 for null. Not
+     * {@code writeUTF}, whose 65535-byte limit made a forged token with a longer string throw here, a 500
+     * where the call should have been ignored (nexus-gy3vq).
+     */
+    private static void writeString(DataOutputStream out, String s) throws IOException {
+        if (s == null) {
+            out.writeInt(-1);
+            return;
+        }
+        byte[] b = s.getBytes(StandardCharsets.UTF_8);
+        out.writeInt(b.length);
+        out.write(b);
     }
 
     /** HMAC-SHA256 over a length-framed encoding of every field, hex. */
@@ -193,20 +217,20 @@ public final class ChunkKeySweep {
         try {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             DataOutputStream out = new DataOutputStream(bytes);
-            out.writeUTF(tenant);
+            writeString(out, tenant);
             out.writeBoolean(cursor != null);
             if (cursor != null) {
-                out.writeUTF(cursor.collection());
-                out.writeUTF(cursor.chash());
+                writeString(out, cursor.collection());
+                writeString(out, cursor.chash());
             }
             out.writeInt(collections.size());
             for (String c : collections) {
-                out.writeUTF(c);
+                writeString(out, c);
             }
             out.writeInt(blocked.size());
             for (Blocked b : blocked) {
-                out.writeUTF(b.collection());
-                out.writeUTF(b.reason() == null ? "" : b.reason());
+                writeString(out, b.collection());
+                writeString(out, b.reason() == null ? "" : b.reason());
                 out.writeLong(b.retiredRows());
             }
             out.writeLong(remaining);
