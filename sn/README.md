@@ -107,7 +107,7 @@ Serena is started with `--context claude-code --project-from-cwd`:
 sn/
 ├── .claude-plugin/
 │   └── plugin.json               # Plugin manifest
-├── .mcp.json                      # Serena (pinned) + Context7 (hosted) MCP server configs
+├── .mcp.json                      # Serena (pinned) + Context7 (hosted, not pinned) MCP server configs
 ├── hooks/
 │   ├── hooks.json                 # SessionStart, SubagentStart, PreToolUse, PermissionRequest
 │   └── scripts/

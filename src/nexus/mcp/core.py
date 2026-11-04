@@ -15620,7 +15620,7 @@ async def nx_answer_report(
     structured_output=False,
 )
 async def nx_tidy(
-    topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"chromadb quotas\").")],
+    topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"embedding quotas\").")],
     collection: Annotated[str, Field(
         description=(
             "T3 collection to search. \"knowledge\" (default) means every live "

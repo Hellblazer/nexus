@@ -1825,8 +1825,8 @@ def _backfill_per_file_from_t3(
         raise click.ClickException(
             f"no repo owner registered for hash {repo_hash!r} "
             f"(collection {collection!r}). Run 'nx catalog backfill' "
-            "first to register repo owners, or index the repository with "
-            "'nx index repo <path>', which registers its owner."
+            "first to register repo owners, or index the repository whose "
+            f"hash is {repo_hash!r} with 'nx index repo <path>', which registers its owner."
         )
 
     # Look up the owner's repo_root so we can anchor file_paths

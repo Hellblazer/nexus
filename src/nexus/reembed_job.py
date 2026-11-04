@@ -131,12 +131,12 @@ def missing_piece(target_model: str, served: Iterable[str]) -> str | None:
     if family == "voyage":
         piece = (
             "it has no Voyage key. Persist one with `nx config set voyage_api_key --stdin` (or export "
-            f"VOYAGE_API_KEY), then restart the service: `{_SERVICE_RESTART_COMMAND}`"
+            f"VOYAGE_API_KEY), then restart the service: {_SERVICE_RESTART_COMMAND}"
         )
     elif family == "bge":
         piece = (
             "it found no bge model files. Run `nx init --service` to provision them, then restart the "
-            f"service: `{_SERVICE_RESTART_COMMAND}`"
+            f"service: {_SERVICE_RESTART_COMMAND}"
         )
     else:
         piece = f"{target_model!r} is not a model it can load"

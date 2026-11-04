@@ -702,7 +702,7 @@ class TestAutostartActivationState:
         assert "reports com.nexus.service disabled" in probe.detail
         # a disabled label refuses bootstrap, so the remedy enables it first
         assert probe.remedy.startswith(f"launchctl enable gui/{os.getuid()}/com.nexus.service && ")
-        assert probe.remedy.endswith("nx daemon service uninstall --autostart && nx daemon service install --autostart")
+        assert probe.remedy.endswith("nx daemon service uninstall --autostart, then nx daemon service install --autostart")
 
     def test_darwin_label_enabled_or_unlisted_is_active(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -789,7 +789,7 @@ class TestAutostartActivationState:
         probe = installer.autostart_activation_state(tmp_path / "nexus-service.service", tier="service")
         assert probe.state is installer.ActivationState.NOT_ACTIVE
         assert probe.detail.endswith("reports disabled"), probe.detail
-        assert probe.remedy == "nx daemon service uninstall --autostart && nx daemon service install --autostart"
+        assert probe.remedy == "nx daemon service uninstall --autostart, then nx daemon service install --autostart"
         script.write_text("#!/bin/sh\necho not-found\nexit 1\n", encoding="utf-8")
         probe = installer.autostart_activation_state(tmp_path / "nexus-service.service", tier="service")
         assert probe.state is installer.ActivationState.NOT_ACTIVE
@@ -863,7 +863,7 @@ class TestInstallAutostartConsultsTheManager:
         assert isinstance(excinfo.value.__cause__, FileNotFoundError)
         assert dest.exists(), "with no manager to retry against the file stays installed"
         assert "file installed but not activated" in str(excinfo.value)
-        assert "nx daemon service uninstall --autostart && nx daemon service install --autostart" in str(excinfo.value)
+        assert "nx daemon service uninstall --autostart, then nx daemon service install --autostart" in str(excinfo.value)
 
     def test_identical_file_the_manager_reports_disabled_is_reactivated_not_already_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

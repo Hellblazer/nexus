@@ -465,7 +465,7 @@ def test_index_repo_profile_refusal_exits_nonzero_without_traceback(runner, repo
     assert result.exit_code != 0, result.output
     assert result.exc_info is not None and result.exc_info[0] is SystemExit, result.exc_info
     assert "Traceback (most recent call last)" not in result.output, result.output
-    assert "nx daemon service stop && nx daemon service start" in result.output
+    assert "nx daemon service stop, then nx daemon service start" in result.output
 
 
 @pytest.mark.t2_tenant
@@ -700,7 +700,7 @@ def test_index_profile_refusal_exits_nonzero_without_traceback(
     assert result.exit_code != 0, result.output
     assert result.exc_info is not None and result.exc_info[0] is SystemExit, result.exc_info
     assert "Traceback (most recent call last)" not in result.output, result.output
-    assert "nx daemon service stop && nx daemon service start" in result.output
+    assert "nx daemon service stop, then nx daemon service start" in result.output
 
 
 def test_index_md_command_empty_file_exits_nonzero_without_registering(

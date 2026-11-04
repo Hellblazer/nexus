@@ -152,7 +152,7 @@ class TestMineruServerAvailableSkew:
         event = fallback_events[0]
         assert event["registered_version"] == "3.4.5"
         assert event["our_version"] == "3.1.11"
-        assert "nx mineru stop && nx mineru start" in event["remedy"]
+        assert "nx mineru stop, then nx mineru start" in event["remedy"]
 
     def test_no_health_wait_no_ensure_mineru_running_call(self, extractor: PDFExtractor) -> None:
         """The bug's core cost: a full mineru_ensure_health_timeout wait

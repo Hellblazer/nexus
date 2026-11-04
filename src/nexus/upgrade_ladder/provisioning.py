@@ -150,7 +150,7 @@ def verify_service_version(
                 "`nx daemon restart-stale` to converge it automatically "
                 "(installs the pinned tag and restarts the service), or "
                 "manually: nx daemon service install-binary "
-                f"engine-service-v{req} && nx daemon service stop && "
+                f"engine-service-v{req}, then nx daemon service stop, then "
                 "nx daemon service start"
             ),
         )

@@ -2631,7 +2631,7 @@ class PDFExtractor:
             self._mineru_server_up = False
             self._mineru_server_checked = True
             skew = get_mineru_skew_info()
-            remedy = "nx mineru stop && nx mineru start  (or set pdf.mineru_server_url explicitly)"
+            remedy = "nx mineru stop, then nx mineru start  (or set pdf.mineru_server_url explicitly)"
             if skew is not None:
                 _log.info(
                     "mineru_skew_subprocess_fallback",

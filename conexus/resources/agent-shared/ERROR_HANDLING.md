@@ -97,9 +97,10 @@ integer-or-None shape `memory_put`/`plan_save` use.
 
 **Engine (T3 store) connectivity failure**:
 - Error: search or store_put fails with a connection error
-- Fix: check the service with `nx doctor` (locally, `nx daemon service status`). The `nx` CLI and T2 go through
-  the same engine, so neither is a fallback: treat the write as NOT landed, say so in your report, and restate the
-  findings inline (the rule under "Write reported an error" above)
+- Fix: nothing can be written until the engine is back. Check it with `nx doctor` (locally,
+  `nx daemon service status`), start it locally with `nx daemon service start`, then retry. The `nx` CLI and T2 go
+  through the same engine, so neither is a fallback: until the retry lands, treat the write as NOT landed, say so in
+  your report, and restate the findings inline (the rule under "Write reported an error" above)
 
 **Voyage AI API limit**:
 - Error: Rate limit or quota exceeded during embedding

@@ -27,7 +27,7 @@ from nexus.config import (
 RESTART_HINT_KEYS: frozenset[str] = frozenset({"local.embed_model", "voyage_api_key"})
 #: The restart recipe as docs/cli-reference.md "Local mode with Voyage" states
 #: it; tests/test_config_cmd.py pins the two to the same string.
-SERVICE_RESTART_COMMAND: str = "nx daemon service stop && nx daemon service start"
+SERVICE_RESTART_COMMAND: str = "nx daemon service stop, then nx daemon service start"
 SERVICE_RESTART_HINT: str = (
     "A restart is required for the engine to adopt this (it reads the model "
     f"and key only at spawn): {SERVICE_RESTART_COMMAND}"

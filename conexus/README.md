@@ -54,7 +54,7 @@ story.
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
+- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -388,7 +388,7 @@ the invocation reads the same and the surface is marked per line below:
 - `/conexus:pdf-process` (command) → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
 
 **Utility commands** (no agent dispatch, no MCP call — direct local action):
-- `/conexus:continuation [topic]` — write a handoff document under `/tmp/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. The chat reply is one `cat <path>` line to paste after `/clear`.
+- `/conexus:continuation [topic]` — write a handoff document under `/tmp/` (the user's temp directory on Windows) capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. The chat reply is one `cat <path>` line to paste after `/clear`.
 - `/conexus:nx-preflight` — verify conexus plugin dependencies (CLI, doctor, beads).
 - `/conexus:setup` — set up Nexus through the nexus server's `setup` and `setup_status` tools: show what is missing, ask, then install the CLI and a service in the background. It has no `nx` shell line, because it must work where `nx` does not exist.
 
@@ -434,7 +434,7 @@ via `plan_run`, and falls through to an inline planner on miss.  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 44 MCP tools and the nexus-catalog server exposes 10 catalog tools, 54 tools an agent calls (13 more are demoted to Python-only, including the 10 operators that `nx_answer` plans run). The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 44 MCP tools and the nexus-catalog server exposes 10 catalog tools, 54 tools an agent calls. Some functions are Python-only, not tools, including the 10 operators that `nx_answer` plans run. The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

@@ -506,7 +506,7 @@ def _warn_mineru_skew_once(
         registered_python=registered_python,
         pid=pid,
         port=port,
-        remedy="nx mineru stop && nx mineru start  (or set pdf.mineru_server_url explicitly)",
+        remedy="nx mineru stop, then nx mineru start  (or set pdf.mineru_server_url explicitly)",
     )
 
 

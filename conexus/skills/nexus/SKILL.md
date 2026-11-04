@@ -41,7 +41,7 @@ mcp__plugin_conexus_nexus__traverse(seeds="1.1.635", purpose="find-implementatio
 mcp__plugin_conexus_nexus__nx_answer(question="rank these approaches by relevance to X"   # plan-matched; operator steps run server-side
 
 # Background hygiene — call and let run (claude -p subprocesses); each requires real args
-mcp__plugin_conexus_nexus__nx_tidy(topic="chromadb quotas", collection="<subject>")   # read-only T3 consolidation report for one collection
+mcp__plugin_conexus_nexus__nx_tidy(topic="embedding quotas", collection="<subject>")   # read-only T3 consolidation report for one collection
 mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<title + description>")  # enriches ONE bead's description
 mcp__plugin_conexus_nexus__nx_plan_audit(plan_json='{"steps": [...]}')                # audits ONE plan against the codebase
 

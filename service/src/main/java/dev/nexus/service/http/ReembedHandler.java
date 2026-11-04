@@ -647,7 +647,7 @@ public final class ReembedHandler implements HttpHandler {
     }
 
     /** {@code corpus._SERVICE_RESTART_COMMAND}; pinned against it by {@code tests/test_reembed_job.py}. */
-    static final String RESTART_COMMAND = "nx daemon service stop && nx daemon service start";
+    static final String RESTART_COMMAND = "nx daemon service stop, then nx daemon service start";
 
     /** The sentence naming what the engine lacks for {@code model}: {@code reembed_job.missing_piece}'s text. */
     static String missingPiece(String model, List<String> served) {
@@ -655,10 +655,10 @@ public final class ReembedHandler implements HttpHandler {
         String piece;
         if (model.startsWith("voyage")) {
             piece = "it has no Voyage key. Persist one with `nx config set voyage_api_key --stdin` (or export "
-                + "VOYAGE_API_KEY), then restart the service: `" + RESTART_COMMAND + "`";
+                + "VOYAGE_API_KEY), then restart the service: " + RESTART_COMMAND;
         } else if (model.startsWith("bge")) {
             piece = "it found no bge model files. Run `nx init --service` to provision them, then restart the "
-                + "service: `" + RESTART_COMMAND + "`";
+                + "service: " + RESTART_COMMAND;
         } else {
             piece = "'" + model + "' is not a model it can load";
         }

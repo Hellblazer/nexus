@@ -3396,7 +3396,7 @@ class TestConvergeServiceAutostartUnitNoServiceManager:
         # uninstall+install sequence that forces a genuine rewrite instead.
         assert "install --autostart --force" not in actions[0]
         assert (
-            "nx daemon service uninstall --autostart && nx daemon service "
+            "nx daemon service uninstall --autostart, then nx daemon service "
             "install --autostart" in actions[0]
         )
 
@@ -4440,7 +4440,7 @@ class TestConvergeServiceAutostartUnitActivation:
         probe = self._probe(
             ActivationState.NOT_ACTIVE,
             "`launchctl print-disabled gui/501` reports com.nexus.service disabled",
-            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart && nx daemon service install --autostart",
+            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart, then nx daemon service install --autostart",
         )
         for kwargs in ({}, {"unattended": True}, {"dry_run": True}):
             actions, asked, uninstall, install, sp = self._run(tmp_path, dest, probe, **kwargs)

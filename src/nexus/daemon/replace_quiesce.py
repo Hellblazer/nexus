@@ -253,7 +253,7 @@ def unverified_stop_warning(outcome: Any) -> str | None:
     return (
         f"a running storage service could not be ruled out ({detail}); if one is "
         "running it may still be using the old files. Restart it by hand: "
-        "nx daemon service stop && nx daemon service start"
+        "nx daemon service stop, then nx daemon service start"
     )
 
 

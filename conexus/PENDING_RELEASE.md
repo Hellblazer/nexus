@@ -54,6 +54,13 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/hooks/scripts/compact_checkpoint.py` (nexus-2v7da): on a compact start with nothing to restore (no checkpoint file, the stub post writes when pre did not run, a checkpoint already used by an earlier compaction, or one past the prune window), inject now emits a short notice saying no restore is available and pointing at the threads board entry and the working tree. It said nothing before, so a resumed session could not tell "nothing was lost" from "nothing was saved". The same notice covers a stamp past the prune window and a checkpoint an earlier compaction already injected (the commonest case: inject runs before post). A foreign session, a non-compact start, an unreadable checkpoint and a second fire for the same compaction (a sidecar under 30 seconds old) stay silent.
 
+- `conexus/agents/developer.md` (nexus-pplwc): names T3 store titles and T2 memory paths, not nonexistent `nx store` / `nx memory` subcommands.
+- `conexus/agents/strategic-planner.md` (nexus-pplwc): the same T3 store / T2 memory wording.
+- `conexus/agents/test-validator.md` (nexus-pplwc): the same T3 store / T2 memory wording.
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-pplwc): the naming conventions say T3 store title, not `nx store title`.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-pplwc): the Input Artifacts row says T3 store docs and T2 memory.
+- `conexus/skills/architecture/SKILL.md` (nexus-pplwc): names `jet_brains_type_hierarchy` (JetBrains only), not a bare `type_hierarchy` no backend has.
+- `sn/hooks/scripts/session-start-section.md` (nexus-pplwc): the injected Serena section names the type hierarchy tool as `jet_brains_type_hierarchy`, JetBrains only.
 - `conexus/agents/architect-planner.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
 - `conexus/agents/code-review-expert.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
 - `conexus/agents/codebase-deep-analyzer.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.

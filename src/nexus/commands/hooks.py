@@ -382,7 +382,7 @@ def hooks_uninstall(path: Path) -> None:
 def hooks_update(path: Path) -> None:
     """Refresh nexus git hooks to the current stanza (nexus-mkj6u shakeout).
 
-    Equivalent to ``nx hooks uninstall && nx hooks install`` in one step.
+    Equivalent to ``nx hooks uninstall`` then ``nx hooks install``, in one step.
     Use this when ``nx doctor`` reports stanza drift — typically after a
     conexus upgrade that changed the stanza (e.g. the 2026-05-23 pgrep
     guard for the multi-indexer pile-up race).

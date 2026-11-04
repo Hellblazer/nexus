@@ -212,7 +212,7 @@ def test_enospc_from_semaphore_creation_is_the_machine_message() -> None:
     )
     assert got == SEMAPHORE_REMEDY
     assert "kern.posix.sem.max" in got
-    assert "nx mineru stop && nx mineru start" in got, "the remedy must name a command that exists"
+    assert "`nx mineru stop`, then `nx mineru start`" in got, "the remedy must name a command that exists"
 
 
 def test_any_other_oserror_is_not_this_fault() -> None:
@@ -248,7 +248,7 @@ def test_the_remedy_is_chosen_by_platform() -> None:
     assert semaphore_remedy("linux") == SEMAPHORE_REMEDY_LINUX
     assert "kern.posix.sem.max" in SEMAPHORE_REMEDY and "/dev/shm" not in SEMAPHORE_REMEDY
     assert "/dev/shm" in SEMAPHORE_REMEDY_LINUX and "kern.posix" not in SEMAPHORE_REMEDY_LINUX
-    assert "nx mineru stop && nx mineru start" in SEMAPHORE_REMEDY_LINUX
+    assert "`nx mineru stop`, then `nx mineru start`" in SEMAPHORE_REMEDY_LINUX
     got = semaphores_exhausted(_create=_raises(OSError(errno.ENOSPC, "x")), _platform="linux")
     assert got == SEMAPHORE_REMEDY_LINUX
 
@@ -353,7 +353,7 @@ def test_each_fault_is_reported_cause_before_symptom() -> None:
     )
     assert len(faults) == 3
     assert "working directory was deleted" in faults[0]
-    assert "nx mineru stop && nx mineru start" in faults[0]
+    assert "`nx mineru stop`, then `nx mineru start`" in faults[0]
     assert faults[1] == "no semaphores"
     assert "every recent task failed" in faults[2] and "7 failed" in faults[2]
 

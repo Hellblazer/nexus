@@ -255,3 +255,39 @@ def test_the_production_text_sweep_catches_planted_rot(tmp_path: Path) -> None:
     assert [(m.path, m.line) for m in sweep.mentions] == [
         ("migrate-to-service", 3), ("repo", 6), ("migrate-to-service", 9)]
     assert sweep.examined == 5
+
+
+#: "a && nx b" in a printed remedy: Windows PowerShell 5.1 (the default shell on Windows 10 and 11) rejects "&&", so
+#: a user pasting it gets a parse error. Remedies say "a, then b" instead. A macOS-only launchctl line is exempt.
+_AND_CHAIN_RE = re.compile(r"&&\s*`*nx\s")
+#: (file, fragment) -> why the "&&" is the point of the text.
+_AND_CHAIN_ALLOWED: dict[tuple[str, str], str] = {
+    ("src/nexus/commands/t3.py", "--dry-run && nx t3 gc"): (
+        "the help shows scripting a dry run whose exit 1 must stop the real run; '&&' is that gate"
+    ),
+}
+
+
+def _and_chained_remedies(files: Iterable[Path], root: Path) -> list[str]:
+    out: list[str] = []
+    for path in files:
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        skip = _non_help_docstrings(module)
+        for node in ast.walk(module):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip
+                    and _AND_CHAIN_RE.search(node.value) and "launchctl" not in node.value
+                    and not any(f == _rel(path, root) and frag in node.value for f, frag in _AND_CHAIN_ALLOWED)):
+                out.append(f"{_rel(path, root)}:{node.lineno}: {node.value.strip()[:100]!r}")
+    return out
+
+
+def test_no_user_facing_remedy_chains_nx_commands_with_and_and() -> None:
+    offenders = _and_chained_remedies(_files(_PYTHON_GLOBS), REPO_ROOT)
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_and_chain_check_catches_a_planted_remedy(tmp_path: Path) -> None:
+    planted = tmp_path / "planted.py"
+    planted.write_text('R = "restart: `nx daemon service stop && nx daemon service start`"\n'
+                       'OK = "nx daemon service stop, then nx daemon service start"\n', encoding="utf-8")
+    assert len(_and_chained_remedies([planted], tmp_path)) == 1

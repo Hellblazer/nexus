@@ -3240,7 +3240,7 @@ def _check_mineru_server() -> list[HealthResult]:
             return [HealthResult(
                 label="MinerU server", ok=False,
                 detail=f"{url} returned HTTP {resp.status_code}",
-                fix_suggestions=["Restart the server: nx mineru stop && nx mineru start"],
+                fix_suggestions=["Restart the server: nx mineru stop, then nx mineru start"],
             )]
 
     # Nothing is up. The question is no longer "is it reachable" but "can
@@ -5003,7 +5003,7 @@ def _check_engine_reaper(
         "event=reaper_run, one line per completed pass; a failed pass logs reaper_pass_failed instead): a thrown "
         "Error is caught and logged, and the schedule stays alive",
         "A reaper that stopped making passes is restarted by restarting the engine "
-        "(`nx daemon service stop && nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
+        "(`nx daemon service stop`, then `nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
         "switches it off on purpose, and then this row reads not applicable",
         "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
     ]
@@ -5195,7 +5195,7 @@ def _check_per_collection_indexes(
             detail=f"builder_state {state}: {why}, so no per-collection index is being built ({counts})",
             fix_suggestions=[
                 *(["After a nexus_admin credential rotation, restart the engine so it reads the new credential "
-                   "(`nx daemon service stop && nx daemon service start` for a local engine); the engine logs "
+                   "(`nx daemon service stop`, then `nx daemon service start` for a local engine); the engine logs "
                    "event=pci_builder_auth_failed"] if state == "auth_failed" else
                   ["The engine's admin role cannot create indexes on the leaves of nexus.chunks: grant it the "
                    "privilege (it must own or be able to CREATE INDEX on the partitions), then restart the engine"]),
@@ -5446,7 +5446,7 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
             detail=(f"profile voyage but the engine serves {served}: it booted degraded, and every Voyage "
                     "collection answers 422 (the engine has no Voyage key)"),
             fix_suggestions=["Persist the key with `nx config set voyage_api_key --stdin` (or export VOYAGE_API_KEY), "
-                             f"then restart the service: `{_SERVICE_RESTART_COMMAND}`",
+                             f"then restart the service: {_SERVICE_RESTART_COMMAND}",
                              "Or choose the local embedder (`nx init`) if Voyage was not intended"],
         )]
     return [HealthResult(
@@ -5454,7 +5454,7 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
         detail=(f"profile bge but the engine serves {served}: it booted degraded, and every bge collection "
                 "answers 422 (the engine found no bge model files)"),
         fix_suggestions=["Run `nx init` to provision the bge model files, then restart the service: "
-                         f"`{_SERVICE_RESTART_COMMAND}`"],
+                         f"{_SERVICE_RESTART_COMMAND}"],
     )]
 
 
@@ -6565,7 +6565,7 @@ def _check_service_autostart_drift() -> list[HealthResult]:
                         "start at login here until one exists"
                     ),
                     fix_suggestions=[
-                        "nx daemon service uninstall --autostart && nx daemon "
+                        "nx daemon service uninstall --autostart, then nx daemon "
                         "service install --autostart  # once a service manager is available",
                     ],
                 )]
@@ -6709,7 +6709,7 @@ def _check_migration_state(
             ),
             fix_suggestions=[
                 "Run `nx init` to apply migrations",
-                "Check that the Postgres cluster is running: nx daemon service status",
+                "Start the storage service (it brings up the Postgres cluster): nx daemon service start",
             ],
             fatal=True,
         )]
@@ -10117,7 +10117,7 @@ def _check_embedding_profile() -> list[HealthResult]:
             detail=f"engine does not serve GET /v1/catalog/embedding_profile ({exc})",
             fix_suggestions=[
                 "The engine predates the RDR-204 Phase 2 route; upgrade it "
-                "(nx upgrade, then nx daemon service stop && nx daemon service start). "
+                "(nx upgrade, then nx daemon service stop, then nx daemon service start). "
                 "No write model is assumed in the meantime.",
             ],
         )]

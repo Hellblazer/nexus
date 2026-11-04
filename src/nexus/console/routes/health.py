@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -112,7 +111,6 @@ def _collect_health_data() -> dict[str, Any]:
     else:
         data["index_log"] = {"exists": False}
 
-    data["dolt_server"] = _collect_dolt_data(nexus_config_dir(), dolt_on_path=shutil.which("dolt") is not None)
 
     # Aspect-extraction queue (RDR-089 worker depth, nexus-qf48). Mirrors
     # the doctor.py --check-aspect-queue surface (nexus-1pfq) so the
@@ -186,15 +184,6 @@ def _collect_aspect_queue_data() -> dict[str, Any]:
 
     storage_backend_for("aspect_queue")
     return _collect_aspect_queue_data_service()
-
-
-def _collect_dolt_data(config_dir: Path, *, dolt_on_path: bool) -> dict[str, Any]:
-    """The Dolt card's data. Dolt is the beads backend, not a nexus dependency: with no server log and no
-    ``dolt`` on PATH the card is not applicable, not a warning (nexus-pplwc)."""
-    dolt_log = config_dir / "dolt-server.log"
-    if dolt_log.exists():
-        return {"exists": True, "applicable": True, "age_seconds": int(time.time() - dolt_log.stat().st_mtime)}
-    return {"exists": False, "applicable": dolt_on_path}
 
 
 def _age_str(seconds: int) -> str:

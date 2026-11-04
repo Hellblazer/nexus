@@ -1957,7 +1957,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
             stale_warning = (
                 f"running service is release_version={svc_release} "
                 f"but the installed binary is {installed['version']} — restart to "
-                "pick it up: nx daemon service stop && nx daemon service start"
+                "pick it up: nx daemon service stop, then nx daemon service start"
             )
             data["stale"] = True
         # Bead pebfx.4(b): warn when the installed binary predates the current

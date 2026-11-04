@@ -158,7 +158,7 @@ Each spawns a `claude -p` subprocess (300-600s timeout) and requires real argume
 - **`nx_plan_audit(plan_json, context="")`** — audits ONE plan (passed as `plan_json`) for file-path/dependency/assumption correctness against the current codebase. Not a scan of the stored plan library.
 
 ```
-mcp__plugin_conexus_nexus__nx_tidy(topic="chromadb quotas", collection="<subject>")
+mcp__plugin_conexus_nexus__nx_tidy(topic="embedding quotas", collection="<subject>")
 mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<bead title + description text>")
 mcp__plugin_conexus_nexus__nx_plan_audit(plan_json='{"steps": [...]}')
 ```
@@ -443,7 +443,7 @@ memory_search uses PostgreSQL full-text search: it matches words, not semantic m
 - Searches all three fields: **title**, **content**, and **tags**
 - Use the terms the stored document uses, not conceptual paraphrases; English words match across stemming (`indexing` finds `indexed`), and accents are folded
 - `"retain slash commands"` works if those words appear in the document
-- Multi-word queries match documents that contain all the words; a query made only of English stopwords matches through titles and tags alone
+- A multi-word query matches a document when every word matches it the same way: all as English stems (title and content), or all as exact words (tags, and the title split at `/ . - _`); a query made only of English stopwords can match only the exact-word way
 - When results are empty: drop one term at a time to identify which token has no match. Use memory_get with empty title to browse titles directly
 
 ## Code Search: When to Use search vs Grep

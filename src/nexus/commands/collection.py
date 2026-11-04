@@ -1865,7 +1865,7 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     if code == 404 and not _ENGINE_404_MESSAGES.match(text):
         return click.ClickException(
             f"this engine does not serve the re-embed routes ({text}); upgrade it "
-            "(nx upgrade, then nx daemon service stop && nx daemon service start)."
+            "(nx upgrade, then nx daemon service stop, then nx daemon service start)."
         )
     if code == 503:
         return click.ClickException(f"the engine refuses the re-embed job: {text}")

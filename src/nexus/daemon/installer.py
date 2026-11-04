@@ -725,7 +725,7 @@ _MANAGER_ABSOLUTE_PATHS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-REINSTALL_REMEDY = "nx daemon service uninstall --autostart && nx daemon service install --autostart"
+REINSTALL_REMEDY = "nx daemon service uninstall --autostart, then nx daemon service install --autostart"
 
 #: ``systemctl is-enabled`` words that mean "the unit will not start at
 #: login" (a positive answer, as opposed to a bus failure).
@@ -1304,7 +1304,7 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     except FileNotFoundError as exc:
         msg = (
             f"{cmd[0]} not found on PATH; file installed but not activated ({exc}). "
-            f"Once a service manager is available, run `{REINSTALL_REMEDY}` to register it."
+            f"Once a service manager is available, run {REINSTALL_REMEDY} to register it."
         )
         if not force:
             raise ActivationError(msg) from exc
@@ -1320,7 +1320,7 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
         msg = (
             f"`{' '.join(cmd)}` did not answer within {_MANAGER_ACTION_TIMEOUT_S:g}s; "
             f"file installed but not activated. Once the service manager responds, run "
-            f"`{REINSTALL_REMEDY}` to register it."
+            f"{REINSTALL_REMEDY} to register it."
         )
         if not force:
             raise ActivationError(msg) from exc

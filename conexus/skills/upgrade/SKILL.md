@@ -42,23 +42,15 @@ one no-ops.
 
 Both are safe to run unprompted.
 
-## The three genuine decisions
+## What the walk asks
 
-The walk asks only what it cannot derive. Surface these to the user and let them
-choose; never answer on their behalf:
+Nothing, today. The ladder's rungs (`aspect_queue_tuples`, `manifest_section_labels`, `note_tags_array`,
+`rdr192_manifest_backfill`) either finish or DEFER: a deferred rung stays pending, the walk goes on past it, and it
+retries on a later run (`nx doctor`'s `Upgrade ladder` row says "REPEATEDLY DEFERRED:" once one keeps deferring).
+No rung rolls back, so there is no rollback to choose.
 
-1. **Billed re-embedding** — collections changing embedding model re-embed
-   through a billed Voyage key. The rung shows an estimate-and-confirm prompt
-   first. A walk with nothing billable never prompts.
-2. **A source collection that vanished** — re-acquire or drop. The walk DEFERS
-   rather than guessing; a deferred rung records nothing and retries on a later
-   run.
-3. **Rollback** — never automatic, never derivable. On a validation block the
-   copy stays in place, reads stay degraded-LOUD (never a bare empty index), and
-   the rung DEFERS with the reason and the remedy in its message (no command
-   rolls a migration back). Surface the block; let the user decide.
-
-Everything else is automatic.
+If a rung ever asks a question (a billed re-embed, a choice the walk cannot derive), surface it to the user and let
+them choose; never answer on their behalf.
 
 ## The RDR-192 backfill rung and its failure mode
 
@@ -194,7 +186,7 @@ nx upgrade
 - **Do not reach for the old migration primitives.** `nx migration` is an
   internal primitive, callable but out of the user story because the ladder
   does its job; `guided-upgrade`, `migrate-to-service` and `migration-audit`
-  no longer exist (removed in RDR-155 P4b). If one seems necessary, that is a
+  no longer exist. If one seems necessary, that is a
   finding worth reporting, not a step to take.
 - **A new upgrade verb is never the answer.** New data axes become rungs.
 
