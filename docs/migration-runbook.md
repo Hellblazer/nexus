@@ -602,14 +602,15 @@ DATA="$CFG/postgres"
 cat "$DATA/PG_VERSION"
 
 # 1. Stop everything. `nx daemon service stop` leaves PostgreSQL running, so
-#    stop the old server with its own pg_ctl and check that it is down.
+#    stop the old server with its own pg_ctl and check that it is down. If a
+#    service manager runs it (`brew services`, systemd), stop it there instead,
+#    or it starts the server again.
 nx daemon service stop
 "$OLD_BIN/pg_ctl" -D "$DATA" -m fast stop
 "$OLD_BIN/pg_ctl" -D "$DATA" status           # "no server running"
 
-# 2. Move the old directory aside (refuse if a previous attempt left one).
-[ -e "$DATA.old" ] && echo "$DATA.old exists: move it away first"
-mv "$DATA" "$DATA.old"
+# 2. Move the old directory aside, unless a previous attempt left one.
+if [ -e "$DATA.old" ]; then echo "$DATA.old exists: move it away first"; else mv "$DATA" "$DATA.old"; fi
 
 # 3. A new cluster with the options nx creates its own with, trust auth for the
 #    upgrade (the next service start converts it to scram-sha-256). Run from a
@@ -620,18 +621,22 @@ WORK="$(mktemp -d /tmp/pgup.XXXXXX)" && cd "$WORK"
 
 # 4. The old cluster asks for a password once nx has converted it to
 #    scram-sha-256 (any nx release from nexus-ja4pq on does that on service
-#    start). pg_upgrade reads it from PGPASSWORD; set it without printing it.
+#    start). pg_upgrade reads it from PGPASSWORD; set it without printing it,
+#    and unset it before the service starts, so the service does not inherit it.
 export PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")"
 "$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" --check
 "$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER"
+unset PGPASSWORD
 
 # 5. Start, then the follow-up pg_upgrade prints. The managed configuration
-#    turns the Unix socket off, so connect over TCP on the cluster's port.
+#    turns the Unix socket off, so connect over TCP on the cluster's port, with
+#    the password given to each command alone.
 nx daemon service start
 PORT="$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")"
-[ -f update_extensions.sql ] && "$NEW_BIN/psql" -h 127.0.0.1 -p "$PORT" -U "$USER" -d postgres -f update_extensions.sql
-"$NEW_BIN/vacuumdb" -h 127.0.0.1 -p "$PORT" -U "$USER" --all --analyze-in-stages
-unset PGPASSWORD
+PASS="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")"
+[ -f update_extensions.sql ] && PGPASSWORD="$PASS" "$NEW_BIN/psql" -h 127.0.0.1 -p "$PORT" -U "$USER" -d postgres -f update_extensions.sql
+PGPASSWORD="$PASS" "$NEW_BIN/vacuumdb" -h 127.0.0.1 -p "$PORT" -U "$USER" --all --analyze-in-stages
+unset PASS
 nx doctor   # "Local PostgreSQL version" passes; "Local PostgreSQL authentication" shows scram-sha-256
 ```
 
@@ -643,8 +648,10 @@ the old cluster was created with, normally the OS user that ran `nx init`.
 
 To back out before the service starts, the old directory is untouched
 (`pg_upgrade` copies by default): stop anything the upgrade started, remove the
-new `$DATA`, and `mv "$DATA.old" "$DATA"`. Keep `$DATA.old` until the service is
-up and your data reads back, then remove it by hand.
+new `$DATA`, and `mv "$DATA.old" "$DATA"`. nx cannot start that cluster (its
+bundle is PostgreSQL 17); start it with `"$OLD_BIN/pg_ctl" -D "$DATA" start` if
+you need it running. Keep `$DATA.old` until the service is up and your data
+reads back, then remove it by hand.
 
 ## If the RDR-231 note-URI backfill halts startup
 

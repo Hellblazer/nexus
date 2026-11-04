@@ -6387,13 +6387,14 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
         if not pg_data:
             return []
         marker = Path(pg_data) / "PG_VERSION"
-        if not marker.exists():
-            return []
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_local_pg_version_check_failed", error=str(exc))
         return []
     label = "Local PostgreSQL version"
     try:
+        # exists() too: a data directory that cannot be searched raises here, and that is "could not look".
+        if not marker.exists():
+            return []
         text = marker.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError) as exc:
         return [HealthResult(label=label, ok=False, detail=f"the cluster's PG_VERSION marker could not be read ({exc})")]

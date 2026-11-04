@@ -13,7 +13,9 @@ writers is ``doc_indexer._sha256`` of the file being indexed. This walks the cal
 * a key that arrives as a parameter is followed into every caller of that function (``X.submit(fn, ...)`` read as
   ``fn(...)``), and a parameter with no caller to follow fails;
 * a writer, or a function on a key's path, referenced other than by a direct call (an alias, ``functools.partial``,
-  a thread target) fails, since the walk cannot see through it;
+  a thread target) fails, since the walk cannot see through it, and so does a writer called outside any function;
+* only the functions in ``_ORIGINS`` may make the key, each from its own file parameter, and a key parameter is
+  never rebound;
 * ``_sha256`` is defined once in ``src`` and is the file's sha256 (a behavioural check against hashlib).
 
 Anything else turns this red: a future caller that salts, derives or re-points the key.
@@ -38,6 +40,11 @@ _WRITERS: dict[str, tuple[int | None, str]] = {
 }
 #: The executor hand-offs read as calls of their first argument.
 _SUBMITS = ("submit",)
+#: The only functions that make the key, each from the file it indexes. A new place that makes a key is added here by
+#: hand, which is where a reviewer sees it.
+_ORIGINS: dict[str, str] = {"_index_document": "file_path", "index_pdf": "pdf_path"}
+#: The functions that stamp the key onto the registration; anything else calling the stamp is outside this walk.
+_STAMPERS = {"_write_chunks_with_owner_rows", "open_writer"}
 
 
 def _modules() -> list[tuple[Path, ast.Module]]:
@@ -105,16 +112,26 @@ def _bindings(fn: ast.FunctionDef, name: str) -> list[tuple[ast.AST, ast.expr | 
         elif isinstance(n, (ast.With, ast.AsyncWith)) and any(
                 i.optional_vars is not None and _binds(i.optional_vars, name) for i in n.items):
             out.append((n, None))
+        elif isinstance(n, ast.ExceptHandler) and n.name == name:
+            out.append((n, None))
+        elif isinstance(n, (ast.Import, ast.ImportFrom)) and any((a.asname or a.name.split(".")[0]) == name
+                                                                 for a in n.names):
+            out.append((n, None))
+        elif isinstance(n, ast.Delete) and any(_binds(t, name) for t in n.targets):
+            out.append((n, None))
+        elif isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name == name:
+            out.append((n, None))
     return out
 
 
 def _is_file_hash(fn: ast.FunctionDef, expr: ast.expr | None) -> bool:
-    """``_sha256(<p>)`` where ``<p>`` is a parameter of *fn* that *fn* never rebinds: the file it indexes."""
+    """``_sha256(<p>)`` in one of the _ORIGINS, where ``<p>`` is that function's file parameter, rebound if at all
+    only to the same file."""
     if not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id == "_sha256"
             and len(expr.args) == 1 and not expr.keywords and isinstance(expr.args[0], ast.Name)):
         return False
     source = expr.args[0].id
-    if source not in _params(fn) + [a.arg for a in fn.args.kwonlyargs]:
+    if _ORIGINS.get(fn.name) != source or source not in _params(fn) + [a.arg for a in fn.args.kwonlyargs]:
         return False
     return all(value is not None and _same_file(value, source) for _node, value in _bindings(fn, source))
 
@@ -162,6 +179,12 @@ class _Walk:
             self.problems.append(f"{where}: the key is {ast.unparse(expr)!r}, not _sha256(<the file parameter>)")
             return 0
         bindings = _bindings(fn, expr.id)
+        params_all = _params(fn) + [a.arg for a in fn.args.kwonlyargs]
+        if bindings and expr.id in params_all:
+            # A key that arrives as a parameter and is also rebound ("compute it if missing") would let a caller's
+            # value through on one branch; the walk refuses the shape instead of following both.
+            self.problems.append(f"{where}: the key parameter {expr.id!r} is also rebound in {fn.name}")
+            return 0
         if bindings:
             reached = 0
             for node, value in bindings:
@@ -178,7 +201,7 @@ class _Walk:
             return 0
         key = (path, fn.name, expr.id)
         if key in self.seen:
-            return 1
+            return 0  # a cycle reaches nothing by itself; the callers outside it must
         self.seen.add(key)
         self.on_path.add(fn.name)
         index = params.index(expr.id) if expr.id in params else None
@@ -219,7 +242,21 @@ def test_every_fence_key_at_the_writer_seams_is_the_indexed_file_s_sha256() -> N
     # Non-vacuity: the four seams counted on 2026-11-04 (three doc_indexer calls of the doc writer, one open_writer).
     assert sites >= 4, f"only {sites} writer call sites found; the walk no longer sees them"
     problems = walk.problems + walk.indirect_references(set(_WRITERS) | walk.on_path)
+    # A writer called outside any function (module level, a class body) is not a site the walk saw.
+    for path, tree in walk.modules:
+        anywhere = sum(1 for c in ast.walk(tree) if isinstance(c, ast.Call) and _callee(c)[0] in _WRITERS)
+        in_functions = sum(1 for fns in walk.functions.values() for fpath, fn in fns if fpath == path
+                           for c in ast.walk(fn) if isinstance(c, ast.Call) and _callee(c)[0] in _WRITERS)
+        if anywhere and not in_functions >= anywhere:
+            problems.append(f"{path.relative_to(_SRC.parents[1])}: a writer is called outside any function")
     assert not problems, "\n".join(problems)
+
+
+def test_only_the_two_seams_stamp_the_key() -> None:
+    """The walk covers the writers that stamp; a new caller of the stamp is a seam it does not know."""
+    callers = {fn.name for defs in _functions(_modules()).values() for _p, fn in defs
+               for c in ast.walk(fn) if isinstance(c, ast.Call) and _name_of(c.func) == "stamp_registered_content_hash"}
+    assert callers == _STAMPERS, callers
 
 
 def test_sha256_is_defined_once_and_hashes_the_file(tmp_path: Path) -> None:
@@ -227,6 +264,19 @@ def test_sha256_is_defined_once_and_hashes_the_file(tmp_path: Path) -> None:
     defs = [(p, n) for p, tree in _modules() for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_sha256"]
     assert [p.name for p, _ in defs] == ["doc_indexer.py"], defs
+    # Nor is the name bound any other way (a lambda, an import of something else under it); importing the one def is fine.
+    others = []
+    for p, tree in _modules():
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                if any(_binds(t, "_sha256") for t in targets):
+                    others.append(f"{p.name}:{n.lineno}")
+            elif isinstance(n, ast.ImportFrom) and any((a.asname or a.name) == "_sha256" for a in n.names):
+                if not (n.module or "").endswith("doc_indexer") or any(a.asname == "_sha256" and a.name != "_sha256"
+                                                                        for a in n.names):
+                    others.append(f"{p.name}:{n.lineno}")
+    assert not others, others
     sample = tmp_path / "sample.pdf"
     sample.write_bytes(b"%PDF-1.7\n" + bytes(range(256)) * 300)
     assert _sha256(sample) == hashlib.sha256(sample.read_bytes()).hexdigest()
