@@ -465,6 +465,19 @@ def test_the_default_run_asks_the_row() -> None:
 
 # ── a failed post-check puts current (and previous) back (nexus-ff366) ───────
 
+#: These tests drive the POSIX flip: ``self_cmd._sh`` runs the bash helpers
+#: ``nx_flip_current`` and ``_nx_symlink_swap`` on real ``os.symlink`` links and read
+#: them back with ``os.readlink``. Windows never runs those helpers: ``current`` and
+#: ``previous`` are junctions moved by ``generation_core`` (``restore_current_generation``
+#: branches on ``_is_windows()``), so there is no bash flip to drive there. The Windows
+#: branch of the same rollback is pinned by
+#: ``test_on_windows_the_rollback_goes_through_the_junction_helpers_and_retargets_the_task``
+#: below and the real-junction flip by ``tests/test_install_generation_real_windows.py``.
+posix_links = pytest.mark.skipif(
+    os.name == "nt", reason="drives the POSIX bash flip helpers on symlinks; Windows flips junctions via generation_core",
+)
+
+
 
 def _layout_with_a_real_flip(bed, monkeypatch, tmp_path: Path, *, with_previous: bool):
     """Real ``current``/``previous`` links under the bed's tools dir, and a faked build that
@@ -489,6 +502,7 @@ def _layout_with_a_real_flip(bed, monkeypatch, tmp_path: Path, *, with_previous:
     return tools, older, original, rebuilt
 
 
+@posix_links
 @pytest.mark.parametrize("with_previous", [True, False])
 def test_a_build_that_leaves_current_unpinned_ends_with_current_and_previous_back_where_they_were(
     bed, monkeypatch, tmp_path, with_previous,
@@ -507,6 +521,7 @@ def test_a_build_that_leaves_current_unpinned_ends_with_current_and_previous_bac
     assert line is not None and "could not be rebuilt" in line and original.name in line
 
 
+@posix_links
 def test_a_build_that_applies_the_lock_leaves_current_on_the_new_generation(bed, monkeypatch, tmp_path) -> None:
     tools, older, original, rebuilt = _layout_with_a_real_flip(bed, monkeypatch, tmp_path, with_previous=True)
     assert "rebuilt" in pdf_stack.rebuild_stale_installer()
@@ -514,6 +529,7 @@ def test_a_build_that_applies_the_lock_leaves_current_on_the_new_generation(bed,
     assert os.readlink(tools / "previous") == str(original)
 
 
+@posix_links
 def test_a_rollback_that_cannot_run_is_reported_and_leaves_current_on_a_working_generation(
     bed, monkeypatch, tmp_path,
 ) -> None:
@@ -610,6 +626,7 @@ def _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path: 
     return tools, gens
 
 
+@posix_links
 def test_a_failed_post_check_rolls_back_before_the_reap_can_remove_the_old_previous(
     bed, monkeypatch, tmp_path,
 ) -> None:
@@ -622,6 +639,7 @@ def test_a_failed_post_check_rolls_back_before_the_reap_can_remove_the_old_previ
     assert line is not None and "current is back on" in line and "previous was" not in line
 
 
+@posix_links
 def test_a_passing_post_check_reaps_after_it(bed, monkeypatch, tmp_path) -> None:
     tools, gens = _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path)
     assert "rebuilt" in pdf_stack.rebuild_stale_installer()
@@ -667,6 +685,7 @@ def _flipped_layout(tmp_path: Path):
     return tools, older, original, rebuilt
 
 
+@posix_links
 def test_a_previous_that_was_removed_after_the_flip_is_not_claimed_as_restored(monkeypatch, tmp_path) -> None:
     tools, older, original, rebuilt = _flipped_layout(tmp_path)
     monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
@@ -677,6 +696,7 @@ def test_a_previous_that_was_removed_after_the_flip_is_not_claimed_as_restored(m
     assert "no rollback target" in line
 
 
+@posix_links
 def test_a_previous_swap_that_fails_after_current_moved_back_does_not_say_current_stays(
     monkeypatch, tmp_path,
 ) -> None:

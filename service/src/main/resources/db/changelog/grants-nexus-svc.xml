@@ -300,6 +300,24 @@ $$;
     </changeSet>
 
     <changeSet id="grants-004-monitor-wal-visibility" author="nexus-hzhgl" runAlways="true">
+        <!--
+            The RAISE message below is part of this changeset's checksum, and every migrated
+            database holds the checksum of the text shipped through engine-service-v0.1.178
+            (it named src/nexus/db/pg_provision.py and docs/configuration.md, files a
+            bring-your-own-Postgres operator has no checkout of). The old checksum is listed
+            so a Liquibase that validates runAlways rows still accepts those databases.
+
+            MEASURED on Liquibase 4.29.0 (SchemaMigratorIntegrationTest, grants004_*): the
+            boot does not check a runAlways row's stored checksum at all, so editing this
+            body would not have failed validation; the entry is insurance, not the fix.
+
+            DO NOT ALSO LIST THE NEW CHECKSUM. Liquibase accepts a stored checksum when the
+            changeset's CURRENT checksum equals any validCheckSum entry, so listing the
+            current one turns validation into a wildcard that accepts every stored value
+            (GrantsMonitorChecksumTest pins it). A later edit to this SQL adds the checksum
+            of the text it replaces, never its own.
+        -->
+        <validCheckSum>9:290051361d2bf95a1a84d7592c6b93b2</validCheckSum>
         <comment>
             nexus-hzhgl (RDR-191 Phase 3/4 pre-flight, conexus relay [22411] ASK B): grant
             the built-in pg_monitor role to nexus_svc so the engine can read
@@ -366,7 +384,7 @@ BEGIN
     BEGIN
         GRANT pg_monitor TO nexus_svc;
     EXCEPTION WHEN insufficient_privilege THEN
-        RAISE EXCEPTION 'grants-004-monitor-wal-visibility: nexus_admin lacks ADMIN OPTION on pg_monitor, so it cannot grant pg_monitor onward to nexus_svc. REMEDY: as a PostgreSQL superuser, run: GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION; -- the local bundle installer does this automatically (src/nexus/db/pg_provision.py); bring-your-own/managed Postgres deployments must run it manually per docs/configuration.md prerequisite 2. Original error: %', SQLERRM;
+        RAISE EXCEPTION 'grants-004-monitor-wal-visibility: nexus_admin lacks ADMIN OPTION on pg_monitor, so it cannot grant pg_monitor onward to nexus_svc. REMEDY: as a PostgreSQL superuser, run: GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION; -- the local bundle installer does this automatically; bring-your-own/managed Postgres deployments must run it manually (prerequisite 2, Roles: https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#storage-service-postgres-prerequisites). Original error: %', SQLERRM;
     END;
 END
 $$;

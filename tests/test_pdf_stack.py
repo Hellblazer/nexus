@@ -12,6 +12,7 @@ rule, the doctor row and the real CLI under a hidden stack have their own files.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -445,7 +446,8 @@ def test_rerun_runs_the_new_generations_nx_with_the_same_argv_and_the_loop_guard
 
     setattr_in(monkeypatch, ("nexus.pdf_stack",), "subprocess.run", _run)
     assert pdf_stack.rerun_command(["index", "pdf", "a.pdf"]) == 3
-    assert ran["argv"] == [str(gen / "bin" / "nx"), "index", "pdf", "a.pdf"]
+    nx = gen / "Scripts" / "nx.exe" if os.name == "nt" else gen / "bin" / "nx"
+    assert ran["argv"] == [str(nx), "index", "pdf", "a.pdf"]
     assert ran["env"][pdf_stack.REEXEC_ENV] == "1"
 
 
@@ -508,6 +510,10 @@ def test_a_later_run_replaces_the_cause_with_its_own(tmp_path) -> None:
     assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 1
 
 
+#: The first-install one-liner names the platform's own installer script.
+_INSTALLER_SCRIPT = "install.ps1" if os.name == "nt" else "install.sh"
+
+
 def _mcpb_bundle(root: Path) -> Path:
     """The layout `mcpb/src/bootstrap.py` leaves: manifest, bootstrap and project beside `.venv`."""
     (root / "src").mkdir(parents=True)
@@ -527,7 +533,7 @@ def test_the_desktop_extension_environment_is_told_to_use_the_cli_install_not_uv
     monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
     plan = pdf_stack.install_plan()
     assert plan.kind == "mcpb" and not plan.auto
-    assert "uv sync" not in plan.command and "install.sh" in plan.command
+    assert "uv sync" not in plan.command and _INSTALLER_SCRIPT in plan.command
     assert ".mcpb" in plan.why and "install the CLI" in plan.why
     # nexus-dzc61: the extension's own opt-in setting is the first remedy named
     assert "Include PDF support setting" in plan.why and "turn on" in plan.why
@@ -543,7 +549,7 @@ def test_the_desktop_extension_with_the_setting_on_is_not_told_to_turn_it_on(mon
     monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
     monkeypatch.setenv("NX_MCPB_INCLUDE_PDF", value)
     plan = pdf_stack.install_plan()
-    assert plan.kind == "mcpb" and not plan.auto and "install.sh" in plan.command
+    assert plan.kind == "mcpb" and not plan.auto and _INSTALLER_SCRIPT in plan.command
     assert "setting is on" in plan.why and "turn on" not in plan.why and "log" in plan.why
     msg = pdf_stack._remedy("nx index pdf", pdf_stack.StackState("absent", "", ()), plan)
     assert "setting is on" in msg, msg

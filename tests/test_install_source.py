@@ -28,6 +28,7 @@ control.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -37,14 +38,27 @@ from nexus import install_advice, install_layout, upgrade_finish
 from tests._generation_layout import build as build_generation
 
 
+#: Where uv keeps its tools under a home directory: the XDG-shaped default on
+#: POSIX, ``%APPDATA%\\uv\\tools`` on Windows (``uv_tool_root`` measured both).
+_UV_TOOLS_UNDER_HOME = (
+    Path("AppData/Roaming/uv/tools") if os.name == "nt" else Path(".local/share/uv/tools")
+)
+
+
 @pytest.fixture(autouse=True)
-def _uv_root_under_home(monkeypatch):
+def _uv_root_under_home(monkeypatch, tmp_path):
     """These tests model a uv-tool box whose tool root is UNDER $HOME (they pin
     HOME at a tmpdir holding a uv receipt). The suite-wide fence sets
     UV_TOOL_DIR to an empty fenced root so a dev box's real layout cannot leak
     in (tests/_fence_home.py); that override would hide this module's
-    deliberate under-HOME roots, so lift it here."""
+    deliberate under-HOME roots, so lift it here.
+
+    Native Windows resolves the root from ``%APPDATA%``, not from HOME, so the
+    tests' tmpdir "home" is also made the APPDATA parent there; the POSIX leg
+    still resolves through HOME alone."""
     monkeypatch.delenv("UV_TOOL_DIR", raising=False)
+    if os.name == "nt":
+        monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
 
 
 def _write_receipt(
@@ -77,7 +91,7 @@ def _write_receipt(
 
 
 def _write_uv_receipt(home: Path, body: str) -> Path:
-    receipt = home / ".local/share/uv/tools/conexus/uv-receipt.toml"
+    receipt = home / _UV_TOOLS_UNDER_HOME / "conexus" / "uv-receipt.toml"
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(body)
     return receipt
