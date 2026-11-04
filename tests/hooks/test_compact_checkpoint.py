@@ -839,10 +839,96 @@ class TestInject:
         assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
         assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "startup"}) == (0, "")
 
-    def test_a_stub_notice_is_not_a_restore_and_leaves_no_sidecar(self, mod, env, monkeypatch) -> None:
+    def test_a_stub_notice_is_not_a_restore_and_repeats_on_the_next_compaction(self, mod, env, monkeypatch) -> None:
+        """No sidecar is written, so a later compaction whose pre also failed is owed the same notice.
+        Fails if inject records the stub as used (the second inject would then be silent)."""
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"})
-        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        first = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert "no working-state checkpoint" in self._ctx(first[1])
         assert not (env.checkpoints / f"{SID}.injected").exists()
+        second = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert "no working-state checkpoint" in self._ctx(second[1]), "the notice repeats"
+
+    @pytest.mark.parametrize("source", [None, "startup", "resume"])
+    def test_a_stub_without_a_compact_source_stays_silent(self, mod, env, monkeypatch, source) -> None:
+        """Only a start that says it is a compact one is told (the absent-file branch already works so)."""
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"})
+        payload = {"session_id": SID} if source is None else {"session_id": SID, "source": source}
+        assert run(mod, monkeypatch, "inject", payload) == (0, "")
+
+    def test_a_checkpoint_that_exists_but_cannot_be_read_is_not_reported_as_missing(
+        self, mod, env, monkeypatch
+    ) -> None:
+        """A directory where the file belongs raises IsADirectoryError (PermissionError on Windows), both
+        OSError but neither FileNotFoundError. The notice says there is no checkpoint, which would be false."""
+        (env.checkpoints / f"{SID}.md").mkdir(parents=True)
+        code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert (code, out) == (0, "")
+        assert "could not be read" in env.hook_log.read_text(encoding="utf-8")
+
+    def test_a_compact_start_with_a_checkpoint_past_the_prune_window_gets_the_notice(
+        self, mod, env, monkeypatch
+    ) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        restamp(env.checkpoints / f"{SID}.md", 3 * 24 * 3600)
+        code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        ctx = self._ctx(out)
+        assert code == 0 and "no working-state checkpoint" in ctx and "state: building" not in ctx
+        assert not (env.checkpoints / f"{SID}.injected").exists()
+
+    def test_a_compact_start_with_an_unstamped_checkpoint_gets_the_notice(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        path = env.checkpoints / f"{SID}.md"
+        path.write_text(re.sub(r"(?m)^- written: .*\n", "", path.read_text(encoding="utf-8")), encoding="utf-8")
+        ctx = self._ctx(run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1])
+        assert "no working-state checkpoint" in ctx and "state: building" not in ctx
+
+    def test_an_already_injected_checkpoint_gets_the_notice_on_a_later_compaction(
+        self, mod, env, monkeypatch
+    ) -> None:
+        """Live order: inject before post, so a compaction whose pre failed finds the previous compaction's
+        checkpoint, already used. The sidecar was written by an EARLIER compaction (minutes ago), so the
+        session is told there is nothing to restore, and the old state is not repeated."""
+        run(mod, monkeypatch, "pre", pre_payload())
+        first = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert "state: building" in self._ctx(first[1])
+        self._age_sidecar(env, 5 * 60)
+        code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        ctx = self._ctx(out)
+        assert code == 0 and "no working-state checkpoint" in ctx and "state: building" not in ctx
+
+    def test_a_duplicated_compact_fire_for_the_same_compaction_stays_silent(self, mod, env, monkeypatch) -> None:
+        """A second SessionStart(compact) fire for a HEALTHY compaction reaches the already-injected branch
+        (the first fire just wrote the sidecar). Telling the session "no restore" there would contradict the
+        restore it was just given. None was seen in 20 live compactions, but Desktop's were never observed."""
+        run(mod, monkeypatch, "pre", pre_payload())
+        first = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert "state: building" in self._ctx(first[1])
+        assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"}) == (0, "")
+        self._age_sidecar(env, 25)  # still inside the window
+        assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"}) == (0, "")
+
+    def test_the_duplicate_fire_window_ends_before_compactions_can_recur(self, mod, env, monkeypatch) -> None:
+        """The closest live pair was 115 s apart: a sidecar 60 s old belongs to an earlier compaction."""
+        assert mod._DUPLICATE_FIRE_S < 115
+        run(mod, monkeypatch, "pre", pre_payload())
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        self._age_sidecar(env, 60)
+        out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})[1]
+        assert "no working-state checkpoint" in self._ctx(out)
+
+    def test_an_already_injected_checkpoint_without_a_compact_source_stays_silent(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "pre", pre_payload())
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        self._age_sidecar(env, 5 * 60)
+        assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
+        assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "startup"}) == (0, "")
+
+    @staticmethod
+    def _age_sidecar(env, seconds: float) -> None:
+        sidecar = env.checkpoints / f"{SID}.injected"
+        then = time.time() - seconds
+        os.utime(sidecar, (then, then))
 
     def test_a_foreign_session_gets_nothing(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
@@ -978,7 +1064,7 @@ class TestInject:
         assert len([p for p in env.checkpoints.iterdir() if p.name != path.name]) == 1, "the bad file is archived"
 
     @pytest.mark.parametrize("inject_first", [True, False], ids=["inject-then-post", "post-then-inject"])
-    def test_after_a_complete_compaction_a_compaction_whose_pre_failed_injects_nothing(
+    def test_after_a_complete_compaction_a_compaction_whose_pre_failed_restores_nothing_and_says_so(
         self, mod, env, monkeypatch, inject_first
     ) -> None:
         path = env.checkpoints / f"{SID}.md"
@@ -987,7 +1073,10 @@ class TestInject:
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "summary one"})
         # compaction 2: pre failed
         if inject_first:
-            assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"}) == (0, "")
+            self._age_sidecar(env, 5 * 60)  # compaction 1's inject was minutes ago, not this compaction's
+            code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+            ctx = self._ctx(out)  # compaction 1's checkpoint, already used: told so, never its state
+            assert code == 0 and "no working-state checkpoint" in ctx and "state: building" not in ctx
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "summary two"})
         if not inject_first:
             code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})

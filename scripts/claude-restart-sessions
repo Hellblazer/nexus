@@ -2215,14 +2215,20 @@ def prune_old_handoffs(directory: Path, *, now: float) -> list[str]:
 
 
 def _prune_handoffs_at_write() -> None:
-    """Prune old handoffs from TMP just before a roll writes new ones. Never raises."""
+    """Prune old handoffs just before a roll writes new ones. Never raises.
+
+    The directory is TMP unless `NX_RESTART_PRUNE_DIR` names another one: the e2e harness runs this
+    script for real in a sandbox HOME, and without the override its rolls would prune the operator's own
+    /tmp. Only the prune moves; the handoffs themselves are still written under /tmp.
+    """
+    directory = Path(os.environ.get("NX_RESTART_PRUNE_DIR") or TMP)
     try:
-        removed = prune_old_handoffs(TMP, now=time.time())
+        removed = prune_old_handoffs(directory, now=time.time())
     except Exception as e:  # noqa: BLE001 -- housekeeping must not stop a roll
         log(f"handoff prune skipped: {e}")
         return
     if removed:
-        log(f"pruned {len(removed)} handoff file(s) older than 7 days from {TMP}")
+        log(f"pruned {len(removed)} handoff file(s) older than 7 days from {directory}")
 
 
 def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers: list[dict], ready: set[str],
