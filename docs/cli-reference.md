@@ -3177,10 +3177,11 @@ a voyage-shaped value and configure a key (`nx init` then keeps that value) —
 ```
 nx config set local.embed_model voyage-code-3
 nx config set voyage_api_key <key>
-nx daemon service stop && nx daemon service start   # re-plumb the key into the engine
+nx daemon service stop                               # then start it again, to
+nx daemon service start                              # re-plumb the key into the engine
 ```
 
-The engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
+The restart (nx daemon service stop, then nx daemon service start) is needed because the engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
 resolves it from the credential chain and injects it into the native
 binary's environment), so **a restart is required** after either command
 above for the change to take effect — `nx config set` alone does not
