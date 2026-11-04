@@ -150,6 +150,9 @@ final class EgressGuardCensus {
             "Voyage rerank call to api.voyageai.com." + VOYAGE_REASON_TAIL));
         m.put("dev/nexus/service/vectors/PciBuilderSession.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the index builder's dedicated session."));
+        m.put("dev/nexus/service/vectors/ChunkConstraintAdmin.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the retire-keys constraint routes' admin session"
+                + " (nexus-6pfgb.43), which adds and validates the chunk CHECKs."));
         m.put("dev/nexus/service/db/PoolerModeCheck.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the pooler-mode probe."));
         m.put("dev/nexus/service/db/EngineSingletonLock.java", Allow.pinned(JDBC_SITE,

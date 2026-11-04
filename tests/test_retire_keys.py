@@ -355,7 +355,7 @@ class TestCli:
     def test_json_carries_one_document(self) -> None:
         client = FakeClient(_dry_report())
         result = _run(client, "--tenant", TENANT, "--json")
-        doc = json.loads(result.output)
+        doc = json.loads(result.stdout)
         assert doc["dry_run"] is True and doc["report"]["tenant"] == TENANT
 
     def test_max_rps_installs_the_request_gate_for_the_whole_run(self) -> None:
@@ -499,6 +499,8 @@ class TestNoAutomaticTrigger:
         "service/src/test/java/dev/nexus/service/ChunkConstraintRoutesIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
         "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
+        "service/src/test/java/dev/nexus/service/db/ChunksWriterLastWrittenAtScanTest.java",
+        "service/src/test/java/dev/nexus/service/EgressGuardCensus.java",
     }
     NAMES = ("chunk_keys_sweep", "chunk_keys_add_constraints", "chunk_keys_validate_constraints",
              "/v1/admin/chunk-keys", "admin/chunk-keys", "retire-keys", "retire_keys")
