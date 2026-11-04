@@ -57,6 +57,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
  *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
+ *   GET   /v1/catalog/manifest/section_label_fillable?limit=N  bounded count of legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds)
  *   GET   /v1/catalog/manifest/null_collection  read-only count of pre-backfill (collection IS NULL) manifest rows (T2 nexus/chroma-residue-plan-2026-08-10 §C2)
  *   GET   /v1/catalog/chash/conformance   per-table chash width-conformance report (tenant-scoped, RDR-180 nexus-du2dw)
  *   GET   /v1/catalog/manifest/verify    per-doc referenced/present/missing (RUNFENCE, nexus-5xn3k.2)
@@ -188,6 +189,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/chash_positions" -> handleChashPositions(exchange, tenant, method);
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
+                case "/manifest/section_label_fillable" -> handleManifestSectionLabelFillable(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -3165,6 +3167,35 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("total", report.get("total"),
                    "backfillable", report.get("backfillable"))));
+    }
+
+    /**
+     * GET /v1/catalog/manifest/section_label_fillable?limit=N (nexus-l4hds): {@code {fillable, limit, capped}}.
+     *
+     * <p>{@code fillable} is how many legacy manifest rows (NULL labels, {@code labels_written} false) the
+     * manifest-section-labels rung could still fill from their chunk row, counted up to {@code limit} (default 1000,
+     * 1 to {@link CatalogRepository#FILLABLE_COUNT_MAX_LIMIT}; anything else is a 400); {@code capped} is true when
+     * the count stopped at {@code limit}, so {@code fillable} then means "at least". One tenant-scoped read-only
+     * query ({@link CatalogRepository#manifestSectionLabelFillable} has the predicate). A client that gets a 404 is on
+     * an engine before this route and must treat the answer as "cannot say", never as "none".
+     */
+    private void handleManifestSectionLabelFillable(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        int limit = 1000;
+        String raw = queryParam(exchange, "limit");
+        if (raw != null && !raw.isBlank()) {
+            try {
+                limit = Integer.parseInt(raw.trim());
+            } catch (NumberFormatException e) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"limit must be an integer (1.." + CatalogRepository.FILLABLE_COUNT_MAX_LIMIT + ")\"}"); return;
+            }
+            if (limit < 1 || limit > CatalogRepository.FILLABLE_COUNT_MAX_LIMIT) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"limit must be 1.." + CatalogRepository.FILLABLE_COUNT_MAX_LIMIT + "\"}"); return;
+            }
+        }
+        int fillable = repo.manifestSectionLabelFillable(tenant, limit);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("fillable", fillable, "limit", limit, "capped", fillable >= limit)));
     }
 
     /**

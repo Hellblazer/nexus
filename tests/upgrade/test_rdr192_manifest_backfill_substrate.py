@@ -165,17 +165,31 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     ghost_live, ghost_gone = doc("ghost-live", [(c_ghost, 0)]), doc("ghost-gone", [(c_ghost, 0)])
     cat.delete_document(ghost_gone)
 
-    before = {t: cat.get_manifest(t) for t in (single, shared_a, shared_b, repeat, written, bare, ghost_live)}
+    # nexus-l4hds: two more rows the scan's attribution guards refuse. The document is stamped now, so a chunk
+    # row stamped in 2099 is far past the five-minute allowance; a chunk row titled for another file is a
+    # former owner's. Both are legacy, with label keys, and not fillable.
+    c_late = seed_chunk(tenant, coll, "late 1nrcu", {**labelled, "indexed_at": "2099-01-01T00:00:00+00:00"})
+    c_other = seed_chunk(tenant, coll, "other 1nrcu", {**labelled, "title": "elsewhere/x.md:chunk-1"})
+    late, other = doc("late", [(c_late, 0)]), doc("other", [(c_other, 0)])
+
+    before = {t: cat.get_manifest(t) for t in (single, shared_a, shared_b, repeat, written, bare, ghost_live, late, other)}
     assert [r.labels_written for r in before[written]] == [True], "control: an empty-labelled row is written"
-    assert all(not r.labels_written for t in (single, shared_a, shared_b, repeat, bare, ghost_live) for r in before[t])
-    legacy_rows = legacy_note_rows + 1 + 2 + 2 + 1 + 1
+    assert all(not r.labels_written for t in (single, shared_a, shared_b, repeat, bare, ghost_live, late, other)
+               for r in before[t])
 
     # The walk above recorded this rung in the tenant's ledger, so a default rung answers "converged" at once
     # (the short-circuit, pinned at the end). The rung under test is the one with no completion on file.
     rung = rung_cls(record_fn=lambda: None)
     status = rung.detect()
     assert status.applicable and not status.converged
-    assert status.pending_detail.startswith(f"1 legacy manifest row(s) of {legacy_rows} "), status.pending_detail
+    assert status.pending_detail.startswith("1 legacy manifest row(s) can take"), status.pending_detail
+    # nexus-l4hds: the engine's one-query count and the rung's own scan agree over every guard above
+    # (shared, repeated, written, no label keys, tombstoned co-owner, late chunk, other title: 1 fillable of
+    # legacy_note_rows + 1 + 2 + 2 + 1 + 1 + 1 + 1 legacy rows).
+    assert cat.manifest_section_label_fillable() == {"fillable": 1, "limit": 1000, "capped": False}
+    scanned = rung._dry_run()
+    assert scanned is not None and scanned.fillable == 1
+    assert scanned.legacy == legacy_note_rows + 1 + 2 + 2 + 1 + 1 + 1 + 1, scanned.summary()
     assert [r.labels_written for r in cat.get_manifest(single)] == [False], "detect writes nothing"
 
     class _Report:
@@ -190,18 +204,14 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     assert (filled.chash, filled.position, filled.chunk_index, filled.line_start) == (
         before[single][0].chash, 0, before[single][0].chunk_index, before[single][0].line_start), \
         "only the chash, labels and flag are written; the rest of the row is the engine's own"
-    for t in (shared_a, shared_b, repeat, bare, ghost_live):
+    for t in (shared_a, shared_b, repeat, bare, ghost_live, late, other):
         assert [r.labels_written for r in cat.get_manifest(t)] == [False] * len(before[t]), t
     assert [(r.section_title, r.section_type, r.labels_written) for r in cat.get_manifest(written)] == [("", "", True)]
     assert {t: cat.resolve(t).indexed_at for t in stamp_before} == stamp_before, (
         "untouched documents are not rewritten, and the filled one's stamp is restored: the engine restamps a "
         "document on every manifest write, which would switch off the chunk-newer guard for its other rows")
     assert rung.verify() is True and "1 filled this run" in rung.record_detail()
-    # the real /stats carries both counts the clean-scan memo is keyed on (nexus-6pfgb.60 review F1)
-    from nexus.upgrade_ladder.rungs.manifest_section_labels import _catalog_shape
-
-    shape = _catalog_shape(cat)
-    assert shape is not None and shape[0] >= 6 and shape[1] >= legacy_rows, shape
+    assert cat.manifest_section_label_fillable() == {"fillable": 0, "limit": 1000, "capped": False}, "filled: the engine agrees"
 
     # a later writer of the shared chunk row no longer decides this row's label
     import nexus.db.http_vector_client as hvc

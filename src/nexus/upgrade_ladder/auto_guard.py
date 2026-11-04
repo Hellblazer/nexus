@@ -10,7 +10,7 @@ local engine's walk is cheap and the ``--auto`` deadline bounds it; a managed se
 walk of shared capacity per session start, and no deadline makes that acceptable.
 
 The rule: a ``detect()`` whose read cost grows with the catalog or a table, and that has nothing
-cheaper to answer from (a completion record, a remembered clean scan), does not read in an UNATTENDED run
+cheaper to answer from (a completion record, a bounded engine count), does not read in an UNATTENDED run
 (:mod:`nexus.upgrade_ladder.unattended`: ``--auto``, ``NX_UPGRADE_UNATTENDED=1``, the version-transition
 callout) against a managed service. It reports itself NOT APPLICABLE, with a reason naming where the first scan
 happens: an interactive ``nx upgrade``. Interactive ``nx upgrade`` runs and local engines keep their

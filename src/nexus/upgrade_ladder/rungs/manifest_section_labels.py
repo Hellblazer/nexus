@@ -63,36 +63,35 @@ ends DEFERRED: its stamp is the run time until someone restores it.
 WHAT IT DOES.
   detect   : converged at once when this tenant's completion is on file (any package version: the rung is a
              one-time transition, and rows that stay legacy by design stay legacy until a forced re-index).
-             Otherwise converged on ONE bounded read (the catalog's ``/stats``: document count and manifest
-             row count) when a clean scan is remembered (:data:`SCAN_MEMO_MAX_AGE`, same two counts;
-             nexus-6pfgb.60). Otherwise the dry run: the full scan with no write, which stops between batches
-             at the ``nx upgrade --auto`` time limit and then reports the rung pending (the answer is not
-             known), never converged. Applicable unless no catalog is available, the engine has no
-             ``chash_positions`` route or it cannot list tombstoned holders (nexus-6pfgb.58). Converged when no legacy row is fillable; rows that stay legacy
-             (multi-row chash, no label keys, ...) are not pending. detect WRITES NOTHING, the memo included:
-             it runs from ``nx doctor`` and ``--dry-run`` before the earlier rungs have done their work, and
-             the RDR-192 backfill adds legacy manifest rows to documents already counted, so a "clean" answer
-             kept from that moment would be outdated by the walk that follows.
+             Otherwise ONE bounded engine read (``GET /manifest/section_label_fillable``, nexus-l4hds): the
+             count of legacy rows that pass the guards below, tenant-wide, in one query. Zero is converged,
+             more is pending with that count. The engine's predicate is this module's, with one deliberate
+             difference in the safe direction (it may count a row the scan would leave legacy, never the
+             reverse: a chunk ``indexed_at`` it cannot parse is counted, see
+             ``CatalogRepository.manifestSectionLabelFillable``), so a pending answer can be a row the scan then
+             leaves legacy: converge runs, writes nothing for it, verify passes and the completion is recorded.
+             An engine that predates the route (or fails it) says nothing, and detect goes on to the dry run:
+             the full scan with no write, which stops between batches at the ``nx upgrade --auto`` time
+             limit and then reports the rung pending (the answer is not known), never converged. Applicable
+             unless no catalog is available, the engine has no ``chash_positions`` route or it cannot list
+             tombstoned holders (nexus-6pfgb.58). Converged when no legacy row is fillable; rows that stay
+             legacy (multi-row chash, no label keys, ...) are not pending. detect WRITES NOTHING: it runs from
+             ``nx doctor`` and ``--dry-run`` before the earlier rungs have done their work, and the RDR-192
+             backfill adds legacy manifest rows to documents already counted, so an answer is read each time
+             and never kept.
   converge : the same scan, writing each batch of :data:`DOC_BATCH` documents through
              ``append_manifest_many``, one request per collection per ~50 documents and per 300 rows
              (a document's rows spill into the next request), so the number of writes is bounded by
              documents / 50 + rows / 300 + collections touched. The
              ``nx upgrade --auto`` time limit is honoured between batches (DEFERRED; filled rows drop
              out of the next scan). A write the engine reports as failed is DEFERRED with its count.
-  verify   : positive signal only: the whole scan completed and no row is fillable. It never reads the memo
-             and never stops at the time limit: it is the gate for the completion record. It is the memo's
-             ONE writer (a cache note in T2, never rung state): a complete scan that found nothing fillable
-             saves the two counts it began with, a fillable result clears the note. This is the one write a
-             ladder ``detect``/``verify`` pair makes; ``protocol.py`` names it.
-             When detect answered converged FROM THE MEMO and this scan then finds a fillable row, the memo
-             was outdated by a change the two counts do not show: the rung reports :meth:`verify_deferred`
-             (the walk maps it to DEFERRED, non-fatal) and the memo is cleared, so the next walk's detect
-             scans and the fill runs. It is never VERIFY_FAILED: converge did not run, so nothing failed.
-
-MEMO WINDOW. The two counts do not see a change that moves no document and no row: a chunk row gaining a label
-in T3, a row swapped for another, a co-owner replaced by another. Within the age bound such a change is found
-by the next verify; a walk whose detect trusted the memo reports it as DEFERRED (``verify_deferred``) and the
-next walk scans.
+  verify   : positive signal only: the whole scan completed and no row is fillable. It never trusts the engine
+             count and never stops at the time limit: it is the gate for the completion record.
+             When detect answered converged FROM THE ENGINE COUNT and this scan then finds a fillable row, a
+             row appeared or changed between the two reads (or the engine undercounted, which its predicate is
+             built not to do): the rung reports :meth:`verify_deferred` (the walk maps it to DEFERRED,
+             non-fatal) and the next walk's detect reads the count again. It is never VERIFY_FAILED: converge
+             did not run, so nothing failed.
 
 RESIDUAL WINDOW. Between the re-read of a batch's manifests and the ``append_manifest_many`` POST, a row can
 still become written or gain a co-owner: ``UPSERT_APPEND`` carries no ``WHERE labels_written = false``. The
@@ -114,7 +113,6 @@ import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -125,7 +123,7 @@ from nexus.upgrade_ladder.auto_guard import (
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
-from nexus.upgrade_ladder.census_progress import NoteStore, T2NoteStore, guarded
+from nexus.upgrade_ladder.census_progress import guarded
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import active_expired
 from nexus.upgrade_ladder.protocol import (
@@ -148,12 +146,9 @@ DOC_BATCH = 50
 #: own transaction, and the sibling writers cut at 300). A document's rows spill into the next request.
 MAX_ROWS_PER_REQUEST = 300
 
-#: How long a remembered clean scan stands in for a new one (nexus-6pfgb.60). Matches
-#: ``census_progress.CENSUS_PROGRESS_MAX_AGE`` and the RDR-192 rung's residual window.
-SCAN_MEMO_MAX_AGE = timedelta(hours=24)
-
-#: The T2 note (project ``upgrade_ladder_state``, the census-progress home) holding the remembered clean scan.
-SCAN_MEMO_TITLE = f"{RUNG_NAME}.clean-scan"
+#: How many fillable rows the detect-time engine read counts before it stops (the engine caps its own query
+#: here, so the read stays bounded however many legacy rows a tenant holds). More than this is "at least".
+FILLABLE_PROBE_LIMIT = 1000
 
 _LABEL_KEYS = ("section_title", "section_type", "page_number")
 
@@ -242,10 +237,6 @@ def _default_record() -> CompletionRecord | None:
         return store.completions().get(RUNG_NAME)
 
 
-def _default_memo() -> NoteStore:
-    return T2NoteStore(SCAN_MEMO_TITLE, tags="upgrade-ladder,rdr236")
-
-
 def _default_t3() -> Any:
     from nexus.db import make_t3  # noqa: PLC0415 — deferred: keeps the registry import cheap
 
@@ -331,8 +322,8 @@ class ManifestSectionLabelsRung:
     """The rung. Collaborators are injected for tests: *reader_factory* (``all_documents``,
     ``get_manifests``, ``chash_positions_with_tombstoned``, ``close``; ``None`` when no catalog is available),
     *writer_factory* (``append_manifest_many``, ``close``) and *t3_factory* (``get_collection``).
-    *memo_store* holds the remembered clean scan (default: a T2 note; ``verify`` writes it, nothing else
-    does); *now_fn* is its clock. The reader also answers ``stats()`` (``doc_count``, ``chunk_count``)."""
+    The reader also answers ``manifest_section_label_fillable(limit)`` (the engine count ``detect`` reads; a
+    reader without it, or one that answers ``None``, is an engine that cannot say)."""
 
     name = RUNG_NAME
 
@@ -345,8 +336,6 @@ class ManifestSectionLabelsRung:
         doc_batch: int = DOC_BATCH,
         max_rows: int = MAX_ROWS_PER_REQUEST,
         record_fn: Callable[[], CompletionRecord | None] = _default_record,
-        memo_store: NoteStore | None = None,
-        now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
         managed_fn: Callable[[], bool] = managed_service,
     ) -> None:
         self._managed_fn = managed_fn
@@ -356,11 +345,8 @@ class ManifestSectionLabelsRung:
         self._doc_batch = doc_batch
         self._max_rows = max_rows
         self._record_fn = record_fn
-        self._memo: NoteStore = memo_store if memo_store is not None else _default_memo()
-        self._now = now_fn
         self._cut = False  # the last scan stopped at the time limit
-        self._scan_shape: tuple[int, int] | None = None  # (documents, manifest rows) per /stats when the last dry run began
-        self._from_memo = False  # the last detect() answered converged from the remembered scan
+        self._from_engine = False  # the last detect() answered converged from the engine's zero count
         self._verify_deferred = False
         self._filled = 0
         self._verify_detail = ""
@@ -564,7 +550,6 @@ class ManifestSectionLabelsRung:
         *honour_deadline*, when the time limit stopped it: ``self._cut``). Past the limit nothing is read,
         the ``/stats`` read included."""
         self._cut = False
-        self._scan_shape = None
         if honour_deadline and active_expired():
             self._cut = True
             return None
@@ -573,48 +558,32 @@ class ManifestSectionLabelsRung:
             return None
         t3 = self._t3_factory()
         try:
-            self._scan_shape = guarded("scan_shape", lambda: _catalog_shape(reader), None)  # before the scan: a document or row added meanwhile makes the memo stale
             return self._scan(reader, writer=None, t3=t3, honour_deadline=honour_deadline)
         finally:
             _close(t3)
             _close(reader)
 
-    # ── the remembered clean scan ────────────────────────────────────────────
+    # ── the engine's count ───────────────────────────────────────────────────
 
-    def _memo_stands(self) -> bool:
-        """True when a clean scan is remembered, young enough, and the catalog still holds the same number
-        of documents AND of manifest rows: ONE bounded read (``/stats``) in place of the scan. The row count
-        is the key that moves when the RDR-192 backfill adds legacy rows to documents already counted. Any
-        failure is 'no memo'."""
-        def check() -> bool:
-            note = self._memo.load()
-            if not isinstance(note, dict):
-                return False
-            documents, chunks, stamp = note.get("documents"), note.get("chunks"), note.get("clean_at")
-            if not _is_count(documents) or not _is_count(chunks) or not isinstance(stamp, str):
-                return False
-            age = self._now() - datetime.fromisoformat(stamp)
-            if not timedelta(0) <= age <= SCAN_MEMO_MAX_AGE:
-                return False
+    def _engine_fillable(self) -> tuple[int, bool] | None:
+        """``(count, capped)`` from the engine's one-query read of the rows this rung could fill, or ``None``
+        when the engine cannot say (no catalog, an engine before the route, a failed or malformed read). ``None``
+        is never zero: the caller then scans. Any failure is 'cannot say'."""
+        def read() -> tuple[int, bool] | None:
             reader = self._reader_factory()
             if reader is None:
-                return False
+                return None
             try:
-                return _catalog_shape(reader) == (documents, chunks)
+                probe = getattr(reader, "manifest_section_label_fillable", None)
+                answer = probe(FILLABLE_PROBE_LIMIT) if probe is not None else None
             finally:
                 _close(reader)
+            if not isinstance(answer, dict):
+                return None
+            count, capped = answer.get("fillable"), answer.get("capped")
+            return (count, capped) if _is_count(count) and isinstance(capped, bool) else None
 
-        return guarded("scan_memo_check", check, False)
-
-    def _remember(self, counts: Counts) -> None:
-        """Keep a complete scan's verdict: clean when nothing is fillable, else drop any memo. Called by
-        ``verify`` only."""
-        if counts.fillable or self._scan_shape is None:
-            guarded("scan_memo_clear", self._memo.clear, None)
-            return
-        documents, chunks = self._scan_shape
-        note = {"clean_at": self._now().isoformat(timespec="seconds"), "documents": documents, "chunks": chunks}
-        guarded("scan_memo_save", lambda: self._memo.save(note), None)
+        return guarded("engine_fillable", read, None)
 
     # ── detect ───────────────────────────────────────────────────────────────
 
@@ -630,26 +599,37 @@ class ManifestSectionLabelsRung:
 
     def detect(self) -> RungStatus:
         """Converged at once when the completion is on file: ``nx doctor``, every ``nx upgrade --auto`` (each
-        session start) and every walk call this, and a scan lists every document. Next cheapest, a remembered
-        clean scan that still holds (one ``/stats`` read). Otherwise, under ``--auto`` against a MANAGED service,
-        not applicable with no catalog read (nexus-75w5d: an interactive ``nx upgrade`` does the first
-        scan). Otherwise the dry run, which honours the ``--auto``
+        session start) and every walk call this, and a scan lists every document. Next cheapest, the engine's
+        count (one bounded query, nexus-l4hds): zero is converged, more is pending. When the engine cannot say,
+        under ``--auto`` against a MANAGED service, not applicable with no catalog read (nexus-75w5d: an
+        interactive ``nx upgrade`` does the first scan). Otherwise the dry run, which honours the ``--auto``
         time limit and then says pending, because a scan that did not finish has not found 'nothing'.
-        READ-ONLY: the memo is written by :meth:`verify` alone (see the module docstring)."""
-        self._from_memo = False
+        READ-ONLY: nothing is written and nothing is kept (see the module docstring)."""
+        self._from_engine = False
         if self._recorded():
             return RungStatus(applicable=True, converged=True)
-        if self._memo_stands():
-            self._from_memo = True
-            return RungStatus(applicable=True, converged=True)
+        counted = None if active_expired() else self._engine_fillable()  # past the limit nothing is read
+        if counted is not None:
+            count, capped = counted
+            if count == 0:
+                self._from_engine = True
+                return RungStatus(applicable=True, converged=True)
+            return RungStatus(
+                applicable=True,
+                converged=False,
+                pending_detail=(
+                    f"{'at least ' if capped else ''}{count} legacy manifest row(s) can take their chunk row's "
+                    "section label (the engine's count; `nx upgrade` fills them)"
+                ),
+            )
         if refuses_unbounded_read(self._managed_fn):
-            # nexus-75w5d: no record and no memo, so the answer is a walk of the whole catalog. On a
+            # nexus-75w5d: no record and the engine cannot count, so the answer is a walk of the whole catalog. On a
             # managed service that is a 15-minute read of shared capacity per session start (19 at once
             # on 2026-10-31), so an unattended run reads nothing. Not applicable, not pending: the walk
             # is skipped; `nx doctor` runs its sweep as unattended too and reports the rung as not checked.
             reason = (
                 "unattended `nx upgrade --auto` does not scan a managed catalog with no completion "
-                f"record and no remembered clean scan; {INTERACTIVE_REMEDY}"
+                f"record and an engine that cannot count the fillable rows; {INTERACTIVE_REMEDY}"
             )
             _log.info("manifest_section_labels_rung_skipped", reason=reason)
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
@@ -732,16 +712,17 @@ class ManifestSectionLabelsRung:
     def verify(self) -> bool:
         """True only when a whole scan completed and no legacy row is fillable. A catalog that is
         missing or cannot be read is not 'nothing to fill': it is False, with :meth:`verify_detail`.
-        The memo's one writer. A fillable row found after detect answered converged FROM THE MEMO is a
-        deferral (:meth:`verify_deferred`), not a failure: the memo was outdated, converge never ran."""
+        A fillable row found after detect answered converged FROM THE ENGINE COUNT is a deferral
+        (:meth:`verify_deferred`), not a failure: converge never ran, so the count was outdated by a change
+        since (or undercounted), and the next detect reads it again."""
         self._verify_detail = ""
         self._verify_deferred = False
-        from_memo, self._from_memo = self._from_memo, False
+        from_engine, self._from_engine = self._from_engine, False
         if refuses_unbounded_read(self._managed_fn):
-            # The runner calls verify() after a detect() that answered converged from the memo (or the record)
-            # and found no verified completion in its own ledger. Unattended against a managed service that
-            # would be the whole-catalog dry run detect() just declined to make (shakedown 7.94.0 census): a
-            # deferral instead. The memo stands, and an interactive `nx upgrade` confirms it and records.
+            # The runner calls verify() after a detect() that answered converged from the engine count (or the
+            # record) and found no verified completion in its own ledger. Unattended against a managed service
+            # that would be the whole-catalog dry run detect() just declined to make (shakedown 7.94.0 census):
+            # a deferral instead, and an interactive `nx upgrade` confirms it and records.
             self._verify_deferred = True
             self._verify_detail = unattended_verify_refusal("every document and manifest")
             return False
@@ -753,22 +734,22 @@ class ManifestSectionLabelsRung:
         if counts is None:
             self._verify_detail = "cannot confirm the fill: no catalog is available"
             return False
-        self._remember(counts)
         if counts.fillable:
             self._verify_detail = f"{counts.fillable} legacy manifest row(s) can still take their chunk row's label ({counts.summary()})"
-            if from_memo:
+            if from_engine:
                 self._verify_deferred = True
+                _log.warning("manifest_section_labels_engine_count_outdated", fillable=counts.fillable)
                 self._verify_detail = (
-                    "a remembered clean scan was outdated: " + self._verify_detail
-                    + "; the memo is cleared and the fill runs on the next `nx upgrade`"
+                    "the engine counted no fillable row but the scan found some: " + self._verify_detail
+                    + "; the fill runs on the next `nx upgrade`"
                 )
             return False
         self._record_detail = f"{self._filled} filled this run; {counts.summary()}"
         return True
 
     def verify_deferred(self) -> bool:
-        """True when the last refusing :meth:`verify` is a deferral (the memo detect trusted was outdated),
-        which the walk reports as DEFERRED instead of VERIFY_FAILED."""
+        """True when the last refusing :meth:`verify` is a deferral (the engine count detect trusted was
+        outdated), which the walk reports as DEFERRED instead of VERIFY_FAILED."""
         return self._verify_deferred
 
     def verify_detail(self) -> str:
@@ -780,20 +761,6 @@ class ManifestSectionLabelsRung:
 
 def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
-def _catalog_shape(reader: Any) -> tuple[int, int] | None:
-    """``(documents, manifest rows of live documents)`` from ONE ``/stats`` read (catalog-019's
-    ``doc_count`` and ``chunk_count``), or ``None`` when the reader cannot give both. The row count is what
-    keeps a memo honest across the RDR-192 backfill, which adds rows without adding documents."""
-    stats = getattr(reader, "stats", None)
-    if stats is None:
-        return None
-    body = stats()
-    if not isinstance(body, dict):
-        return None
-    documents, chunks = body.get("doc_count"), body.get("chunk_count")
-    return (documents, chunks) if _is_count(documents) and _is_count(chunks) else None
 
 
 def _close(obj: Any) -> None:

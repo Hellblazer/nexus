@@ -9602,7 +9602,7 @@ def _check_pending_rungs() -> list[HealthResult]:
         # manifest-section-labels dry run lists every document and reads manifests and T3 per batch) must not
         # do that for a doctor row against a managed service: 43.7k documents did not finish in 30 minutes.
         # The same refusal `nx upgrade --auto` gets applies (auto_guard: managed service, no completion
-        # record, no remembered clean scan); a local engine keeps its scan. A refused rung is reported below
+        # record, and an engine that cannot count the fillable rows in one read); a local engine keeps its scan. A refused rung is reported below
         # as NOT CHECKED, never as converged.
         with unattended_run():
             statuses = pending_rungs(_ladder_registry.default_registry())
@@ -9680,7 +9680,7 @@ def _check_pending_rungs() -> list[HealthResult]:
         )
         fixes.append(
             "Run `nx upgrade` interactively (not --auto): it makes that read and records each rung it verifies "
-            "(manifest-section-labels also keeps a remembered clean scan), and this row then answers from the "
+            "and this row then answers from the "
             "record without a read"
         )
     if record_note:

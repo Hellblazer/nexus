@@ -168,6 +168,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     get_ops: list[str] = []          # ops seen by do_GET, in order
     post_ops: list[str] = []         # ops seen by do_POST, in order
     last_link_body: dict[str, Any] = {}
+    #: nexus-l4hds: how many fillable manifest rows /manifest/section_label_fillable counts (capped at its limit).
+    fillable_rows: int = 0
     #: from_tumbler value for which /link_query reports NO existing link (absent path).
     link_absent_from: str = "9.9.9"
     #: when set, /list returns this many docs for a content_type-filtered request
@@ -440,6 +442,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # /manifest/null_collection -> {total, backfillable} — mirrors
             # CatalogRepository.manifestNullCollectionReport's shape.
             self._send_json({"total": 0, "backfillable": 0})
+        elif op == "/manifest/section_label_fillable":
+            # nexus-l4hds: GET /manifest/section_label_fillable?limit=N -> {fillable, limit, capped} — mirrors
+            # CatalogHandler.handleManifestSectionLabelFillable. The fake holds `fillable_rows` fillable rows.
+            limit = int(self._query_params().get("limit", "1000"))
+            counted = min(FakeCatalogHandler.fillable_rows, limit)
+            self._send_json({"fillable": counted, "limit": limit, "capped": counted >= limit})
         elif op == "/chash/conformance":
             # RDR-180 (nexus-du2dw): GET /chash/conformance?dim= ->
             # {dim, tables: [{table_name, total, non_conformant, sample_chashes}]}
@@ -2976,6 +2984,59 @@ class TestManifestNullCollectionReport:
         c = self._client_get_returning(monkeypatch, None)
         report = c.manifest_null_collection_report()
         assert report == {"total": 0, "backfillable": 0, "unavailable": True}
+
+
+class TestManifestSectionLabelFillable:
+    """nexus-l4hds: ``manifest_section_label_fillable`` over the live fake (the wire: request, envelope) and with the
+    transport stubbed (every way the answer can be "cannot say", which is ``None``, never a count)."""
+
+    def test_the_count_and_the_limit_travel_the_wire(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.fillable_rows = 7
+        try:
+            assert client.manifest_section_label_fillable(1000) == {"fillable": 7, "limit": 1000, "capped": False}
+            assert client.manifest_section_label_fillable(5) == {"fillable": 5, "limit": 5, "capped": True}
+            assert client.manifest_section_label_fillable(7) == {"fillable": 7, "limit": 7, "capped": True}
+        finally:
+            FakeCatalogHandler.fillable_rows = 0
+        assert client.manifest_section_label_fillable() == {"fillable": 0, "limit": 1000, "capped": False}
+
+    @staticmethod
+    def _client(monkeypatch: pytest.MonkeyPatch, body: Any = None, *, status: int = 0) -> HttpCatalogClient:
+        c = object.__new__(HttpCatalogClient)
+
+        def fake_get(path, **params):
+            assert path == "/manifest/section_label_fillable" and params == {"limit": 1000}
+            if status:
+                request = httpx.Request("GET", "http://svc/v1/catalog/manifest/section_label_fillable")
+                raise httpx.HTTPStatusError(
+                    "boom", request=request, response=httpx.Response(status, json={"error": "x"}, request=request))
+            return body
+
+        monkeypatch.setattr(c, "_get", fake_get, raising=False)
+        return c
+
+    def test_an_engine_before_the_route_is_cannot_say_not_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._client(monkeypatch, status=404).manifest_section_label_fillable() is None
+
+    def test_a_failing_engine_is_cannot_say(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._client(monkeypatch, status=500).manifest_section_label_fillable() is None
+
+    def test_a_transport_failure_is_cannot_say(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = object.__new__(HttpCatalogClient)
+
+        def down(path, **params):
+            raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(c, "_get", down, raising=False)
+        assert c.manifest_section_label_fillable() is None
+
+    @pytest.mark.parametrize("body", [
+        None, [], "x", {}, {"capped": False}, {"fillable": 2}, {"fillable": True, "capped": False},
+        {"fillable": -1, "capped": False}, {"fillable": "2", "capped": False}, {"fillable": 2, "capped": "no"},
+    ])
+    def test_a_body_without_a_usable_count_is_cannot_say(self, monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+        """A stripped ``fillable`` must not read as a clean zero (the rung would call the catalog converged)."""
+        assert self._client(monkeypatch, body).manifest_section_label_fillable() is None
 
 
 # ── RDR-204 (nexus-ft04v.33): embedding_profile accessor ─────────────────────

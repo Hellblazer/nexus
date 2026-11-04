@@ -280,6 +280,8 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // T2 nexus/chroma-residue-plan-2026-08-10 §C2: scalar {total,
         // backfillable} counts, not a JSON array -- not collectionReturning.
         neither("/manifest/null_collection", "handleManifestNullCollection"),
+        // nexus-l4hds: scalar {fillable, limit, capped}, a bounded count, not a JSON array.
+        neither("/manifest/section_label_fillable", "handleManifestSectionLabelFillable"),
         collectionOk("/links/orphaned", "handleLinksOrphaned"),
 
         // ── Chash conformance (RDR-180, nexus-du2dw) ────────────────────────

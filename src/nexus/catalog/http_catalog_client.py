@@ -1023,6 +1023,35 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "unavailable": False,
         }
 
+    def manifest_section_label_fillable(self, limit: int = 1000) -> dict | None:
+        """How many legacy manifest rows the manifest-section-labels rung could still fill (nexus-l4hds): one
+        bounded, tenant-scoped, read-only engine query (``GET /manifest/section_label_fillable``) in place of the
+        rung's walk of every document.
+
+        Returns ``{"fillable": n, "limit": limit, "capped": bool}``; ``capped`` means the count stopped at
+        *limit*, so ``fillable`` is then "at least". ``None`` is "cannot say", never "none": the engine predates
+        the route (404), failed, or sent a body without a usable ``fillable``. A caller that needs the answer
+        falls back to its own scan on ``None``. The engine's predicate is the rung's, with one deliberate
+        difference in the safe direction (``CatalogRepository.manifestSectionLabelFillable``): it may count a row
+        the scan would leave legacy, never the reverse.
+        """
+        try:
+            result = self._get("/manifest/section_label_fillable", limit=limit)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            _log.info("http_catalog_client.manifest_section_label_fillable_unavailable", status=status)
+            return None
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller scans instead
+            _log.info("http_catalog_client.manifest_section_label_fillable_unavailable", error=str(exc))
+            return None
+        if not isinstance(result, dict):
+            return None
+        fillable, capped = result.get("fillable"), result.get("capped")
+        if isinstance(fillable, bool) or not isinstance(fillable, int) or fillable < 0 or not isinstance(capped, bool):
+            _log.warning("http_catalog_client.manifest_section_label_fillable_malformed", keys=sorted(result))
+            return None
+        return {"fillable": fillable, "limit": limit, "capped": capped}
+
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
         nexus-du2dw): the engine-route counterpart to the LOCAL-ONLY

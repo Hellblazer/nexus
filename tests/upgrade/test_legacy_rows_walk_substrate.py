@@ -93,7 +93,7 @@ def test_the_walk_fills_exactly_the_legacy_row_a_chunk_label_is_exact_for(
 
     _run_ladder(dry_run=True, auto_mode=False)
     pending = [line for line in _pending_lines(capsys.readouterr().out) if RUNG_MANIFEST_SECTION_LABELS in line]
-    assert len(pending) == 1 and "1 legacy manifest row(s) of 4 " in pending[0], pending
+    assert len(pending) == 1 and "1 legacy manifest row(s) can take" in pending[0], pending  # the engine's count (nexus-l4hds)
     assert [r.labels_written for r in cat.get_manifest(single)] == [False], "the dry run writes nothing"
 
     _run_ladder(dry_run=False, auto_mode=False)

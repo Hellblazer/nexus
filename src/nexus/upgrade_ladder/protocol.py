@@ -19,11 +19,11 @@ substrate ETL, …). The seam is ``detect → converge → verify``:
   that lets the runner record the rung complete (RDR-142: the position must never advance past
   deferred or failed work — the guard itself lives in the runner, P0.3).
 
-ONE named write outside ``converge``: ``manifest-section-labels``'s ``verify()``
-saves a cache note (a remembered clean scan, in T2; never rung state, never a
-completion) that its ``detect()`` reads to skip a full-catalog scan. Its
-``detect()`` writes nothing. A rung's ``detect()`` or ``verify()`` that wrote
-anything else would break the dry-run and doctor guarantees.
+No rung's ``detect()`` or ``verify()`` writes anything outside ``converge``. A
+rung whose ``detect()`` would otherwise read a whole catalog asks the engine for
+a bounded count instead (``manifest-section-labels``, nexus-l4hds); it keeps
+no cache note of its own. One that wrote would break the dry-run and doctor
+guarantees.
 
 Verdicts are frozen dataclasses (the ``migrations.py`` Migration/
 StepOutcome precedent): a consumer can never "fix up" a verdict, the

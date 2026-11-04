@@ -223,8 +223,8 @@ without a gate and nineteen walked the cloud catalog at once).
   `service_url` is configured and `NX_LOCAL=0` or `install.mode` is `managed`. A service
   on a LAN host counts as managed, because the rule protects capacity other boxes share.
   In an unattended run against a managed service, a rung whose `detect()` would read the
-  whole catalog or a whole table, with no completion record and no remembered clean scan
-  to answer from, reads nothing and reports itself not applicable, naming the interactive
+  whole catalog or a whole table, with no completion record and no bounded engine count
+  to answer from (`manifest-section-labels` asks the engine for one count when the engine has the route), reads nothing and reports itself not applicable, naming the interactive
   run. The rungs: `manifest-section-labels`, `note-tags-array`, and the whole-table
   fallback of `aspect-queue-tuples`. The `rdr192-manifest-backfill` census (one engine
   scan per collection) is refused the same way in `converge()`: reported deferred, no
