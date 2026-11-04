@@ -405,12 +405,12 @@ mcp__plugin_conexus_nexus__memory_get( project="{project}", title=""
 
 ## Usage in Agent Files
 
-Agents should reference this protocol instead of duplicating:
+Agents should reference this protocol instead of duplicating. `<plugin-root>` in the block stands for the plugin-root variable, spelled exactly as the files in [../../agents/](../../agents/) spell it. This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
 
 ```markdown
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](<plugin-root>/resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - [Additional artifacts this agent produces]

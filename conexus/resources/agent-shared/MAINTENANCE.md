@@ -23,11 +23,11 @@
 
 3. Add Beads Integration section
 
-4. Add Context Protocol reference:
+4. Add Context Protocol reference. `<plugin-root>` below stands for the plugin-root variable, spelled exactly as the files in [../../agents/](../../agents/) spell it. This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
    ```markdown
    ## Context Protocol
 
-   This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md).
+   This agent follows the [Shared Context Protocol](<plugin-root>/resources/agent-shared/CONTEXT_PROTOCOL.md).
 
    ### Agent-Specific PRODUCE
    - **Output Type 1**: Description
@@ -97,7 +97,7 @@ Update version in frontmatter when making significant changes to an agent.
 - Check that [CONTEXT_PROTOCOL.md](./CONTEXT_PROTOCOL.md) exists beside this file
 - Verify the link syntax in an agent file:
   ```markdown
-  [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md)
+  [Shared Context Protocol](<plugin-root>/resources/agent-shared/CONTEXT_PROTOCOL.md)
   ```
 
 **PRODUCE section missing**:

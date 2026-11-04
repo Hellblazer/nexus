@@ -120,6 +120,18 @@ def test_legacy_directory_install_keeps_its_uv_vocabulary(tmp_path, monkeypatch)
     )
 
 
+def test_a_checkout_path_with_a_space_is_one_shell_word_in_the_advice(tmp_path, monkeypatch) -> None:
+    """nexus-z7ddd: the advice is a command to paste, so the script path is quoted as one word."""
+    import shlex
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_uv_receipt(tmp_path, _UV_DIRECTORY.replace("/legacy/checkout", "/legacy/my checkout"))
+
+    detail = upgrade_finish.install_source()
+    quoted = shlex.quote("/legacy/my checkout/scripts/reinstall-tool.sh")
+    assert quoted.startswith("'") and f"use {quoted} or reinstall" in detail, detail
+
+
 def test_legacy_pinned_install_keeps_its_uv_vocabulary(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     _write_uv_receipt(tmp_path, _UV_PINNED)

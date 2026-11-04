@@ -236,7 +236,7 @@ elif [ -z "$CONSTRAINTS" ]; then
         # beats refusing, but it must not look pinned: say so where the operator
         # will read it. The wording claims only what was observed: no file at
         # the expected place in what was installed.
-        echo "install_generation: WARNING: no nexus/_install/constraints.txt was found in the installed ${SPEC} package (a release that predates it, or an unexpected venv layout); its dependencies are resolved UNCONSTRAINED from the package index, so versions may differ from the release's uv.lock" >&2
+        echo "install_generation: WARNING: no nexus/_install/constraints.txt was found in the installed ${SPEC} package (a release that predates it, or an unexpected venv layout); its dependencies are resolved UNCONSTRAINED from the package index, so versions may differ from the release's lockfile" >&2
     fi
 fi
 if [ -n "$CONSTRAINTS" ]; then

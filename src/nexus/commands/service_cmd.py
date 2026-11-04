@@ -29,7 +29,7 @@ def service() -> None:
     "url",
     default=None,
     help="Managed service base URL. Defaults to NX_SERVICE_URL or "
-    "https://api.conexus-nexus.com.",
+    "https://api.conexus-nexus.com (the managed service).",
 )
 def probe(url: str | None) -> None:
     """Probe a managed nexus service for reachability + version compatibility.

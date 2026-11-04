@@ -5825,7 +5825,7 @@ def store_put(
             "token. Reuse an existing subject before minting one (see "
             "`nx collection list`); placeholders default/knowledge/notes/"
             "tmp/test are refused. Rules: "
-            "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md."
+            "(https://github.com/Hellblazer/nexus/blob/main/docs/collections.md)."
         ),
     )],
     title: Annotated[str, Field(

@@ -336,7 +336,7 @@ def _check_generation_layout() -> list[HealthResult]:
                     f"{len(generations)} generation(s) exist but current does "
                     "not — nothing resolves, so nothing will start"
                 ),
-                fix_suggestions=["nx self install"],
+                fix_suggestions=[_install_advice().GENERATION_INSTALLER],
             )]
 
         current = install_layout.current_generation()
@@ -356,7 +356,7 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"current points at {current}, which does not exist — every "
                 "shim resolves current at spawn, so nothing will start"
             ),
-            fix_suggestions=["nx self install"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
 
     if not install_layout.receipt_path(current).is_file():
@@ -366,7 +366,7 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"current points at {current.name}, which has no receipt — that "
                 "is an unfinished build, not a generation"
             ),
-            fix_suggestions=["nx self install"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
 
     # THE OWNED SET IS WHAT THE DISTRIBUTION DECLARES, not a listing of
@@ -626,7 +626,7 @@ def _check_base_interpreters(current, generations) -> list[HealthResult]:
                 f"{missing_current}, which no longer exists — uv prunes managed "
                 "interpreters, and this generation cannot run without it"
             ),
-            fix_suggestions=["nx self install"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
     if missing_old:
         return [HealthResult(
@@ -694,7 +694,7 @@ def _check_orphan_uv_install() -> list[HealthResult]:
         ),
         fix_suggestions=[
             "nx self install    # registers it for reap, then reaps once its holders are gone",
-            "the reinstall-tool.sh script in a nexus checkout's scripts directory    # same, from a checkout",
+            "the reinstall script of a nexus checkout    # same, from a checkout",
         ],
     )]
 
@@ -6416,7 +6416,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
         ),
         fix_suggestions=[
             f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "
-            "docs/migration-runbook.md, 'A local cluster older than PostgreSQL 17'",
+            "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md (section 'A local cluster older than PostgreSQL 17')",
         ],
     )]
 

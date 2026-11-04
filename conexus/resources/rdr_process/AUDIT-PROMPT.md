@@ -1,6 +1,6 @@
 # RDR-067 Canonical Audit Prompt v1 (patch v1.2 — code-verification gate for PARTIAL/SCOPE-REDUCED)
 
-**Purpose**: Pinned prompt text for the `rdr-audit-checklist` skill. The skill dispatches `deep-research-synthesizer` with the prompt below, substituting `{project}`, `{project_path}`, and `{transcript_excerpts}` before dispatch. This file ships with the plugin so the audit runs on an install whose T2 holds no `nexus_rdr` entries; a T2 entry `nexus_rdr/067-canonical-prompt-v1`, when present, overrides it (same structure: everything below the `PROMPT TEXT` line is the prompt).
+**Purpose**: Pinned prompt text for the `rdr-audit-checklist` skill. The skill dispatches `deep-research-synthesizer` with the prompt below, substituting `{project}`, `{project_path}`, and `{transcript_excerpts}` before dispatch. This file ships with the plugin so the audit runs on an install whose T2 holds no `nexus_rdr` entries; a T2 entry `nexus_rdr/067-canonical-prompt-v1`, when present, overrides it. The override must keep this file's structure: the prompt is the part after the marker heading further down, and nothing above that heading is sent.
 
 **Template parameters**:
 - `{project}` — target project name, bare (e.g., `ART`, `nexus`). Used for display and for RDR citation text.

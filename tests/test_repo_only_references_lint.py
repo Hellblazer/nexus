@@ -11,28 +11,51 @@ What counts as a channel, and how each is checked:
 
 - **Plugin markdown** (``conexus/``, ``sn/``, ``prose-edit/``, ``tool-spill/``): every ``.md`` file, maintainer
   docs included, bar the two release ledgers. A repo path becomes a GitHub link or inline text.
-- **Resource files** an agent opens with ``Read`` (``conexus/resources/``): Claude Code does not substitute
-  ``${CLAUDE_PLUGIN_ROOT}`` in a file read that way, so the variable may appear only inside a fenced block (a
-  template for an agent file, where it is substituted), never in running text. Plugin files are named by a
-  path relative to the resource file.
+- **Plugin files that are not markdown or Python** (JSON, YAML, plist, unit files, shell, TypeScript): the text a
+  user can open, a comment in an installed plist included.
+- **Files an agent opens with** ``Read``: Claude Code does not substitute ``${CLAUDE_PLUGIN_ROOT}`` in a file read
+  that way (measured by the out-of-repo gate's canary on 2.1.318), fenced or not, and does not substitute the
+  unbraced ``$CLAUDE_PLUGIN_ROOT`` anywhere. So a resource file, a skill's ``reference.md`` or other non-``SKILL.md``
+  file, and a hook-printed ``.md`` hold no variable at all; they name a plugin file by a path relative to
+  themselves. The unbraced form is banned in every plugin markdown file.
 - **MCP tool descriptions and parameter descriptions**, from the live tool registry of both servers.
-- **CLI help and option help**, from the live click command tree.
+- **CLI help and option help**, from the live click command tree. A ``\\b`` example block counts like prose: an
+  example that names a repo file misleads exactly as a sentence does. A URL must also survive click's wrapping
+  (see ``test_every_url_in_cli_help_renders_unbroken_at_80_columns``).
 - **Every other string constant in ``src/nexus``** (error and hint text, ``click.echo`` text, doctor
-  suggestions), found by AST. The same scan covers the plugins' Python (hook and launcher text). Docstrings and bare string statements are developer text, comments are not in the
-  AST at all; the click and MCP docstrings that DO reach a user are covered by the two runtime scans above.
+  suggestions), found by AST. The same scan covers the plugins' Python (hook and launcher text). Docstrings and
+  bare string statements are developer text, comments are not in the AST at all; the click and MCP docstrings
+  that DO reach a user are covered by the two runtime scans above.
+- **Engine strings**: every string literal in ``service/src/main/java`` (boot refusals, error bodies), and the
+  ``RAISE`` messages in the Liquibase changelogs, which reach an operator who has no checkout.
+- **Packaged shell and markdown under** ``src/nexus`` (``_install/*.sh`` echo text, ``*.md`` data files).
 
 A path is repo-only when it starts at a top-level directory of the nexus checkout and names something that exists
-there (or has a file extension). ``docs/rdr/`` is every project's own RDR directory and is left alone, as is a
-path inside a GitHub URL. Deliberate sites are in ``_ALLOWED``, each with the reason an installed user is not
-misled; the live checks print what they scanned and floor it (nexus-moht0: a scan that found nothing to check is
-a failure, not a pass).
+there (or has a file extension). Besides the plain ``tests/x.py`` form the scan sees: ``../tests/x.py`` (exists in
+the checkout), ``$REPO/scripts/x.sh`` (a variable named for the repo or a checkout), ``~/git/nexus/scripts/x.sh``
+and ``/opt/nexus/scripts/x.sh`` (a path ending in ``nexus/``), ``{x}/scripts/x.sh`` and a string that begins
+``/scripts/`` (the tail of an f-string or a joined path), a bare name of one of the repo's own scripts
+(``mvnw-leased.sh``), and a root-level file (``AGENTS.md``) written in the checkout's own terms. ``docs/rdr/`` is
+every project's own RDR directory and is left alone, except a concrete nexus RDR file that exists here; a path
+inside a GitHub URL is left alone. Deliberate sites are in ``_ALLOWED``, each one line with the marker text that
+identifies it and the reason an installed user is not misled; the live checks print what they scanned and floor it
+(nexus-moht0: a scan that found nothing to check is a failure, not a pass).
+
+**Why the links say ``blob/main``.** A plugin text and the file it links reach ``main`` in the same release (a
+release promotes ``develop`` to ``main``), and an installed plugin is a release, so the link resolves for as
+long as the file stays put. A tag-pinned link would 404 for any file added after the tag; a ``develop`` link
+would 404 for a release that never carried it. The cost is a link that goes dead when a file later moves, which
+this lint cannot see from an old install; ``test_every_github_link_this_lint_asks_for_names_something_in_the_tree``
+catches the move on the PR that makes it.
 """
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -45,23 +68,91 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _ROOTS = (
     "src/nexus", "tests", "scripts", "docs", "service", "conexus", "sn", "prose-edit", "tool-spill",
     ".claude", ".github", "web", "mcpb", "infra", "bench",
+    "data", "dt", "archive", "papers", "blog", ".beads", ".plans", ".devcontainer",
 )
-#: ``docs/`` and ``web/`` hold pages that are named in running text as the user's own conventions (the prose-edit
-#: genre map, ``docs/rdr/``): only an exact existing file counts there, never a directory or a glob.
-_FILE_ONLY_ROOTS = ("docs", "web")
+#: These hold pages or names that running text uses for the USER'S own conventions (the prose-edit genre map,
+#: ``docs/rdr/``, a project's ``data/`` or ``.beads/`` directory): only an exact existing file counts there,
+#: never a directory or a glob.
+_FILE_ONLY_ROOTS = frozenset({"docs", "web", "data", "dt", "archive", "papers", "blog", ".beads", ".plans", ".devcontainer"})
 _FILE_EXTENSIONS = frozenset({".md", ".py", ".sh", ".yaml", ".yml", ".xml", ".toml", ".json", ".txt", ".html", ".java", ".sql"})
+#: Root-level files of the checkout. Every project has some of these, so one counts only in text that says it is
+#: the nexus checkout's own (see ``_ROOT_FILE_CONTEXT``).
+_ROOT_FILES = ("AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "pyproject.toml", "uv.lock", "LICENSING.md")
+_ROOT_FILE_CONTEXT = re.compile(r"(?i)\bnexus\b")
 
-_PATH = re.compile(
-    r"(?<![\w/.:@~$}-])(?:\./)?"
-    r"(?P<p>(?:" + "|".join(re.escape(r) for r in _ROOTS) + r")/[\w.*<>{}\[\]-]+(?:/[\w.*<>{}\[\]-]+)*/?)"
-)
+_ROOT_ALT = "|".join(re.escape(r) for r in sorted(_ROOTS, key=len, reverse=True))
+_SEG = r"[\w.*<>{}\[\]-]+"
+_PATH = re.compile(r"(?P<p>(?:" + _ROOT_ALT + r")/" + _SEG + r"(?:/" + _SEG + r")*/?)")
+_ROOT_FILE = re.compile(r"(?<![\w/.\-])(?P<p>" + "|".join(re.escape(f) for f in _ROOT_FILES) + r")(?![\w/\-])")
+_BARE_SCRIPT = re.compile(r"(?<![\w/.\-])(?P<p>[A-Za-z0-9][\w.-]*\.(?:sh|py))(?![\w/\-])")
 #: A markdown link to a URL: label and target both leave the scan (a label may show the path it links).
 _URL_LINK = re.compile(r"\[[^\]]*\]\(https?://[^)]*\)")
 _URL = re.compile(r"https?://\S+")
+#: A URL that ends in a period: the sentence's period glued to it pastes into a browser as part of the address.
+_URL_GLUED = re.compile(r"https?://[^\s\"'<>()\[\]`]*[a-zA-Z0-9/_-]\.(?=$|[\s\"')\]`])")
 _LINE_SUFFIX = re.compile(r"(?::\d+(?:-\d+)?|::\w+)$")
+#: A placeholder or variable that names the user's own place, not the checkout.
+_USERS_OWN = re.compile(r"(?i)project|plugin|home|cwd|user|tmp|temp|work")
+_REPO_VAR = re.compile(r"(?i)repo|checkout|nexus")
+_DELIMS = " \t\r\n`'\"([{<,;=|*>"
 
 
-def _is_repo_only(token: str, repo_root: Path = REPO_ROOT) -> bool:
+@functools.cache
+def _own_script_names(repo_root: Path = REPO_ROOT) -> frozenset[str]:
+    """Bare file names of the repo's own scripts: ``scripts/`` and the e2e helper library. A name that a plugin
+    also ships (``install.sh``) is the plugin's, not the repo's."""
+    names: set[str] = set()
+    for d in ("scripts", "tests/e2e/lib"):
+        for p in (repo_root / d).rglob("*"):
+            if p.is_file() and p.suffix in (".sh", ".py") and not p.name.startswith("_") and "__pycache__" not in p.parts:
+                names.add(p.name)
+    shipped = {
+        p.name
+        for d in ("conexus", "sn", "prose-edit", "tool-spill", "src/nexus", "mcpb")
+        for p in (repo_root / d).rglob("*")
+        if p.is_file() and p.suffix in (".sh", ".py")
+    }
+    return frozenset(names - shipped)
+
+
+def _prefix_kind(text: str, start: int) -> str | None:
+    """How the root-directory match at *start* is attached to what precedes it.
+
+    ``plain`` a free-standing path; ``up`` after ``../`` (counts only when it exists in the checkout);
+    ``joined`` a tail glued to a placeholder, a leading ``/`` or a variable; ``checkout`` under a path that ends
+    in ``nexus/``; ``None`` the middle of some other word or path (``hooks/scripts/x``, ``~/scripts/x``).
+    """
+    if start == 0:
+        return "plain"
+    prev = text[start - 1]
+    if prev in _DELIMS:
+        return "plain"
+    if prev != "/":
+        return None
+    before = text[: start - 1]
+    if before == "" or before[-1] in _DELIMS:
+        return "joined"
+    if re.search(r"(?:^|[^\w.])\.\.$", before):
+        return "up"
+    if re.search(r"(?:^|[^\w.])\.$", before):
+        return "plain"
+    if before.endswith(("}", ">")):
+        m = re.search(r"\$?[{<]([^{}<>]*)[}>]$", before)
+        name = m.group(1) if m else ""
+        return None if _USERS_OWN.search(name) else "joined"
+    m = re.search(r"\$([A-Za-z_]\w*)$", before)
+    if m:
+        name = m.group(1)
+        return "joined" if _REPO_VAR.search(name) and not name.startswith("CLAUDE_") else None
+    if before.endswith("~"):
+        return None
+    m = re.search(r"([~/][\w.\-/~]*)$", before)
+    if m and re.search(r"(?:^|/)nexus(?:-wt/[\w.\-]+)?$", m.group(1)):
+        return "checkout"
+    return None
+
+
+def _is_repo_only(token: str, repo_root: Path = REPO_ROOT, *, exists_only: bool = False) -> bool:
     t = token.rstrip(".,;:)'\"`")
     t = _LINE_SUFFIX.sub("", t)
     for mark in ("*", "<", "{", "["):
@@ -70,11 +161,14 @@ def _is_repo_only(token: str, repo_root: Path = REPO_ROOT) -> bool:
     t = t.rstrip("/")
     if "/" not in t:
         return False
-    if t == "docs/rdr" or t.startswith("docs/rdr/"):
-        return False
     path = repo_root / t
+    if t == "docs/rdr" or t.startswith("docs/rdr/"):
+        # Every project has its own docs/rdr/. A concrete nexus RDR file that exists here is still ours.
+        return bool(re.match(r"docs/rdr/(?:rdr-)?\d{3}[-\w]*\.md$", t)) and path.is_file()
     if t.split("/", 1)[0] in _FILE_ONLY_ROOTS:
         return path.is_file()
+    if exists_only:
+        return path.exists()
     return path.exists() or Path(t).suffix in _FILE_EXTENSIONS
 
 
@@ -82,7 +176,28 @@ def repo_only_paths(text: str, repo_root: Path = REPO_ROOT) -> list[str]:
     """The repo-only paths in *text*, as written."""
     text = _URL_LINK.sub(" ", text)
     text = _URL.sub(" ", text)
-    return [m.group("p") for m in _PATH.finditer(text) if _is_repo_only(m.group("p"), repo_root)]
+    found: list[str] = []
+    for m in _PATH.finditer(text):
+        kind = _prefix_kind(text, m.start())
+        if kind is not None and _is_repo_only(m.group("p"), repo_root, exists_only=(kind == "up")):
+            found.append(m.group("p"))
+    for m in _ROOT_FILE.finditer(text):
+        if _ROOT_FILE_CONTEXT.search(text) and (repo_root / m.group("p")).is_file():
+            found.append(m.group("p"))
+    names = _own_script_names(repo_root)
+    found += [m.group("p") for m in _BARE_SCRIPT.finditer(text) if m.group("p") in names]
+    return found
+
+
+def glued_url_tails(text: str) -> list[str]:
+    """URLs in *text* that end in a sentence's closing period."""
+    stripped = _URL_LINK.sub(" ", text)
+    return _URL_GLUED.findall(stripped)
+
+
+def scan_tokens(text: str, repo_root: Path = REPO_ROOT) -> list[str]:
+    """Everything in *text* a user cannot use: repo-only paths and URLs with punctuation glued on."""
+    return repo_only_paths(text, repo_root) + [f"{u} (period glued to the URL)" for u in glued_url_tails(text)]
 
 
 def _fenced_lines(lines: list[str]) -> set[int]:
@@ -101,30 +216,83 @@ def _fenced_lines(lines: list[str]) -> set[int]:
     return inside
 
 
-#: Deliberate repo paths: {repo-relative file: {path as written: why an installed user is not misled}}.
-_ALLOWED: dict[str, dict[str, str]] = {
-    "prose-edit/README.md": {
-        ".claude/skills/site-page/SKILL.md": "names the optional file a USER'S repository may carry; the sentence says a repository without it is fine",
-    },
-    "src/nexus/hooks/subagent_start.py": {
-        "scripts/agent-worktree-preflight.sh": (
-            "emitted only when the project has the script (_worktree_preflight_row checks os.path.isfile)"
-        ),
-    },
-    "src/nexus/catalog/types.py": {
-        "tests/fixtures": "a path-fragment marker matched against indexed file paths, never shown",
-    },
-    "src/nexus/target_installer.py": {
-        "src/nexus/_install": "a candidate directory probed relative to a root, never shown",
-    },
-    "src/nexus/tables/chunk_metadata_keys.py": {
-        "src/nexus/catalog/note_ttl.py": "a module path compared with the repo's own scan results, never shown",
-    },
-}
+class Site(NamedTuple):
+    """One deliberate repo path: the token, text on its line that picks the site out, and why it is harmless."""
 
-#: Files whose paths are the subject: a lint that names the checkout's own layout.
-_WHOLE_FILE_ALLOWED: dict[str, str] = {
-    "src/nexus/storage_boundary_lint.py": "path constants the storage-boundary lint matches against its own checkout",
+    token: str
+    marker: str
+    reason: str
+
+
+class Hit(NamedTuple):
+    rel: str
+    lineno: int
+    token: str
+    text: str
+
+
+#: Deliberate repo paths, one line each: {repo-relative file: [Site]}. A site matches a hit when the token is the
+#: same and the marker occurs in the hit's line (a Python string constant is one "line"). A guarded conditional
+#: names a path that the project has or has not ("when the project has X"), so a project without it takes the
+#: other branch; the user's own checkout path is the user's.
+_ALLOWED: dict[str, list[Site]] = {
+    "prose-edit/README.md": [
+        Site(".claude/skills/site-page/SKILL.md", "", "names the optional file a USER'S repository may carry; the sentence says a repository without it is fine"),
+    ],
+    "src/nexus/hooks/subagent_start.py": [
+        Site("scripts/agent-worktree-preflight.sh", "", "emitted only when the project has the script (_worktree_preflight_row checks os.path.isfile)"),
+    ],
+    "src/nexus/catalog/types.py": [
+        Site("tests/fixtures", "", "a path-fragment marker matched against indexed file paths, never shown"),
+    ],
+    "src/nexus/target_installer.py": [
+        Site("src/nexus/_install", "", "a candidate directory probed relative to a root, never shown"),
+    ],
+    "src/nexus/tables/chunk_metadata_keys.py": [
+        Site("src/nexus/catalog/note_ttl.py", "", "a module path compared with the repo's own scan results, never shown"),
+    ],
+    "src/nexus/pdf_stack.py": [
+        Site("scripts/reinstall-tool.sh", "/scripts/reinstall-tool.sh", "the prefix is the install receipt's own checkout directory; reached only for an install built from a directory source, whose owner has that checkout"),
+    ],
+    "src/nexus/upgrade_finish.py": [
+        Site("scripts/reinstall-tool.sh", "/scripts/reinstall-tool.sh", "the prefix is the uv receipt's own checkout directory; reached only for an install built from a local checkout"),
+    ],
+    "src/nexus/commands/self_cmd.py": [
+        Site("reinstall-tool.sh", "a dev checkout uses", "named for the dev-checkout case only, in a sentence conditional on running from one"),
+        Site("reinstall-tool.sh", "For a checkout, run", "printed when nx runs from a source checkout, where the script is in the checkout's scripts directory"),
+    ],
+    "conexus/hooks/scripts/routing/credential_print_guard.py": [
+        Site("claude_credentials.py", "blob/main/tests/e2e/lib/claude_credentials.py", "the message links the wrapper in its first sentence; the later mentions are the same file"),
+    ],
+    "service/src/main/resources/db/changelog/grants-nexus-svc.xml": [
+        Site("src/nexus/db/pg_provision.py", "grants-004-monitor-wal-visibility", "inside an executed Liquibase changeset: its checksum is recorded in every migrated database, so editing the body fails validation at engine boot; a superseding changeset is the fix"),
+        Site("docs/configuration.md", "grants-004-monitor-wal-visibility", "same executed changeset body as above; the operator who reads it is told which prerequisite to run, and the engine documentation names it"),
+    ],
+    "src/nexus/storage_boundary_lint.py": [
+        # Path constants the storage-boundary lint matches against its own checkout; none is printed.
+        Site("src/nexus/catalog/", "CATALOG_PHASE_ALLOWLIST_PREFIX", "a prefix matched against scanned file paths, never shown"),
+        Site("src/nexus/db/", '"src/nexus/db/",', "a prefix matched against scanned file paths, never shown"),
+        Site("src/nexus/catalog/", '"src/nexus/catalog/",', "a prefix matched against scanned file paths, never shown"),
+        Site("src/nexus/daemon/", '"src/nexus/daemon/",', "a prefix matched against scanned file paths, never shown"),
+        *(
+            Site(path, f'"{path}": ', "a key of an allowlist dict compared with the scan's own file paths, never shown")
+            for path in (
+                "src/nexus/collection_health.py", "src/nexus/context.py", "src/nexus/mcp_infra.py",
+                "src/nexus/commands/_helpers.py", "src/nexus/commands/aspects.py", "src/nexus/commands/catalog.py",
+                "src/nexus/commands/catalog_cmds/report.py", "src/nexus/commands/doc.py", "src/nexus/commands/enrich.py",
+                "src/nexus/commands/index.py", "src/nexus/commands/rdr.py", "src/nexus/commands/search_cmd.py",
+                "src/nexus/commands/taxonomy_cmd.py",
+            )
+        ),
+    ],
+    "conexus/commands/continuation.md": [
+        Site("tests/e2e/lib/commit_scope_audit.sh", "when the project has", "a guarded conditional: the script runs only in a project that has it; any other project takes the by-hand branch on the same line"),
+        Site("tests/e2e/lib/commit_scope_audit.sh", "<session-start-ref>..", "the command for the branch the conditional names; reached only when the project has the script"),
+    ],
+    "conexus/skills/composition-probe/SKILL.md": [
+        Site("scripts/mvnw-leased.sh", "when the project has that script", "a guarded conditional: used only in a project that has the script; any other project takes the ./mvnw branch in the same paragraph"),
+        Site("service/mvnw", "wraps `service/mvnw`", "describes what the nexus script wraps, inside the same guarded conditional"),
+    ],
 }
 
 #: The two release ledgers name repo paths on purpose: one is the changelog of what changed, the other the list of
@@ -138,17 +306,50 @@ _EVAL_README = "conexus/evals/README.md"
 _PLUGIN_DIRS = ("conexus", "sn", "prose-edit", "tool-spill")
 
 #: Files another session is rewriting at the same time, so this change leaves them alone to avoid a merge fight:
-#: {file: why}. Each still holds a violation (``test_every_deferral_still_has_something_to_defer`` fails the day
-#: one is clean, so the entry cannot outlive its reason). The links this change would have made are in the hand-off
-#: patch for these two READMEs: GitHub links for the test, script and doc paths they name.
+#: {file: why}, and every reason names the bead and the release by which the entry must be gone.
+#: ``test_every_deferral_still_has_something_to_defer`` fails the day a file is clean, so the entry cannot outlive
+#: its reason, and ``test_every_deferral_names_a_bead_and_a_release`` fails an entry with no owner or no bound.
 _DEFERRED_FILES: dict[str, str] = {
-    "conexus/README.md": "being rewritten for dead nx verbs and count drift by the marginalia session (nexus-z7ddd, 2026-11-04)",
-    "sn/README.md": "being rewritten for dead nx verbs and count drift by the marginalia session (nexus-z7ddd, 2026-11-04)",
+    "conexus/README.md": "being rewritten for dead nx verbs and count drift by the marginalia session; bead nexus-pplwc; must be clean by the first client release after 7.95.0",
+    "sn/README.md": "being rewritten for dead nx verbs and count drift by the marginalia session; bead nexus-pplwc; must be clean by the first client release after 7.95.0",
 }
+
+#: Plugin files that are not markdown or Python and that a user can open.
+_PLUGIN_TEXT_SUFFIXES = frozenset({".json", ".yaml", ".yml", ".plist", ".service", ".txt", ".toml"})
+#: Plugin source whose comment lines are developer text but whose other lines print.
+_PLUGIN_CODE_SUFFIXES = frozenset({".sh", ".ts", ".js"})
+_SKIP_DIRS = frozenset({"node_modules", "__pycache__", ".venv", "dist"})
+
+
+def _walk(root: Path, suffixes: frozenset[str] | tuple[str, ...]) -> list[Path]:
+    out = []
+    for p in sorted(root.rglob("*")):
+        if p.is_file() and p.suffix in suffixes and not (_SKIP_DIRS & set(p.relative_to(root).parts)):
+            out.append(p)
+    return out
+
+
+def _is_comment(line: str) -> bool:
+    s = line.strip()
+    return s.startswith(("#", "//", "/*", "*"))
+
+
+def _apply_allowed(hits: list[Hit]) -> tuple[list[str], set[tuple[str, int]]]:
+    """(violations as ``file:line: token``, the (file, index) of every allowlist site that matched)."""
+    bad: list[str] = []
+    used: set[tuple[str, int]] = set()
+    for h in hits:
+        sites = _ALLOWED.get(h.rel, [])
+        matched = [i for i, s in enumerate(sites) if s.token == h.token and s.marker in h.text]
+        if matched:
+            used.update((h.rel, i) for i in matched)
+        else:
+            bad.append(f"{h.rel}:{h.lineno}: {h.token}")
+    return bad, used
 
 
 # --------------------------------------------------------------------------------------------------------------
-# Plugin markdown
+# Raw hits per channel
 # --------------------------------------------------------------------------------------------------------------
 
 def _plugin_markdown(repo_root: Path = REPO_ROOT) -> list[Path]:
@@ -160,42 +361,41 @@ def _plugin_markdown(repo_root: Path = REPO_ROOT) -> list[Path]:
         p for p, rel in rels.items()
         if rel not in _MARKDOWN_EXEMPT and rel not in _DEFERRED_FILES
         and not (rel.startswith(_EVAL_CASE_PREFIX) and rel != _EVAL_README)
+        and not (_SKIP_DIRS & set(Path(rel).parts))
     ]
 
 
+def _line_hits(path: Path, repo_root: Path, *, skip_comments: bool = False) -> list[Hit]:
+    rel = path.relative_to(repo_root).as_posix()
+    hits = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if skip_comments and _is_comment(line):
+            continue
+        hits += [Hit(rel, lineno, t, line) for t in scan_tokens(line, repo_root)]
+    return hits
+
+
+def _markdown_hits(files: list[Path], repo_root: Path = REPO_ROOT) -> list[Hit]:
+    return [h for p in files for h in _line_hits(p, repo_root)]
+
+
 def _markdown_violations(files: list[Path], repo_root: Path = REPO_ROOT) -> list[str]:
-    bad = []
-    for path in files:
-        rel = path.relative_to(repo_root).as_posix()
-        allowed = _ALLOWED.get(rel, {})
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            for tok in repo_only_paths(line, repo_root):
-                if tok not in allowed:
-                    bad.append(f"{rel}:{lineno}: {tok}")
-    return bad
+    return _apply_allowed(_markdown_hits(files, repo_root))[0]
 
 
-# --------------------------------------------------------------------------------------------------------------
-# Resource files
-# --------------------------------------------------------------------------------------------------------------
-
-_PLUGIN_ROOT_VAR = re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT\}?")
-
-
-def _resource_variable_violations(files: list[Path], repo_root: Path = REPO_ROOT) -> list[str]:
-    bad = []
-    for path in files:
-        lines = path.read_text(encoding="utf-8").splitlines()
-        fenced = _fenced_lines(lines)
-        for i, line in enumerate(lines):
-            if i not in fenced and _PLUGIN_ROOT_VAR.search(line):
-                bad.append(f"{path.relative_to(repo_root).as_posix()}:{i + 1}: plugin-root variable outside a fenced block")
-    return bad
+def _plugin_text_files(repo_root: Path = REPO_ROOT) -> list[Path]:
+    files: list[Path] = []
+    for d in _PLUGIN_DIRS:
+        files += _walk(repo_root / d, _PLUGIN_TEXT_SUFFIXES | _PLUGIN_CODE_SUFFIXES)
+    return [p for p in files if not p.relative_to(repo_root).as_posix().startswith(_EVAL_CASE_PREFIX)]
 
 
-# --------------------------------------------------------------------------------------------------------------
-# src/nexus string constants
-# --------------------------------------------------------------------------------------------------------------
+def _plugin_text_hits(repo_root: Path = REPO_ROOT) -> list[Hit]:
+    hits = []
+    for p in _plugin_text_files(repo_root):
+        hits += _line_hits(p, repo_root, skip_comments=p.suffix in _PLUGIN_CODE_SUFFIXES)
+    return hits
+
 
 def _developer_text_ids(tree: ast.AST) -> set[int]:
     """Ids of string nodes that are developer text: docstrings and any bare string statement."""
@@ -206,25 +406,148 @@ def _developer_text_ids(tree: ast.AST) -> set[int]:
     }
 
 
-def _string_violations(src_root: Path, repo_root: Path = REPO_ROOT) -> tuple[list[str], int]:
-    """(violations, number of string constants examined) over every ``.py`` file under *src_root*."""
-    bad: list[str] = []
+def _string_hits(src_root: Path, repo_root: Path = REPO_ROOT) -> tuple[list[Hit], int]:
+    """(hits, number of string constants examined) over every ``.py`` file under *src_root*."""
+    hits: list[Hit] = []
     examined = 0
     for path in sorted(src_root.rglob("*.py")):
-        rel = path.relative_to(repo_root).as_posix()
-        if rel in _WHOLE_FILE_ALLOWED:
+        if _SKIP_DIRS & set(path.relative_to(src_root).parts):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(repo_root).as_posix()
+        source = path.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        tree = ast.parse(source)
         skip = _developer_text_ids(tree)
-        allowed = _ALLOWED.get(rel, {})
         for n in ast.walk(tree):
             if not (isinstance(n, ast.Constant) and isinstance(n.value, str)) or id(n) in skip:
                 continue
             examined += 1
-            for tok in repo_only_paths(n.value, repo_root):
-                if tok not in allowed:
-                    bad.append(f"{rel}:{n.lineno}: {tok}")
-    return bad, examined
+            toks = scan_tokens(n.value, repo_root)
+            if toks:
+                # A site is picked out by the constant or by the source line it sits on.
+                line = lines[n.lineno - 1] if n.lineno <= len(lines) else ""
+                hits += [Hit(rel, n.lineno, t, n.value + "\n" + line) for t in toks]
+    return hits, examined
+
+
+def _string_violations(src_root: Path, repo_root: Path = REPO_ROOT) -> tuple[list[str], int]:
+    hits, examined = _string_hits(src_root, repo_root)
+    return _apply_allowed(hits)[0], examined
+
+
+def _java_string_literals(src: str) -> list[tuple[int, str]]:
+    """(line, text) of each string literal and text block in Java source; comments and char literals are skipped."""
+    out: list[tuple[int, str]] = []
+    i, n, line = 0, len(src), 1
+    while i < n:
+        c = src[i]
+        if c == "\n":
+            line += 1
+            i += 1
+        elif src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+        elif src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            line += src.count("\n", i, j)
+            i = j
+        elif src.startswith('"""', i):
+            j = src.find('"""', i + 3)
+            j = n if j < 0 else j
+            out.append((line, src[i + 3 : j]))
+            line += src.count("\n", i, j)
+            i = j + 3
+        elif c == '"':
+            j = i + 1
+            while j < n and src[j] != '"' and src[j] != "\n":
+                j += 2 if src[j] == "\\" else 1
+            out.append((line, src[i + 1 : j]))
+            i = j + 1
+        elif c == "'":
+            j = i + 1
+            while j < n and src[j] != "'" and src[j] != "\n":
+                j += 2 if src[j] == "\\" else 1
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+_RAISE_MESSAGE = re.compile(r"RAISE\s+(?:EXCEPTION|NOTICE|WARNING|INFO)\s+'((?:[^']|'')*)'", re.IGNORECASE)
+
+
+def _engine_hits(repo_root: Path = REPO_ROOT) -> tuple[list[Hit], int]:
+    """(hits, strings examined) over the engine's Java string literals and its changelogs' ``RAISE`` messages."""
+    hits: list[Hit] = []
+    examined = 0
+    java = repo_root / "service" / "src" / "main" / "java"
+    for path in sorted(java.rglob("*.java")):
+        rel = path.relative_to(repo_root).as_posix()
+        for lineno, text in _java_string_literals(path.read_text(encoding="utf-8")):
+            examined += 1
+            hits += [Hit(rel, lineno, t, text) for t in scan_tokens(text, repo_root)]
+    for path in sorted((repo_root / "service" / "src" / "main" / "resources").rglob("*.xml")):
+        rel = path.relative_to(repo_root).as_posix()
+        src = path.read_text(encoding="utf-8")
+        for m in _RAISE_MESSAGE.finditer(src):
+            examined += 1
+            lineno = src.count("\n", 0, m.start()) + 1
+            hits += [Hit(rel, lineno, t, m.group(1)) for t in scan_tokens(m.group(1), repo_root)]
+    return hits, examined
+
+
+def _packaged_text_hits(repo_root: Path = REPO_ROOT) -> tuple[list[Hit], int]:
+    """Shell echo text and markdown data files that ship inside the ``nexus`` package."""
+    hits: list[Hit] = []
+    # AGENTS.md and CLAUDE.md in a module directory are contributor guidance for work inside a checkout. Hatch
+    # packages them with the module, but no session reads them from site-packages and no command prints them.
+    files = [
+        p for p in _walk(repo_root / "src" / "nexus", frozenset({".sh", ".md"}))
+        if p.name not in ("AGENTS.md", "CLAUDE.md")
+    ]
+    for p in files:
+        hits += _line_hits(p, repo_root, skip_comments=p.suffix == ".sh")
+    return hits, len(files)
+
+
+def _resource_files(repo_root: Path = REPO_ROOT) -> list[Path]:
+    """Files the model opens with ``Read`` (or that a hook prints): the variable is never substituted in them."""
+    files = set((repo_root / "conexus" / "resources").rglob("*.md"))
+    for d in _PLUGIN_DIRS:
+        for p in (repo_root / d / "skills").rglob("*.md") if (repo_root / d / "skills").is_dir() else []:
+            if p.name != "SKILL.md":
+                files.add(p)
+        hooks = repo_root / d / "hooks"
+        if hooks.is_dir():
+            files.update(p for p in hooks.rglob("*.md") if p.name != "README.md")
+    return sorted(p for p in files if not (_SKIP_DIRS & set(p.relative_to(repo_root).parts)))
+
+
+_BRACED_VAR = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}")
+_UNBRACED_VAR = re.compile(r"\$CLAUDE_PLUGIN_ROOT(?![\w{])")
+_UNBRACED_PATH = re.compile(r"\$CLAUDE_PLUGIN_ROOT/")
+
+
+def _resource_variable_violations(files: list[Path], repo_root: Path = REPO_ROOT) -> list[str]:
+    bad = []
+    for path in files:
+        rel = path.relative_to(repo_root).as_posix()
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if _BRACED_VAR.search(line) or _UNBRACED_VAR.search(line):
+                bad.append(f"{rel}:{i}: plugin-root variable in a file the model Reads (never substituted there)")
+    return bad
+
+
+def _unbraced_variable_violations(files: list[Path], repo_root: Path = REPO_ROOT) -> list[str]:
+    bad = []
+    for path in files:
+        rel = path.relative_to(repo_root).as_posix()
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            # A README is for people: naming the variable in prose harms no one, a path built on it does.
+            if (_UNBRACED_PATH if path.name == "README.md" else _UNBRACED_VAR).search(line):
+                bad.append(f"{rel}:{i}: unbraced $CLAUDE_PLUGIN_ROOT (Claude Code substitutes only the braced form)")
+    return bad
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -244,6 +567,19 @@ def _string_violations(src_root: Path, repo_root: Path = REPO_ROOT) -> tuple[lis
         "the rule .claude/rules/releases-and-engine.md",
         "dir tests/e2e/** is scanned",
         "a new file tests/brand_new_helper.py",
+        "up one: ../../scripts/reinstall-tool.sh",
+        "with a variable $REPO/scripts/reinstall-tool.sh",
+        "with a braced variable ${NEXUS_REPO}/scripts/reinstall-tool.sh",
+        "from home ~/git/nexus/scripts/reinstall-tool.sh",
+        "from an install /opt/nexus/scripts/reinstall-tool.sh",
+        "a worktree /home/u/nexus-wt/feature/scripts/reinstall-tool.sh",
+        "a placeholder {receipt.source}/scripts/reinstall-tool.sh",
+        "a placeholder <checkout>/scripts/reinstall-tool.sh",
+        "/scripts/reinstall-tool.sh",
+        "a bare script mvnw-leased.sh runs the build",
+        "the project's AGENTS.md in the nexus repo",
+        "the nexus CHANGELOG.md",
+        "concrete RDR docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md",
     ],
 )
 def test_a_repo_only_path_is_flagged(text: str) -> None:
@@ -253,27 +589,51 @@ def test_a_repo_only_path_is_flagged(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "Rules: https://github.com/Hellblazer/nexus/blob/main/docs/collections.md.",
+        "Rules: https://github.com/Hellblazer/nexus/blob/main/docs/collections.md",
         "[tests/test_x.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_x.py)",
         "Write the RDR to docs/rdr/NNN-kebab-title.md",
+        "the project's docs/rdr/rdr-001-example.md",
         "the project's docs/guide.md and web/no-such-page.html",
         "genres: docs/exploration/ and docs/*.md",
         "a generic src/main/java/auth/AuthController.java example",
         "pytest tests/ -k x",
         "the service/PG pair and conexus/nexus store",
         "${CLAUDE_PLUGIN_ROOT}/resources/rdr/TEMPLATE.md",
-        "{receipt.source}/scripts/reinstall-tool.sh",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/x.py and hooks/scripts/y.py",
+        "{project_path}/scripts/deploy.sh",
+        "$HOME/scripts/deploy.sh and ~/scripts/deploy.sh",
+        "../skills/orchestration/SKILL.md",
+        "the project's own pyproject.toml and CHANGELOG.md",
+        "a user script run-the-thing.sh",
     ],
 )
 def test_text_a_user_can_open_or_that_is_not_a_repo_path_passes(text: str) -> None:
     assert not repo_only_paths(text), text
 
 
-def test_an_installed_users_own_file_of_the_same_name_is_still_a_repo_only_path_when_it_exists_here() -> None:
-    """The rule is about the nexus checkout's tree, so it follows what exists there."""
-    assert (REPO_ROOT / "docs" / "collections.md").is_file()
-    assert repo_only_paths("docs/collections.md")
-    assert not repo_only_paths("docs/this-page-does-not-exist-anywhere.md")
+def test_a_root_level_file_and_a_data_directory_are_judged_by_what_exists_here(tmp_path: Path) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "present.csv").write_text("")
+    (tmp_path / "AGENTS.md").write_text("")
+    assert repo_only_paths("load data/present.csv", tmp_path)
+    assert not repo_only_paths("load data/absent.csv", tmp_path)
+    assert repo_only_paths("the nexus AGENTS.md", tmp_path)
+    assert not repo_only_paths("the project's AGENTS.md", tmp_path)
+    assert not repo_only_paths("the nexus CHANGELOG.md", tmp_path), "absent here: nothing to point at"
+
+
+def test_a_url_with_punctuation_glued_on_is_flagged() -> None:
+    assert glued_url_tails("see https://github.com/Hellblazer/nexus/blob/main/docs/collections.md.")
+    assert not glued_url_tails("(https://example.com/a, then)")
+    assert not glued_url_tails("see https://github.com/Hellblazer/nexus/blob/main/docs/collections.md")
+    assert not glued_url_tails("see [the rules](https://github.com/Hellblazer/nexus/blob/main/docs/collections.md).")
+    assert not glued_url_tails("go to (https://example.com/a) now")
+
+
+def test_the_nexus_checkout_is_the_only_thing_that_makes_a_bare_script_name_repo_only() -> None:
+    names = _own_script_names()
+    assert {"mvnw-leased.sh", "reinstall-tool.sh", "build-gate-jar.sh", "commit_scope_audit.sh"} <= names
+    assert not {"__init__.py", "conftest.py", "install.sh", "nx_launch.py"} & names
 
 
 def test_the_markdown_scan_flags_a_planted_file_and_honours_the_allowlist(tmp_path: Path) -> None:
@@ -284,6 +644,21 @@ def test_the_markdown_scan_flags_a_planted_file_and_honours_the_allowlist(tmp_pa
     skill.write_text("ok line\nRun tests/x.sh now\n", encoding="utf-8")
     bad = _markdown_violations([skill], tmp_path)
     assert bad == ["conexus/skills/s/SKILL.md:2: tests/x.sh"], bad
+
+
+def test_an_allowlist_site_covers_only_the_line_its_marker_picks_out() -> None:
+    hits = [
+        Hit("f.md", 1, "scripts/x.sh", "when the project has scripts/x.sh, run it"),
+        Hit("f.md", 2, "scripts/x.sh", "now run scripts/x.sh unconditionally"),
+    ]
+    saved = dict(_ALLOWED)
+    try:
+        _ALLOWED["f.md"] = [Site("scripts/x.sh", "when the project has", "guarded")]
+        bad, used = _apply_allowed(hits)
+    finally:
+        _ALLOWED.clear()
+        _ALLOWED.update(saved)
+    assert bad == ["f.md:2: scripts/x.sh"] and used == {("f.md", 0)}
 
 
 def test_the_plugin_markdown_census_covers_all_four_plugins_and_skips_only_the_ledgers() -> None:
@@ -299,17 +674,26 @@ def test_the_plugin_markdown_census_covers_all_four_plugins_and_skips_only_the_l
     assert not any(f.startswith("conexus/evals/") and f != "conexus/evals/README.md" for f in files)
 
 
-def test_a_plugin_root_variable_in_running_text_of_a_resource_file_is_flagged(tmp_path: Path) -> None:
+def test_a_plugin_root_variable_in_a_file_the_model_reads_is_flagged_fenced_or_not(tmp_path: Path) -> None:
     f = tmp_path / "R.md"
     f.write_text(
         "Read `${CLAUDE_PLUGIN_ROOT}/skills/x/SKILL.md` first.\n"
         "```markdown\n[Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md)\n```\n"
-        "  ```markdown\n  indented ${CLAUDE_PLUGIN_ROOT} template\n  ```\n"
-        "also $CLAUDE_PLUGIN_ROOT here\n",
+        "also $CLAUDE_PLUGIN_ROOT here\n"
+        "a placeholder <plugin-root>/resources/x.md is fine\n",
         encoding="utf-8",
     )
     bad = _resource_variable_violations([f], tmp_path)
-    assert [b.split(":")[1] for b in bad] == ["1", "8"], bad
+    assert [b.split(":")[1] for b in bad] == ["1", "3", "5"], bad
+
+
+def test_the_unbraced_variable_is_flagged_and_the_braced_one_is_not(tmp_path: Path) -> None:
+    f = tmp_path / "S.md"
+    f.write_text("Run ${CLAUDE_PLUGIN_ROOT}/a.sh\nRun $CLAUDE_PLUGIN_ROOT/a.sh\nRun $CLAUDE_PLUGIN_ROOT_X\nuses $CLAUDE_PLUGIN_ROOT here\n", encoding="utf-8")
+    assert [b.split(":")[1] for b in _unbraced_variable_violations([f], tmp_path)] == ["2", "4"]
+    readme = tmp_path / "README.md"
+    readme.write_text("uses $CLAUDE_PLUGIN_ROOT here\nbut not $CLAUDE_PLUGIN_ROOT/a.sh\n", encoding="utf-8")
+    assert [b.split(":")[1] for b in _unbraced_variable_violations([readme], tmp_path)] == ["2"]
 
 
 def test_a_string_constant_scan_flags_code_text_and_skips_developer_text(tmp_path: Path) -> None:
@@ -326,12 +710,49 @@ def test_a_string_constant_scan_flags_code_text_and_skips_developer_text(tmp_pat
         '    """Attribute doc: docs/collections.md."""\n'
         '    raise RuntimeError("rules: docs/collections.md")\n'
         'HINT = f"read {x} then docs/collections.md"\n'
-        'OK = "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md"\n',
+        'OK = "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md"\n'
+        'JOINED = f"{x}/scripts/reinstall-tool.sh"\n'
+        'GLUED = "see https://github.com/Hellblazer/nexus/blob/main/docs/collections.md."\n',
         encoding="utf-8",
     )
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "reinstall-tool.sh").write_text("")
     bad, examined = _string_violations(pkg, tmp_path)
-    assert sorted(b.split(":")[1] for b in bad) == ["7", "8"], bad
+    assert sorted(b.split(":")[1] for b in bad) == ["10", "11", "7", "8"], bad
     assert examined >= 4
+
+
+def test_java_literals_are_found_and_comments_and_char_literals_are_not() -> None:
+    src = (
+        '// a comment with "docs/a.md"\n'
+        '/* block "docs/b.md" */\n'
+        'String a = "See docs/configuration.md" + \'"\' + "tail";\n'
+        'String t = """\n  text block docs/c.md\n  """;\n'
+        'char q = \'"\';\n'
+        'String e = "esc \\" docs/d.md";\n'
+    )
+    lits = _java_string_literals(src)
+    texts = [t for _, t in lits]
+    assert "See docs/configuration.md" in texts and "tail" in texts
+    assert any("docs/c.md" in t for t in texts) and any("docs/d.md" in t for t in texts)
+    assert not any("docs/a.md" in t or "docs/b.md" in t for t in texts)
+    assert dict((t, ln) for ln, t in lits)["See docs/configuration.md"] == 3
+
+
+def test_the_engine_scan_reads_java_strings_and_changelog_raise_messages(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "configuration.md").write_text("")
+    java = tmp_path / "service" / "src" / "main" / "java" / "A.java"
+    java.parent.mkdir(parents=True)
+    java.write_text('class A { String m = "See docs/configuration.md"; // docs/configuration.md\n}\n', encoding="utf-8")
+    xml = tmp_path / "service" / "src" / "main" / "resources" / "db" / "changelog" / "x.xml"
+    xml.parent.mkdir(parents=True)
+    xml.write_text("<sql>RAISE EXCEPTION 'halted; see docs/configuration.md', n;</sql>", encoding="utf-8")
+    hits, examined = _engine_hits(tmp_path)
+    assert sorted((h.rel.rsplit("/", 1)[-1], h.token) for h in hits) == [
+        ("A.java", "docs/configuration.md"), ("x.xml", "docs/configuration.md"),
+    ]
+    assert examined == 2
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -341,22 +762,41 @@ def test_a_string_constant_scan_flags_code_text_and_skips_developer_text(tmp_pat
 def test_plugin_markdown_names_no_repo_only_file() -> None:
     files = _plugin_markdown()
     print(f"plugin markdown: scanned {len(files)} files")
-    assert len(files) >= 80, f"only {len(files)} plugin markdown files: wrong root?"
+    assert len(files) >= 84, f"only {len(files)} plugin markdown files: wrong root?"
     bad = _markdown_violations(files)
     assert not bad, "\n".join(bad)
 
 
-def test_resource_files_use_the_plugin_root_variable_only_in_fenced_templates() -> None:
-    files = sorted((REPO_ROOT / "conexus" / "resources").rglob("*.md"))
-    print(f"resource files: scanned {len(files)}")
-    assert len(files) >= 8, f"only {len(files)} resource files: wrong root?"
-    fenced_uses = 0
-    for p in files:
-        lines = p.read_text(encoding="utf-8").splitlines()
-        fenced = _fenced_lines(lines)
-        fenced_uses += sum(1 for i in fenced if _PLUGIN_ROOT_VAR.search(lines[i]))
-    assert fenced_uses >= 2, "no fenced agent-file template names the variable: the fence rule is unexercised"
+def test_plugin_files_that_are_not_markdown_or_python_name_no_repo_only_file() -> None:
+    files = _plugin_text_files()
+    print(f"plugin text files: scanned {len(files)} files")
+    assert len(files) >= 28, f"only {len(files)} plugin text files: wrong root?"
+    bad, _ = _apply_allowed(_plugin_text_hits())
+    assert not bad, "\n".join(bad)
+
+
+def test_packaged_shell_and_markdown_under_src_nexus_name_no_repo_only_file() -> None:
+    hits, n = _packaged_text_hits()
+    print(f"src/nexus shell and markdown: scanned {n} files")
+    assert n >= 8, f"only {n} files: wrong root?"
+    bad, _ = _apply_allowed(hits)
+    assert not bad, "\n".join(bad)
+
+
+def test_resource_files_hold_no_plugin_root_variable() -> None:
+    files = _resource_files()
+    print(f"files the model Reads: scanned {len(files)}")
+    assert len(files) >= 16, f"only {len(files)} Read-opened files: wrong root?"
+    assert any(p.name == "CONTEXT_PROTOCOL.md" for p in files)
     bad = _resource_variable_violations(files)
+    assert not bad, "\n".join(bad)
+
+
+def test_no_plugin_markdown_uses_the_unbraced_plugin_root_variable() -> None:
+    files = _plugin_markdown() + list(map(lambda r: REPO_ROOT / r, _DEFERRED_FILES))
+    print(f"unbraced-variable scan: {len(files)} files")
+    assert len(files) >= 84
+    bad = _unbraced_variable_violations(files)
     assert not bad, "\n".join(bad)
 
 
@@ -370,12 +810,12 @@ def test_mcp_tool_and_parameter_descriptions_name_no_repo_only_file() -> None:
         mod = importlib.import_module(module_path)
         for name, tool in sorted(mod.mcp._tool_manager._tools.items()):
             tools += 1
-            bad += [f"{server}.{name}: {t}" for t in repo_only_paths(tool.description or "")]
+            bad += [f"{server}.{name}: {t}" for t in scan_tokens(tool.description or "")]
             for pname, schema in (tool.parameters.get("properties") or {}).items():
                 params += 1
-                bad += [f"{server}.{name}({pname}): {t}" for t in repo_only_paths(schema.get("description") or "")]
+                bad += [f"{server}.{name}({pname}): {t}" for t in scan_tokens(schema.get("description") or "")]
     print(f"mcp: scanned {tools} tool descriptions and {params} parameter descriptions")
-    assert tools >= 50 and params >= 150, (tools, params)
+    assert tools >= 50 and params >= 237, (tools, params)
     assert not bad, "\n".join(bad)
 
 
@@ -393,47 +833,144 @@ def test_cli_help_names_no_repo_only_file() -> None:
         texts = [("help", cmd.help or ""), ("short_help", cmd.short_help or ""), ("epilog", cmd.epilog or "")]
         texts += [(f"--{p.name}", getattr(p, "help", "") or "") for p in cmd.params]
         for where, text in texts:
-            # Docstring examples (``\b`` blocks) show a path the user supplies, so only the prose around it counts.
-            bad.extend(f"{' '.join(path)} {where}: {t}" for t in repo_only_paths(text))
+            # A ``\b`` example block is scanned like the prose around it: an example that names a repo file
+            # misleads as a sentence does (the examples in the tree use generic paths such as src/app/main.py).
+            bad.extend(f"{' '.join(path)} {where}: {t}" for t in scan_tokens(text))
         if isinstance(cmd, click.Group):
             for name, sub in sorted(cmd.commands.items()):
                 walk(sub, [*path, name])
 
     walk(main, ["nx"])
     print(f"cli: scanned {seen} commands")
-    assert seen >= 200, f"only {seen} commands: the click tree did not load"
+    assert seen >= 263, f"only {seen} commands: the click tree did not load"
     assert not bad, "\n".join(bad)
 
 
 def test_no_string_constant_in_src_nexus_names_a_repo_only_file() -> None:
-    bad, examined = _string_violations(REPO_ROOT / "src" / "nexus")
-    skipped_files = sorted(_WHOLE_FILE_ALLOWED)
-    print(f"src/nexus: examined {examined} string constants, skipped whole files {skipped_files}, "
-          f"{sum(map(len, _ALLOWED.values()))} allowlisted tokens")
-    assert examined >= 20000, f"only {examined} string constants examined: wrong root?"
+    hits, examined = _string_hits(REPO_ROOT / "src" / "nexus")
+    bad, _ = _apply_allowed(hits)
+    print(f"src/nexus: examined {examined} string constants, "
+          f"{sum(map(len, _ALLOWED.values()))} allowlisted sites")
+    assert examined >= 54000, f"only {examined} string constants examined: wrong root?"
     assert not bad, "\n".join(bad)
+
+
+def test_no_string_constant_in_the_plugins_python_names_a_repo_only_file() -> None:
+    """Hook and launcher text reaches the user's model too (the SessionStart and SubagentStart injections)."""
+    hits: list[Hit] = []
+    examined = 0
+    for d in ("conexus", "sn", "prose-edit"):
+        found, n = _string_hits(REPO_ROOT / d)
+        hits += found
+        examined += n
+    bad, _ = _apply_allowed(hits)
+    print(f"plugin python: examined {examined} string constants")
+    assert examined >= 6200, f"only {examined} string constants examined: wrong roots?"
+    assert not bad, "\n".join(bad)
+
+
+def test_the_engines_strings_name_no_repo_only_file() -> None:
+    """A boot refusal reaches an operator with a PyPI install and no checkout (ServiceRoleBypassRlsCheck, PgVersionFloor)."""
+    hits, examined = _engine_hits()
+    bad, _ = _apply_allowed(hits)
+    print(f"engine: examined {examined} string literals and RAISE messages")
+    assert examined >= 11600, f"only {examined} engine strings examined: wrong root?"
+    assert not bad, "\n".join(bad)
+
+
+@functools.cache
+def _every_file_hit() -> list[Hit]:
+    hits = _markdown_hits(_plugin_markdown())
+    hits += _plugin_text_hits()
+    hits += _packaged_text_hits()[0]
+    hits += _string_hits(REPO_ROOT / "src" / "nexus")[0]
+    for d in ("conexus", "sn", "prose-edit"):
+        hits += _string_hits(REPO_ROOT / d)[0]
+    hits += _engine_hits()[0]
+    return hits
 
 
 def test_every_allowlist_entry_is_still_needed() -> None:
     """A stale entry hides nothing today and a future use of the path tomorrow."""
-    for rel, reason in _WHOLE_FILE_ALLOWED.items():
-        assert (REPO_ROOT / rel).is_file() and reason.strip(), rel
-    for rel, entries in _ALLOWED.items():
-        path = REPO_ROOT / rel
-        assert path.is_file(), rel
-        found: set[str] = set()
-        if path.suffix == ".py":
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            skip = _developer_text_ids(tree)
-            for n in ast.walk(tree):
-                if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skip:
-                    found.update(repo_only_paths(n.value))
-        else:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                found.update(repo_only_paths(line))
-        for token, why in entries.items():
-            assert why.strip(), (rel, token)
-            assert token in found, f"{rel}: allowlisted {token!r} is no longer there"
+    _, used = _apply_allowed(_every_file_hit())
+    for rel, sites in _ALLOWED.items():
+        assert (REPO_ROOT / rel).is_file(), rel
+        for i, site in enumerate(sites):
+            assert site.reason.strip() and len(site.reason.split()) >= 3, (rel, site.token)
+            assert (rel, i) in used, f"{rel}: allowlisted {site.token!r} (marker {site.marker!r}) is no longer there"
+
+
+# --------------------------------------------------------------------------------------------------------------
+# A URL in help text must survive click's wrapping
+# --------------------------------------------------------------------------------------------------------------
+
+_HELP_URL = re.compile(r"https?://[^\s)\"'<>]+")
+
+
+def _intact_url(raw: str) -> str:
+    """The URL as an author meant it: a sentence's closing period or comma is not part of it."""
+    return raw.rstrip(".,;:")
+
+
+def _wrapped_urls(cmd: "click.Command", path: list[str], width: int = 80) -> list[str]:
+    """URLs in *cmd*'s help, epilog and option help that the rendered ``--help`` at *width* columns breaks."""
+    import click  # noqa: PLC0415
+
+    ctx = click.Context(cmd, info_name=path[-1], terminal_width=width, max_content_width=width)
+    rendered = cmd.get_help(ctx)
+    texts = [cmd.help or "", cmd.short_help or "", cmd.epilog or ""]
+    texts += [getattr(p, "help", "") or "" for p in cmd.params]
+    bad = []
+    for text in texts:
+        for m in _HELP_URL.finditer(text):
+            url = _intact_url(m.group(0))
+            if url not in rendered:
+                bad.append(f"{' '.join(path)}: {url}")
+    return bad
+
+
+def test_a_url_that_wraps_in_rendered_help_is_flagged() -> None:
+    import click  # noqa: PLC0415
+
+    @click.command()
+    @click.option("--a-long-option-name-here", help="Rules: see https://github.com/Hellblazer/nexus/blob/main/docs/collections.md for the rules.")
+    def wraps(a_long_option_name_here: str) -> None:
+        """Does a thing."""
+
+    @click.command(epilog="\b\nhttps://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md")
+    def holds() -> None:
+        """Does a thing."""
+
+    assert _wrapped_urls(wraps, ["nx", "wraps"]), "an option help URL wraps at 80 columns"
+    assert not _wrapped_urls(holds, ["nx", "holds"])
+
+
+def test_every_url_in_cli_help_renders_unbroken_at_80_columns() -> None:
+    """A wrapped URL pastes into a browser broken (``docs/collection`` newline ``s.md``). Put it in an epilog or a
+    ``\\b`` block, which click does not rewrap."""
+    import click  # noqa: PLC0415
+
+    from nexus.cli import main  # noqa: PLC0415
+
+    bad: list[str] = []
+    checked = urls = 0
+
+    def walk(cmd: click.Command, path: list[str]) -> None:
+        nonlocal checked, urls
+        checked += 1
+        urls += sum(
+            len(_HELP_URL.findall(t))
+            for t in [cmd.help or "", cmd.short_help or "", cmd.epilog or "", *[getattr(p, "help", "") or "" for p in cmd.params]]
+        )
+        bad.extend(_wrapped_urls(cmd, path))
+        if isinstance(cmd, click.Group):
+            for name, sub in sorted(cmd.commands.items()):
+                walk(sub, [*path, name])
+
+    walk(main, ["nx"])
+    print(f"cli help urls: {urls} urls over {checked} commands")
+    assert checked >= 263 and urls >= 17, (checked, urls)
+    assert not bad, "\n".join(bad)
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -475,29 +1012,21 @@ def test_every_github_link_this_lint_asks_for_names_something_in_the_tree() -> N
             for n in ast.walk(tree)
             if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skip
         ]
+    for path in sorted((REPO_ROOT / "service" / "src" / "main" / "java").rglob("*.java")):
+        texts += [
+            (f"{path.relative_to(REPO_ROOT).as_posix()}:{ln}", t)
+            for ln, t in _java_string_literals(path.read_text(encoding="utf-8"))
+        ]
     n_links = sum(len(_GITHUB_TARGET.findall(t)) for _, t in texts)
     print(f"github links: {n_links} checked")
-    assert n_links >= 60, f"only {n_links} links: the pattern saw nothing"
+    assert n_links >= 72, f"only {n_links} links: the pattern saw nothing"
     missing = _missing_github_targets(texts)
     assert not missing, "\n".join(missing)
 
 
-def test_no_string_constant_in_the_plugins_python_names_a_repo_only_file() -> None:
-    """Hook and launcher text reaches the user's model too (the SessionStart and SubagentStart injections)."""
-    bad: list[str] = []
-    examined = 0
-    for d in ("conexus", "sn", "prose-edit"):
-        found, n = _string_violations(REPO_ROOT / d)
-        bad += found
-        examined += n
-    print(f"plugin python: examined {examined} string constants")
-    assert examined >= 5000, f"only {examined} string constants examined: wrong roots?"
-    assert not bad, "\n".join(bad)
-
-
 def test_the_credential_guard_deny_message_links_the_wrapper_it_names() -> None:
     """The guard ships to every user of the plugin; the wrapper it names exists only in the nexus repo, so the
-    message carries the GitHub link (a bare file name reads as something to run; no path rule sees it)."""
+    message carries the GitHub link (a bare file name reads as something to run; the bare-name rule sees it too)."""
     src = (REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "credential_print_guard.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     messages = [
@@ -510,9 +1039,24 @@ def test_the_credential_guard_deny_message_links_the_wrapper_it_names() -> None:
     assert "https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py" in messages[0]
 
 
+def test_an_installed_users_own_file_of_the_same_name_is_still_a_repo_only_path_when_it_exists_here(tmp_path: Path) -> None:
+    """The rule is about the nexus checkout's tree, so it follows what exists there. Built in a scratch root so a
+    rename of any real page cannot fail this for the wrong reason."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "collections.md").write_text("")
+    assert repo_only_paths("docs/collections.md", tmp_path)
+    assert not repo_only_paths("docs/this-page-does-not-exist-anywhere.md", tmp_path)
+
+
 def test_every_deferral_still_has_something_to_defer() -> None:
     for rel, why in _DEFERRED_FILES.items():
         assert why.strip(), rel
         path = REPO_ROOT / rel
         assert path.is_file(), rel
         assert _markdown_violations([path]), f"{rel} is clean now: delete its _DEFERRED_FILES entry"
+
+
+def test_every_deferral_names_a_bead_and_a_release() -> None:
+    for rel, why in _DEFERRED_FILES.items():
+        assert re.search(r"\bnexus-[a-z0-9]{4,}\b", why), f"{rel}: the deferral names no bead"
+        assert re.search(r"(?i)\brelease\b", why), f"{rel}: the deferral names no release by which it ends"

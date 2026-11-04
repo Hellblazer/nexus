@@ -188,6 +188,39 @@ def test_a_checkout_built_host_leaves_a_registry_current_alone(real_plan) -> Non
     assert pdf_stack.rebuild_stale_installer() is None and real_plan.builds == []
 
 
+def test_a_checkout_built_host_is_told_the_checkouts_script_as_one_quoted_word(real_plan, tmp_path) -> None:
+    """nexus-z7ddd: the remedy is an ABSOLUTE path (a relative one means nothing to a user who is not in the
+    checkout), and a checkout path with a space still pastes as one word. Deleting the prefix, or the quoting,
+    fails this."""
+    import dataclasses
+    import shlex
+
+    checkout = tmp_path / "my checkout"
+    real_plan.host = dataclasses.replace(
+        _receipt(constraints="applied", source_kind="directory"), source=str(checkout)
+    )
+    plan = pdf_stack.install_plan()
+    assert plan.kind == "directory"
+    assert plan.command == f"NX_REINSTALL_EXTRAS=pdf {shlex.quote(str(checkout) + '/scripts/reinstall-tool.sh')}"
+    assert shlex.split(plan.command) == ["NX_REINSTALL_EXTRAS=pdf", f"{checkout}/scripts/reinstall-tool.sh"]
+    assert str(checkout) in plan.why
+
+
+def test_the_refusal_for_a_newer_checkout_built_current_quotes_the_script_path(bed, tmp_path) -> None:
+    """nexus-z7ddd: the same quoting on the second place the checkout script is printed."""
+    import dataclasses
+    import shlex
+
+    checkout = tmp_path / "my checkout"
+    bed.current = dataclasses.replace(
+        _receipt(constraints="applied", version="10.0.0", source_kind="directory"), source=str(checkout)
+    )
+    with pytest.raises(pdf_stack.PdfStackMissingError) as err:
+        pdf_stack._install_generation()
+    assert f"Run: NX_REINSTALL_EXTRAS=pdf {shlex.quote(str(checkout) + '/scripts/reinstall-tool.sh')}" in str(err.value)
+    assert bed.builds == [], "nothing was written"
+
+
 @pytest.mark.parametrize("current_version", ["9.9.8", "10.0.0"])
 def test_a_host_whose_version_differs_from_current_is_not_this_rungs(real_plan, current_version) -> None:
     """The process runs 9.9.9 and `current` names another release: the ordinary upgrade replaces an

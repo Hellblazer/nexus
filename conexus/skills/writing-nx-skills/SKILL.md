@@ -129,7 +129,7 @@ This applies to `--description`, `--notes`, `--design`, and any flag that accept
 - [ ] Added to [conexus/registry.yaml](https://github.com/Hellblazer/nexus/blob/main/conexus/registry.yaml) (including `model_summary` for agent skills)
 - [ ] Named in the orchestration skill's `reference.md` § Skill Routing
 
-**Verify before committing:**
+**Verify before committing** (from a nexus checkout, where [tests/test_plugin_structure.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py) lives):
 ```bash
 uv run pytest <path to test_plugin_structure.py> -k "skill_name" -v
 ```

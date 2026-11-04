@@ -107,7 +107,7 @@ A valid relay MUST have:
 
 ### Input Artifacts
 - nx store: decision-architect-auth-redesign
-- nx memory: Delos/phase2-auth.md
+- nx memory: project Delos, title phase2-auth.md
 - Files: src/main/java/auth/AuthController.java, src/main/java/auth/TokenValidator.java
 
 ### Deliverable
@@ -141,13 +141,13 @@ Coverage report with gap identification
 
 ## Usage in Skills
 
-Skills should reference this template rather than inline it:
+Skills should reference this template rather than inline it. `<plugin-root>` in the block stands for the plugin-root variable, spelled exactly as the files in [../../agents/](../../agents/) spell it. This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
 
 ```markdown
 ## Agent Invocation
 
 Use the Agent tool with standardized relay format.
-See [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
+See [RELAY_TEMPLATE.md](<plugin-root>/resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
 ```
 
 ## Usage in Agents

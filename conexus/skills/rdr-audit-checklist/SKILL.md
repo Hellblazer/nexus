@@ -81,13 +81,13 @@ This invariant was verified in RDR-067 Phase 1b (T2 `nexus_rdr/067-spike-disposi
 
 The skill embeds the pinned canonical prompt at dispatch time. The prompt ships with the plugin at `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/AUDIT-PROMPT.md`, so it is there on an install whose T2 holds no `nexus_rdr` entries. A T2 entry of the same name overrides the shipped text:
 
-1. `Read` `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/AUDIT-PROMPT.md`. Then try `mcp__plugin_conexus_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` (stored with no `ttl`, i.e. permanent; reference by stable title only — do not pass any runtime numeric id as a parameter). If it returns an entry, that entry replaces the shipped text; if it reports no such entry, use the shipped text. Either way the prompt is everything below the `PROMPT TEXT` line.
+1. `Read` `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/AUDIT-PROMPT.md`. Then try `mcp__plugin_conexus_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` (stored with no `ttl`, i.e. permanent; reference by stable title only — do not pass any runtime numeric id as a parameter). If it returns an entry, that entry replaces the shipped text; if it reports no such entry, use the shipped text. Either way the prompt is everything below the marker heading in the file (the one that says the text below it is what the skill embeds).
 2. Substitute `{project}` with the derived project name (bare name, for display)
 3. Substitute `{project_path}` with the resolved absolute worktree path (see §Project Worktree Path Resolution) — this MUST be an absolute path with no tilde, no `$HOME`, no relative components. The canonical prompt uses `{project_path}` wherever it Globs evidence files.
 4. Substitute `{transcript_excerpts}` with the pre-step block (empty if fast path)
 5. Pass the substituted text as the subagent's task body
 
-Do NOT inline the canonical prompt text into this skill file — the shipped resource is the single source of truth, and a T2 entry under the stable title is the override. Changing the default prompt is an edit to the resource file; trying a variant is a T2 `memory_put` upsert.
+Do NOT inline the canonical prompt text into this skill file — the shipped resource is the single source of truth, and a T2 entry under the stable title is the override. Changing the default prompt for everyone is an edit to the resource file. The T2 entry exists for trying a variant on one machine before that edit: it wins over the shipped file for as long as it exists, so a stored copy goes stale when the shipped text changes. When the resource file changes, re-`memory_put` the new body over the entry (or delete the entry), and when you notice an entry that differs from the shipped file only by older text, do the same.
 
 ## Behavior — Audit Dispatch (default mode)
 

@@ -76,10 +76,20 @@ _REPO_PATH = re.compile(
     r"(?<![\w/.:-])(?:\.{1,2}/)*(?:tests|scripts|src/nexus|service|\.claude/rules)/[\w./*-]*[\w*-]"
 )
 
-#: Deliberate repo paths: file (from the repo root) -> {path: why it stays}. Empty since nexus-z7ddd: every site
-#: became a GitHub link or inline text, and ``tests/test_repo_only_references_lint.py`` now holds the wider rule
-#: (all plugin markdown, resource files, MCP and CLI text) with its own reasoned allowlist.
-_REPO_PATH_ALLOWED: dict[str, dict[str, str]] = {}
+#: Deliberate repo paths: file (from the repo root) -> {path: why it stays}. Since nexus-z7ddd every site is a
+#: GitHub link or inline text except the guarded conditionals below, which name the path as the detection key
+#: ("when the project has X"): without it the agent could not tell which project it is in.
+#: ``tests/test_repo_only_references_lint.py`` holds the wider rule (all plugin markdown, resource files, MCP and CLI
+#: text) with its own line-level allowlist.
+_REPO_PATH_ALLOWED: dict[str, dict[str, str]] = {
+    "conexus/skills/composition-probe/SKILL.md": {
+        "scripts/mvnw-leased.sh": "named under 'when the project has that script' (the nexus repo), with a ./mvnw fallback",
+        "service/mvnw": "named inside the same nexus-repo clause, as what the script wraps",
+    },
+    "conexus/commands/continuation.md": {
+        "tests/e2e/lib/commit_scope_audit.sh": "guarded: 'when the project has' the script, with a by-hand fallback",
+    },
+}
 
 #: Plugin file names an agent or command body might name bare (``registry.yaml``, ``reference.md``): with no base
 #: directory a bare name is unanchored. Common names any project has are left out.
