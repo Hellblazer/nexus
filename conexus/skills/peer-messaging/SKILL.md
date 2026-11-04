@@ -25,7 +25,7 @@ Check the rows in order; the first that fits wins.
 |---|---|
 | A step your human carries between instances: a deploy, a release, a tag | An explicit relay to your human naming the entry to read and the action wanted back. A mailbox request may record it; it never replaces the relay. |
 | Content longer than a few lines: a report, findings, a diff summary | `memory_put` (T2), then send the project and title on one of the channels below |
-| A status question: what a peer is doing, or a roll call | Where the sessions keep a threads board in T2, read it instead of mailing the session: `memory_get(project="threads", title="")` lists the sessions, then `memory_get` the one you want. Mail only when it has no entry or the entry is stale. |
+| A status question: what a peer is doing, or a roll call | Where the sessions keep a threads board in T2, read it instead of mailing the session: `memory_get(project="threads", title="")` lists the sessions, then `memory_get` the one you want. Mail only when the board has no entry, or one that predates the work you are asking about. |
 | A request that must get an answer, or a peer that is busy, offline, on another machine, or may `/clear` | A mailbox request (shape below) |
 | A quick exchange with a peer `ListAgents` shows on this machine | `SendMessage(to="<name>")` |
 | Know when a local peer finishes its turn | `SendMessage(to="<name>", notify_when_idle=true)` with no message |
