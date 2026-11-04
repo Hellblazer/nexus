@@ -408,6 +408,11 @@ the script, so recall alone does not make the answer better than the script's.
   (`cust-0035.md` → "Cust 0035"), code chunks are titled `rel_path:Lstart-Lend`,
   PDF and markdown titles are human-readable. Step 1's `entity_key` covers
   store_put and configured collections; md/pdf extraction is deferred (Step 1).
+  The stamp does not widen what `resolve` finds: `resolve` matches titles only
+  (`BY_VALUES = ("title",)`), so a record resolves only where its title equals
+  its key, and a caller-set `entity_key` that differs from the title is read by
+  nothing until the conditional linker or a meta-key filter exists
+  (147-research-11).
 - [ ] **#2 A post-store batch hook can create catalog links** — **Status**: To
   re-verify on the PG engine (Step 2, only if the linker is built). The June
   verification reasoned about the T2 daemon's `asyncio.Lock` and an `fcntl` lock
@@ -535,8 +540,14 @@ visible in the run summary rather than silent.
 example `entity.collections: {"knowledge__herb-*": "CUST-\\d{4}|eid_[0-9a-f]{8}"}`,
 and an optional caller-set `entity_key` on `store_put`, stamped into catalog
 document meta (never chunk metadata, per RDR-236). One helper,
-`classify_entity(doc) -> key | None`, serves both the repair and the linker. The
-same patterns find key tokens in evidence text. Code is excluded; md/pdf
+`classify_entity(doc) -> key | None`, serves the store_put stamp and the linker.
+The same patterns find key tokens in evidence text
+(`find_key_tokens(text, collection)`), which is what the repair uses. The glob
+therefore serves two roles: it names the collections whose records get a title
+stamp, and the collections whose text the repair scans for keys. The repair
+looks the pattern up by each anchor's collection, so the collection holding the
+referencing artifacts (HERB: the Slack messages) must be configured as well as
+the one holding the records (147-research-11). Code is excluded; md/pdf
 extractors are deferred (Step 1).
 
 **Entity linker (Step 2, conditional).** If built:
