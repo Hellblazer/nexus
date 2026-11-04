@@ -22,7 +22,9 @@ import pytest
 import nexus.mcp.core as mcp_core
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.plans import runner
+from nexus.plans.continuation_envelope import _harvest_hydrated_bundles
 from nexus.plans.cost_estimate import OperatorPriceTable, estimate_plan_cost
+from nexus.plans.coverage_ledger import _hits
 from nexus.plans.document_confinement import (
     CONFINED_TOOLS,
     CONFINEMENT_MARKER,
@@ -461,21 +463,15 @@ _RESOLVE_SHAPED = {
 
 
 def test_the_continuation_envelope_pairs_each_id_with_the_document_that_contributed_it():
-    from nexus.plans.continuation_envelope import _harvest_hydrated_bundles
-
     (bundle,) = _harvest_hydrated_bundles([_RESOLVE_SHAPED], None)
     assert [it["tumbler"] for it in bundle["items"]] == ["1.1.1", "1.1.1", "1.1.2"]
 
 
 def test_the_repair_hits_pair_each_id_with_the_document_that_contributed_it():
-    from nexus.plans.coverage_ledger import _hits
-
     assert [h.tumbler for h in _hits(_RESOLVE_SHAPED)] == ["1.1.1", "1.1.1", "1.1.2"]
 
 
 def test_a_check_steps_evidence_source_pairs_each_id_with_the_document_that_contributed_it():
-    from nexus.plans import runner
-
     resolved = {"ids": ["c1", "c2", "c3"]}
     out = runner._with_evidence_source(
         "operator_check", {"ids": "$step1.ids"}, resolved, [_RESOLVE_SHAPED],
