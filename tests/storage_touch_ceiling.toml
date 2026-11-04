@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5124
+provisioned_tests = 5126
 tolerance_tests = 0
+# 5124 -> 5126 (nexus-dm617, 2026-11-04): +2. tests/test_rename_vs_tuple_tasks.py is two real-engine tests of the default
+# (tuples) aspect producer across a collection rename: the deterministic journey and the threaded race. Both need a real
+# tenant, because the subject is what the engine's rename does to queued tasks while the Python producer writes them.
 # 5123 -> 5124 (nexus-6pfgb.43, 2026-11-03): +1. tests/test_retire_keys.py runs the verb end to end against a real engine tenant (dry run, wrong-tenant refusal, apply, last_written_at, rerun).
 # 5122 -> 5123 (nexus-fai28 fix round 1, 2026-11-04): +1. tests/test_fai28_recovery_entity_key.py has one real-engine test: a recovery import stamps the
 # exported entity key into the catalog entry's meta, which needs a real catalog to read back.
