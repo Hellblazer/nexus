@@ -15,8 +15,11 @@ The engine holds three admin routes under ``/v1/admin/chunk-keys``:
 Nothing calls them on its own. This verb is the operator's way in, per tenant and per install; the upgrade-ladder rung
 that would run the sweep on every install ships later, after a cloud dry run has been read.
 
-``--tenant`` names the tenant the operator MEANS. A credential is bound to one tenant, so the verb reads the tenant
-back from the dry run and refuses to go on when it is another one: a sweep of the wrong tenant is not undone.
+``--tenant`` names the tenant to sweep and is sent to the engine. A credential bound to that tenant sweeps it; the
+ROOT credential may name any registered tenant (the engine runs the call in that tenant's scope and records it in
+``gc_audit``); another credential naming a different tenant is refused. The verb then checks that the engine's answer
+names the tenant asked for, before any apply: an engine that predates the target field ignores it and answers for the
+credential's own tenant, and a sweep of the wrong tenant is not undone. That case is one line and exit 4.
 
 Pacing: ``--max-rps`` holds every request the verb sends to that rate (the request gate, nexus-ldf2s). Run against
 the cloud, start with ``--max-rps 2``. An apply is a write and goes through the production-write guard
@@ -32,8 +35,8 @@ import click
 
 from nexus.db.http_vector_client import VectorServiceError
 
-#: Exit codes. 1 is a failed call, 2 a usage error or the wrong tenant, 3 a precondition the engine counts that is
-#: neither zero nor accepted, 4 an engine that predates the routes, 5 a stalled apply.
+#: Exit codes. 1 is a failed call, 2 a usage error or a tenant the engine refuses, 3 a precondition the engine counts
+#: that is neither zero nor accepted, 4 an engine that predates the routes or the target tenant, 5 a stalled apply.
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
@@ -75,6 +78,14 @@ def parse_accept(values: tuple[str, ...]) -> dict[str, int]:
     return out
 
 
+def _old_engine_tenant(asked: str, answered: object) -> NoReturn:
+    """The engine answered for another tenant than the one asked for: it predates the ``tenant`` field."""
+    _fail(
+        f"This engine cannot sweep another tenant (it answered for tenant {answered!r}, not {asked!r}): upgrade the "
+        f"engine, or run this with {asked!r}'s own NX_SERVICE_TOKEN.", EXIT_NO_ROUTE,
+    )
+
+
 def _engine_error(exc: VectorServiceError) -> NoReturn:
     if exc.code == 404:
         _fail(
@@ -84,6 +95,8 @@ def _engine_error(exc: VectorServiceError) -> NoReturn:
     body = exc.engine_body or {}
     reason = exc.reason or body.get("reason")
     lines = [f"The engine refused: {body.get('error') or exc}"]
+    if reason in ("tenant_mismatch", "unknown_tenant"):
+        _fail("\n".join(lines), EXIT_USAGE)
     if reason == "sweep_preconditions_not_met":
         report = body.get("report") or {}
         pre = report.get("preconditions") or {}
@@ -165,16 +178,13 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
     try:
         report = client.chunk_keys_sweep(
             dry_run=True, accept=accept, collection=collection, batch_size=batch_size,
-            measure_batch=None if not apply else False,
+            measure_batch=None if not apply else False, tenant=tenant,
         )
     except VectorServiceError as exc:
         _engine_error(exc)
     if report.get("tenant") != tenant:
-        _fail(
-            f"The credential in use is bound to tenant {report.get('tenant')!r}, not {tenant!r}. A token is bound to "
-            f"one tenant: run this with {tenant!r}'s NX_SERVICE_TOKEN.", EXIT_USAGE,
-        )
-    out: dict[str, Any] = {"dry_run": not apply, "report": report}
+        _old_engine_tenant(tenant, report.get("tenant"))
+    out: dict[str, Any] = {"tenant": tenant, "dry_run": not apply, "report": report}
     if not as_json:
         _render_dry_run(report, tenant=tenant)
     if not apply:
@@ -199,10 +209,12 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
         try:
             last = client.chunk_keys_sweep(
                 dry_run=False, accept=accept, collection=collection, batch_size=batch_size,
-                max_batches=_MAX_BATCHES, budget_seconds=_BUDGET_SECONDS, resume=resume,
+                max_batches=_MAX_BATCHES, budget_seconds=_BUDGET_SECONDS, resume=resume, tenant=tenant,
             )
         except VectorServiceError as exc:
             _engine_error(exc)
+        if last.get("tenant") != tenant:
+            _old_engine_tenant(tenant, last.get("tenant"))
         calls += 1
         n = int(last.get("rows_swept", 0))
         swept += n
@@ -298,8 +310,9 @@ def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) ->
 
 @click.command("retire-keys")
 @click.option("--tenant", metavar="ID", default=None,
-              help="The tenant to sweep. Required for the sweep; the verb refuses if the credential in use is bound "
-                   "to another tenant.")
+              help="The tenant to sweep. Required for the sweep. The root credential may name any registered tenant; "
+                   "another credential may name only its own. The verb checks the engine's answer names this tenant, "
+                   "and refuses (exit 4) an engine too old to sweep another tenant.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False,
               help="Count only (the default). Spelled out so a script says what it means.")
 @click.option("--apply", "apply", is_flag=True, default=False,
@@ -344,8 +357,8 @@ def retire_keys_cmd(tenant: str | None, dry_run: bool, apply: bool, accept: tupl
     --add-check: the database then refuses a write that carries a key outside the allow-list, an unequal hash or
     model, or a quarantined_by without quarantined_at; and, because a NOT VALID CHECK is evaluated on every new row
     version, ANY update of a row that still holds a retired key (the rows the sweep leaves in a blocked collection,
-    which the output names) until it is fixed. Exit codes: 0 ok; 1 a failed call; 2 usage or the wrong tenant; 3 a
-    precondition; 4 an engine without the routes; 5 a stalled apply.
+    which the output names) until it is fixed. Exit codes: 0 ok; 1 a failed call; 2 usage, or a tenant the engine
+    refuses; 3 a precondition; 4 an engine without the routes, or too old to sweep another tenant; 5 a stalled apply.
     """
     from nexus.db import request_gate  # noqa: PLC0415 — command-local
 

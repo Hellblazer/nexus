@@ -5285,9 +5285,17 @@ class HttpVectorClient:
     def chunk_keys_sweep(
         self, *, dry_run: bool = True, accept: Mapping[str, int] | None = None, collection: str | None = None,
         batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
-        measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None,
+        measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None, tenant: str | None = None,
     ) -> dict:
-        """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant (nexus-6pfgb.43).
+        """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant, or of ``tenant`` when the
+        credential is the root one (nexus-6pfgb.43).
+
+        ``tenant`` names the target. A credential bound to that tenant sweeps it as before; the root credential may name
+        another registered tenant (the engine runs the call in that tenant's scope and records it in ``gc_audit``); any
+        other credential naming another tenant is 403 ``tenant_mismatch``, an unregistered name is 422
+        ``unknown_tenant``. The answer's ``tenant`` is the tenant that was swept: an engine that predates the field
+        ignores ``tenant`` and answers for the credential's own tenant, so a caller that asked for one tenant must
+        compare the answer's ``tenant`` with it before it goes on (``nx t3 retire-keys`` does, before any apply).
 
         The allow-list, the bypass prefixes and the quarantine implication ride in the body, rendered from the key
         table (:func:`nexus.tables.chunk_metadata_keys.engine_plan`): the engine cannot name the ROW keys, so it pins
@@ -5318,6 +5326,8 @@ class HttpVectorClient:
         from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
 
         body: dict[str, Any] = {**engine_plan(), "dry_run": dry_run}
+        if tenant is not None:
+            body["tenant"] = tenant
         if accept:
             body["accept"] = {str(name): int(rows) for name, rows in accept.items()}
         if resume:

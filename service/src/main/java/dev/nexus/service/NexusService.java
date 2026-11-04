@@ -814,7 +814,8 @@ public final class NexusService {
                         pgVectorRepository == null ? null
                             : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository),
                         () -> chunkConstraintAdmin,
-                        tokenStore::listKnownTenants));
+                        tokenStore::listKnownTenants,
+                        catalogRepo::recordGcAudit));
         chunkKeysCtx.getFilters().addAll(authFilter);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered

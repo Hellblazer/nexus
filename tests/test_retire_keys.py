@@ -100,6 +100,18 @@ class TestWire:
         assert "measure_batch" not in body
         guard.assert_called_once()
 
+    def test_the_target_tenant_rides_in_the_body_only_when_named(self) -> None:
+        """nexus-6pfgb.43 (root names the target): an old client sends no ``tenant`` and a new engine reads that as the
+        credential's own tenant; the verb names it every time."""
+        with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write"):
+            _client().chunk_keys_sweep()
+            _client().chunk_keys_sweep(tenant="nexus")
+            _client().chunk_keys_sweep(dry_run=False, tenant="gate-xr789")
+        unnamed, dry, applied = (c.args[1] for c in post.call_args_list)
+        assert "tenant" not in unnamed
+        assert dry["tenant"] == "nexus" and dry["dry_run"] is True
+        assert applied["tenant"] == "gate-xr789" and applied["dry_run"] is False
+
     def test_a_first_call_sends_neither_accept_nor_resume_when_given_none(self) -> None:
         with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write"):
             _client().chunk_keys_sweep(dry_run=False)
@@ -272,12 +284,42 @@ class TestCli:
         assert result.exit_code == rk.EXIT_USAGE
         assert client.calls == []
 
-    def test_a_credential_bound_to_another_tenant_stops_the_verb_before_any_write(self) -> None:
-        client = FakeClient(_dry_report(tenant="somebody-else"))
+    def test_an_engine_that_answers_for_another_tenant_is_too_old_to_sweep_it_one_line_exit_4(self) -> None:
+        """An engine that predates the target field ignores ``tenant`` and answers for the credential's own tenant
+        (a root token bound to ``default``). The verb says so in one line and sends no apply."""
+        client = FakeClient(_dry_report(tenant="default"))
+        result = _run(client, "--tenant", TENANT, "--apply")
+        assert result.exit_code == rk.EXIT_NO_ROUTE
+        lines = [ln for ln in result.output.splitlines() if ln.strip()]
+        assert len(lines) == 1, result.output
+        assert "cannot sweep another tenant" in lines[0] and "upgrade the engine" in lines[0]
+        assert "'default'" in lines[0] and repr(TENANT) in lines[0]
+        assert "Traceback" not in result.output
+        assert all(kw["dry_run"] for _, kw in client.calls), "no apply request was sent"
+
+    def test_the_target_is_sent_on_the_dry_run_and_on_every_apply_call(self) -> None:
+        client = FakeClient(_dry_report(), applies=[_apply(4, done=False, remaining=2), _apply(2, done=True)])
+        result = _run(client, "--tenant", TENANT, "--apply", "--accept", "keyless_notes=2")
+        assert result.exit_code == 0, result.output
+        assert [kw["tenant"] for _, kw in client.calls] == [TENANT, TENANT, TENANT]
+
+    def test_an_apply_answer_that_names_another_tenant_stops_the_loop(self) -> None:
+        wrong = {**_apply(4, done=False, remaining=2), "tenant": "default"}
+        client = FakeClient(_dry_report(), applies=[wrong, _apply(2, done=True)])
+        result = _run(client, "--tenant", TENANT, "--apply")
+        assert result.exit_code == rk.EXIT_NO_ROUTE
+        assert len([c for c in client.calls if not c[1]["dry_run"]]) == 1, "the loop stopped at the wrong answer"
+
+    @pytest.mark.parametrize("reason", ["tenant_mismatch", "unknown_tenant"])
+    def test_a_target_the_engine_refuses_is_a_usage_exit_that_prints_the_engines_reason(self, reason: str) -> None:
+        refusal = VectorServiceError(
+            "refused", code=403 if reason == "tenant_mismatch" else 422, reason=reason,
+            engine_body={"error": f"engine says {reason}", "reason": reason},
+        )
+        client = FakeClient(_dry_report(), error=refusal)
         result = _run(client, "--tenant", TENANT, "--apply")
         assert result.exit_code == rk.EXIT_USAGE
-        assert "somebody-else" in result.output
-        assert all(kw["dry_run"] for _, kw in client.calls), "no apply request was sent"
+        assert f"engine says {reason}" in result.output
 
     def test_apply_loops_until_the_engine_says_done_and_sums_the_rows(self) -> None:
         client = FakeClient(_dry_report(), applies=[_apply(4, done=False, remaining=2), _apply(2, done=True)])
@@ -357,6 +399,7 @@ class TestCli:
         result = _run(client, "--tenant", TENANT, "--json")
         doc = json.loads(result.stdout)
         assert doc["dry_run"] is True and doc["report"]["tenant"] == TENANT
+        assert doc["tenant"] == TENANT, "the document names the tenant that was asked for"
 
     def test_max_rps_installs_the_request_gate_for_the_whole_run(self) -> None:
         client = FakeClient(_dry_report(), applies=[_apply(5, done=True)])
@@ -496,6 +539,7 @@ class TestNoAutomaticTrigger:
         "tests/test_retire_keys.py",
         "service/src/test/java/dev/nexus/service/ChunkKeysTestBase.java",
         "service/src/test/java/dev/nexus/service/ChunkKeySweepIntegrationTest.java",
+        "service/src/test/java/dev/nexus/service/ChunkKeySweepRootTargetIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/ChunkConstraintRoutesIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
         "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
