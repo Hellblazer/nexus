@@ -186,6 +186,8 @@ ENDPOINT = "https://api.conexus-nexus.com"
 PLUGINS = ("conexus@nexus-plugins", "sn@nexus-plugins")  # required: must be installed
 MARKETPLACE = "nexus-plugins"
 INSTALLED = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+#: Where Claude Code keeps each added marketplace's catalogue (<name>/.claude-plugin/marketplace.json).
+MARKETPLACES = Path.home() / ".claude" / "plugins" / "marketplaces"
 
 
 def script_sha256(path: Path | None = None) -> str:
@@ -413,8 +415,28 @@ def _on_allowlist(managed: list[dict]) -> bool:
                for d in managed)
 
 
+def _default_enabled(cwd: str) -> bool:
+    """conexus's defaultEnabled, which Claude Code applies when no enabledPlugins entry names it
+    (settings-reference, enabledPlugins: "unset plugins fall back to defaultEnabled"; plugins
+    manifest-reference: defaults to true, and the marketplace entry's value overrides the manifest's).
+    Read from this machine's copy of the marketplace and the installed plugin.json (nexus-tkwe4)."""
+    catalogue = _json_object(MARKETPLACES / MARKETPLACE / ".claude-plugin" / "marketplace.json")
+    entries = catalogue.get("plugins")
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and e.get("name") == "conexus" and isinstance(e.get("defaultEnabled"), bool):
+            return e["defaultEnabled"]
+    install = _install_entry(cwd)
+    root = install.get("installPath") if install else None
+    if isinstance(root, str) and root:
+        value = _json_object(Path(root) / ".claude-plugin" / "plugin.json").get("defaultEnabled")
+        if isinstance(value, bool):
+            return value
+    return True
+
+
 def _disabled(cwd: str, managed: list[dict]) -> bool:
-    """True when the effective enabledPlugins value for conexus is false (user, project, local, then managed win in turn)."""
+    """True when the effective enabledPlugins value for conexus is false (user, project, local, then managed win in turn),
+    or, with no entry in any of them, when its defaultEnabled is false."""
     layers = [_json_object(USER_SETTINGS)]
     if cwd:
         layers += [_json_object(Path(cwd) / ".claude" / n) for n in ("settings.json", "settings.local.json")]
@@ -423,15 +445,23 @@ def _disabled(cwd: str, managed: list[dict]) -> bool:
         enabled = d.get("enabledPlugins")
         if isinstance(enabled, dict) and f"conexus@{MARKETPLACE}" in enabled:
             value = enabled[f"conexus@{MARKETPLACE}"]
+    if value is None:
+        return not _default_enabled(cwd)
     return value is False
 
 
 def _installed_for(cwd: str) -> bool:
     """True when conexus is installed at user scope, or at project scope for a project holding *cwd*."""
+    return _install_entry(cwd) is not None
+
+
+def _install_entry(cwd: str) -> dict | None:
+    """The install record that makes conexus available to a session in *cwd* (user scope, or project
+    scope for a project holding *cwd*), or None."""
     try:
         data = json.loads(INSTALLED.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
+        return None
     data = data.get("plugins", data)
     entries = data.get(f"conexus@{MARKETPLACE}") if isinstance(data, dict) else None
     for e in entries if isinstance(entries, list) else []:
@@ -439,12 +469,12 @@ def _installed_for(cwd: str) -> bool:
             continue
         scope = e.get("scope", "user")
         if scope == "user":
-            return True
+            return e
         root = e.get("projectPath")
         if scope == "project" and cwd and isinstance(root, str) and root \
                 and Path(os.path.realpath(cwd)).is_relative_to(os.path.realpath(root)):
-            return True
-    return False
+            return e
+    return None
 
 
 def plugin_channel_registers(cwd: str) -> bool:

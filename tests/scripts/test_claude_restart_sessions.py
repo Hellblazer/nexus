@@ -56,6 +56,7 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     settings = tmp_path_factory.mktemp("claude-settings")
     monkeypatch.setattr(crs, "MANAGED_SETTINGS", (settings / "managed" / "managed-settings.json",))
     monkeypatch.setattr(crs, "USER_SETTINGS", settings / "user-settings.json")
+    monkeypatch.setattr(crs, "MARKETPLACES", settings / "marketplaces")
     monkeypatch.setattr(crs, "KEEP_DEV_CHANNEL", False)
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
 
@@ -320,6 +321,33 @@ def test_the_managed_allowlist_is_read_from_the_managed_settings_directory_too(c
     assert _swapped(crs) is False
     _managed(crs, ALLOW, name="managed-settings.d/10-channels.json")
     assert _swapped(crs) is True
+
+
+@pytest.mark.parametrize(("marketplace", "manifest", "user", "swapped"), [
+    (None, None, None, True),     # nothing set anywhere: defaultEnabled defaults to true
+    (False, None, None, False),   # the marketplace entry's defaultEnabled: false
+    (None, False, None, False),   # the installed manifest's defaultEnabled: false
+    (True, False, None, True),    # the marketplace entry overrides the manifest
+    (False, None, True, True),    # an enabledPlugins entry beats defaultEnabled
+], ids=["default-true", "marketplace-off", "manifest-off", "marketplace-beats-manifest", "entry-beats-default"])
+def test_an_unset_plugin_falls_back_to_default_enabled(crs, monkeypatch, tmp_path, marketplace, manifest, user,
+                                                       swapped) -> None:
+    """nexus-tkwe4: Claude Code's rule (settings-reference, enabledPlugins; plugins manifest-reference,
+    defaultEnabled): a plugin with no enabledPlugins entry is enabled as its defaultEnabled says, the
+    marketplace entry's value over the manifest's, true when neither sets it."""
+    install = tmp_path / "cache" / "conexus" / "7.94.1"
+    (install / ".claude-plugin").mkdir(parents=True)
+    (install / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "conexus", **({} if manifest is None else {"defaultEnabled": manifest})}), encoding="utf-8")
+    _installed(monkeypatch, crs, tmp_path, {"conexus@nexus-plugins": [{"scope": "user", "installPath": str(install)}]})
+    mp = crs.MARKETPLACES / "nexus-plugins" / ".claude-plugin" / "marketplace.json"
+    mp.parent.mkdir(parents=True)
+    entry = {"name": "conexus", **({} if marketplace is None else {"defaultEnabled": marketplace})}
+    mp.write_text(json.dumps({"name": "nexus-plugins", "plugins": [{"name": "other"}, entry]}), encoding="utf-8")
+    if user is not None:
+        crs.USER_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        crs.USER_SETTINGS.write_text(json.dumps({"enabledPlugins": {"conexus@nexus-plugins": user}}), encoding="utf-8")
+    assert _swapped(crs) is swapped
 
 
 @pytest.mark.parametrize(("where", "value", "swapped"), [
