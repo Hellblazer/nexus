@@ -118,8 +118,10 @@ QUARANTINE_IMPLIES: Final[tuple[str, str]] = ("quarantined_by", "quarantined_at"
 def engine_plan() -> dict[str, list[str]]:
     """The request fields the engine's retire-keys and chunk-constraint routes take, rendered from this table
     (nexus-6pfgb.43): ``allowed_keys`` (the CHUNK and ROW metadata keys, sorted), ``bypass_prefixes`` and
-    ``quarantine_implies``. The engine cannot name the ROW keys, so it takes them from here, and it refuses a
-    list that drops a CHUNK key or names a DOCUMENT, POSITION or LEGACY key."""
+    ``quarantine_implies``. The engine cannot name the ROW keys, so it takes them from here, and it pins what it
+    gets: the ROW keys must hash to the digest ``scripts/gen_chunk_metadata_keys_java.py`` renders from this table,
+    the bypass prefixes must be exactly the quarantine and taxonomy prefixes, the implication must be this pair.
+    A list that differs (a dropped or unknown key, a missing or extra prefix) is a 400."""
     return {
         "allowed_keys": sorted(keys_of("CHUNK") | keys_of("ROW")),
         "bypass_prefixes": list(BYPASS_PREFIXES),

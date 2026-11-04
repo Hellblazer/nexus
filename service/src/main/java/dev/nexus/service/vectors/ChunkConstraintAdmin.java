@@ -21,7 +21,9 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 
@@ -39,24 +41,37 @@ import java.util.Properties;
  *       format()} with {@code %L}; a key-table change re-adds the constraint with {@code replace}, because a Liquibase
  *       changeset is immutable and so cannot carry the array.</li>
  *   <li>{@link #CHUNK_TEXT_HASH}: {@code metadata->>'chunk_text_hash' = encode(chash, 'hex')}.</li>
- *   <li>{@link #EMBEDDING_MODEL}: {@code metadata->>'embedding_model' = embedding_model}, the one uncensused
- *       chunk-table equality (6pfgb.42 counts it, this route ships it).</li>
- *   <li>{@link #QUARANTINE_KEYS}: the first key of {@link ChunkKeyPlan#quarantineImplies()} implies the second; added
- *       only when the request names the pair.</li>
+ *   <li>{@link #EMBEDDING_MODEL}: {@code metadata->>'embedding_model' = embedding_model}, an equality the RF-16 census
+ *       did not count; the probe counts it here and {@code add} refuses while it is broken. The other uncensused
+ *       equalities of the RDR (manifest collection against the document's physical collection, chunk_index against
+ *       position, labels_written) are not chunk-table CHECKs and not part of these routes.</li>
+ *   <li>{@link #QUARANTINE_KEYS}: the first key of {@link ChunkKeyPlan#quarantineImplies()} implies the second (the
+ *       pair is required of every request and pinned by digest).</li>
  *   <li>{@link #CHASH_WIDTH}: {@code chunks_chash_octet_check}, which vectors-004 left NOT VALID on purpose; this route
  *       only validates it.</li>
  * </ul>
  * A CHECK passes when its expression is NULL, so a row without the key is not refused by the equalities.
  *
- * <p><b>Guards.</b> The migrator's advisory lock is read before each statement (a migration walk and DDL on the same
- * table can deadlock); {@code lock_timeout} is 5 s so the ACCESS EXCLUSIVE an ADD needs for an instant never queues
- * behind a long reader and, behind it, every writer; one run at a time on the {@link #ADVISORY_LOCK_KEY} lock. A
- * refusal is a {@link Refused} the handler answers with its status.
+ * <p><b>Guards.</b> The migrator's advisory lock is read once per run, before the first statement (a migration walk and
+ * DDL on the same table can deadlock); {@code lock_timeout} is 5 s so the ACCESS EXCLUSIVE an ADD needs for an instant
+ * never queues behind a long reader and, behind it, every writer; one run at a time on the {@link #ADVISORY_LOCK_KEY}
+ * lock. A refusal is a {@link Refused} the handler answers with its status.
  *
- * <p>DATA EFFECT of {@code add}: none on existing rows (NOT VALID checks only rows written afterwards: a write that
- * carries a key outside the allow-list is then refused with SQLSTATE 23514). DATA EFFECT of {@code validate}: none; it
+ * <p><b>The table-wide probe.</b> {@link #probe} reads every tenant's counts in one pass on the admin session, which is
+ * not row-filtered (RF-16: the owner role sees every tenant's rows), so a tenant with chunk rows and no
+ * {@code service_tokens} row is seen. The routes use it to find the tenants to check and to refuse before any DDL.
+ *
+ * <p><b>DATA EFFECT of {@code add}.</b> No row is changed, but a NOT VALID CHECK is evaluated against every new row
+ * version, including an UPDATE that touches no metadata: a row that already breaks a constraint can no longer be
+ * UPDATEd (SQLSTATE 23514) until it is fixed. The routes refuse an add while the equalities or the chash width are
+ * broken anywhere, so what an add freezes is the retired-key rows the sweep deliberately leaves (those in a blocked
+ * collection); the response names them. A write carrying a key outside the allow-list, an unequal hash or model, or
+ * {@code by} without {@code at} is refused for every row written afterwards. DATA EFFECT of {@code validate}: none; it
  * reads the whole table under SHARE UPDATE EXCLUSIVE, which lets writers through, and fails (leaving the constraint NOT
- * VALID) if a row violates it.
+ * VALID) if a row violates it. {@code replace} on a constraint that is VALID makes it NOT VALID until the next validate.
+ *
+ * <p><b>Capability flags.</b> The Phase 3 manifest-keyed read flags the sweep depends on are constants in this binary,
+ * true by construction wherever this class exists; nothing here reads them from {@code /version}.
  */
 public final class ChunkConstraintAdmin {
 
@@ -114,8 +129,33 @@ public final class ChunkConstraintAdmin {
     /** One constraint's state on {@code nexus.chunks}. */
     public record State(String name, boolean present, Boolean validated, String definition) {}
 
-    /** What a call did to one constraint, and the state it left. */
-    public record Action(String name, String action, State after) {}
+    /**
+     * What a call did to one constraint, and the state it left. {@code warning} is a consequence the operator should
+     * know (a VALID constraint replaced is NOT VALID now); {@code expectedDefinition} is set when an existing
+     * constraint's stored definition is not the one this plan would add ({@code present_differs}).
+     */
+    public record Action(String name, String action, State after, String warning, String expectedDefinition) {
+        public Action(String name, String action, State after) {
+            this(name, action, after, null, null);
+        }
+
+        Action withState(State state) {
+            return new Action(name, action, state, warning, expectedDefinition);
+        }
+    }
+
+    /** One tenant's standing in the table-wide probe, counted on the admin session. */
+    public record TenantProbe(String tenant, long rows, long retiredRows, long hashMismatch, long modelMismatch,
+                              long wrongWidth, long quarantineBreach) {
+        /** True when any constraint count is non-zero. */
+        public boolean violatesAny() {
+            return retiredRows > 0 || hashMismatch > 0 || modelMismatch > 0 || wrongWidth > 0 || quarantineBreach > 0;
+        }
+    }
+
+    /** Name of the session-private table a plan's expected definitions are rendered on. */
+    private static final String PROBE_TABLE = "chunk_constraint_probe";
+    private static final String PROBE_STATEMENT_TIMEOUT = "10min";
 
     private final AdminConnection admin;
 
@@ -133,36 +173,68 @@ public final class ChunkConstraintAdmin {
     }
 
     /**
+     * The table-wide probe: every tenant's counts, read in one pass on the admin session (not row-filtered), so a tenant
+     * absent from {@code service_tokens} is seen. Per tenant: its rows, the rows outside every bypass prefix that hold a
+     * key outside the allow-list, the rows whose {@code chunk_text_hash} or {@code embedding_model} differs from the
+     * column, the rows whose chash is not 32 bytes and the rows that break the quarantine implication (the last four over
+     * every collection, as the CHECKs apply to all). Tenants with no rows do not appear.
+     */
+    public List<TenantProbe> probe(ChunkKeyPlan plan) {
+        try (Session s = open(false)) {
+            s.setSession("statement_timeout", PROBE_STATEMENT_TIMEOUT);
+            return s.probe(plan);
+        }
+    }
+
+    /**
      * Add the constraints NOT VALID. A constraint that exists is left alone unless {@code replace}, which drops and
-     * re-adds it in one statement (a changed allow-list); an existing constraint is reported with its definition so the
-     * operator can see whether it matches.
+     * re-adds it in one statement (a changed allow-list). An existing constraint is not reported as simply present: its
+     * stored definition is compared with the definition this plan would add (rendered by the server on a session-private
+     * table of the same columns), and a difference is reported as {@code present_differs} with the expected text.
      */
     public List<Action> add(ChunkKeyPlan plan, boolean replace) {
         try (Session s = open(true)) {
             s.guard(ADD_STATEMENT_TIMEOUT);
             List<Action> out = new ArrayList<>();
             List<State> before = s.states();
+            Map<String, String> expected = null;
             for (String name : List.of(ALLOW_LIST, CHUNK_TEXT_HASH, EMBEDDING_MODEL, QUARANTINE_KEYS)) {
-                if (QUARANTINE_KEYS.equals(name) && plan.quarantineImplies().isEmpty()) {
-                    continue;
-                }
-                boolean exists = stateOf(before, name).present();
+                State existing = stateOf(before, name);
+                boolean exists = existing.present();
                 if (exists && !replace) {
-                    out.add(new Action(name, "present", null));
+                    if (expected == null) {
+                        expected = s.expectedDefinitions(plan);
+                    }
+                    String want = expected.get(name);
+                    boolean same = sameDefinition(existing.definition(), want);
+                    out.add(new Action(name, same ? "present" : "present_differs", null, null, same ? null : want));
                     continue;
                 }
-                s.ddl(addStatement(name, plan, exists), args(name, plan, exists));
-                out.add(new Action(name, exists ? "replaced" : "added", null));
+                String warning = exists && Boolean.TRUE.equals(existing.validated())
+                    ? "was VALID and is now NOT VALID until validate-constraints runs again" : null;
+                s.ddl(addStatement(name, plan, exists), args(name, plan, exists, CHUNKS.getSchema().getName(),
+                    CHUNKS.getName()));
+                out.add(new Action(name, exists ? "replaced" : "added", null, warning, null));
             }
             List<State> after = s.states();
             List<Action> done = new ArrayList<>();
             for (Action a : out) {
-                done.add(new Action(a.name(), a.action(), stateOf(after, a.name())));
+                done.add(a.withState(stateOf(after, a.name())));
             }
             log.info("event=chunk_constraints_added actions={}", done.stream().map(a -> a.name() + ":" + a.action())
                 .toList());
             return done;
         }
+    }
+
+    /** True when two stored definitions are the same CHECK, whether or not either is NOT VALID. */
+    static boolean sameDefinition(String stored, String expected) {
+        return stored != null && expected != null && stripNotValid(stored).equals(stripNotValid(expected));
+    }
+
+    private static String stripNotValid(String def) {
+        String suffix = " NOT VALID";
+        return def.endsWith(suffix) ? def.substring(0, def.length() - suffix.length()) : def;
     }
 
     /** VALIDATE every managed constraint that exists and is not yet valid; one that is absent is reported. */
@@ -186,7 +258,7 @@ public final class ChunkConstraintAdmin {
             List<State> after = s.states();
             List<Action> done = new ArrayList<>();
             for (Action a : out) {
-                done.add(new Action(a.name(), a.action(), a.after() != null ? a.after() : stateOf(after, a.name())));
+                done.add(a.after() != null ? a : a.withState(stateOf(after, a.name())));
             }
             log.info("event=chunk_constraints_validated actions={}",
                 done.stream().map(a -> a.name() + ":" + a.action()).toList());
@@ -229,10 +301,10 @@ public final class ChunkConstraintAdmin {
         return t.toString();
     }
 
-    private static List<Object> args(String name, ChunkKeyPlan plan, boolean replace) {
+    private static List<Object> args(String name, ChunkKeyPlan plan, boolean replace, String schema, String table) {
         List<Object> a = new ArrayList<>();
-        a.add(CHUNKS.getSchema().getName());
-        a.add(CHUNKS.getName());
+        a.add(schema);
+        a.add(table);
         if (replace) {
             a.add(name);
         }
@@ -347,6 +419,49 @@ public final class ChunkConstraintAdmin {
             return out;
         }
 
+        /** The probe query: one pass over {@code nexus.chunks}, grouped by tenant, typed jOOQ on the admin connection. */
+        List<TenantProbe> probe(ChunkKeyPlan plan) {
+            var rows = ctx.select(CHUNKS.TENANT_ID, DSL.count(),
+                    DSL.count().filterWhere(ChunkKeySweep.notBypass(CHUNKS.COLLECTION, plan).and(ChunkKeySweep.retired(plan))),
+                    DSL.count().filterWhere(ChunkKeySweep.hashMismatch()),
+                    DSL.count().filterWhere(ChunkKeySweep.modelMismatch()),
+                    DSL.count().filterWhere(ChunkKeySweep.width(false)),
+                    DSL.count().filterWhere(ChunkKeySweep.quarantineBreach(plan)))
+                .from(CHUNKS)
+                .groupBy(CHUNKS.TENANT_ID)
+                .orderBy(CHUNKS.TENANT_ID)
+                .fetch();
+            List<TenantProbe> out = new ArrayList<>();
+            for (var r : rows) {
+                out.add(new TenantProbe(r.get(0, String.class), r.get(1, Long.class), r.get(2, Long.class),
+                    r.get(3, Long.class), r.get(4, Long.class), r.get(5, Long.class), r.get(6, Long.class)));
+            }
+            return out;
+        }
+
+        /**
+         * The definitions the plan's ADDs produce, as the server prints them: the same statements run on a session-private
+         * table with the columns of {@code nexus.chunks} (nothing on the real table is touched), read back from
+         * {@code pg_constraint}. The temp table vanishes with the connection.
+         */
+        Map<String, String> expectedDefinitions(ChunkKeyPlan plan) {
+            ddl("CREATE TEMP TABLE %I (LIKE %I.%I)", List.of(PROBE_TABLE, CHUNKS.getSchema().getName(), CHUNKS.getName()));
+            Map<String, String> out = new LinkedHashMap<>();
+            for (String name : List.of(ALLOW_LIST, CHUNK_TEXT_HASH, EMBEDDING_MODEL, QUARANTINE_KEYS)) {
+                ddl(addStatement(name, plan, false), args(name, plan, false, "pg_temp", PROBE_TABLE));
+            }
+            var rows = ctx.select(DSL.field(DSL.name("con", "conname"), String.class),
+                    DSL.function("pg_get_constraintdef", SQLDataType.VARCHAR, DSL.field(DSL.name("con", "oid"))))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("con"))
+                .where(DSL.field(DSL.name("con", "conrelid")).eq(
+                    DSL.function("to_regclass", SQLDataType.OTHER, DSL.val("pg_temp." + PROBE_TABLE))))
+                .fetch();
+            for (var r : rows) {
+                out.put(r.value1(), r.value2());
+            }
+            return out;
+        }
+
         /** Render {@code template} on the server (format() with %I and %L) and send the text on this connection. */
         void ddl(String template, List<Object> args) {
             Field<?>[] params = new Field<?>[args.size() + 1];
@@ -378,7 +493,9 @@ public final class ChunkConstraintAdmin {
             String state = e.getSQLState();
             if (LOCK_NOT_AVAILABLE.equals(state)) {
                 return new Refused(503, "lock_timeout",
-                    "the table lock was not available within " + LOCK_TIMEOUT + "; nothing changed, run it again");
+                    "the table lock was not available within " + LOCK_TIMEOUT + ". Earlier constraints of this run "
+                        + "may already have landed (a run is several statements, none rolled back); a rerun is safe: "
+                        + "add skips a constraint that exists and validate skips one that is valid");
             }
             if (CHECK_VIOLATION.equals(state)) {
                 return new Refused(409, "check_violation",

@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -14,6 +15,7 @@ import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.Rdr192BackfillGate;
+import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.vectors.ChunkConstraintAdmin;
 import dev.nexus.service.vectors.ChunkMetadataKeys;
@@ -43,10 +45,11 @@ import java.util.Map;
  * real service and a real PostgreSQL, in the order an operator runs them. One container, so the steps are ordered: the
  * constraints, once added, are on {@code nexus.chunks} for every test after them.
  *
- * <p>Three tenants. {@code cc-a} holds retired keys (to be swept), a quarantine row that carries them and a chunk the
+ * <p>Five tenants. {@code cc-a} holds retired keys (to be swept), a quarantine row that carries them and a chunk the
  * real reaper moved to quarantine with its retired document keys; {@code cc-b} is clean; {@code cc-c} is clean except
- * one row whose {@code chunk_text_hash} is not its chash (a row the allow-list sweep does not touch and the equality
- * CHECK would refuse at VALIDATE).
+ * one row whose {@code chunk_text_hash} is not its chash; {@code cc-ghost} holds chunks with retired keys and NO
+ * {@code service_tokens} row (the tenant a token-list walk never sees); {@code cc-blocked} holds one retired-key row in a
+ * collection the sweep must leave alone (its census reads legacy-unmanifested), the row an add freezes.
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
@@ -54,9 +57,9 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
     private static final String A = "cc-a";
     private static final String B = "cc-b";
     private static final String C = "cc-c";
+    private static final String GHOST = "cc-ghost";
+    private static final String D = "cc-blocked";
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-01T12:00:00Z"), ZoneOffset.UTC);
-    private static final List<String> ALL_RESIDUES = List.of("legacy_label_rows", "keyless_notes", "keyless_ttl_rows",
-        "homeless_documents", "null_span_rows", "generated_nulls");
     private static final List<String> FIVE = List.of("chunks_metadata_keys_check", "chunks_chunk_text_hash_check",
         "chunks_embedding_model_check", "chunks_quarantine_keys_check", "chunks_chash_octet_check");
 
@@ -65,6 +68,9 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
     private String quarantineA;
     private String liveC;
     private String mismatchedHash;
+    private String liveGhost;
+    private String liveD;
+    private String blockedRow;
     private String reaperOrigin;
     private String reaperChash;
     private String restoreOrigin;
@@ -79,6 +85,7 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         tokenA = tenantToken(A);
         tenantToken(B);
         tenantToken(C);
+        tenantToken(D);
         liveA = conformant("cc-a");
         quarantineA = "quarantine-" + liveA;
         Map<String, Map<String, Object>> a = new LinkedHashMap<>();
@@ -96,6 +103,21 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         badHash.put("chunk_text_hash", "0".repeat(64));
         seed(C, liveC, Map.of("c1", badHash, "c2", keyed(C, liveC, "c2")));
         mismatchedHash = hexOf(C, liveC, "c1");
+
+        // A tenant with chunk rows and no service_tokens row: seed() writes chunks and registers the collection, and
+        // issues no token.
+        liveGhost = conformant("cc-ghost");
+        seed(GHOST, liveGhost, Map.of("g1", keyed(GHOST, liveGhost, "g1", "title", "g", "doc_id", "gone"),
+            "g2", keyed(GHOST, liveGhost, "g2", "tags", "x")));
+
+        // A collection the sweep leaves alone: a live document found through the chunk's own forward key has no
+        // manifest row (the census's legacy-unmanifested bucket).
+        liveD = conformant("cc-blocked");
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCatalogDocument(DSL.using(su, SQLDialect.POSTGRES), D, "census.d");
+        }
+        seed(D, liveD, Map.of("d1", keyed(D, liveD, "d1", "catalog_doc_id", "census.d", "title", "held")));
+        blockedRow = hexOf(D, liveD, "d1");
 
         reaperOrigin = "code" + "_".repeat(2) + "cc-r" + "_".repeat(2) + MODEL + "_".repeat(2) + "v1";
         reaperChash = reaperQuarantined("cc-reaper", reaperOrigin, "gc-restore", true);
@@ -158,12 +180,32 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         return out;
     }
 
+    private static List<String> checkedNames(JsonNode body) {
+        List<String> out = new ArrayList<>();
+        body.path("tenants_checked").forEach(t -> out.add(t.asText()));
+        return out;
+    }
+
     private HttpResponse<String> add(String bearer, Object... extra) throws Exception {
         return post("/v1/admin/chunk-keys/add-constraints", bearer, plan(extra));
     }
 
     private HttpResponse<String> validate(String bearer) throws Exception {
         return post("/v1/admin/chunk-keys/validate-constraints", bearer, plan());
+    }
+
+    private JsonNode tenantRow(JsonNode body, String tenant) {
+        for (JsonNode t : body.path("tenants")) {
+            if (tenant.equals(t.path("tenant").asText())) {
+                return t;
+            }
+        }
+        throw new AssertionError("tenant " + tenant + " is not named in " + body);
+    }
+
+    private List<String> presentConstraints() {
+        return admin().states().stream().filter(ChunkConstraintAdmin.State::present)
+            .map(ChunkConstraintAdmin.State::name).toList();
     }
 
     // ---- 0. before the sweep: a legacy-keyed row is still written --------------------------------------------
@@ -178,47 +220,67 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
 
         assertThat(metadataOf(A, liveA, a1)).as("the write landed, merged onto the row").containsEntry("source_path",
             "/legacy/writer");
-        assertThat(admin().states()).filteredOn(ChunkConstraintAdmin.State::present)
-            .extracting(ChunkConstraintAdmin.State::name).containsExactly("chunks_chash_octet_check");
+        assertThat(presentConstraints()).containsExactly("chunks_chash_octet_check");
     }
 
     // ---- 1. refusals before anything is swept -------------------------------------------------------------------
 
     @Test
-    @Order(1)
-    void addIsRefusedWhileATenantIsUnswept_namingIt_andAddsNothing() throws Exception {
+    @Order(10)
+    void addIsRefusedWhileATenantIsNotReady_namingEach_andAddsNothing() throws Exception {
         HttpResponse<String> r = add(ROOT);
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
         JsonNode body = json(r);
         assertThat(body.path("reason").asText()).isEqualTo("tenant_unswept");
-        assertThat(tenantNames(body)).as("only the unswept tenant is named").containsExactly(A);
-        assertThat(body.path("tenants").get(0).path("unswept_rows").asLong()).isEqualTo(3);
-        assertThat(r.body()).doesNotContain(B).doesNotContain(C);
-        assertThat(admin().states()).filteredOn(ChunkConstraintAdmin.State::present)
-            .extracting(ChunkConstraintAdmin.State::name).containsExactly("chunks_chash_octet_check");
+        assertThat(tenantNames(body)).as("the unswept tenants and the one whose hash differs; not the clean one nor "
+            + "the one whose only retired row is in a blocked collection").containsExactlyInAnyOrder(A, C, GHOST);
+        assertThat(tenantRow(body, A).path("unswept_rows").asLong()).isEqualTo(3);
+        assertThat(tenantRow(body, C).path("chunk_text_hash_mismatch").asLong()).as("B3: an equality violation").isEqualTo(1);
+        assertThat(tenantNames(body)).doesNotContain(B);
+        assertThat(presentConstraints()).containsExactly("chunks_chash_octet_check");
     }
 
     @Test
-    @Order(2)
+    @Order(11)
+    void aTenantWithChunksAndNoServiceTokensRowIsCheckedAndNamed() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(SERVICE_TOKENS, SERVICE_TOKENS.TENANT_ID.eq(GHOST)))
+                .as("fixture: the tenant has no token row, so a token-list walk cannot see it").isZero();
+        }
+
+        HttpResponse<String> r = add(ROOT);
+
+        assertThat(r.statusCode()).isEqualTo(409);
+        JsonNode body = json(r);
+        assertThat(tenantNames(body)).contains(GHOST);
+        assertThat(tenantRow(body, GHOST).path("unswept_rows").asLong()).isEqualTo(2);
+        assertThat(checkedNames(body)).as("the checked set is named: the default tenant, the known ones and this one")
+            .contains(TenantConstants.DEFAULT_TENANT, A, B, C, D, GHOST);
+        assertThat(body.path("table_rows_examined").asLong()).as("the probe examined rows").isGreaterThanOrEqualTo(8);
+        assertThat(presentConstraints()).containsExactly("chunks_chash_octet_check");
+        // validate sees it too, and the blocked collection's row: VALIDATE cannot pass over it.
+        JsonNode v = json(validate(ROOT));
+        assertThat(tenantNames(v)).contains(GHOST, D);
+    }
+
+    @Test
+    @Order(20)
     void validateIsRefusedWhileATenantStillBreaksAConstraint_namingEach() throws Exception {
         HttpResponse<String> r = validate(ROOT);
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
         JsonNode body = json(r);
         assertThat(body.path("reason").asText()).isEqualTo("tenant_violates_constraint");
-        assertThat(tenantNames(body)).containsExactlyInAnyOrder(A, C);
-        for (JsonNode t : body.path("tenants")) {
-            if (A.equals(t.path("tenant").asText())) {
-                assertThat(t.path("retired_key_rows").asLong()).isEqualTo(3);
-            } else {
-                assertThat(t.path("chunk_text_hash_mismatch").asLong()).isEqualTo(1);
-            }
-        }
+        assertThat(tenantNames(body)).containsExactlyInAnyOrder(A, C, GHOST, D);
+        assertThat(tenantRow(body, A).path("retired_key_rows").asLong()).isEqualTo(3);
+        assertThat(tenantRow(body, D).path("retired_key_rows").asLong()).as("a blocked collection's row counts here")
+            .isEqualTo(1);
+        assertThat(tenantRow(body, C).path("chunk_text_hash_mismatch").asLong()).isEqualTo(1);
     }
 
     @Test
-    @Order(3)
+    @Order(30)
     void theTableWideRoutesNeedTheRootToken() throws Exception {
         assertThat(add(tokenA).statusCode()).isEqualTo(403);
         assertThat(validate(tokenA).statusCode()).isEqualTo(403);
@@ -227,12 +289,45 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
             .statusCode()).isEqualTo(403);
     }
 
+    // ---- 1b. the engine pins the plan (B2) ----------------------------------------------------------------------
+
+    @Test
+    @Order(35)
+    void aPlanThatDiffersFromTheEnginesPinsIsRefusedBeforeAnythingIsDone() throws Exception {
+        List<String> allowed = new ArrayList<>(ChunkMetadataKeys.CHUNK);
+        allowed.addAll(ROW_KEYS);
+        Map<String, Map<String, Object>> variants = new LinkedHashMap<>();
+        variants.put("taxonomy omitted", plan("bypass_prefixes", List.of("quarantine-")));
+        variants.put("an extra prefix", plan("bypass_prefixes", List.of(TAXONOMY_PREFIX, "quarantine-",
+            "knowledge" + "_".repeat(2))));
+        List<String> unknown = new ArrayList<>(allowed);
+        unknown.add("zz_extra");
+        variants.put("an unknown key", plan("allowed_keys", unknown));
+        List<String> dropped = new ArrayList<>(allowed);
+        dropped.remove("origin_collection");
+        variants.put("a dropped ROW key", plan("allowed_keys", dropped));
+        Map<String, Object> noImplication = plan();
+        noImplication.remove("quarantine_implies");
+        variants.put("no quarantine implication", noImplication);
+        variants.put("the implication reversed", plan("quarantine_implies", List.of("quarantined_at", "quarantined_by")));
+
+        for (var e : variants.entrySet()) {
+            for (String route : List.of("add-constraints", "validate-constraints")) {
+                HttpResponse<String> r = post("/v1/admin/chunk-keys/" + route, ROOT, e.getValue());
+                assertThat(r.statusCode()).as(e.getKey() + " on " + route + ": " + r.body()).isEqualTo(400);
+            }
+            assertThat(sweep(tokenA, e.getValue()).statusCode()).as(e.getKey() + " on sweep").isEqualTo(400);
+        }
+        assertThat(presentConstraints()).as("nothing was added").containsExactly("chunks_chash_octet_check");
+        assertThat(retiredRowCount(A, liveA)).as("and nothing was swept").isEqualTo(3);
+    }
+
     // ---- 2. sweep, add ------------------------------------------------------------------------------------------
 
     @Test
-    @Order(4)
+    @Order(40)
     void theSweepLeavesTheQuarantineRowsRetiredKeysAlone() throws Exception {
-        HttpResponse<String> r = sweep(tokenA, plan("dry_run", false, "accept", ALL_RESIDUES));
+        HttpResponse<String> r = sweep(tokenA, plan("dry_run", false));
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
         assertThat(json(r).path("rows_swept").asLong()).isEqualTo(3);
@@ -243,13 +338,47 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
     }
 
     @Test
-    @Order(5)
-    void addAddsTheFourConstraintsNotValid_andARerunLeavesThemBe() throws Exception {
+    @Order(41)
+    void theGhostTenantIsSweptOnceItHoldsACredential() throws Exception {
+        HttpResponse<String> r = sweep(tenantToken(GHOST), plan("dry_run", false));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(json(r).path("rows_swept").asLong()).isEqualTo(2);
+    }
+
+    @Test
+    @Order(42)
+    void theBlockedCollectionIsLeftAloneByTheSweep() throws Exception {
+        HttpResponse<String> r = sweep(tenantToken(D), plan("dry_run", false, "accept", accept("homeless_documents", 1,
+            "generated_nulls", 1)));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = json(r);
+        assertThat(body.path("rows_swept").asLong()).isZero();
+        assertThat(body.path("blocked_collections").get(0).path("collection").asText()).isEqualTo(liveD);
+        assertThat(metadataOf(D, liveD, blockedRow)).containsKey("title");
+    }
+
+    @Test
+    @Order(43)
+    void theHashThatDiffersIsFixedByTheOperatorBeforeTheAdd() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.METADATA, JSONB.jsonb("{\"chunk_text_hash\":\"" + mismatchedHash
+                    + "\",\"embedding_model\":\"" + MODEL + "\"}"))
+                .where(CHUNKS.TENANT_ID.eq(C)).and(CHUNKS.CHASH.eq(Chash.fromHex(mismatchedHash).toBytes())).execute();
+        }
+        assertThat(metadataOf(C, liveC, mismatchedHash).get("chunk_text_hash")).isEqualTo(mismatchedHash);
+    }
+
+    @Test
+    @Order(50)
+    void addAddsTheFourConstraintsNotValid_reportsWhatItLeavesBehind_andARerunLeavesThemBe() throws Exception {
         HttpResponse<String> r = add(ROOT);
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
         JsonNode body = json(r);
-        assertThat(body.path("tenants_checked").asInt()).isGreaterThanOrEqualTo(4);
+        assertThat(checkedNames(body)).contains(TenantConstants.DEFAULT_TENANT, A, B, C, D, GHOST);
         Map<String, String> actions = new LinkedHashMap<>();
         body.path("constraints").forEach(c -> actions.put(c.path("name").asText(), c.path("action").asText()));
         assertThat(actions).containsOnlyKeys("chunks_metadata_keys_check", "chunks_chunk_text_hash_check",
@@ -264,12 +393,60 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
             .contains("quarantined_by");
         assertThat(allowList).as("the bypass prefixes are exempt").contains("starts_with");
 
+        // B3: what the add leaves behind, per tenant, by name.
+        JsonNode left = body.path("left_behind");
+        assertThat(left).hasSize(1);
+        assertThat(left.get(0).path("tenant").asText()).isEqualTo(D);
+        assertThat(left.get(0).path("blocked_collections").get(0).path("collection").asText()).isEqualTo(liveD);
+        assertThat(left.get(0).path("blocked_collections").get(0).path("blocked").asText())
+            .isEqualTo("legacy_unmanifested");
+        assertThat(left.get(0).path("blocked_collections").get(0).path("retired_key_rows").asLong()).isEqualTo(1);
+
+        // A rerun leaves them be, and the stored definitions are compared with what the plan would add: equal, so
+        // "present", never a silent present for a stale definition.
         JsonNode again = json(add(ROOT));
         again.path("constraints").forEach(c -> assertThat(c.path("action").asText()).isEqualTo("present"));
     }
 
     @Test
-    @Order(6)
+    @Order(51)
+    void afterTheAdd_anUpdateOfARowTheSweepLeftBehindIsRefused_theAcceptedFreeze() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // Even an UPDATE that touches no metadata fails: a NOT VALID CHECK is evaluated on every new row version.
+            assertThatThrownBy(() -> ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, STAMP.plusDays(1))
+                .where(CHUNKS.TENANT_ID.eq(D)).and(CHUNKS.CHASH.eq(Chash.fromHex(blockedRow).toBytes())).execute())
+                .as("the row in the blocked collection is frozen until fixed")
+                .hasMessageContaining("chunks_metadata_keys_check");
+            // A swept row of another tenant is not frozen.
+            assertThat(ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, STAMP.plusDays(1))
+                .where(CHUNKS.TENANT_ID.eq(B)).execute()).isGreaterThan(0);
+        }
+    }
+
+    @Test
+    @Order(52)
+    void aStoredDefinitionThatIsNotThePlansIsReported_notCalledPresent() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_embedding_model_check");
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS)
+                .add(DSL.constraint("chunks_embedding_model_check").check(DSL.trueCondition())).execute();
+        }
+
+        JsonNode r = json(add(ROOT));
+
+        Map<String, JsonNode> byName = new LinkedHashMap<>();
+        r.path("constraints").forEach(c -> byName.put(c.path("name").asText(), c));
+        assertThat(byName.get("chunks_embedding_model_check").path("action").asText()).isEqualTo("present_differs");
+        assertThat(byName.get("chunks_embedding_model_check").path("expected_definition").asText())
+            .contains("embedding_model");
+        assertThat(byName.get("chunks_metadata_keys_check").path("action").asText()).isEqualTo("present");
+        assertThat(byName.get("chunks_chunk_text_hash_check").path("action").asText()).isEqualTo("present");
+    }
+
+    @Test
+    @Order(60)
     void replaceDropsAndReAddsInOneStatement_forAChangedKeyTable() throws Exception {
         HttpResponse<String> r = add(ROOT, "replace", true);
 
@@ -277,11 +454,17 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         json(r).path("constraints").forEach(c -> {
             assertThat(c.path("action").asText()).isEqualTo("replaced");
             assertThat(c.path("validated").asBoolean()).isFalse();
+            // Only the stale one the previous step put in (enforced, so VALID) loses a validation by being replaced.
+            assertThat(c.has("warning")).as(c.path("name").asText())
+                .isEqualTo("chunks_embedding_model_check".equals(c.path("name").asText()));
         });
+        JsonNode again = json(add(ROOT));
+        again.path("constraints").forEach(c -> assertThat(c.path("action").asText())
+            .as("the replaced stale definition is now the plan's").isEqualTo("present"));
     }
 
     @Test
-    @Order(7)
+    @Order(70)
     void afterTheAdd_aLegacyKeyedWriteToALiveCollectionIsRefusedByTheDatabase_theBypassCollectionsAreNot()
             throws Exception {
         String hex = Chash.ofText("after-add legacy").toHex();
@@ -319,26 +502,25 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
     // ---- 3. validate --------------------------------------------------------------------------------------------
 
     @Test
-    @Order(8)
-    void validateIsStillRefusedForTheTenantWhoseHashDiffers_andOnlyThatOne() throws Exception {
+    @Order(80)
+    void validateIsStillRefusedForTheTenantWhoseBlockedRowWasLeftBehind_andOnlyThatOne() throws Exception {
         HttpResponse<String> r = validate(ROOT);
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
         JsonNode body = json(r);
-        assertThat(tenantNames(body)).containsExactly(C);
-        assertThat(body.path("tenants").get(0).path("chunk_text_hash_mismatch").asLong()).isEqualTo(1);
-        assertThat(admin().states()).filteredOn(s -> "chunks_chunk_text_hash_check".equals(s.name()))
+        assertThat(tenantNames(body)).containsExactly(D);
+        assertThat(body.path("tenants").get(0).path("retired_key_rows").asLong()).isEqualTo(1);
+        assertThat(admin().states()).filteredOn(s -> "chunks_metadata_keys_check".equals(s.name()))
             .allSatisfy(s -> assertThat(s.validated()).isFalse());
     }
 
     @Test
-    @Order(9)
+    @Order(90)
     void validateValidatesAllFive_readingConvalidatedFirst_andARerunIsANoOp() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
-                .set(CHUNKS.METADATA, JSONB.jsonb("{\"chunk_text_hash\":\"" + mismatchedHash
-                    + "\",\"embedding_model\":\"" + MODEL + "\"}"))
-                .where(CHUNKS.TENANT_ID.eq(C)).and(CHUNKS.CHASH.eq(Chash.fromHex(mismatchedHash).toBytes())).execute();
+            // The operator fixes the frozen row the only way left: it cannot be UPDATEd, so it is deleted.
+            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(D)).and(CHUNKS.CHASH.eq(Chash.fromHex(blockedRow).toBytes())).execute();
         }
 
         HttpResponse<String> r = validate(ROOT);
@@ -357,10 +539,27 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         again.path("constraints").forEach(c -> assertThat(c.path("action").asText()).isEqualTo("already_valid"));
     }
 
+    @Test
+    @Order(95)
+    void replaceOnAValidConstraintWarnsItIsNotValidNow_andValidateRestoresIt() throws Exception {
+        JsonNode r = json(add(ROOT, "replace", true));
+
+        r.path("constraints").forEach(c -> {
+            assertThat(c.path("action").asText()).isEqualTo("replaced");
+            assertThat(c.path("validated").asBoolean()).isFalse();
+            assertThat(c.path("warning").asText()).contains("NOT VALID");
+        });
+        JsonNode v = json(validate(ROOT));
+        Map<String, String> actions = new LinkedHashMap<>();
+        v.path("constraints").forEach(c -> actions.put(c.path("name").asText(), c.path("action").asText()));
+        assertThat(actions.get("chunks_metadata_keys_check")).isEqualTo("validated");
+        assertThat(actions.get("chunks_chash_octet_check")).isEqualTo("already_valid");
+    }
+
     // ---- 4. the restores pass the validated CHECK ---------------------------------------------------------------
 
     @Test
-    @Order(10)
+    @Order(100)
     void gcRestoreRereferencedBringsALegacyKeyedQuarantineRowBackAsChunkKeysOnly_throughTheValidatedCheck()
             throws Exception {
         assertThat(vectors.restoreRereferenced("cc-reaper", "quarantine-" + reaperOrigin, reaperOrigin))
@@ -372,7 +571,7 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
     }
 
     @Test
-    @Order(11)
+    @Order(110)
     void quarantineRestoreChunksBringsALegacyKeyedQuarantineRowBackAsChunkKeysOnly_throughTheValidatedCheck()
             throws Exception {
         var out = vectors.quarantineRestore("cc-reaper", restoreOrigin, "quarantine-" + restoreOrigin,

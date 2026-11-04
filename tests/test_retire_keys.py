@@ -53,6 +53,19 @@ class TestPlan:
         assert by != at
         assert {by, at} <= ckm.keys_of("ROW")
 
+    def test_the_engine_pins_what_the_plan_renders(self) -> None:
+        """The engine holds the ROW keys by digest and the bypass set exactly (ChunkKeyPlan): the generated Java
+        constants must be the digests of what ``engine_plan`` sends, or every request would be a 400."""
+        import gen_chunk_metadata_keys_java as gen  # noqa: PLC0415 — scripts/ is on the test pythonpath (pyproject)
+
+        plan = ckm.engine_plan()
+        rows = [k for k in plan["allowed_keys"] if k not in ckm.keys_of("CHUNK")]
+        assert rows == sorted(ckm.keys_of("ROW")) and len(rows) >= 4
+        source = gen.OUTPUT.read_text(encoding="utf-8")
+        assert f'ROW_KEYS_SHA256 =\n        "{gen.digest(rows)}"' in source
+        assert f'QUARANTINE_IMPLIES_SHA256 =\n        "{gen.digest(plan["quarantine_implies"])}"' in source
+        assert sorted(plan["bypass_prefixes"]) == sorted(["quarantine-", "taxonomy" + "_" * 2])
+
 
 # ── the wire ─────────────────────────────────────────────────────────────────
 
@@ -76,15 +89,22 @@ class TestWire:
     def test_an_apply_sends_its_fields_only_when_given_and_goes_through_the_write_guard(self) -> None:
         with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write") as guard:
             _client().chunk_keys_sweep(
-                dry_run=False, accept=("keyless_notes",), collection="c", batch_size=10, max_batches=2,
-                budget_seconds=5,
+                dry_run=False, accept={"keyless_notes": 3}, collection="c", batch_size=10, max_batches=2,
+                budget_seconds=5, resume={"cursor": None, "collections": ["c"], "blocked": [], "remaining": 4},
             )
         _, body = post.call_args.args
         assert body["dry_run"] is False
-        assert body["accept"] == ["keyless_notes"]
+        assert body["accept"] == {"keyless_notes": 3}, "a residue is accepted up to a number of rows, not by name alone"
+        assert body["resume"] == {"cursor": None, "collections": ["c"], "blocked": [], "remaining": 4}
         assert (body["collection"], body["batch_size"], body["max_batches"], body["budget_seconds"]) == ("c", 10, 2, 5)
         assert "measure_batch" not in body
         guard.assert_called_once()
+
+    def test_a_first_call_sends_neither_accept_nor_resume_when_given_none(self) -> None:
+        with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write"):
+            _client().chunk_keys_sweep(dry_run=False)
+        _, body = post.call_args.args
+        assert "accept" not in body and "resume" not in body
 
     def test_the_guard_runs_before_the_request_and_a_refusal_sends_nothing(self) -> None:
         with patch.object(hv, "_guard_chunk_keys_write", side_effect=RuntimeError("refused")), \
@@ -132,12 +152,20 @@ def _dry_report(*, tenant: str = TENANT, blocking: list[str] | None = None, swee
         }],
         "totals": {"retired_key_rows": sweepable + 1, "sweepable_rows": sweepable, "blocked_rows": 0,
                    "wrong_width_rows": 1},
-        "preconditions": {"keyless_notes": 2, "wrong_width_rows": 1},
-        "acceptable_residues": ["keyless_notes"],
+        "preconditions": {"keyless_notes": 2, "generated_nulls": 3, "null_span_rows": 2, "wrong_width_rows": 1},
+        "precondition_details": {
+            "generated_nulls": {"by_content_type": {"code": 2, "(none)": 1},
+                                "missing_key": {"source_format": 1, "tags": 3, "category": 0}},
+            "null_span_rows": {"by_field": {"line_start": 1, "line_end": 0, "chunk_start_char": 0, "chunk_end_char": 1}},
+        },
+        "acceptable_residues": ["keyless_notes", "generated_nulls", "null_span_rows"],
+        "accepted": {},
         "blocking": blocking if blocking is not None else [],
         "applicable": not blocking,
         "batch_size": 1000,
-        "batch_cost": {"rows": sweepable, "select_ms": 3, "update_ms": 9, "rolled_back": True, "projected_seconds": 0.0},
+        "batch_cost": {"samples": [{"collection": "knowledge__a__m__v1", "rows": sweepable, "select_ms": 3}],
+                       "select_ms": 3, "update_ms": None, "projected_seconds": 0.0,
+                       "projection_is_lower_bound": True},
     }
 
 
@@ -163,15 +191,27 @@ class FakeClient:
         self.calls.append(("add", kw))
         if self.error is not None:
             raise self.error
-        return {"tenants_checked": 3, "constraints": [{"name": "chunks_metadata_keys_check", "action": "added",
-                                                       "validated": False}]}
+        return self.add_result
+
+    add_result: dict = {
+        "tenants_checked": ["default", "cc-a", "cc-ghost"], "table_rows_examined": 77,
+        "left_behind": [{"tenant": "cc-blocked", "blocked_collections": [
+            {"collection": "knowledge__x__m__v1", "retired_key_rows": 4, "blocked": "legacy_unmanifested"}]}],
+        "constraints": [
+            {"name": "chunks_metadata_keys_check", "action": "added", "validated": False},
+            {"name": "chunks_embedding_model_check", "action": "present_differs", "validated": False,
+             "expected_definition": "CHECK (((metadata ->> 'embedding_model'::text) = embedding_model))"},
+            {"name": "chunks_chunk_text_hash_check", "action": "replaced", "validated": False,
+             "warning": "was VALID and is now NOT VALID until validate-constraints runs again"},
+        ],
+    }
 
     def chunk_keys_validate_constraints(self, **kw):
         self.calls.append(("validate", kw))
         if self.error is not None:
             raise self.error
-        return {"tenants_checked": 3, "constraints": [{"name": "chunks_chash_octet_check", "action": "validated",
-                                                       "validated": True}]}
+        return {"tenants_checked": ["default", "cc-a"], "table_rows_examined": 5,
+                "constraints": [{"name": "chunks_chash_octet_check", "action": "validated", "validated": True}]}
 
 
 def _run(client: FakeClient, *args: str):
@@ -179,9 +219,12 @@ def _run(client: FakeClient, *args: str):
         return CliRunner().invoke(t3, ["retire-keys", *args])
 
 
-def _apply(rows: int, *, done: bool, remaining: int = 0) -> dict:
+def _apply(rows: int, *, done: bool, remaining: int = 0, locked: int = 0, marker: str = "m") -> dict:
     return {"tenant": TENANT, "dry_run": False, "rows_swept": rows, "batches": 1, "done": done,
-            "remaining_rows": remaining, "first_batch_ms": 12, "elapsed_ms": 20, "blocked_collections": []}
+            "remaining_rows": remaining, "locked_skipped_rows": locked, "first_batch_ms": 12, "elapsed_ms": 20,
+            "blocked_collections": [],
+            "resume": None if done else {"cursor": {"collection": "c", "chash": "ab" * 32}, "collections": ["c"],
+                                         "blocked": [], "remaining": remaining, "marker": marker}}
 
 
 class TestCli:
@@ -193,8 +236,20 @@ class TestCli:
         assert "knowledge__a__m__v1" in result.output
         assert "5 to sweep" in result.output and "1 with a wrong-width chash" in result.output
         assert "keyless_notes: 2 (acceptable residue)" in result.output
-        assert "rolled back" in result.output
         assert "Dry run: nothing written" in result.output
+
+    def test_the_dry_run_says_its_cost_figure_is_the_select_only_lower_bound(self) -> None:
+        result = _run(FakeClient(_dry_report()), "--tenant", TENANT)
+        assert "nothing written or locked" in result.output
+        assert "LOWER BOUND" in result.output and "not measured" in result.output
+        assert "rolled back" not in result.output, "no UPDATE is run, not even a rolled-back one"
+
+    def test_the_dry_run_prints_the_breakdown_of_the_two_residues_that_have_one(self) -> None:
+        result = _run(FakeClient(_dry_report()), "--tenant", TENANT)
+        assert "generated_nulls by content type: code=2, (none)=1; missing key: source_format=1, tags=3, category=0" \
+            in result.output
+        assert "null_span_rows by column: line_start=1, line_end=0, chunk_start_char=0, chunk_end_char=1" \
+            in result.output
 
     def test_dry_run_and_apply_together_are_a_usage_error(self) -> None:
         client = FakeClient(_dry_report())
@@ -217,14 +272,46 @@ class TestCli:
 
     def test_apply_loops_until_the_engine_says_done_and_sums_the_rows(self) -> None:
         client = FakeClient(_dry_report(), applies=[_apply(4, done=False, remaining=2), _apply(2, done=True)])
-        result = _run(client, "--tenant", TENANT, "--apply", "--accept", "keyless_notes")
+        result = _run(client, "--tenant", TENANT, "--apply", "--accept", "keyless_notes=2")
         assert result.exit_code == 0, result.output
         modes = [kw["dry_run"] for _, kw in client.calls]
         assert modes == [True, False, False]
         assert client.calls[0][1]["measure_batch"] is False, "the identity check does not pay for a measured batch"
-        assert client.calls[1][1]["accept"] == ("keyless_notes",)
+        assert client.calls[1][1]["accept"] == {"keyless_notes": 2}
         assert client.calls[1][1]["budget_seconds"] == rk._BUDGET_SECONDS
         assert "Swept 6 rows in 2 calls" in result.output
+
+    def test_the_continuation_the_engine_returns_is_sent_back_and_the_first_call_sends_none(self) -> None:
+        client = FakeClient(_dry_report(), applies=[_apply(4, done=False, remaining=2, marker="after-1"),
+                                                    _apply(2, done=False, remaining=1, marker="after-2"),
+                                                    _apply(1, done=True)])
+        result = _run(client, "--tenant", TENANT, "--apply")
+        assert result.exit_code == 0, result.output
+        applies = [kw for _, kw in client.calls if not kw["dry_run"]]
+        assert applies[0]["resume"] is None, "the first call does the checks"
+        assert applies[1]["resume"]["marker"] == "after-1", "the next call carries the previous call's resume"
+        assert applies[2]["resume"]["marker"] == "after-2"
+        assert applies[1]["resume"]["cursor"]["chash"] == "ab" * 32
+
+    def test_locked_rows_the_engine_skipped_are_reported_and_a_run_that_cannot_finish_stops(self) -> None:
+        client = FakeClient(_dry_report(), applies=[_apply(0, done=False, remaining=1, locked=1) for _ in range(5)])
+        result = _run(client, "--tenant", TENANT, "--apply")
+        assert result.exit_code == rk.EXIT_STALLED
+        assert "1 skipped: locked by a writer" in result.output
+        assert "locked by a writer" in result.output.splitlines()[-1]
+
+    @pytest.mark.parametrize("bad", ["keyless_notes", "keyless_notes=", "=3", "keyless_notes=many", "keyless_notes=-1"])
+    def test_accept_wants_a_name_and_a_number(self, bad: str) -> None:
+        client = FakeClient(_dry_report())
+        result = _run(client, "--tenant", TENANT, "--accept", bad)
+        assert result.exit_code == rk.EXIT_USAGE
+        assert "NAME=N" in result.output
+        assert client.calls == []
+
+    def test_accept_is_not_for_the_table_wide_steps(self) -> None:
+        client = FakeClient(_dry_report())
+        assert _run(client, "--add-check", "--apply", "--accept", "keyless_notes=1").exit_code == rk.EXIT_USAGE
+        assert client.calls == []
 
     def test_apply_is_not_sent_while_the_engine_reports_a_blocking_precondition(self) -> None:
         client = FakeClient(_dry_report(blocking=["keyless_notes"]))
@@ -242,9 +329,9 @@ class TestCli:
         client = FakeClient(_dry_report(), applies=[])
         client.chunk_keys_sweep = lambda **kw: (_ for _ in ()).throw(refusal) if not kw.get("dry_run", True) \
             else _dry_report()   # type: ignore[method-assign]
-        result = _run(client, "--tenant", TENANT, "--apply", "--accept", "keyless_notes")
+        result = _run(client, "--tenant", TENANT, "--apply", "--accept", "keyless_notes=2")
         assert result.exit_code == rk.EXIT_PRECONDITION
-        assert "keyless_notes=7" in result.output
+        assert "keyless_notes=7" in result.output and "--accept NAME=N" in result.output
 
     def test_an_apply_that_sweeps_nothing_and_never_finishes_is_stopped(self) -> None:
         client = FakeClient(_dry_report(), applies=[_apply(0, done=False, remaining=9) for _ in range(5)])
@@ -280,8 +367,10 @@ class TestCli:
 
     def test_the_table_wide_steps_need_apply_and_no_tenant(self) -> None:
         client = FakeClient(_dry_report())
-        assert _run(client, "--add-check").exit_code == 0
-        assert _run(client, "--validate").exit_code == 0
+        for flag in ("--add-check", "--validate"):
+            result = _run(client, flag)
+            assert result.exit_code == rk.EXIT_USAGE, "a step that did nothing must not exit 0 in a script"
+            assert "--apply" in result.output
         assert client.calls == [], "without --apply nothing is sent"
         assert _run(client, "--add-check", "--tenant", TENANT, "--apply").exit_code == rk.EXIT_USAGE
         assert _run(client, "--add-check", "--validate", "--apply").exit_code == rk.EXIT_USAGE
@@ -297,6 +386,23 @@ class TestCli:
         assert [c[0] for c in client.calls] == ["add", "validate"]
         assert client.calls[0][1] == {"replace": True}
 
+    def test_add_check_names_the_tenants_checked_what_it_left_behind_and_every_warning(self) -> None:
+        added = _run(FakeClient(_dry_report()), "--add-check", "--apply")
+        assert added.exit_code == 0, added.output
+        assert "checked 3 tenants: default, cc-a, cc-ghost" in added.output
+        assert "77 chunk rows examined" in added.output
+        assert "Left behind" in added.output and "refuses ANY UPDATE" in added.output
+        assert "tenant cc-blocked: knowledge__x__m__v1 (legacy_unmanifested), 4 rows" in added.output
+        assert "chunks_embedding_model_check: present_differs" in added.output
+        assert "Expected: CHECK (((metadata ->> 'embedding_model'::text) = embedding_model))" in added.output
+        assert "--replace" in added.output
+        assert "WARNING: was VALID and is now NOT VALID" in added.output
+
+    def test_replace_help_says_a_valid_constraint_becomes_not_valid(self) -> None:
+        text = CliRunner().invoke(t3, ["retire-keys", "--help"]).output
+        flat = " ".join(text.split())
+        assert "was VALID is NOT VALID until --validate runs again" in flat
+
     def test_a_table_wide_refusal_names_the_tenants(self) -> None:
         refusal = VectorServiceError(
             "409", code=409, reason="tenant_unswept",
@@ -307,6 +413,16 @@ class TestCli:
         result = _run(client, "--add-check", "--apply")
         assert result.exit_code == rk.EXIT_FAILED
         assert "cc-a" in result.output and "unswept_rows=3" in result.output
+
+    def test_a_refusal_names_every_tenant_the_engine_checked(self) -> None:
+        refusal = VectorServiceError(
+            "409", code=409, reason="tenant_unswept",
+            engine_body={"error": "refused", "reason": "tenant_unswept",
+                         "tenants": [{"tenant": "cc-ghost", "unswept_rows": 2}],
+                         "tenants_checked": ["default", "cc-a", "cc-ghost"]},
+        )
+        result = _run(FakeClient(_dry_report(), error=refusal), "--add-check", "--apply")
+        assert "tenants checked (3): default, cc-a, cc-ghost" in result.output
 
 
 def test_the_verb_is_registered_under_t3() -> None:
@@ -321,35 +437,109 @@ class TestNoAutomaticTrigger:
     run has been read. Until it does, only the verb may reach the routes: no hook, rung, doctor row or daemon calls
     them, and the engine mounts them for a request to reach and runs them from no schedule."""
 
-    CLIENT_ONLY = {
-        "src/nexus/db/http_vector_client.py",          # defines the three methods
-        "src/nexus/commands/t3_cmds/retire_keys.py",   # the verb
-        "src/nexus/commands/t3.py",                    # registers the verb (its comment names the path)
+    #: Where the routes, the client methods and the verb may be named: the client (defines the three methods), the
+    #: verb, the group that registers it, the key table's docstring, the engine classes that implement and mount
+    #: the routes, and the tests of all of them. Anything else in the repository that names one is a caller.
+    NAMING_ALLOWED = {
+        "src/nexus/db/http_vector_client.py",
+        "src/nexus/commands/t3_cmds/retire_keys.py",
+        "src/nexus/commands/t3.py",
+        "src/nexus/tables/chunk_metadata_keys.py",
+        "service/src/main/java/dev/nexus/service/NexusService.java",
+        "service/src/main/java/dev/nexus/service/vectors/ChunkKeyPlan.java",
+        "service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java",
+        "service/src/main/java/dev/nexus/service/http/ChunkKeysAdminHandler.java",
+        "tests/test_retire_keys.py",
+        "service/src/test/java/dev/nexus/service/ChunkKeysTestBase.java",
+        "service/src/test/java/dev/nexus/service/ChunkKeySweepIntegrationTest.java",
+        "service/src/test/java/dev/nexus/service/ChunkConstraintRoutesIntegrationTest.java",
+        "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
+        "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
     }
     NAMES = ("chunk_keys_sweep", "chunk_keys_add_constraints", "chunk_keys_validate_constraints",
-             "/v1/admin/chunk-keys")
+             "/v1/admin/chunk-keys", "admin/chunk-keys", "retire-keys", "retire_keys")
+    #: Not scanned: version control, environments and build output, and prose (docs, the site, any *.md) that only
+    #: describes the verb. Everything else is: src, scripts, conexus, .github, deploy, hooks, tests, the engine.
+    SKIP_DIRS = {".git", ".venv", "node_modules", "target", "__pycache__", "docs", "web", ".mypy_cache",
+                 ".ruff_cache", ".pytest_cache", ".beads", ".claude", "build", "dist"}
+    #: Directories the brief names; each that exists must have been scanned (a gate that scanned none is vacuous).
+    NAMED_ROOTS = ("src", "scripts", "conexus", ".github", "deploy")
 
-    def test_only_the_client_and_the_verb_name_the_routes(self) -> None:
+    def _scan(self) -> tuple[dict[str, set[str]], dict[str, int]]:
+        import os  # noqa: PLC0415 — only this scan walks the tree
+
         root = Path(__file__).resolve().parent.parent
         seen: dict[str, set[str]] = {}
-        for path in (root / "src" / "nexus").rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            hits = {n for n in self.NAMES if n in text}
-            if hits:
-                seen[path.relative_to(root).as_posix()] = hits
-        assert set(seen) == self.CLIENT_ONLY, f"a caller other than the verb reaches the routes: {sorted(seen)}"
+        scanned: dict[str, int] = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in self.SKIP_DIRS]
+            for fname in filenames:
+                path = Path(dirpath) / fname
+                if path.suffix == ".md":
+                    continue
+                try:
+                    if path.stat().st_size > 3_000_000:
+                        continue
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                rel = path.relative_to(root).as_posix()
+                top = rel.split("/", 1)[0]
+                scanned[top] = scanned.get(top, 0) + 1
+                hits = {n for n in self.NAMES if n in text}
+                if hits:
+                    seen[rel] = hits
+        return seen, scanned
 
-    def test_the_engine_calls_the_sweep_from_its_handler_alone(self) -> None:
+    def test_nothing_in_the_repository_names_the_routes_but_the_verb_the_engine_and_their_tests(self) -> None:
+        seen, scanned = self._scan()
+        for top in self.NAMED_ROOTS:
+            if (Path(__file__).resolve().parent.parent / top).is_dir():
+                assert scanned.get(top, 0) > 0, f"the scan looked at nothing under {top}/"
+        assert sum(scanned.values()) > 1000, "the scan examined too few files to mean anything"
+        assert set(seen) <= self.NAMING_ALLOWED, \
+            f"a file other than the verb, the engine and their tests names the routes: {sorted(set(seen) - self.NAMING_ALLOWED)}"
+        assert {"src/nexus/db/http_vector_client.py", "src/nexus/commands/t3_cmds/retire_keys.py"} <= set(seen), \
+            "the scan cannot see the files that define the routes' client: it is not looking where it says"
+
+    def test_the_engines_main_sources_name_the_classes_only_where_they_are_built_and_bound(self) -> None:
         root = Path(__file__).resolve().parent.parent / "service" / "src" / "main" / "java"
         callers = {
             p.name for p in root.rglob("*.java")
-            if any(tok in p.read_text(encoding="utf-8") for tok in ("ChunkKeySweep", "ChunkConstraintAdmin"))
+            if any(tok in p.read_text(encoding="utf-8")
+                   for tok in ("ChunkKeySweep", "ChunkConstraintAdmin", "ChunkKeysAdminHandler"))
         }
         # The classes themselves, the handler that mounts them, and the two places that build and bind them.
         assert callers == {"ChunkKeySweep.java", "ChunkConstraintAdmin.java", "ChunkKeysAdminHandler.java",
                            "NexusService.java", "Main.java"}
-        for scheduler in ("ChunkReaper.java", "LeafBloatSweep.java"):
-            assert scheduler not in callers
+
+    def test_nexus_service_and_main_never_invoke_the_operations_or_schedule_them(self) -> None:
+        """Not a file whitelist: every line of NexusService and Main that names the sweep, the admin or the handler
+        (and the two lines either side) is read, and none may call an operation on them or sit beside a scheduler."""
+        import re  # noqa: PLC0415 — only this check needs a regex
+
+        root = Path(__file__).resolve().parent.parent / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service"
+        mention = re.compile(r"\b(ChunkKeySweep|ChunkConstraintAdmin|ChunkKeysAdminHandler|chunkConstraintAdmin)\b")
+        operations = (".dryRun(", ".apply(", ".probe(", ".collectionsOf(", ".validate(", ".add(", ".states(",
+                      ".preconditions(", ".preconditionReport(", ".run(", ".submit(", ".execute(")
+        forbidden_words = ("schedul", "Executor", "Runnable", "startup", "Timer", "Thread")
+        examined = 0
+        for name in ("NexusService.java", "Main.java"):
+            lines = (root / name).read_text(encoding="utf-8").splitlines()
+            hit_lines = [i for i, line in enumerate(lines) if mention.search(line)]
+            assert hit_lines, f"{name} no longer builds or binds the routes' classes: the check is looking at nothing"
+            for i in hit_lines:
+                for j in range(max(0, i - 2), min(len(lines), i + 3)):
+                    stripped = lines[j].strip()
+                    if stripped.startswith(("//", "*", "/*")):
+                        continue
+                    examined += 1
+                    assert not any(op in lines[j] for op in operations), f"{name}:{j + 1} invokes an operation: {stripped}"
+                    assert not any(w in lines[j] for w in forbidden_words), \
+                        f"{name}:{j + 1} sits beside a scheduler or startup hook: {stripped}"
+                    assert not re.search(r"\bchunkConstraintAdmin\s*\.", lines[j]), \
+                        f"{name}:{j + 1} calls on the admin: {stripped}"
+        assert examined >= 8, "the check read too few lines to mean anything"
 
 
 # ── the verb against the real engine ─────────────────────────────────────────
@@ -402,7 +592,8 @@ def test_the_verb_end_to_end_against_the_real_engine(t2_service_env) -> None:
     report = json.loads(dry.stdout)["report"]
     assert report["tenant"] == tenant
     assert [(c["collection"], c["retired_key_rows"]) for c in report["collections"]] == [(collection, 3)]
-    assert report["batch_cost"]["rolled_back"] is True
+    assert report["batch_cost"]["projection_is_lower_bound"] is True and report["batch_cost"]["update_ms"] is None
+    assert report["batch_cost"]["samples"][0]["rows"] == 3, "the sampled batch SELECT saw the three rows"
     assert _metadata(tenant, collection, ids[0])["title"] == "t0", "the dry run wrote nothing"
 
     wrong = runner.invoke(t3, ["retire-keys", "--tenant", "somebody-else", "--apply"])

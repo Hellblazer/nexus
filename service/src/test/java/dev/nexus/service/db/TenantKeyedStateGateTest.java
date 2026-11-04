@@ -545,10 +545,15 @@ public class TenantKeyedStateGateTest {
             // nexus-6pfgb.43: the retire-keys routes hold nothing between requests.
             for (String f : List.of("ChunkKeySweep.DryRun.tenant", "ChunkKeySweep.DryRun.collections",
                 "ChunkKeySweep.DryRun.preconditions", "ChunkKeySweep.DryRun.blocking", "ChunkKeySweep.Applied.tenant",
-                "ChunkKeySweep.Applied.blocked")) {
+                "ChunkKeySweep.Applied.blocked", "ChunkKeySweep.DryRun.details", "ChunkKeySweep.DryRun.accepted",
+                "ChunkKeySweep.DryRun.samples", "ChunkKeySweep.Preconditions.counts",
+                "ChunkKeySweep.Preconditions.details", "ChunkKeySweep.Resume.collections",
+                "ChunkKeySweep.Resume.blocked")) {
                 notKeyed.put(f, "a component of one sweep call's result record, built for that request and dropped "
                     + "with its response; nothing keeps it between requests");
             }
+            notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
+                + "tenant name beside its counts), built for that request and dropped with its response");
             for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",
                 "ChunkKeyPlan.quarantineImplies")) {
                 notKeyed.put(f, "a component of one request's immutable plan (List.copyOf), built per request from "

@@ -37,7 +37,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -5278,23 +5278,29 @@ class HttpVectorClient:
     # ---- RDR-236 Phase 4 Step 3: retire the chunk-row metadata keys (nexus-6pfgb.43) -------------------------
 
     def chunk_keys_sweep(
-        self, *, dry_run: bool = True, accept: Sequence[str] = (), collection: str | None = None,
+        self, *, dry_run: bool = True, accept: Mapping[str, int] | None = None, collection: str | None = None,
         batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
-        measure_batch: bool | None = None,
+        measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None,
     ) -> dict:
         """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant (nexus-6pfgb.43).
 
         The allow-list, the bypass prefixes and the quarantine implication ride in the body, rendered from the key
-        table (:func:`nexus.tables.chunk_metadata_keys.engine_plan`): the engine cannot name the ROW keys. The
-        default is a DRY RUN, which writes nothing: it answers ``{"tenant", "collections": [{"collection",
-        "retired_key_rows", "wrong_width_rows", "sweepable_rows", "legacy_unmanifested", "blocked"}], "totals",
-        "preconditions": {name: count}, "acceptable_residues", "blocking", "applicable", "batch_cost":
-        {"rows", "select_ms", "update_ms", "rolled_back", "projected_seconds"}}``. ``dry_run=False`` sweeps up to
-        ``max_batches`` batches of ``batch_size`` rows or ``budget_seconds`` and answers ``{"tenant", "rows_swept",
-        "batches", "done", "remaining_rows", "first_batch_ms", "elapsed_ms", "blocked_collections"}``; the caller
-        calls again while ``done`` is false. ``accept`` names the residues of ``acceptable_residues`` the operator
-        accepts: apply is refused (409, ``reason == "sweep_preconditions_not_met"``, the report in
-        ``engine_body``) while a non-zero one is not named.
+        table (:func:`nexus.tables.chunk_metadata_keys.engine_plan`): the engine cannot name the ROW keys, so it pins
+        them (the ROW keys by digest, exactly the quarantine and taxonomy prefixes, the implication pair) and answers
+        400 to a plan that differs. The default is a DRY RUN, which writes nothing, locks no row and runs no UPDATE: it
+        answers ``{"tenant", "collections": [{"collection", "retired_key_rows", "wrong_width_rows", "sweepable_rows",
+        "legacy_unmanifested", "blocked"}], "totals", "preconditions": {name: count}, "precondition_details"
+        (``generated_nulls`` by content type and by missing key, ``null_span_rows`` by column), "acceptable_residues",
+        "accepted", "blocking", "blocking_detail", "applicable", "batch_cost": {"samples": [{"collection", "rows",
+        "select_ms"}], "select_ms", "update_ms": null, "projected_seconds", "projection_is_lower_bound": true}}``: the
+        cost is the batch SELECT only, so the projection is a lower bound. ``dry_run=False`` sweeps up to
+        ``max_batches`` batches of ``batch_size`` rows or ``budget_seconds`` (counted after the checks) in keyset
+        order and answers ``{"tenant", "rows_swept", "batches", "done", "remaining_rows", "locked_skipped_rows",
+        "first_batch_ms", "elapsed_ms", "blocked_collections", "resume"}``; the caller calls again, passing the
+        ``resume`` object back, while ``done`` is false. A call with ``resume`` does not repeat the preconditions or
+        the census (the first call of a run did them). ``accept`` is ``{residue: rows}``: each residue of
+        ``acceptable_residues`` the operator accepts, up to that many rows; apply is refused (409, ``reason ==
+        "sweep_preconditions_not_met"``, the report in ``engine_body``) while a live count is above what was accepted.
 
         An apply is a WRITE: it goes through the production-write guard
         (:func:`~nexus.db.service_endpoint.guard_production_write`, ``NX_ALLOW_PROD_WRITE``) before the first
@@ -5306,7 +5312,9 @@ class HttpVectorClient:
 
         body: dict[str, Any] = {**engine_plan(), "dry_run": dry_run}
         if accept:
-            body["accept"] = list(accept)
+            body["accept"] = {str(name): int(rows) for name, rows in accept.items()}
+        if resume:
+            body["resume"] = dict(resume)
         for key, value in (
             ("collection", collection), ("batch_size", batch_size), ("max_batches", max_batches),
             ("budget_seconds", budget_seconds), ("measure_batch", measure_batch),
@@ -5320,11 +5328,18 @@ class HttpVectorClient:
     def chunk_keys_add_constraints(self, *, replace: bool = False) -> dict:
         """POST /v1/admin/chunk-keys/add-constraints: the table-wide add of the chunk CHECKs, NOT VALID (nexus-6pfgb.43).
 
-        Operator (root token) only. Refused (409, ``reason == "tenant_unswept"``, the tenants in
-        ``engine_body["tenants"]``) while any tenant of the install still has rows to sweep. Answers
-        ``{"tenants_checked", "constraints": [{"name", "action", "present", "validated", "definition"}]}`` where
-        ``action`` is ``added``, ``present`` (left alone) or ``replaced``. ``replace=True`` drops and re-adds each in
-        one statement, which is how a changed key table reaches the database. A WRITE: guarded like the sweep's apply.
+        Operator (root token) only. The engine first reads every tenant with chunk rows on its admin connection (a
+        tenant with no ``service_tokens`` row included) and refuses (409, ``reason`` ``tenant_unswept`` or
+        ``tenant_violates_constraint``, the tenants in ``engine_body["tenants"]``) while one has rows the sweep can
+        still take, a hash or model that differs from its column, a chash that is not 32 bytes, or a half-stamped
+        quarantine row. Answers ``{"tenants_checked": [names], "table_rows_examined", "left_behind": [{"tenant",
+        "blocked_collections": [{"collection", "retired_key_rows", "blocked"}]}], "constraints": [{"name", "action",
+        "present", "validated", "definition", "warning", "expected_definition"}]}`` where ``action`` is ``added``,
+        ``present`` (the stored definition is the plan's), ``present_differs`` (it is not; ``expected_definition``
+        says what the plan would add) or ``replaced`` (``warning`` when it was VALID and is NOT VALID now).
+        ``replace=True`` drops and re-adds each in one statement, which is how a changed key table reaches the
+        database. DATA EFFECT: a NOT VALID CHECK is evaluated on every new row version, so a row the sweep left
+        behind (``left_behind``) cannot be UPDATEd until it is fixed. A WRITE: guarded like the sweep's apply.
         """
         from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
 

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -203,6 +205,43 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
             m.put((String) extra[i], extra[i + 1]);
         }
         return m;
+    }
+
+    /** {@code "accept"} as the route takes it: residue name to the rows accepted. */
+    static Map<String, Object> accept(Object... pairs) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (int i = 0; i < pairs.length; i += 2) {
+            m.put((String) pairs[i], pairs[i + 1]);
+        }
+        return m;
+    }
+
+    /** A live catalog document with the given type, physical collection and meta (a JSON object text, or null). */
+    void document(String tenant, String tumbler, String contentType, String physicalCollection, String metadataJson)
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                    CATALOG_DOCUMENTS.METADATA)
+                .values(tenant, tumbler, "Doc " + tumbler, contentType, physicalCollection,
+                    metadataJson == null ? null : JSONB.jsonb(metadataJson))
+                .execute();
+        }
+    }
+
+    /** The four manifest span columns of the manifest row that names {@code hex} (null leaves a column NULL). */
+    void manifestSpans(String tenant, String collection, String hex, Integer lineStart, Integer lineEnd,
+                       Integer charStart, Integer charEnd) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.LINE_START, lineStart).set(CATALOG_DOCUMENT_CHUNKS.LINE_END, lineEnd)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, charStart).set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, charEnd)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes())).execute();
+        }
     }
 
     // ---- reads -------------------------------------------------------------------------------------------------
