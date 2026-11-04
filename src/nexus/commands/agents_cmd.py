@@ -139,6 +139,10 @@ def compose_worktree_developer(*, sn_dir: Path, conexus_dir: Path) -> str:
 
     shared_dir = (conexus_dir.resolve() / "resources" / "agent-shared").as_posix()
     d_body = _SHARED_LINK.sub(f"]({shared_dir}/", d_body)
+    # nexus-z7ddd: the composed file is not a plugin file, so nothing substitutes
+    # ${CLAUDE_PLUGIN_ROOT} in it; every other plugin path (a skill, another agent)
+    # is resolved against the installed conexus directory here.
+    d_body = d_body.replace("${CLAUDE_PLUGIN_ROOT}", conexus_dir.resolve().as_posix())
 
     digest = hashlib.sha256((template + developer).encode("utf-8")).hexdigest()[:16]
     marker = (
