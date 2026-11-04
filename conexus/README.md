@@ -38,11 +38,11 @@ T2 — the T2 daemon was retired in favour of that service. For a storage
 service that survives reboots independent of Claude Code (recommended for
 any host with regular `nx` CLI use), run `nx daemon service install
 --autostart` once after install. See
-[Container Integration](../docs/container-integration.md) for the full
+[Container Integration](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for the full
 story.
 
 **Companion plugin:**
-- **[sn](../sn/README.md)** — Serena (LSP code intelligence) + Context7 (library docs) with SubagentStart guidance injection. Install separately: `/plugin install sn@nexus-plugins`.
+- **[sn](https://github.com/Hellblazer/nexus/blob/main/sn/README.md)** — Serena (LSP code intelligence) + Context7 (library docs) with SubagentStart guidance injection. Install separately: `/plugin install sn@nexus-plugins`.
 
 **Also required:**
 - Python 3.12–3.13 (for hook scripts)
@@ -296,7 +296,7 @@ empty directories: 0.1 to 0.2 s with a Python already there, 2.3 s each when uv 
 the Windows gate hosts were slower (nexus-3ya9d). Each `SessionStart` entry's timeout is therefore its own
 work budget plus a 30 s cold-start allowance, so Claude Code does not cancel the first session's hooks while
 uv starts; a warm hook returns when it is done and pays nothing for the larger limit.
-`tests/test_session_start_cold_start_allowance.py` pins the rule.
+[`test_session_start_cold_start_allowance.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_cold_start_allowance.py) pins the rule.
 
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
@@ -352,7 +352,7 @@ for that release (so was the bd-close gate, since deleted, which let an
 unreviewed `bd close` through while returning a correct deny to anything
 that called it directly). It is still registered on both tiers, because
 the verdict is useful as data; only the command tier is wired. `nexus.mcp.hooks.DECIDING_HOOKS` is the list, and
-`tests/test_deciding_hooks_are_command_tier.py` refuses a `hooks.json`
+[`test_deciding_hooks_are_command_tier.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_deciding_hooks_are_command_tier.py) refuses a `hooks.json`
 that moves any of them back.
 
 ## Slash Commands
@@ -378,8 +378,8 @@ commands used to inject is not replaced; the skill's own MCP-tool
 project-context calls cover the same ground.
 
 **MCP-tool pointers** (RDR-080 — dispatch the named MCP tool directly). Some
-are commands (`conexus/commands/*.md`) and some are skills
-(`conexus/skills/*/SKILL.md`); Claude Code spells both `/conexus:<name>`, so
+are commands (`commands/*.md`) and some are skills
+(`skills/*/SKILL.md`); Claude Code spells both `/conexus:<name>`, so
 the invocation reads the same and the surface is marked per line below:
 - `nx_answer` (MCP tool, no skill or command since nexus-dg7i6.6) — multi-step retrieval
 - `/conexus:knowledge-tidying` (skill) → `nx_tidy` *(was → knowledge-tidier agent; command `/conexus:knowledge-tidy` merged into this skill at nexus-cnzei.4)*
@@ -395,7 +395,7 @@ the invocation reads the same and the surface is marked per line below:
 **RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`, `/conexus:rdr-fix`. Four of these
 (`rdr-gate`, `rdr-accept`, `rdr-audit`, `rdr-fix`) pair a `commands/*.md` file with a distinctly-named
 `*-checklist` skill (`rdr-gate-checklist`, `rdr-accept-checklist`, `rdr-audit-checklist`, `rdr-fix-checklist`).
-The names don't collide, so `_KNOWN_COMMAND_SKILL_COLLISIONS` in `tests/test_plugin_structure.py` stays
+The names don't collide, so `_KNOWN_COMMAND_SKILL_COLLISIONS` in [`test_plugin_structure.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py) stays
 empty. `rdr-list` is command-only (its skill depended on the command's own bash-injected data and was
 deleted at nexus-cnzei.4); `rdr-create`/`rdr-close`/`rdr-research`/`rdr-show` are skill-only (the redundant
 command was deleted at nexus-cnzei.4).
@@ -430,7 +430,7 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 **`nx_answer`** is the retrieval entry point for multi-step questions.
 It runs `plan_match` against the library, executes the best-matching plan
 via `plan_run`, and falls through to an inline planner on miss.  See
-[`docs/querying-guide.md`](../docs/querying-guide.md) for the pattern.
+[`docs/querying-guide.md`](https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md) for the pattern.
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 

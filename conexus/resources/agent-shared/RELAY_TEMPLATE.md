@@ -141,7 +141,7 @@ Coverage report with gap identification
 
 ## Usage in Skills
 
-Skills should reference this template rather than inline it. `<plugin-root>` in the block stands for the plugin-root variable, spelled exactly as the files in [../../agents/](../../agents/) spell it. This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
+Skills should reference this template rather than inline it. `<plugin-root>` in the block stands for the plugin-root variable, spelled exactly as [agents/developer.md](../../agents/developer.md) spells it on its "This agent follows the Shared Context Protocol" line (copy that line's link target). This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
 
 ```markdown
 ## Agent Invocation

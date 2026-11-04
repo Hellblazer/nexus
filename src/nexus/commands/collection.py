@@ -9,6 +9,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands.store import _t3
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import (
@@ -169,12 +170,12 @@ _SHAPE_MAX_LISTED_PER_CHECK: int = 10
 _COLLECTION_RULES_URL: str = "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md"
 
 
-@collection.command("shape")
+@collection.command("shape", epilog=COLLECTIONS_RULES_EPILOG)
 @click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
 @click.option("--full", is_flag=True, help=f"List every collection per check instead of the first {_SHAPE_MAX_LISTED_PER_CHECK}.")
 def shape_cmd(as_json: bool, full: bool) -> None:
     """Read-only shape audit of the whole collection SET against the collection rules
-    (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md).
+    (the page is linked at the end of this help).
 
     Distinct from ``nx collection audit NAME`` (the RDR-087 deep dive of one
     collection).

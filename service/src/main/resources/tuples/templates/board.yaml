@@ -57,7 +57,7 @@ max_live_rows: 500
 doc:
   summary: An append-only announcement log per topic, many readers and no claiming; a post is a short message with a sender and an optional label.
   writers:
-    - Unverified: any session of the tenant, by tuple_out or nx tuple out, following the board posting convention (one post per topic per minute) in conexus/skills/mailbox/SKILL.md
+    - Unverified: any session of the tenant, by tuple_out or nx tuple out, following the board posting convention (one post per topic per minute) in the mailbox skill of the conexus plugin
     - Unverified: no code in this repository posts to board/<topic>; the live tenant holds no such subspace
   readers:
     - Unverified: a session that called tuple_subscribe on the topic gets each post pushed through the channel (at most 32 topics per session)
@@ -78,4 +78,4 @@ doc:
     body: An example post body.
   see_also:
     - RDR-211
-    - conexus/skills/mailbox/SKILL.md
+    - https://github.com/Hellblazer/nexus/blob/main/conexus/skills/mailbox/SKILL.md

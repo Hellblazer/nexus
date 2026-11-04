@@ -1077,7 +1077,7 @@ def init_cmd(
     ``--embedder`` selects bge-768 vs minilm-384 for the local service-embedder
     step (minilm-384 gets an advisory — this step always fetches the bge-768 ONNX).
     A separate opt-in (nexus-umm29) switches the running service to Voyage
-    instead — see https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md "Local mode with Voyage" for the
+    instead — the page linked at the end of this help ("Local mode with Voyage") has the
     ``local.embed_model`` + ``voyage_api_key`` + restart steps; a later
     ``nx init`` keeps a voyage-* ``local.embed_model`` and says so
     (nexus-ddmfg). ``--service`` is still accepted (it

@@ -5005,7 +5005,7 @@ def _check_engine_reaper(
         "A reaper that stopped making passes is restarted by restarting the engine "
         "(`nx daemon service stop`, then `nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
         "switches it off on purpose, and then this row reads not applicable",
-        "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+        "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md (the refusal table, the settings and what a pass does)",
     ]
 
     if last_raw is None:
@@ -5049,7 +5049,7 @@ def _check_engine_reaper(
                     *(["An errored tenant: read the engine log for event=reaper_tenant_failed and "
                        "event=reaper_collection_failed (a permission or grants regression errors every "
                        "collection and the pass still completes)"] if errored else []),
-                    "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+                    "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md (the refusal table, the settings and what a pass does)",
                 ],
             )]
         return [HealthResult(
@@ -5154,7 +5154,7 @@ def _check_per_collection_indexes(
             fix_suggestions=[
                 "The engine reports a per_collection_indexes object this client does not understand: check that "
                 "the client and engine versions match (`nx doctor` reports both)",
-                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
 
@@ -5200,7 +5200,7 @@ def _check_per_collection_indexes(
                   ["The engine's admin role cannot create indexes on the leaves of nexus.chunks: grant it the "
                    "privilege (it must own or be able to CREATE INDEX on the partitions), then restart the engine"]),
                 "NX_SEARCH_PCI=0 switches the builder off on purpose, and then this row passes with a note",
-                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
     off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
@@ -5253,7 +5253,7 @@ def _check_per_collection_indexes(
                 *(["A reindex leftover is dropped by the builder on its next pass: set NX_SEARCH_PCI=1, or "
                    "DROP INDEX CONCURRENTLY it by hand (it is the invalid pci_<hash>_ccnew/_ccold index)"]
                   if warn_leftover else []),
-                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
     if state == "standby":
@@ -5703,7 +5703,7 @@ def _check_chunks_leaf_bloat(
                    "event=chunks_leaf_autovacuum_checked naming any it could not"] if n_unset else []),
                 *(["autovacuum_enabled=false is kept on purpose by the self-heal; as the owner of each leaf named in "
                    "the log, reset that storage parameter on it: RESET (autovacuum_enabled)"] if n_disabled else []),
-                "https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md: the nexus.chunks leaf autovacuum policy",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md (the nexus.chunks leaf autovacuum policy)",
             ],
         )]
     note = ""

@@ -23,13 +23,12 @@ def service() -> None:
     """Administer the storage service."""
 
 
-@service.command("probe")
+@service.command("probe", epilog="\b\nThe managed service's URL, used when neither --url nor NX_SERVICE_URL is set:\nhttps://api.conexus-nexus.com")
 @click.option(
     "--url",
     "url",
     default=None,
-    help="Managed service base URL. Defaults to NX_SERVICE_URL or "
-    "https://api.conexus-nexus.com (the managed service).",
+    help="Managed service base URL. Defaults to NX_SERVICE_URL, then to the managed service (URL at the end of this help).",
 )
 def probe(url: str | None) -> None:
     """Probe a managed nexus service for reachability + version compatibility.

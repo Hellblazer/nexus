@@ -23,7 +23,7 @@
 
 3. Add Beads Integration section
 
-4. Add Context Protocol reference. `<plugin-root>` below stands for the plugin-root variable, spelled exactly as the files in [../../agents/](../../agents/) spell it. This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
+4. Add Context Protocol reference. `<plugin-root>` below stands for the plugin-root variable, spelled exactly as [agents/developer.md](../../agents/developer.md) spells it on its "This agent follows the Shared Context Protocol" line (copy that line's link target). This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
    ```markdown
    ## Context Protocol
 
