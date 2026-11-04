@@ -64,7 +64,6 @@ def daemon_group() -> None:
 # RDR-174 P2.1 (nexus-y2yj6): the storage SERVICE tier (engine-service binary +
 # local Postgres; serves T2 + T3). Mirrors the T2/T3 autostart-unit identity.
 _SERVICE_PLIST_NAME = "com.nexus.service.plist"
-_MIGRATION_RUNBOOK_URL = "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
 _SERVICE_SERVICE_NAME = "nexus-service.service"
 # T2 autostart-unit IDENTITY. The T2 DAEMON is gone (nexus-i711w Stage 2
 # sub-stage B), but these OUTLIVE it deliberately: an install upgraded from a
