@@ -22,7 +22,7 @@ from tests.hooks.test_subagent_start_hook import _run_hook
 def test_the_row_is_given_in_a_project_that_has_the_script(tmp_path: Path) -> None:
     script = tmp_path / "scripts" / "agent-worktree-preflight.sh"
     script.parent.mkdir()
-    script.write_text("#!/bin/sh\n")
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
     row = subagent_start._worktree_preflight_row(str(tmp_path))
     assert row == subagent_start._WORKTREE_PREFLIGHT
     assert "agent-worktree-preflight.sh" in row
@@ -48,7 +48,7 @@ def _repo(path: Path, *, with_script: bool) -> Path:
     if with_script:
         script = path / subagent_start._WORKTREE_PREFLIGHT_SCRIPT
         script.parent.mkdir(parents=True)
-        script.write_text("#!/bin/sh\n")
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
     return path
 
 

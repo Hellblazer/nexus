@@ -336,7 +336,7 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
     # script, as the nexus repo does; seed it so this measures the largest case.
     preflight = main_repo / "scripts" / "agent-worktree-preflight.sh"
     preflight.parent.mkdir()
-    preflight.write_text("#!/bin/sh\n")
+    preflight.write_text("#!/bin/sh\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@t",
          "commit", "-q", "--allow-empty", "-m", "init"],

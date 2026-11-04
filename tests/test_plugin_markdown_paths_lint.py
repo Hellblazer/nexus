@@ -95,9 +95,6 @@ _REPO_PATH_ALLOWED: dict[str, dict[str, str]] = {
         "scripts/mvnw-leased.sh": "named under 'when the project has that script' (the nexus repo)",
         "service/mvnw": "named inside the same nexus-repo clause, as what the script wraps",
     },
-    "conexus/skills/orchestration/SKILL.md": {
-        ".claude/rules/releases-and-engine.md": "labelled 'this repo's own' file, not a path the reader must open",
-    },
     "conexus/skills/cli-controller/SKILL.md": {
         "service/target": "inside an HTML comment saying the example is generic and the path is nexus's",
     },
