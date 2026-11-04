@@ -484,7 +484,7 @@ class TestCheckServiceAutostartDrift:
         assert r.ok is False and r.warn is True
         assert "installed but not registered for login" in r.detail
         assert "reports com.nexus.service disabled" in r.detail
-        assert r.fix_suggestions[0].startswith("launchctl enable gui/")
+        assert r.fix_suggestions[0].startswith("`launchctl enable gui/")
 
     def test_real_unit_file_and_a_fake_manager_with_no_gui_domain_is_informational(self, tmp_path, monkeypatch):
         r = self._end_to_end(
