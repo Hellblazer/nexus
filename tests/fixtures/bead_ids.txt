@@ -4247,6 +4247,7 @@ nexus-gxr
 nexus-gxzfq
 nexus-gy2eh
 nexus-gy317
+nexus-gy3vq
 nexus-gynt2
 nexus-gynt2.1
 nexus-gzk
@@ -4486,6 +4487,7 @@ nexus-i0frt
 nexus-i0frt.1
 nexus-i0wsm
 nexus-i15oc
+nexus-i1eb4
 nexus-i1mi1
 nexus-i1oh4
 nexus-i24r4
