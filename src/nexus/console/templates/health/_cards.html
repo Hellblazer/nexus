@@ -60,16 +60,7 @@
     {% endif %}
   </article>
 
-  <article class="health-card {% if dolt_server.exists %}ok{% else %}warn{% endif %}">
-    <header>Dolt</header>
-    {% if dolt_server.exists %}
-    <div class="stat-value" style="color:var(--console-ok);">OK</div>
-    <div class="stat-label">log active {{ age_str(dolt_server.age_seconds) }}</div>
-    {% else %}
-    <div class="stat-value" style="color:var(--console-muted);">&mdash;</div>
-    <div class="stat-label">no log</div>
-    {% endif %}
-  </article>
+  {% include "health/_dolt_card.html" %}
 
   <article class="health-card {% if health_ok %}ok{% else %}warn{% endif %}">
     <header>System</header>
