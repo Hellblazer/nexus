@@ -388,7 +388,7 @@ the invocation reads the same and the surface is marked per line below:
 - `/conexus:pdf-process` (command) → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
 
 **Utility commands** (no agent dispatch, no MCP call — direct local action):
-- `/conexus:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
+- `/conexus:continuation [topic]` — write a handoff document under `/tmp/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. The chat reply is one `cat <path>` line to paste after `/clear`.
 - `/conexus:nx-preflight` — verify conexus plugin dependencies (CLI, doctor, beads).
 - `/conexus:setup` — set up Nexus through the nexus server's `setup` and `setup_status` tools: show what is missing, ask, then install the CLI and a service in the background. It has no `nx` shell line, because it must work where `nx` does not exist.
 
