@@ -47,6 +47,11 @@ class EntityConfigError(ValueError):
     not compile. The message names the key (``entity.collections["<glob>"]``)."""
 
 
+class EntityKeyError(ValueError):
+    """An explicit ``entity_key`` the put refuses (:func:`check_explicit_key`), raised before any
+    state is touched."""
+
+
 def is_code_collection(collection: str) -> bool:
     """True for a ``code__`` collection, which has no entity keys. The prefix table is
     ``metadata_schema``'s, the one the chunk writer reads (a name-prefix dispatch, not a parse of
@@ -189,15 +194,15 @@ def check_explicit_key(collection: str, explicit: str) -> None:
     """Refuse an explicit entity key a put cannot honour, before it touches any state: a control
     character (newline included), a key longer than :data:`MAX_ENTITY_KEY_LEN`, or any key on a
     ``code__`` collection (it has no keys, so the key would be dropped without a word). An unset or
-    all-whitespace key is "none given". Raises ``ValueError``."""
+    all-whitespace key is "none given". Raises :class:`EntityKeyError` (a ``ValueError``)."""
     if not explicit or not explicit.strip():
         return
     if any(unicodedata.category(ch) == "Cc" for ch in explicit):
-        raise ValueError("entity_key must not contain control characters (newline included)")
+        raise EntityKeyError("entity_key must not contain control characters (newline included)")
     if len(explicit.strip()) > MAX_ENTITY_KEY_LEN:
-        raise ValueError(f"entity_key is longer than {MAX_ENTITY_KEY_LEN} characters")
+        raise EntityKeyError(f"entity_key is longer than {MAX_ENTITY_KEY_LEN} characters")
     if is_code_collection(collection):
-        raise ValueError(
+        raise EntityKeyError(
             f"entity_key is not allowed on a code collection ({collection}): code__ collections have "
             "no entity keys, so the key would be dropped. Store the document in a knowledge, docs or "
             "rdr collection, or leave the key off.")

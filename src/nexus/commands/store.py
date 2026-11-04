@@ -20,6 +20,7 @@ from nexus.corpus import (
 )
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
+from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
@@ -175,10 +176,10 @@ def put_cmd(
             category=category, source_agent=agent,
             ttl_days=ttl_days, entity_key=entity_key,
         )
-    except (PutOversizedError, NoteUriEngineTooOldError, ValueError) as exc:
-        # ValueError: an --entity-key the put refuses (a code collection, a control character, over
-        # 256 characters; nexus-fai28), raised before any register or write. The config error
-        # (EntityConfigError, also a ValueError) names its file and key.
+    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError) as exc:
+        # EntityKeyError: an --entity-key the put refuses (a code collection, a control character,
+        # over 256 characters; nexus-fai28), raised before any register or write. EntityConfigError
+        # names its config file and key. Any other ValueError keeps its traceback.
         # put_note refuses an over-quota note, or one the serving engine is too old to hold
         # (RDR-231, nexus-bivz3.13), before it mints a catalog row.
         raise click.ClickException(str(exc)) from exc

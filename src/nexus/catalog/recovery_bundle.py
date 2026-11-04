@@ -705,7 +705,8 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         tags=",".join(split_note_tags(rec.get("tags"))), category=rec.get("category", ""),
         ttl_days=_positive_ttl(rec.get("ttl_days")),
         source_agent="recovery-import",
-        # An old bundle has no key (the put then stamps none, as before); a code__ target takes none.
+        # An old bundle has no key: the put stamps the title if a configured pattern matches it in
+        # full, else none, as before. A code__ target takes none.
         entity_key=_importable_entity_key(rec, col_name),
     )
     message = failure_message(outcome, subject=repr(title))

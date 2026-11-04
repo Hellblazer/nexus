@@ -232,8 +232,8 @@ def main(ctx: click.Context, verbose: bool) -> None:
         from nexus.upgrade_finish import spawn_tripwire  # noqa: PLC0415 — deferred import
 
         spawn_tripwire()
-    except Exception:  # noqa: BLE001 — the tripwire must never break CLI startup
-        pass
+    except Exception as exc:  # noqa: BLE001 — the tripwire must never break CLI startup
+        _reraise_config_error(exc)
 
     # nexus-gynt2: stranded-install detector. Disarmed (a pure constant
     # check, no filesystem access) on every migration-capable release; at
@@ -262,7 +262,8 @@ def main(ctx: click.Context, verbose: bool) -> None:
             click.echo(
                 f"[stranded-install] {_stranded.message_for(_hop)}", err=True
             )
-    except Exception:  # noqa: BLE001 — the detector must never break CLI startup
+    except Exception as exc:  # noqa: BLE001 — the detector must never break CLI startup
+        _reraise_config_error(exc)
         import structlog  # noqa: PLC0415 — deferred import
         structlog.get_logger(__name__).warning(
             "stranded_install_check_failed", exc_info=True,
@@ -280,11 +281,26 @@ def main(ctx: click.Context, verbose: bool) -> None:
         _summary = check_version_transition(nexus_config_dir())
         if _summary:
             click.echo(f"[upgrade-finish] {_summary}", err=True)
-    except Exception:  # noqa: BLE001 — the trigger must never break CLI startup
+    except Exception as exc:  # noqa: BLE001 — the trigger must never break CLI startup
+        _reraise_config_error(exc)
         import structlog  # noqa: PLC0415 — deferred import
         structlog.get_logger(__name__).warning(
             "upgrade_finish_trigger_failed", exc_info=True,
         )
+
+
+
+def _reraise_config_error(exc: BaseException) -> None:
+    """Let a bad user config past the startup checks' catch-alls (nexus-fai28).
+
+    Those checks may never break CLI startup over their own faults, but a bad
+    ``entity.collections`` entry in a config file is the user's to fix: it must reach
+    the group's one-line error, not be logged as a traceback and then raised again
+    by the subcommand."""
+    from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
+
+    if isinstance(exc, EntityConfigError):
+        raise exc
 
 
 main.add_command(catalog)
