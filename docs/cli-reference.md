@@ -4142,7 +4142,9 @@ request, and the reply says so) and never for a request of unknown kind; a plan 
 plan whose last step is not an operator (`summarize`, `generate`, `extract`, `rank`, `compare`, `filter`, `check`,
 `verify`, `groupby`, `aggregate`) is refused when it claims `lookup`, `synthesis`, `comparison`, `audit` or `debug`:
 it hands back what it retrieved, which is a listing; declare `discovery/listing` or `unknown`, or add the step that
-puts the answer together. The `grown` and `builtin-template` tags are removed from `tags` (nexus-3ihve). A plan
+puts the answer together. The check reads the last step only: `search` then `rank`, `filter` or `extract` passes,
+and a caller can still mislabel the kind. `project` is the repository's name (not a worktree's); the reply warns when
+it is not the session's project (its directory name or its primary checkout's) and when the kind is `unknown`. The `grown` and `builtin-template` tags are removed from `tags` (nexus-3ihve). A plan
 saved before this change declares nothing and serves no request; save it again with a kind.
 
 ### nx plan reseed
@@ -4170,9 +4172,10 @@ alone.
 
 Only the builtin tier (`conexus/plans/builtin`, the global scope) declares its answer kinds `curated`. A
 template under the project, RDR or repo tier (`.nexus/plans`, `docs/rdr/rdr-*/`) that sets `answer_kind` is written
-with `saved` provenance whatever tags it carries, so it serves only its own kind and only that project's requests
-(nexus-0vh80; closes nexus-8ofx8). A row written before that, still saying `curated`, is rewritten by the next
-reconcile.
+with `saved` provenance whatever tags it carries (nexus-0vh80; closes nexus-8ofx8). It is never curated, and in
+practice it serves nothing: those rows are filed under the tier's scope name (`project`, `repo`, `rdr-<slug>`), and a
+saved plan serves only a request from the project it is filed under, whose name is a repository's. A row written
+before that, still saying `curated`, is rewritten by the next reconcile.
 
 ### nx plan repair (removed)
 
@@ -6188,7 +6191,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   (`plan_save`'s `answer_kind`, or a template in a project, RDR or repo tier) serves only a request of its own
   declared kind, none of the compatibility cells a curated plan has and never the `unknown` request (reason
   `unknown_request_untrusted_plan`, a mismatched kind `kind_mismatch`); the request's project is the session's
-  directory name, the name a grown plan is filed under.
+  directory name (the name a grown plan is filed under) or the name of the primary checkout of its git repository, so
+  a session in a linked worktree matches a plan saved under the repository's name; both sides are compared stripped.
   The filter judges after every other drop (unmet binding, scope conflict,
   always-failing, FTS literal drop), so a count is "would have been returned, but for
   eligibility". The gate is on by default (nexus-jypmj.2.8; `NX_ANSWER_KIND_ELIGIBILITY=0`,

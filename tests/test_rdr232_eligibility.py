@@ -1595,7 +1595,7 @@ def test_nx_answer_hands_the_matcher_the_sessions_project_the_grown_plans_are_fi
     from pathlib import Path
 
     _, _, seen = _drive(LOOKUP_Q, [LOOKUP_473], [(473, 0.1)])
-    assert seen[0]["eligibility"].project == Path.cwd().name
+    assert Path.cwd().name in seen[0]["eligibility"].request_projects
 
 
 def test_through_nx_answer_a_saved_lookup_plan_serves_its_own_project_and_no_other(monkeypatch) -> None:
@@ -1607,3 +1607,78 @@ def test_through_nx_answer_a_saved_lookup_plan_serves_its_own_project_and_no_oth
     wire = env["plan_eligibility"]
     assert wire["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
     assert env["plan_id"] == 940 and not miss.called
+
+
+# ── nexus-0vh80 review round 1: the request's project is the cwd name or the primary checkout's ────────────────
+
+
+def _match_as(rows, hits, request: K, cwd_name: str, aliases=(), **kw):
+    lib = _Library(rows, kw.pop("fts", ()))
+    filt = el.EligibilityFilter(request_kind=request, decision="heuristic", enforce=True, project=cwd_name,
+                                project_aliases=aliases)
+    out = real_plan_match("q", library=lib, cache=_Cache(hits), eligibility=filt, n=5, **kw)
+    return out, filt
+
+
+def test_a_saved_plan_filed_under_the_repo_name_serves_a_session_in_a_worktree_of_it() -> None:
+    row = _saved(950, L, project="nexus")
+    out, _ = _match_as([row], [(950, 0.05)], L, "elsinore-0vh80", aliases=("nexus",))
+    assert _ids(out) == [950]
+    out, _ = _match_as([row], [(950, 0.05)], L, "elsinore-0vh80", aliases=("nexus",))
+    assert _ids(out) == [950]
+
+
+def test_a_worktree_session_still_refuses_another_projects_saved_plan_and_a_plan_with_no_alias_match() -> None:
+    row = _saved(951, L, project="ART")
+    out, filt = _match_as([row], [(951, 0.05)], L, "elsinore-0vh80", aliases=("nexus",))
+    assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
+    out, _ = _match_as([_saved(952, L, project="nexus")], [(952, 0.05)], L, "elsinore-0vh80")
+    assert out == [], "with no primary name known only the cwd name counts"
+
+
+@pytest.mark.parametrize(("plan_project", "request_project"), [(" nexus ", "nexus"), ("nexus", " nexus\n"), ("\tnexus", " nexus ")])
+def test_the_project_comparison_strips_whitespace_on_both_sides(plan_project: str, request_project: str) -> None:
+    out, _ = _match([_saved(953, L, project=plan_project)], [(953, 0.05)], L, request_project=request_project)
+    assert _ids(out) == [953]
+
+
+def test_a_whitespace_only_project_is_no_project() -> None:
+    out, _ = _match([_saved(954, L, project="  ")], [(954, 0.05)], L, request_project="  ")
+    assert out == []
+    out, _ = _match([_saved(955, L, project="nexus")], [(955, 0.05)], L, request_project="   ")
+    assert out == []
+
+
+def test_the_few_shot_filter_takes_the_same_names() -> None:
+    ms = [_as_match(_saved(956, L, project="nexus")), _as_match(_saved(957, L, project="ART"))]
+    assert _ids(el.eligible_matches(L, ms, request_project=("elsinore-0vh80", "nexus"))) == [956]
+
+
+def test_the_primary_checkout_name_is_read_from_the_git_common_dir_of_a_worktree(tmp_path) -> None:
+    import subprocess
+
+    from nexus.plans.active_project import primary_checkout_name
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "PATH": __import__("os").environ["PATH"], "HOME": str(tmp_path)}
+    for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "x"],
+                 ["worktree", "add", "-q", str(tmp_path / "wt-feature"), "-b", "feat"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, capture_output=True)
+    sub = tmp_path / "wt-feature" / "deep"
+    sub.mkdir()
+    assert primary_checkout_name(str(repo)) == "myrepo"
+    assert primary_checkout_name(str(tmp_path / "wt-feature")) == "myrepo"
+    assert primary_checkout_name(str(sub)) == "myrepo", "from a subdirectory too"
+    assert primary_checkout_name(str(tmp_path)) == "", "not a git checkout: no name, never raises"
+    assert primary_checkout_name(str(tmp_path / "missing")) == ""
+
+
+def test_nx_answer_hands_the_filter_the_cwd_name_and_the_primary_checkouts_name(monkeypatch) -> None:
+    monkeypatch.setattr("nexus.plans.active_project.primary_checkout_name", lambda cwd: "nexus")
+    from pathlib import Path
+
+    _, _, seen = _drive(LOOKUP_Q, [LOOKUP_473], [(473, 0.1)])
+    filt = seen[0]["eligibility"]
+    assert filt.request_projects == frozenset({Path.cwd().name, "nexus"})

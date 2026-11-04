@@ -35,8 +35,9 @@ A saved plan's kind is its saver's claim, not reviewed, so it is honoured at onc
 row of its own kind, with none of the compatibility cells a curated plan has (a saved synthesis plan serves no
 comparison, audit or debug request) and none of the unknown-plan allowances (a saved plan of unknown kind serves
 nothing, not even a lookup). It serves only the project that saved it: its row's ``project`` must equal the
-request's (:attr:`EligibilityFilter.project`, the session's project, the one a grown plan is filed under), and a blank
-one on either side serves nothing. And a shape veto applies: a plan whose last step is not an operator (it hands back
+request's (:attr:`EligibilityFilter.request_projects`: the session's directory name, the one a grown plan is filed
+under, and the primary checkout's name, so a session in a linked worktree matches a plan saved under the repository's
+name; compared stripped), and a blank one on either side serves nothing. And a shape veto applies: a plan whose last step is not an operator (it hands back
 what it retrieved) cannot claim lookup, synthesis, comparison, audit or debug (``saved_retrieval_only``;
 ``answer_kind.SHAPE_VETOED_KINDS``). Reasons: ``kind_mismatch``, ``saved_unknown_plan``, ``saved_other_project``,
 ``saved_retrieval_only``; the ``unknown`` request keeps ``unknown_request_untrusted_plan``.
@@ -201,6 +202,7 @@ __all__ = [
     "coerce_kind",
     "check_builtins",
     "declared_strategy",
+    "project_names",
     "eligibility",
     "eligibility_enforced",
     "eligible_matches",
@@ -645,20 +647,29 @@ def declared_strategy(dimensions: Any) -> str | None:
     return None
 
 
+def project_names(value: str | Iterable[str] | None) -> frozenset[str]:
+    """The non-blank, whitespace-stripped project names in *value* (one name or several)."""
+    if value is None:
+        return frozenset()
+    items = [value] if isinstance(value, str) else list(value)
+    return frozenset(t for t in (i.strip() for i in items if isinstance(i, str)) if t)
+
+
 def _judge(
     request_kind: PlanAnswerKind, tags: str | None, plan_json: Any, dimensions: Any = None, named_source_count: int = 0,
-    *, plan_project: Any = None, request_project: str = "",
+    *, plan_project: Any = None, request_project: str | Iterable[str] = "",
 ) -> tuple[PlanStanding, Verdict]:
     standing = classify_plan(tags, plan_json)
     verdict = eligibility(request_kind, standing.kind, standing.provenance)
     if not verdict.eligible and standing.flag is not None:
         verdict = Verdict(False, standing.flag)
     if verdict.eligible and standing.provenance == "saved":
-        # nexus-0vh80: a saved plan serves the project that saved it, compared exactly; no project on either side
-        # means there is no saving project to match. Then the shape veto: a plan that ends in retrieval cannot
-        # claim an answering kind.
-        saving = plan_project if isinstance(plan_project, str) else ""
-        if not saving or saving != request_project:
+        # nexus-0vh80: a saved plan serves the project that saved it, compared exactly after stripping whitespace
+        # (the request has one name, or two when the session is in a linked worktree: its own directory and the
+        # primary checkout's); no project on either side means there is no saving project to match. Then the shape
+        # veto: a plan that ends in retrieval cannot claim an answering kind.
+        saving = plan_project.strip() if isinstance(plan_project, str) else ""
+        if not saving or saving not in project_names(request_project):
             verdict = Verdict(False, "saved_other_project")
         elif standing.kind in SHAPE_VETOED_KINDS and terminal_is_retrieval_only(plan_json):
             verdict = Verdict(False, "saved_retrieval_only")
@@ -677,7 +688,7 @@ def _judge(
 
 def _safe_judge(
     request_kind: PlanAnswerKind, tags: Any, plan_json: Any, dimensions: Any = None, named_source_count: int = 0,
-    *, plan_project: Any = None, request_project: str = "",
+    *, plan_project: Any = None, request_project: str | Iterable[str] = "",
 ) -> tuple[PlanStanding, Verdict]:
     """:func:`_judge` that never raises: a fault is the ``judge_error`` verdict on an unattested standing.
 
@@ -696,12 +707,13 @@ def _safe_judge(
 
 def eligible_matches(
     request_kind: PlanAnswerKind, matches: Iterable[Any] | None, named_source_count: int = 0,
-    request_project: str = "",
+    request_project: str | Iterable[str] = "",
 ) -> list[Any]:
     """*matches* without the plans a request of *request_kind* may not use (quiet: no counting).
 
     *named_source_count* is how many sources the request names (the single-source synthesis rule reads it).
-    *request_project* is the request's project: a saved plan is kept only when its own project equals it.
+    *request_project* is the request's project name, or its names (the session's directory and the primary
+    checkout's): a saved plan is kept only when its own project equals one of them.
     """
     kept = []
     for m in matches or ():
@@ -726,11 +738,15 @@ class EligibilityFilter:
     def __init__(
         self, request_kind: PlanAnswerKind | str, decision: str = "unknown", enforce: bool = False,
         shadow_reason: str | None = None, named_source_count: int = 0, project: str = "",
+        project_aliases: Iterable[str] = (),
     ) -> None:
         self.request_kind = coerce_kind(request_kind)
         #: The request's project (nexus-0vh80): a saved plan serves only a request from the project that saved it.
-        #: ``nx_answer`` passes the session's project, the name a grown plan is filed under; blank serves no saved plan.
+        #: ``nx_answer`` passes the session's directory name, the name a grown plan is filed under, and in
+        #: *project_aliases* the primary checkout's name (a session in a linked worktree). Blank names count for
+        #: nothing; with none left no saved plan is served.
         self.project = project
+        self.request_projects = project_names(project) | project_names(project_aliases)
         #: How many distinct sources the request names (nexus-4xmpv): exactly one switches the single-source rule on.
         self.named_source_count = named_source_count
         self.decision = decision
@@ -762,7 +778,7 @@ class EligibilityFilter:
             self.request_kind, row.get("tags") if isinstance(row, Mapping) else None,
             row.get("plan_json") if isinstance(row, Mapping) else None,
             row.get("dimensions") if isinstance(row, Mapping) else None, self.named_source_count,
-            plan_project=row.get("project") if isinstance(row, Mapping) else None, request_project=self.project,
+            plan_project=row.get("project") if isinstance(row, Mapping) else None, request_project=self.request_projects,
         )
         if isinstance(plan_id, int):
             self._judged[plan_id] = (standing, verdict)
@@ -815,7 +831,7 @@ class EligibilityFilter:
             return _safe_judge(
                 self.request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None),
                 getattr(m, "dimensions", None), self.named_source_count,
-                plan_project=getattr(m, "project", None), request_project=self.project,
+                plan_project=getattr(m, "project", None), request_project=self.request_projects,
             )
 
         self._returned = {

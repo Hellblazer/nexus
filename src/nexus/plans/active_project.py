@@ -62,6 +62,7 @@ __all__ = [
     "OWNER_NAMES_TTL_S",
     "REMEDY",
     "apply_active_project",
+    "primary_checkout_name",
     "detect_active_project",
     "registered_owner_names",
     "reset_active_project_caches_for_tests",
@@ -93,6 +94,42 @@ _cache_lock = threading.Lock()
 _detection_cache: tuple[tuple[str, str], Any, "ActiveProject", float] | None = None
 #: ``(catalog, names, stored at)`` of the last successful owner-name read.
 _owner_names_cache: tuple[Any, frozenset[str], float] | None = None
+
+
+_primary_names: dict[str, str] = {}
+
+
+def primary_checkout_name(cwd: str) -> str:
+    """The directory name of the primary checkout of the git repository that holds *cwd*; ``""`` if there is none.
+
+    A linked worktree (``../nexus-wt/<session>``) has its own directory name, but shares the repository's git
+    common directory with the primary checkout, whose name is the repository's (``nexus``). Read with
+    ``git rev-parse --git-common-dir`` (the parent of ``<primary>/.git``; a bare repository's own name without
+    ``.git``), once per directory per process. Never raises: not a checkout, no git, or a timeout is ``""``.
+    """
+    key = os.path.realpath(cwd) if cwd else ""
+    if not key:
+        return ""
+    if key in _primary_names:
+        return _primary_names[key]
+    name = ""
+    try:
+        import subprocess  # noqa: PLC0415 — stdlib, branch-local
+
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["git", "-C", key, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        common = proc.stdout.strip()
+        if proc.returncode == 0 and common:
+            path = os.path.realpath(common if os.path.isabs(common) else os.path.join(key, common))
+            base = os.path.basename(path)
+            name = os.path.basename(os.path.dirname(path)) if base == ".git" else base.removesuffix(".git")
+    except Exception as exc:  # noqa: BLE001 — a missing git or a timeout is "no primary name", never a failure
+        _log.debug("primary_checkout_name_unavailable", error=type(exc).__name__)
+        name = ""
+    _primary_names[key] = name
+    return name
 
 
 def reset_active_project_caches_for_tests() -> None:

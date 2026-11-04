@@ -333,7 +333,8 @@ class TestReadPathsNeverRetireAPlanForItsDeclaration:
 
 
 def _plan_save(
-    plan: dict[str, Any], tags: str = "", answer_kind: str = "unknown", project: str = "nexus",
+    plan: dict[str, Any], tags: str = "", answer_kind: str = "discovery/listing", project: str = "nexus",
+    session: tuple[str, tuple[str, ...]] = ("nexus", ()),
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run the plan_save MCP tool against a recording library; returns (reply, save_plan kwargs per call)."""
     from unittest.mock import MagicMock
@@ -355,6 +356,8 @@ def _plan_save(
     with (
         patch("nexus.mcp.core._t2_index_write", fake_write),
         patch("nexus.mcp.core._record_tier_write"),
+        patch("nexus.mcp.core._nx_answer_session_project", return_value=session[0]),
+        patch("nexus.mcp.core._nx_answer_session_project_aliases", return_value=session[1]),
     ):
         return plan_save(
             query="q", plan_json=json.dumps(plan), verb="research", tags=tags, answer_kind=answer_kind,
@@ -434,7 +437,29 @@ class TestPlanSaveWritesASavedDeclaration:
         assert out.startswith("Saved plan: [7]") and "no project" in out and "serves no request" in out
         assert saved[0]["project"] == ""
         quiet, _ = _plan_save({"steps": _ANSWERING}, answer_kind="unknown", project="")
-        assert "no project" not in quiet, "an unknown-kind plan serves nothing in any project, so there is nothing to add"
+        assert "no project" not in quiet, "an unknown-kind plan has its own note"
+
+    def test_an_unknown_kind_save_says_it_serves_nothing(self) -> None:
+        out, saved = _plan_save({"steps": _ANSWERING}, answer_kind="unknown")
+        assert out.startswith("Saved plan: [7]") and "answer_kind unknown" in out and "serves no request" in out
+        assert len(saved) == 1
+
+    def test_a_project_that_is_not_the_sessions_is_named_in_the_reply(self) -> None:
+        out, saved = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="ART")
+        assert out.startswith("Saved plan: [7]") and "'ART' is not this session's project, nexus" in out
+        assert saved[0]["project"] == "ART", "stored as given: the warning does not change the save"
+
+    def test_a_save_under_the_repos_name_from_a_worktree_session_is_not_warned(self) -> None:
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="nexus", session=("wt-feature", ("nexus",)))
+        assert out == "Saved plan: [7] q"
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="wt-feature", session=("wt-feature", ("nexus",)))
+        assert out == "Saved plan: [7] q", "the session's own directory name matches too"
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="ART", session=("wt-feature", ("nexus",)))
+        assert "not this session's project, nexus, wt-feature" in out
+
+    def test_the_project_is_compared_stripped(self) -> None:
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project=" nexus ")
+        assert out == "Saved plan: [7] q"
 
     @pytest.mark.parametrize("kind", ["lookup", "synthesis", "discovery/listing", "comparison", "audit", "debug"])
     def test_the_stored_row_reads_saved_and_serves_its_kind_in_its_project_only(self, kind: str) -> None:
@@ -456,6 +481,41 @@ class TestPlanSaveWritesASavedDeclaration:
 
         assert "answer_kind" in plan_save.__doc__ and "saved" in plan_save.__doc__
         assert "ends in retrieval" in plan_save.__doc__ or "retrieval-only" in plan_save.__doc__
+        assert "reads the last step only" in plan_save.__doc__ or "last step is retrieval-only" in plan_save.__doc__
+
+
+@pytest.mark.t2_tenant
+def test_a_real_saved_row_read_back_through_the_library_carries_its_project_and_the_filter_uses_it() -> None:
+    """Engine-backed: the project survives the write and the read, so the filter's project check has something to
+    compare (a fake row that carries ``project`` would pass with a library that dropped it)."""
+    import re
+
+    from nexus.mcp.core import plan_save
+    from nexus.mcp_infra import t2_ctx
+    from nexus.plans.eligibility import EligibilityFilter
+    from nexus.plans.match import Match
+
+    with patch("nexus.mcp.core._nx_answer_session_project", return_value="savedproj"), \
+         patch("nexus.mcp.core._nx_answer_session_project_aliases", return_value=()):
+        out = plan_save(
+            query="where did the saved-provenance round-trip land", plan_json=json.dumps({"steps": _ANSWERING}),
+            verb="query", answer_kind="lookup", project="savedproj", tags="roundtrip",
+        )
+    assert out.startswith("Saved plan: ["), out
+    plan_id = int(re.match(r"Saved plan: \[(\d+)\]", out).group(1))
+    with t2_ctx() as db:
+        row = db.plans.get_plan(plan_id)
+    assert row is not None and row["project"] == "savedproj"
+    assert Match.from_plan_row(row).project == "savedproj"
+    decl = decode_declaration(row["plan_json"])
+    assert (decl.kind, decl.provenance) == (PlanAnswerKind.LOOKUP, "saved")
+    here = EligibilityFilter(PlanAnswerKind.LOOKUP, enforce=True, project="savedproj")
+    assert here.admit(row, "cosine") is True
+    worktree = EligibilityFilter(PlanAnswerKind.LOOKUP, enforce=True, project="wt-x", project_aliases=("savedproj",))
+    assert worktree.admit(row, "cosine") is True
+    elsewhere = EligibilityFilter(PlanAnswerKind.LOOKUP, enforce=True, project="otherproj")
+    assert elsewhere.admit(row, "cosine") is False
+    assert elsewhere.to_wire()["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
 
 
 class TestSavedPlanJson:
@@ -483,6 +543,9 @@ class TestTheShapeVeto:
             pytest.param(_RETRIEVING, True, id="ends-in-search"),
             pytest.param([{"tool": "extract"}, {"tool": "rank"}], False, id="every-operator-counts"),
             pytest.param([{"tool": "operator_generate"}], False, id="resolved-operator-name"),
+            pytest.param([{"tool": "mcp__plugin_conexus_nexus__operator_summarize"}], False, id="mcp-prefixed-operator"),
+            pytest.param([{"tool": "mcp__plugin_conexus_nexus__summarize"}], False, id="mcp-prefixed-plan-name"),
+            pytest.param([{"tool": "mcp__plugin_conexus_nexus__search"}], True, id="mcp-prefixed-retrieval-still-vetoed"),
             pytest.param([{"tool": "summarize"}, {"tool": "traverse"}], True, id="only-the-last-step-counts"),
             pytest.param([], True, id="no-steps"),
             pytest.param(["x"], True, id="not-a-step"),
@@ -531,7 +594,7 @@ class TestPlanSaveNeverStoresProvenanceTags:
 
         _, saved = _plan_save({"steps": self._STEPS}, tags="grown")
         standing = el.classify_plan(saved[0]["tags"], saved[0]["plan_json"])
-        assert standing.provenance == "saved" and standing.kind is PlanAnswerKind.UNKNOWN, "never grown: the tag is gone"
+        assert standing.provenance == "saved", "never grown: the tag is gone"
         assert not el.eligibility(PlanAnswerKind.LOOKUP, standing.kind, standing.provenance).eligible
 
     def test_the_tool_description_names_the_reserved_tags(self) -> None:

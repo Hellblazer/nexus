@@ -355,6 +355,10 @@ SHAPE_VETOED_KINDS: frozenset[PlanAnswerKind] = frozenset({
 def terminal_is_retrieval_only(plan_json: str | dict[str, Any] | None) -> bool:
     """Whether the last step of *plan_json* is not an operator (see :data:`OPERATOR_TERMINALS`).
 
+    An ``mcp__<plugin>__<server>__<tool>`` name is read as its last segment, as ``plans/runner`` does.
+    It checks the last step only: ``search`` then ``rank``, ``filter`` or ``extract`` passes (an operator
+    ends it), whatever those steps do to the retrieved text, and a caller can still mislabel the kind.
+
     Fails closed: a plan with no readable steps, or a last step with no tool name, counts as retrieval-only. This
     reads the declared steps and nothing else; it guesses no kind from them (RDR-232 forbids that), it only vetoes a
     claim the shape cannot support.
@@ -365,4 +369,8 @@ def terminal_is_retrieval_only(plan_json: str | dict[str, Any] | None) -> bool:
         return True
     last = steps[-1]
     tool = last.get("tool") if isinstance(last, dict) else None
-    return not (isinstance(tool, str) and tool in OPERATOR_TERMINALS)
+    if not isinstance(tool, str):
+        return True
+    if tool.startswith("mcp__"):
+        tool = tool.rsplit("__", 1)[-1]  # the runner's own reading of a fully qualified tool name
+    return tool not in OPERATOR_TERMINALS
