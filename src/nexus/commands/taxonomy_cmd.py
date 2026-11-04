@@ -1185,7 +1185,7 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
             f"DOC_ID {doc_id!r} is not a valid chunk chash: expected 64 lowercase "
             "hex characters (RDR-194 D1). topic_assignments.doc_id is a chunk "
             "chash, not a free-form identifier; pass the chash reported by "
-            "`nx search` / `nx query`, not a title or tumbler."
+            "`nx search` or the `query` MCP tool, not a title or tumbler."
         )
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)

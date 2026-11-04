@@ -2631,7 +2631,7 @@ class PDFExtractor:
             self._mineru_server_up = False
             self._mineru_server_checked = True
             skew = get_mineru_skew_info()
-            remedy = "nx mineru restart  (or set pdf.mineru_server_url explicitly)"
+            remedy = "nx mineru stop && nx mineru start  (or set pdf.mineru_server_url explicitly)"
             if skew is not None:
                 _log.info(
                     "mineru_skew_subprocess_fallback",
@@ -2644,7 +2644,7 @@ class PDFExtractor:
                 _progress(
                     f"  MinerU server registered under mineru {skew.registered_version}, "
                     f"this environment pins {skew.our_version} — skipping straight to "
-                    f"in-process subprocess (run `nx mineru restart` to pick this "
+                    f"in-process subprocess (run `nx mineru stop` then `nx mineru start` to pick this "
                     f"environment's version back up, or set pdf.mineru_server_url "
                     f"explicitly)."
                 )
@@ -2765,7 +2765,7 @@ class PDFExtractor:
         # eti1v's fix. This method re-resolves the URL FRESH on every call
         # (unlike the once-per-instance cache in _mineru_server_available),
         # so a skew that appears mid-extraction (another process runs `nx
-        # mineru restart` onto a differently-versioned server between this
+        # mineru stop` and `start` onto a differently-versioned server between this
         # instance's initial availability check and this page's dispatch)
         # can hit this call after _mineru_server_available already cached
         # True. An unguarded f-string turned that into the literal URL

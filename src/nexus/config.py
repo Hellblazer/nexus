@@ -488,7 +488,7 @@ class MineruSkewInfo(NamedTuple):
 #: wait that a known skew can never resolve). Keyed on the values that
 #: make a warning meaningfully NEW: a different registered version, a
 #: different installed version, or a different server pid (e.g. after
-#: ``nx mineru restart`` comes up still mismatched).
+#: ``nx mineru stop`` and ``start`` bring it up still mismatched).
 _mineru_skew_warned: set[tuple[str, str, int]] = set()
 
 
@@ -506,7 +506,7 @@ def _warn_mineru_skew_once(
         registered_python=registered_python,
         pid=pid,
         port=port,
-        remedy="nx mineru restart  (or set pdf.mineru_server_url explicitly)",
+        remedy="nx mineru stop && nx mineru start  (or set pdf.mineru_server_url explicitly)",
     )
 
 

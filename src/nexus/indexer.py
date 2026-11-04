@@ -839,7 +839,7 @@ def _migrate_legacy_collections(
                         "different embedding model than the one the indexer "
                         "writes; rename never re-embeds, so it is kept under "
                         "its legacy name and indexed there. To move it, "
-                        "re-embed it to the write model (nx re-embed), or "
+                        "re-embed it to the write model (nx collection re-embed), or "
                         "rename it to a name carrying its row's own model "
                         "token, which the indexer does not then write to."
                     ),

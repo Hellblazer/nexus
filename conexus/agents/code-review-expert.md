@@ -307,7 +307,7 @@ not verification.
 ```
 ## Next Step: test-validator
 **Task**: Coverage analysis for [surface too large to read in this review]
-**Input Artifacts**: [reviewed files, review findings, nx memory keys]
+**Input Artifacts**: [reviewed files, review findings, T2 memory keys]
 **Deliverable**: Test validation report with coverage assessment
 ```
 

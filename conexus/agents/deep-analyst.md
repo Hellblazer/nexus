@@ -219,7 +219,7 @@ When your investigation reveals issues requiring planned remediation, your final
 ```
 ## Next Step: strategic-planner
 **Task**: Create remediation plan for [findings summary]
-**Input Artifacts**: [analysis output, nx store titles, files, nx memory keys]
+**Input Artifacts**: [analysis output, T3 store titles, files, T2 memory keys]
 **Deliverable**: Phased execution plan with beads
 ```
 

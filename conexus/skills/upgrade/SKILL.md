@@ -55,8 +55,8 @@ choose; never answer on their behalf:
    run.
 3. **Rollback** — never automatic, never derivable. On a validation block the
    copy stays in place, reads stay degraded-LOUD (never a bare empty index), and
-   the remedy is printed: `nx storage migrate vectors --rollback [--cloud]`.
-   Surface the block; let the user decide.
+   the rung DEFERS with the reason and the remedy in its message (no command
+   rolls a migration back). Surface the block; let the user decide.
 
 Everything else is automatic.
 
@@ -88,7 +88,7 @@ the wire — the correct id is `sha256(chunk_text)[:32]`, a pure function of tex
 the ETL is already carrying, so **no re-index and no source files are needed**,
 including for `store_put`-only notes that have neither.
 
-If you meet an older diagnostic (or the demoted `nx migrate-to-service` path)
+If you meet an older diagnostic (or the removed `migrate-to-service` path)
 printing "re-index from source" as the remedy for legacy ids: that remedy was
 impossible for source-less notes and is what RDR-185 retired. The answer is
 `nx upgrade`.
@@ -191,11 +191,11 @@ nx upgrade
 
 - **This surface adds no upgrade logic.** It routes to `nx upgrade`. Anything
   needing orchestration belongs in `nexus.upgrade_ladder`, not here.
-- **Do not reach for the demoted primitives.** `nx guided-upgrade`,
-  `nx migrate-to-service`, `nx migration` and `nx migration-audit`
-  are internal primitives — callable, but out of
-  the user story because the ladder does their job. If one seems necessary,
-  that is a finding worth reporting, not a step to take.
+- **Do not reach for the old migration primitives.** `nx migration` is an
+  internal primitive, callable but out of the user story because the ladder
+  does its job; `guided-upgrade`, `migrate-to-service` and `migration-audit`
+  no longer exist (removed in RDR-155 P4b). If one seems necessary, that is a
+  finding worth reporting, not a step to take.
 - **A new upgrade verb is never the answer.** New data axes become rungs.
 
 ## Notes

@@ -172,7 +172,7 @@ Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` BEFORE every v
 ```
 Thought 1: State what artifact is being critiqued and its stated purpose
 Thought 2: Identify the criteria/specification it should conform to
-Thought 3: Gather evidence - cross-reference with nx store via search tool (corpus="knowledge"), related artifacts
+Thought 3: Gather evidence - cross-reference with the T3 store via the search tool (corpus="knowledge"), related artifacts
 Thought 4: Analyze first dimension (e.g., structural integrity)
 Thought 5: Analyze second dimension (e.g., logical consistency)
 Thought 6: Analyze third dimension (e.g., completeness)
@@ -202,7 +202,7 @@ When your critique reveals Critical issues requiring remediation, your final out
 ```
 ## Next Step: [appropriate agent, developer, architect-planner, or strategic-planner]
 **Task**: Address critical issues: [list]
-**Input Artifacts**: [critique output, beads created, nx memory path]
+**Input Artifacts**: [critique output, beads created, T2 memory path]
 **Deliverable**: Remediated artifact addressing critical findings
 ```
 

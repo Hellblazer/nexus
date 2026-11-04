@@ -261,7 +261,7 @@ def index(ctx: click.Context) -> None:
     _banner = migration_banner()
     if _banner:
         raise click.ClickException(
-            f"{_banner} — nx index is suspended until the upgrade "
+            f"{_banner} — `nx index` is suspended until the upgrade "
             "completes (or fails and is cleared)."
         )
 

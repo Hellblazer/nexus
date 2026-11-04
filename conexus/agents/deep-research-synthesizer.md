@@ -156,7 +156,7 @@ Thought 4: Gather evidence from second source — compare and contrast
 Thought 5: Identify contradictions or gaps between sources
 Thought 6: Form synthesis — what does the combined evidence support confidently?
 Thought 7: Assess remaining uncertainty — what is still unclear or contested?
-Thought 8: Determine actionable conclusions and persistence plan (nx store titles)
+Thought 8: Determine actionable conclusions and persistence plan (T3 store titles)
 ```
 
 Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to explore alternatives.

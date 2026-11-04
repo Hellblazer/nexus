@@ -4543,7 +4543,7 @@ def _check_storage_service_health(
             ok=False,
             detail=f"Storage service at {url} unreachable: {exc}",
             fix_suggestions=[
-                "Start the service: nx service start",
+                "Start the service: nx daemon service start",
                 f"Check that the service is listening on {host}:{port}",
             ],
             fatal=True,
@@ -4584,7 +4584,7 @@ def _check_storage_service_health(
         ok=False,
         detail=detail,
         fix_suggestions=[
-            "Start the service: nx service start",
+            "Start the service: nx daemon service start",
             f"Check service logs; the DB probe at {host}:{port} is failing",
         ],
         fatal=True,
@@ -6709,7 +6709,7 @@ def _check_migration_state(
             ),
             fix_suggestions=[
                 "Run `nx init` to apply migrations",
-                "Check that the Postgres cluster is running: nx service status",
+                "Check that the Postgres cluster is running: nx daemon service status",
             ],
             fatal=True,
         )]
