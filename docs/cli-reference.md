@@ -6410,7 +6410,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `missing` and `ambiguous` (the keys by outcome), `joined_added` (the joined items merged into the reduction's
   input, which is `items_merged`; `items_found` is how many were built), `joined_dropped` (each
   `<key>@<anchor item_id>:<reason>` pair that made no item: `cap`, `no_text` (the record has no readable text),
-  `out_of_scope` (the record lies outside the caller's scope), `held` (the input already holds that joined text) or
+  `out_of_scope` (the record lies outside the caller's scope), `held` (the input already holds that joined text, or an earlier anchor with the same text made that join in this run) or
   `self` (the anchor is the resolved record itself, which joins nothing)), `tokens_dropped` (the keys the item cap
   kept from being resolved) and `anchor_key_ids` (every distinct key the anchors named, less a key only its own record
   names). Each of these six lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at

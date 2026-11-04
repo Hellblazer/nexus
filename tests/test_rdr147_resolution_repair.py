@@ -627,7 +627,7 @@ async def test_a_record_longer_than_the_chunk_bound_is_cut_to_its_first_chunks_a
     cov = _cov(await _run(d, on()))
     long = next(a for a in _joined(cov) if _key_of(a) == _tok(1))
     assert _chunk_text(_tok(1), bound - 1) in long.content and _chunk_text(_tok(1), bound) not in long.content
-    assert f"1 records cut to their first {bound} chunks" in cov.repair.detail
+    assert f"1 record cut to its first {bound} chunks" in cov.repair.detail
     fetch = [a["ids"] for t, a in d.calls if t == "store_get_many" and set(a["ids"]) <= set(d.catalog.record_texts())]
     assert [len(ids) for ids in fetch] == [bound + 1]
     assert cov.repair.joined_added == 2 and cov.repair.joined_dropped == ()

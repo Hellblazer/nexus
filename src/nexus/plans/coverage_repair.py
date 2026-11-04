@@ -131,7 +131,7 @@ RESOLUTION_REASONS: tuple[str, ...] = (
     "confined_run", "entity_config_error", "no_pattern_for_anchor_collections", "no_key_tokens",
 )
 #: Why a (key, anchor) pair of the resolution branch made no joined item: over the item cap; its record has no readable
-#: text; its record lies outside the caller's scope; the input already holds that joined text; the anchor is the
+#: text; its record lies outside the caller's scope; the input already holds that joined text, or an earlier anchor with the same text made that join in this run; the anchor is the
 #: resolved record itself.
 JOINED_DROP_REASONS: tuple[str, ...] = ("cap", "no_text", "out_of_scope", "held", "self")
 #: Chunks of one resolved record that may join a reduction input. A joined item is an anchor plus its record's text and

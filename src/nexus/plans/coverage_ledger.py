@@ -1397,7 +1397,8 @@ class CoverageBoundary:
             f"{len(dropped)} pairs dropped, {len(fields['missing'])} missing, {len(fields['ambiguous'])} ambiguous"
         )
         if cut:
-            detail += f"; {cut} records cut to their first {RESOLVED_RECORD_MAX_CHUNKS} chunks"
+            detail += (f"; {cut} record{'s' if cut != 1 else ''} cut to {'their' if cut != 1 else 'its'} first "
+                       f"{RESOLVED_RECORD_MAX_CHUNKS} chunks")
         return _Resolution(fields, entered=True, items=items, detail=detail)
 
     async def _repair(self, view: BoundaryView, first: CoverageResult, targets: tuple[str, ...]) -> CoverageResult:
