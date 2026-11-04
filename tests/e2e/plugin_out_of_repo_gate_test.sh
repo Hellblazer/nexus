@@ -16,7 +16,8 @@
 #   2. the allowlist: five fields, class-keyed, >= 3 words, plugin names validated;
 #   3. the sweep judgement on event files: Read events decide; noise is UNPROBED;
 #      definite evidence fails; no result at all exits 2;
-#   4. the canary judgement, and the pins it measures;
+#   4. the canary judgement, and the pins it measures; a session whose model skips a
+#      step is NOISE (retried), never ok; the init event of every run is judged;
 #   5. the gate end to end with the stub: argv and env pinned (no hooks, no real
 #      tool dirs, UPGRADE_AUTO off, scratch cwd), retries, the watchdog and an
 #      interrupt kill the process tree;
@@ -34,6 +35,7 @@ STUBPY="$HERE/lib/stub_claude.py"
 # shellcheck source=lib/python.sh disable=SC1091
 source "$HERE/lib/python.sh"
 e2e_python_resolve 10 || exit 2
+export NX_GATE_RETRY_SLEEP=0   # the backoff between retries is tested on its own
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/plugin_out_of_repo_gate_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 PASS=0; FAIL=0
@@ -41,6 +43,7 @@ ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
 expect_has()   { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1: missing [$3]" ;; esac; }
 expect_lacks() { case "$2" in *"$3"*) bad "$1: unexpected [$3]" ;; *) ok "$1" ;; esac; }
+chk()          { if "${@:2}"; then ok "$1"; else bad "$1"; fi; }
 expect_eq()    { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: want [$2] got [$3]"; fi; }
 
 [ -f "$GATE" ] && [ -f "$MOD" ] && [ -f "$CAN" ] && [ -f "$STUBPY" ] || { bad "the gate, its modules or the stub do not exist"; echo "$PASS passed, $FAIL failed"; exit 1; }
@@ -120,6 +123,22 @@ printf -- '---\nname: worker\n---\nUse $CLAUDE_PLUGIN_ROOT/resources/agent-share
 out="$(run_static "$SUBP")"
 expect_has "the unbraced variable is UNSUBSTITUTED even in an agent body" "$out" 'UNSUBSTITUTED  agents/worker.md:4  $CLAUDE_PLUGIN_ROOT/resources/agent-shared/CTX.md'
 
+printf -- '---\nname: worker\ndescription: Reads ${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CTX.md first\nallowed-tools: Read(${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CTX.md)\n---\nbody\n' >"$SUBP/agents/worker.md"
+out="$(run_static "$SUBP")"
+expect_has "a variable in an agent's frontmatter DESCRIPTION is UNSUBSTITUTED (the model's Agent listing shows it literally)" "$out" 'UNSUBSTITUTED  agents/worker.md:3  ${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CTX.md'
+expect_lacks "an allowed-tools line, which Claude Code consumes, is not judged" "$out" "agents/worker.md:4"
+printf -- '---\nname: worker\n---\nBody ${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CTX.md here.\n' >"$SUBP/agents/worker.md"
+out="$("$E2E_PYTHON" -I -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import plugin_out_of_repo as c
+sk = sys.argv[2] + "/skills/probe/reference.md"
+print("default", c._substituted_text("skills", sk), c._substituted_text("resources", sys.argv[2] + "/resources/agent-shared/RELAY.md"))
+c.READ_FILES_SUBSTITUTED = True
+print("flipped", c._substituted_text("skills", sk), c._substituted_text("resources", sys.argv[2] + "/resources/agent-shared/RELAY.md"))
+' "$HERE/lib" "$SUBP")"
+expect_has "READ_FILES_SUBSTITUTED governs a skill's reference file as it does a resource (False)" "$out" "default False False"
+expect_has "and flipping it changes both (the pin measured on each is the classifier's, not decoration)" "$out" "flipped True True"
 echo "extraction scope"
 EXT="$WORKDIR/ext"; mkplugin "$EXT"; EXT="$(realpath_of "$EXT")"
 {
@@ -162,6 +181,25 @@ import json, sys
 path, text, read_path, ok = sys.argv[1:5]
 import os
 ev = []
+if not os.environ.get("NOINIT"):
+    name = os.environ.get("INIT_PLUGIN", "fx")
+    init = {"type": "system", "subtype": "init",
+            "plugins": [{"name": name, "path": "/p", "source": name + "@inline"},
+                        {"name": "cc-plugin-x", "path": "builtin", "source": "cc-plugin-x@builtin"}],
+            "mcp_servers": [], "tools": ["Task", "Read", "Skill"], "permissionMode": "default",
+            "slash_commands": [name + ":a", "debug"], "skills": [name + ":b"], "agents": ["Explore"]}
+    tweak = os.environ.get("INIT_TWEAK", "")
+    if tweak == "plugin":
+        init["plugins"].append({"name": "conexus", "path": "/h/cache", "source": "conexus@nexus-plugins"})
+    elif tweak == "mcp":
+        init["mcp_servers"] = [{"name": "serena"}]
+    elif tweak == "tools":
+        init["tools"] = ["Task", "Read", "Skill", "Bash"]
+    elif tweak == "perm":
+        init["permissionMode"] = "acceptEdits"
+    elif tweak == "foreign":
+        init["skills"].append("conexus:orchestration")
+    ev.append(init)
 if os.environ.get("BASEDIR_TEXT"):
     ev.append({"type": "user", "message": {"role": "user", "content": [
         {"type": "text", "text": "Base directory for this skill: " + os.environ["BASEDIR_TEXT"]}]}})
@@ -239,13 +277,21 @@ expect_has "as UNSUBSTITUTED" "$out" "UNSUBSTITUTED"
 D="$WORKDIR/ev-quotedvar"; mkdir -p "$D"
 mkevents "$D" agents worker "REF${T}\${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY.md${T}$RELAY" "$RELAY" true
 out="$(run_live "$D")"; rc=$?
-expect_eq "a variable the model QUOTED literally fails even though the path it then read opened" 1 "$rc"
-expect_has "as UNSUBSTITUTED" "$out" "UNSUBSTITUTED=1"
+expect_eq "a variable the model only QUOTED literally (every Read was given a real path) is model text, not evidence: exit 0" 0 "$rc"
+expect_has "counted QUOTE-ONLY" "$out" "QUOTE-ONLY=1"
+expect_has "named UNPROBED" "$out" "UNPROBED       agents/worker"
+expect_eq "and offered for a retry" "agents__worker" "$(run_live "$D" --retry-list)"
+expect_lacks "never UNSUBSTITUTED" "$out" "UNSUBSTITUTED="
 
 D="$WORKDIR/ev-rel"; mkdir -p "$D"
 mkevents "$D" agents worker "REF${T}../resources/agent-shared/RELAY.md${T}$RELAY" "$RELAY" true
 out="$(run_live "$D")"; rc=$?
-expect_eq "a relative target quoted from an agent fails even when a guessed path opened" 1 "$rc"
+expect_eq "a relative target the model only QUOTED from an agent (it Read an absolute guess) is not evidence: exit 0" 0 "$rc"
+expect_lacks "and no RELATIVE-DEAD is reported from the quote" "$out" "RELATIVE-DEAD"
+D="$WORKDIR/ev-rel2"; mkdir -p "$D"
+mkevents "$D" agents worker "REF${T}../resources/agent-shared/RELAY.md${T}../resources/agent-shared/RELAY.md" "../resources/agent-shared/RELAY.md" false
+out="$(run_live "$D")"; rc=$?
+expect_eq "the same quote with a Read that WAS given the relative path is corroborated: fails" 1 "$rc"
 expect_has "as RELATIVE-DEAD" "$out" "RELATIVE-DEAD"
 
 D="$WORKDIR/ev-extra"; mkdir -p "$D"
@@ -277,6 +323,23 @@ mkevents "$D" skills probe "REF${T}../../resources/agent-shared/RELAY.md${T}$SK/
 out="$("$E2E_PYTHON" -I "$MOD" live --plugin "$SK" --events-dir "$D" --partial 2>&1)"; rc=$?
 expect_eq "the same target with no announced base directory fails" 1 "$rc"
 expect_has "as RELATIVE-DEAD" "$out" "RELATIVE-DEAD"
+
+for tweak in plugin mcp tools perm foreign; do
+    D="$WORKDIR/ev-init-$tweak"; mkdir -p "$D"
+    INIT_TWEAK="$tweak" mkevents "$D" agents worker "REF${T}$RELAY${T}$RELAY" "$RELAY" true
+    out="$(run_live "$D")"; rc=$?
+    expect_eq "a sweep run whose init event shows $tweak is a definite red (a Read that opened does not save it)" 1 "$rc"
+    expect_has "named ISOLATION ($tweak)" "$out" "ISOLATION"
+done
+D="$WORKDIR/ev-init-none"; mkdir -p "$D"
+NOINIT=1 mkevents "$D" agents worker "REF${T}$RELAY${T}$RELAY" "$RELAY" true
+out="$(run_live "$D")"; rc=$?
+expect_eq "a sweep run with no init event cannot show its isolation: red" 1 "$rc"
+expect_has "saying so" "$out" "no system init event"
+D="$WORKDIR/ev-init-ok"; mkdir -p "$D"
+INIT_PLUGIN=fx mkevents "$D" agents worker "REF${T}$RELAY${T}$RELAY" "$RELAY" true
+out="$(run_live "$D")"
+expect_lacks "the plugin under test and Claude Code's own builtin plugins are not isolation failures" "$out" "ISOLATION"
 
 D="$WORKDIR/ev-noresult"; mkdir -p "$D"
 printf '{"type": "system"}\n' >"$D/agents__worker.events.jsonl"
@@ -325,54 +388,116 @@ export STUB_STATE="$WORKDIR/stub-state"; mkdir -p "$STUB_STATE"
 CW="$WORKDIR/canary"; mkdir -p "$CW"
 "$E2E_PYTHON" -I "$CAN" build --dest "$CW/plugin" --manifest "$CW/manifest.json"
 "$E2E_PYTHON" -I "$CAN" prompts >"$CW/prompts.tsv"
-expect_eq "four sessions" 4 "$(wc -l <"$CW/prompts.tsv" | tr -d ' ')"
-canary_events() {  # <dir> <mode> [env assignment]
+expect_eq "five sessions" 5 "$(wc -l <"$CW/prompts.tsv" | tr -d ' ')"
+expect_has "the fixture has a skill reference file (a non-SKILL.md file the model Reads)" "$(cat "$CW/plugin/skills/canary-skill-var/reference.md")" 'BRACED: ${CLAUDE_PLUGIN_ROOT}'
+expect_has "the agent fixture has a link inside the resource it Reads" "$(cat "$CW/plugin/resources/relay.md")" "[sibling](./sibling.txt)"
+expect_has "the agent-ub fixture has an unbraced line" "$(cat "$CW/plugin/agents/canary-agent-ub.md")" 'Read the file at $CLAUDE_PLUGIN_ROOT/nonces/agentub.txt'
+expect_has "and a variable in its frontmatter description" "$(head -4 "$CW/plugin/agents/canary-agent-ub.md")" 'description: Gate canary. Its marker file is ${CLAUDE_PLUGIN_ROOT}/nonces/fm.txt'
+expect_has "the command fixture has an unbraced line" "$(cat "$CW/plugin/commands/canary-cmd.md")" 'Read the file $CLAUDE_PLUGIN_ROOT/nonces/cmdub.txt'
+canary_events() {  # <dir> <mode> [VAR=value ...]
     local dir="$1" mode="$2" s p
-    mkdir -p "$dir"
+    shift 2
+    rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE" "$dir"
     while IFS=$'\t' read -r s p; do
-        env STUB_LOG="$WORKDIR/canary-stub.log" STUB_MODE="$mode" ${3:+"$3"} "$STUBW" -p --plugin-dir "$CW/plugin" "$p" >"$dir/canary__$s.events.jsonl"
+        env STUB_LOG="$WORKDIR/canary-stub.log" STUB_MODE="$mode" "$@" "$STUBW" -p --plugin-dir "$CW/plugin" "$p" >"$dir/canary__$s.events.jsonl"
     done <"$CW/prompts.tsv"
 }
-rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+judge() {  # <events dir> [extra args]
+    "$E2E_PYTHON" -I "$CAN" judge --plugin "$CW/plugin" --manifest "$CW/manifest.json" --events-dir "$1" "${@:2}" 2>&1
+}
 canary_events "$WORKDIR/cev-ok" ok
-out="$("$E2E_PYTHON" -I "$CAN" judge --plugin "$CW/plugin" --manifest "$CW/manifest.json" --events-dir "$WORKDIR/cev-ok" 2>&1)"; rc=$?
+out="$(judge "$WORKDIR/cev-ok")"; rc=$?
 expect_eq "a canary run that behaves is clean" 0 "$rc"
 expect_has "it measured that a Read file is not substituted" "$out" "MEASURED read-file-substituted=no"
 expect_has "it measured that a skill body is" "$out" "MEASURED skill-body-substituted=yes"
-expect_has "it measured the unbraced variable" "$out" "MEASURED skill-unbraced-substituted=no"
+expect_has "it measured the unbraced variable in a skill" "$out" "MEASURED skill-unbraced-substituted=no"
+expect_has "and in an agent" "$out" "MEASURED agent-unbraced-substituted=no"
+expect_has "and in a command" "$out" "MEASURED command-unbraced-substituted=no"
+expect_has "a skill's reference file" "$out" "MEASURED skill-reference-file-substituted=no"
+expect_has "a link inside a Read resource" "$out" "MEASURED resource-relative-resolves=yes"
+expect_has "the announcement of the base directory" "$out" "MEASURED skill-base-dir-announced=yes"
+expect_has "a variable in an agent's frontmatter description (real Claude Code 2.1.318: literal)" "$out" "MEASURED agent-description-substituted=no"
+expect_has "twelve measurements" "$out" "5 sessions, 12 measurements"
 ln -s "$CW/plugin" "$WORKDIR/canary-alias"
 rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
 mkdir -p "$WORKDIR/cev-alias"
 while IFS=$'\t' read -r s p; do
     env STUB_LOG="$WORKDIR/canary-stub.log" STUB_MODE=ok "$STUBW" -p --plugin-dir "$WORKDIR/canary-alias" "$p" >"$WORKDIR/cev-alias/canary__$s.events.jsonl"
 done <"$CW/prompts.tsv"
-out="$("$E2E_PYTHON" -I "$CAN" judge --plugin "$CW/plugin" --manifest "$CW/manifest.json" --events-dir "$WORKDIR/cev-alias" 2>&1)"; rc=$?
+out="$(judge "$WORKDIR/cev-alias")"; rc=$?
 expect_eq "canary events whose paths go through a symlinked alias of the plugin dir are judged the same" 0 "$rc"
-rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
 canary_events "$WORKDIR/cev-lit" literal
-out="$("$E2E_PYTHON" -I "$CAN" judge --plugin "$CW/plugin" --manifest "$CW/manifest.json" --events-dir "$WORKDIR/cev-lit" 2>&1)"; rc=$?
+out="$(judge "$WORKDIR/cev-lit")"; rc=$?
 expect_eq "a variable that reaches the model literally breaks the canary (exit 1)" 1 "$rc"
 expect_has "naming the mechanism" "$out" "BROKEN"
 expect_has "and the contradicted pin" "$out" "CONTRADICTS the classifier's pin"
-rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
 canary_events "$WORKDIR/cev-sub" ok STUB_READ_SUBSTITUTED=1
-out="$("$E2E_PYTHON" -I "$CAN" judge --plugin "$CW/plugin" --manifest "$CW/manifest.json" --events-dir "$WORKDIR/cev-sub" 2>&1)"; rc=$?
+out="$(judge "$WORKDIR/cev-sub")"; rc=$?
 expect_eq "a Claude Code that starts substituting Read files contradicts the pin: exit 1" 1 "$rc"
-expect_has "naming it" "$out" "read-file-substituted=yes (CONTRADICTS"
-rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+expect_has "naming the resource" "$out" "read-file-substituted=yes (CONTRADICTS"
+expect_has "and the skill's reference file (the classifier applies the pin to both)" "$out" "skill-reference-file-substituted=yes (CONTRADICTS"
+canary_events "$WORKDIR/cev-unb" ok STUB_UNBRACED_SUBSTITUTED=1
+out="$(judge "$WORKDIR/cev-unb")"; rc=$?
+expect_eq "a Claude Code that starts substituting the unbraced variable contradicts the pin: exit 1" 1 "$rc"
+expect_has "in a skill" "$out" "skill-unbraced-substituted=yes (CONTRADICTS"
+expect_has "in an agent" "$out" "agent-unbraced-substituted=yes (CONTRADICTS"
+expect_has "in a command" "$out" "command-unbraced-substituted=yes (CONTRADICTS"
+canary_events "$WORKDIR/cev-els" ok STUB_REL_ELSEWHERE=1
+out="$(judge "$WORKDIR/cev-els")"; rc=$?
+expect_eq "a relative Read that goes somewhere else than the announced base directory is BROKEN, not a retry: exit 1" 1 "$rc"
+expect_has "the skill's relative link is recorded as not resolving" "$out" "skill-relative-resolves=no (CONTRADICTS"
+expect_has "and so is the link inside a Read resource" "$out" "resource-relative-resolves=no (CONTRADICTS"
+expect_eq "and nothing is offered for a retry" "" "$(judge "$WORKDIR/cev-els" --retry-list)"
+canary_events "$WORKDIR/cev-noann" ok STUB_NO_ANNOUNCE=1
+out="$(judge "$WORKDIR/cev-noann")"; rc=$?
+expect_eq "a skill delivered without its base-directory announcement is red, not a noise retry: exit 1" 1 "$rc"
+expect_has "the announcement is a measured pin" "$out" "skill-base-dir-announced=no (CONTRADICTS"
+expect_eq "and nothing is offered for a retry" "" "$(judge "$WORKDIR/cev-noann" --retry-list)"
+canary_events "$WORKDIR/cev-fm" ok STUB_FM_SUBSTITUTED=1
+out="$(judge "$WORKDIR/cev-fm")"; rc=$?
+expect_eq "a Claude Code that starts substituting an agent's description contradicts the pin: exit 1" 1 "$rc"
+expect_has "naming it" "$out" "agent-description-substituted=yes (CONTRADICTS"
 canary_events "$WORKDIR/cev-noise" noise-once
-out="$("$E2E_PYTHON" -I "$CAN" judge --plugin "$CW/plugin" --manifest "$CW/manifest.json" --events-dir "$WORKDIR/cev-noise" 2>&1)"; rc=$?
+out="$(judge "$WORKDIR/cev-noise")"; rc=$?
 expect_eq "sessions that produced no result are UNVERIFIED, never a pass (exit 2)" 2 "$rc"
-expect_eq "and all four are offered for a retry" 4 "$("$E2E_PYTHON" -I "$CAN" judge --plugin "$CW/plugin" --manifest "$CW/manifest.json" --events-dir "$WORKDIR/cev-noise" --retry-list | wc -l | tr -d ' ')"
+expect_eq "and all five are offered for a retry" 5 "$(judge "$WORKDIR/cev-noise" --retry-list | wc -l | tr -d ' ')"
+# the flake that would have turned a release red with no retry: a subagent that skips step 2
+canary_events "$WORKDIR/cev-skip" skip-relay
+out="$(judge "$WORKDIR/cev-skip")"; rc=$?
+expect_eq "an agent session that never Read relay.md is not ok: UNVERIFIED, exit 2" 2 "$rc"
+expect_has "and says why" "$out" "relay.md was not Read"
+expect_lacks "the agent session is not reported OPENED" "$(printf '%s\n' "$out" | grep ' agent ')" "OPENED"
+expect_eq "and it is offered for a retry (the flake is retried, not final)" "agent" "$(judge "$WORKDIR/cev-skip" --retry-list)"
+# an init event that shows a run which was not isolated
+for tweak in plugin mcp tools perm none; do
+    canary_events "$WORKDIR/cev-init-$tweak" ok STUB_INIT="$tweak"
+    out="$(judge "$WORKDIR/cev-init-$tweak")"; rc=$?
+    expect_eq "an init event showing '$tweak' is a definite red (exit 1)" 1 "$rc"
+    expect_has "naming the isolation ($tweak)" "$out" "isolation: "
+    expect_eq "and it is not retried ($tweak)" "" "$(judge "$WORKDIR/cev-init-$tweak" --retry-list)"
+done
+out="$(judge "$WORKDIR/cev-init-plugin")"
+expect_has "the extra plugin is named" "$out" "plugin conexus (conexus@nexus-plugins) loaded beside the one under test"
+out="$(judge "$WORKDIR/cev-init-tools")"
+expect_has "the extra tool is named" "$out" "extra: ['Bash']"
 IS="$WORKDIR/isolated"
 cp -R "$CLEAN" "$WORKDIR/iso-src"; mkdir -p "$WORKDIR/iso-src/hooks"
 printf '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "nx"}]}]}}\n' >"$WORKDIR/iso-src/hooks/hooks.json"
-printf -- '---\nname: worker\nmemory: user\ntools: Read\n---\nbody\n' >"$WORKDIR/iso-src/agents/worker.md"
+printf -- '---\nname: worker\nmemory: user\ntools: Bash, Write, Edit\ndisallowedTools: Foo\nmcpServers:\n  - serena\n  - other\nhooks:\n  Stop: []\nmodel: sonnet\n---\nbody\n' >"$WORKDIR/iso-src/agents/worker.md"
 out="$("$E2E_PYTHON" -I "$CAN" isolate --src "$WORKDIR/iso-src" --dest "$IS" 2>&1)"; rc=$?
 expect_eq "isolate succeeds" 0 "$rc"
 expect_eq "the copy's hooks are emptied" '{"hooks": {}}' "$(cat "$IS/hooks/hooks.json")"
 expect_lacks "the copy's agents lose memory:" "$(cat "$IS/agents/worker.md")" "memory:"
 expect_has "and keep their body" "$(cat "$IS/agents/worker.md")" "body"
+expect_has "and keep their other keys" "$(cat "$IS/agents/worker.md")" "model: sonnet"
+expect_eq "the copy's agents carry exactly one tools: line, Read (a subagent's tools come from its frontmatter, not --allowedTools)" "tools: Read" "$(grep -E '^tools:' "$IS/agents/worker.md")"
+expect_lacks "no Bash, Write or Edit" "$(cat "$IS/agents/worker.md")" "Bash"
+expect_lacks "no disallowedTools" "$(cat "$IS/agents/worker.md")" "disallowedTools"
+expect_lacks "no mcpServers, and none of its list items" "$(cat "$IS/agents/worker.md")" "serena"
+expect_lacks "no hooks" "$(cat "$IS/agents/worker.md")" "Stop"
+printf -- '---\nname: bare\n---\nbody\n' >"$WORKDIR/iso-src/agents/bare.md"
+rm -rf "$WORKDIR/iso2"; "$E2E_PYTHON" -I "$CAN" isolate --src "$WORKDIR/iso-src" --dest "$WORKDIR/iso2" >/dev/null
+expect_eq "an agent with no tools: line gets Read too" "tools: Read" "$(grep -E '^tools:' "$WORKDIR/iso2/agents/bare.md")"
 expect_has "the original is untouched" "$(cat "$WORKDIR/iso-src/hooks/hooks.json")" "SessionStart"
 expect_has "and its agent keeps memory" "$(cat "$WORKDIR/iso-src/agents/worker.md")" "memory: user"
 
@@ -387,22 +512,23 @@ export STUB_LOG="$WORKDIR/gate-stub.log" STUB_MODE=ok STUB_PIDS="$WORKDIR/stub.p
 out="$(NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" --keep 2>&1)"; rc=$?
 expect_eq "the default run (static + canary) passes against the stub" 0 "$rc"
 expect_has "and says so" "$out" "PLUGIN OUT-OF-REPO GATE PASSED (static + canary)"
-expect_eq "four canary sessions ran" 4 "$(grep -c '^ARGV' "$STUB_LOG")"
-expect_eq "every run has --strict-mcp-config" 4 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'\t--strict-mcp-config\t')"
-expect_eq "every run has an EMPTY --setting-sources (no installed plugin or user setting loads)" 4 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'--setting-sources\t\t--strict-mcp-config')"
-expect_eq "every run has --no-session-persistence" 4 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'\t--no-session-persistence\t')"
-expect_eq "every run is pinned to Read,Agent,Task,Skill tools" 4 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'--tools\tRead,Agent,Task,Skill\t')"
-expect_eq "NX_UPGRADE_AUTO=0 in every run" 4 "$(grep -c $'^ENV\tNX_UPGRADE_AUTO=0$' "$STUB_LOG")"
-expect_eq "NX_NO_TELEMETRY=1 in every run" 4 "$(grep -c $'^ENV\tNX_NO_TELEMETRY=1$' "$STUB_LOG")"
-for v in NEXUS_CONFIG_DIR NX_TOOLS_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR NX_LOCKSTEP_MARKER NX_PLUGIN_REGISTRY NX_PLUGIN_MARKETPLACES; do
+expect_eq "five canary sessions ran" 5 "$(grep -c '^ARGV' "$STUB_LOG")"
+expect_eq "every run has --strict-mcp-config" 5 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'\t--strict-mcp-config\t')"
+expect_eq "every run has an EMPTY --setting-sources (no installed plugin or user setting loads)" 5 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'--setting-sources\t\t--strict-mcp-config')"
+expect_eq "every run has --no-session-persistence" 5 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'\t--no-session-persistence\t')"
+expect_eq "every run is pinned to Read,Agent,Task,Skill tools" 5 "$(grep '^ARGV' "$STUB_LOG" | grep -c -- $'--tools\tRead,Agent,Task,Skill\t')"
+expect_eq "NX_UPGRADE_AUTO=0 in every run" 5 "$(grep -c $'^ENV\tNX_UPGRADE_AUTO=0$' "$STUB_LOG")"
+expect_eq "NX_NO_TELEMETRY=1 in every run" 5 "$(grep -c $'^ENV\tNX_NO_TELEMETRY=1$' "$STUB_LOG")"
+for v in NEXUS_CONFIG_DIR NX_TOOLS_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR UV_CACHE_DIR NX_LOCKSTEP_MARKER NX_PLUGIN_REGISTRY NX_PLUGIN_MARKETPLACES; do
     n="$(grep -c "^ENV${T}$v=.*/plugin-out-of-repo-gate\..*/iso/" "$STUB_LOG")"
-    expect_eq "$v points into the gate's scratch iso/ directory in every run" 4 "$n"
+    expect_eq "$v points into the gate's scratch iso/ directory in every run" 5 "$n"
 done
-expect_eq "NX_SERVICE_URL is dead in every run" 4 "$(grep -c $'^ENV\tNX_SERVICE_URL=http://127.0.0.1:9$' "$STUB_LOG")"
+expect_eq "NX_SERVICE_URL is dead in every run" 5 "$(grep -c $'^ENV\tNX_SERVICE_URL=http://127.0.0.1:9$' "$STUB_LOG")"
 expect_lacks "no env value points under the real HOME's tool or config dirs" "$(grep '^ENV' "$STUB_LOG" | grep -v '^ENV.HOME=')" "$HOME/.local"
 expect_lacks "nor under ~/.config" "$(grep '^ENV' "$STUB_LOG" | grep -v '^ENV.HOME=')" "$HOME/.config"
-expect_eq "HOME itself is the real one (the sign-in lives there)" 4 "$(grep -c "^ENV${T}HOME=$HOME\$" "$STUB_LOG")"
-expect_eq "every run's cwd is the scratch project" 4 "$(grep -c "^CWD${T}.*/plugin-out-of-repo-gate\..*/project\$" "$STUB_LOG")"
+expect_eq "HOME itself is the real one (the sign-in lives there)" 5 "$(grep -c "^ENV${T}HOME=$HOME\$" "$STUB_LOG")"
+expect_eq "every run's cwd is the scratch project" 5 "$(grep -c "^CWD${T}.*/plugin-out-of-repo-gate\..*/project\$" "$STUB_LOG")"
+expect_lacks "no env value points under the real HOME's uv cache" "$(grep '^ENV' "$STUB_LOG" | grep -v '^ENV.HOME=')" "$HOME/.cache"
 expect_lacks "the canary runs against the fixture, never the plugin under test" "$(grep '^ARGV' "$STUB_LOG")" "$GP"
 : >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
 out="$(NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" --sweep --no-canary --keep 2>&1)"; rc=$?
@@ -411,7 +537,8 @@ expect_has "and says it is advisory" "$out" "sweep, advisory"
 expect_eq "one run per agent and loadable skill (2)" 2 "$(grep -c '^ARGV' "$STUB_LOG")"
 expect_lacks "the sweep runs a scratch COPY, not the plugin under test" "$(grep '^ARGV' "$STUB_LOG")" "--plugin-dir${T}$GP${T}"
 expect_eq "the copy's hooks are emptied in every run" 2 "$(grep -c "^HOOKS${T}{\"hooks\": {}}\$" "$STUB_LOG")"
-expect_eq "the copy's agents have no memory: in every run" 2 "$(grep -c "^AGENT${T}worker.md${T}memory=no\$" "$STUB_LOG")"
+expect_eq "the copy's agents have no memory: in every run" 2 "$(grep -c "^AGENT${T}worker.md${T}memory=no${T}" "$STUB_LOG")"
+expect_eq "and are narrowed to the Read tool in every run" 2 "$(grep -c "^AGENT${T}worker.md${T}memory=no${T}tools=Read\$" "$STUB_LOG")"
 scratch="$(printf '%s\n' "$out" | sed -n 's/^  scratch: //p')"
 scratch="${scratch%%$'\n'*}"
 if [ -n "$scratch" ] && [ -f "$scratch/iso/lockstep-marker" ]; then
@@ -438,9 +565,63 @@ out="$(STUB_MODE=noise-once NX_GATE_RETRIES=0 NX_GATE_CLAUDE="$STUBW" bash "$GAT
 expect_eq "with no retries the same noise leaves the canary UNVERIFIED, exit 2" 2 "$rc"
 expect_has "and the closing verdict says so" "$(printf '%s\n' "$out" | tail -1)" "PLUGIN OUT-OF-REPO GATE UNVERIFIED"
 : >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+out="$(STUB_MODE=skip-relay-once NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" 2>&1)"; rc=$?
+expect_eq "an agent that skips the relay.md Read on its first run is retried and the gate passes (the ship-blocker flake)" 0 "$rc"
+expect_eq "the retry names exactly the agent session" 1 "$(printf '%s\n' "$out" | grep -c '^  canary retry 1: agent$')"
+expect_lacks "no second retry was needed" "$out" "canary retry 2"
+: >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+out="$(STUB_MODE=skip-relay NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" 2>&1)"; rc=$?
+expect_eq "an agent that never reads relay.md ends UNVERIFIED after its retries, exit 2" 2 "$rc"
+expect_eq "it was retried twice (3 runs of the agent prompt, 5 + 2 = 7 canary runs)" 7 "$(grep -c '^ARGV' "$STUB_LOG")"
+: >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
 out="$(STUB_MODE=literal NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" 2>&1)"; rc=$?
 expect_eq "a Claude Code that hands the variable over literally fails the gate, exit 1" 1 "$rc"
 expect_has "FAILED" "$(printf '%s\n' "$out" | tail -1)" "PLUGIN OUT-OF-REPO GATE FAILED"
+
+# backoff between retries
+: >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+FAKEBIN="$WORKDIR/fakebin"; mkdir -p "$FAKEBIN"; : >"$WORKDIR/sleep.log"
+printf '#!/bin/sh\necho "$1" >>"%s"\n[ "$1" = 7 ] && exit 0\nexec /bin/sleep "$@"\n' "$WORKDIR/sleep.log" >"$FAKEBIN/sleep"; chmod +x "$FAKEBIN/sleep"
+out="$(PATH="$FAKEBIN:$PATH" STUB_MODE=noise-once NX_GATE_RETRY_SLEEP=7 NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" 2>&1)"; rc=$?
+expect_eq "a retried canary still passes with the backoff on" 0 "$rc"
+expect_has "the pause is announced" "$out" "(pausing 7s before the retry)"
+expect_eq "and the gate really called sleep 7 (attempt 1 x NX_GATE_RETRY_SLEEP), once" 1 "$(grep -c '^7$' "$WORKDIR/sleep.log")"
+
+# the init event, through the gate
+for tweak in plugin mcp tools perm none; do
+    : >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+    out="$(STUB_INIT="$tweak" NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" 2>&1)"; rc=$?
+    expect_eq "a canary whose init event shows '$tweak' fails the gate, exit 1" 1 "$rc"
+    expect_has "and says the run was not isolated ($tweak)" "$out" "isolation: "
+done
+: >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+out="$(STUB_INIT=mcp NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" --sweep --no-canary 2>&1)"; rc=$?
+expect_eq "a sweep run whose init event shows an MCP server fails the sweep, exit 1" 1 "$rc"
+expect_has "as ISOLATION" "$out" "ISOLATION"
+
+echo "the project directory Claude Code leaves under its config dir"
+CFG="$WORKDIR/claude-config"; PROJ="$CFG/projects"; mkdir -p "$PROJ"
+DECOY1="$PROJ/-Users-someone-code-my-project"; mkdir -p "$DECOY1/memory"; : >"$DECOY1/keep.jsonl"
+DECOY2="$PROJ/-tmp-other-plugin-out-of-repo-gate-ABCDEF-project"; mkdir -p "$DECOY2/memory"            # a gate-shaped name that is not this run's
+DECOY3="$PROJ/-tmp-x-plugin-out-of-repo-gate-ZZZZZZ-project"; mkdir -p "$DECOY3/s/subagents"; printf 'x' >"$DECOY3/s/transcript.jsonl"; printf '{}' >"$DECOY3/s/subagents/agent-q.meta.json"   # gate-shaped, holds a transcript
+: >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
+out="$(CLAUDE_CONFIG_DIR="$CFG" STUB_RESIDUE=1 NX_GATE_CLAUDE="$STUBW" bash "$GATE" --plugin "$GP" 2>&1)"; rc=$?
+expect_eq "the gate passes with a stub that leaves the residue" 0 "$rc"
+expect_eq "it made residue five times (one per run, one directory: the scratch project)" 5 "$(grep -c '^RESIDUE' "$STUB_LOG")"
+left=0; while read -r _ d; do [ -e "$d" ] && left=$((left + 1)); done < <(grep '^RESIDUE' "$STUB_LOG")
+expect_eq "the gate removed its own project directory (memory/ and the subagent meta file included)" 0 "$left"
+chk "another project's directory is untouched" [ -f "$DECOY1/keep.jsonl" ]
+chk "a gate-shaped directory that is not this run's is untouched" [ -d "$DECOY2" ]
+chk "a gate-shaped directory holding a transcript is untouched" [ -f "$DECOY3/s/transcript.jsonl" ]
+out="$(CLAUDE_CONFIG_DIR="$CFG" bash "$GATE" --clean-residue 2>&1)"; rc=$?
+expect_eq "--clean-residue exits 0" 0 "$rc"
+expect_has "it lists the gate-shaped directories first" "$out" "gate project directories under $PROJ: 2"
+expect_has "naming them" "$out" "-tmp-other-plugin-out-of-repo-gate-ABCDEF-project"
+expect_has "it removed the empty one and left the one holding a transcript" "$out" "removed 1, left in place 1"
+chk "the empty gate-shaped directory is gone" [ ! -e "$DECOY2" ]
+chk "the transcript survives --clean-residue" [ -f "$DECOY3/s/transcript.jsonl" ]
+chk "and so does the subagent meta file beside it (a directory holding anything else is left whole)" [ -f "$DECOY3/s/subagents/agent-q.meta.json" ]
+chk "and another project's file survives" [ -f "$DECOY1/keep.jsonl" ]
 
 echo "the watchdog and an interrupt kill the process tree"
 alive() { kill -0 "$1" 2>/dev/null; }
@@ -638,6 +819,7 @@ mkplugin "$CACHE/conexus/$V" conexus "$V"
 mkhooks "$CACHE/sn/$V" sn "$V"
 mkdir -p "$CACHE/conexus-tool-spill/$V/.claude-plugin"; printf '{"name": "conexus-tool-spill", "version": "%s"}\n' "$V" >"$CACHE/conexus-tool-spill/$V/.claude-plugin/plugin.json"
 mkplugin "$CACHE/conexus-prose-edit/$V" conexus-prose-edit "$V"
+export NX_GATE_CONEXUS_FLOOR="1 1"   # the fixtures are one-agent, one-skill plugins; the real floor is tested on its own below
 run_inst() { NX_GATE_PLUGIN_CACHE="$CACHE" bash "$GATE" --installed "$V" --static-only 2>&1; }
 out="$(run_inst)"; rc=$?
 expect_eq "four installed plugins, all clean: exit 0" 0 "$rc"
@@ -659,6 +841,11 @@ expect_has "naming it" "$out" "sn                     FAILED (not found)"
 mkhooks "$CACHE/sn/$V" sn "$V"
 out="$(NX_GATE_PLUGIN_CACHE="$CACHE" bash "$GATE" --installed 1.2.3 --static-only 2>&1)"; rc=$?
 expect_eq "a version nothing is installed at fails" 1 "$rc"
+# the real floor: a conexus of one agent and one skill is APPLICABLE and still not a pass
+out="$(NX_GATE_CONEXUS_FLOOR="" NX_GATE_PLUGIN_CACHE="$CACHE" bash "$GATE" --installed "$V" --static-only 2>&1)"; rc=$?
+expect_eq "a one-agent one-skill conexus is below the census floor: the run FAILS" 1 "$rc"
+expect_has "naming the counts and the floor" "$out" "conexus                FAILED (hollow: 1 agents, 1 skills; floor 5/10)"
+expect_lacks "and the closing verdict is not PASSED" "$(printf '%s\n' "$out" | tail -1)" "GATE PASSED"
 # a hollow plugin (NOT-APPLICABLE where it must be APPLICABLE) is not a pass
 HOLLOW="$WORKDIR/cache-hollow"; cp -R "$CACHE" "$HOLLOW"
 rm -rf "$HOLLOW/conexus/$V/agents" "$HOLLOW/conexus/$V/commands" "$HOLLOW/conexus/$V/skills" "$HOLLOW/conexus/$V/resources"
@@ -692,7 +879,7 @@ expect_has "the closing verdict is UNVERIFIED" "$(printf '%s\n' "$out" | tail -1
 out="$(NX_GATE_PLUGIN_CACHE="$CACHE" NX_GATE_CLAUDE="$STUBW" bash "$GATE" --installed "$V" 2>&1)"; rc=$?
 expect_eq "four installed plugins with the stub: static + canary, once" 0 "$rc"
 expect_has "one closing verdict naming the canary" "$(printf '%s\n' "$out" | tail -1)" "PLUGIN OUT-OF-REPO GATE PASSED (static + canary) -- installed $V: 2 passed, 2 not applicable"
-expect_eq "the canary ran once for the whole run (4 sessions), not once per plugin" 4 "$(grep -c '^ARGV' "$STUB_LOG")"
+expect_eq "the canary ran once for the whole run (5 sessions), not once per plugin" 5 "$(grep -c '^ARGV' "$STUB_LOG")"
 out="$(bash "$GATE" --installed notaversion 2>&1)"; rc=$?
 expect_eq "--installed wants a version" 64 "$rc"
 out="$(bash "$GATE" --all --only worker 2>&1)"; rc=$?

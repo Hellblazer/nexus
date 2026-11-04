@@ -439,7 +439,7 @@ def test_the_plugins_leg_runs_the_canary_where_claude_is_and_static_only_where_i
     r = battery.run(env={"NX_GATE_CLAUDE": str(tmp_path / "no-such-claude")})
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert (battery.out / "plugins.args").read_text() == "--all --static-only", "no claude: the static pass, by name"
-    r = battery.run(env={"NX_GATE_PLUGIN_GATE_LIVE_UNUSED": "1", "NX_BATTERY_PLUGIN_GATE_LIVE": "0"})
+    r = battery.run(env={"NX_BATTERY_PLUGIN_GATE_LIVE": "0"})
     assert (battery.out / "plugins.args").read_text() == "--all --static-only", "the operator asked for static"
     r = battery.run(env={"NX_BATTERY_CLAUDE": str(tmp_path / "no-such-claude")})
     assert (battery.out / "plugins.args").read_text() == "--all", "the retired NX_BATTERY_CLAUDE knob decides nothing"

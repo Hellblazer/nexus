@@ -34,10 +34,12 @@ one:
 
            What Claude Code substitutes, MEASURED by plugin_canary.py on every
            gate run (it fails when a measurement contradicts these constants,
-           READ_FILES_SUBSTITUTED and UNBRACED_SUBSTITUTED):
+           READ_FILES_SUBSTITUTED, UNBRACED_SUBSTITUTED and FRONTMATTER_SUBSTITUTED):
 
              ${CLAUDE_PLUGIN_ROOT}  in an agent's body, a skill's SKILL.md and a
                                     command's body: substituted (RESOLVES).
+             ${CLAUDE_PLUGIN_ROOT}  in an agent's frontmatter description: NOT
+                                    substituted (see below). UNSUBSTITUTED.
              ${CLAUDE_PLUGIN_ROOT}  in a file the model Reads (a resource, a
                                     skill's reference.md or any other file under
                                     skills/): NOT substituted. The Read result
@@ -47,8 +49,11 @@ one:
              in hook-injected markdown (hooks/**/*.md, which a hook prints):
                                     never substituted. UNSUBSTITUTED.
 
-           A frontmatter line is treated like the body of its file (unmeasured:
-           the model never sees it).
+           A variable in an agent's frontmatter `description:` is NOT substituted
+           (measured: the model's Agent listing shows it literally). UNSUBSTITUTED.
+           Other frontmatter lines (an agent's or skill's allowed-tools, which Claude
+           Code consumes, not the model; a skill's or command's description) are
+           treated like the body of their file and are unmeasured.
 
            A directory counts as a file: a reference to a directory that exists
            is RESOLVES, or RELATIVE-NEAR from a skill or resource.
@@ -149,6 +154,7 @@ from dataclasses import dataclass, field
 #: changes substitution turns the gate red instead of leaving the classifier wrong.
 READ_FILES_SUBSTITUTED = False    # a file the model Reads (a resource, a skill's reference file)
 UNBRACED_SUBSTITUTED = False      # $CLAUDE_PLUGIN_ROOT without braces, in a body that is substituted
+FRONTMATTER_SUBSTITUTED = False   # ${CLAUDE_PLUGIN_ROOT} in an agent's frontmatter description (what the model sees in its Agent listing)
 
 CENSUS_SURFACES = ("agents", "commands", "skills", "resources")
 SURFACES = CENSUS_SURFACES + ("hooks",)
@@ -295,9 +301,10 @@ def _substituted_text(surface: str, file_abs: str) -> bool:
     """True when Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} in this file's text before the model sees it."""
     if surface in ("agents", "commands"):
         return True
-    if surface == "skills":
-        return os.path.basename(file_abs) == "SKILL.md"
-    return READ_FILES_SUBSTITUTED and surface == "resources"
+    if surface == "skills" and os.path.basename(file_abs) == "SKILL.md":
+        return True
+    # a resource, or a skill's reference file: a file the model Reads (measured by the canary)
+    return READ_FILES_SUBSTITUTED and surface in ("resources", "skills")
 
 
 def _target_path(target: str, surface: str, file_abs: str, plugin: str) -> str | None:
@@ -396,6 +403,26 @@ def load_allowlist(path: str | None, known: frozenset[str] = KNOWN_PLUGINS
     return allow, errors
 
 
+def description_lines(text: str) -> set[int]:
+    """1-based line numbers of the frontmatter `description:` value (continuation lines included)."""
+    lines = text.split("\n")
+    out: set[int] = set()
+    if not lines or lines[0] != "---":
+        return out
+    inside = False
+    for no, line in enumerate(lines[1:], 2):
+        if line == "---":
+            break
+        key = re.match(r"^([A-Za-z][\w-]*):", line)
+        if key:
+            inside = key.group(1) == "description"
+        elif inside and not line.startswith((" ", "\t")):
+            inside = False
+        if inside:
+            out.add(no)
+    return out
+
+
 def static_census(plugin: str, allow: dict | None = None) -> list[Ref]:
     allow = allow or {}
     name = plugin_name(plugin)
@@ -404,8 +431,11 @@ def static_census(plugin: str, allow: dict | None = None) -> list[Ref]:
         rel = os.path.relpath(path, plugin)
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
+        desc = description_lines(text) if surface == "agents" and not FRONTMATTER_SUBSTITUTED else set()
         for no, target in extract(text):
             cls = classify(target, surface, path, plugin)
+            if no in desc and _ROOT_VAR.search(target):   # measured: the model sees it literally
+                cls = "UNSUBSTITUTED"
             opened = _target_path(target, surface, path, plugin)
             reason = allow.get((name, rel, target, cls), "") if cls in FAILING else ""
             refs.append(Ref(surface, rel, no, target, cls,
@@ -438,6 +468,14 @@ def applicability(plugin: str) -> tuple[str, int, int]:
     hooks = sum(1 for s, _ in plugin_files(plugin) if s == "hooks")
     kind = "APPLICABLE" if census else ("HOOKS-ONLY" if hooks else "NO-MARKDOWN")
     return kind, census, hooks
+
+
+def census_counts(plugin: str) -> tuple[int, int]:
+    """-> (agent files, skill files) in the census: the gate pins a floor for the plugins that must
+    not be hollow, so a conexus with one agent and one skill is not APPLICABLE by courtesy."""
+    files = list(plugin_files(plugin))
+    return (sum(1 for s, _ in files if s == "agents"),
+            sum(1 for s, p in files if s == "skills" and os.path.basename(p) == "SKILL.md"))
 
 
 def _known_for(plugin: str, extra: frozenset[str]) -> frozenset[str]:
@@ -608,6 +646,72 @@ def into_nexus_checkout(path: str, plugin: str) -> bool:
         d = parent
 
 
+#: The tools a gate run is started with (`--tools Read,Agent,Task,Skill`); the init event names the Agent tool "Task".
+INTENDED_TOOLS = frozenset({"Read", "Agent", "Task", "Skill"})
+INIT_KEYS = ("plugins", "mcp_servers", "tools", "permissionMode")
+
+
+def init_event(path: str) -> dict | None:
+    """The stream-json `system` / `init` event of a run: what Claude Code actually loaded."""
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and e.get("type") == "system" and e.get("subtype") == "init":
+                return e
+    return None
+
+
+def check_init(path: str, plugin_name: str) -> list[str]:
+    """Reasons a live run was NOT the isolated run the gate meant to make; empty when it was.
+
+    The flags the gate passes (`--setting-sources ""`, `--strict-mcp-config`, `--tools`) are only
+    argv until something observes their effect. The init event is that observation: any plugin
+    other than the one under test (Claude Code's own `@builtin` ones aside), any MCP server, a tool
+    set other than the intended one, a permission mode other than `default`, or a plugin-namespaced
+    skill, command or agent of another plugin is a definite red. A missing event, or one without
+    these fields, is red too: a contract that cannot be observed is not isolation."""
+    ev = init_event(path)
+    if ev is None:
+        return ["no system init event: the isolation of this run could not be observed"]
+    missing = [k for k in INIT_KEYS if k not in ev]
+    if missing:
+        return [f"the init event lacks {', '.join(missing)}: the isolation of this run could not be observed"]
+    bad: list[str] = []
+    seen = False
+    for p in ev["plugins"] or []:
+        name, src = str(p.get("name")), str(p.get("source") or "")
+        if src.endswith("@builtin") and p.get("path") == "builtin":
+            continue
+        if name == plugin_name and src.endswith("@inline"):
+            seen = True
+            continue
+        bad.append(f"plugin {name} ({src or 'no source'}) loaded beside the one under test")
+    if not seen:
+        bad.append(f"the plugin under test ({plugin_name}) is not among the loaded plugins")
+    if ev["mcp_servers"]:
+        bad.append("MCP server(s) loaded: " + ", ".join(
+            str(m.get("name", m)) if isinstance(m, dict) else str(m) for m in ev["mcp_servers"]))
+    tools = ev["tools"]
+    if not isinstance(tools, list) or "Read" not in tools or set(tools) - INTENDED_TOOLS:
+        extra = sorted(set(tools) - INTENDED_TOOLS) if isinstance(tools, list) else []
+        bad.append(f"tool set {tools!r} is not the intended Read/Agent/Task/Skill set"
+                   + (f" (extra: {extra})" if extra else ""))
+    if ev["permissionMode"] != "default":
+        bad.append(f"permission mode is {ev['permissionMode']!r}, not 'default'")
+    for key in ("slash_commands", "skills", "agents"):
+        for entry in ev.get(key) or []:
+            if ":" in str(entry) and str(entry).split(":", 1)[0] != plugin_name:
+                bad.append(f"{key} entry {entry} belongs to another plugin")
+    return bad
+
+
 @dataclass
 class Run:
     surface: str
@@ -698,8 +802,8 @@ def parse_ref_lines(text: str) -> list[tuple[str, str]]:
 
 
 #: A verdict that is evidence of a plugin defect. Everything else short of OPENED is noise.
-DEFINITE = frozenset({"FAILED", "UNSUBSTITUTED", "RELATIVE-DEAD", "INTO-CHECKOUT"})
-NOISE_CLASSES = ("NO-REFS", "UNREAD", "MISRESOLVED", "NO-RESULT", "NO-EVENTS")
+DEFINITE = frozenset({"FAILED", "UNSUBSTITUTED", "RELATIVE-DEAD", "INTO-CHECKOUT", "ISOLATION"})
+NOISE_CLASSES = ("NO-REFS", "UNREAD", "MISRESOLVED", "QUOTE-ONLY", "NO-RESULT", "NO-EVENTS")
 
 
 @dataclass
@@ -741,6 +845,8 @@ def evaluate(run: Run, plugin: str, expected: dict[str, tuple[str, str]],
         by_raw.setdefault(q, (q, rp))
         by_raw.setdefault(_BRACED.sub(plugin, q), (q, rp))
     verdicts: list[RefVerdict] = []
+    literal_read = any("CLAUDE_PLUGIN_ROOT" in p for p in run.reads)
+    relative_read = any(p and not p.startswith("/") and "CLAUDE_PLUGIN_ROOT" not in p for p in run.reads)
     for raw, (ep, cls) in sorted(expected.items()):
         ep = canon(ep)
         mech = _mechanism(run.surface, cls)
@@ -752,14 +858,18 @@ def evaluate(run: Run, plugin: str, expected: dict[str, tuple[str, str]],
         quoted, read_path = claim if claim else (raw, "")
         if claim:
             if "CLAUDE_PLUGIN_ROOT" in quoted:
-                verdicts.append(v("UNSUBSTITUTED", "the variable reached the model literally", quoted, read_path))
+                # what the model QUOTES is model text; the Read events are the evidence (nexus-z7ddd)
+                if literal_read:
+                    verdicts.append(v("UNSUBSTITUTED", "the variable reached the model literally (a Read was given it)",
+                                      quoted, read_path))
+                else:
+                    verdicts.append(v("QUOTE-ONLY", "the model quoted the variable literally but no Read was given it: "
+                                      "model text alone is not evidence", quoted, read_path))
                 continue
             if not quoted.startswith("/") and not _URL.match(quoted):
-                if run.surface == "agents":
-                    verdicts.append(v("RELATIVE-DEAD", "an agent's prompt carries no location to resolve it against",
-                                      quoted, read_path))
-                    continue
-                if not run.basedir.startswith("/"):
+                # (an agent's relative target is never an expected reference: the static pass classes it
+                # RELATIVE-DEAD, and the trailing loop below judges the model's quote of it)
+                if run.surface != "agents" and not run.basedir.startswith("/"):
                     verdicts.append(v("RELATIVE-DEAD", "no base directory announced to resolve it against",
                                       quoted, read_path))
                     continue
@@ -777,7 +887,9 @@ def evaluate(run: Run, plugin: str, expected: dict[str, tuple[str, str]],
             verdicts.append(v("NO-REFS", "no Read of it and no REF line for it", quoted, ""))
     if run.surface == "agents":
         for q, rp in refs:
-            if q in dead:   # the model quoted a relative target from an agent's text: the text carries no location
+            # the model quoted a relative target from an agent's text (the text carries no location), and a
+            # Read was given a relative path: the quote alone is not evidence
+            if q in dead and relative_read:
                 verdicts.append(RefVerdict(run.surface, run.name, q, rp, "RELATIVE-DEAD",
                                            "an agent's prompt carries no location to resolve it against",
                                            "agent-variable"))
@@ -842,6 +954,9 @@ def _live_report(plugin: str, events_dir: str, as_json: bool, partial: bool = Fa
         exp = _expectations(plugin, static, src) if src else {}
         dead = frozenset(r.raw for r in static if r.rel_file == src and r.cls == "RELATIVE-DEAD" and not r.allowed)
         vs, fs = evaluate(run, plugin, exp, dead) if run.has_result and not run.is_error else ([], [])
+        if run.has_result:   # what Claude Code actually loaded, from the init event (nexus-z7ddd)
+            fs = fs + [RefVerdict(run.surface, run.name, "(init event)", "", "ISOLATION", why)
+                       for why in check_init(os.path.join(events_dir, f), plugin_name(plugin))]
         states[f] = target_state(run, vs, fs, len(exp))
         detail[f] = (vs, fs, len(exp))
 
@@ -950,7 +1065,8 @@ def main(argv: list[str]) -> int:
         return 0
     if a.cmd == "applicability":
         kind, census, hooks = applicability(plugin)
-        print(f"{kind}\t{census}\t{hooks}")
+        n_agents, n_skills = census_counts(plugin)
+        print(f"{kind}\t{census}\t{hooks}\t{n_agents}\t{n_skills}")
         return 0
     if a.cmd == "meta":
         meta = read_meta(plugin)

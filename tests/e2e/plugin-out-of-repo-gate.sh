@@ -8,6 +8,7 @@
 #                                        [--allowlist FILE] [--only <name>[,<name>...]]
 #                                        [--jobs N] [--model M] [--timeout SECONDS]
 #                                        [--out DIR] [--keep]
+#   tests/e2e/plugin-out-of-repo-gate.sh --clean-residue
 #
 #   --plugin DIR       one plugin directory (default: the repo's conexus/)
 #   --all              the four plugin directories of this checkout: conexus, sn,
@@ -24,6 +25,8 @@
 #   --sweep            add the live sweep: one claude run per agent and skill
 #                      (opt-in, ADVISORY; --only implies it and skips the canary)
 #   --no-canary        skip the canary (the sweep alone, for an investigation)
+#   --clean-residue    list, then remove, the project directories earlier runs of this gate left under
+#                      ~/.claude/projects (see Isolation); runs nothing else
 #   --allowlist FILE   reference allowlist (default: plugin-out-of-repo-allowlist.txt
 #                      beside this script). Format and rules: lib/plugin_out_of_repo.py.
 #
@@ -33,7 +36,11 @@
 # inside the nexus checkout, where those paths, `conexus/registry.yaml` and
 # `scripts/...` all happen to open.
 #
-# What a default run is, and why it is deterministic:
+# What a default run is. The static pass is deterministic. The canary is five live
+# model runs, judged on events and delivered text rather than on what the model says
+# (the one exception: each session also has to print its nonce); it can still go red
+# without a defect in the plugins, when an API error, a rate limit or an outage leaves
+# a session without evidence, so UNVERIFIED is a red outcome: rerun, never waive.
 #
 #   1. STATIC. Every file reference in agents/, commands/, skills/, resources/
 #      and the markdown a hook injects (hooks/**/*.md) is classified
@@ -43,13 +50,16 @@
 #      written reason; a stale allowlist entry fails too.
 #   2. CANARY. The static classes rest on beliefs about Claude Code (the variable
 #      is substituted in an agent, a skill and a command but NOT in a file the
-#      model Reads; a skill's relative link resolves against the announced base
-#      directory). The canary measures them: a fixture plugin the gate builds with
-#      random nonces, one claude run per mechanism, judged on the Read events and
-#      the text Claude Code delivered, never on what the model says (lib/
-#      plugin_canary.py). It fails when a measurement contradicts the static
-#      pass's pins. A model that does not follow three plain lines is retried
-#      (at most 2) and then reported UNVERIFIED, never as a pass.
+#      model Reads; the unbraced form never is; a skill's relative link resolves
+#      against the announced base directory; so does a link inside a Read file
+#      against that file's directory). The canary measures them: a fixture plugin
+#      the gate builds with random nonces, one claude run per mechanism, judged on
+#      the Read events, the text Claude Code delivered and the run's init event
+#      (lib/plugin_canary.py). It loads the FIXTURE through --plugin-dir, never the
+#      plugin as the marketplace installs it: whether the two substitute alike is
+#      not measured. It fails when a measurement contradicts the static pass's
+#      pins. A session whose model skips a step leaves a measurement missing; it
+#      is retried (at most 2, with a growing pause) and then UNVERIFIED, never a pass.
 #
 #   The SWEEP (--sweep) is the per-target live pass: one run per agent and per
 #   skill of the real plugin, the model quoting and Reading each reference. It
@@ -64,7 +74,8 @@
 # applicable is not a pass.
 #
 # Exit: 0 clean; 1 any failure; 2 UNVERIFIED (claude is not on PATH where a
-# live pass is due, the canary or sweep produced no evidence); 64 usage.
+# live pass is due, the canary or sweep produced no evidence; red for a release:
+# rerun, never waive); 64 usage.
 #
 # Isolation (the live runs). The real HOME stays (the sign-in lives there), and
 # nothing else of the real install does:
@@ -74,18 +85,29 @@
 #     memory:user agent reads and writes ~/.claude/agent-memory). The first version of
 #     this gate loaded the real hooks and left 13 nx tool generations behind;
 #   * NX_UPGRADE_AUTO=0, the lockstep marker pre-written in scratch, a scratch
-#     NEXUS_CONFIG_DIR, NX_TOOLS_DIR, UV_TOOL_DIR, UV_TOOL_BIN_DIR, an empty plugin
+#     NEXUS_CONFIG_DIR, NX_TOOLS_DIR, UV_TOOL_DIR, UV_TOOL_BIN_DIR, UV_CACHE_DIR, an empty plugin
 #     registry and marketplace list, and a dead NX_SERVICE_URL: should a hook run
 #     anyway it has nothing real to act on;
 #   * `--setting-sources ""` (no user or project settings, so no installed plugin
 #     loads beside the copy), `--strict-mcp-config` (no plugin MCP server),
-#     `--no-session-persistence`, a Read/Agent/Task/Skill-only tool set, and a
-#     scratch project directory with no git repository above it;
+#     `--no-session-persistence`, a Read/Agent/Task/Skill-only tool set (and, in the
+#     sweep, agents narrowed to Read in the scratch copy), and a scratch project
+#     directory with no repository above it. Those are argv; what they DID is read
+#     from every run's init event, and any plugin but the one under test, any MCP
+#     server, another tool set or a non-default permission mode is a definite red;
+#   * a project directory Claude Code makes under ~/.claude/projects for the scratch
+#     project (an empty memory/ directory, and agent-*.meta.json files for subagents) is
+#     removed when the run ends: only the one named after this run's own scratch path,
+#     only if it holds nothing but those, and never by a glob (--clean-residue applies
+#     the same rule to earlier runs' leftovers). What remains outside the gate's scratch
+#     is the sign-in (read), ~/.claude.json and the plugin cache, which a run may touch
+#     and this gate does not observe; the model's own context (~/.claude/CLAUDE.md,
+#     rules) is not hermetic either, so the canary's flake rate differs per machine;
 #   * a watchdog that kills the claude process TREE at --timeout, and an
 #     INT/TERM handler that kills every run's tree.
 # Nothing here prints a token, an env dump or a config file.
 #
-# Cost: the canary is 4 short claude runs (plus at most 2 retries each); the
+# Cost: the canary is 5 short claude runs (plus at most 2 retries each); the
 # sweep is one run per agent (two model sessions each) and per loadable skill,
 # NX_GATE_JOBS (default 4) at a time.
 set -u -o pipefail
@@ -109,6 +131,7 @@ BUDGET="${NX_GATE_MAX_USD:-2}"
 RETRIES="${NX_GATE_RETRIES:-2}"
 OUT=""
 KEEP=0
+CLEAN_RESIDUE=0
 ALLOWLIST=""
 ALLOWLIST_EXPLICIT=0
 CACHE="${NX_GATE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache/nexus-plugins}"
@@ -129,6 +152,7 @@ while [ $# -gt 0 ]; do
         --timeout) [ $# -ge 2 ] || usage; TIMEOUT="$2"; shift 2 ;;
         --out) [ $# -ge 2 ] || usage; OUT="$2"; shift 2 ;;
         --keep) KEEP=1; shift ;;
+        --clean-residue) CLEAN_RESIDUE=1; shift ;;
         -h|--help) usage ;;
         *) echo "unknown argument: $1" >&2; usage ;;
     esac
@@ -173,14 +197,69 @@ reap_jobs() {
 CLAUDE=""
 WORK=""
 CHILD_PID=""
+# Claude Code files a directory per working directory under <config>/projects even with
+# --no-session-persistence: an empty memory/ directory and, for a subagent,
+# <session>/subagents/agent-*.meta.json. Each run of this gate would leave one behind.
+#
+# clean_project_dir <directory NAME under projects>: remove it, and ONLY when all of this holds:
+#   * the name is this gate's own: a mangled scratch path ending plugin-out-of-repo-gate-XXXXXX-project;
+#   * it is a real directory (not a link) directly under <config>/projects;
+#   * it holds nothing but directories and agent-*.meta.json files.
+# It deletes those meta files and the then-empty directories, never recursively and never by glob.
+project_residue_root() { printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; }
+clean_project_dir() {
+    local name="$1" root dir stray
+    case "$name" in
+        */*|.*|'') return 0 ;;
+        *plugin-out-of-repo-gate-??????-project) ;;
+        *) return 0 ;;
+    esac
+    root="$(project_residue_root)"
+    dir="$root/$name"
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+    stray="$(find "$dir" ! -type d ! -name 'agent-*.meta.json' 2>/dev/null)"
+    if [ -n "$stray" ]; then
+        echo "  left in place (holds something besides subagent meta files): $dir" >&2
+        return 0
+    fi
+    find "$dir" -type f -name 'agent-*.meta.json' -delete 2>/dev/null
+    find "$dir" -depth -type d -empty -delete 2>/dev/null
+    return 0
+}
+# This run's own project directory: the scratch path with every non-alphanumeric character a dash.
+# shellcheck disable=SC2329  # invoked by cleanup, which the EXIT trap runs
+clean_own_project_dir() {
+    [ -n "${SCRATCH:-}" ] || return 0
+    case "${WORK:-}" in */plugin-out-of-repo-gate.??????) ;; *) return 0 ;; esac
+    clean_project_dir "$(printf '%s' "$SCRATCH" | sed 's/[^A-Za-z0-9]/-/g')"
+}
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() {
     reap_jobs
     if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then kill_tree "$CHILD_PID" TERM; fi
+    clean_own_project_dir
     if [ -n "$WORK" ] && [ "$KEEP" -ne 1 ]; then rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+
+if [ "$CLEAN_RESIDUE" -eq 1 ]; then
+    # The leftovers of earlier runs, by the same rule as a run's own cleanup (clean_project_dir):
+    # list first, then remove. Nothing else is touched.
+    root="$(project_residue_root)"
+    found=()
+    for d in "$root"/*plugin-out-of-repo-gate-??????-project; do
+        [ -d "$d" ] && [ ! -L "$d" ] || continue
+        found+=("$(basename "$d")")
+    done
+    echo "gate project directories under $root: ${#found[@]}"
+    for n in "${found[@]}"; do echo "  $n"; done
+    for n in "${found[@]}"; do clean_project_dir "$n"; done
+    left=0
+    for n in "${found[@]}"; do [ -d "$root/$n" ] && left=$((left + 1)); done
+    echo "removed $((${#found[@]} - left)), left in place $left"
+    exit 0
+fi
 
 mkwork() {
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/plugin-out-of-repo-gate.XXXXXX")" || exit 2
@@ -191,13 +270,13 @@ ENVOPTS=()
 SCRATCH=""
 setup_isolation() {  # <plugin version for the lockstep marker>
     local iso="$WORK/iso" ver="${1:-0.0.0}"
-    mkdir -p "$iso/nexus-config" "$iso/nx-tools" "$iso/uv-tools" "$iso/uv-bin"
+    mkdir -p "$iso/nexus-config" "$iso/nx-tools" "$iso/uv-tools" "$iso/uv-bin" "$iso/uv-cache"
     printf '%s\n' "$ver" >"$iso/lockstep-marker"
     printf '{"version": 2, "plugins": {}}\n' >"$iso/installed_plugins.json"
     printf '{}\n' >"$iso/known_marketplaces.json"
     ENVOPTS=(NX_NO_TELEMETRY=1 NX_UPGRADE_AUTO=0
         "NEXUS_CONFIG_DIR=$iso/nexus-config" "NX_TOOLS_DIR=$iso/nx-tools"
-        "UV_TOOL_DIR=$iso/uv-tools" "UV_TOOL_BIN_DIR=$iso/uv-bin"
+        "UV_TOOL_DIR=$iso/uv-tools" "UV_TOOL_BIN_DIR=$iso/uv-bin" "UV_CACHE_DIR=$iso/uv-cache"
         "NX_LOCKSTEP_MARKER=$iso/lockstep-marker"
         "NX_PLUGIN_REGISTRY=$iso/installed_plugins.json" "NX_PLUGIN_MARKETPLACES=$iso/known_marketplaces.json"
         NX_SERVICE_URL=http://127.0.0.1:9 NX_SERVICE_TOKEN=plugin-gate-unused)
@@ -246,6 +325,12 @@ claude_session() {  # <events base path> <plugin dir> <prompt> <budget usd>
     )
 }
 
+RETRY_SLEEP="${NX_GATE_RETRY_SLEEP:-15}"   # seconds x the attempt number, between a failed round and its retry
+backoff() {  # <attempt number>: an API error or a rate limit does not clear in the next second
+    local n=$(($1 * RETRY_SLEEP))
+    [ "$n" -le 0 ] || { echo "    (pausing ${n}s before the retry)"; sleep "$n"; }
+}
+
 throttle() { while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$JOBS" ]; do sleep 1; done; }
 
 claude_version() { local v; v="$("$CLAUDE" --version 2>/dev/null)"; printf '%s' "${v%%$'\n'*}"; }
@@ -255,16 +340,18 @@ need_claude() {
 }
 
 # ---------------------------------------------------------------------------
-# The canary: four claude runs against a fixture plugin the gate builds.
+# The canary: one claude run per mechanism against a fixture plugin the gate builds.
 # Sets CANARY_RC (0 clean, 1 broken or contradicted, 2 no evidence).
 # ---------------------------------------------------------------------------
 CANARY_RC=0
+CANARY_SESSIONS=0
 run_canary() {
     local cw="$WORK/canary" ev sessions s prompt attempt retry
     ev="$cw/events"; [ -z "$OUT" ] || ev="$OUT/canary"
     mkdir -p "$cw" "$ev"
     "$E2E_PYTHON" -I "$CANARY" build --dest "$cw/plugin" --manifest "$cw/manifest.json" || { CANARY_RC=2; return; }
     sessions="$("$E2E_PYTHON" -I "$CANARY" prompts)" || { CANARY_RC=2; return; }
+    CANARY_SESSIONS="$(printf '%s\n' "$sessions" | wc -l | tr -d ' ')"
     echo "== canary (claude $(claude_version), model $MODEL, cwd $SCRATCH) =="
     local line
     while IFS=$'\t' read -r s prompt; do
@@ -278,6 +365,7 @@ run_canary() {
         [ -n "$retry" ] || break
         attempt=$((attempt + 1))
         echo "  canary retry $attempt: $(printf '%s' "$retry" | tr '\n' ' ')"
+        backoff "$attempt"
         while IFS= read -r s; do
             line="$(printf '%s\n' "$sessions" | awk -F'\t' -v s="$s" '$1 == s')"
             prompt="${line#*$'\t'}"
@@ -295,6 +383,9 @@ run_canary() {
 # ---------------------------------------------------------------------------
 expect_kind() {  # <label> -> APPLICABLE | HOOKS-ONLY | ANY
     case "$1" in conexus|prose-edit|conexus-prose-edit) echo APPLICABLE ;; sn) echo HOOKS-ONLY ;; *) echo ANY ;; esac
+}
+expect_floor() {  # <label> -> "<min agents> <min skills>": a plugin that must not be hollow is not APPLICABLE by courtesy of one file
+    case "$1" in conexus) echo "${NX_GATE_CONEXUS_FLOOR:-5 10}" ;; prose-edit|conexus-prose-edit) echo "1 1" ;; *) echo "0 0" ;; esac
 }
 expect_name() {  # <label> -> the "name" its plugin.json must carry
     case "$1" in prose-edit|conexus-prose-edit) echo conexus-prose-edit ;; tool-spill|conexus-tool-spill) echo conexus-tool-spill ;; *) echo "$1" ;; esac
@@ -352,7 +443,15 @@ if [ -n "$MULTI" ]; then
             continue
         fi
         want_kind="$(expect_kind "$label")"
-        IFS=$'\t' read -r kind _ _ < <("$E2E_PYTHON" -I "$PYMOD" applicability --plugin "$dir")
+        IFS=$'\t' read -r kind _ _ n_agents n_skills < <("$E2E_PYTHON" -I "$PYMOD" applicability --plugin "$dir")
+        read -r min_agents min_skills <<<"$(expect_floor "$label")"
+        if [ "$want_kind" = APPLICABLE ] && [ "${kind:-}" = APPLICABLE ] \
+            && { [ "${n_agents:-0}" -lt "$min_agents" ] || [ "${n_skills:-0}" -lt "$min_skills" ]; }; then
+            echo "PLUGIN OUT-OF-REPO GATE FAILED -- $label has ${n_agents:-0} agent(s) and ${n_skills:-0} skill(s), below the floor of $min_agents and $min_skills: a one-file plugin is not a pass (nothing in it was examined)"
+            SUMMARY+=("$(printf '%-22s %s' "$label" "FAILED (hollow: ${n_agents:-0} agents, ${n_skills:-0} skills; floor $min_agents/$min_skills)")")
+            ANY_FAILED=1
+            continue
+        fi
         if [ "$want_kind" != ANY ] && [ "${kind:-}" != "$want_kind" ]; then
             echo "PLUGIN OUT-OF-REPO GATE FAILED -- $label is ${kind:-unknown}, expected $want_kind: a hollow plugin is not a pass (nothing in it was examined)"
             SUMMARY+=("$(printf '%-22s %s' "$label" "FAILED (hollow: ${kind:-unknown}, want $want_kind)")")
@@ -464,7 +563,7 @@ CANARY_NOTE=""
 if [ "$DO_CANARY" -eq 1 ]; then
     echo
     run_canary
-    CALLS=$((CALLS + 4))
+    CALLS=$((CALLS + CANARY_SESSIONS))
     CANARY_NOTE=" + canary"
     case "$CANARY_RC" in 0) ;; 2) UNVERIFIED=1 ;; *) FAILED=1 ;; esac
 fi
@@ -527,6 +626,7 @@ if [ "$DO_SWEEP" -eq 1 ]; then
             [ -n "$retry" ] || break
             attempt=$((attempt + 1))
             echo "  sweep retry $attempt: $(printf '%s' "$retry" | tr '\n' ' ')"
+            backoff "$attempt"
             lines=""
             while IFS= read -r name; do
                 s="${name%%__*}"; b="${name#*__}"
