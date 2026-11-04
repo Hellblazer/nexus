@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-10 agents, 44 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+10 agents, 39 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
 
@@ -50,11 +50,11 @@ story.
 ## What You Get
 
 - **10 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility. The three MCP-tool redirect stubs (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted (nexus-cnzei.4) — call `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` directly
-- **44 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
+- **39 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (46 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
+- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -407,23 +407,23 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | Retrieval + storage (core) | 46 tools — see below |
+| `nexus` | Retrieval + storage (core) | 44 tools — see below |
 | `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
-### `nexus` MCP tool catalog (46 tools)
+### `nexus` MCP tool catalog (44 tools)
 
 | Category | Tools |
 |----------|-------|
 | Retrieval (T3) | `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list` |
-| Scoped search (RDR-156, service mode) | `search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop` |
+| Scoped search (RDR-156, service mode) | `search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped` |
 | Memory (T2) | `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `memory_consolidate` |
 | Scratch (T1) | `scratch`, `scratch_manage` |
 | Collections | `collection_list` |
 | Plans (RDR-078) | `plan_save`, `plan_search`, `plan_delete`, `traverse` |
-| Tuple space (RDR-205/206/211/213) | `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_release`, `tuple_registry`, `tuple_list`, `tuple_stats`, `tuple_subscribe`, `tuple_unsubscribe`, `tuple_subscriptions` |
+| Tuple space (RDR-205/206/211/213) | `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_release`, `tuple_registry`, `tuple_list`, `tuple_stats`, `tuple_subscribe`, `tuple_unsubscribe`, `tuple_subscriptions`, `mailbox_send` |
 | Operators (RDR-079/088/093) | none on the MCP surface (nexus-ivi4s): `summarize`, `extract`, `rank`, `compare`, `generate`, `filter`, `groupby`, `aggregate`, `check`, `verify` run as plan steps inside `nx_answer` |
-| Orchestration (RDR-080) | `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
+| Orchestration (RDR-080) | `nx_answer`, `nx_answer_report`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
 | Admin | `daemon_uninstall` |
 | Setup (RDR-228) | `setup`, `setup_status` |
 
@@ -434,7 +434,7 @@ via `plan_run`, and falls through to an inline planner on miss.  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 42 MCP tools and the nexus-catalog server exposes 10 catalog tools, 52 tools an agent calls (13 more are demoted to Python-only, including the 10 operators that `nx_answer` plans run). The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 44 MCP tools and the nexus-catalog server exposes 10 catalog tools, 54 tools an agent calls (13 more are demoted to Python-only, including the 10 operators that `nx_answer` plans run). The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 
