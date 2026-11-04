@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5128
+provisioned_tests = 5129
 tolerance_tests = 0
+# 5128 -> 5129 (nexus-0vh80, 2026-11-04): +1. tests/test_plan_answer_kind.py::test_a_real_saved_row_read_back_through_the_library_carries_its_project_and_the_filter_uses_it
+# writes a saved plan through plan_save and reads it back from the real engine, so the eligibility filter's project
+# check is pinned against a row that actually carries its project (a fake row would pass with a library that dropped it).
 # 5126 -> 5128 (nexus-z7ddd, 2026-11-04): +2. tests/hooks/test_subagent_start_preflight_row.py drives the SubagentStart hook
 # as a child process in two throwaway git repos (with and without the worktree preflight script) and reads its real
 # injection; the hook's T2 scan reaches the engine, so each takes a tenant, as the hook module's own tests do.
