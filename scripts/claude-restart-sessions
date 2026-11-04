@@ -187,7 +187,7 @@ PLUGINS = ("conexus@nexus-plugins", "sn@nexus-plugins")  # required: must be ins
 MARKETPLACE = "nexus-plugins"
 INSTALLED = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 #: Where Claude Code keeps each added marketplace's catalogue (<name>/.claude-plugin/marketplace.json);
-#: KNOWN_MARKETPLACES' installLocation names it instead for one added from a local directory or file.
+#: KNOWN_MARKETPLACES' installLocation names it instead for one added from a local directory.
 MARKETPLACES = Path.home() / ".claude" / "plugins" / "marketplaces"
 KNOWN_MARKETPLACES = Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
 
@@ -1011,7 +1011,9 @@ def handoff_marker(s: dict) -> str:
 
 def ask_marker(s: dict, path: str) -> Path:
     """The file mail_ask creates before it mails the ask about *path* to *s*: named by the session and
-    the path, so the handoff ask and the ready ask of one session have different markers."""
+    the path, so the handoff ask and the ready ask of one session have different markers. mail_ask is
+    its only creator, and it stamps the file's mtime with the ask's expiry; anything else that ever
+    creates one must do the same, or sweep_stale_markers can remove a live ask's marker."""
     digest = hashlib.sha256(f"{s['sessionId']} {path}".encode()).hexdigest()[:12]
     return ASK_MARKERS / f"{s['sessionId'][:8]}-{digest}"
 
@@ -1025,9 +1027,10 @@ SENT_MARKERS: dict[str, Path] = {}
 
 
 def sweep_stale_markers(now: float | None = None) -> int:
-    """Remove ask markers no round accounts for any more (nexus-drza4): those left when the previous
-    round file was malformed or missing, so withdraw_ready_asks had nothing to read, or when a run was
-    killed. Only an empty regular file directly in ASK_MARKERS, named as ask_marker names one, whose
+    """Remove ask markers whose asks are long dead (nexus-drza4), above all those no round accounts for:
+    left when the previous round file was malformed or missing, so withdraw_ready_asks had nothing to
+    read, or when a run was killed. Only an empty regular file directly in ASK_MARKERS, named as
+    ask_marker names one, whose
     mtime (its ask's expiry, set by mail_ask) is more than MARKER_SWEEP_MARGIN_S in the past, is
     removed. Returns how many were."""
     now = time.time() if now is None else now
@@ -1130,10 +1133,15 @@ def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "r
     try:  # the session checks it exists before acting: without it the mail would read as forged
         marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         marker.touch(mode=0o600)
-        expires = time.time() + ttl  # the marker's mtime is its ask's expiry (sweep_stale_markers)
-        os.utime(marker, (expires, expires))
     except OSError as e:
         log(f"WARN {label(s)}: could not create the ask marker {marker} ({e}); not mailed")
+        return False
+    try:
+        expires = time.time() + ttl  # the marker's mtime is its ask's expiry (sweep_stale_markers)
+        os.utime(marker, (expires, expires))
+    except (OSError, OverflowError) as e:
+        drop_marker(marker)
+        log(f"WARN {label(s)}: could not stamp the ask marker {marker} with its expiry ({e}); not mailed")
         return False
     MADE_MARKERS.add(marker)
     log(note if note is not None else mail_note(s, path))

@@ -2379,14 +2379,15 @@ def _expired(path: Path, ago_s: float) -> Path:
     return path
 
 
-def test_mail_ask_stamps_the_marker_with_its_ask_s_expiry(crs, rd, monkeypatch) -> None:
+@pytest.mark.parametrize("kind", ["restart-handoff", "restart-ready"])
+def test_mail_ask_stamps_the_marker_with_its_ask_s_expiry(crs, rd, monkeypatch, kind) -> None:
     """nexus-drza4: the marker's mtime is when its ask expires, so the sweep needs no TTL of its own."""
     monkeypatch.setattr(crs, "_nx_binary", lambda: "nx")
     setattr_in(monkeypatch, crs, "subprocess.run",
                lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "tuple_id: t-1\n", ""))
     s = {"sessionId": "ffff6666-rest", "name": "f", "pane": "%1"}
     before = time.time()
-    crs.mail_ask(s, "/tmp/h.md", "me", ttl=86400 * 3)
+    crs.mail_ask(s, "/tmp/h.md", "me", ttl=86400 * 3, kind=kind)
     mtime = crs.ask_marker(s, "/tmp/h.md").stat().st_mtime
     assert before + 86400 * 3 - 5 <= mtime <= time.time() + 86400 * 3 + 5
 
@@ -2417,6 +2418,16 @@ def test_the_stale_marker_sweep_removes_only_markers_whose_asks_expired_long_ago
     assert not leaked.exists()
     assert recent.exists() and live.exists() and not_empty.exists() and foreign.exists()
     assert sub.is_dir() and link.is_symlink() and target.exists() and fifo.exists()
+
+
+def test_a_marker_that_cannot_be_stamped_is_dropped_and_not_mailed(crs, rd, monkeypatch) -> None:
+    """An expiry the clock cannot hold (an absurd --handoff-timeout) leaves no unstamped marker behind."""
+    sent: list = []
+    monkeypatch.setattr(crs, "_nx_binary", lambda: "nx")
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda argv, **_k: sent.append(argv))
+    s = {"sessionId": "acac3434-rest", "name": "h", "pane": "%3"}
+    assert crs.mail_ask(s, "/tmp/h.md", "me", ttl=10 ** 30) is False
+    assert not crs.ask_marker(s, "/tmp/h.md").exists() and not sent
 
 
 def test_a_marker_mailed_again_is_not_swept(crs, rd, monkeypatch) -> None:
