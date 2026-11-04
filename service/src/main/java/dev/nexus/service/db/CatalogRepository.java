@@ -8547,8 +8547,8 @@ public final class CatalogRepository {
      * <p>BOUNDS. The count runs under a {@code statement_timeout} of {@link #FILLABLE_COUNT_TIMEOUT_MS} set inside
      * its transaction; a count that outlasts it throws a {@code DataAccessException} whose cause chain holds
      * SQLSTATE {@link #QUERY_CANCELED}, which the route maps to 503. The chunk row is joined on the tenant and on the
-     * manifest row's own {@code embedding_model} (the partition keys of {@code chunks}), so the join prunes to one
-     * partition.
+     * manifest row's own {@code embedding_model} (the partition keys of {@code chunks}): the tenant equality prunes
+     * at plan time, and the model, read from each row, prunes only at execution.
      *
      * <p>One arm names TOMBSTONED holders by design (the deleted-holder exclusion, a NOT EXISTS whose join
      * requires {@code DELETED_AT.isNotNull()}); the row's own document and every other-holder join are live only.

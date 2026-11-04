@@ -3028,10 +3028,17 @@ class TestManifestSectionLabelFillable:
     def test_a_503_is_sent_once_and_read_as_cannot_say(self, client: HttpCatalogClient) -> None:
         """The engine's statement bound answers 503 (nexus-l4hds). A gateway retry would run the same bounded query
         again (the mixin's 503 loop: three more sends and 17 s of sleep), so the request goes out exactly once."""
+        from nexus.db import gateway_hold
+
         FakeCatalogHandler.fillable_status, FakeCatalogHandler.fillable_requests = 503, 0
+        hold = gateway_hold._hold_path()
+        held_before = hold.read_bytes() if hold.exists() else None
         try:
             assert client.manifest_section_label_fillable(1000) is None
             assert FakeCatalogHandler.fillable_requests == 1
+            # A statement-timeout 503 holds no other caller: the single attempt neither writes nor
+            # rewrites the shared gateway hold (review r2).
+            assert (hold.read_bytes() if hold.exists() else None) == held_before
         finally:
             FakeCatalogHandler.fillable_status = 0
 
