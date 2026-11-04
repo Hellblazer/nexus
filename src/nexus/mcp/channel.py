@@ -105,12 +105,17 @@ registered handler for that method, so the handler fires exactly once per
 connection, right when the handshake completes (nexus-sgmyl, verified against
 mcp 2.3.0 ``mcp/server/runner.py``).
 
-Handshake era only. The channel capability rides ``initialize``'s
-``capabilities.experimental``. A client that opens with the 2026-07-28
-per-request envelope skips ``initialize`` and reads ``server/discover``, which
-the SDK builds without our experimental map; Claude Code opens with
-``initialize`` today, and a modern-era client would see no channel capability
-and so register no listener (a documented no-op, not an error).
+Handshake era only, enforced (nexus-w4l00). The channel capability rides
+``initialize``'s ``capabilities.experimental``. A client that opens with the
+2026-07-28 per-request envelope skips ``initialize`` and reads
+``server/discover``, which the SDK builds without our experimental map, and it
+never sends ``notifications/initialized``. Claude Code 2.1.317 opens exactly
+that way, so under ``Server.run`` (dual era) it connected modern, logged
+"Channel notifications skipped: server did not declare claude/channel
+capability", and the first send parked on the gate for the life of the
+session. :func:`run_stdio_with_channel` therefore drives ``serve_loop``
+(handshake only): the enveloped probe is refused and the client falls back to
+``initialize``.
 """
 from __future__ import annotations
 
@@ -353,6 +358,7 @@ async def run_stdio_with_channel(mcp: "MCPServer") -> None:
     ``run_stdio_async`` -- nothing about lifespan behavior changes, only
     the initialize options passed alongside it.
     """
+    from mcp.server.runner import serve_loop  # noqa: PLC0415 — deferred: only needed for the stdio driver
     from mcp.server.stdio import stdio_server  # noqa: PLC0415 — deferred: only needed for the stdio driver
 
     global _write_stream, _initialized_event
@@ -364,11 +370,27 @@ async def run_stdio_with_channel(mcp: "MCPServer") -> None:
         _write_stream = write_stream
         _initialized_event = asyncio.Event()
         try:
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(experimental_capabilities=CHANNEL_CAPABILITY),
-            )
+            # Handshake era only (nexus-w4l00). ``Server.run`` is the lifespan
+            # plus ``serve_dual_era_loop``, which serves the 2026-07-28 era to a
+            # client whose first request carries its envelope. Claude Code
+            # 2.1.317 opens that way (an enveloped ``server/discover``); the
+            # SDK's discover result has no ``experimental`` map, so Claude Code
+            # connected modern, skipped the channel ("server did not declare
+            # claude/channel capability") and never sent
+            # ``notifications/initialized``, which left every send parked on
+            # the gate. ``serve_loop`` refuses the probe, the client falls back
+            # to ``initialize``, and the capability rides its result, as on
+            # mcp 1.x. The lifespan is entered here as ``Server.run`` does.
+            async with server.lifespan(server) as lifespan_state:
+                await serve_loop(
+                    server,
+                    read_stream,
+                    write_stream,
+                    lifespan_state=lifespan_state,
+                    init_options=server.create_initialization_options(
+                        experimental_capabilities=CHANNEL_CAPABILITY,
+                    ),
+                )
         finally:
             _write_stream = None
             _initialized_event = None
