@@ -56,7 +56,7 @@ The resolved absolute path is what gets substituted into `{project_path}` in the
 
 **Transcript mining is NOT delegatable to subagents.** The `~/.claude/projects/*.jsonl` tree is not efficiently scannable from a subagent context — subagents do not have the main session's working directory, cannot traverse the directory efficiently with their tool budget, and the JSONL line lengths cause truncation in Grep tool output. The main session must gather transcript excerpts BEFORE dispatching the deep-research-synthesizer agent.
 
-This invariant was verified in RDR-067 Phase 1b (T2 `nexus_rdr/067-spike-disposition` id 754). Violating it means the subagent receives an empty evidence layer and degrades silently.
+This invariant was verified in RDR-067 Phase 1b. Violating it means the subagent receives an empty evidence layer and degrades silently.
 
 **Pre-step flow**:
 
@@ -253,7 +253,7 @@ Outputs generated across the audit flow:
 
 ## Phase 1b Signals Folded In
 
-This skill incorporates six signals surfaced by the Phase 1b spike (T2 `nexus_rdr/067-spike-disposition`):
+This skill incorporates six signals surfaced by the RDR-067 Phase 1b spike:
 
 1. **Skill body owns `memory_put`** — subagents do not reliably self-persist (0/3 Phase 1b runs called memory_put despite explicit instruction). Resolved by moving persistence to the skill body.
 2. **Transcript-mining fast path** — `--no-transcripts` flag + automatic fast path when no transcript directory exists. Resolves the meta-session noise trap identified in Phase 1b.
@@ -272,4 +272,3 @@ Two independent CA-1/CA-2 audit runs against nexus produced a false-positive SCO
 - The incident block in the output format now requires a `Code-verification result` field for non-CLEAN verdicts
 - Method notes updated: "Unchecked success criteria are NOT evidence of non-implementation"
 
-See T2 `nexus_rdr/067-research-2-audit-methodology-false-positive` (id 771) for the evidence.

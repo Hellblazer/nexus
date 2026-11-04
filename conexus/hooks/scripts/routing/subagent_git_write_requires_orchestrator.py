@@ -3818,17 +3818,12 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
 
 #: The ssh aliases of a remote test host (nexus-yc7fs). A git write sent there
 #: runs in that host's own clone, never in the checkout this guard protects.
-#: ``NX_REMOTE_TEST_HOSTS`` (comma-separated aliases) names them; set it empty
-#: to exempt none. Unset, the default is the nexus maintainers' test box
-#: (``chas`` / ``chas-test``): an alias a user's ssh config does not define
-#: never matches a command that can run.
-_DEFAULT_REMOTE_TEST_HOSTS: frozenset[str] = frozenset({"chas", "chas-test"})
-
-
+#: ``NX_REMOTE_TEST_HOSTS`` (comma-separated ssh host aliases) names them.
+#: Unset or empty exempts none: an exemption for a name the user never chose
+#: would be fail-open on a security guard, since a bare name can resolve
+#: through DNS or a search domain to a host the user does not mean.
 def _remote_test_hosts() -> frozenset[str]:
-    raw = os.environ.get("NX_REMOTE_TEST_HOSTS")
-    if raw is None:
-        return _DEFAULT_REMOTE_TEST_HOSTS
+    raw = os.environ.get("NX_REMOTE_TEST_HOSTS", "")
     return frozenset(h.strip() for h in raw.split(",") if h.strip())
 
 #: ssh flags that run nothing locally. Every other option is refused, since
@@ -3899,7 +3894,7 @@ def _safe_ssh_o_value(value: str) -> bool:
 
 
 def _remote_test_host_command(command: str) -> str | None:
-    """The chas host a subagent command runs on, when the WHOLE command is one
+    """The remote test host a subagent command runs on, when the WHOLE command is one
     ssh invocation whose only work happens there; otherwise None.
 
     nexus-yc7fs: the primary rule matches ``git`` plus a write verb anywhere
@@ -3907,8 +3902,8 @@ def _remote_test_host_command(command: str) -> str | None:
     its git runs in chas's clone. The carve-out is deliberately narrow: the
     shell reads the command literally (``_read_literally``), the first word is
     ssh, every option, before or after the host (OpenSSH parses both until the
-    remote command starts), is one that runs nothing locally, the host is a
-    chas alias (``user@`` allowed), and the remote command does not name an
+    remote command starts), is one that runs nothing locally, the host is one
+    of the aliases in ``NX_REMOTE_TEST_HOSTS`` (``user@`` allowed), and the remote command does not name an
     onward hop. Known limit: a remote command can still reach other hosts by
     means this does not name; the guard protects against a subagent's git, not
     against a hostile one.

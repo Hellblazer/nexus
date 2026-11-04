@@ -116,6 +116,9 @@ def _isolate_log(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(tmp_path / "log.jsonl"))
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "isolated-nexus-config"))
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    # The exempt-host list is the session's setting; no case may inherit it. The
+    # ssh carve-out tests below set it themselves (``remote_hosts``).
+    monkeypatch.delenv("NX_REMOTE_TEST_HOSTS", raising=False)
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "dropped_writes.jsonl"))
 
 
@@ -4050,15 +4053,22 @@ _CHAS_DENIED = [
 ]
 
 
-def test_a_subagent_ssh_to_chas_is_allowed(shared_repo):
+@pytest.fixture()
+def remote_hosts(monkeypatch):
+    """The carve-out only fires for a host the session names: these cases name
+    the two aliases the _CHAS_* commands use."""
+    monkeypatch.setenv("NX_REMOTE_TEST_HOSTS", "chas,chas-test")
+
+
+def test_a_subagent_ssh_to_chas_is_allowed(shared_repo, remote_hosts):
     assert _denied_among(_CHAS_ALLOWED, shared_repo) == []
 
 
-def test_a_command_that_can_run_git_locally_is_not_carved_out(shared_repo):
+def test_a_command_that_can_run_git_locally_is_not_carved_out(shared_repo, remote_hosts):
     assert _not_denied(_CHAS_DENIED, shared_repo) == []
 
 
-def test_the_chas_carve_out_is_not_vacuous(shared_repo):
+def test_the_chas_carve_out_is_not_vacuous(shared_repo, remote_hosts):
     """Without the carve-out every allowed command above contains git and a
     write verb, so the primary rule would deny it: the allow test proves the
     carve-out fired, not that the scan missed the text."""
@@ -4093,15 +4103,16 @@ def _remote_verdict(host: str, cwd: pathlib.Path, hosts: str | None) -> dict:
     return _hso(proc)
 
 
-def test_remote_test_hosts_default_is_the_maintainers_box(shared_repo):
-    assert _remote_verdict("chas-test", shared_repo, None).get("permissionDecision") != "deny"
-    assert _remote_verdict("devbox", shared_repo, None).get("permissionDecision") == "deny"
+def test_remote_test_hosts_unset_exempts_none(shared_repo):
+    """No alias is exempt by default, the maintainers' own included."""
+    for host in ("chas", "chas-test", "devbox"):
+        assert _remote_verdict(host, shared_repo, None).get("permissionDecision") == "deny", host
 
 
 def test_remote_test_hosts_env_names_the_users_own_host(shared_repo):
     assert _remote_verdict("devbox", shared_repo, "devbox,ci-box").get("permissionDecision") != "deny"
     assert _remote_verdict("ci-box", shared_repo, "devbox, ci-box").get("permissionDecision") != "deny"
-    # the variable REPLACES the default: the maintainers' alias is no longer exempt
+    # only the named aliases are exempt
     assert _remote_verdict("chas-test", shared_repo, "devbox").get("permissionDecision") == "deny"
 
 

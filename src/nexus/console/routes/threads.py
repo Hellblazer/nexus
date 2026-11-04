@@ -8,9 +8,11 @@ test injects a stand-in without patching ``subprocess`` or T2 globally.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -35,26 +37,44 @@ THREADS_PROJECT = "threads"
 BD_TIMEOUT_SECONDS = 10.0
 _BD_ARGV = ["bd", "list", "--label", "needs-sam", "--status", "open,in_progress,blocked", "--limit", "0", "--json"]
 
+#: bd's own error text (compared lower case) when the working directory has no beads database.
+_NO_BEADS_DATABASE = "no beads database found"
+
 BdRunner = Callable[[], BeadsResult]
 ThreadsReader = Callable[[], list[dict[str, Any]]]
 Clock = Callable[[], datetime]
 
 
+def _has_beads_database() -> bool:
+    """True when the beads dir variable is set or a ``.beads`` directory sits at or above the working directory."""
+    if os.environ.get("BEADS_DIR"):
+        return True
+    cwd = Path.cwd()
+    return any((d / ".beads").is_dir() for d in (cwd, *cwd.parents))
+
+
 def run_bd_needs_sam(timeout: float = BD_TIMEOUT_SECONDS) -> BeadsResult:
     """Live beads (open, in progress or blocked) labelled ``needs-sam``, from the repo the console started in.
 
-    Never raises: a missing ``bd`` comes back as ``skipped`` (a user without beads has none to read); a timeout, a non-zero exit or unparseable
-    output comes back as a one-line ``error``.
+    Never raises. The source is ``skipped`` (a user without beads has none to read) only when there is no beads
+    database for the working directory: ``bd`` is missing from PATH and no ``.beads`` directory sits at or above
+    it, or ``bd`` exits with its "no beads database found" error. A missing ``bd`` where a ``.beads`` directory
+    exists, a broken ``bd``, a timeout, any other non-zero exit or unparseable output comes back as a one-line
+    ``error``, so a real failure never reads as "nothing needs you".
     """
     try:
         proc = run_bounded(_BD_ARGV, timeout=timeout)
     except FileNotFoundError:
+        if _has_beads_database():
+            return BeadsResult((), "bd is not on PATH")
         return BeadsResult((), skipped="bd is not installed")
     except subprocess.TimeoutExpired:
         return BeadsResult((), f"bd list timed out after {timeout:g}s")
     except OSError as exc:
         return BeadsResult((), f"bd could not run: {exc}")
     if proc.returncode != 0:
+        if _NO_BEADS_DATABASE in f"{proc.stderr}\n{proc.stdout}".lower():
+            return BeadsResult((), skipped="there is no beads database here")
         detail = (proc.stderr or proc.stdout).strip().splitlines()
         return BeadsResult((), f"bd list failed (exit {proc.returncode})" + (f": {detail[0][:120]}" if detail else ""))
     try:

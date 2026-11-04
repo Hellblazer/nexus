@@ -31,8 +31,6 @@ Do NOT include Serena tool instructions in the subagent prompt. If a future targ
 escalation (e.g., `typing.Protocol` / `TypeVar` intensive composition), escalate to the user before
 dispatching — do not silently extend the tool budget.
 
-**T2 reference**: `nexus_rdr/066-research-5-ca1-ca2-ca3-hard-case-spike`
-
 ## Behavior
 
 ### Step 1: Read Coordinator Bead

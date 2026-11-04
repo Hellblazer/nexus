@@ -52,7 +52,13 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/nexus/SKILL.md` (nexus-0vh80): `plan_save` takes a required `answer_kind`, and a saved plan serves only that kind, in its own project.
 - `conexus/skills/nexus/reference.md` (nexus-0vh80): the saved provenance, its narrow eligibility and the retrieval-only shape veto.
 - `conexus/skills/orchestration/SKILL.md` (nexus-z7ddd): the review-round counter-metric no longer cites a T2 record in the maintainer's store.
-- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-z7ddd): the remote test hosts a subagent's ssh git write may name come from `NX_REMOTE_TEST_HOSTS` (comma-separated aliases; empty exempts none); unset keeps the maintainers' two aliases.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-z7ddd): the remote test hosts a subagent's ssh git write may name come from `NX_REMOTE_TEST_HOSTS` (comma-separated ssh host aliases; unset or empty exempts none, where the hook used to exempt `chas` and `chas-test`). A maintainer who relied on that sets the variable in the session's settings `env`.
+- `conexus/README.md` (nexus-z7ddd): the hooks table names `NX_REMOTE_TEST_HOSTS` as the setting behind the ssh test-host exemption.
+- `conexus/skills/orchestration/reference.md` (nexus-z7ddd): the nx_answer timing figures no longer cite a T2 record in the maintainer's store.
+- `conexus/skills/composition-probe/SKILL.md` (nexus-z7ddd): drops a pointer to a T2 record in the maintainer's store.
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-z7ddd): states the Phase 1b facts inline instead of citing T2 records in the maintainer's store; the canonical prompt load stays (a lint allowlist entry names it).
+- `conexus/agents/substantive-critic.md` (nexus-z7ddd): drops a pointer to a T2 record in the maintainer's store.
+- `conexus/skills/rdr-close/SKILL.md` (nexus-z7ddd): the close-override measurement pattern names the repo's own `{repo}_rdr` project, not `nexus_rdr`.
 
 - `conexus/hooks/scripts/compact_checkpoint.py` (nexus-2v7da): on a compact start with nothing to restore (no checkpoint file, the stub post writes when pre did not run, a checkpoint already used by an earlier compaction, or one past the prune window), inject now emits a short notice saying no restore is available and pointing at the threads board entry and the working tree. It said nothing before, so a resumed session could not tell "nothing was lost" from "nothing was saved". The same notice covers a stamp past the prune window and a checkpoint an earlier compaction already injected (the commonest case: inject runs before post). A foreign session, a non-compact start, an unreadable checkpoint and a second fire for the same compaction (a sidecar under 30 seconds old) stay silent.
 
