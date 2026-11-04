@@ -12,9 +12,10 @@ Measured 2026-10-22 against one CI run's reports: 5042 at collection against 494
 time, differing in 39 of 348 modules; the rest is inferred to be tests that skip at run time,
 which a delta between two collections cancels.
 
-The count runs last among the collection hooks, after ``-m`` deselection, so the
-integration/slow/lint tests the default selection drops are not counted (CI's python_unit
-shards drop them too). Not seen: a fixture other than the two named that requests the tenant
+The count is a trylast hook, so it runs after ``-m`` deselection and after the hooks registered before it,
+so the integration/slow/lint tests the default selection drops are not counted (CI's python_unit
+shards drop them too). A trylast hook registered later (a conftest's, or a splitting plugin's) runs after
+it; nothing in the census run deselects that way today. Not seen: a fixture other than the two named that requests the tenant
 at run time with ``request.getfixturevalue("t2_tenant")`` (on 2026-10-22 only a test double in
 tests/test_storage_touch_guard.py does).
 """

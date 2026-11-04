@@ -4,6 +4,7 @@ at the merge base, against a throwaway git repo with its own pytest config."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -208,6 +209,49 @@ def test_a_collection_cut_short_before_the_census_is_refused_not_read_as_zero(re
     proc = _run(repo)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "WARNING: tenant delta: could not count" in proc.stderr
+
+
+@pytest.mark.parametrize("written", [
+    {"tests/test_a.py": 2},  # the old plugin's bare mapping
+    {"complete": False, "counts": {}, "failed": {}},
+    {"counts": {}, "failed": {}},
+])
+def test_a_census_that_is_not_complete_is_refused(repo: Path, monkeypatch: pytest.MonkeyPatch, written: dict) -> None:
+    """The reader's own guard, apart from the missing-file case: an incomplete or old-format census is refused."""
+    spec = importlib.util.spec_from_file_location("tenant_delta_guard", SCRIPT)
+    td = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(td)
+    real_run = td.subprocess.run
+
+    def run(argv, **kw):
+        proc = real_run(argv, **kw)
+        if "--collect-only" in argv:
+            Path(kw["env"]["TENANT_CENSUS_OUT"]).write_text(json.dumps(written), encoding="utf-8")
+        return proc
+
+    monkeypatch.setattr(td.subprocess, "run", run)
+    with pytest.raises(td.CollectionFailed):
+        td.census(repo, ["tests/test_a.py"], deadline=time.monotonic() + 60)
+
+
+def test_a_failure_that_covers_no_module_asked_for_is_refused(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed collector the reader cannot place (a nodeid owning none of the modules asked for) would leave the
+    modules it hid reading as zero; it is refused instead."""
+    spec = importlib.util.spec_from_file_location("tenant_delta_unowned", SCRIPT)
+    td = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(td)
+    real_run = td.subprocess.run
+
+    def run(argv, **kw):
+        proc = real_run(argv, **kw)
+        if "--collect-only" in argv:
+            Path(kw["env"]["TENANT_CENSUS_OUT"]).write_text(json.dumps(
+                {"complete": True, "counts": {}, "failed": {"tests/__init__.py": "E"}}), encoding="utf-8")
+        return proc
+
+    monkeypatch.setattr(td.subprocess, "run", run)
+    with pytest.raises(td.CollectionFailed):
+        td.census(repo, ["tests/test_a.py"], deadline=time.monotonic() + 60)
 
 
 def test_a_failed_package_covers_only_the_modules_under_it() -> None:

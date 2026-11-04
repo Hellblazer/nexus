@@ -129,6 +129,10 @@ def census(root: Path, modules: list[str], *, deadline: float,
         if "" in failed_nodes:
             raise CollectionFailed(root, proc.returncode, failed_nodes[""])
         failed = {m: r for m in present if (r := _owner(m, failed_nodes)) is not None}
+        for nodeid, reason in failed_nodes.items():
+            # A failure that covers no module asked for cannot be placed; the modules it hid would read as zero.
+            if not any(_owner(m, {nodeid: reason}) for m in present):
+                raise CollectionFailed(root, proc.returncode, f"{nodeid}: {reason}")
         counts = {m: n for m, n in data["counts"].items() if m not in failed}
         return counts, failed
 
