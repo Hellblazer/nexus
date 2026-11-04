@@ -90,5 +90,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/README.md` (nexus-z7ddd): maintainer notes link the nexus tests on GitHub.
 - `conexus/hooks/scripts/routing/registry.yaml` (nexus-z7ddd): a rule's rationale and the schema note name the credentials wrapper and the routing directory by description, not by a repo path or a bare script name.
 - `conexus/skills/orchestration/reference.md` (nexus-z7ddd): the collection-rules line is a link, not a URL with the sentence's period glued on.
+- `sn/hooks/scripts/serena-tools.txt` (nexus-z7ddd): the generated header names the sync script instead of a repo path; the tool list is unchanged.
 
 ## Deferred to the next client release
