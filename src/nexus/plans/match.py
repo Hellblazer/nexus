@@ -70,6 +70,9 @@ class Match:
     # RDR-091 Phase 2a scope-tag column (comma-separated, normalized).
     # Phase 2b matcher consumes this; ``""`` means agnostic.
     scope_tags: str = ""
+    # The row's project column (empty for the global tier). Answer-kind eligibility reads it for a saved plan
+    # (nexus-0vh80): that plan serves only the project that saved it.
+    project: str = ""
 
     @property
     def answer_kind(self) -> PlanAnswerKind:
@@ -122,4 +125,5 @@ class Match:
             default_bindings=_decode_json_dict(row.get("default_bindings")),
             parent_dims=parent or None,
             scope_tags=row.get("scope_tags") or "",
+            project=row.get("project") or "",
         )

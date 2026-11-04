@@ -157,7 +157,7 @@ async def test_p2c_ab_measurement(request) -> None:
         question, plan_json, _args = _plan_for(op)
         questions[op] = question
         save_result = plan_save(
-            query=question, plan_json=plan_json, verb="analyze",
+            query=question, plan_json=plan_json, verb="analyze", answer_kind="unknown",
             project="nexus", outcome="success",
             tags="rdr196,p2c,ab-measurement,nexus-nyry9.16",
         )

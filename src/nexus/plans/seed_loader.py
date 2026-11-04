@@ -213,8 +213,13 @@ def desired_row_for_template(template: dict[str, Any]) -> DesiredRow:
     # too, and an explicit ``answer_kind: null`` raises, as the validator does.
     plan_json_payload.pop(ANSWER_KIND_KEY, None)
     if ANSWER_KIND_KEY in template:
+        # nexus-0vh80 (Sam, 2026-11-03; closes nexus-8ofx8): only the builtin tier, the global scope stored under
+        # the empty project, is reviewed and shipped with the plugin. A project, RDR or repo template is written
+        # by whoever owns that repo, and its ``tags`` (including ``builtin-template``) are theirs too, so its
+        # declared kind is a saved one: honoured narrowly, in that project only, never as curated.
+        builtin_tier = _default_project_for_scope(template["dimensions"].get("scope", "")) == ""
         plan_json_payload[ANSWER_KIND_KEY] = declaration_payload(
-            PlanAnswerKind(template[ANSWER_KIND_KEY]), "curated",
+            PlanAnswerKind(template[ANSWER_KIND_KEY]), "curated" if builtin_tier else "saved",
         )
     return DesiredRow(
         query=template["description"],

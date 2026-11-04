@@ -4127,6 +4127,24 @@ sorted-unique. Idempotent. `--from-project` (mutually exclusive with `TAGS`)
 stamps scope_tags from the plan's own `project` column, the same recovery
 source as the automatic #1069 fallback in `save_plan`.
 
+### plan_save (MCP tool; there is no `nx plan save`)
+
+```
+plan_save(query, plan_json, verb, answer_kind, project="", outcome="success", tags="", ttl=None, scope_tags="")
+```
+
+`answer_kind` is **required** (nexus-0vh80, Sam 2026-11-03): `lookup`, `synthesis`, `discovery/listing`,
+`comparison`, `audit`, `debug` or `unknown`. A save without one, or with another word, is refused, as a save
+without a `verb` is. It is stored as a `saved` declaration in `plan_json` (`{"version": 1, "kind": ..., "provenance":
+"saved"}`); an `answer_kind` key embedded in `plan_json` is replaced by it, never trusted. `nx_answer` serves a saved
+plan only for a request of the same kind, only from the project that saved it (`project`; a save with none serves no
+request, and the reply says so) and never for a request of unknown kind; a plan saved as `unknown` serves nothing. A
+plan whose last step is not an operator (`summarize`, `generate`, `extract`, `rank`, `compare`, `filter`, `check`,
+`verify`, `groupby`, `aggregate`) is refused when it claims `lookup`, `synthesis`, `comparison`, `audit` or `debug`:
+it hands back what it retrieved, which is a listing; declare `discovery/listing` or `unknown`, or add the step that
+puts the answer together. The `grown` and `builtin-template` tags are removed from `tags` (nexus-3ihve). A plan
+saved before this change declares nothing and serves no request; save it again with a kind.
+
 ### nx plan reseed
 
 ```
@@ -4149,6 +4167,12 @@ compatibility and is a no-op**: reconcile is the default, so the flag
 changes nothing. `--insert-only` selects the pre-nexus-f1mbo behavior —
 skip the update leg, insert missing templates only, and leave drifted rows
 alone.
+
+Only the builtin tier (`conexus/plans/builtin`, the global scope) declares its answer kinds `curated`. A
+template under the project, RDR or repo tier (`.nexus/plans`, `docs/rdr/rdr-*/`) that sets `answer_kind` is written
+with `saved` provenance whatever tags it carries, so it serves only its own kind and only that project's requests
+(nexus-0vh80; closes nexus-8ofx8). A row written before that, still saying `curated`, is rewritten by the next
+reconcile.
 
 ### nx plan repair (removed)
 
@@ -6155,8 +6179,16 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   (a lookup request refusing a grown plan whose discounted recorded kind is not lookup: the
   recorded kind never widens eligibility but does narrow it, nexus-indyo), `unattested_plan`
   (a lookup or discovery/listing request refusing a plan that declares no answer kind, such as a
-  user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp) or `judge_error`
-  (judging the candidate failed; kept when not enforcing, dropped when enforcing).
+  user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp),
+  `saved_unknown_plan` (a saved plan of unknown kind serves no request), `saved_other_project` (a saved
+  plan serves only a request from the project that saved it; a blank project on either side refuses it) or
+  `saved_retrieval_only` (a saved plan whose last step is not an operator, declared lookup, synthesis,
+  comparison, audit or debug; nexus-0vh80), or `judge_error`
+  (judging the candidate failed; kept when not enforcing, dropped when enforcing). A **saved** plan
+  (`plan_save`'s `answer_kind`, or a template in a project, RDR or repo tier) serves only a request of its own
+  declared kind, none of the compatibility cells a curated plan has and never the `unknown` request (reason
+  `unknown_request_untrusted_plan`, a mismatched kind `kind_mismatch`); the request's project is the session's
+  directory name, the name a grown plan is filed under.
   The filter judges after every other drop (unmet binding, scope conflict,
   always-failing, FTS literal drop), so a count is "would have been returned, but for
   eligibility". The gate is on by default (nexus-jypmj.2.8; `NX_ANSWER_KIND_ELIGIBILITY=0`,

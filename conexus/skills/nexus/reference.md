@@ -368,12 +368,14 @@ Save a query execution plan to the T2 plan library.
 |-----------|------|---------|-------------|
 | `query` | str | required | Original natural-language question |
 | `plan_json` | str | required | JSON string: `{"steps": [...], "tools_used": [...], "outcome_notes": "..."}` |
-| `project` | str | `""` | Project namespace |
+| `verb` | str | required | Retrieval verb (research, analyze, query, review, debug, document) |
+| `answer_kind` | str | required | `lookup`, `synthesis`, `discovery/listing`, `comparison`, `audit`, `debug` or `unknown`. A saved plan serves only a request of this kind, only from `project`; `unknown` serves nothing. A plan ending in retrieval (not an operator) cannot claim lookup, synthesis, comparison, audit or debug |
+| `project` | str | `""` | Project namespace; a saved plan serves only requests from this project |
 | `outcome` | str | `"success"` | Plan outcome: "success" or "partial" |
 | `tags` | str | `""` | Comma-separated tags |
 
 ```
-Use plan_save tool: query="How many ART papers in T3?", plan_json='{"steps": ["collection_list", "store_list docs=true"], "tools_used": ["collection_list", "store_list"], "outcome_notes": "78 papers found"}', project="nexus"
+Use plan_save tool: query="What does RDR-232 say about plan eligibility?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
 ```
 
 ### plan_search

@@ -17,20 +17,30 @@ Stored shape (``ANSWER_KIND_VERSION`` 1)::
     {"version": 1, "kind": "lookup", "provenance": "curated"}
     {"version": 1, "kind": "synthesis", "provenance": "grown", "route": "heuristic"}
     {"version": 1, "kind": "unknown", "provenance": "grown"}
+    {"version": 1, "kind": "lookup", "provenance": "saved"}
 
 * ``curated`` is a reviewed template (the builtin YAMLs declare it with a
-  template-level ``answer_kind: <kind>`` that the seed loader folds in).
+  template-level ``answer_kind: <kind>`` that the seed loader folds in). Only the
+  builtin (global) tier declares it: a template in a project, RDR or repo tier is
+  written ``saved`` instead (nexus-0vh80, Sam 2026-11-03).
 * ``grown`` is a plan the inline planner produced. It records a kind only
   when the request route that produced it was known, and ``route`` then
   says how that was decided (``explicit``, ``heuristic`` or ``model-assisted``,
   the RDR's three words). With no recorded route the kind is ``unknown``.
+* ``saved`` is a plan a person or an agent put in the library, with the kind the
+  caller declared when saving it (``plan_save``'s ``answer_kind``, ``unknown``
+  allowed) or a project-tier template. It records no route: the kind is the
+  saver's own claim, unreviewed, so eligibility honours it narrowly
+  (``nexus.plans.eligibility``; nexus-0vh80).
 
-Who may write a declaration (nexus-jypmj.2.1 fix round). Only the seed loader
-writes ``curated`` and only the ``nx_answer`` grow site writes ``grown``. The
-``plan_save`` door STRIPS any embedded ``answer_kind`` before storing, so a
-caller cannot forge either one; a row it saves declares nothing. Read paths
-(``nx plan hygiene``, the matcher, the session cache) never refuse or retire a
-row for its declaration: a bad one decodes to ``unknown``.
+Who may write a declaration (nexus-jypmj.2.1 fix round, nexus-0vh80). Only the
+seed loader writes ``curated`` (builtin tier) and ``saved`` (the other tiers),
+only the ``nx_answer`` grow site writes ``grown``, and only ``plan_save`` writes
+``saved`` from a caller's argument. The ``plan_save`` door replaces any embedded
+``answer_kind`` with the one the caller declared, so a caller cannot forge
+``curated`` or ``grown``. Read paths (``nx plan hygiene``, the matcher, the
+session cache) never refuse or retire a row for its declaration: a bad one
+decodes to ``unknown``.
 
 Provenance rule the eligibility step (``nexus.plans.eligibility``,
 nexus-jypmj.2.3) applies, failing closed:
@@ -48,8 +58,11 @@ nexus-jypmj.2.3) applies, failing closed:
   provenance only "after review". Until a reviewed decision (nexus-jypmj.2.8)
   adds a route, eligibility reads every grown row as ``unknown``
   (``unreviewed_route``); the route is still recorded here;
+* a row whose declaration says ``saved`` is **saved**, whatever its tags say
+  (the builtin tag does not make it curated): it serves only its declared kind,
+  in its own project, and a saved ``unknown`` serves nothing;
 * a row with no declaration is **unattested** (provenance ``None``): it is
-  neither curated nor grown, and is eligible only where an ``unknown`` plan is;
+  neither curated, grown nor saved, and serves no request kind;
 * ``provenance: grown`` on an ``unknown`` kind records ORIGIN only. It is not
   the RDR's "recorded route provenance" (that is ``route``), and it never
   relaxes the unknown-plan restriction.
@@ -83,7 +96,11 @@ __all__ = [
     "declaration_payload",
     "golden_label_kind",
     "grown_plan_json",
+    "OPERATOR_TERMINALS",
+    "SHAPE_VETOED_KINDS",
+    "saved_plan_json",
     "strip_declaration",
+    "terminal_is_retrieval_only",
     "validate_declaration",
 ]
 
@@ -94,8 +111,8 @@ ANSWER_KIND_KEY: str = "answer_kind"
 #: decodes to ``unknown`` until a versioned migration says otherwise.
 ANSWER_KIND_VERSION: int = 1
 
-#: Where a declaration came from: a reviewed template, or the inline planner.
-PROVENANCES: frozenset[str] = frozenset({"curated", "grown"})
+#: Where a declaration came from: a reviewed template, the inline planner, or a saver's own claim.
+PROVENANCES: frozenset[str] = frozenset({"curated", "grown", "saved"})
 
 #: How a grown plan's route kind was decided (RDR-232: explicit, heuristic or
 #: model-assisted). Required for a grown plan to record any kind but unknown.
@@ -202,7 +219,7 @@ def validate_declaration(raw: Any) -> AnswerKindDeclaration:
             f"{ANSWER_KIND_KEY}.provenance must be one of {sorted(PROVENANCES)}, got {provenance!r}"
         )
     route = raw.get("route")
-    if provenance == "curated":
+    if provenance in ("curated", "saved"):
         if route is not None:
             raise AnswerKindError(f"{ANSWER_KIND_KEY}.route is only for grown plans")
     elif kind is not PlanAnswerKind.UNKNOWN:
@@ -249,9 +266,9 @@ def decode_answer_kind(plan_json: str | dict[str, Any] | None) -> PlanAnswerKind
 def strip_declaration(plan: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Return *plan* without its ``answer_kind`` key, and whether a key was removed.
 
-    The ``plan_save`` door uses this: a caller never declares a kind, so any
-    embedded value (valid, malformed or an unrelated key of the same name) is
-    dropped rather than refused, and an old plan carrying one still saves.
+    Any embedded value (valid, malformed or an unrelated key of the same name)
+    is dropped rather than refused, and an old plan carrying one still saves.
+    :func:`saved_plan_json` uses it before stamping the declared kind.
     """
     if ANSWER_KIND_KEY not in plan:
         return plan, False
@@ -297,3 +314,55 @@ def grown_plan_json(
         else declaration_payload(PlanAnswerKind.UNKNOWN, "grown")
     )
     return json.dumps(stamped)
+
+
+def saved_plan_json(plan_json: str, kind: PlanAnswerKind) -> str:
+    """Return *plan_json* with the ``saved`` declaration of *kind* (nexus-0vh80).
+
+    The ``plan_save`` door calls this with the kind its caller declared. A
+    declaration already in *plan_json* is replaced, never trusted, so a caller
+    cannot embed a ``curated`` or ``grown`` one. A *plan_json* that is not a
+    JSON object comes back unchanged.
+    """
+    plan = _as_plan(plan_json)
+    if plan is None:
+        return plan_json
+    stamped, _ = strip_declaration(plan)
+    stamped = dict(stamped)
+    stamped[ANSWER_KIND_KEY] = declaration_payload(kind, "saved")
+    return json.dumps(stamped)
+
+
+#: The operator tools of the plan runner (``plans/runner._OPERATOR_TOOL_MAP``: the plan names and the resolved
+#: ``operator_*`` names). A step with one of these puts an answer together from what was retrieved; a test pins this
+#: set to the runner's map.
+OPERATOR_TERMINALS: frozenset[str] = frozenset({
+    "extract", "rank", "compare", "summarize", "generate", "filter", "check", "verify", "groupby", "aggregate",
+    "operator_extract", "operator_rank", "operator_compare", "operator_summarize", "operator_generate",
+    "operator_filter", "operator_check", "operator_verify", "operator_groupby", "operator_aggregate",
+})
+
+#: Declared kinds a plan may claim only if its last step is an operator. A plan that ends in retrieval hands back
+#: the retrieved ids or chunks, which is a listing; claiming a lookup or a synthesis with it is what plans 598 and
+#: 599 did (nexus-rflvp: they won 31 of 77 lookups and answered with raw ids). ``discovery/listing`` and ``unknown``
+#: are not vetoed.
+SHAPE_VETOED_KINDS: frozenset[PlanAnswerKind] = frozenset({
+    PlanAnswerKind.LOOKUP, PlanAnswerKind.SYNTHESIS, PlanAnswerKind.COMPARISON, PlanAnswerKind.AUDIT,
+    PlanAnswerKind.DEBUG,
+})
+
+
+def terminal_is_retrieval_only(plan_json: str | dict[str, Any] | None) -> bool:
+    """Whether the last step of *plan_json* is not an operator (see :data:`OPERATOR_TERMINALS`).
+
+    Fails closed: a plan with no readable steps, or a last step with no tool name, counts as retrieval-only. This
+    reads the declared steps and nothing else; it guesses no kind from them (RDR-232 forbids that), it only vetoes a
+    claim the shape cannot support.
+    """
+    plan = _as_plan(plan_json)
+    steps = plan.get("steps") if plan is not None else None
+    if not isinstance(steps, list) or not steps:
+        return True
+    last = steps[-1]
+    tool = last.get("tool") if isinstance(last, dict) else None
+    return not (isinstance(tool, str) and tool in OPERATOR_TERMINALS)
