@@ -16,8 +16,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.t2_tenant
-
 T0 = datetime.now(UTC)
 _TTL_DAYS = 30
 
@@ -67,6 +65,7 @@ def _import(library, query: str, *, created_days: float, last_used_days: float |
     )
 
 
+@pytest.mark.t2_tenant
 def test_expired_cache_hit_is_dropped_and_evicted(library) -> None:
     from nexus.plans.matcher import plan_match
 
