@@ -281,6 +281,45 @@ class PlanRepositoryTest {
             .contains(id);
     }
 
+    @Test
+    @Order(26)
+    void incrementRunStarted_onAnExpiredPlan_countsTheRunButDoesNotReviveIt() throws Exception {
+        // nexus-i1eb4: a run start on a plan past its TTL must not reset the
+        // disuse clock, or any caller holding a stale plan id brings it back.
+        long id = savePlanWithTtl("proj-ttl-runstart-expired", "expired run start", 30);
+        backdatePlan(id, 400, 200);
+        OffsetDateTime before = repo.getById(TENANT_A, id).get().getLastUsed();
+        int uses = repo.getById(TENANT_A, id).get().getUseCount();
+
+        repo.incrementRunStarted(TENANT_A, id);
+
+        var row = repo.getById(TENANT_A, id).get();
+        assertThat(row.getUseCount()).as("the run still counts").isEqualTo(uses + 1);
+        assertThat(row.getLastUsed()).as("an expired plan keeps its old last_used").isEqualTo(before);
+        assertThat(repo.listActivePlans(TENANT_A, "success", "proj-ttl-runstart-expired"))
+            .extracting(r -> r.getId())
+            .as("and stays out of the active set")
+            .doesNotContain(id);
+    }
+
+    @Test
+    @Order(27)
+    void incrementRunStarted_onALiveOrPermanentPlan_resetsLastUsed() throws Exception {
+        long live = savePlanWithTtl("proj-ttl-runstart-live", "live run start", 30);
+        backdatePlan(live, 400, 25);
+        long permanent = savePlanWithTtl("proj-ttl-runstart-permanent", "permanent run start", null);
+        backdatePlan(permanent, 4000, 4000);
+        OffsetDateTime floor = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10);
+
+        repo.incrementRunStarted(TENANT_A, live);
+        repo.incrementRunStarted(TENANT_A, permanent);
+
+        assertThat(repo.getById(TENANT_A, live).get().getLastUsed())
+            .as("a plan inside its TTL gets a fresh last_used").isAfter(floor);
+        assertThat(repo.getById(TENANT_A, permanent).get().getLastUsed())
+            .as("a NULL ttl never expires, so it always gets a fresh last_used").isAfter(floor);
+    }
+
     // ── hygiene-001 follow-on (coordinator scope addition): deleteExpiredPlans
     //    actually DELETES the rows notExpiredCondition() filters out of every
     //    read, sharing the exact same predicate (PlanRepository.notExpiredCondition,

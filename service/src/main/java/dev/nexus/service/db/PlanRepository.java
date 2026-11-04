@@ -496,9 +496,16 @@ public final class PlanRepository {
      * holds no state of its own.
      */
     static void incrementRunStartedIn(DSLContext ctx, long id) {
+        // nexus-i1eb4: the run counts either way, but only a plan still inside
+        // its TTL gets a fresh last_used. Stamping an expired row would reset
+        // its disuse clock and make it active again, which defeats the TTL for
+        // any caller that starts a run on a stale plan id. PG evaluates the
+        // CASE against the row as it was before this UPDATE.
         ctx.update(PLANS)
            .set(PLANS.USE_COUNT, PLANS.USE_COUNT.add(1))
-           .set(PLANS.LAST_USED, OffsetDateTime.now(ZoneOffset.UTC))
+           .set(PLANS.LAST_USED, when(notExpiredCondition(),
+                   val(OffsetDateTime.now(ZoneOffset.UTC)))
+               .otherwise(PLANS.LAST_USED))
            .where(PLANS.ID.eq(id))
            .execute();
     }
