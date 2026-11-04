@@ -30,6 +30,10 @@ its chash-membership filter in both modes.
 * ``traverse``: confined by the existing catalog ``scope_filter`` at document depth (the policy scope is the
   document's tumbler; ``ScopeConstraint.admits`` matches by equality, the engine's ``GraphScopeFilter.ofSubtree``
   the same). It needs no chash filter. In ``steps_not_run`` mode it is not run either.
+* ``resolve`` (RDR-147 Step 3, nexus-v9v5r): an exact-title lookup over the whole tenant's catalog. What it returns
+  is other documents' tumblers and chunk hashes, and an operator step reads ``ids`` without passing through the
+  ``store_get_many`` cut below, so it is not run in a confined run (``resolve_reaches_outside_document``), in
+  either mode.
 * ``store_get_many``: its ids are cut to the document's chash set (a tumbler id must be the document's own), in
   every form the tool takes (a comma string, a flat list, a list of lists), with an aligned ``collections`` list
   cut together with the ids; an ``ids`` value it cannot parse becomes an empty list. A SAMPLED set cuts too: an id
@@ -84,8 +88,8 @@ _UNCONFINABLE_TOOLS = frozenset({
 })
 
 #: Every tool the confinement acts on. Census: ``tests/test_rdr232_document_confinement.py`` pins that this equals
-#: ``runner._RETRIEVAL_TOOLS | {"traverse"}``, so a retrieval tool added to the runner cannot run unconfined unnoticed.
-CONFINED_TOOLS: frozenset[str] = _CHASH_TOOLS | _UNCONFINABLE_TOOLS | {"traverse", "store_get_many"}
+#: ``runner._RETRIEVAL_TOOLS | {"traverse", "resolve"}``, so a retrieval tool added to the runner cannot run unconfined unnoticed.
+CONFINED_TOOLS: frozenset[str] = _CHASH_TOOLS | _UNCONFINABLE_TOOLS | {"traverse", "store_get_many", "resolve"}
 
 
 def valid_chashes(candidates: Sequence[Any]) -> tuple[tuple[str, ...], int]:
@@ -190,6 +194,8 @@ def confine_step(tool: str, args: Mapping[str, Any], c: DocumentConfinement | No
         return Confinement(out) if c.mode == "engine_filter" else Confinement(out, "steps_not_run")
     if tool in _UNCONFINABLE_TOOLS:
         return Confinement(out, "route_has_no_chash_filter")
+    if tool == "resolve":
+        return Confinement(out, "resolve_reaches_outside_document")
     if c.mode != "engine_filter" or not c.chashes:
         return Confinement(out, "steps_not_run")
     if tool == "query" and any(out.get(k) for k in _QUERY_CATALOG_PARAMS):

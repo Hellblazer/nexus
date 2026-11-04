@@ -213,6 +213,8 @@ _KNOWN_RETRIEVAL_TOOLS: Final[frozenset[str]] = frozenset({
     # RDR-156 Decision 5 (nexus-ubnwk): the fourth combined-query shape.
     "search_aspect_scoped",
     "plan_search",
+    # RDR-147 Step 3 (nexus-v9v5r): the runner-native exact-title lookup -- no embedding, no model call.
+    "resolve",
 })
 
 

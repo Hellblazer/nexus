@@ -337,6 +337,7 @@ reference earlier output via `$stepK.<field>`.
 | `search` | `{ids, tumblers, distances, collections}` |
 | `query` | `{ids, tumblers, collections}` |
 | `traverse` | `{tumblers, ids, collections}` — walks the catalog link graph |
+| `resolve` | `{tumblers, ids, collections, missing, ambiguous}` — exact-title lookup of key tokens (RDR-147); `ids`/`collections` line up one-to-one; no embedding or model call |
 | `store_get_many` | `{contents, missing}` — batch hydration past the per-request 300-record cap |
 | `operator_extract` | schema-conforming dict (e.g. `{extractions: [...]}`) |
 | `operator_rank` | schema-conforming dict (e.g. `{ranked: [...]}`) |

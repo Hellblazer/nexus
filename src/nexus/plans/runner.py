@@ -597,10 +597,11 @@ _DOMAIN_TO_CORPUS: dict[str, str] = {
     "prose": "knowledge,docs,rdr,paper",
 }
 
-#: Tools that operate on tumblers/ids/link-types and never embeddings.
+#: Tools that operate on tumblers/ids/link-types/titles and never embeddings.
 #: They are exempt from the cross-embedding guard *and* from the
 #: corpus-injection helper (no embedding space to route into).
-_NON_EMBEDDING_TOOLS: frozenset[str] = frozenset({"traverse"})
+#: ``resolve`` (RDR-147 Step 3, nexus-v9v5r) is an exact-title catalog lookup.
+_NON_EMBEDDING_TOOLS: frozenset[str] = frozenset({"traverse", "resolve"})
 
 #: Tools that accept the ``structured=True`` kwarg to opt into the retrieval
 #: step-output contract (RDR-079 P1). ``traverse`` is deliberately excluded —
@@ -3189,6 +3190,30 @@ def _hydrate_operator_args(
 _SUPPORTS_BUNDLING_ATTR: str = "supports_bundling"
 
 
+async def _dispatch_resolve(args: dict[str, Any]) -> dict[str, Any]:
+    """Run a ``resolve`` step (:mod:`nexus.plans.resolve_step`) against the live catalog.
+
+    One HTTP call per distinct token, so it runs on a worker thread (a copy of the context goes with it) and
+    does not hold the event loop. A catalog that is not available fails the step loudly: an unreachable catalog
+    must not read as "every token is missing".
+    """
+    from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.plans.resolve_step import resolve_keys  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
+
+    unknown = sorted(set(args) - {"tokens", "by", "content_type", "owner"})
+    if unknown:
+        raise ValueError(f"resolve: unexpected argument(s) {unknown}; it takes tokens, by, content_type, owner")
+    if "tokens" not in args:
+        raise ValueError("resolve: the 'tokens' argument is required")
+    catalog = _get_catalog()
+    if catalog is None:
+        raise RuntimeError("resolve: the catalog is not available, so no token can be resolved")
+    return await asyncio.to_thread(
+        resolve_keys, catalog, args["tokens"],
+        by=args.get("by", "title"), content_type=args.get("content_type"), owner=args.get("owner"),
+    )
+
+
 async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch *tool* against the live MCP tool registry.
 
@@ -3211,6 +3236,11 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     content and injects ``inputs`` (JSON array) into the args before
     dispatch. Plan YAML does NOT need explicit hydration steps.
     """
+    # RDR-147 Step 3 (nexus-v9v5r): ``resolve`` is runner-native, not an MCP tool, and no operator. Answered here,
+    # before hydration, model tiering and the MCP lookup below, none of which apply to it.
+    if tool == "resolve":
+        return await _dispatch_resolve(args)
+
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # Auto-hydration + arg normalization: shared with the bundle path. Skipped when the runner already
