@@ -40,8 +40,9 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5123
+provisioned_tests = 5124
 tolerance_tests = 0
+# 5123 -> 5124 (nexus-6pfgb.43, 2026-11-03): +1. tests/test_retire_keys.py runs the verb end to end against a real engine tenant (dry run, wrong-tenant refusal, apply, last_written_at, rerun).
 # 5122 -> 5123 (nexus-fai28 fix round 1, 2026-11-04): +1. tests/test_fai28_recovery_entity_key.py has one real-engine test: a recovery import stamps the
 # exported entity key into the catalog entry's meta, which needs a real catalog to read back.
 # 5117 -> 5122 (nexus-fai28, 2026-11-04): +5. tests/test_rdr147_entity_keys.py runs five store_put tests (explicit key, title stamp, unconfigured
