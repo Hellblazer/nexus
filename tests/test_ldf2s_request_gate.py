@@ -295,3 +295,92 @@ def test_a_stale_connection_replay_is_a_second_request_and_passes_the_gate(engin
     while len(engine.log) < 3 and time.monotonic() < deadline:
         time.sleep(0.01)
     assert gate.count == 3 and len(engine.log) == 3, "two logical requests, one replayed after the reset: three on the wire, all granted"
+
+
+# ── the two one-shot transports: the data-token mint and the /version probe (nexus-dr0da) ──────────
+
+class _OneShotServer:
+    """A real local HTTP server (port 0) that answers a POST mint and GET /version and counts requests."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+        outer = self
+
+        class _H(http.server.BaseHTTPRequestHandler):
+            def _reply(self, payload: dict) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:  # noqa: N802 — http.server's hook name
+                outer.seen.append(f"POST {self.path}")
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self._reply({"token": "t", "expires_in": 60})
+
+            def do_GET(self) -> None:  # noqa: N802 — http.server's hook name
+                outer.seen.append(f"GET {self.path}")
+                self._reply({"release_version": "999.0.0", "app_version": "999.0.0"})
+
+            def log_message(self, *_a) -> None:
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def one_shot():
+    srv = _OneShotServer()
+    yield srv
+    srv.close()
+
+
+def _mint(one_shot: _OneShotServer) -> None:
+    from nexus.db.data_token import _default_poster
+    _default_poster(f"{one_shot.url}/v1/data-token", {}, {"tenant": "t"})
+
+
+def _probe(one_shot: _OneShotServer) -> None:
+    import contextlib
+    from nexus.db.managed_endpoint import probe_managed_service
+    with contextlib.suppress(Exception):  # only the request matters here, not the verdict on the version
+        probe_managed_service(base_url=one_shot.url, timeout=5.0)
+
+
+@pytest.mark.parametrize("send", [_mint, _probe], ids=["data-token-mint", "version-probe"])
+def test_the_one_shot_transports_pass_the_gate(one_shot, send):
+    """Each request the mint and the probe put on the wire is one the gate granted: removing either
+    hook makes the gate's count fall short of what the server saw."""
+    with request_gate.paced(request_gate.RequestGate()) as gate:
+        send(one_shot)
+    assert len(one_shot.seen) == 1, one_shot.seen
+    assert gate.count == len(one_shot.seen)
+
+
+@pytest.mark.parametrize(("send", "module"), [(_mint, "nexus.db.data_token"), (_probe, "nexus.db.managed_endpoint")],
+                         ids=["data-token-mint", "version-probe"])
+def test_without_a_one_shot_hook_the_gate_would_see_nothing(one_shot, monkeypatch, send, module):
+    """Control for the test above: with the call site's hook removed the server still sees the request
+    and the gate does not, which the equality above catches."""
+    monkeypatch.setattr(f"{module}.before_request", lambda: None)
+    with request_gate.paced(request_gate.RequestGate()) as gate:
+        send(one_shot)
+    assert len(one_shot.seen) == 1 and gate.count == 0
+
+
+def test_a_long_lived_gate_keeps_a_bounded_tail_of_stamps():
+    """The count is exact however long the gate lives; the diagnostic stamps keep only the newest."""
+    gate = request_gate.RequestGate()
+    for _ in range(request_gate.MAX_STAMPS + 5):
+        gate.acquire()
+    assert gate.count == request_gate.MAX_STAMPS + 5
+    assert len(gate.stamps) == request_gate.MAX_STAMPS
+

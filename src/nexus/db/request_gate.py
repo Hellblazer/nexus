@@ -22,6 +22,11 @@ import time
 from collections.abc import Callable, Iterator
 
 
+#: How many grant stamps a gate keeps: the newest, for tests and diagnostics. The count is never trimmed,
+#: so a long-lived gate stays exact while its memory stays bounded (nexus-dr0da).
+MAX_STAMPS: int = 10_000
+
+
 class RequestGate:
     """At most *max_rps* requests a second: :meth:`acquire` hands out send slots at least ``1 / max_rps``
     seconds apart and blocks until its slot. ``max_rps=None`` paces nothing and still counts.
@@ -44,7 +49,7 @@ class RequestGate:
         self._lock = threading.Lock()
         self._next_slot: float | None = None
         self.count = 0
-        self.stamps: list[float] = []   # the clock reading of each grant, for tests and diagnostics
+        self.stamps: list[float] = []   # the clock reading of each recent grant (MAX_STAMPS), for tests and diagnostics
 
     def acquire(self) -> None:
         with self._lock:
@@ -55,6 +60,8 @@ class RequestGate:
             self._next_slot = slot + self.interval
             self.count += 1
             self.stamps.append(slot)
+            if len(self.stamps) > MAX_STAMPS:
+                del self.stamps[: len(self.stamps) - MAX_STAMPS]
         wait = slot - now
         if wait > 0:
             self._sleep(wait)
