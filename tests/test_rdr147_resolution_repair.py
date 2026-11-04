@@ -14,8 +14,12 @@ Every pin below was run with the branch removed and fails there (the vacuity red
 from __future__ import annotations
 
 import hashlib
+import ast
 import json
 import os
+import re
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -26,7 +30,14 @@ from nexus import config as _config
 from nexus.entity_keys import EntityConfigError
 from nexus.plans import coverage_ledger, switches
 from nexus.plans.coverage_ledger import BoundaryView, CoverageBoundary
-from nexus.plans.coverage_repair import MAX_REPAIR_ITEMS, RepairReport
+from nexus.plans.coverage_repair import (
+    JOINED_DROP_REASONS,
+    MAX_REPAIR_ITEMS,
+    RESOLUTION_REASONS,
+    RESOLVED_RECORD_MAX_CHUNKS,
+    WIRE_KEY_LIST_CAP,
+    RepairReport,
+)
 from nexus.plans.evidence import ScopeConstraint
 from nexus.plans.repair_stream import SupplementItem
 from nexus.plans.reserved_stream import strip_source_note
@@ -58,6 +69,11 @@ def _record_text(token: str) -> str:
     return f"Customer {token} is Acme-{token[-4:]}"
 
 
+def _chunk_text(token: str, k: int) -> str:
+    """Chunk *k* of the record named *token*: chunk 0 is the one-line record, a later chunk carries its own text."""
+    return _record_text(token) if k == 0 else f"{_record_text(token)} part {k}"
+
+
 def _anchor_text(n: int, *tokens: str) -> str:
     return f"decision message {n} raised by {' and '.join(tokens) or 'nobody'} in the channel"
 
@@ -65,14 +81,19 @@ def _anchor_text(n: int, *tokens: str) -> str:
 class FakeCatalog:
     """``find_by_title_exact`` and ``get_manifests``: the two methods ``resolve_keys`` calls."""
 
-    def __init__(self, tokens: list[str], *, ambiguous: tuple[str, ...] = (), record_collection: str = RECORD_COLL) -> None:
+    def __init__(self, tokens: list[str], *, ambiguous: tuple[str, ...] = (), record_collection: str = RECORD_COLL,
+                 chunks: int | dict[str, int] = 1, tumblers: dict[str, str] | None = None) -> None:
         self.docs: dict[str, list[Any]] = {}
         self.manifests: dict[str, list[Any]] = {}
+        self.chunk_texts: dict[str, str] = {}
         for i, token in enumerate(tokens):
-            tumbler = f"1.9.{i + 1}"
+            tumbler = (tumblers or {}).get(token, f"1.9.{i + 1}")
+            n = chunks.get(token, 1) if isinstance(chunks, dict) else chunks
             doc = SimpleNamespace(tumbler=tumbler, physical_collection=record_collection)
             self.docs[token] = [doc, SimpleNamespace(tumbler=f"{tumbler}9", physical_collection=record_collection)] if token in ambiguous else [doc]
-            self.manifests[tumbler] = [SimpleNamespace(position=0, chash=_h(_record_text(token)), collection=record_collection)]
+            self.manifests[tumbler] = [
+                SimpleNamespace(position=k, chash=_h(_chunk_text(token, k)), collection=record_collection) for k in range(n)]
+            self.chunk_texts.update({_h(_chunk_text(token, k)): _chunk_text(token, k) for k in range(n)})
 
     def find_by_title_exact(self, title: str, *, content_type: str | None = None, owner: Any = None) -> list[Any]:  # noqa: ARG002
         return list(self.docs.get(title, []))
@@ -81,7 +102,7 @@ class FakeCatalog:
         return {d: self.manifests.get(d, []) for d in doc_ids}
 
     def record_texts(self) -> dict[str, str]:
-        return {_h(_record_text(t)): _record_text(t) for t in self.docs}
+        return dict(self.chunk_texts)
 
 
 class ResolveDispatcher(RepairDispatcher):
@@ -90,8 +111,9 @@ class ResolveDispatcher(RepairDispatcher):
     repair starts (its first ``resolve`` call), so a test can leave an anchor unread in round one only."""
 
     def __init__(self, anchor_texts: list[str], catalog: FakeCatalog, check=CHECK, *, fail_resolve: bool = False,
-                 restore_cap: int | None = None, **kw: Any) -> None:
+                 restore_cap: int | None = None, blank_records: bool = False, **kw: Any) -> None:
         super().__init__(check, **kw)
+        self.blank_records = blank_records  # the record chunks come back with no text (a fetch that finds nothing readable)
         self.anchor_texts = anchor_texts
         self.catalog = catalog
         self.fail_resolve = fail_resolve
@@ -111,6 +133,8 @@ class ResolveDispatcher(RepairDispatcher):
             return _structured([strip_source_note(t) for t in self.anchor_texts], RDR_COLL)
         if tool == "store_get_many" and args.get("ids") and {str(i) for i in args["ids"]} <= set(self.by_hash):
             self.calls.append((tool, dict(args)))
+            if self.blank_records and {str(i) for i in args["ids"]} <= set(self.catalog.record_texts()):
+                return {"contents": ["" for _ in args["ids"]]}
             return {"contents": [self.by_hash[str(i)] for i in args["ids"]]}
         return await super().__call__(tool, args)
 
@@ -168,9 +192,19 @@ def test_the_switch_reads_one_as_on_and_everything_else_as_off(raw: str, expecte
     assert switches.resolution_repair_enabled({switches.ANSWER_RESOLUTION_REPAIR_ENV: raw}) is expected
 
 
-def test_the_suite_clears_the_switch_for_every_test(monkeypatch: pytest.MonkeyPatch) -> None:
-
-    assert switches.ANSWER_RESOLUTION_REPAIR_ENV not in os.environ, "tests/conftest.py clears it, so a developer's export cannot leak in"
+def test_the_suite_clears_the_switch_for_every_test() -> None:
+    """``tests/conftest.py`` must clear the switch before every test, so a developer's export cannot leak in. The
+    runtime check (the variable is absent here) cannot fail on CI, where nothing exports it; this one reads the
+    conftest and fails when the ``delenv`` of the switch is gone."""
+    tree = ast.parse((Path(__file__).parent / "conftest.py").read_text(encoding="utf-8"))
+    cleared = {
+        call.args[0].value
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "delenv"
+        and call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)
+    }
+    assert switches.ANSWER_RESOLUTION_REPAIR_ENV in cleared, "the conftest no longer clears the switch for every test"
+    assert switches.ANSWER_RESOLUTION_REPAIR_ENV not in os.environ
 
 
 @pytest.mark.asyncio
@@ -295,7 +329,8 @@ async def test_ten_distinct_ids_over_twenty_pairs_make_twelve_items_one_per_toke
     cov = _cov(await _run(d, on()))
     r = cov.repair
     assert MAX_REPAIR_ITEMS == 12 and r.joined_added == 12 and r.items_merged == 12
-    assert len(r.joined_dropped) == 8 and all("@e" in x for x in r.joined_dropped), "each dropped pair is named as token@anchor id"
+    assert len(r.joined_dropped) == 8 and all(re.fullmatch(r"CUST-\d{4}@e\d+:cap", x) for x in r.joined_dropped), "each dropped pair is named token@anchor id:reason"
+    assert r.tokens_dropped == ()
     joined = [a for a in cov.ledger.anchors if JOINED_SEP in a.content]
     represented = {a.content.split(JOINED_SEP)[1].split(":")[0] for a in joined}
     assert represented == set(tokens), "all ten tokens are represented"
@@ -313,7 +348,8 @@ async def test_fourteen_distinct_ids_resolve_twelve_tokens_and_list_the_other_tw
     r = cov.repair
     assert d.resolve_calls() == [tokens[:12]], "at most twelve tokens are resolved, in anchor order"
     assert r.resolution_tokens == 12 and len(r.resolved) == 12 and r.joined_added == 12
-    assert r.joined_dropped == (_tok(13), _tok(14)), "a token never resolved is listed by name, not silently"
+    assert r.tokens_dropped == (_tok(13), _tok(14)), "a token never resolved is listed by name, not silently"
+    assert r.joined_dropped == (), "and it is not a dropped pair: no pair of it was ever built"
     assert r.anchor_key_ids == tuple(tokens), "the completeness domain still lists all fourteen"
 
 
@@ -325,8 +361,9 @@ async def test_a_joined_text_already_held_is_not_added_twice() -> None:
     cov = _cov(await _run(d, on()))
     assert cov.repair.resolution_entered
     assert sum(1 for a in cov.ledger.anchors if a.content == joined) == 1, "the join the input already holds is not added again"
-    # the held join itself names CUST-0001, so it pairs with the record once more: that (new) join is the one item added
-    assert cov.repair.joined_added == 1 and cov.repair.joined_dropped == ()
+    # the held join itself names CUST-0001, so it pairs with the record once more: that (new) join is the one item added;
+    # the join of the first anchor is the one the input holds, and it is named, not skipped silently
+    assert cov.repair.joined_added == 1 and cov.repair.joined_dropped == (f"{_tok(1)}@e1:held",)
 
 
 # ── when the branch does not enter ─────────────────────────────────────────────────────────────────────────
@@ -340,9 +377,10 @@ async def test_a_collection_with_no_pattern_does_not_enter_and_the_semantic_repa
     d = _simple(2)
     cov = _cov(await _run(d, on()))
     r = cov.repair
-    assert (r.resolution_entered, r.resolution_reason, r.anchor_key_ids) == (False, "no_key_tokens", ())
+    assert (r.resolution_entered, r.resolution_reason, r.anchor_key_ids) == (False, "no_pattern_for_anchor_collections", ())
+    assert r.resolution_reason in RESOLUTION_REASONS
     assert d.resolve_calls() == [] and len(d.repair_searches()) == 1 and r.outcome == "completed" and REPAIR_TEXT in d.args_of("generate")[0]["context"]
-    assert r.to_wire()["resolution_entered"] is False and r.to_wire()["resolution_reason"] == "no_key_tokens"
+    assert r.to_wire()["resolution_entered"] is False and r.to_wire()["resolution_reason"] == "no_pattern_for_anchor_collections"
 
 
 @pytest.mark.asyncio
@@ -350,6 +388,7 @@ async def test_anchors_with_no_tokens_do_not_enter_and_the_semantic_repair_runs_
     d = ResolveDispatcher([_anchor_text(1), _anchor_text(2)], FakeCatalog([]))
     cov = _cov(await _run(d, on()))
     assert (cov.repair.resolution_entered, cov.repair.resolution_reason) == (False, "no_key_tokens")
+    assert cov.repair.resolution_reason in RESOLUTION_REASONS
     assert d.resolve_calls() == [] and len(d.repair_searches()) == 1 and cov.repair.outcome == "completed"
 
 
@@ -360,6 +399,7 @@ async def test_a_key_only_in_the_source_note_is_not_a_key_the_text_names() -> No
         [f"[source: {_tok(5)}]\n{_anchor_text(1)}", f"[source: {_tok(6)}]\n{_anchor_text(2)}"], FakeCatalog([_tok(5), _tok(6)]))
     cov = _cov(await _run(d, on()))
     assert (cov.repair.resolution_entered, cov.repair.resolution_reason, cov.repair.anchor_key_ids) == (False, "no_key_tokens", ())
+    assert cov.repair.resolution_reason in RESOLUTION_REASONS
     assert d.resolve_calls() == []
 
 
@@ -381,6 +421,7 @@ async def test_a_malformed_entity_config_is_not_entered_and_never_escapes_the_bo
     d = _simple(2)
     cov = _cov(await _run(d, on()))
     assert (cov.repair.resolution_entered, cov.repair.resolution_reason) == (False, "entity_config_error")
+    assert cov.repair.resolution_reason in RESOLUTION_REASONS
     assert d.resolve_calls() == [] and cov.repair.outcome == "completed" and len(d.repair_searches()) == 1
 
 
@@ -393,6 +434,7 @@ async def test_a_run_confined_to_one_document_does_not_enter_and_says_why() -> N
     cov = _cov(await _run(d, on(confinement=confinement)))
     r = cov.repair
     assert (r.resolution_entered, r.resolution_reason, r.anchor_key_ids) == (False, "confined_run", ())
+    assert r.resolution_reason in RESOLUTION_REASONS
     assert d.resolve_calls() == [], "no catalog call from a confined run"
     assert len(d.repair_searches()) == 1, "the confined semantic repair runs as it did"
 
@@ -405,7 +447,7 @@ async def test_a_record_outside_the_callers_scope_is_dropped_and_one_inside_join
     d = ResolveDispatcher([_anchor_text(i, t) for i, t in enumerate(tokens, 1)], FakeCatalog(tokens))
     outside = _cov(await _run(d, on(scope=ScopeConstraint("corpus_prefix", "rdr"))))
     assert outside.repair.resolution_entered and outside.repair.joined_added == 0
-    assert outside.repair.joined_dropped == (f"{_tok(1)}@e1", f"{_tok(2)}@e2")
+    assert outside.repair.joined_dropped == (f"{_tok(1)}@e1:out_of_scope", f"{_tok(2)}@e2:out_of_scope")
     d2 = ResolveDispatcher([_anchor_text(i, t) for i, t in enumerate(tokens, 1)], FakeCatalog(tokens))
     inside = _cov(await _run(d2, on(scope=ScopeConstraint("corpus_prefix", "knowledge__custs"))))
     assert inside.repair.resolution_entered is True
@@ -428,7 +470,7 @@ async def test_a_view_with_no_retrieval_hooks_is_unavailable_and_the_branch_does
     assert d.resolve_calls() == []
 
 
-async def _hooked_view(d: ResolveDispatcher, *, hooks: bool) -> BoundaryView:
+async def _hooked_view(d: ResolveDispatcher, *, hooks: bool, merges: bool = True) -> BoundaryView:
     """A boundary view over a finished plain run, with the repair hooks the runner would hand it (or none), and NO plan
     retrieval scope (``resolved_args`` empty, no primary source): the semantic repair has nowhere to ask."""
     first = await _run(d, CoverageBoundary(request=_request(3), max_repair_queries=0))
@@ -450,7 +492,7 @@ async def _hooked_view(d: ResolveDispatcher, *, hooks: bool) -> BoundaryView:
         check=check, remaining_usd=lambda: None, remaining_seconds=lambda: None,
         retrieve=retrieve if hooks else None, fetch=fetch if hooks else None,
         install_supplement=(lambda items: installed.__setitem__(slice(None), list(items))) if hooks else None,
-        rehydrate=(lambda: ([*texts, *[i.text for i in installed]], True)) if hooks else None,
+        rehydrate=(lambda: ([*texts, *[i.text for i in installed]] if merges else list(texts), True)) if hooks else None,
     )
 
 
@@ -513,11 +555,11 @@ def test_to_wire_carries_the_resolution_fields_when_the_branch_was_considered_an
     assert "resolution_entered" not in quiet.to_wire() and "anchor_key_ids" not in quiet.to_wire()
     r = RepairReport(
         "completed", ("f3",), resolution_entered=True, resolution_tokens=3, resolved=("CUST-0001",), missing=("CUST-0002",),
-        ambiguous=("CUST-0003",), joined_added=1, joined_dropped=("CUST-0001@e2",), anchor_key_ids=("CUST-0001", "CUST-0002", "CUST-0003"))
+        ambiguous=("CUST-0003",), joined_added=1, joined_dropped=("CUST-0001@e2:cap",), anchor_key_ids=("CUST-0001", "CUST-0002", "CUST-0003"))
     wire = r.to_wire()
     assert wire["resolution_entered"] is True and wire["resolution_tokens"] == 3 and wire["resolved"] == ["CUST-0001"]
     assert wire["missing"] == ["CUST-0002"] and wire["ambiguous"] == ["CUST-0003"] and wire["joined_added"] == 1
-    assert wire["joined_dropped"] == ["CUST-0001@e2"] and wire["anchor_key_ids"] == ["CUST-0001", "CUST-0002", "CUST-0003"]
+    assert wire["joined_dropped"] == ["CUST-0001@e2:cap"] and wire["anchor_key_ids"] == ["CUST-0001", "CUST-0002", "CUST-0003"]
     assert {"outcome", "facet_ids", "queries", "items_found", "items_merged", "latency_ms", "detail", "noted_facets", "reason", "unread_facet_ids"} <= set(wire)
     reason_only = RepairReport("completed", resolution_reason="confined_run").to_wire()
     assert reason_only["resolution_entered"] is False and reason_only["resolution_reason"] == "confined_run"
@@ -545,3 +587,222 @@ async def test_nx_answer_hands_the_boundary_the_switch_it_reads_from_the_environ
     run = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(2))
     [kw] = run.plan_run_calls
     assert kw["coverage_boundary"].resolution_repair is expected
+
+
+# ── fix round 1 (review r1 of 9e281b3e4) ────────────────────────────────────────────────────────────────────
+
+
+def _joined(cov: Any) -> list[Any]:
+    return [a for a in cov.ledger.anchors if JOINED_SEP in a.content]
+
+
+def _key_of(anchor: Any) -> str:
+    return anchor.content.split(JOINED_SEP)[1].split(":")[0]
+
+
+@pytest.mark.asyncio
+async def test_ten_records_of_three_chunks_each_get_their_item_none_is_starved_by_an_earlier_record() -> None:
+    """B1: the chunk fetch was one flat list cut at twice the item cap across all tokens, so a record with several chunks
+    took the slots of the records after it (probe: 10 tokens of 3 chunks, 24 fetched, CUST-0009 and CUST-0010 dropped)."""
+    tokens = [_tok(i) for i in range(1, 11)]
+    d = ResolveDispatcher([_anchor_text(i, t) for i, t in enumerate(tokens, 1)], FakeCatalog(tokens, chunks=3))
+    cov = _cov(await _run(d, on()))
+    r = cov.repair
+    assert (r.resolved, r.joined_added, r.joined_dropped) == (tuple(tokens), 10, ())
+    assert [_key_of(a) for a in _joined(cov)] == tokens, "every resolved key has its item"
+    for a in _joined(cov):
+        key = _key_of(a)
+        assert all(_chunk_text(key, k) in a.content for k in range(3)), "the item carries the whole record (three chunks)"
+    fetch = [a["ids"] for t, a in d.calls if t == "store_get_many" and set(a["ids"]) <= set(d.catalog.record_texts())]
+    assert [len(ids) for ids in fetch] == [30], "one fetch, every record's chunks: not cut at twice the item cap"
+
+
+@pytest.mark.asyncio
+async def test_a_record_longer_than_the_chunk_bound_is_cut_to_its_first_chunks_and_the_cut_is_named() -> None:
+    """B1: the per-record bound keeps one joined item (anchor + record body) and the fetch (items x bound) finite."""
+    bound = RESOLVED_RECORD_MAX_CHUNKS
+    assert bound == 3
+    tokens = [_tok(1), _tok(2)]
+    d = ResolveDispatcher([_anchor_text(i, t) for i, t in enumerate(tokens, 1)], FakeCatalog(tokens, chunks={_tok(1): bound + 2, _tok(2): 1}))
+    cov = _cov(await _run(d, on()))
+    long = next(a for a in _joined(cov) if _key_of(a) == _tok(1))
+    assert _chunk_text(_tok(1), bound - 1) in long.content and _chunk_text(_tok(1), bound) not in long.content
+    assert f"1 records cut to their first {bound} chunks" in cov.repair.detail
+    fetch = [a["ids"] for t, a in d.calls if t == "store_get_many" and set(a["ids"]) <= set(d.catalog.record_texts())]
+    assert [len(ids) for ids in fetch] == [bound + 1]
+    assert cov.repair.joined_added == 2 and cov.repair.joined_dropped == ()
+
+
+@pytest.mark.asyncio
+async def test_a_record_the_fetch_returns_no_text_for_is_dropped_as_no_text() -> None:
+    """B1: a pair dropped for a missing record text says so (it used to carry no reason, and the comment named the scope)."""
+    d = ResolveDispatcher([_anchor_text(1, _tok(1))], FakeCatalog([_tok(1)]), blank_records=True)
+    cov = _cov(await _run(d, on()))
+    assert cov.repair.resolution_entered and cov.repair.joined_added == 0
+    assert cov.repair.joined_dropped == (f"{_tok(1)}@e1:no_text",)
+
+
+def test_every_drop_reason_the_ledger_writes_is_in_the_closed_set() -> None:
+    assert JOINED_DROP_REASONS == ("cap", "no_text", "out_of_scope", "held", "self")
+    assert RESOLUTION_REASONS == ("confined_run", "entity_config_error", "no_pattern_for_anchor_collections", "no_key_tokens")
+
+
+# F2: an anchor that IS the record it resolves to is no join
+
+
+@pytest.mark.asyncio
+async def test_an_anchor_that_is_the_resolved_record_is_skipped_as_self_and_the_real_pair_still_joins() -> None:
+    """The record's own chunk is an anchor (same chash) and its body names its own key: it is not a join, and it must
+    not take the key's first slot (a self-pair ahead of the message pushed the message past the cap)."""
+    tokens = [_tok(1)]
+    d = ResolveDispatcher([_record_text(_tok(1)), _anchor_text(2, _tok(1))], FakeCatalog(tokens))
+    cov = _cov(await _run(d, on()))
+    r = cov.repair
+    assert r.joined_dropped == (f"{_tok(1)}@e1:self",) and r.joined_added == 1
+    assert [a.content for a in _joined(cov)] == [_anchor_text(2, _tok(1)) + JOINED_SEP + f"{_tok(1)}: {_record_text(_tok(1))}"]
+    assert r.anchor_key_ids == (_tok(1),), "another anchor names the key, so it stays in the completeness domain"
+
+
+@pytest.mark.asyncio
+async def test_an_anchor_in_the_resolved_documents_tumbler_is_also_self() -> None:
+    """The anchor is another chunk of the record's document: same tumbler, different chash."""
+    tokens = [_tok(1)]
+    d = ResolveDispatcher([_anchor_text(1, _tok(1)), _anchor_text(2, _tok(1))], FakeCatalog(tokens, tumblers={_tok(1): "1.1.1"}))
+    cov = _cov(await _run(d, on()))
+    assert cov.repair.joined_dropped == (f"{_tok(1)}@e2:self",) and cov.repair.joined_added == 1
+
+
+@pytest.mark.asyncio
+async def test_a_key_only_its_own_record_names_is_not_in_the_completeness_domain() -> None:
+    tokens = [_tok(1), _tok(2)]
+    d = ResolveDispatcher([_record_text(_tok(1)), _anchor_text(2, _tok(2))], FakeCatalog(tokens))
+    cov = _cov(await _run(d, on()))
+    r = cov.repair
+    assert r.resolution_tokens == 2 and r.resolved == (_tok(1), _tok(2)) and r.joined_added == 1
+    assert r.joined_dropped == (f"{_tok(1)}@e1:self",)
+    assert r.anchor_key_ids == (_tok(2),), "the record that names itself is not evidence that a message tied it to the issue"
+
+
+# F3: the entered early returns still reassess an unread anchor
+
+
+async def _unread_run(d: ResolveDispatcher) -> Any:
+    with patch.object(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", 80):  # one anchor (52 chars) fits a call, two do not
+        return _cov(await _run(d, on()))
+
+
+@pytest.mark.asyncio
+async def test_when_every_key_is_missing_the_anchor_the_first_round_left_unread_is_still_reread() -> None:
+    d = ResolveDispatcher([_anchor_text(1, "CUST-0098"), _anchor_text(2, "CUST-0099")], FakeCatalog([]), restore_cap=120_000)
+    cov = await _unread_run(d)
+    assert cov.repair.outcome == "no_new_evidence" and cov.repair.resolution_entered and cov.repair.joined_added == 0
+    assert cov.ledger.rounds == 2, "the repair did not end at the no-item return: the unread anchor was reassessed"
+    e2 = next(a.item_id for a in cov.ledger.anchors if a.content == _anchor_text(2, "CUST-0099"))
+    assert e2 in [i["id"] for i in json.loads(d.args_of("operator_check")[-1]["items"])]
+
+
+@pytest.mark.asyncio
+async def test_when_the_resolve_fails_the_anchor_the_first_round_left_unread_is_still_reread() -> None:
+    d = ResolveDispatcher([_anchor_text(1, _tok(1)), _anchor_text(2, _tok(2))], FakeCatalog([_tok(1), _tok(2)]), fail_resolve=True, restore_cap=120_000)
+    cov = await _unread_run(d)
+    assert cov.repair.outcome == "retrieval_failed" and cov.repair.resolution_entered
+    assert cov.ledger.rounds == 2
+    e2 = next(a.item_id for a in cov.ledger.anchors if a.content == _anchor_text(2, _tok(2)))
+    assert e2 in [i["id"] for i in json.loads(d.args_of("operator_check")[-1]["items"])]
+
+
+# F4: joined_added is what reached the reduction
+
+
+@pytest.mark.asyncio
+async def test_joined_added_counts_the_items_merged_not_the_items_built() -> None:
+    d = _simple(2)
+    cov = await on().run(await _hooked_view(d, hooks=True, merges=False))
+    r = cov.repair
+    assert r.outcome == "not_merged" and r.resolution_entered
+    assert (r.items_found, r.items_merged, r.joined_added) == (2, 0, 0), "built 2, merged none: joined_added says none"
+    ok = await on().run(await _hooked_view(_simple(2), hooks=True))
+    assert (ok.repair.items_found, ok.repair.items_merged, ok.repair.joined_added) == (2, 2, 2)
+
+
+# F5: an anchor collection with no configured pattern is not silent
+
+
+@pytest.mark.asyncio
+async def test_the_report_counts_the_anchors_scanned_and_those_whose_collection_has_no_pattern() -> None:
+    d = _simple(2)
+    cov = _cov(await _run(d, on()))
+    scanned = len(cov.ledger.anchors) - sum(1 for a in cov.ledger.anchors if JOINED_SEP in a.content)
+    assert scanned >= 2
+    assert (cov.repair.anchors_scanned, cov.repair.anchors_without_pattern) == (scanned, 0)
+    assert cov.to_wire()["repair"]["anchors_scanned"] == scanned and cov.to_wire()["repair"]["anchors_without_pattern"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_anchor_collection_with_a_pattern_is_its_own_reason_and_the_counts_say_how_many(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The records collection is configured and the anchors' collection is not (the research-11 mistake): that is not
+    'the evidence names no ids'."""
+    real = _config.load_config
+    monkeypatch.setattr(_config, "load_config", lambda *a, **k: {**real(*a, **k), "entity": {"collections": {RECORD_COLL: PATTERN}}})
+    cov = _cov(await _run(_simple(2), on()))
+    r = cov.repair
+    assert r.resolution_reason == "no_pattern_for_anchor_collections" and r.resolution_entered is False
+    assert r.anchors_scanned >= 2 and r.anchors_without_pattern == r.anchors_scanned
+    assert cov.to_wire()["repair"]["anchors_without_pattern"] == r.anchors_without_pattern
+
+
+@pytest.mark.asyncio
+async def test_a_configured_collection_whose_anchors_name_no_key_is_still_no_key_tokens() -> None:
+    cov = _cov(await _run(ResolveDispatcher([_anchor_text(1), _anchor_text(2)], FakeCatalog([])), on()))
+    assert cov.repair.resolution_reason == "no_key_tokens" and cov.repair.anchors_without_pattern == 0 and cov.repair.anchors_scanned >= 2
+
+
+# F6: the key lists on the wire are capped
+
+
+def test_the_wire_caps_each_key_list_and_counts_what_it_left_out() -> None:
+    assert WIRE_KEY_LIST_CAP == 50
+    keys = tuple(f"CUST-{i:04d}" for i in range(60))
+    r = RepairReport("completed", resolution_entered=True, anchor_key_ids=keys, joined_dropped=keys[:51], tokens_dropped=keys[:3], resolved=keys[:12])
+    wire = r.to_wire()
+    assert wire["anchor_key_ids"] == list(keys[:50]) and wire["anchor_key_ids_truncated"] == 10
+    assert wire["joined_dropped"] == list(keys[:50]) and wire["joined_dropped_truncated"] == 1
+    assert wire["tokens_dropped"] == list(keys[:3]) and wire["tokens_dropped_truncated"] == 0
+    assert wire["resolved_truncated"] == 0 and wire["missing_truncated"] == 0 and wire["ambiguous_truncated"] == 0
+    assert r.anchor_key_ids == keys, "the report itself is whole; only the wire is cut"
+
+
+# F7: the persisted run summary says the branch ran
+
+
+def test_the_run_summary_repair_block_carries_the_resolution_counts_when_the_branch_was_considered() -> None:
+    from tests.test_rdr232_run_summary import _build, _coverage  # noqa: PLC0415 — the summary tests' builders
+
+    base = _coverage("partial", rounds=2)
+    off = _build(coverage=base)["repair"]
+    assert "resolution_entered" not in off, "off is the summary of today"
+    report = RepairReport(
+        "completed", ("f2",), 0, 3, 2, 10, "", resolution_entered=True, resolved=("CUST-0001", "CUST-0002"), missing=("CUST-0003",),
+        ambiguous=("CUST-0004", "CUST-0005", "CUST-0006"), joined_added=2, anchor_key_ids=("CUST-0001",))
+    block = _build(coverage=replace(base, repair=report))["repair"]
+    assert (block["resolution_entered"], block["resolution_reason"]) == (True, "")
+    assert (block["resolution_resolved"], block["resolution_missing"], block["resolution_ambiguous"], block["resolution_items_merged"]) == (2, 1, 3, 2)
+    assert "CUST-0001" not in json.dumps(block), "counts only, no key"
+    said = _build(coverage=replace(base, repair=RepairReport("completed", resolution_reason="confined_run")))["repair"]
+    assert said["resolution_entered"] is False and said["resolution_reason"] == "confined_run"
+
+
+# F9: the joined chash is the anchor convention's
+
+
+@pytest.mark.asyncio
+async def test_the_joined_chash_is_the_hash_of_the_text_without_the_source_line() -> None:
+    """An anchor's chash is the sha256 of its chunk text WITHOUT the ``[source: ...]`` line (``EvidenceAnchor``); the
+    joined item follows it, so a lookup by recomputing the hash from the bare text finds it."""
+    text = f"[source: Slack #escalations]\n{_anchor_text(1, _tok(1))}"
+    d = ResolveDispatcher([text], FakeCatalog([_tok(1)]))
+    cov = _cov(await _run(d, on()))
+    [item] = _joined(cov)
+    assert item.content.startswith("[source: Slack #escalations]\n")
+    bare = strip_source_note(item.content)
+    assert item.chash == hashlib.sha256(bare.encode()).hexdigest() != hashlib.sha256(item.content.encode()).hexdigest()

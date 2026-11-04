@@ -6389,7 +6389,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   tumbler, t2_record_id}` and carries identity only, never evidence text;
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and
-  closed names only. `repair` also says why it ran (nexus-z6yvk): `reason` is `unsupported`
+  closed names only; the one exception is the exact-key branch's key lists below, which may carry entity keys
+  (identifiers the operator configured in `entity.collections`), never evidence text. `repair` also says why it ran (nexus-z6yvk): `reason` is `unsupported`
   (a facet no held evidence bears on), `unread_tail` (a covered or contradicted facet with more than half of
   the ledger's anchors left unread by the assessment's per-call size cap, which the repair then
   reads) or `unsupported_and_unread_tail`, empty when no repair ran, and `unread_facet_ids` names the
@@ -6401,13 +6402,20 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `NX_ANSWER_RESOLUTION_REPAIR=1` (off by default; RDR-147 Step 4, nexus-qpimy) the repair may instead take an
   exact-key branch, and `repair` then adds keys, only once the branch was considered (with the switch off the
   wire is unchanged): `resolution_entered` (the branch resolved keys in place of the semantic queries) and
-  `resolution_reason` (why a considered branch did not enter: `confined_run`, `entity_config_error` or
-  `no_key_tokens`), `resolution_tokens` (distinct keys sent to `resolve`, at most 12), `resolved`, `missing`
-  and `ambiguous` (the keys by outcome), `joined_added` (joined items that reached the reduction),
-  `joined_dropped` (each pair a cap, the caller's scope or a missing record left out as `<key>@<anchor item_id>`,
-  and each key the cap kept from being resolved, as the bare key) and `anchor_key_ids` (every distinct key the
-  anchors named). The outcome stays one of the existing ones: `completed`, `no_new_evidence` when no key
-  yielded a joined item, `retrieval_failed` when the resolve or the record fetch failed. `assessment` also reports what each call came back as
+  `resolution_reason` (why a considered branch did not enter: `confined_run`, `entity_config_error`,
+  `no_pattern_for_anchor_collections` when no anchor's collection has a key pattern, or `no_key_tokens` when the
+  anchors of the collections that do name none), `anchors_scanned` and `anchors_without_pattern` (how many anchors the
+  scan read, and how many of them lie in a collection with no pattern: the keys scanned for are those of the
+  configured collections only), `resolution_tokens` (distinct keys sent to `resolve`, at most 12), `resolved`,
+  `missing` and `ambiguous` (the keys by outcome), `joined_added` (the joined items merged into the reduction's
+  input, which is `items_merged`; `items_found` is how many were built), `joined_dropped` (each
+  `<key>@<anchor item_id>:<reason>` pair that made no item: `cap`, `no_text` (the record has no readable text),
+  `out_of_scope` (the record lies outside the caller's scope), `held` (the input already holds that joined text) or
+  `self` (the anchor is the resolved record itself, which joins nothing)), `tokens_dropped` (the keys the item cap
+  kept from being resolved) and `anchor_key_ids` (every distinct key the anchors named, less a key only its own record
+  names). Each of these six lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at
+  its first 3 chunks, and the cut is named in `detail`. The outcome stays one of the existing ones: `completed`,
+  `no_new_evidence` when no key yielded a joined item, `retrieval_failed` when the resolve or the record fetch failed. `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,

@@ -150,6 +150,7 @@ from nexus.plans.coverage_repair import (
     REPAIR_RESULTS_PER_QUERY,
     REPAIR_RESULTS_PER_QUERY_UNFILTERED,
     REPAIR_RETRIEVAL_SHARE,
+    RESOLVED_RECORD_MAX_CHUNKS,
     RepairHit,
     RepairOutcome,
     RepairQuery,
@@ -659,7 +660,9 @@ class CoverageResult:
     def to_wire(self, *, redact: bool = False) -> dict[str, Any]:
         """The ``coverage`` object: the envelope's top-level key (RDR-232 section 4) and ``continuation.coverage``.
 
-        Ids, states, counts and closed names only: never evidence text, never a facet's text. ``requested_facet_ids``
+        Ids, states, counts and closed names only: never evidence text, never a facet's text. The one exception is the
+        repair report's exact-key key lists (RDR-147 Step 4), which carry entity keys, identifiers the operator
+        configured, capped at 50 each. ``requested_facet_ids``
         and ``covered_facet_ids`` name the facets asked for and the ones settled; ``residual_gaps`` is every other
         facet with its state and reason; ``primary_source`` and ``corpus_counts`` say what was read. ``redact`` blanks
         the caller's source wording (source labels, row details).
@@ -1231,40 +1234,55 @@ class CoverageBoundary:
 
         Scans the first ledger's anchors for the entity keys their own collection's pattern names (Step 1, the config
         loaded once), resolves the first :attr:`max_repair_items` distinct keys through the run's dispatcher (the
-        ``resolve`` step, Step 3: no model call, an accounted ``sql`` step), fetches the resolved records' chunks, and
-        builds one joined item per (anchor, key) pair: the anchor's text, a blank line, ``Resolved <key>: <record text>``,
-        chash the sha256 of that text. The items count against :attr:`max_repair_items`: one per resolved key first, in
-        key order, then further anchors round robin; everything left out is named in ``joined_dropped``.
+        ``resolve`` step, Step 3: no model call, an accounted ``sql`` step), fetches the resolved records' chunks (the
+        first :data:`RESOLVED_RECORD_MAX_CHUNKS` of each, in one fetch), and builds one joined item per (anchor, key)
+        pair: the anchor's text, a blank line, ``Resolved <key>: <record text>``, chash the sha256 of that text without
+        its source line (the anchors' convention). The items count against :attr:`max_repair_items`: one per resolved
+        key first, in key order, then further anchors round robin. Every pair left out is named in ``joined_dropped``
+        with its reason (``cap``, ``no_text``, ``out_of_scope``, ``held``, ``self``: the anchor is the resolved record
+        itself, which joins nothing); every key the cap kept from being resolved is in ``tokens_dropped``.
 
         Not entered, with the reason in the report, for a run confined to one document (a joined item carries another
         document's text under a new chash, so it cannot pass the confinement's membership test; ``resolve`` is a
-        confined tool for the same reason), a malformed entity config, and anchors that name no key. A caller-scoped run
-        enters, and a record outside the scope is dropped like a repair hit outside it (``_hit_in_scope``). A resolve or
-        fetch failure is an entered branch with ``failure`` set: the first ledger stands.
+        confined tool for the same reason), a malformed entity config, anchors none of whose collections has a pattern,
+        and anchors that name no key. A caller-scoped run enters, and a record outside the scope is dropped like a
+        repair hit outside it (``_hit_in_scope``). A resolve or fetch failure is an entered branch with ``failure``
+        set: the first ledger stands.
         """
         if self.confinement is not None:
             return _Resolution({"resolution_reason": "confined_run"})
-        from nexus.entity_keys import EntityConfigError, find_key_tokens  # noqa: PLC0415 — deferred: the ledger stays light at import
+        from nexus.entity_keys import EntityConfigError, find_key_tokens, pattern_for_collection  # noqa: PLC0415 — deferred: the ledger stays light at import
 
         pairs: list[tuple[EvidenceAnchor, str]] = []
+        scanned = without_pattern = 0
         try:
             from nexus.config import load_config  # noqa: PLC0415 — deferred, as above
 
             config = load_config()  # once per repair: pattern_for_collection would otherwise reload it per call
+            has_pattern: dict[str, bool] = {}
             for a in first.ledger.anchors:
+                scanned += 1
+                if a.collection not in has_pattern:
+                    has_pattern[a.collection] = pattern_for_collection(a.collection, config) is not None
+                if not has_pattern[a.collection]:
+                    without_pattern += 1
+                    continue
                 # the source note names the chunk's own document, not what the chunk says: scan the text only
                 pairs += [(a, t) for t in find_key_tokens(strip_source_note(a.content), a.collection, config=config)]
         except EntityConfigError as exc:
             _log.warning("nx_answer_coverage_resolution_config_invalid", error=str(exc)[:200])
             return _Resolution({"resolution_reason": "entity_config_error"})
+        scan: dict[str, Any] = {"anchors_scanned": scanned, "anchors_without_pattern": without_pattern}
+        if scanned and without_pattern == scanned:
+            return _Resolution({**scan, "resolution_reason": "no_pattern_for_anchor_collections"})
         key_ids = tuple(dict.fromkeys(t for _, t in pairs))
         if not key_ids:
-            return _Resolution({"resolution_reason": "no_key_tokens"})
+            return _Resolution({**scan, "resolution_reason": "no_key_tokens"})
         cap = max(1, self.max_repair_items)
         tokens = list(key_ids[:cap])
         fields: dict[str, Any] = {
-            "resolution_entered": True, "anchor_key_ids": key_ids, "resolution_tokens": len(tokens),
-            "joined_dropped": key_ids[cap:],  # never resolved: listed by name
+            **scan, "resolution_entered": True, "anchor_key_ids": key_ids, "resolution_tokens": len(tokens),
+            "tokens_dropped": key_ids[cap:],  # never resolved: listed by name
         }
 
         def failed(why: str) -> _Resolution:
@@ -1287,16 +1305,35 @@ class CoverageBoundary:
             ambiguous=tuple(str(t) for t in (out.get("ambiguous") or {})),
         )
 
-        # The record's chunks, inside the caller's scope; the fetch budget is the semantic repair's.
+        def is_self(anchor: EvidenceAnchor, token: str) -> bool:
+            """The anchor is the record the key resolved to (its document, or one of its chunks): it joins nothing."""
+            entry = by_token.get(token)
+            if not isinstance(entry, Mapping):
+                return False
+            tumbler = str(entry.get("tumbler") or "")
+            if tumbler and anchor.tumbler == tumbler:
+                return True
+            return bool(anchor.chash) and anchor.chash.lower() in {str(i).lower() for i in entry.get("ids") or ()}
+
+        # A key only its own record names is no evidence that a message tied it to the question: not in the domain.
+        fields["anchor_key_ids"] = tuple(dict.fromkeys(t for a, t in pairs if not is_self(a, t)))
+
+        # The record's chunks, inside the caller's scope, the first RESOLVED_RECORD_MAX_CHUNKS of each: the bound is per
+        # record, so a record of many chunks cannot take the slots of the records after it.
         record_hits: dict[str, list[RepairHit]] = {}
+        out_of_scope: set[str] = set()
+        cut = 0
         for token in resolved:
             entry = by_token[token]
             tumbler = str(entry.get("tumbler") or "")
             chunks = [RepairHit(str(i), str(c), tumbler, str(i)) for i, c in zip(entry.get("ids") or [], entry.get("collections") or [], strict=False)]
             kept = [h for h in chunks if self._hit_in_scope(h)]
+            if chunks and not kept:
+                out_of_scope.add(token)
             if kept:
-                record_hits[token] = kept
-        flat = [h for hs in record_hits.values() for h in hs][: cap * 2]
+                cut += len(kept) > RESOLVED_RECORD_MAX_CHUNKS
+                record_hits[token] = kept[:RESOLVED_RECORD_MAX_CHUNKS]
+        flat = [h for hs in record_hits.values() for h in hs]  # at most len(resolved) * RESOLVED_RECORD_MAX_CHUNKS
         text_of: dict[str, str] = {}
         if flat:
             try:
@@ -1313,20 +1350,26 @@ class CoverageBoundary:
             if body:
                 record_text[token] = body
 
-        # The pairs per resolved key, in anchor order; a joined text the input already holds is skipped, not dropped.
+        # The pairs per resolved key, in anchor order. A pair that makes no item is named with its reason.
         held = {strip_source_note(t) for t in view.evidence_texts if isinstance(t, str)}
-        dropped: list[str] = list(fields["joined_dropped"])
+        dropped: list[str] = []
         candidates: dict[str, list[tuple[EvidenceAnchor, str]]] = {t: [] for t in resolved}
         for anchor, token in pairs:
             if token not in candidates:
-                continue
-            if token not in record_text:
-                dropped.append(f"{token}@{anchor.item_id}")  # no record text inside the scope
-                continue
-            joined = f"{anchor.content}{_JOINED_SEP}{token}: {record_text[token]}"
-            if strip_source_note(joined) not in held:
-                held.add(strip_source_note(joined))
-                candidates[token].append((anchor, joined))
+                continue  # missing, ambiguous or past the cap: named in missing, ambiguous or tokens_dropped
+            if is_self(anchor, token):
+                dropped.append(f"{token}@{anchor.item_id}:self")
+            elif token in out_of_scope:
+                dropped.append(f"{token}@{anchor.item_id}:out_of_scope")
+            elif token not in record_text:
+                dropped.append(f"{token}@{anchor.item_id}:no_text")
+            else:
+                joined = f"{anchor.content}{_JOINED_SEP}{token}: {record_text[token]}"
+                if strip_source_note(joined) in held:
+                    dropped.append(f"{token}@{anchor.item_id}:held")
+                else:
+                    held.add(strip_source_note(joined))
+                    candidates[token].append((anchor, joined))
         chosen: list[tuple[str, EvidenceAnchor, str]] = []
         depth = 0
         while len(chosen) < cap:  # one per key first (depth 0), then the further anchors round robin
@@ -1339,19 +1382,22 @@ class CoverageBoundary:
                 break
             depth += 1
         taken = {(t, a.item_id) for t, a, _ in chosen}
-        dropped += [f"{t}@{a.item_id}" for t in resolved for a, _ in candidates[t] if (t, a.item_id) not in taken]
+        dropped += [f"{t}@{a.item_id}:cap" for t in resolved for a, _ in candidates[t] if (t, a.item_id) not in taken]
         items = [
             SupplementItem(
-                text=joined, chash=hashlib.sha256(joined.encode("utf-8")).hexdigest(),
+                # the chash is the anchors' convention: the text without its source line
+                text=joined, chash=hashlib.sha256(strip_source_note(joined).encode("utf-8")).hexdigest(),
                 collection=record_hits[token][0].collection, tumbler=record_hits[token][0].tumbler,
             )
             for token, _a, joined in chosen
         ]
-        fields.update(joined_added=len(items), joined_dropped=tuple(dropped))
+        fields.update(joined_dropped=tuple(dropped))
         detail = (
-            f"resolution repair: {len(resolved)} of {len(tokens)} keys resolved, {len(items)} joined items added, "
-            f"{len(dropped)} dropped, {len(fields['missing'])} missing, {len(fields['ambiguous'])} ambiguous"
+            f"resolution repair: {len(resolved)} of {len(tokens)} keys resolved, {len(items)} joined items built, "
+            f"{len(dropped)} pairs dropped, {len(fields['missing'])} missing, {len(fields['ambiguous'])} ambiguous"
         )
+        if cut:
+            detail += f"; {cut} records cut to their first {RESOLVED_RECORD_MAX_CHUNKS} chunks"
         return _Resolution(fields, entered=True, items=items, detail=detail)
 
     async def _repair(self, view: BoundaryView, first: CoverageResult, targets: tuple[str, ...]) -> CoverageResult:
@@ -1360,9 +1406,12 @@ class CoverageBoundary:
         resolution_fields: dict[str, Any] = {}  # the resolution branch's RepairReport fields, once it was considered (RDR-147 Step 4)
 
         def done(outcome: RepairOutcome, *, queries: int = 0, found: int = 0, merged: int = 0, detail: str = "", result: CoverageResult | None = None) -> CoverageResult:
+            extra = dict(resolution_fields)
+            if extra.get("resolution_entered"):
+                extra["joined_added"] = merged  # what reached the reduction's input, not what was built (``found``)
             report = RepairReport(
                 outcome, targets, queries, found, merged, int((time.monotonic() - started) * 1000), detail,
-                **self._why(first), **resolution_fields)
+                **self._why(first), **extra)
             return replace(result or first, repair=report)
 
         if view.retrieve is None or view.fetch is None or view.install_supplement is None or view.rehydrate is None:

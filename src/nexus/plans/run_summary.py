@@ -308,6 +308,21 @@ def _streams_block(diagnostics: Mapping[str, Any] | None) -> dict[str, Any] | No
     return out
 
 
+def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
+    """The exact-key repair branch's outcome as counts (RDR-147 Step 4, nexus-qpimy): no key, no text. Empty unless the
+    branch was considered, so a run with the switch off carries the summary it always did (additive within version 1)."""
+    if coverage is None:
+        return {}
+    r = coverage.repair
+    if not (r.resolution_entered or r.resolution_reason):
+        return {}
+    return {
+        "resolution_entered": r.resolution_entered, "resolution_reason": r.resolution_reason,
+        "resolution_resolved": len(r.resolved), "resolution_missing": len(r.missing),
+        "resolution_ambiguous": len(r.ambiguous), "resolution_items_merged": r.joined_added,
+    }
+
+
 def build_run_summary(
     inputs: RunSummaryInputs, *, outcome: str, plan_id: int | None, step_count: int, duration_ms: int,
     cost_usd: float | None, trace: bool, coverage: Any, terminal_reached: bool, kind: str = "nx_answer",
@@ -344,6 +359,7 @@ def build_run_summary(
             "entered": coverage.repair_entered if coverage is not None else False,
             "reason": coverage.repair.reason if coverage is not None else "",
             "unread_tail_facets": len(coverage.repair.unread_facet_ids) if coverage is not None else 0,
+            **_resolution_counts(coverage),
         },
         "run": {
             "plan_id": plan_id, "step_count": step_count, "duration_ms": duration_ms,

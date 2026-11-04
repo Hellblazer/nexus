@@ -49,6 +49,7 @@ from typing import Any, Literal
 from nexus.plans.request_coverage import Facet
 
 __all__ = [
+    "JOINED_DROP_REASONS",
     "MAX_ANCHORS_PER_ASSESSMENT_CALL",
     "MAX_REPAIR_ITEMS",
     "MAX_REPAIR_QUERIES",
@@ -62,6 +63,7 @@ __all__ = [
     "REPAIR_RESULTS_PER_QUERY_UNFILTERED",
     "REPAIR_RETRIEVAL_SHARE",
     "RESOLUTION_REASONS",
+    "RESOLVED_RECORD_MAX_CHUNKS",
     "RepairHit",
     "RepairOutcome",
     "RepairQuery",
@@ -72,6 +74,7 @@ __all__ = [
     "repair_reason",
     "unresolved_note",
     "usd_affordable",
+    "WIRE_KEY_LIST_CAP",
 ]
 
 #: Targeted queries one repair may issue (all facets, all targets).
@@ -123,8 +126,20 @@ def repair_reason(*, unsupported: bool, unread_tail: bool) -> str:
 
 
 #: Why a considered resolution branch (RDR-147 Step 4) did not enter: the run is confined to one document, the entity
-#: config is malformed, or no anchor names a key its collection's pattern matches.
-RESOLUTION_REASONS: tuple[str, ...] = ("confined_run", "entity_config_error", "no_key_tokens")
+#: config is malformed, no anchor's collection has a key pattern, or the anchors of the collections that do name no key.
+RESOLUTION_REASONS: tuple[str, ...] = (
+    "confined_run", "entity_config_error", "no_pattern_for_anchor_collections", "no_key_tokens",
+)
+#: Why a (key, anchor) pair of the resolution branch made no joined item: over the item cap; its record has no readable
+#: text; its record lies outside the caller's scope; the input already holds that joined text; the anchor is the
+#: resolved record itself.
+JOINED_DROP_REASONS: tuple[str, ...] = ("cap", "no_text", "out_of_scope", "held", "self")
+#: Chunks of one resolved record that may join a reduction input. A joined item is an anchor plus its record's text and
+#: up to :data:`MAX_REPAIR_ITEMS` of them go into one input, so the record is cut at its first chunks (the cut is named in
+#: the report's ``detail``); the fetch is then at most items times this, whatever the records' lengths.
+RESOLVED_RECORD_MAX_CHUNKS: int = 3
+#: Entries of one key list that the wire form carries; the rest is counted in ``<list>_truncated``.
+WIRE_KEY_LIST_CAP: int = 50
 
 RepairOutcome = Literal[
     "not_attempted", "completed", "no_new_evidence", "not_merged", "retrieval_failed", "no_target",
@@ -168,10 +183,13 @@ class RepairReport:
     #: ``resolve`` call in place of the semantic facet queries. ``resolution_reason`` names why a considered branch did
     #: not enter (:data:`RESOLUTION_REASONS`); both are empty while the switch is off. ``resolution_tokens`` is how many
     #: distinct tokens went to ``resolve`` (at most :data:`MAX_REPAIR_ITEMS`); ``resolved``, ``missing`` and
-    #: ``ambiguous`` are the tokens by outcome; ``joined_added`` the joined items that reached the reduction.
-    #: ``joined_dropped`` names every pair a cap, the caller's scope or a missing record text left out, as
-    #: ``<token>@<anchor id>``, and every token the cap kept from being resolved, as the bare token. ``anchor_key_ids``
-    #: is every distinct key the first ledger's anchors named: the MVV's join-completeness domain.
+    #: ``ambiguous`` are the tokens by outcome; ``joined_added`` the joined items MERGED into the reduction's input
+    #: (``items_found`` is how many were built; the two differ when the merge failed). ``joined_dropped`` names every
+    #: (token, anchor) pair that made no item, as ``<token>@<anchor id>:<reason>`` (:data:`JOINED_DROP_REASONS`);
+    #: ``tokens_dropped`` the keys the item cap kept from being resolved at all. ``anchor_key_ids`` is every distinct
+    #: key the scanned anchors named, less a key only its own record names: the MVV's join-completeness domain, so it
+    #: covers the collections that have a pattern. ``anchors_scanned`` and ``anchors_without_pattern`` say how many
+    #: anchors the scan read and how many of them lie in a collection with no pattern.
     resolution_entered: bool = False
     resolution_reason: str = ""
     resolution_tokens: int = 0
@@ -181,6 +199,9 @@ class RepairReport:
     joined_added: int = 0
     joined_dropped: tuple[str, ...] = ()
     anchor_key_ids: tuple[str, ...] = ()
+    tokens_dropped: tuple[str, ...] = ()
+    anchors_scanned: int = 0
+    anchors_without_pattern: int = 0
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -193,10 +214,15 @@ class RepairReport:
             # Additive, and only once the branch was considered: with the switch off the wire is what it was.
             wire.update({
                 "resolution_entered": self.resolution_entered, "resolution_reason": self.resolution_reason,
-                "resolution_tokens": self.resolution_tokens, "resolved": list(self.resolved),
-                "missing": list(self.missing), "ambiguous": list(self.ambiguous), "joined_added": self.joined_added,
-                "joined_dropped": list(self.joined_dropped), "anchor_key_ids": list(self.anchor_key_ids),
+                "resolution_tokens": self.resolution_tokens, "joined_added": self.joined_added,
+                "anchors_scanned": self.anchors_scanned, "anchors_without_pattern": self.anchors_without_pattern,
             })
+            # The key lists hold entity keys (identifiers the operator configured), never evidence text; each is cut at
+            # WIRE_KEY_LIST_CAP entries and says how many it left out.
+            for name in ("resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped", "anchor_key_ids"):
+                values: tuple[str, ...] = getattr(self, name)
+                wire[name] = list(values[:WIRE_KEY_LIST_CAP])
+                wire[f"{name}_truncated"] = max(0, len(values) - WIRE_KEY_LIST_CAP)
         return wire
 
 
