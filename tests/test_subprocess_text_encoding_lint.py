@@ -121,7 +121,7 @@ _KWARGS_READ: dict[str, str] = {
         "or text, none passes encoding, so the wrapper's utf-8 default decides; its "
         "children are git, bd, gh and nx"
     ),
-    "src/nexus/daemon/installer.py:935": (
+    "src/nexus/daemon/installer.py:946": (
         "``_run_manager`` funnel into run_bounded: callers pass capture_output (dropped), "
         "text and check; ``_run_manager`` sets ``encoding`` itself before this call, per "
         "the manager (schtasks: console code page; launchctl, systemctl: utf-8)"
