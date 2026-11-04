@@ -75,7 +75,7 @@ replace_symbol_body("method_name", new_body)  # replace precisely
 
 ```
 get_symbols_overview("path/to/file.py")       # symbols without file body
-type_hierarchy("ClassName")                   # inheritance tree
+jet_brains_type_hierarchy("ClassName")        # inheritance tree (JetBrains only)
 # read only the methods you actually need after this
 ```
 

@@ -97,14 +97,15 @@ integer-or-None shape `memory_put`/`plan_save` use.
 
 **Engine (T3 store) connectivity failure**:
 - Error: search or store_put fails with a connection error
-- Fix: check the service with `nx doctor` (locally, `nx daemon service status`); fall back to the `nx` CLI via the Bash tool (degraded mode)
-- Fallback: Write to T2 memory with note to promote to T3 later:
-  Use memory_put tool: `content="content", project="{project}", title="pending-t3-promotion.md"`
+- Fix: check the service with `nx doctor` (locally, `nx daemon service status`). The `nx` CLI and T2 go through
+  the same engine, so neither is a fallback: treat the write as NOT landed, say so in your report, and restate the
+  findings inline (the rule under "Write reported an error" above)
 
 **Voyage AI API limit**:
 - Error: Rate limit or quota exceeded during embedding
 - Fix: Reduce batch size; wait and retry
-- Fallback: Store in T2 with `tags="pending-t3-promotion"` for later batch upload
+- If it still fails: treat the write as NOT landed, say so in your report, and restate the findings inline (the
+  rule under "Write reported an error" above); do not park them in another tier
 
 **Collection name validation**:
 - Collection names use `__` as separator (NOT `::`).
