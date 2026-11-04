@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5103
+provisioned_tests = 5114
 tolerance_tests = 0
+# 5103 -> 5114 (nexus-v9v5r, 2026-11-04): +11. tests/test_rdr147_resolve_step.py is new and 11 of its tests need the engine
+# (a real catalog, real manifests and chunk rows; the resolve plan runs through the default dispatcher). The
+# argument checks run over a stub catalog and the constant and confinement pins touch nothing, so none of them asks for a tenant.
 # 5097 -> 5103 (nexus-gie46, 2026-11-04): +6. The new tests/test_rdr147_link_deletion_pins.py pins how the catalog deletes links
 # (hard delete cascades, trash keeps and restore returns them, traverse skips a trashed endpoint, links_from/links_to still show one,
 # find_by_title_exact skips one) against the real engine: it purges aged tombstones and drops the link FKs, which a fake cannot do.

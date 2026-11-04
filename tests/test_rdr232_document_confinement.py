@@ -162,11 +162,11 @@ def test_a_traverse_step_runs_in_engine_filter_mode_and_every_other_tool_is_unto
 
 def test_the_confined_tools_are_every_retrieval_tool_the_runner_knows_plus_the_walk_and_the_title_lookup() -> None:
     # The census: a retrieval tool added to the runner's set is a tool the confinement must decide on. Pinned to the
-    # runner's own set, not to a literal, so adding one without a rule here fails this test instead of running
-    # unconfined. ``resolve`` (RDR-147 Step 3, nexus-v9v5r) is a runner-native catalog lookup, not a retrieval tool
-    # of the structured contract; its decision (not run in a confined run) is pinned in
+    # runner's own sets, not to a literal, so adding a retrieval tool or a runner-native non-embedding tool without a
+    # rule here fails this test instead of running unconfined. ``resolve`` (RDR-147 Step 3, nexus-v9v5r) is a
+    # runner-native catalog lookup in ``_NON_EMBEDDING_TOOLS``; its decision (not run in a confined run) is pinned in
     # tests/test_rdr147_resolve_step.py.
-    assert CONFINED_TOOLS == runner._RETRIEVAL_TOOLS | {"traverse", "resolve"}
+    assert CONFINED_TOOLS == runner._RETRIEVAL_TOOLS | runner._NON_EMBEDDING_TOOLS
 
 
 def test_store_get_many_ids_are_cut_to_the_document_even_when_its_set_is_a_sample() -> None:

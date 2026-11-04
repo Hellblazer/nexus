@@ -8,9 +8,8 @@ ambiguous}``. A token with no live document is ``missing``; a token that names s
 every candidate tumbler and is never resolved to one of them. No embedding, no model call, no MCP tool.
 
 These run on the engine substrate: a real catalog, real manifests, real chunk text. The only wrapper is the call
-counter in :class:`_Spy`, which delegates to the real client.
-
-Every pin here was shown to fail with its code removed; the reds are in the bead's hand-back.
+counter in :class:`_Spy`, which delegates to the real client. Only the tests that reach the engine ask for a
+tenant (``@engine``); the argument checks run over :class:`_NoCatalog`, which fails on any lookup.
 """
 from __future__ import annotations
 
@@ -36,9 +35,18 @@ from nexus.plans.runner import plan_run
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._chunk_seed import seed_chunks_direct
 
-pytestmark = pytest.mark.t2_tenant
+#: A test that reaches the engine asks for a tenant on the test itself (tests/AGENTS.md § The tenant is opt-in);
+#: the checks that raise before any lookup and the constant pins mint none.
+engine = pytest.mark.t2_tenant
 
 COLLECTION = "knowledge__rdr147resolve__bge-base-en-v15-768__v1"
+
+
+#: What ``resolve_keys`` answers for no tokens: the step-output keys a later ``$stepN.<key>`` may name.
+EMPTY_RESULT: dict[str, Any] = {
+    "tumblers": [], "ids": [], "collections": [], "chunk_collections": [], "chunk_tumblers": [],
+    "by_token": {}, "missing": [], "ambiguous": {},
+}
 
 
 def _chash(text: str) -> str:
@@ -70,6 +78,21 @@ class _Spy:
         return self._real.get_manifests(doc_ids)
 
 
+class _NoCatalog:
+    """A catalog that fails on any lookup: for the checks that must raise or answer before they ask it anything."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def find_by_title_exact(self, title: str, **kw: Any) -> Any:
+        self.calls.append(title)
+        raise AssertionError(f"unexpected catalog lookup of {title!r}")
+
+    def get_manifests(self, doc_ids: list[str]) -> Any:
+        self.calls.append(repr(doc_ids))
+        raise AssertionError(f"unexpected manifest fetch for {doc_ids!r}")
+
+
 @pytest.fixture
 def cat() -> ActiveCatalog:
     return ActiveCatalog()
@@ -99,6 +122,7 @@ def _doc(cat: ActiveCatalog, owner_name: str, title: str, texts: list[str], *,
 # ── the core function ───────────────────────────────────────────────────────────────────────────
 
 
+@engine
 def test_a_unique_an_absent_and_a_shared_token(cat: ActiveCatalog, client: HttpCatalogClient) -> None:
     only = _doc(cat, "o-a", "CUST-0001", ["customer one, page one", "customer one, page two"])
     a = _doc(cat, "o-b", "CUST-SHARED", ["shared title, copy a"])
@@ -109,12 +133,18 @@ def test_a_unique_an_absent_and_a_shared_token(cat: ActiveCatalog, client: HttpC
     assert out["tumblers"] == [only]
     assert out["ids"] == [_chash("customer one, page one"), _chash("customer one, page two")]
     assert out["collections"] == [COLLECTION, COLLECTION], "collections line up one-to-one with ids"
+    assert out["chunk_collections"] == out["collections"]
+    assert out["chunk_tumblers"] == [only, only], "chunk_tumblers line up one-to-one with ids"
+    assert out["by_token"] == {
+        "CUST-0001": {"tumbler": only, "ids": out["ids"], "collections": [COLLECTION, COLLECTION]},
+    }, "only a resolved token has a by_token entry"
     assert out["missing"] == ["CUST-ABSENT"]
     assert out["ambiguous"] == {"CUST-SHARED": sorted([a, b])}
     assert a not in out["tumblers"] and b not in out["tumblers"], "an ambiguous token resolves to neither"
     assert _chash("shared title, copy a") not in out["ids"]
 
 
+@engine
 def test_a_trashed_document_is_missing(cat: ActiveCatalog, client: HttpCatalogClient) -> None:
     gone = _doc(cat, "o-a", "CUST-0002", ["customer two"])
     assert cat.delete_document(gone)
@@ -125,6 +155,7 @@ def test_a_trashed_document_is_missing(cat: ActiveCatalog, client: HttpCatalogCl
     assert out["tumblers"] == [] and out["ids"] == [] and out["ambiguous"] == {}
 
 
+@engine
 def test_trashing_one_of_two_copies_leaves_the_token_resolved(cat: ActiveCatalog, client: HttpCatalogClient) -> None:
     keep = _doc(cat, "o-a", "CUST-0003", ["kept copy"])
     drop = _doc(cat, "o-b", "CUST-0003", ["trashed copy"])
@@ -136,6 +167,7 @@ def test_trashing_one_of_two_copies_leaves_the_token_resolved(cat: ActiveCatalog
     assert out["tumblers"] == [keep] and out["ambiguous"] == {} and out["missing"] == []
 
 
+@engine
 def test_a_repeated_token_is_looked_up_once(cat: ActiveCatalog, client: HttpCatalogClient) -> None:
     only = _doc(cat, "o-a", "CUST-0004", ["customer four"])
     other = _doc(cat, "o-b", "CUST-0005", ["customer five"])
@@ -148,6 +180,7 @@ def test_a_repeated_token_is_looked_up_once(cat: ActiveCatalog, client: HttpCata
     assert len(spy.manifest_calls) == 1, "the manifests of every resolved document come in one batch"
 
 
+@engine
 def test_a_chunk_shared_by_two_resolved_documents_is_listed_once(cat: ActiveCatalog, client: HttpCatalogClient) -> None:
     """Identical chunk text is one T3 row (RDR-108); two documents whose manifests list it give the plan one id."""
     a = _doc(cat, "o-a", "CUST-0007", ["boilerplate footer", "only in seven"])
@@ -158,8 +191,30 @@ def test_a_chunk_shared_by_two_resolved_documents_is_listed_once(cat: ActiveCata
     assert out["tumblers"] == [a, b]
     assert out["ids"] == [_chash("boilerplate footer"), _chash("only in seven"), _chash("only in eight")]
     assert len(out["collections"]) == len(out["ids"])
+    assert out["chunk_tumblers"] == [a, a, b], "the shared chunk is credited to the document that contributed it first"
 
 
+@engine
+def test_by_token_keeps_each_tokens_own_chunks_when_two_documents_share_one(
+    cat: ActiveCatalog, client: HttpCatalogClient,
+) -> None:
+    """Two single-chunk documents whose chunk text is identical are one T3 row (RDR-108). ``ids`` lists it once, but
+    the repair that joins a record to the anchor that named it needs each token's own chunks."""
+    a = _doc(cat, "o-a", "CUST-0013", ["identical text in both"])
+    b = _doc(cat, "o-b", "CUST-0014", ["identical text in both"])
+    shared = _chash("identical text in both")
+
+    out = resolve_keys(client, ["CUST-0013", "CUST-0014"])
+
+    assert out["ids"] == [shared], "the cross-document dedup is unchanged"
+    assert out["chunk_tumblers"] == [a]
+    assert out["by_token"] == {
+        "CUST-0013": {"tumbler": a, "ids": [shared], "collections": [COLLECTION]},
+        "CUST-0014": {"tumbler": b, "ids": [shared], "collections": [COLLECTION]},
+    }, "the second token still reports the chunk the dedup took out of ids"
+
+
+@engine
 def test_the_title_match_is_case_exact(cat: ActiveCatalog, client: HttpCatalogClient) -> None:
     _doc(cat, "o-a", "CUST-0018", ["customer eighteen"])
 
@@ -168,6 +223,7 @@ def test_the_title_match_is_case_exact(cat: ActiveCatalog, client: HttpCatalogCl
     assert out["missing"] == ["cust-0018"] and out["tumblers"] == []
 
 
+@engine
 def test_owner_and_content_type_narrow_an_ambiguous_token(cat: ActiveCatalog, client: HttpCatalogClient) -> None:
     note = _doc(cat, "o-a", "CUST-0006", ["the note"], content_type="knowledge")
     paper = _doc(cat, "o-b", "CUST-0006", ["the paper"], content_type="paper")
@@ -182,37 +238,63 @@ def test_owner_and_content_type_narrow_an_ambiguous_token(cat: ActiveCatalog, cl
 
 
 @pytest.mark.parametrize("by", ["chash", "tumbler", "", "TITLE"])
-def test_any_other_by_value_raises(by: str, client: HttpCatalogClient) -> None:
-    spy = _Spy(client)
+def test_any_other_by_value_raises(by: str) -> None:
+    stub = _NoCatalog()
     with pytest.raises(ValueError, match="by"):
-        resolve_keys(spy, ["CUST-0001"], by=by)
-    assert spy.title_calls == [], "refused before any lookup"
+        resolve_keys(stub, ["CUST-0001"], by=by)
+    assert stub.calls == [], "refused before any lookup"
 
 
-@pytest.mark.parametrize("tokens", ["CUST-0001", ["CUST-0001", ""], ["CUST-0001", None], 7])
-def test_a_token_list_that_is_not_a_list_of_nonblank_strings_raises(tokens: Any, client: HttpCatalogClient) -> None:
+@pytest.mark.parametrize("tokens", ["CUST-0001", ["CUST-0001", None], ["CUST-0001", 7], 7, None])
+def test_tokens_that_are_not_a_list_of_strings_raise(tokens: Any) -> None:
+    stub = _NoCatalog()
     with pytest.raises((TypeError, ValueError)):
-        resolve_keys(client, tokens)
+        resolve_keys(stub, tokens)
+    assert stub.calls == [], "refused before any lookup"
 
 
-def test_no_tokens_resolve_to_nothing_without_a_call(client: HttpCatalogClient) -> None:
+def test_a_blank_token_is_missing_without_a_catalog_call() -> None:
+    """``find_by_title_exact("")`` falls back to a scan of every document, so a blank token never reaches it."""
+    stub = _NoCatalog()
+
+    out = resolve_keys(stub, ["", "   ", "\t", ""])
+
+    assert stub.calls == []
+    assert out["missing"] == ["", "   ", "\t"], "each distinct blank token is reported, in first-seen order"
+    assert out["tumblers"] == [] and out["ids"] == [] and out["ambiguous"] == {} and out["by_token"] == {}
+
+
+@engine
+def test_a_blank_token_beside_a_real_one_leaves_the_real_one_resolved(
+    cat: ActiveCatalog, client: HttpCatalogClient,
+) -> None:
+    only = _doc(cat, "o-a", "CUST-0012", ["customer twelve"])
     spy = _Spy(client)
-    out = resolve_keys(spy, [])
-    assert out == {
-        "tumblers": [], "ids": [], "collections": [], "chunk_collections": [], "missing": [], "ambiguous": {},
-    }
-    assert spy.title_calls == [] and spy.manifest_calls == []
+
+    out = resolve_keys(spy, ["CUST-0012", " "])
+
+    assert spy.title_calls == ["CUST-0012"]
+    assert out["tumblers"] == [only] and out["missing"] == [" "]
+
+
+def test_no_tokens_resolve_to_nothing_without_a_call() -> None:
+    stub = _NoCatalog()
+    out = resolve_keys(stub, [])
+    assert out == EMPTY_RESULT
+    assert stub.calls == []
 
 
 # ── the plan step ───────────────────────────────────────────────────────────────────────────────
 
 
+@engine
 @pytest.mark.asyncio
 async def test_resolve_then_store_get_many_on_its_ids_returns_the_record_text(cat: ActiveCatalog) -> None:
     text = "CUST-0010 is a member since 2019; renewal due in March."
     _doc(cat, "o-a", "CUST-0010", [text])
     plan = {"steps": [
-        {"tool": "resolve", "args": {"tokens": ["CUST-0010", "CUST-NOPE"]}},
+        # a step-level scope.topic is forwarded to every step by the runner; resolve takes no topic and must not fail on it
+        {"tool": "resolve", "args": {"tokens": ["CUST-0010", "CUST-NOPE"]}, "scope": {"topic": "customers"}},
         {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
     ]}
 
@@ -224,6 +306,7 @@ async def test_resolve_then_store_get_many_on_its_ids_returns_the_record_text(ca
     assert second["missing"] == []
 
 
+@engine
 @pytest.mark.asyncio
 async def test_a_resolve_step_dispatches_no_operator_and_no_mcp_tool(
     cat: ActiveCatalog, monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +329,29 @@ async def test_a_resolve_step_dispatches_no_operator_and_no_mcp_tool(
 
 
 # ── the guards that let it through ──────────────────────────────────────────────────────────────
+
+
+def test_the_scope_topic_the_runner_injects_is_not_forwarded_to_a_resolve_step() -> None:
+    scope = {"topic": "customers"}
+    args = {"tokens": ["CUST-0001"]}
+    assert runner._apply_scope_to_args("search", scope, {"query": "q"}, bindings={}, step_outputs=[])["topic"] == "customers"
+    out = runner._apply_scope_to_args("resolve", scope, args, bindings={}, step_outputs=[])
+    assert out == args, "resolve takes no topic: the injected key is dropped"
+    # a topic the plan author wrote on the step is a mistake and still reaches the dispatcher, which refuses it
+    authored = runner._apply_scope_to_args("resolve", scope, {**args, "topic": "mine"}, bindings={}, step_outputs=[])
+    assert authored["topic"] == "mine"
+
+
+@pytest.mark.asyncio
+async def test_a_resolve_step_with_an_unknown_argument_raises() -> None:
+    with pytest.raises(ValueError, match=r"unexpected argument.*topic"):
+        await runner._default_dispatcher("resolve", {"tokens": ["CUST-0001"], "topic": "mine"})
+
+
+@pytest.mark.asyncio
+async def test_a_resolve_step_without_tokens_raises() -> None:
+    with pytest.raises(ValueError, match="'tokens' argument is required"):
+        await runner._default_dispatcher("resolve", {"by": "title"})
 
 
 def test_resolve_is_a_non_embedding_tool() -> None:
@@ -317,3 +423,26 @@ async def test_a_confined_run_does_not_dispatch_a_resolve_step() -> None:
     out = result.steps[0]
     assert out["ids"] == [] and out["tumblers"] == []
     assert out[CONFINEMENT_MARKER]["reason"] == "resolve_reaches_outside_document"
+    assert set(EMPTY_RESULT) <= set(out), "every key a later $stepN.<key> may read from a resolve step is there"
+    assert out["missing"] == [] and out["ambiguous"] == {} and out["by_token"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_step_reading_missing_from_a_skipped_resolve_step_neither_raises_nor_dispatches() -> None:
+    calls: list[str] = []
+
+    async def dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        calls.append(tool)
+        return {}
+
+    plan = {"steps": [
+        {"tool": "resolve", "args": {"tokens": ["CUST-0001"]}},
+        {"tool": "search", "args": {"query": "q", "corpus": "knowledge", "note": "$step1.missing"}},
+    ]}
+    result = await plan_run(
+        _match(plan), {}, dispatcher=dispatcher, bundle_operators=False,
+        document_confinement=_confinement("steps_not_run"),
+    )
+
+    assert calls == [], "neither step was dispatched"
+    assert len(result.steps) == 2

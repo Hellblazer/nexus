@@ -337,7 +337,7 @@ reference earlier output via `$stepK.<field>`.
 | `search` | `{ids, tumblers, distances, collections}` |
 | `query` | `{ids, tumblers, collections}` |
 | `traverse` | `{tumblers, ids, collections}` — walks the catalog link graph |
-| `resolve` | `{tumblers, ids, collections, missing, ambiguous}` — exact-title lookup of key tokens (RDR-147); `ids`/`collections` line up one-to-one; no embedding or model call |
+| `resolve` | `{tumblers, ids, collections, chunk_collections, chunk_tumblers, by_token, missing, ambiguous}` — exact-title lookup of key tokens (RDR-147). `tumblers` has one entry per resolved document; `ids`, `collections`, `chunk_collections` and `chunk_tumblers` line up one-to-one (`ids` is deduplicated across documents); `by_token` gives each resolved token its own `{tumbler, ids, collections}` before that dedup. No embedding or model call. It reads the whole tenant: a caller `scope` or owner does not narrow it, and a run confined to one document skips it (marker `resolve_reaches_outside_document`) |
 | `store_get_many` | `{contents, missing}` — batch hydration past the per-request 300-record cap |
 | `operator_extract` | schema-conforming dict (e.g. `{extractions: [...]}`) |
 | `operator_rank` | schema-conforming dict (e.g. `{ranked: [...]}`) |

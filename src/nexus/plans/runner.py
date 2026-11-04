@@ -1405,7 +1405,11 @@ def _apply_scope_to_args(
             out["corpus"] = corpus
 
     topic = scope.get("topic")
-    if topic is not None and "topic" not in out:
+    if topic is not None and tool == "resolve":
+        # An exact-title lookup takes no topic and ``_dispatch_resolve`` refuses unknown arguments, so the
+        # runner-injected key is dropped here; a ``topic`` the plan author wrote on the step is kept and refused.
+        _log.debug("resolve_step_scope_topic_not_forwarded", topic=str(topic))
+    elif topic is not None and "topic" not in out:
         out["topic"] = _resolve_value(
             topic, bindings=bindings, step_outputs=step_outputs,
         )
@@ -3194,8 +3198,8 @@ async def _dispatch_resolve(args: dict[str, Any]) -> dict[str, Any]:
     """Run a ``resolve`` step (:mod:`nexus.plans.resolve_step`) against the live catalog.
 
     One HTTP call per distinct token, so it runs on a worker thread (a copy of the context goes with it) and
-    does not hold the event loop. A catalog that is not available fails the step loudly: an unreachable catalog
-    must not read as "every token is missing".
+    does not hold the event loop. A catalog that is not available fails the step loudly (the first call raises): an
+    unreachable catalog must not read as "every token is missing".
     """
     from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.plans.resolve_step import resolve_keys  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
@@ -3205,11 +3209,10 @@ async def _dispatch_resolve(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"resolve: unexpected argument(s) {unknown}; it takes tokens, by, content_type, owner")
     if "tokens" not in args:
         raise ValueError("resolve: the 'tokens' argument is required")
-    catalog = _get_catalog()
-    if catalog is None:
-        raise RuntimeError("resolve: the catalog is not available, so no token can be resolved")
+    # get_catalog() always returns the service-backed client (its Optional annotation is historical, and an
+    # unreachable engine raises on the first call), so no None guard: an unreachable catalog fails the step.
     return await asyncio.to_thread(
-        resolve_keys, catalog, args["tokens"],
+        resolve_keys, _get_catalog(), args["tokens"],
         by=args.get("by", "title"), content_type=args.get("content_type"), owner=args.get("owner"),
     )
 

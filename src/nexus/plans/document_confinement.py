@@ -88,7 +88,8 @@ _UNCONFINABLE_TOOLS = frozenset({
 })
 
 #: Every tool the confinement acts on. Census: ``tests/test_rdr232_document_confinement.py`` pins that this equals
-#: ``runner._RETRIEVAL_TOOLS | {"traverse", "resolve"}``, so a retrieval tool added to the runner cannot run unconfined unnoticed.
+#: ``runner._RETRIEVAL_TOOLS | runner._NON_EMBEDDING_TOOLS``, so a retrieval tool or a runner-native non-embedding tool
+#: added to the runner cannot run unconfined unnoticed.
 CONFINED_TOOLS: frozenset[str] = _CHASH_TOOLS | _UNCONFINABLE_TOOLS | {"traverse", "store_get_many", "resolve"}
 
 
@@ -253,8 +254,10 @@ def _cut_ids(args: dict[str, Any], c: DocumentConfinement) -> dict[str, Any]:
 
 def empty_confined_output(tool: str, step_index: int, c: DocumentConfinement, reason: str) -> dict[str, Any]:
     """The empty structured retrieval shape (the keys ``query`` and ``search`` return in structured mode, plus
-    ``contents``) so a later ``$stepN.<key>`` reference resolves to the empty value, with the marker."""
-    return {
+    ``contents``) so a later ``$stepN.<key>`` reference resolves to the empty value, with the marker. A skipped
+    ``resolve`` step also carries the keys only it answers (``missing``, ``ambiguous``, ``by_token``,
+    ``chunk_tumblers``): a later step may read any of them, and a missing key would raise."""
+    out: dict[str, Any] = {
         "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [], "collections": [],
         "chunk_collections": [], "also_in": [], "also_in_ids": [], "chunk_text_hash": [],
         "contents": [],
@@ -262,6 +265,9 @@ def empty_confined_output(tool: str, step_index: int, c: DocumentConfinement, re
             "step_index": step_index, "tool": tool, "document": c.tumbler, "mode": c.mode, "reason": reason,
         },
     }
+    if tool == "resolve":
+        out.update({"missing": [], "ambiguous": {}, "by_token": {}, "chunk_tumblers": []})
+    return out
 
 
 # ── run-scoped state ─────────────────────────────────────────────────────────────────────────────────────────
