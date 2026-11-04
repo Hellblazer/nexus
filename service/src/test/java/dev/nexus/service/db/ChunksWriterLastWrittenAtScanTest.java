@@ -85,7 +85,12 @@ class ChunksWriterLastWrittenAtScanTest {
             "nexus-pvkbv: removes the span fields a departed writer left on a chunk row whose sole remaining holder"
                 + " has none; maintenance, not a client re-write: last_written_at is the client-write clock (the"
                 + " reaper's grace window, the one-hour guard of the manifest triggers), and stamping it here would"
-                + " make a metadata cleanup look like a write"))
+                + " make a metadata cleanup look like a write")),
+        Map.entry("ChunkKeySweep#oneBatch", new Decision(Kind.EXEMPT, 1,
+            "nexus-6pfgb.43 (RDR-236 Phase 4 Step 3): the operator retire-keys sweep removes retired metadata keys;"
+                + " maintenance, not a client re-write: last_written_at is the client-write clock (the reaper's grace"
+                + " window, the manifest triggers' one-hour guard), and stamping it would make every swept row look"
+                + " freshly written; ChunkKeySweepIntegrationTest pins that the sweep leaves it unchanged"))
     ));
 
     // ── the real tree ────────────────────────────────────────────────────────
