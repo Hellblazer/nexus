@@ -6,12 +6,13 @@ and ChromaDB are gone (RDR-158 P4, RDR-155 P4b). 7.95.0 still told users T2 was 
 memory_search takes "FTS5 syntax", and that a store failure was a "ChromaDB connectivity failure".
 
 The sweep reads the plugin markdown (less the change records), ``conexus/registry.yaml``, both plugins'
-``plugin.json``, the mcpb manifest, and every MCP tool's description and parameter descriptions as the server
-registers them. Any ``SQLite``, ``Chroma`` or ``FTS5`` there fails unless :data:`_HISTORY` lists that file and a
+``plugin.json``, the mcpb manifest, and every MCP tool's description and every string in its input schema, as the
+server lists them, plus the servers' instructions. Any ``SQLite``, ``Chroma`` or ``FTS5`` there fails unless :data:`_HISTORY` lists that file and a
 fragment of that line with the reason it is history, not a claim about the running system.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import re
 from pathlib import Path
@@ -56,12 +57,25 @@ def _file_lines() -> list[tuple[str, int, str]]:
             for p in sorted(paths) for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)]
 
 
+def _strings(value: object) -> list[str]:
+    """Every string inside a JSON schema (descriptions at any depth, enum values, nested anyOf branches)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
 def _tool_lines() -> list[tuple[str, int, str]]:
     out: list[tuple[str, int, str]] = []
     for module in ("nexus.mcp.core", "nexus.mcp.catalog"):
-        for name, tool in importlib.import_module(module).mcp._tool_manager._tools.items():
-            texts = [tool.description or ""] + [
-                str(p.get("description", "")) for p in (tool.parameters or {}).get("properties", {}).values()]
+        server = importlib.import_module(module).mcp
+        texts_by_tool = {t.name: [t.description or "", *_strings(t.input_schema)]
+                         for t in asyncio.run(server.list_tools())}
+        texts_by_tool["instructions"] = [server.instructions or ""]
+        for name, texts in texts_by_tool.items():
             out += [(f"mcp:{name}", n, line) for text in texts for n, line in enumerate(text.splitlines(), 1)]
     return out
 

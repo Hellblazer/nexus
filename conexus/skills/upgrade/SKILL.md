@@ -27,8 +27,7 @@ data migrations the install actually needs — T2 schema, pre-RDR-108 chunk
 identity, embedder era. (The ChromaDB → Postgres+pgvector move is NOT among
 them on a current release: see "Installs that predate Postgres" below.) Each
 rung detects, converges, and verifies before completion is recorded; the walk is
-idempotent and resumable, and the source store is left byte-untouched as a
-rollback target. An install dormant since 5.x converges the same way a current
+idempotent and resumable. An install dormant since 5.x converges the same way a current
 one no-ops.
 
 ## Reporting before running
@@ -45,8 +44,8 @@ Both are safe to run unprompted.
 ## What the walk asks
 
 Nothing, today. The ladder's rungs (`aspect_queue_tuples`, `manifest_section_labels`, `note_tags_array`,
-`rdr192_manifest_backfill`) either finish or DEFER: a deferred rung stays pending, the walk goes on past it, and it
-retries on a later run (`nx doctor`'s `Upgrade ladder` row says "REPEATEDLY DEFERRED:" once one keeps deferring).
+`rdr192_manifest_backfill`) either finish or DEFER: a deferred rung stays pending and holds back the rungs that depend on it, the walk
+goes on to the rungs that do not, and it retries on a later run (`nx doctor`'s `Upgrade ladder` row says "REPEATEDLY DEFERRED:" once one keeps deferring).
 No rung rolls back, so there is no rollback to choose.
 
 If a rung ever asks a question (a billed re-embed, a choice the walk cannot derive), surface it to the user and let

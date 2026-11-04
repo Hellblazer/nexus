@@ -55,7 +55,7 @@ def test_skill_counts_match_the_skill_directories() -> None:
 
 
 def test_agent_counts_match_the_agent_files() -> None:
-    _check(_claims(r"(?:^|\*\*)(\d+) agents\b"), len(list((_REPO / "conexus" / "agents").glob("*.md"))), "agents",
+    _check(_claims(r"\b(\d+) agents\b"), len(list((_REPO / "conexus" / "agents").glob("*.md"))), "agents",
            at_least=2)
 
 
@@ -109,5 +109,6 @@ def test_docs_mcp_servers_states_the_registered_count() -> None:
     [(registered, agents, hooks)] = re.findall(
         r"Of the (\d+) registered tools, (\d+) are for agents; (\d+) are internal `hook_\*` tools", text)
     every = _registered("nexus.mcp.core")
+    assert f"## `nexus` — retrieval + storage ({len(every)} tools)" in text
     assert (int(registered), int(agents), int(hooks)) == (len(every), len(_core_agent_tools()),
                                                          len(every) - len(_core_agent_tools()))

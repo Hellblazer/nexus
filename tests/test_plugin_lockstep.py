@@ -488,8 +488,8 @@ def test_ref_drift_reinstall_failure_reports_manual_command(
     assert lines == [
         "Plugin update: conexus@nexus-plugins 7.35.0: a plugin-only release exists but reinstall failed: "
         "uninstalled but reinstall failed: ✘ Failed to install plugin \"conexus@nexus-plugins\". "
-        "Run: claude plugin uninstall conexus@nexus-plugins -s user -y "
-        "&& claude plugin install conexus@nexus-plugins -s user -y"]
+        "Run: `claude plugin uninstall conexus@nexus-plugins -s user -y`, "
+        "then `claude plugin install conexus@nexus-plugins -s user -y`"]
 
 
 def test_ref_drift_uninstall_failure_reports_manual_command(

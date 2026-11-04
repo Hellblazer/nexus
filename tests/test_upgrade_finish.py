@@ -3396,8 +3396,8 @@ class TestConvergeServiceAutostartUnitNoServiceManager:
         # uninstall+install sequence that forces a genuine rewrite instead.
         assert "install --autostart --force" not in actions[0]
         assert (
-            "nx daemon service uninstall --autostart, then nx daemon service "
-            "install --autostart" in actions[0]
+            "`nx daemon service uninstall --autostart`, then `nx daemon service "
+            "install --autostart`" in actions[0]
         )
 
         # The file was rewritten to the (REAL, unmocked) current template --
@@ -4440,7 +4440,7 @@ class TestConvergeServiceAutostartUnitActivation:
         probe = self._probe(
             ActivationState.NOT_ACTIVE,
             "`launchctl print-disabled gui/501` reports com.nexus.service disabled",
-            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart, then nx daemon service install --autostart",
+            "`launchctl enable gui/501/com.nexus.service`, then `nx daemon service uninstall --autostart`, then `nx daemon service install --autostart`",
         )
         for kwargs in ({}, {"unattended": True}, {"dry_run": True}):
             actions, asked, uninstall, install, sp = self._run(tmp_path, dest, probe, **kwargs)
@@ -4448,7 +4448,7 @@ class TestConvergeServiceAutostartUnitActivation:
             assert actions[0].startswith("NOTE:")
             assert "not registered for login" in actions[0]
             assert "reports com.nexus.service disabled" in actions[0]
-            assert "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart" in actions[0]
+            assert "`launchctl enable gui/501/com.nexus.service`, then `nx daemon service uninstall --autostart`" in actions[0]
             asked.assert_called_once()
             uninstall.assert_not_called()
             install.assert_not_called()

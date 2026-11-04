@@ -839,9 +839,11 @@ def _migrate_legacy_collections(
                         "different embedding model than the one the indexer "
                         "writes; rename never re-embeds, so it is kept under "
                         "its legacy name and indexed there. To move it, "
-                        f"re-index it from source (nx collection reindex {legacy}), "
-                        f"or re-embed it to the write model (nx collection re-embed {legacy} "
-                        f"--to {conformant_name.embedding_model}, a job on the local engine), or "
+                        + (f"re-index it from source (nx collection reindex {legacy}), or "
+                           if ct != "code" else "re-index it from source (nx index repo), or ")
+                        + f"re-embed it to the write model (nx collection re-embed {legacy} "
+                        f"--to {conformant_name.embedding_model} plans it; add --no-dry-run --yes "
+                        "to run it as a job on the local engine), or "
                         "rename it to a name carrying its row's own model "
                         "token, which the indexer does not then write to."
                     ),

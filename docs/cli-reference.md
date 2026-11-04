@@ -3177,8 +3177,8 @@ a voyage-shaped value and configure a key (`nx init` then keeps that value) —
 ```
 nx config set local.embed_model voyage-code-3
 nx config set voyage_api_key <key>
-nx daemon service stop                               # then start it again, to
-nx daemon service start                              # re-plumb the key into the engine
+nx daemon service stop                               # restart the service so the
+nx daemon service start                              # engine reads the new key
 ```
 
 The restart (nx daemon service stop, then nx daemon service start) is needed because the engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
@@ -5122,7 +5122,7 @@ needs_sam: none
 
 A `#`, `##` or `###` heading starts a thread; fields before any heading belong to a thread named for the session. Fields are `key: value`; `-`, space and `_` in a key are the same (`needs-sam`, `needs sam`, `Needs_Sam`), and a line that fits nothing is kept as a note. A line whose key mentions "sam" or "needs" is shown as an ask whatever its spelling. `session:` and `updated:` lines are ignored (the entry's first line, `session: <session id>`, is the key the compaction-checkpoint hook finds the entry by; the board does not show it): a session's age is the T2 entry's own write time, which every `memory_put` refreshes. The headline says "Nothing needs you" only when both sources were read and at least one session has reported; with a source down it says "At least N things need you" or "Can't tell what needs you right now". "Needs you" comes first: thread asks, then the `needs-sam` beads (a thread that lists a bead's id in `ref:` is shown on that bead's row, not twice). Below it are the session cards, newest first; a session whose entry is older than 24 hours is greyed with its age. The board prints "As of HH:MM" and reloads itself every 60 seconds.
 
-**Health** (`/health`) shows T1 session leases, MinerU, the catalog cache, the index log, the Dolt log, the aspect queue and the `nx doctor` checks.
+**Health** (`/health`) shows T1 session leases, MinerU, the catalog cache, the index log, the aspect queue and the `nx doctor` checks.
 
 | Flag | Description |
 |------|-------------|

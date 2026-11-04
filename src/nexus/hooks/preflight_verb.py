@@ -178,9 +178,9 @@ def _install_hint(name: str) -> str:
     is_macos = sys.platform == "darwin"
     hints = {
         "nx": {
-            "win32":  "winget install --id astral-sh.uv --scope user && uv tool install conexus --python 3.12",
-            "darwin": "brew install uv && uv tool install conexus --python 3.12",
-            "linux":  "curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool install conexus --python 3.12",
+            "win32":  "`winget install --id astral-sh.uv --scope user`, then `uv tool install conexus --python 3.12`",
+            "darwin": "`brew install uv`, then `uv tool install conexus --python 3.12`",
+            "linux":  "`curl -LsSf https://astral.sh/uv/install.sh | sh`, then `uv tool install conexus --python 3.12`",
         },
         "bd": {
             "win32":  "https://github.com/BeadsProject/beads/releases   (download for your OS)",

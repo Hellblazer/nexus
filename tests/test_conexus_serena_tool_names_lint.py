@@ -8,7 +8,8 @@ use three excluded tools, and ``conexus/registry.yaml`` granted them and an LSP 
 have, so an agent following the skill reached for a tool that is not there.
 
 * Every ``mcp__plugin_sn_serena__<tool>`` in conexus markdown and ``registry.yaml`` is on the exposed list.
-* No excluded tool is named in backticks in a markdown table row, which is where a skill recommends a tool.
+* No excluded tool is named anywhere except on a line that says it is excluded (review r2 widened this from table
+  rows).
 * No JetBrains-only tool is named without its ``jet_brains_`` prefix: ``type_hierarchy``, ``inline_symbol`` and the
   inspection tools exist only as ``jet_brains_*``, so the bare name is a tool in no backend. Review round 1 found
   ``type_hierarchy(...)`` in a skill's code block and in sn's injected SessionStart section, outside the first two
@@ -31,7 +32,6 @@ pytestmark = pytest.mark.lint
 
 _REPO = Path(__file__).resolve().parents[1]
 _FULL_NAME_RE = re.compile(r"mcp__plugin_sn_serena__([a-z][a-z_]*)")
-_BACKTICKED_RE = re.compile(r"`([a-z][a-z_]*)`")
 
 
 _RECORDS = frozenset({"CHANGELOG.md", "PENDING_RELEASE.md"})
@@ -65,15 +65,22 @@ def test_every_full_serena_name_in_conexus_is_exposed() -> None:
     assert not offenders, "\n".join(offenders)
 
 
-def test_no_excluded_serena_tool_is_recommended_in_a_table() -> None:
+#: Words on a line that name an excluded tool AS excluded (or as conditionally present), which is the only way the
+#: plugin text may mention one.
+_EXCLUSION_RE = re.compile(r"exclud|not exposed|call needed|stays available exactly when no project", re.IGNORECASE)
+
+
+def test_no_excluded_serena_tool_is_named_except_as_excluded() -> None:
+    """Review r2: r1 checked table rows only; an excluded name anywhere else told an agent to reach for it."""
     _, _, excluded = parse_snapshot()
     assert "search_for_pattern" in excluded, excluded
+    pattern = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(sorted(excluded)) + r")(?![A-Za-z0-9_])")
     offenders = [
-        f"{path.relative_to(_REPO)}:{lineno}: `{name}`"
-        for path in _conexus_files() if path.suffix == ".md"
+        f"{path.relative_to(_REPO)}:{lineno}: {m.group(1)}"
+        for path in _conexus_files()
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if line.lstrip().startswith("|")
-        for name in _BACKTICKED_RE.findall(line) if name in excluded
+        if not _EXCLUSION_RE.search(line)
+        for m in pattern.finditer(line)
     ]
     assert not offenders, "\n".join(offenders)
 

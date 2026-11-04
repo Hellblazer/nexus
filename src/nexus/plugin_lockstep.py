@@ -565,8 +565,8 @@ def render(report: LockstepReport, echo: Callable[[str], Any]) -> None:
                 echo(f"Plugin update: {o.plugin_id} {o.installed}: picked up a plugin-only release ({o.detail})")
             case "ref_check_failed":
                 echo(f"Plugin update: {o.plugin_id} {o.installed}: a plugin-only release exists but reinstall "
-                     f"failed: {o.detail}. Run: claude plugin uninstall {o.plugin_id} -s {o.scope} -y "
-                     f"&& claude plugin install {o.plugin_id} -s {o.scope} -y")
+                     f"failed: {o.detail}. Run: `claude plugin uninstall {o.plugin_id} -s {o.scope} -y`, "
+                     f"then `claude plugin install {o.plugin_id} -s {o.scope} -y`")
             case _:
                 echo(f"Plugin update: {o.plugin_id} {o.installed} still behind conexus {report.wheel}: {o.detail}. "
                      f"Run: claude plugin update {o.plugin_id} -s {o.scope} -y")

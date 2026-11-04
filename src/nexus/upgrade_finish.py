@@ -3087,7 +3087,7 @@ def converge_service_autostart_unit(
         return [
             f"NOTE: the storage-service autostart unit at {dest} is current "
             f"but not registered for login ({activation.detail}). Not "
-            f"touching it here -- run `{activation.remedy}` to "
+            f"touching it here -- run {activation.remedy} to "
             "re-register it, then `nx doctor` to confirm."
         ]
 

@@ -6565,8 +6565,8 @@ def _check_service_autostart_drift() -> list[HealthResult]:
                         "start at login here until one exists"
                     ),
                     fix_suggestions=[
-                        "nx daemon service uninstall --autostart, then nx daemon "
-                        "service install --autostart  # once a service manager is available",
+                        "`nx daemon service uninstall --autostart`, then `nx daemon "
+                        "service install --autostart`  # once a service manager is available",
                     ],
                 )]
             case ActivationState.UNREACHABLE | _:

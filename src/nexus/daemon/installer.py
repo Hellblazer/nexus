@@ -325,7 +325,7 @@ def retarget_windows_task(pythonw: str) -> list[str]:
         ]
     probe = autostart_activation_state(dest, tier="service")
     if probe.state is not ActivationState.ACTIVE:
-        hint = f"; to use it again, `{probe.remedy}`" if probe.remedy else ""
+        hint = f"; to use it again, {probe.remedy}" if probe.remedy else ""
         return [
             f"the {name} logon task was not repointed at {pythonw}: {probe.detail}{hint}, "
             f"then {remedy}"
@@ -725,7 +725,18 @@ _MANAGER_ABSOLUTE_PATHS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-REINSTALL_REMEDY = "nx daemon service uninstall --autostart, then nx daemon service install --autostart"
+#: The re-registration, as the commands to run in order. A remedy names each command in its own backticks joined
+#: by ", then " (nx_standin.instructions does the same): one span holding two commands pastes as one broken call, and
+#: "a && b" is rejected by Windows PowerShell 5.1.
+REINSTALL_STEPS: tuple[str, ...] = ("nx daemon service uninstall --autostart", "nx daemon service install --autostart")
+
+
+def render_steps(steps: tuple[str, ...]) -> str:
+    """``a``, then ``b``: each command in its own backticks, in order."""
+    return ", then ".join(f"`{step}`" for step in steps)
+
+
+REINSTALL_REMEDY: str = render_steps(REINSTALL_STEPS)
 
 #: ``systemctl is-enabled`` words that mean "the unit will not start at
 #: login" (a positive answer, as opposed to a bus failure).
@@ -1022,7 +1033,7 @@ def autostart_activation_state(dest: Path, *, tier: str) -> ActivationProbe:
             return ActivationProbe(
                 ActivationState.NOT_ACTIVE,
                 f"`{shown}` reports {label} disabled",
-                remedy=f"launchctl enable gui/{os.getuid()}/{label} && {REINSTALL_REMEDY}",
+                remedy=render_steps((f"launchctl enable gui/{os.getuid()}/{label}", *REINSTALL_STEPS)),
             )
         if token in _LAUNCHD_ENABLED_TOKENS:
             return ActivationProbe(ActivationState.ACTIVE)
@@ -1339,7 +1350,7 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
             # The manager had already said why (a disabled launchd label
             # refuses bootstrap); the failing path names the same remedy
             # the doctor row and converge do.
-            msg += f" -- {probe.detail}; run `{probe.remedy}`"
+            msg += f" -- {probe.detail}; run {probe.remedy}"
         if not force:
             raise ActivationError(msg)
         _log.warning(f"{tier}_install_activation_failed", dest=str(dest), returncode=result.returncode)

@@ -13,7 +13,7 @@ Each level is deep-merged, with higher-priority values winning.
 
 ## Local Mode
 
-Nexus auto-detects local mode when cloud credentials are absent. The recommended setup is `uv tool install conexus --python 3.12 && nx init`: `nx init` provisions the local service stack and sets its embedder to bge-768 by default, fetching the ONNX the Java service reads (see [nx init](cli-reference.md#nx-init)). The service can be switched to embed with Voyage instead — see [CLI reference § Local mode with Voyage](cli-reference.md#nx-init). It does **not** add the `[local]` extra — the RDR-144 embedder picker that did was removed at RDR-174 P1.3. Request the extra at install time instead, with `uv tool install "conexus[local]" --python 3.12`; `[local]` adds the Python-side bge-768 embedder used by the non-service local paths. In the default service mode the service embeds server-side (bge-768 by default) and the client names collections from the service's token, so a plain `conexus` install searches with bge-768 too. Upgrade with [`nx self install`](cli-reference.md#nx-self-install), which carries the extras recorded in the install receipt into the new generation; `uv tool upgrade conexus` and `uv tool install --reinstall conexus` do not touch a generation install.
+Nexus auto-detects local mode when cloud credentials are absent. The recommended setup is `uv tool install conexus --python 3.12`, then `nx init`: `nx init` provisions the local service stack and sets its embedder to bge-768 by default, fetching the ONNX the Java service reads (see [nx init](cli-reference.md#nx-init)). The service can be switched to embed with Voyage instead — see [CLI reference § Local mode with Voyage](cli-reference.md#nx-init). It does **not** add the `[local]` extra — the RDR-144 embedder picker that did was removed at RDR-174 P1.3. Request the extra at install time instead, with `uv tool install "conexus[local]" --python 3.12`; `[local]` adds the Python-side bge-768 embedder used by the non-service local paths. In the default service mode the service embeds server-side (bge-768 by default) and the client names collections from the service's token, so a plain `conexus` install searches with bge-768 too. Upgrade with [`nx self install`](cli-reference.md#nx-self-install), which carries the extras recorded in the install receipt into the new generation; `uv tool upgrade conexus` and `uv tool install --reinstall conexus` do not touch a generation install.
 
 | Env var | Default | Description |
 |---|---|---|
@@ -516,7 +516,6 @@ Central configuration: `src/nexus/logging_setup.py` — `configure_logging(mode,
 | File | Writer | Format |
 |---|---|---|
 | `~/.config/nexus/index.log` | Git post-commit hook (`nx index repo`) | Unstructured, ~60 MB observed |
-| `~/.config/nexus/dolt-server.log` | Dolt server process | Dolt native format |
 | `~/.config/nexus/logs/mcp.log` | MCP servers (via `logging_setup`) | `%(asctime)s %(name)s %(levelname)s %(message)s` |
 | `~/.config/nexus/logs/console.log` | Console server (via `logging_setup`) | Same as above |
 

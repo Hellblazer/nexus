@@ -10,10 +10,12 @@ which exist, and an upgrade skill that called three removed primitives "callable
 
 Scope, all resolved against the live Click tree on the FULL verb path:
 
-* Text: every ``.md`` under ``conexus/`` and ``sn/`` (prose, inline code and every fence alike) and every ``.md``,
-  ``.html`` and ``.txt`` under ``src/nexus``. ``CHANGELOG.md`` and ``PENDING_RELEASE.md`` are left out: they are
+* Text: every ``.md`` under ``conexus/`` and ``sn/`` (prose, inline code and every fence alike), every ``.md``,
+  ``.html`` and ``.txt`` under ``src/nexus``, ``conexus/registry.yaml``, the plan library YAML, the mcpb manifest and
+  both ``plugin.json`` files. ``CHANGELOG.md`` and ``PENDING_RELEASE.md`` are left out: they are
   change records and name removed verbs as history.
-* Python under ``src/nexus`` and ``conexus/hooks``: every string literal that is not a docstring, plus the docstring
+* Python under ``src/nexus``, ``conexus/hooks``, ``conexus/launch``, ``conexus/mcp``, ``mcpb/src`` and
+  ``sn/hooks/scripts``: every string literal that is not a docstring, plus the docstring
   of every Click command or group (its ``--help`` text).
 
 ``nx`` is also a noun in prose ("nx not found", "this nx cannot read", "the nx process"). A word after ``nx`` that is
@@ -39,8 +41,11 @@ from tests.test_release_artifact_verb_rot import REPO_ROOT, _click_tree
 
 pytestmark = pytest.mark.lint
 
-_TEXT_GLOBS = ("conexus/**/*.md", "sn/**/*.md", "src/nexus/**/*.md", "src/nexus/**/*.html", "src/nexus/**/*.txt")
-_PYTHON_GLOBS = ("src/nexus/**/*.py", "conexus/hooks/**/*.py")
+_TEXT_GLOBS = ("conexus/**/*.md", "sn/**/*.md", "src/nexus/**/*.md", "src/nexus/**/*.html", "src/nexus/**/*.txt",
+               "conexus/registry.yaml", "conexus/plans/**/*.yml", "conexus/plans/**/*.yaml", "mcpb/manifest.json",
+               "conexus/.claude-plugin/plugin.json", "sn/.claude-plugin/plugin.json")
+_PYTHON_GLOBS = ("src/nexus/**/*.py", "conexus/hooks/**/*.py", "conexus/launch/**/*.py", "conexus/mcp/**/*.py",
+                 "mcpb/src/**/*.py", "sn/hooks/scripts/**/*.py")
 _RECORDS = frozenset({"CHANGELOG.md", "PENDING_RELEASE.md"})
 _VERB_RE = re.compile(r"\bnx\s+([a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*){0,3})")
 
@@ -50,29 +55,38 @@ _PROSE_WORDS: frozenset[str] = frozenset("""
     a already an and are as at be been builds call can cannot client code command commands configuration could
     creates did does effort entry for from has have health in is it itself log looks makes manages may must never
     not of on option or parses path pins process quietly reads restriction running runs ships should spawn
-    subcommand that the then this tier to tools unreachable until uses via was when which will with would
+    subcommand that the then this tier to tools unreachable until uses via was when which will with would you
 """.split())
 
 #: (relative path, dead verb path, a fragment of the mention text) -> why the mention is deliberate.
 _ALLOWLIST: dict[tuple[str, str, str], str] = {
-    ("conexus/skills/upgrade/SKILL.md", "guided-upgrade", "Never run the pin's"): (
+    ("conexus/skills/upgrade/SKILL.md", "guided-upgrade", "Never run the pin's `nx guided-upgrade"): (
         "the 6.18.1 pin's own verb: the step reads that pinned release's source and warns never to run it"
     ),
-    ("src/nexus/commands/hooks.py", "index post-commit", "nx index post-commit"): (
+    ("src/nexus/commands/hooks.py", "index post-commit", 'echo "=== nx index post-commit'): (
         "a log banner in the git hook script; the hook's invocation is `nx index repo`"
     ),
-    ("src/nexus/doc/footnote_converter.py", "catalog tumbler", "nx catalog tumbler"): (
-        "the footnote text format 'nx catalog tumbler `1.2`' the converter writes and parses, not a command"
+    ("src/nexus/doc/footnote_converter.py", "catalog tumbler", "]: nx catalog tumbler `"): (
+        "the footnote text format 'nx catalog tumbler `1.2`' the converter writes, not a command"
     ),
-    ("src/nexus/upgrade_finish.py", "daemon t2", "daemon t2"): (
-        "names the retired `nx daemon t2 start` a stale autostart unit still fires, telling the user to delete it"
+    ("src/nexus/doc/footnote_converter.py", "catalog tumbler", r"\]:\s*nx catalog tumbler"): (
+        "the regex that parses that footnote format back"
     ),
-    ("src/nexus/health.py", "daemon t2", "daemon t2"): (
+    ("src/nexus/upgrade_finish.py", "daemon t2", "it fires a `nx daemon t2 start` that no longer exists"): (
+        "names the retired verb a stale autostart unit still fires, telling the user to delete the unit"
+    ),
+    ("src/nexus/health.py", "daemon t2", "immediately-failing `nx daemon t2 start`"): (
         "the same retired T2 daemon autostart unit, named so the user can delete it"
     ),
-    ("src/nexus/mcp_infra.py", "hooks auto-approved", "hooks auto-approved"): (
+    ("src/nexus/mcp_infra.py", "hooks auto-approved", "v4.34.x nx hooks auto-approved every Bash command"): (
         "names the retired v4.34.x hook a stale plugin still runs, so the user can uninstall it"
     ),
+    ("src/nexus/daemon/AGENTS.md", "entry", "an nx entry point stands directly before"): "'nx entry point': a noun",
+    ("src/nexus/daemon/CLAUDE.md", "entry", "an nx entry point stands directly before"): "the same file (a symlink)",
+    ("src/nexus/_session_end_launcher.py", "tier", "nx tier writes"): "'nx tier writes': a noun phrase",
+    ("src/nexus/commands/command_context.py", "option", "nx option parsing"): "'nx option parsing': a noun phrase",
+    ("src/nexus/operators/dispatch.py", "tools", "files and nx tools through it"): "'nx tools': a noun",
+    ("src/nexus/pdf_stack.py", "pins", "this nx pins carries"): "'this nx pins': nx as the subject of 'pins'",
 }
 
 
@@ -84,10 +98,23 @@ class Mention:
     text: str
 
 
+#: Prose words that are also nouns a dead verb could be named for ("nx health", "nx log tail"): one of these reads as
+#: prose only when no word follows it or the next word is prose too ("nx log is", "the nx process (or").
+_NOUNS: frozenset[str] = frozenset(
+    "client code command commands configuration effort entry health log option path pins process restriction "
+    "subcommand tier tools".split())
+
+
 def _dead_path(words: list[str], tree: dict[str, click.Command]) -> str | None:
     """The verb path up to the first word that is not a command, or None when the path resolves (or names nothing)."""
+    if words[0] in _NOUNS and len(words) > 1 and words[1] not in _PROSE_WORDS:
+        return words[0] if words[0] not in tree else _dead_path_from(words, tree)
     if words[0] in _PROSE_WORDS:
         return None
+    return _dead_path_from(words, tree)
+
+
+def _dead_path_from(words: list[str], tree: dict[str, click.Command]) -> str | None:
     if words[0] not in tree:
         return words[0]
     cmd: click.Command = tree[words[0]]
@@ -181,7 +208,7 @@ def test_plugin_and_package_text_names_only_live_verbs() -> None:
     files = _files(_TEXT_GLOBS)
     assert len(files) > 40, f"only {len(files)} text files found"
     sweep = _text_mentions(_click_tree(), files, REPO_ROOT)
-    assert sweep.examined > 300, sweep.examined  # 376 at nexus-pplwc
+    assert sweep.examined > 300, sweep.examined  # 347 at nexus-pplwc r2
     offenders = _offenders(sweep.mentions)
     assert not offenders, "\n".join(offenders)
 
@@ -190,7 +217,7 @@ def test_user_facing_python_strings_name_only_live_verbs() -> None:
     files = _files(_PYTHON_GLOBS)
     assert len(files) > 200, f"only {len(files)} source files found"
     sweep = _python_mentions(_click_tree(), files, REPO_ROOT)
-    assert sweep.examined > 1000, sweep.examined  # 1385 at nexus-pplwc
+    assert sweep.examined > 1000, sweep.examined  # 1409 at nexus-pplwc r2
     offenders = _offenders(sweep.mentions)
     assert not offenders, "\n".join(offenders)
 
@@ -204,6 +231,10 @@ def test_the_resolver_reads_paths_and_prose() -> None:
     assert _dead_path(["is", "not", "running"], tree) is None
     assert _dead_path(["index", "is", "suspended"], tree) is None
     assert _dead_path(["store", "via", "the"], tree) is None
+    assert _dead_path(["log", "tail"], tree) == "log"
+    assert _dead_path(["tools", "list"], tree) == "tools"
+    assert _dead_path(["process", "or", "until"], tree) is None
+    assert _dead_path(["health"], tree) is None
 
 
 def test_allowlist_entries_still_match_a_mention() -> None:
@@ -257,13 +288,21 @@ def test_the_production_text_sweep_catches_planted_rot(tmp_path: Path) -> None:
     assert sweep.examined == 5
 
 
-#: "a && nx b" in a printed remedy: Windows PowerShell 5.1 (the default shell on Windows 10 and 11) rejects "&&", so
-#: a user pasting it gets a parse error. Remedies say "a, then b" instead. A macOS-only launchctl line is exempt.
-_AND_CHAIN_RE = re.compile(r"&&\s*`*nx\s")
-#: (file, fragment) -> why the "&&" is the point of the text.
+#: "a && b" in a printed string: Windows PowerShell 5.1 (the default shell on Windows 10 and 11) rejects "&&", so a
+#: user pasting it gets a parse error. Remedies say "`a`, then `b`" instead. Any "&&" in a non-docstring literal (an
+#: f-string part, one half of a concatenation) fails unless it is listed here with the reason it is not a remedy.
 _AND_CHAIN_ALLOWED: dict[tuple[str, str], str] = {
     ("src/nexus/commands/t3.py", "--dry-run && nx t3 gc"): (
         "the help shows scripting a dry run whose exit 1 must stop the real run; '&&' is that gate"
+    ),
+    ("src/nexus/commands/hooks.py", "REPO_TOP=\"$(git rev-parse --show-toplevel)\""): (
+        "the body of the git post-commit hook nexus writes; git runs it under sh"
+    ),
+    ("src/nexus/commands/doctor.py", "awk '$2==1 && /multiprocessing/"): (
+        "an awk condition inside a POSIX ps | awk | xargs pipeline, not a command chain"
+    ),
+    ("conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py", "(?:&&|"): (
+        "a regex that splits a shell command line at its separators"
     ),
 }
 
@@ -273,21 +312,34 @@ def _and_chained_remedies(files: Iterable[Path], root: Path) -> list[str]:
     for path in files:
         module = ast.parse(path.read_text(encoding="utf-8"))
         skip = _non_help_docstrings(module)
+        rel = _rel(path, root)
         for node in ast.walk(module):
             if (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in skip
-                    and _AND_CHAIN_RE.search(node.value) and "launchctl" not in node.value
-                    and not any(f == _rel(path, root) and frag in node.value for f, frag in _AND_CHAIN_ALLOWED)):
-                out.append(f"{_rel(path, root)}:{node.lineno}: {node.value.strip()[:100]!r}")
+                    and "&&" in node.value
+                    and not any(f == rel and frag in node.value for f, frag in _AND_CHAIN_ALLOWED)):
+                out.append(f"{rel}:{node.lineno}: {node.value.strip()[:100]!r}")
     return out
 
 
-def test_no_user_facing_remedy_chains_nx_commands_with_and_and() -> None:
+def test_no_user_facing_string_chains_commands_with_and_and() -> None:
     offenders = _and_chained_remedies(_files(_PYTHON_GLOBS), REPO_ROOT)
     assert not offenders, "\n".join(offenders)
 
 
-def test_the_and_chain_check_catches_a_planted_remedy(tmp_path: Path) -> None:
+def test_and_chain_allowlist_entries_still_match() -> None:
+    files = {_rel(p, REPO_ROOT): p for p in _files(_PYTHON_GLOBS)}
+    stale = [k for k in _AND_CHAIN_ALLOWED if k[0] not in files or k[1] not in files[k[0]].read_text(encoding="utf-8")]
+    assert not stale, stale
+
+
+def test_the_and_chain_check_catches_planted_remedies(tmp_path: Path) -> None:
     planted = tmp_path / "planted.py"
-    planted.write_text('R = "restart: `nx daemon service stop && nx daemon service start`"\n'
-                       'OK = "nx daemon service stop, then nx daemon service start"\n', encoding="utf-8")
-    assert len(_and_chained_remedies([planted], tmp_path)) == 1
+    planted.write_text(
+        'A = "restart: `nx daemon service stop && nx daemon service start`"\n'
+        'B = f"run {cmd} && {other}"\n'
+        'C = "nx a && " + "nx b"\n'
+        'D = "uv sync && uv run nx doctor"\n'
+        'E = "launchctl enable gui/1/x && nx daemon service install"\n'
+        'F = "winget install uv && claude plugin install x"\n'
+        'OK = "nx daemon service stop, then nx daemon service start"\n', encoding="utf-8")
+    assert len(_and_chained_remedies([planted], tmp_path)) == 6
