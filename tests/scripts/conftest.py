@@ -50,3 +50,11 @@ def _isolate_wire_contract_ledger(
     monkeypatch.setattr(_wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
 
 
+@pytest.fixture(autouse=True)
+def _restart_prune_never_touches_the_real_tmp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """scripts/claude-restart-sessions prunes old handoff files at write time (nexus-2v7da). Any test here
+    that reaches _roll or main would otherwise prune the operator's real /tmp; point the prune at a scratch
+    dir for every test. A test that sets or clears NX_RESTART_PRUNE_DIR itself still wins."""
+    monkeypatch.setenv("NX_RESTART_PRUNE_DIR", str(tmp_path_factory.mktemp("restart-prune")))

@@ -64,7 +64,9 @@ def test_prune_removes_only_old_files_with_the_exact_handoff_name(crs, tmp_path)
 
 def test_the_seven_day_boundary_is_inclusive_of_the_keeper(crs, tmp_path) -> None:
     """Exactly seven days old is kept; a second more is removed. 6 d and 8 d alone would not pin this."""
-    now = time.time()
+    # Whole seconds: an mtime of now - 7 d is then exact on every filesystem (NTFS stores 100 ns ticks, so a
+    # fractional float could round past the boundary).
+    now = float(int(time.time()))
     exact = _aged(tmp_path / "nexus-continuation-exact.md", 7, now)
     over = _aged(tmp_path / "nexus-continuation-over.md", 7, now)
     os.utime(over, (now - 7 * _DAY - 1, now - 7 * _DAY - 1))
@@ -144,7 +146,12 @@ class TestTheWriteTimeWrapper:
     def test_the_harness_sets_the_override_on_its_roll_command(self) -> None:
         """tests/e2e/restart-sessions/run.py runs the real script; without this its rolls prune real /tmp."""
         harness = (SCRIPT.parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py").read_text(encoding="utf-8")
-        assert "NX_RESTART_PRUNE_DIR=" in harness
+        # In roll_command's code, not merely somewhere in the file (a comment would satisfy a substring grep).
+        import ast  # noqa: PLC0415
+        fn = next(n for n in ast.walk(ast.parse(harness))
+                  if isinstance(n, ast.FunctionDef) and n.name == "roll_command")
+        strings = [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        assert any("NX_RESTART_PRUNE_DIR=" in s for s in strings)
 
 
 def test_the_script_and_command_context_prune_by_the_same_rule(crs) -> None:
