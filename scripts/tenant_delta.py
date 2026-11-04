@@ -10,8 +10,12 @@ and at the merge base with origin/develop, and prints the difference beside the 
 
 Both sides are counted at collection by scripts/_tenant_census_plugin.py, so tests that skip
 at run time cancel out; the base is read from ``git archive`` of the merge base into a
-temporary directory, never a worktree or a checkout. Advisory: exit 0 unless ``--strict`` and
-the branch adds tenant tests, or 2 when the count could not be taken.
+temporary directory, never a worktree or a checkout, and is collected against that tree's own
+``src/`` and files (nexus-l35bq: collected against HEAD's code, a base test that used an API HEAD
+had changed failed to import, and the whole count was lost). A base module that still will not
+collect is named, with its HEAD count, and the others are counted. Advisory: exit 0 unless
+``--strict`` and the branch adds tenant tests, or 2 when the count could not be taken (a HEAD
+module that does not collect, or the budget).
 
     uv run python scripts/tenant_delta.py [--base REF] [--quiet-if-zero] [--strict]
 """
@@ -45,16 +49,35 @@ def changed_test_modules(repo: Path, base: str) -> list[str]:
     )
 
 
+class CollectionFailed(RuntimeError):
+    """Collection under a tree failed; ``reason`` is the first error line pytest printed."""
+
+    def __init__(self, root: Path, returncode: int, output: str) -> None:
+        self.reason = _first_error(output)
+        super().__init__(f"collection under {root} failed (rc {returncode}): {self.reason}")
+
+
+def _first_error(output: str) -> str:
+    """The first line that says what failed (an ``E   `` line, or an exception line), else the tail."""
+    for line in output.splitlines():
+        text = line.strip()
+        if line.startswith("E   ") or (text.split(":", 1)[0].endswith(("Error", "Exception")) and ":" in text):
+            return text.removeprefix("E").strip()[:300]
+    return output.strip()[-300:]
+
+
 def census(root: Path, modules: list[str], *, deadline: float) -> dict[str, int]:
-    """Tenant-minting tests per module, collected under *root* (only modules that exist there),
-    finishing before *deadline* (a time.monotonic() value) or raising."""
+    """Tenant-minting tests per module, collected under *root* (only modules that exist there), against
+    *root*'s own ``src/`` first on the path, finishing before *deadline* (a time.monotonic() value) or
+    raising (CollectionFailed when a module will not collect)."""
     present = [m for m in modules if (root / m).is_file()]
     if not present:
         return {}
     with tempfile.TemporaryDirectory(prefix="tenant-census-") as tmp:
         out = Path(tmp) / "census.json"
+        path = [str(root / "src")] if (root / "src").is_dir() else []
         env = dict(os.environ, TENANT_CENSUS_OUT=str(out), NX_TEST_T2_SUBSTRATE="none", NX_NO_TELEMETRY="1",
-                   PYTHONPATH=os.pathsep.join([str(root), str(root / "scripts"), str(PLUGIN_DIR)]))
+                   PYTHONPATH=os.pathsep.join([*path, str(root), str(root / "scripts"), str(PLUGIN_DIR)]))
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             raise RuntimeError("out of time budget")
@@ -67,18 +90,19 @@ def census(root: Path, modules: list[str], *, deadline: float) -> dict[str, int]
         # rc 0 or 5 (nothing collected) is a census; anything else means a module failed to
         # collect, which would read as zero tenant tests, so the count is refused instead.
         if proc.returncode not in (0, 5) or not out.is_file():
-            raise RuntimeError(f"collection under {root} failed (rc {proc.returncode}): "
-                               f"{(proc.stdout + proc.stderr)[-800:]}")
+            raise CollectionFailed(root, proc.returncode, proc.stdout + proc.stderr)
         return json.loads(out.read_text(encoding="utf-8"))
 
 
-def base_census(repo: Path, base: str, modules: list[str], *, deadline: float) -> dict[str, int]:
-    """The same count at *base*: its tests/, scripts/ and pyproject.toml, unpacked from git archive."""
+def base_census(repo: Path, base: str, modules: list[str], *,
+                deadline: float) -> tuple[dict[str, int], dict[str, str]]:
+    """The same count at *base*, over its whole tree unpacked from git archive (a test may read any file of
+    it while collecting, and imports the base's own src/). Returns the counts and, for each module that will
+    not collect there even alone, the first error line: one such module costs its own count, not all."""
     with tempfile.TemporaryDirectory(prefix="tenant-base-") as tmp:
         root = Path(tmp)
-        present = _git(repo, "ls-tree", "--name-only", base, "--", "tests", "scripts", "pyproject.toml").split()
         archive = subprocess.run(
-            ["git", "-C", str(repo), "archive", "--format=tar", base, *present],
+            ["git", "-C", str(repo), "archive", "--format=tar", base],
             check=True, capture_output=True,
         ).stdout
         tar_path = root / "base.tar"
@@ -86,7 +110,18 @@ def base_census(repo: Path, base: str, modules: list[str], *, deadline: float) -
         with tarfile.open(tar_path) as tar:
             tar.extractall(root, filter="data")
         tar_path.unlink()
-        return census(root, modules, deadline=deadline)
+        try:
+            return census(root, modules, deadline=deadline), {}
+        except CollectionFailed:
+            pass
+        counts: dict[str, int] = {}
+        failed: dict[str, str] = {}
+        for module in modules:
+            try:
+                counts.update(census(root, [module], deadline=deadline))
+            except CollectionFailed as exc:
+                failed[module] = exc.reason
+        return counts, failed
 
 
 def _say(text: str, *, err: bool = False) -> None:
@@ -120,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         deadline = time.monotonic() + args.budget_s
         head = census(repo, modules, deadline=deadline)
-        base = base_census(repo, merge_base, modules, deadline=deadline)
+        base, uncounted = base_census(repo, merge_base, modules, deadline=deadline)
     except subprocess.TimeoutExpired:
         _say(f"tenant delta: not counted, over the {args.budget_s:g} s budget "
              f"({len(modules)} changed test module(s)); run scripts/tenant_delta.py by hand", err=True)
@@ -128,15 +163,18 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
         _say(f"tenant delta: could not count ({str(exc)[:300]})", err=True)
         return 2
-    rows = [(m, base.get(m, 0), head.get(m, 0)) for m in modules]
+    rows = [(m, base.get(m, 0), head.get(m, 0)) for m in modules if m not in uncounted]
     delta = sum(h - b for _m, b, h in rows)
-    if delta == 0 and args.quiet_if_zero:
+    if delta == 0 and not uncounted and args.quiet_if_zero:
         return 0
     for module, before, after in rows:
         if after != before:
             _say(f"  {module}: {before} -> {after} ({after - before:+d})")
+    for module, reason in uncounted.items():
+        _say(f"  {module}: not counted at the merge base, {head.get(module, 0)} at head ({reason})")
     limit = ceiling(repo)
-    _say(f"tenant delta: {delta:+d} test(s) that mint a tenant across {len(modules)} changed module(s); "
+    not_counted = f", {len(uncounted)} not counted at the merge base" if uncounted else ""
+    _say(f"tenant delta: {delta:+d} test(s) that mint a tenant across {len(modules)} changed module(s){not_counted}; "
           f"python_unit ceiling {limit}, tolerance 0 (tests/storage_touch_ceiling.toml)")
     if delta > 0:
         _say("  develop CI's count usually sits at or just under the ceiling, so a rise will likely fail "

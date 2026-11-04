@@ -121,6 +121,50 @@ def test_a_module_that_fails_to_collect_is_refused_not_counted_as_zero(repo: Pat
     assert "could not count" in proc.stderr
 
 
+def test_the_base_side_is_collected_against_the_base_tree_not_head_s(repo: Path) -> None:
+    """nexus-l35bq: the base's tests run against the base's own src/ and see every file of the base tree,
+    so a test that imports base code head has changed, or reads a non-test file while collecting, counts."""
+    _git(repo, "checkout", "-q", "develop")
+    _commit(repo, {
+        "src/pkgx/__init__.py": "def old():\n    return 1\n",
+        "data/golden.yaml": "x: 1\n",
+        "tests/test_d.py": "from pathlib import Path\nimport pytest\nfrom pkgx import old\n\n"
+                           "GOLDEN = (Path(__file__).parents[1] / 'data' / 'golden.yaml').read_text()\n\n"
+                           "@pytest.mark.t2_tenant\ndef test_d():\n    assert old() == 1\n",
+    }, "base with src and data")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "develop")
+    _commit(repo, {
+        "src/pkgx/__init__.py": "def new():\n    return 2\n",
+        "tests/test_d.py": "from pathlib import Path\nimport pytest\nfrom pkgx import new\n\n"
+                           "GOLDEN = (Path(__file__).parents[1] / 'data' / 'golden.yaml').read_text()\n\n"
+                           "@pytest.mark.t2_tenant\ndef test_d():\n    assert new() == 2\n\n"
+                           "@pytest.mark.t2_tenant\ndef test_e():\n    pass\n",
+    }, "head renames old to new")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stderr
+    assert "tests/test_d.py: 1 -> 2 (+1)" in proc.stdout
+
+
+def test_a_module_the_base_cannot_collect_is_named_and_the_rest_still_count(repo: Path) -> None:
+    """A base module that will not collect even against its own tree (a dependency head changed, say)
+    is named with its head count and the reason; the other modules are counted, and the run is advisory."""
+    _git(repo, "checkout", "-q", "develop")
+    _commit(repo, {"tests/test_b.py": "import no_such_module_at_base\n\ndef test_free():\n    pass\n"},
+            "a base module that cannot be collected")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "develop")
+    _commit(repo, {
+        "tests/test_a.py": "import pytest\n\n@pytest.mark.t2_tenant\ndef test_one():\n    pass\n",
+        "tests/test_b.py": "import pytest\n\n@pytest.mark.t2_tenant\ndef test_marked():\n    pass\n",
+    }, "head")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stderr
+    assert "tests/test_a.py: 2 -> 1 (-1)" in proc.stdout
+    assert "tests/test_b.py: not counted at the merge base, 1 at head" in proc.stdout
+    assert "no_such_module_at_base" in proc.stdout
+
+
 def test_a_count_over_its_budget_is_refused_and_says_so(repo: Path) -> None:
     _commit(repo, {"tests/test_b.py": "import pytest\n\n@pytest.mark.t2_tenant\ndef test_m():\n    pass\n"},
             "head")
