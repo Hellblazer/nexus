@@ -168,7 +168,7 @@ privacy policy.
 | Engine `CatalogRepository` | Yes | Document upserts replace `metadata` wholesale at lines 842, 12049 and 12102. `registerDocument` returns the existing tumbler without writing fields when a live row has the same source URI (around line 1131), and a tombstoned source URI gets a new tumbler. `UPDATABLE_DOC_COLUMNS` at line 1894 is a closed whitelist and unknown keys fail with 400. The update route merges `metadata` (`jsonb_concat`, nexus-ke45f). `renameCollection` (line 9697) rewrites `physical_collection` in place. |
 | Engine search functions | Yes | Eight function families return chunk text. The HNSW searches set `hnsw.iterative_scan = strict_order` (vectors-030), so a filter inside the predicate keeps scanning until k rows pass, up to the scan limit. |
 | Python dispatch | Yes | 21 call sites reach `claude_dispatch` or `run_text_sync` (16 in mcp/core.py, 2 taxonomy, 1 bundle, 1 memory rollup, 1 aspect API leg). Two argv sites build `claude -p`: `CliBackend` (dispatch.py:1301) and `_run_claude_isolated` (aspect_extractor.py:2232). |
-| Python `contextvars` | Documented | `asyncio` tasks and `asyncio.to_thread` copy the context; `loop.run_in_executor` and `threading.Thread` do not. The runner's executor path already copies it (runner.py:3341). |
+| Python `contextvars` | Documented | `asyncio` tasks and `asyncio.to_thread` copy the context; `loop.run_in_executor` and `threading.Thread` do not. The runner's executor path copies it (runner.py:3342), but the search fan-out pools in `search_cross_corpus` do not (`nexus_rdr/243-research-14`), so reads take the posture as an explicit argument (Technical Design item 6). |
 | DEVONthink AppleScript | No | The property names for record-level and database-level exclusion in DEVONthink 4 are not confirmed. Assumption A6. |
 
 ### Key Discoveries
@@ -313,11 +313,12 @@ from indexing an excluded record.
   Spike against DEVONthink 4 (`get properties of record`). Phase 3 only;
   phase 1 does not depend on it.
 - **A7:** No code path that reads chunk text for an LLM surface runs on a
-  bare `threading.Thread` or a `run_in_executor` without a copied context.
-  **Status**: Unverified; the one executor path found
-  (runner.py:3341) copies the context. **Method**: Source Search, then a
-  test that runs each registry surface with the scope set and asserts the
-  posture is visible at the read.
+  thread that lacks the caller's context. **Status**: Refuted at d67b81f01
+  (`nexus_rdr/243-research-14`): `search_cross_corpus` fans out on plain
+  thread pools that copy no context (search_engine.py:1854, 1941, 2188,
+  2257, 2293), so a posture read from a ContextVar in a worker would be the
+  default. The design no longer depends on A7: the posture travels as an
+  explicit argument (Technical Design item 6). **Method**: Source Search.
 
 ## Proposed Solution
 
@@ -331,8 +332,9 @@ Three layers, each closing a different hole.
    audited route that the operator calls from the CLI with a reason.
 2. **A scope that every dispatch root asserts.** Code that sends anything
    to an LLM must run inside `nexus.sensitivity.llm_bound(...)`. A dispatch
-   outside the scope raises. Inside the scope, every corpus read asks the
-   engine to exclude sensitive chunks, and document-keyed pipelines check
+   outside the scope raises. Inside the scope, every corpus read passes
+   `sensitivity=exclude` to the engine as an explicit argument (never as
+   thread state), and document-keyed pipelines check
    the document before reading it. A surface someone forgets fails its
    first test run instead of leaking.
 3. **A closed registry with a lint and a canary.** A checked table lists
@@ -402,7 +404,8 @@ filter.
 llm_bound(surface: str) -> ContextManager[None]
     sets a ContextVar posture = "llm_bound" and the surface name
 current_posture() -> Literal["default", "llm_bound"]
-    ContextVar first, then NX_SENSITIVITY_POSTURE in the environment
+    ContextVar first, then NX_SENSITIVITY_POSTURE in the environment;
+    read only on the thread that entered the scope
 assert_llm_bound(root: str) -> None
     raises DispatchOutsideSensitivityScope(root, surface=None)
 class SensitiveDocumentRefused(Exception): tumbler, surface
@@ -411,13 +414,21 @@ class SensitiveDocumentRefused(Exception): tumbler, surface
 `claude_dispatch`, `run_text_sync`, `_run_claude_isolated` and
 `CliBackend` call `assert_llm_bound`. `_build_dispatch_env` always exports
 `NX_SENSITIVITY_POSTURE=llm_bound` to the child. The nx MCP server reads
-the variable at startup and runs every tool inside the scope (A5).
+the variable at startup and runs every tool inside the scope (A5). The
+ContextVar decides the dispatch asserts and the value an entry point passes
+to its reads; no read consults it, because worker threads in the search
+fan-out do not inherit it (A7, refuted).
 
-**6. Reads under the scope.** `HttpVectorClient` search, query, get and
-get-many, `store_get_many`, and the runner's `_hydrate_tumbler_ids` send
-`sensitivity=exclude` when the posture is `llm_bound`. If the engine does
-not advertise the capability, a posture-bound read raises; it never falls
-back to an unfiltered read. Document-keyed pipelines check the catalog row
+**6. Reads under the scope.** The posture reaches a read as an explicit
+argument. `HttpVectorClient` search, query, get and get-many take a
+keyword-only `sensitivity: Literal["exclude", "include"]` with no default,
+so a call site that omits it fails at call time. Each LLM-bound entry point
+reads `current_posture()` once on its own thread and passes the value
+down: `search_cross_corpus` takes `sensitivity` and hands it to every pool
+task as an argument, and `store_get_many` and the runner's
+`_hydrate_tumbler_ids` take it the same way. `exclude` sends
+`sensitivity=exclude`. If the engine does not advertise the capability, an
+`exclude` read raises; it never falls back to an unfiltered read. Document-keyed pipelines check the catalog row
 before they read: aspect enqueue, the worker drain, `extract_aspects`, the
 bib and CrossRef selection, the validation sample frame, taxonomy sample
 names, and `aspect_readers` source reads (disk, DEVONthink, https) under
@@ -575,10 +586,12 @@ does not depend on callers telling the truth.
 
 ### Risks and Mitigations
 
-- **Risk**: A read runs on a thread that did not copy the context, sees the
-  default posture, and returns unfiltered text (A7).
-  **Mitigation**: the default MCP output posture is itself protective
-  (Q1); the canary test covers every registered surface.
+- **Risk**: A read made for an LLM-bound surface passes `include` or
+  reaches the engine without the argument.
+  **Mitigation**: the `sensitivity` keyword has no default, so an omitted
+  argument fails at call time; the posture never rides on thread state
+  (A7, refuted); the canary runs `nx_answer` retrieval over at least two
+  collections, so the search fan-out pools execute.
 - **Risk**: A client sends `sensitivity=exclude` to an engine that ignores
   unknown parameters and returns sensitive rows.
   **Mitigation**: the client checks the capability first and raises when
@@ -606,8 +619,9 @@ does not depend on callers telling the truth.
 
 ### Prerequisites
 
-- [ ] A1, A3, A5 and A7 verified before the phase that depends on each
-  (A1 and A7 before phase 1 closes; A3 and A5 before phase 2 starts).
+- [ ] A1, A3 and A5 verified before the phase that depends on each (A1
+  before phase 1 closes; A3 and A5 before phase 2 starts). A7 is refuted
+  and no longer a prerequisite (Technical Design item 6).
 - [x] Sam's answers to Q1 to Q8: all as recommended (2026-11-03).
 
 ### Minimum Viable Validation
@@ -659,7 +673,9 @@ has been seen to fail with its gate removed.
 
 Engine `sensitivity=exclude` in every search family and in get-by-id
 (a new `vectors-0NN` changeset), the route parity test, the capability
-entry. `HttpVectorClient` posture-driven and fail-closed. Runner and bundle
+entry. `HttpVectorClient` read methods take the explicit, default-less
+`sensitivity` argument and fail closed; `search_cross_corpus` passes it to
+every pool task. Runner and bundle
 hydration refusals. `NX_SENSITIVITY_POSTURE` exported to children and read
 by the nested MCP server. `nx_tidy` prefetch exclusion. The engine release
 that carries the changeset precedes the client release.
@@ -693,8 +709,9 @@ None.
 
 - **Scenario**: Canary over the registry — **Verify**: for each row, the
   canary string is absent from every captured LLM payload and outbound
-  request; the test is parametrized over the table, so a new row brings its
-  own case.
+  request; the corpus spans at least two collections, so the search fan-out
+  pools run; the test is parametrized over the table, so a new row brings
+  its own case.
 - **Scenario**: Registry lint — **Verify**: every call to
   `claude_dispatch` or `run_text_sync`, every `claude -p` argv, and every
   `httpx` request outside the engine-client modules sits in a function the
@@ -725,9 +742,11 @@ None.
   derived from the route table and `pg_proc`, not typed by hand.
 - **Scenario**: Old engine (phase 2) — **Verify**: a posture-bound read
   raises; a default read works.
-- **Scenario**: `nx_answer` over a corpus with a sensitive canary document
-  (phase 2) — **Verify**: the canary is absent from every operator prompt
-  and from the final answer.
+- **Scenario**: `nx_answer` over a corpus of at least two collections with
+  a sensitive canary document (phase 2) — **Verify**: the canary is absent
+  from every operator prompt and from the final answer.
+- **Scenario**: An `HttpVectorClient` read without `sensitivity` (phase 2)
+  — **Verify**: it raises at call time.
 - **Scenario**: Child process with MCP tools (phase 2) — **Verify**: its
   `search` returns no sensitive hits.
 - **Scenario**: Doctor rows on a tenant with no sensitive documents —
