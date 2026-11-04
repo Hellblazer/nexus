@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from nexus.doc_indexer import _sha256
+
 pytestmark = pytest.mark.lint
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "nexus"
@@ -225,8 +227,6 @@ def test_sha256_is_defined_once_and_hashes_the_file(tmp_path: Path) -> None:
     defs = [(p, n) for p, tree in _modules() for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_sha256"]
     assert [p.name for p, _ in defs] == ["doc_indexer.py"], defs
-    from nexus.doc_indexer import _sha256
-
     sample = tmp_path / "sample.pdf"
     sample.write_bytes(b"%PDF-1.7\n" + bytes(range(256)) * 300)
     assert _sha256(sample) == hashlib.sha256(sample.read_bytes()).hexdigest()

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.health import PG_VERSION_FLOOR, _check_local_pg_version
+from nexus.health import PG_VERSION_FLOOR, _check_local_pg_version, run_health_checks
 
 _REPO = Path(__file__).resolve().parents[1]
 _JAVA_FLOOR = (_REPO / "service" / "src" / "main" / "java" / "dev" / "nexus"
@@ -88,9 +88,7 @@ def test_a_leftover_directory_with_no_cluster_in_use_has_no_row(tmp_path: Path) 
 
 
 def test_the_row_is_registered_in_the_doctor_run() -> None:
-    import nexus.health as h
-
-    assert "_check_local_pg_version()" in inspect.getsource(h.run_health_checks)
+    assert "_check_local_pg_version()" in inspect.getsource(run_health_checks)
 
 
 def test_the_runbook_s_initdb_options_are_the_ones_nx_provisions_with() -> None:
