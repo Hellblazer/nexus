@@ -8455,25 +8455,66 @@ public final class CatalogRepository {
         });
     }
 
-    /** A chunk row's {@code indexed_at} text with an explicit offset ({@code Z}, {@code +05:30}, {@code -0800}). */
+    /**
+     * A chunk row's {@code indexed_at} text with an explicit offset ({@code Z}, {@code +05:30}, {@code -0800}).
+     * PYTHON TWIN: {@code nexus.catalog.note_ttl.parse_iso} ({@code datetime.fromisoformat}), which the rung's scan
+     * reads the stamp with; this is the subset of its forms that PostgreSQL reads the same way. A stamp outside it
+     * is counted, never judged (see {@link #manifestSectionLabelFillable}).
+     */
     private static final String STAMP_WITH_OFFSET =
         "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$";
 
-    /** A chunk row's {@code indexed_at} text with no offset: read as UTC, as {@code nexus.catalog.note_ttl.parse_iso} does. */
+    /**
+     * A chunk row's {@code indexed_at} text with no offset: read as UTC, as {@code nexus.catalog.note_ttl.parse_iso} does.
+     * PYTHON TWIN: the same function, see {@link #STAMP_WITH_OFFSET}.
+     */
     private static final String STAMP_NAIVE =
         "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$";
 
-    /** The per-chunk suffix an indexer appends to a chunk row's title ({@code :12-30}, {@code :chunk-3}, {@code :page-2}). */
+    /**
+     * The per-chunk suffix an indexer appends to a chunk row's title ({@code :12-30}, {@code :chunk-3}, {@code :page-2}).
+     * PYTHON TWIN: {@code _CHUNK_TITLE_SUFFIX} in {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
     private static final String CHUNK_TITLE_SUFFIX = ":(chunk-[0-9]+|[0-9]+-[0-9]+|page-[0-9]+)$";
 
-    /** Everything up to the last slash: what {@code os.path.basename} drops. */
+    /**
+     * Everything up to the last slash: what {@code os.path.basename} drops.
+     * PYTHON TWIN: {@code os.path.basename} in {@code _title_names_document} of
+     * {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
     private static final String FILE_NAME_PREFIX = "^.*/";
 
-    /** {@code nexus.catalog.note_ttl.PUT_SKEW}: how long after a document a chunk row may be stamped and still be its own. */
+    /**
+     * How long after a document a chunk row may be stamped and still be its own.
+     * PYTHON TWIN: {@code nexus.catalog.note_ttl.PUT_SKEW} (five minutes), applied in {@code _labels_from_chunk_row}
+     * of {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
     private static final int SECTION_LABEL_SKEW_SECONDS = 300;
+
+    /**
+     * The {@code metadata.backfill_from} value of a document the orphan backfill minted.
+     * PYTHON TWIN: {@code ORPHAN_BACKFILL_MARKER} in {@code nexus.upgrade_ladder.rungs.manifest_section_labels}.
+     */
+    private static final String ORPHAN_BACKFILL_VALUE = "t3_orphan";
 
     /** The most rows {@link #manifestSectionLabelFillable} counts in one call. */
     public static final int FILLABLE_COUNT_MAX_LIMIT = 10_000;
+
+    /**
+     * The statement bound of {@link #manifestSectionLabelFillable}, in milliseconds (nexus-l4hds): a count that
+     * outlasts it is cancelled by PostgreSQL (SQLSTATE 57014) and the route answers 503. The client's own timeout is
+     * longer, so it reads the engine's answer instead of timing out first.
+     */
+    public static final int FILLABLE_COUNT_TIMEOUT_MS = 10_000;
+
+    /**
+     * System property that replaces {@link #FILLABLE_COUNT_TIMEOUT_MS} (read on every call): the test hook that makes
+     * the timeout path deterministic (a test holds a table lock and sets a short bound).
+     */
+    public static final String FILLABLE_COUNT_TIMEOUT_PROPERTY = "nexus.catalog.fillable_count_timeout_ms";
+
+    /** SQLSTATE query_canceled: the statement bound fired. */
+    public static final String QUERY_CANCELED = "57014";
 
     /**
      * How many manifest rows the manifest-section-labels rung could still fill, counted up to {@code limit}
@@ -8498,10 +8539,16 @@ public final class CatalogRepository {
      *
      * <p>Where SQL cannot say what Python's {@code datetime.fromisoformat} says, the answer errs toward COUNTING
      * the row: a chunk {@code indexed_at} that is not {@code YYYY-MM-DD[T ]HH:MM[:SS[.f]]} with an optional offset
-     * is not judged by the date guard here. A count above what the rung's scan would fill makes the rung run its
-     * scan once and record the completion; a count below it would hide a fill, so the error is never that way.
-     * (A stamp of that shape with an impossible date, month 13, makes PostgreSQL raise and the route answer 500,
-     * which the client reads as "cannot say" and falls back to its scan.)
+     * is not judged by the date guard here, and neither is one of that shape that PostgreSQL cannot read as a
+     * timestamp (month 13, hour 99: {@code pg_input_is_valid} says so without raising). A count above what the
+     * rung's scan would fill makes the rung run its scan once and record the completion; a count below it would hide
+     * a fill, so the error is never that way.
+     *
+     * <p>BOUNDS. The count runs under a {@code statement_timeout} of {@link #FILLABLE_COUNT_TIMEOUT_MS} set inside
+     * its transaction; a count that outlasts it throws a {@code DataAccessException} whose cause chain holds
+     * SQLSTATE {@link #QUERY_CANCELED}, which the route maps to 503. The chunk row is joined on the tenant and on the
+     * manifest row's own {@code embedding_model} (the partition keys of {@code chunks}), so the join prunes to one
+     * partition.
      *
      * <p>One arm names TOMBSTONED holders by design (the deleted-holder exclusion, a NOT EXISTS whose join
      * requires {@code DELETED_AT.isNotNull()}); the row's own document and every other-holder join are live only.
@@ -8514,6 +8561,8 @@ public final class CatalogRepository {
             throw new IllegalArgumentException("limit must be 1.." + FILLABLE_COUNT_MAX_LIMIT);
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
+                FILLABLE_COUNT_TIMEOUT_PROPERTY, FILLABLE_COUNT_TIMEOUT_MS)));
             var row = CATALOG_DOCUMENT_CHUNKS;
             var doc = CATALOG_DOCUMENTS;
             var other = CATALOG_DOCUMENT_CHUNKS.as("other_holder");
@@ -8531,10 +8580,16 @@ public final class CatalogRepository {
 
             // The stamp as an instant, NULL when it is not in a shape this reads (then the row is counted, see above).
             // A stamp with no offset is read as UTC, as parse_iso does.
-            Field<OffsetDateTime> stampAt = DSL.when(chunkStamp.likeRegex(STAMP_WITH_OFFSET),
+            // pg_input_is_valid (PostgreSQL 16+; the floor is 17) says whether the cast would raise, so month 13 is
+            // 'cannot read' (NULL, counted) and never an error for the whole tenant. CASE evaluates in order, so the
+            // cast of an invalid stamp is not reached.
+            Field<String> naiveAsUtc = DSL.concat(chunkStamp, DSL.inline("+00"));
+            Field<OffsetDateTime> stampAt = DSL.when(chunkStamp.likeRegex(STAMP_WITH_OFFSET)
+                        .and(DSL.condition("pg_input_is_valid({0}, 'timestamptz')", chunkStamp)),
                     DSL.cast(chunkStamp, SQLDataType.TIMESTAMPWITHTIMEZONE))
-                .when(chunkStamp.likeRegex(STAMP_NAIVE),
-                    DSL.cast(DSL.concat(chunkStamp, DSL.inline("+00")), SQLDataType.TIMESTAMPWITHTIMEZONE));
+                .when(chunkStamp.likeRegex(STAMP_NAIVE)
+                        .and(DSL.condition("pg_input_is_valid({0}, 'timestamptz')", naiveAsUtc)),
+                    DSL.cast(naiveAsUtc, SQLDataType.TIMESTAMPWITHTIMEZONE));
             // chunk - document <= 5 minutes (note_ttl.PUT_SKEW), compared as epoch seconds.
             Condition withinSkew = DSL.extract(stampAt, DatePart.EPOCH)
                 .minus(DSL.extract(doc.INDEXED_AT, DatePart.EPOCH)).le(DSL.val(SECTION_LABEL_SKEW_SECONDS));
@@ -8558,13 +8613,15 @@ public final class CatalogRepository {
                 .from(row)
                 .join(doc).on(doc.TENANT_ID.eq(row.TENANT_ID).and(doc.TUMBLER.eq(row.DOC_ID)))
                 .join(CHUNKS).on(CHUNKS.TENANT_ID.eq(row.TENANT_ID)
+                    .and(CHUNKS.EMBEDDING_MODEL.eq(row.EMBEDDING_MODEL))
                     .and(CHUNKS.COLLECTION.eq(row.COLLECTION)).and(CHUNKS.CHASH.eq(row.CHASH)))
                 .where(row.TENANT_ID.eq(tenant)
+                    .and(CHUNKS.TENANT_ID.eq(tenant))
                     .and(row.LABELS_WRITTEN.isFalse())
                     .and(row.CHASH.isNotNull())
                     .and(doc.DELETED_AT.isNull())
                     .and(doc.ALIAS_OF.eq(""))
-                    .and(DSL.jsonbGetAttributeAsText(doc.METADATA, "backfill_from").isDistinctFrom("t3_orphan"))
+                    .and(DSL.jsonbGetAttributeAsText(doc.METADATA, "backfill_from").isDistinctFrom(ORPHAN_BACKFILL_VALUE))
                     .and(hasLabelKey)
                     .and(attributable)
                     .and(namesDocument)

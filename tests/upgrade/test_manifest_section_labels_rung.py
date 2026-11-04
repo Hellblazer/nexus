@@ -206,6 +206,7 @@ class World:
 
     def rung(self, **kw) -> ManifestSectionLabelsRung:
         kw.setdefault("record_fn", lambda: None)  # no completion on file: the default would ask the engine's ledger
+        kw.setdefault("stale_zero_fn", lambda: False)  # no deferral on file: the default would read the T2 note
         return ManifestSectionLabelsRung(
             reader_factory=lambda: None if self.no_catalog else self,
             writer_factory=lambda: self, t3_factory=lambda: self, **kw)
@@ -627,7 +628,8 @@ def test_a_reader_with_no_count_read_leaves_detect_to_the_scan(world: World) -> 
                              chash_positions=world.chash_positions,
                              chash_positions_with_tombstoned=world.chash_positions_with_tombstoned, close=lambda: None)
     rung = ManifestSectionLabelsRung(
-        reader_factory=lambda: reader, writer_factory=lambda: world, t3_factory=lambda: world, record_fn=lambda: None)
+        reader_factory=lambda: reader, writer_factory=lambda: world, t3_factory=lambda: world, record_fn=lambda: None,
+        stale_zero_fn=lambda: False)
 
     status = rung.detect()
 
@@ -711,6 +713,86 @@ def test_an_engine_zero_over_a_fillable_row_defers_the_walk_and_the_next_walk_co
     world.engine_fillable = 1                            # the engine sees it now
     again, _ = _walk(world)
     assert [r.outcome for r in again.runs] == [RungOutcome.RECORDED]
+
+
+class _MemoryNote:
+    """The deferral log's note store, in memory (what a T2 round trip hands back)."""
+
+    def __init__(self) -> None:
+        self.note: dict | None = None
+
+    def load(self):
+        return self.note
+
+    def save(self, note) -> None:
+        import json
+
+        self.note = json.loads(json.dumps(note))
+
+    def clear(self) -> None:
+        self.note = None
+
+
+def test_an_engine_zero_that_stays_wrong_does_not_hold_the_rung_deferred_for_ever(world: World) -> None:
+    """nexus-l4hds (review r1, S2/S3): the engine counts none for good (a predicate gap) while the scan finds a
+    fillable row. The first walk defers and the deferral log keeps the marker; the next walk's detect does not ask the
+    engine again, scans, and the fill runs and records."""
+    from nexus.upgrade_ladder.deferral_log import DeferralLog
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import stale_zero_recorded
+
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.engine_fillable = 0                            # wrong, and it stays wrong
+    log = DeferralLog(_MemoryNote())
+
+    first, ledger = _walk(world, world.rung(stale_zero_fn=lambda: stale_zero_recorded(log)))
+    assert [r.outcome for r in first.runs] == [RungOutcome.DEFERRED], [(r.outcome, r.detail) for r in first.runs]
+    log.record(first, ledger.completions())              # what the upgrade command does after a walk
+    assert world.appends == [] and world.fillable_reads == 1
+
+    second, ledger = _walk(world, world.rung(stale_zero_fn=lambda: stale_zero_recorded(log)))
+    assert [r.outcome for r in second.runs] == [RungOutcome.RECORDED], [(r.outcome, r.detail) for r in second.runs]
+    assert world.fillable_reads == 1, "the second detect did not ask the engine"
+    assert world.labels("1.1.1") == [(0, "Refs", "references", 9, True)]
+    assert ledger.verified_rungs() == frozenset({RUNG_MANIFEST_SECTION_LABELS})
+
+
+def test_a_deferral_of_another_kind_is_not_a_distrusted_count(world: World) -> None:
+    from nexus.upgrade_ladder.deferral_log import DeferralLog
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import stale_zero_recorded
+    from nexus.upgrade_ladder.runner import LadderRunReport, RungRun
+
+    log = DeferralLog(_MemoryNote())
+    log.record(LadderRunReport((RungRun(RUNG_MANIFEST_SECTION_LABELS, RungOutcome.DEFERRED, detail="the engine refused the write"),), 0), {})
+    assert stale_zero_recorded(log) is False
+    world.doc("1.1.1")
+    world.engine_fillable = 0
+    assert world.rung(stale_zero_fn=lambda: stale_zero_recorded(log)).detect().converged is True
+    assert world.fillable_reads == 1
+
+
+def test_a_distrusted_count_on_a_managed_service_unattended_is_not_applicable_and_reads_nothing_else(world: World) -> None:
+    """The marker stays until an interactive run: an unattended managed run neither asks the engine nor walks."""
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.engine_fillable = 0
+    with _bound_auto():
+        status = world.rung(managed_fn=lambda: True, stale_zero_fn=lambda: True).detect()
+    assert (status.applicable, status.converged) == (False, False)
+    assert "interactive `nx upgrade`" in status.pending_detail
+    assert world.engine_reads() == (0, 0, 0, 0, 0)
+
+
+def test_an_unreadable_deferral_log_leaves_the_engine_count_in_charge(world: World) -> None:
+    def broken() -> bool:
+        raise RuntimeError("t2 down")
+
+    world.doc("1.1.1")
+    world.engine_fillable = 0
+    assert world.rung(stale_zero_fn=broken).detect().converged is True
+    assert world.fillable_reads == 1
 
 
 def test_a_verify_refusal_after_a_scan_that_ran_converge_is_still_a_failure(world: World) -> None:
@@ -883,6 +965,46 @@ def test_a_managed_auto_walk_with_an_engine_zero_and_no_record_defers_and_scans_
     assert "interactive `nx upgrade`" in report.runs[0].detail
     assert world.engine_reads() == (0, 0, 0, 0, 1), "no listing, manifest, owner or chunk read; only detect's one count"
     assert not ledger.verified_rungs()
+
+
+def test_a_managed_auto_walk_with_an_engine_count_above_zero_reports_it_and_fills_nothing(world: World) -> None:
+    """nexus-l4hds review r1 (C1): detect() answers 'pending' from the engine's count on a managed service, so the
+    runner calls converge(). converge is the whole-catalog scan WITH writes (nexus-75w5d forbids it unattended): it
+    is DEFERRED before any reader opens, nothing is listed or written, and no completion is recorded."""
+    from nexus.upgrade_ladder.deadline import Deadline
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    _one_fillable_and_one_newer_row(world)
+    world.engine_fillable = 1
+    ledger = InMemoryCompletionLedger()
+    runner = LadderRunner(
+        LadderRegistry((world.rung(managed_fn=lambda: True),)), ledger,
+        package_version_fn=lambda: "9.9.9", deadline=Deadline(900),
+    )
+
+    with unattended_run():
+        report = runner.run()
+
+    assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED], [(r.outcome, r.detail) for r in report.runs]
+    assert "interactive `nx upgrade`" in report.runs[0].detail
+    assert world.engine_reads() == (0, 0, 0, 0, 1), "no listing, manifest, owner or chunk read; only detect's one count"
+    assert world.appends == [] and world.updates == []
+    assert not ledger.verified_rungs()
+
+
+def test_converge_unattended_on_a_managed_service_opens_no_reader() -> None:
+    from nexus.upgrade_ladder.protocol import ConvergeOutcome
+
+    def no_reader():
+        raise AssertionError("a reader was opened")
+
+    rung = ManifestSectionLabelsRung(
+        reader_factory=no_reader, writer_factory=no_reader, t3_factory=no_reader,
+        record_fn=lambda: None, managed_fn=lambda: True, stale_zero_fn=lambda: False)
+    with _bound_auto():
+        result = rung.converge(Report())
+    assert result.outcome is ConvergeOutcome.DEFERRED
+    assert "interactive `nx upgrade`" in result.detail
 
 
 def test_the_same_walk_interactively_confirms_the_engine_zero_and_records(world: World) -> None:
@@ -1086,7 +1208,7 @@ def test_a_reader_with_no_tombstoned_read_is_not_applicable(world: World) -> Non
                              chash_positions=world.chash_positions, close=lambda: None)
     rung = ManifestSectionLabelsRung(
         reader_factory=lambda: reader, writer_factory=lambda: world, t3_factory=lambda: world,
-        record_fn=lambda: None)
+        record_fn=lambda: None, stale_zero_fn=lambda: False)
 
     assert rung.detect().applicable is False
     assert rung.converge(Report()).outcome is ConvergeOutcome.DEFERRED

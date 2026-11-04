@@ -259,6 +259,12 @@ _find_all_by_file_paths_404_warned: bool = False
 # NOT this fix.
 _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
 
+#: The per-request timeout of ``manifest_section_label_fillable`` (nexus-l4hds), in seconds. The engine bounds the
+#: count itself (``CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS``, 10 s) and answers 503 when it is exceeded, so
+#: this one is longer: the client reads the engine's answer instead of timing out first, and a hung peer is
+#: still cut off well under the 30 s client-wide default.
+_SECTION_LABEL_FILLABLE_TIMEOUT_S = 15.0
+
 #: The engine's caps on the RDR-223 append routes (Phase 1, P1.3/P1.4). Refused here, locally and
 #: before any round trip, so a violation reads as a client bug naming the cap instead of a 400
 #: that arrives after an embed budget was set aside. ``sweep_chashes`` at most this many per
@@ -628,16 +634,25 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # rather than touching ``self._client`` directly, so every call site
     # gets self-heal for free with no signature changes.
 
-    def _get(self, path: str, *, idempotent: bool = True, **params: Any) -> Any:
+    def _get(self, path: str, *, idempotent: bool = True, timeout: float | None = None, **params: Any) -> Any:
         """``idempotent`` (nexus-ll31n sibling, T2 review-wave2-daemon):
         forwarded to the mixin's ``_get`` unchanged — default ``True``
         preserves every existing call site (a GET is ordinarily safe to
-        retry). No current call site passes ``False``; added so this
+        retry). ``manifest_section_label_fillable`` passes ``False``: the
+        request is then sent once (no gateway backoff loop, no
+        read-timeout resend), because a retry of a bounded-cost query
+        that timed out would run it again. Added so this
         override is not the next ``HttpCatalogClient._post``-shaped trap
         (missing the kwarg entirely) the moment one needs to.
+
+        ``timeout`` (nexus-l4hds): the mixin's per-request override,
+        forwarded unchanged; ``None`` (the default) rides the client-wide
+        timeout exactly as before. It is a named keyword, so a query
+        parameter called ``timeout`` can no longer be passed through
+        ``**params`` (none exists).
         """
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
-        return super()._get(f"/v1/catalog{path}", params=filtered, idempotent=idempotent)
+        return super()._get(f"/v1/catalog{path}", params=filtered, idempotent=idempotent, timeout=timeout)
 
     def _post(
         self,
@@ -1030,13 +1045,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         Returns ``{"fillable": n, "limit": limit, "capped": bool}``; ``capped`` means the count stopped at
         *limit*, so ``fillable`` is then "at least". ``None`` is "cannot say", never "none": the engine predates
-        the route (404), failed, or sent a body without a usable ``fillable``. A caller that needs the answer
+        the route (404), failed (a 503 is the engine's own statement timeout), or sent a body without a usable
+        ``fillable``. The request is sent once, with a 15 s timeout. A caller that needs the answer
         falls back to its own scan on ``None``. The engine's predicate is the rung's, with one deliberate
         difference in the safe direction (``CatalogRepository.manifestSectionLabelFillable``): it may count a row
         the scan would leave legacy, never the reverse.
         """
         try:
-            result = self._get("/manifest/section_label_fillable", limit=limit)
+            # One shot with a bound of its own (nexus-l4hds): the engine cancels the count at its statement bound
+            # (10 s) and answers 503, which is read below as "cannot say"; a gateway or read-timeout resend would
+            # run the same query again. idempotent=False is the mixin's single-attempt mode.
+            result = self._get(
+                "/manifest/section_label_fillable", idempotent=False,
+                timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             _log.info("http_catalog_client.manifest_section_label_fillable_unavailable", status=status)

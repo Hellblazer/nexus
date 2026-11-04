@@ -172,6 +172,44 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     c_other = seed_chunk(tenant, coll, "other 1nrcu", {**labelled, "title": "elsewhere/x.md:chunk-1"})
     late, other = doc("late", [(c_late, 0)]), doc("other", [(c_other, 0)])
 
+    # nexus-l4hds (review r1): the rows where the engine's SQL and the scan's Python could part. Each is a legacy
+    # row with label keys whose chunk row differs only in its ``indexed_at`` (or in the document it belongs to), and
+    # the document is stamped now. ``AGREE`` rows are counted the same by both sides; ``ENGINE_ONLY`` rows are the
+    # deliberate over-count (the engine cannot read the stamp, so it counts the row; Python can, or cannot, and the
+    # scan then leaves it legacy). The engine must never count LESS than the scan.
+    def stamped(stamp: str) -> dict:
+        return {**labelled, "indexed_at": stamp}
+
+    stamp_rows = {  # name -> (chunk stamp, counted by the scan?, counted by the engine?)
+        "off_early": ("2025-12-31T20:00:00-05:00", True, True),     # an offset stamp, read as an instant: early
+        "off_late": ("2099-01-01T05:00:00+05:00", False, False),    # the same form, past the five minutes
+        "naive_early": ("2026-01-01T00:00:00.5", True, True),       # no offset: UTC, early
+        "naive_late": ("2099-01-01T00:00:00", False, False),        # no offset, late
+        "date_early": ("2026-01-01", True, True),                   # date only: the scan parses it; the engine cannot read it and counts it
+        "date_late": ("2099-01-01", False, True),                   # date only and late: the scan refuses it; the engine counts it
+        "garbage": ("not-a-date", False, True),                     # unreadable to both: the scan refuses; the engine counts
+        "impossible": ("2026-13-01T00:00:00+00:00", False, True),   # month 13: PostgreSQL would raise; counted, not an error
+    }
+    stamp_docs = {
+        name: doc(name, [(seed_chunk(tenant, coll, f"{name} l4hds", stamped(chunk_stamp)), 0)])
+        for name, (chunk_stamp, _scan, _engine) in stamp_rows.items()
+    }
+    # an alias document: the scan skips it entirely; the engine excludes it by alias_of
+    c_alias = seed_chunk(tenant, coll, "alias l4hds", labelled)
+    alias = doc("alias", [(c_alias, 0)])
+    cat.update(alias, alias_of=single)
+    # a document the orphan backfill minted: legacy and counted apart by the scan, never fillable; excluded by the engine
+    c_orphan = seed_chunk(tenant, coll, "orphan l4hds", labelled)
+    orphan = doc("orphan", [(c_orphan, 0)])
+    psql(
+        "UPDATE nexus.catalog_documents SET metadata = '{\"backfill_from\": \"t3_orphan\"}'::jsonb "
+        f"WHERE tenant_id = {lit(tenant)} AND tumbler = {lit(orphan)}"
+    )
+    scan_expected = 1 + sum(1 for _s, in_scan, _e in stamp_rows.values() if in_scan)
+    engine_expected = 1 + sum(1 for _s, _sc, in_engine in stamp_rows.values() if in_engine)
+    engine_only = engine_expected - scan_expected
+    assert (scan_expected, engine_expected, engine_only) == (4, 7, 3), "the table above is the expectation"
+
     before = {t: cat.get_manifest(t) for t in (single, shared_a, shared_b, repeat, written, bare, ghost_live, late, other)}
     assert [r.labels_written for r in before[written]] == [True], "control: an empty-labelled row is written"
     assert all(not r.labels_written for t in (single, shared_a, shared_b, repeat, bare, ghost_live, late, other)
@@ -182,14 +220,20 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     rung = rung_cls(record_fn=lambda: None)
     status = rung.detect()
     assert status.applicable and not status.converged
-    assert status.pending_detail.startswith("1 legacy manifest row(s) can take"), status.pending_detail
-    # nexus-l4hds: the engine's one-query count and the rung's own scan agree over every guard above
-    # (shared, repeated, written, no label keys, tombstoned co-owner, late chunk, other title: 1 fillable of
-    # legacy_note_rows + 1 + 2 + 2 + 1 + 1 + 1 + 1 legacy rows).
-    assert cat.manifest_section_label_fillable() == {"fillable": 1, "limit": 1000, "capped": False}
+    assert status.pending_detail.startswith(f"{engine_expected} legacy manifest row(s) can take"), status.pending_detail
+    # nexus-l4hds: the engine's one-query count and the rung's own scan, over every guard above (shared, repeated,
+    # written, no label keys, tombstoned co-owner, late chunk, other title) and every stamp form. They agree on all
+    # but the rows the engine cannot read the stamp of; there it counts more, never less.
+    engine = cat.manifest_section_label_fillable()
+    assert engine == {"fillable": engine_expected, "limit": 1000, "capped": False}
     scanned = rung._dry_run()
-    assert scanned is not None and scanned.fillable == 1
-    assert scanned.legacy == legacy_note_rows + 1 + 2 + 2 + 1 + 1 + 1 + 1, scanned.summary()
+    assert scanned is not None and scanned.fillable == scan_expected
+    assert engine["fillable"] >= scanned.fillable, "the engine never counts less than the scan"
+    assert engine["fillable"] - scanned.fillable == engine_only, "and the surplus is exactly the unreadable stamps"
+    # legacy rows the scan sees: the note rows, single, shared x2, repeat x2, bare, ghost, late, other, the eight stamp
+    # rows and the orphan-minted one (counted apart). The alias document is not walked at all.
+    assert scanned.legacy == legacy_note_rows + 1 + 2 + 2 + 1 + 1 + 1 + 1 + len(stamp_rows) + 1, scanned.summary()
+    assert scanned.orphan_minted == 1, scanned.summary()
     assert [r.labels_written for r in cat.get_manifest(single)] == [False], "detect writes nothing"
 
     class _Report:
@@ -206,12 +250,17 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
         "only the chash, labels and flag are written; the rest of the row is the engine's own"
     for t in (shared_a, shared_b, repeat, bare, ghost_live, late, other):
         assert [r.labels_written for r in cat.get_manifest(t)] == [False] * len(before[t]), t
+    for name, (_stamp, in_scan, _in_engine) in stamp_rows.items():
+        assert [r.labels_written for r in cat.get_manifest(stamp_docs[name])] == [in_scan], name
+    for t in (alias, orphan):
+        assert [r.labels_written for r in cat.get_manifest(t)] == [False], "an alias and an orphan-minted document stay legacy"
     assert [(r.section_title, r.section_type, r.labels_written) for r in cat.get_manifest(written)] == [("", "", True)]
     assert {t: cat.resolve(t).indexed_at for t in stamp_before} == stamp_before, (
         "untouched documents are not rewritten, and the filled one's stamp is restored: the engine restamps a "
         "document on every manifest write, which would switch off the chunk-newer guard for its other rows")
-    assert rung.verify() is True and "1 filled this run" in rung.record_detail()
-    assert cat.manifest_section_label_fillable() == {"fillable": 0, "limit": 1000, "capped": False}, "filled: the engine agrees"
+    assert rung.verify() is True and f"{scan_expected} filled this run" in rung.record_detail()
+    assert cat.manifest_section_label_fillable() == {"fillable": engine_only, "limit": 1000, "capped": False}, (
+        "filled: the engine's count falls to the rows it over-counts by design (a stamp it cannot read)")
 
     # a later writer of the shared chunk row no longer decides this row's label
     import nexus.db.http_vector_client as hvc
@@ -225,8 +274,9 @@ def _labels_rung_against_the_engine(tenant, cat, owner, rung_cls, *, legacy_note
     manifests = {t: cat.get_manifest(t) for t in before}
     stamp = cat.resolve(single).indexed_at
     again = rung_cls(record_fn=lambda: None)
-    assert again.detect().converged is True
-    assert again.converge(_Report()).outcome is ConvergeOutcome.COMPLETED
+    assert again.detect().converged is False, "the engine still counts the rows whose stamp it cannot read"
+    assert again.converge(_Report()).outcome is ConvergeOutcome.COMPLETED, "and the scan fills none of them"
+    assert again.verify() is True, "so verify passes and the completion is recorded"
     assert {t: cat.get_manifest(t) for t in before} == manifests
     assert cat.resolve(single).indexed_at == stamp, "a second run sends no write"
 

@@ -389,6 +389,54 @@ class ManifestSectionLabelFillableTest {
         assertThat(fillable()).isEqualTo(1);
     }
 
+    @Test
+    void aStampThatIsNotARealDateIsCounted_andDoesNotFailTheRouteForTheTenant() throws Exception {
+        // The regexes admit month 13 and hour 99; PostgreSQL cannot read them as a timestamp. pg_input_is_valid keeps
+        // the cast from being reached, so the stamp is 'cannot read' (counted), and the route answers for the tenant.
+        String[] stamps = {"2026-13-01T00:00:00+00:00", "2026-10-01T99:00:00", "2026-02-30 12:00:00Z"};
+        for (int i = 0; i < stamps.length; i++) {
+            String d = doc("impossible date " + i);
+            chunk(TENANT, h(60 + i), labelled(stamps[i]));
+            manifest(d, h(60 + i));
+        }
+        String control = doc("control beside impossible dates");
+        chunk(TENANT, h(0xc1), labelled("2026-10-01T11:59:00+00:00"));
+        manifest(control, h(0xc1));
+        assertThat(fillable()).isEqualTo(4);
+    }
+
+    @Test
+    void aStampThatIsNotARealDateDoesNotHideALateRowBesideIt() throws Exception {
+        // The impossible stamp must not poison the rows around it: a late (not fillable) neighbour is still excluded.
+        String bad = doc("impossible date");
+        String late = doc("late neighbour");
+        chunk(TENANT, h(63), labelled("2026-13-45T00:00:00+00:00"));
+        chunk(TENANT, h(64), labelled("2026-10-01T12:05:01+00:00"));
+        manifest(bad, h(63));
+        manifest(late, h(64));
+        assertThat(fillable()).isEqualTo(1);
+    }
+
+    // ── the label keys ──────────────────────────────────────────────────────
+
+    @Test
+    void aLabelKeyHoldingJsonNullIsStillAKey_andIsCounted() throws Exception {
+        // The rung's scan asks whether the key is IN the chunk row's metadata; a stored JSON null is a key. jsonb
+        // '->' gives the jsonb value null (not SQL NULL), where '->>' gives SQL NULL and would undercount.
+        String d = doc("null label");
+        chunk(TENANT, h(65), "{\"section_title\":null,\"indexed_at\":\"2026-10-01T11:59:00+00:00\"}");
+        manifest(d, h(65));
+        assertThat(fillable()).isEqualTo(1);
+    }
+
+    @Test
+    void aLabelKeyHoldingAnEmptyStringIsStillAKey_andIsCounted() throws Exception {
+        String d = doc("empty label");
+        chunk(TENANT, h(66), "{\"section_title\":\"\",\"indexed_at\":\"2026-10-01T11:59:00+00:00\"}");
+        manifest(d, h(66));
+        assertThat(fillable()).isEqualTo(1);
+    }
+
     // ── the title guard ─────────────────────────────────────────────────────
 
     @Test
@@ -473,6 +521,32 @@ class ManifestSectionLabelFillableTest {
     void theDefaultLimitIsOneThousand() throws Exception {
         var body = mapperRead(get(TOKEN, TENANT, "/v1/catalog/manifest/section_label_fillable"));
         assertThat(body).containsEntry("limit", 1000);
+    }
+
+    @Test
+    void aCountThatOutlastsItsStatementBoundAnswers503_andTheNextCountAnswers() throws Exception {
+        // Deterministic: another session holds ACCESS EXCLUSIVE on the manifest table, so the count waits on the lock
+        // until its statement_timeout fires (a lock wait is bounded by statement_timeout too).
+        String d = doc("bounded by time");
+        chunk(TENANT, h(70), labelled("2026-10-01T11:59:00+00:00"));
+        manifest(d, h(70));
+        System.setProperty(dev.nexus.service.db.CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, "300");
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            try (var st = holder.createStatement()) {
+                st.execute("LOCK TABLE nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE");
+            }
+            long t0 = System.nanoTime();
+            var resp = get(TOKEN, TENANT, "/v1/catalog/manifest/section_label_fillable");
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(503);
+            assertThat(mapper.readValue(resp.body(), MAP_T)).containsEntry("reason", "statement_timeout");
+            assertThat(ms).as("answered at the bound, not after the lock was released").isLessThan(5_000);
+            holder.rollback();
+        } finally {
+            System.clearProperty(dev.nexus.service.db.CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY);
+        }
+        assertThat(fillable()).as("the cancelled count left the pool usable").isEqualTo(1);
     }
 
     // ── http ────────────────────────────────────────────────────────────────

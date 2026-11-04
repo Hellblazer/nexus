@@ -13,7 +13,9 @@ The rule: a ``detect()`` whose read cost grows with the catalog or a table, and 
 cheaper to answer from (a completion record, a bounded engine count), does not read in an UNATTENDED run
 (:mod:`nexus.upgrade_ladder.unattended`: ``--auto``, ``NX_UPGRADE_UNATTENDED=1``, the version-transition
 callout) against a managed service. It reports itself NOT APPLICABLE, with a reason naming where the first scan
-happens: an interactive ``nx upgrade``. Interactive ``nx upgrade`` runs and local engines keep their
+happens: an interactive ``nx upgrade``. A bounded engine count lets such a ``detect()`` answer (``manifest-section-labels``,
+nexus-l4hds), but only as a REPORT: the same rung's ``converge()`` is the whole-catalog scan with writes, so it
+checks :func:`refuses_unbounded_read` too and is DEFERRED unattended; an interactive ``nx upgrade`` fills. Interactive ``nx upgrade`` runs and local engines keep their
 walk; ``nx doctor`` runs its sweep as unattended (nexus-mq980) and reports a refused rung as not checked.
 """
 from __future__ import annotations

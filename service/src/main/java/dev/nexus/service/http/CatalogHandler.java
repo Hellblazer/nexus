@@ -3169,6 +3169,15 @@ public final class CatalogHandler implements HttpHandler {
                    "backfillable", report.get("backfillable"))));
     }
 
+    /** True when {@code t} or a cause (depth-bounded) is a {@link java.sql.SQLException} with SQLSTATE {@code state}. */
+    private static boolean hasSqlState(Throwable t, String state) {
+        int depth = 0;
+        for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof java.sql.SQLException sql && state.equals(sql.getSQLState())) return true;
+        }
+        return false;
+    }
+
     /**
      * GET /v1/catalog/manifest/section_label_fillable?limit=N (nexus-l4hds): {@code {fillable, limit, capped}}.
      *
@@ -3176,8 +3185,10 @@ public final class CatalogHandler implements HttpHandler {
      * manifest-section-labels rung could still fill from their chunk row, counted up to {@code limit} (default 1000,
      * 1 to {@link CatalogRepository#FILLABLE_COUNT_MAX_LIMIT}; anything else is a 400); {@code capped} is true when
      * the count stopped at {@code limit}, so {@code fillable} then means "at least". One tenant-scoped read-only
-     * query ({@link CatalogRepository#manifestSectionLabelFillable} has the predicate). A client that gets a 404 is on
-     * an engine before this route and must treat the answer as "cannot say", never as "none".
+     * query ({@link CatalogRepository#manifestSectionLabelFillable} has the predicate), bounded by a statement
+     * timeout: a count that outlasts it answers 503 {@code {"error":..., "reason":"statement_timeout"}}. A client
+     * that gets a 404 is on an engine before this route, and one that gets a 503 is on an engine that could not
+     * count in time; both must treat the answer as "cannot say", never as "none".
      */
     private void handleManifestSectionLabelFillable(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -3193,7 +3204,18 @@ public final class CatalogHandler implements HttpHandler {
                 HttpUtil.send(exchange, 400, "{\"error\":\"limit must be 1.." + CatalogRepository.FILLABLE_COUNT_MAX_LIMIT + "\"}"); return;
             }
         }
-        int fillable = repo.manifestSectionLabelFillable(tenant, limit);
+        int fillable;
+        try {
+            fillable = repo.manifestSectionLabelFillable(tenant, limit);
+        } catch (RuntimeException e) {
+            if (!hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            // The count outlasted its statement bound. The client reads any 503 here as "cannot say" and does not
+            // retry this route (a retry would run the same query again).
+            log.warn("event=catalog_section_label_fillable_timeout tenant={} limit={}", tenant, limit);
+            HttpUtil.send(exchange, 503,
+                "{\"error\":\"section_label_fillable count exceeded its time bound\",\"reason\":\"statement_timeout\"}");
+            return;
+        }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("fillable", fillable, "limit", limit, "capped", fillable >= limit)));
     }

@@ -65,7 +65,9 @@ WHAT IT DOES.
              one-time transition, and rows that stay legacy by design stay legacy until a forced re-index).
              Otherwise ONE bounded engine read (``GET /manifest/section_label_fillable``, nexus-l4hds): the
              count of legacy rows that pass the guards below, tenant-wide, in one query. Zero is converged,
-             more is pending with that count. The engine's predicate is this module's, with one deliberate
+             more is pending with that count. The count is a REPORT, not a licence to fill: an unattended run
+             against a managed service reads it and stops there (converge refuses, see below), and an interactive
+             ``nx upgrade`` does the fill. The engine's predicate is this module's, with one deliberate
              difference in the safe direction (it may count a row the scan would leave legacy, never the
              reverse: a chunk ``indexed_at`` it cannot parse is counted, see
              ``CatalogRepository.manifestSectionLabelFillable``), so a pending answer can be a row the scan then
@@ -82,7 +84,10 @@ WHAT IT DOES.
   converge : the same scan, writing each batch of :data:`DOC_BATCH` documents through
              ``append_manifest_many``, one request per collection per ~50 documents and per 300 rows
              (a document's rows spill into the next request), so the number of writes is bounded by
-             documents / 50 + rows / 300 + collections touched. The
+             documents / 50 + rows / 300 + collections touched. UNATTENDED against a MANAGED service it does
+             nothing: the scan is a walk of the whole catalog, and the engine count that makes detect() answer
+             'pending' there would otherwise start that walk, with writes, at every session start (nexus-75w5d,
+             nexus-l4hds); it is DEFERRED with :data:`INTERACTIVE_REMEDY` before any reader opens. The
              ``nx upgrade --auto`` time limit is honoured between batches (DEFERRED; filled rows drop
              out of the next scan). A write the engine reports as failed is DEFERRED with its count.
   verify   : positive signal only: the whole scan completed and no row is fillable. It never trusts the engine
@@ -91,7 +96,10 @@ WHAT IT DOES.
              row appeared or changed between the two reads (or the engine undercounted, which its predicate is
              built not to do): the rung reports :meth:`verify_deferred` (the walk maps it to DEFERRED,
              non-fatal) and the next walk's detect reads the count again. It is never VERIFY_FAILED: converge
-             did not run, so nothing failed.
+             did not run, so nothing failed. The deferral's detail starts with :data:`ENGINE_STALE_MARKER`, and the
+             walk's deferral log keeps it (``upgrade_ladder.deferral_log``, one note per tenant): the next detect()
+             finds the marker there and does not ask the engine again, so a count that is wrong for good (a
+             predicate gap) cannot hold the rung at 'converged, then deferred' for ever. See :meth:`detect`.
 
 RESIDUAL WINDOW. Between the re-read of a batch's manifests and the ``append_manifest_many`` POST, a row can
 still become written or gain a co-owner: ``UPSERT_APPEND`` carries no ``WHERE labels_written = false``. The
@@ -150,13 +158,19 @@ MAX_ROWS_PER_REQUEST = 300
 #: here, so the read stays bounded however many legacy rows a tenant holds). More than this is "at least".
 FILLABLE_PROBE_LIMIT = 1000
 
+#: What :meth:`ManifestSectionLabelsRung.verify` puts first in the detail of the deferral it reports when detect()
+#: answered converged from the engine's zero and the scan then found a fillable row. The walk files that detail in
+#: the deferral log (one T2 note per tenant); the next detect() reads it back as "the engine's count is not to be
+#: trusted yet" (nexus-l4hds). The log keeps the first 300 characters of a detail, so the marker leads.
+ENGINE_STALE_MARKER = "the engine counted no fillable row but the scan found some"
+
 _LABEL_KEYS = ("section_title", "section_type", "page_number")
 
 #: The catalog ``meta`` marker every document the orphan backfill registers carries
 #: (``nexus.catalog.orphan_backfill``: dt_link, synthetic, synthetic_chash, csv_curated). Such a document's
 #: ``indexed_at`` is the backfill's run time, later than any chunk it holds, so the date guard always passes
 #: for it, and the chunk label is a FORMER owner's (nexus-jz86a, decision (a)): its rows stay legacy.
-ORPHAN_BACKFILL_MARKER = ("backfill_from", "t3_orphan")
+ORPHAN_BACKFILL_MARKER = ("backfill_from", "t3_orphan")  # Java twin: CatalogRepository.ORPHAN_BACKFILL_VALUE
 
 
 def minted_by_orphan_backfill(doc: Any) -> bool:
@@ -237,6 +251,21 @@ def _default_record() -> CompletionRecord | None:
         return store.completions().get(RUNG_NAME)
 
 
+def stale_zero_recorded(log: Any) -> bool:
+    """True when *log* (a ``DeferralLog``) holds a deferral of this rung that starts with
+    :data:`ENGINE_STALE_MARKER`: the last walk that deferred it found fillable rows after the engine counted
+    none. The entry outlives the fill (the log drops an entry only at the rung's next deferral), which is
+    harmless: detect() answers from the completion record before it looks here."""
+    entry = log.deferrals().get(RUNG_NAME)
+    return entry is not None and entry.detail.startswith(ENGINE_STALE_MARKER)
+
+
+def _default_stale_zero() -> bool:
+    from nexus.upgrade_ladder.deferral_log import t2_deferral_log  # noqa: PLC0415 — deferred: keeps the registry import cheap
+
+    return stale_zero_recorded(t2_deferral_log())
+
+
 def _default_t3() -> Any:
     from nexus.db import make_t3  # noqa: PLC0415 — deferred: keeps the registry import cheap
 
@@ -245,6 +274,7 @@ def _default_t3() -> Any:
 
 #: The per-chunk suffix an indexer appends to a chunk row's title: ``<relative path>:<line>-<line>`` (code),
 #: ``:chunk-<n>`` (prose) and ``:page-<n>`` (page chunks).
+# Java twin: CatalogRepository.CHUNK_TITLE_SUFFIX (and FILE_NAME_PREFIX for the basename below).
 _CHUNK_TITLE_SUFFIX = re.compile(r":(?:chunk-\d+|\d+-\d+|page-\d+)$")
 
 
@@ -321,7 +351,8 @@ def _row_collection(row: Any, doc: Any) -> str:
 class ManifestSectionLabelsRung:
     """The rung. Collaborators are injected for tests: *reader_factory* (``all_documents``,
     ``get_manifests``, ``chash_positions_with_tombstoned``, ``close``; ``None`` when no catalog is available),
-    *writer_factory* (``append_manifest_many``, ``close``) and *t3_factory* (``get_collection``).
+    *writer_factory* (``append_manifest_many``, ``close``) and *t3_factory* (``get_collection``);
+    *stale_zero_fn* says whether the deferral log holds an engine-count-outdated deferral of this rung.
     The reader also answers ``manifest_section_label_fillable(limit)`` (the engine count ``detect`` reads; a
     reader without it, or one that answers ``None``, is an engine that cannot say)."""
 
@@ -337,8 +368,10 @@ class ManifestSectionLabelsRung:
         max_rows: int = MAX_ROWS_PER_REQUEST,
         record_fn: Callable[[], CompletionRecord | None] = _default_record,
         managed_fn: Callable[[], bool] = managed_service,
+        stale_zero_fn: Callable[[], bool] = _default_stale_zero,
     ) -> None:
         self._managed_fn = managed_fn
+        self._stale_zero_fn = stale_zero_fn
         self._reader_factory = reader_factory
         self._writer_factory = writer_factory
         self._t3_factory = t3_factory
@@ -597,6 +630,11 @@ class ManifestSectionLabelsRung:
             _log.info("manifest_section_labels_ledger_unreadable", error=str(exc))
             return False
 
+    def _stale_zero(self) -> bool:
+        """True when the deferral log says the engine's count was outdated at the last walk (see
+        :data:`ENGINE_STALE_MARKER`). An unreadable log is 'no': the count is asked for as before."""
+        return guarded("stale_zero", self._stale_zero_fn, False)
+
     def detect(self) -> RungStatus:
         """Converged at once when the completion is on file: ``nx doctor``, every ``nx upgrade --auto`` (each
         session start) and every walk call this, and a scan lists every document. Next cheapest, the engine's
@@ -604,11 +642,18 @@ class ManifestSectionLabelsRung:
         under ``--auto`` against a MANAGED service, not applicable with no catalog read (nexus-75w5d: an
         interactive ``nx upgrade`` does the first scan). Otherwise the dry run, which honours the ``--auto``
         time limit and then says pending, because a scan that did not finish has not found 'nothing'.
+        When the deferral log holds the walk's earlier "engine counted none, scan found some" deferral
+        (:data:`ENGINE_STALE_MARKER`), the engine's count is skipped and the answer is the scan's (or, unattended on
+        a managed service, not applicable): a count that was wrong once is not asked again until a scan has run.
         READ-ONLY: nothing is written and nothing is kept (see the module docstring)."""
         self._from_engine = False
         if self._recorded():
             return RungStatus(applicable=True, converged=True)
-        counted = None if active_expired() else self._engine_fillable()  # past the limit nothing is read
+        # A deferral on file says the engine counted none and the scan then found some: its count is not trusted
+        # until a scan has run (any mode: an unattended managed run then reads nothing and is not applicable, and
+        # its not-applicable leaves the log's entry alone, where a deferral of another kind would overwrite it).
+        distrusted = self._stale_zero()
+        counted = None if distrusted or active_expired() else self._engine_fillable()  # past the limit nothing is read
         if counted is not None:
             count, capped = counted
             if count == 0:
@@ -666,6 +711,17 @@ class ManifestSectionLabelsRung:
     # ── converge ─────────────────────────────────────────────────────────────
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
+        if refuses_unbounded_read(self._managed_fn):
+            # nexus-75w5d: the scan is a walk of every document of the catalog, with writes. detect() now answers
+            # 'pending' from the engine's count on a managed service, which would send an unattended run here at
+            # every session start (the scan restarts from zero each time). It reads nothing and writes nothing;
+            # an interactive `nx upgrade` fills and records. Before any reader opens.
+            reason = (
+                "unattended `nx upgrade --auto` does not fill the section labels of a managed service "
+                f"(a scan of every document); {INTERACTIVE_REMEDY}"
+            )
+            _log.info("manifest_section_labels_converge_skipped", reason=reason)
+            return ConvergeResult(ConvergeOutcome.DEFERRED, detail=reason)
         reader = self._reader_factory()
         if reader is None:
             return ConvergeResult(ConvergeOutcome.DEFERRED, detail="no catalog is available")
@@ -740,8 +796,7 @@ class ManifestSectionLabelsRung:
                 self._verify_deferred = True
                 _log.warning("manifest_section_labels_engine_count_outdated", fillable=counts.fillable)
                 self._verify_detail = (
-                    "the engine counted no fillable row but the scan found some: " + self._verify_detail
-                    + "; the fill runs on the next `nx upgrade`"
+                    ENGINE_STALE_MARKER + ": " + self._verify_detail + "; the fill runs on the next `nx upgrade`"
                 )
             return False
         self._record_detail = f"{self._filled} filled this run; {counts.summary()}"

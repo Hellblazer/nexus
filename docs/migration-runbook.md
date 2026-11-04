@@ -224,8 +224,11 @@ without a gate and nineteen walked the cloud catalog at once).
   on a LAN host counts as managed, because the rule protects capacity other boxes share.
   In an unattended run against a managed service, a rung whose `detect()` would read the
   whole catalog or a whole table, with no completion record and no bounded engine count
-  to answer from (`manifest-section-labels` asks the engine for one count when the engine has the route), reads nothing and reports itself not applicable, naming the interactive
-  run. The rungs: `manifest-section-labels`, `note-tags-array`, and the whole-table
+  to answer from, reads nothing and reports itself not applicable, naming the interactive
+  run. (`manifest-section-labels` asks the engine for one count when the engine has the
+  route: `--auto` then REPORTS the count, zero as converged and more as pending, and its
+  `converge()` is deferred without a read or a write. An interactive `nx upgrade` does the
+  fill and records the completion.) The rungs: `manifest-section-labels`, `note-tags-array`, and the whole-table
   fallback of `aspect-queue-tuples`. The `rdr192-manifest-backfill` census (one engine
   scan per collection) is refused the same way in `converge()`: reported deferred, no
   census call. The version-transition callout that any `nx` command can print asks every
