@@ -288,4 +288,10 @@ def test_a_stale_connection_replay_is_a_second_request_and_passes_the_gate(engin
         for _ in range(2):
             with opener.open(f"{engine.url}/v1/catalog/list", timeout=5) as resp:
                 assert resp.status == 200
+    # The reset is faked on the client's read, so the client never waits for the server to finish the second
+    # request: its handler thread can log it after the client has moved on (develop red, job 126331517009).
+    # Wait, bounded, for the server's log to catch up before comparing.
+    deadline = time.monotonic() + 2.0
+    while len(engine.log) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert gate.count == 3 and len(engine.log) == 3, "two logical requests, one replayed after the reset: three on the wire, all granted"
