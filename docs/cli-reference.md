@@ -2149,6 +2149,41 @@ Needs engine-service-v0.1.133 or later. Against an older engine the verb exits 4
 
 ---
 
+### nx t3 retire-keys
+
+```
+nx t3 retire-keys --tenant ID [--dry-run | --apply] [--accept NAME ...] [--collection NAME] [--batch-size N] [--max-rps R] [--json]
+nx t3 retire-keys --add-check [--replace] --apply [--max-rps R] [--json]
+nx t3 retire-keys --validate --apply [--max-rps R] [--json]
+```
+
+The sweep vehicle of RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): the operator's way into the engine's `POST /v1/admin/chunk-keys/sweep`, `/add-constraints` and `/validate-constraints`. Nothing calls those routes on its own; the upgrade-ladder rung that would run the sweep on every install is a later bead that ships after a cloud dry run has been read. The allowed keys, the bypass prefixes and the quarantine implication are rendered from the key table (`src/nexus/tables/chunk-metadata-keys.toml`) into every request, because the engine cannot name the ROW keys; the engine refuses a list that drops a CHUNK key or names a DOCUMENT, POSITION or LEGACY key.
+
+Order, per install: dry run for each tenant, `--apply` for each tenant, then `--add-check --apply` once, then `--validate --apply` once.
+
+**The sweep (`--tenant`).** Strips every metadata key the allow-list (the CHUNK and ROW keys) does not name from the chunk rows of the tenant the credential is bound to, in batches of up to 1000 rows. The verb reads the tenant back from the engine's answer and refuses (exit 2) when it is not `ID`: a token is bound to one tenant, so run it with that tenant's `NX_SERVICE_TOKEN`. The default is a dry run, which writes nothing beyond one measured batch that is rolled back; `--dry-run` spells that out and `--apply` writes. The dry run prints, per collection, the rows with a retired key, how many are swept and how many are left alone, then the preconditions and the measured batch cost. A `quarantine-` or `taxonomy` collection is never swept, a row whose chash is not 32 bytes is left alone (the width CHECK would refuse the update), and a collection whose manifest-less census reads `legacy-unmanifested` above zero (or could not be read) is skipped and reported as blocked. The sweep does not set `last_written_at`.
+
+*Preconditions.* The engine counts, per tenant: `legacy_label_rows`, `keyless_notes`, `keyless_ttl_rows`, `homeless_documents`, `null_span_rows` and `generated_nulls`, the residues the sweep would leave without a home (an operator may accept each by name with `--accept NAME`; apply is refused with exit 3 while one is non-zero and not named), and, for the constraint steps, `chunk_text_hash_mismatch`, `embedding_model_mismatch`, `wrong_width_rows`, `row_keys_on_live_rows` and `quarantine_implication_violations`. `--collection` limits an apply to one collection; `--batch-size` sets the rows per batch.
+
+**The CHECKs (`--add-check`, `--validate`).** Table-wide and operator only (the root token); both write and need `--apply` (they have no dry run: the sweep's is the rehearsal). `--add-check` adds the allow-list CHECK, the `chunk_text_hash` equality, the `embedding_model` equality and the quarantine implication to `nexus.chunks`, all NOT VALID, and is refused (exit 1, the tenants named) while any tenant of the install still has rows to sweep; `--replace` drops and re-adds each in one statement, which is how a changed key table reaches the database. `--validate` validates those four and the existing `chunks_chash_octet_check`, reading `pg_constraint.convalidated` first, and is refused while any tenant still holds a retired key or breaks an equality or the width. Neither is ever run by a startup changeset.
+
+`--max-rps` holds every request the verb sends to that rate (the request gate, nexus-ldf2s); against a managed service start with `--max-rps 2`. An apply goes through the production-write guard: from a development checkout it needs `NX_ALLOW_PROD_WRITE` with a reason. DATA EFFECT of an apply: each swept row loses its retired keys and nothing else on the row changes; after `--add-check` a write that carries a key outside the allow-list is refused by the database (SQLSTATE 23514).
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Done (or a dry run reported). |
+| 1 | A call failed, or the engine refused a table-wide step and named the tenants. |
+| 2 | A usage error, or the credential is bound to a tenant other than `--tenant`. |
+| 3 | A sweep precondition is non-zero and not accepted. |
+| 4 | The connected engine predates the routes. |
+| 5 | The apply stalled: three calls in a row swept nothing while rows remain. |
+
+Needs the engine release that carries nexus-6pfgb.43.
+
+---
+
 ### nx t3 quarantine restore
 
 ```

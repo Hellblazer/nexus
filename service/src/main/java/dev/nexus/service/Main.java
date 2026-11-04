@@ -576,6 +576,8 @@ public final class Main {
                 leafBloatSweep.status(), leafBloatSweep.periodSeconds()));
         // nexus-i827c: the same cache, named, on the operator-only GET /v1/admin/chunks-leaves.
         service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds);
+        // nexus-6pfgb.43: the chunk CHECK add/validate routes run DDL on the admin connection; nothing calls them.
+        service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
 
         log.info("event=service_ready port={}", service.getPort());
 

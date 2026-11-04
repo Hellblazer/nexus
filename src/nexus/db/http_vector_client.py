@@ -1965,6 +1965,24 @@ def _request_deadline_ms_for(path: str) -> int | None:
     return None
 
 
+#: Socket timeout (seconds) of a retire-keys sweep call (nexus-6pfgb.43): the engine bounds one call by its own
+#: ``budget_seconds`` and by the census it runs first, so this is a ceiling above both.
+_CHUNK_KEYS_TIMEOUT_S = 300
+
+#: The validate route scans the whole chunk table (the engine allows it 30 minutes); the socket outlasts that.
+_CHUNK_KEYS_VALIDATE_TIMEOUT_S = 2100
+
+
+def _guard_chunk_keys_write() -> None:
+    """The production-write guard (nexus-a2qhz) for a retire-keys call that writes. The three routes share one
+    path prefix with their dry run, so :func:`_post`'s path-suffix guard cannot tell the two apart; the caller
+    that knows it is writing calls this first."""
+    from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: no circular import (service_endpoint imports no nexus.* modules)
+
+    base_url, _ = _resolve_endpoint()
+    guard_production_write(base_url)
+
+
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 120) -> Any:
     """POST JSON to the service endpoint, return parsed response body.
 
@@ -5256,6 +5274,82 @@ class HttpVectorClient:
         if after_chash:
             body["after_chash"] = after_chash
         return _post("/v1/vectors/reapable", body, tenant=self._tenant)
+
+    # ---- RDR-236 Phase 4 Step 3: retire the chunk-row metadata keys (nexus-6pfgb.43) -------------------------
+
+    def chunk_keys_sweep(
+        self, *, dry_run: bool = True, accept: Sequence[str] = (), collection: str | None = None,
+        batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
+        measure_batch: bool | None = None,
+    ) -> dict:
+        """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant (nexus-6pfgb.43).
+
+        The allow-list, the bypass prefixes and the quarantine implication ride in the body, rendered from the key
+        table (:func:`nexus.tables.chunk_metadata_keys.engine_plan`): the engine cannot name the ROW keys. The
+        default is a DRY RUN, which writes nothing: it answers ``{"tenant", "collections": [{"collection",
+        "retired_key_rows", "wrong_width_rows", "sweepable_rows", "legacy_unmanifested", "blocked"}], "totals",
+        "preconditions": {name: count}, "acceptable_residues", "blocking", "applicable", "batch_cost":
+        {"rows", "select_ms", "update_ms", "rolled_back", "projected_seconds"}}``. ``dry_run=False`` sweeps up to
+        ``max_batches`` batches of ``batch_size`` rows or ``budget_seconds`` and answers ``{"tenant", "rows_swept",
+        "batches", "done", "remaining_rows", "first_batch_ms", "elapsed_ms", "blocked_collections"}``; the caller
+        calls again while ``done`` is false. ``accept`` names the residues of ``acceptable_residues`` the operator
+        accepts: apply is refused (409, ``reason == "sweep_preconditions_not_met"``, the report in
+        ``engine_body``) while a non-zero one is not named.
+
+        An apply is a WRITE: it goes through the production-write guard
+        (:func:`~nexus.db.service_endpoint.guard_production_write`, ``NX_ALLOW_PROD_WRITE``) before the first
+        request; a dry run does not.
+
+        Raises :class:`VectorServiceError` (``code=404`` on an engine that predates the route).
+        """
+        from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
+
+        body: dict[str, Any] = {**engine_plan(), "dry_run": dry_run}
+        if accept:
+            body["accept"] = list(accept)
+        for key, value in (
+            ("collection", collection), ("batch_size", batch_size), ("max_batches", max_batches),
+            ("budget_seconds", budget_seconds), ("measure_batch", measure_batch),
+        ):
+            if value is not None:
+                body[key] = value
+        if not dry_run:
+            _guard_chunk_keys_write()
+        return _post("/v1/admin/chunk-keys/sweep", body, tenant=self._tenant, timeout=_CHUNK_KEYS_TIMEOUT_S)
+
+    def chunk_keys_add_constraints(self, *, replace: bool = False) -> dict:
+        """POST /v1/admin/chunk-keys/add-constraints: the table-wide add of the chunk CHECKs, NOT VALID (nexus-6pfgb.43).
+
+        Operator (root token) only. Refused (409, ``reason == "tenant_unswept"``, the tenants in
+        ``engine_body["tenants"]``) while any tenant of the install still has rows to sweep. Answers
+        ``{"tenants_checked", "constraints": [{"name", "action", "present", "validated", "definition"}]}`` where
+        ``action`` is ``added``, ``present`` (left alone) or ``replaced``. ``replace=True`` drops and re-adds each in
+        one statement, which is how a changed key table reaches the database. A WRITE: guarded like the sweep's apply.
+        """
+        from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
+
+        body: dict[str, Any] = {**engine_plan()}
+        if replace:
+            body["replace"] = True
+        _guard_chunk_keys_write()
+        return _post("/v1/admin/chunk-keys/add-constraints", body, tenant=self._tenant, timeout=_CHUNK_KEYS_TIMEOUT_S)
+
+    def chunk_keys_validate_constraints(self) -> dict:
+        """POST /v1/admin/chunk-keys/validate-constraints: VALIDATE the chunk CHECKs (nexus-6pfgb.43).
+
+        Operator only. Reads ``pg_constraint.convalidated`` first and validates only what is not yet valid
+        (``action`` ``validated``, ``already_valid`` or ``absent``). Refused (409, ``reason ==
+        "tenant_violates_constraint"``) while any tenant still holds a retired key, an unequal hash or model, a
+        quarantine implication breach or a wrong-width chash. The scan can run for minutes on a large table; the
+        socket timeout allows it. A WRITE: guarded like the sweep's apply.
+        """
+        from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
+
+        _guard_chunk_keys_write()
+        return _post(
+            "/v1/admin/chunk-keys/validate-constraints", {**engine_plan()}, tenant=self._tenant,
+            timeout=_CHUNK_KEYS_VALIDATE_TIMEOUT_S,
+        )
 
     def reapable_chunks(
         self, collection: str, *, grace_seconds: int | None = None, page_limit: int = 300,

@@ -109,6 +109,24 @@ def keys_of(cls: str, *, kind: str = "metadata-key") -> frozenset[str]:
     return frozenset(r.key for r in rows() if r.cls == cls and r.kind == kind)
 
 
+#: The pair the quarantine CHECK is built from: ``quarantined_by`` may be present only when ``quarantined_at`` is
+#: (RDR-236 RF-16: 158 engine moves carry ``quarantined_at`` alone, so the implication is one-directional). Both
+#: are ROW keys of the table, and a test holds them to it.
+QUARANTINE_IMPLIES: Final[tuple[str, str]] = ("quarantined_by", "quarantined_at")
+
+
+def engine_plan() -> dict[str, list[str]]:
+    """The request fields the engine's retire-keys and chunk-constraint routes take, rendered from this table
+    (nexus-6pfgb.43): ``allowed_keys`` (the CHUNK and ROW metadata keys, sorted), ``bypass_prefixes`` and
+    ``quarantine_implies``. The engine cannot name the ROW keys, so it takes them from here, and it refuses a
+    list that drops a CHUNK key or names a DOCUMENT, POSITION or LEGACY key."""
+    return {
+        "allowed_keys": sorted(keys_of("CHUNK") | keys_of("ROW")),
+        "bypass_prefixes": list(BYPASS_PREFIXES),
+        "quarantine_implies": list(QUARANTINE_IMPLIES),
+    }
+
+
 def non_chunk_row_keys() -> frozenset[str]:
     """The metadata keys a reader must not take from a shared chunk row: DOCUMENT, POSITION, LEGACY."""
     return keys_of("DOCUMENT") | keys_of("POSITION") | keys_of("LEGACY")

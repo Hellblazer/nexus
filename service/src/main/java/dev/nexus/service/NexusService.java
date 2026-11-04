@@ -304,6 +304,8 @@ public final class NexusService {
      */
     private volatile java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> chunksLeavesView;
     private volatile java.util.function.Supplier<Long> chunksLeavesSweepSeconds;
+    /** nexus-6pfgb.43: the admin-connection DDL behind {@code /v1/admin/chunk-keys/add-constraints} and {@code validate-constraints}; null until {@code Main} binds it. */
+    private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
@@ -803,6 +805,18 @@ public final class NexusService {
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
 
+        // /v1/admin/chunk-keys/* — RDR-236 Phase 4 Step 3 (nexus-6pfgb.43): the retire-keys sweep and the table-wide
+        // add/validate of the chunk CHECKs. Registered always, so an engine without a pgvector repository answers 503
+        // rather than a 404 that reads as an unknown route. Nothing in the engine calls these routes; the admin
+        // connection the constraint routes run on is bound late, from Main (chunkConstraintAdmin).
+        var chunkKeysCtx = server.createContext(dev.nexus.service.http.ChunkKeysAdminHandler.PATH,
+                new dev.nexus.service.http.ChunkKeysAdminHandler(
+                        pgVectorRepository == null ? null
+                            : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository),
+                        () -> chunkConstraintAdmin,
+                        tokenStore::listKnownTenants));
+        chunkKeysCtx.getFilters().addAll(authFilter);
+
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
         // only when a boot-checked TemplateRegistry was supplied (see the constructor
         // javadoc above) — a null registry means the feature was never loaded, so the
@@ -1126,6 +1140,15 @@ public final class NexusService {
                              java.util.function.Supplier<Long> sweepSeconds) {
         this.chunksLeavesView = view;
         this.chunksLeavesSweepSeconds = sweepSeconds;
+    }
+
+    /**
+     * Bind the admin-connection DDL behind the chunk-constraint routes (nexus-6pfgb.43). {@code Main} calls it once,
+     * with the same {@code NX_DB_ADMIN_*} values the migrator and the index builder use; until then the routes answer
+     * 503.
+     */
+    public void chunkConstraintAdmin(dev.nexus.service.vectors.ChunkConstraintAdmin admin) {
+        this.chunkConstraintAdmin = admin;
     }
 
     /** The bound object, or null before {@link #chunksLeafBloat(java.util.function.Supplier)} (key omitted). */

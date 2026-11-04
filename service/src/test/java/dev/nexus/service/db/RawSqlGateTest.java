@@ -411,6 +411,12 @@ class RawSqlGateTest {
             // SANCTIONED RAW (RDR-227, nexus-43ulx.16): DROP INDEX CONCURRENTLY, same reasons as runBuild.
             // Single-homed: Pass#drop.
             "runDrop", Map.of(".execute(sql)", 1))),
+        Map.entry("ChunkConstraintAdmin.java", Map.of(
+            // SANCTIONED RAW (RDR-236 Phase 4 Step 3, nexus-6pfgb.43): ALTER TABLE ... ADD CONSTRAINT ... NOT VALID and
+            // VALIDATE CONSTRAINT take a rendered CHECK expression, which has no typed jOOQ form. The text is rendered
+            // by PostgreSQL's format() with %I and %L (Session#ddl), so no identifier, key or prefix is concatenated in
+            // Java. Plain JDBC Statement.execute, as PciBuilderSession's does. Single-homed: Session#ddl.
+            "runDdl", Map.of(".execute(sql)", 1))),
         Map.entry("PgContainerHelper.java", Map.of(
             // SANCTIONED RAW (nexus-cbo4a batch 10): replayPart is the one site of the changeset-replay idiom
             // (PgContainerHelper#replayChangeset / #replayChangesetRollback). It executes ONE product changeset's

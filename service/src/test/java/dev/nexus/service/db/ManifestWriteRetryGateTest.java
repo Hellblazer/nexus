@@ -107,6 +107,9 @@ class ManifestWriteRetryGateTest {
             + " writes the manifest through CatalogRepository"),
         Map.entry("ChunkOwnerLabel", "nexus-6pfgb.39: a jOOQ SELECT subquery over the manifest joined to its live document (the"
             + " owner label of a gc-audit chunk); it builds a Select and writes nothing"),
+        Map.entry("ChunkKeySweep", "nexus-6pfgb.43: SELECT subqueries over the manifest joined to its live document (the"
+            + " precondition counts of the retire-keys dry run: legacy-label rows, NULL-span rows, rows whose TTL no owner"
+            + " records) and an UPDATE of nexus.chunks metadata; it writes no manifest row"),
         Map.entry("DepartedWriterSpans", "nexus-pvkbv: SELECT subqueries over the manifest (which chunks a document is the"
             + " sole remaining holder of, and what span fields its rows lack) and an UPDATE of nexus.chunks metadata;"
             + " it writes no manifest row. Its caller is the manifest writer, inside that writer's retried transaction")));
