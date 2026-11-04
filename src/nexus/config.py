@@ -1817,6 +1817,16 @@ def _per_repo_config_path(repo_root: Path | None) -> Path | None:
         return None
 
 
+def _validate_entity_layer(layer: dict[str, Any], path: Path | None) -> None:
+    """RDR-147 Step 1 (nexus-fai28): raise ``EntityConfigError`` for a malformed ``entity`` section in
+    one config layer, naming *path* (the file the entry came from) when there is one. Checked per file
+    BEFORE the merge: after it, a bad entry could be any layer's. The module is light (``re`` and
+    ``fnmatch``), so the import costs nothing on a hot config read."""
+    from nexus.entity_keys import validate_entity_config  # noqa: PLC0415 — entity_keys imports config lazily; keep the cycle out of module load
+
+    validate_entity_config(layer, source=str(path) if path is not None else "")
+
+
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     """Load and merge configuration.
 
@@ -1837,6 +1847,7 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
         if not isinstance(data, dict):
             _log.warning("global config is not a dict, ignoring", path=str(global_path))
             data = {}
+        _validate_entity_layer(data, global_path)
         config = _deep_merge(config, data)
 
     # Per-repo config
@@ -1847,16 +1858,13 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
         if not isinstance(data, dict):
             _log.warning("repo config is not a dict, ignoring", path=str(repo_config_path))
             data = {}
+        _validate_entity_layer(data, repo_config_path)
         config = _deep_merge(config, data)
 
     # Env var overrides
     config = _empty_none_sections(_apply_env_overrides(config))
 
-    # RDR-147 Step 1: a bad entity.collections regex fails here, naming the key.
-    entity_section = config.get("entity")
-    if not isinstance(entity_section, dict) or entity_section.get("collections"):
-        from nexus.entity_keys import validate_entity_config  # noqa: PLC0415 — light module, imported only when a pattern is configured (or the section is malformed)
-
-        validate_entity_config(config)
+    # RDR-147 Step 1: the merged result is checked too (each file was checked above, naming the file).
+    _validate_entity_layer(config, None)
 
     return config

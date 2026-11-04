@@ -25,11 +25,16 @@ from __future__ import annotations
 import fnmatch
 import functools
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
 #: The ``meta`` key a document's entity key lives under.
 ENTITY_KEY_META = "entity_key"
+
+#: The longest explicit entity key a put accepts, and the characters it refuses (any control
+#: character, newline included): a key is an identifier read back out of text, never prose.
+MAX_ENTITY_KEY_LEN = 256
 
 #: A key is a whole token: no word character directly before or after it. ``CUST-00180`` holds no
 #: ``CUST-0018`` key, and ``xCUST-0018`` holds none either.
@@ -56,14 +61,21 @@ def _compile_all(items: tuple[tuple[str, str], ...]) -> tuple[tuple[str, re.Patt
     for glob, pattern in items:
         try:
             compiled = re.compile(pattern)
-            # The token form wraps the pattern in a group, which a pattern-wide inline flag such as
-            # ``(?i)`` cannot sit inside: refuse it here, at load, not at the first search.
-            re.compile(f"{_TOKEN_BEFORE}(?:{pattern}){_TOKEN_AFTER}", compiled.flags)
-            out.append((glob, compiled))
         except re.error as exc:
             raise EntityConfigError(
                 f'entity.collections["{glob}"] is not a valid regex: {exc} (pattern {pattern!r})'
             ) from exc
+        # The token form wraps the pattern in a group, which a pattern-wide inline flag such as
+        # ``(?i)`` cannot sit inside: refuse it here, at load, not at the first search.
+        try:
+            re.compile(f"{_TOKEN_BEFORE}(?:{pattern}){_TOKEN_AFTER}", compiled.flags)
+        except re.error as exc:
+            raise EntityConfigError(
+                f'entity.collections["{glob}"] cannot be used as a whole-token pattern: {exc} '
+                f"(pattern {pattern!r}). A pattern-wide inline flag must be scoped to the group: "
+                "write (?i:...) rather than (?i)..."
+            ) from exc
+        out.append((glob, compiled))
     return tuple(out)
 
 
@@ -87,14 +99,24 @@ def _items(collections: object) -> tuple[tuple[str, str], ...]:
     return tuple(items)
 
 
-def validate_entity_config(config: Mapping[str, Any]) -> None:
+def validate_entity_config(config: Mapping[str, Any], source: str = "") -> None:
     """Raise :class:`EntityConfigError` when *config*'s ``entity.collections`` is malformed.
-    ``load_config`` calls it, so a bad regex fails when the config loads. Compiles once per
-    distinct map (the cache is keyed on the map's items, so every later read is a lookup)."""
-    entity = config.get("entity") or {}
-    if not isinstance(entity, Mapping):
-        raise EntityConfigError(f"entity must be a map, got {type(entity).__name__}")
-    _compiled(_items(entity.get("collections")))
+    ``load_config`` calls it on each config file before the merge (*source* is the file's path, so
+    the message names the file the bad entry came from) and once on the merged result. Compiles once
+    per distinct map (the cache is keyed on the map's items, so every later read is a lookup). Only a
+    missing or ``None`` ``collections`` is "nothing configured"; ``[]``, ``""``, ``0`` and ``false``
+    are not maps and raise."""
+    try:
+        entity = config.get("entity")
+        if entity is None:
+            entity = {}
+        if not isinstance(entity, Mapping):
+            raise EntityConfigError(f"entity must be a map, got {type(entity).__name__}")
+        _compiled(_items(entity.get("collections")))
+    except EntityConfigError as exc:
+        if source:
+            raise EntityConfigError(f"{source}: {exc}") from exc
+        raise
 
 
 def pattern_for_collection(collection: str, config: Mapping[str, Any] | None = None) -> re.Pattern[str] | None:
@@ -163,10 +185,33 @@ def _token_pattern(pattern: re.Pattern[str]) -> re.Pattern[str]:
     return re.compile(f"{_TOKEN_BEFORE}(?:{pattern.pattern}){_TOKEN_AFTER}", pattern.flags)
 
 
+def check_explicit_key(collection: str, explicit: str) -> None:
+    """Refuse an explicit entity key a put cannot honour, before it touches any state: a control
+    character (newline included), a key longer than :data:`MAX_ENTITY_KEY_LEN`, or any key on a
+    ``code__`` collection (it has no keys, so the key would be dropped without a word). An unset or
+    all-whitespace key is "none given". Raises ``ValueError``."""
+    if not explicit or not explicit.strip():
+        return
+    if any(unicodedata.category(ch) == "Cc" for ch in explicit):
+        raise ValueError("entity_key must not contain control characters (newline included)")
+    if len(explicit.strip()) > MAX_ENTITY_KEY_LEN:
+        raise ValueError(f"entity_key is longer than {MAX_ENTITY_KEY_LEN} characters")
+    if is_code_collection(collection):
+        raise ValueError(
+            f"entity_key is not allowed on a code collection ({collection}): code__ collections have "
+            "no entity keys, so the key would be dropped. Store the document in a knowledge, docs or "
+            "rdr collection, or leave the key off.")
+
+
 def resolve_put_key(*, collection: str, title: str, explicit: str = "") -> str:
     """The key a ``store_put`` stamps into the document's catalog ``meta``: the caller's
     *explicit* key, else the title when the collection's pattern matches it in full, else ``""``
-    (nothing to stamp). The one rule of :func:`classify_entity`, so a put and a later read agree."""
+    (nothing to stamp). The one rule of :func:`classify_entity`, so a put and a later read agree.
+
+    An explicit key that :func:`check_explicit_key` refuses raises ``ValueError`` here, before the
+    caller has registered or written anything. A title-derived key on a ``code__`` collection stays
+    silent: nothing was asked for."""
+    check_explicit_key(collection, explicit)
     key = classify_entity({
         "physical_collection": collection, "title": title, "meta": {ENTITY_KEY_META: explicit},
     })

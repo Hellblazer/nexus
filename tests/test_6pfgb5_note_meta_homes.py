@@ -416,3 +416,101 @@ def test_note_catalog_meta_accepts_a_list_of_tags_too():
 
     write, _ = note_catalog_meta(tags=["a", " b", "a"])
     assert write == {"tags": ["a", "b"]}
+
+
+# ── entity_key rides the same paths (RDR-147 Step 1, nexus-fai28) ────────────────────────────
+
+
+_CODE_COLLECTION = "code__6pfgb5__bge-base-en-v15-768__v1"
+
+
+def test_note_catalog_meta_sets_changes_and_retracts_the_entity_key_with_its_undo():
+    from nexus.catalog.store_hook import NOTE_META_KEYS, note_catalog_meta  # noqa: PLC0415 - see test_note_catalog_meta_returns_the_undo
+
+    assert note_catalog_meta(entity_key="CUST-0018", prior=None) == (
+        {"entity_key": "CUST-0018"}, {"entity_key": ""})
+    assert note_catalog_meta(entity_key="CUST-0042", prior={"entity_key": "CUST-0018"}) == (
+        {"entity_key": "CUST-0042"}, {"entity_key": "CUST-0018"})
+    assert note_catalog_meta(prior={"entity_key": "CUST-0018"}) == (
+        {"entity_key": ""}, {"entity_key": "CUST-0018"}), "a put that gives none retracts the held key"
+    assert note_catalog_meta(entity_key="CUST-0018", prior={"entity_key": "CUST-0018"}) == (
+        {"entity_key": "CUST-0018"}, {"entity_key": "CUST-0018"}), "a given key is always written, like the others"
+    assert note_catalog_meta(prior={"entity_key": ""}) == ({}, {}), "an empty held key counts as unset"
+    assert "entity_key" not in NOTE_META_KEYS, "the key must not read as a put-stamped note key"
+
+
+def test_a_failed_reput_restores_the_old_entity_key_with_the_stamp(cat):
+    tumbler, _ = catalog_store_hook_tracked("ek-restore", _CHASH, _COLLECTION, tags="old", entity_key="CUST-0018")
+    before = dict(cat.docs[tumbler].meta)
+    assert before["entity_key"] == "CUST-0018"
+    pre_call: dict = {}
+    catalog_store_hook_tracked(
+        "ek-restore", "cd" * 32, _COLLECTION, tags="new", entity_key="CUST-0042", pre_call_doc_id_out=pre_call)
+    assert cat.docs[tumbler].meta["entity_key"] == "CUST-0042"
+
+    restore_pre_call_stamp(
+        tumbler, pre_call["doc_id"], "cd" * 32, pre_call.get("note_meta"), pre_call.get("note_meta_stamped"))
+
+    assert cat.docs[tumbler].meta == before
+
+
+def test_a_failed_reput_that_retracted_the_entity_key_gets_it_back(cat):
+    tumbler, _ = catalog_store_hook_tracked("ek-retract", _CHASH, _COLLECTION, entity_key="CUST-0018")
+    before = dict(cat.docs[tumbler].meta)
+    pre_call: dict = {}
+    catalog_store_hook_tracked("ek-retract", "cd" * 32, _COLLECTION, pre_call_doc_id_out=pre_call)
+    assert cat.docs[tumbler].meta["entity_key"] == ""
+
+    restore_pre_call_stamp(
+        tumbler, pre_call["doc_id"], "cd" * 32, pre_call.get("note_meta"), pre_call.get("note_meta_stamped"))
+
+    assert cat.docs[tumbler].meta == before
+
+
+def test_a_same_text_reput_through_the_chash_dedup_replaces_and_retracts_the_entity_key(cat):
+    """The dedup-hit register path: the same content under the same title resolves onto the note's own
+    entry (no new register), and the key follows the put."""
+    first, _ = catalog_store_hook_tracked("ek-dedup", _CHASH, _COLLECTION, entity_key="CUST-0018")
+    assert cat.docs_for_chashes([_CHASH]) == {_CHASH: [first]}
+    again, created = catalog_store_hook_tracked("ek-dedup", _CHASH, _COLLECTION, entity_key="CUST-0042")
+    assert again == first and not created and len(cat.registers) == 1
+    assert cat.docs[first].meta["entity_key"] == "CUST-0042"
+    catalog_store_hook_tracked("ek-dedup", _CHASH, _COLLECTION)
+    assert cat.docs[first].meta["entity_key"] == ""
+
+
+def test_a_ghost_reconcile_writes_the_entity_key_and_retracts_the_one_the_ghost_held(cat):
+    bare = cat.seed_ghost("ek-ghost-bare")
+    out, created = catalog_store_hook_tracked("ek-ghost-bare", _CHASH, _COLLECTION, entity_key="CUST-0018")
+    assert out == bare and not created and not cat.registers
+    assert cat.docs[bare].meta["entity_key"] == "CUST-0018"
+
+    held = cat.seed_ghost("ek-ghost-held", meta={"entity_key": "CUST-0001"})
+    out, _ = catalog_store_hook_tracked("ek-ghost-held", "cd" * 32, _COLLECTION)
+    assert out == held
+    assert cat.docs[held].meta["entity_key"] == ""
+
+
+def _put_note_refused_before_any_effect(**kwargs):
+    """put_note with the writer, the fence and the engine probe all patched to fail the test if reached."""
+    with patch("nexus.catalog.note_write.write_note") as write, \
+         patch("nexus.doc_indexer._fence_begin") as fence, \
+         patch("nexus.db.serving_engine_version.require_note_uri_engine") as probe, \
+         pytest.raises(ValueError) as exc:
+        note_write.put_note(**kwargs)
+    assert not write.called and not fence.called and not probe.called
+    return exc.value
+
+
+def test_an_explicit_entity_key_on_a_code_collection_raises_and_touches_nothing(cat):
+    err = _put_note_refused_before_any_effect(
+        content="6pfgb5 code body", collection=_CODE_COLLECTION, title="mod.py:L1-L5", entity_key="CUST-0018")
+    assert "code" in str(err)
+    assert cat.registers == [] and cat.docs == {} and cat.updates == []
+
+
+@pytest.mark.parametrize("key", ["CUST\n0018", "K" * 257])
+def test_a_refused_entity_key_touches_nothing(cat, key):
+    _put_note_refused_before_any_effect(
+        content="6pfgb5 refused key body", collection=_COLLECTION, title="refused-key", entity_key=key)
+    assert cat.registers == [] and cat.docs == {} and cat.updates == []

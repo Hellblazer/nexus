@@ -65,8 +65,10 @@ def store() -> None:
               help="TTL: Nd, Nw, or permanent")
 @click.option("--entity-key", default="",
               help="Stable identifier this document names, such as CUST-0018, stamped into the "
-                   "catalog document's metadata (never a chunk's). Unset: a collection configured "
-                   "with an entity-key pattern stamps the title when the whole title matches it.")
+                   "catalog document's metadata (never a chunk's). At most 256 characters, no "
+                   "control characters, refused on a code__ collection. Unset: a collection "
+                   "configured with an entity-key pattern stamps the title when the whole title "
+                   "matches it. A re-put without it removes the stored key.")
 @click.option("--session-id", default="", hidden=True)
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
@@ -173,7 +175,10 @@ def put_cmd(
             category=category, source_agent=agent,
             ttl_days=ttl_days, entity_key=entity_key,
         )
-    except (PutOversizedError, NoteUriEngineTooOldError) as exc:
+    except (PutOversizedError, NoteUriEngineTooOldError, ValueError) as exc:
+        # ValueError: an --entity-key the put refuses (a code collection, a control character, over
+        # 256 characters; nexus-fai28), raised before any register or write. The config error
+        # (EntityConfigError, also a ValueError) names its file and key.
         # put_note refuses an over-quota note, or one the serving engine is too old to hold
         # (RDR-231, nexus-bivz3.13), before it mints a catalog row.
         raise click.ClickException(str(exc)) from exc

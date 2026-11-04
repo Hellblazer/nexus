@@ -5856,8 +5856,10 @@ def store_put(
     entity_key: Annotated[str, Field(
         description=(
             "Optional stable identifier this document names, such as \"CUST-0018\", stamped into the "
-            "catalog document's metadata (never a chunk's). Unset: a collection configured with an "
-            "entity-key pattern stamps the title when the whole title matches it."
+            "catalog document's metadata (never a chunk's). At most 256 characters, no control "
+            "characters, and refused on a code__ collection. Unset: a collection configured with an "
+            "entity-key pattern stamps the title when the whole title matches it. A re-put without "
+            "it removes the stored key."
         ),
     )] = "",
 ) -> str:

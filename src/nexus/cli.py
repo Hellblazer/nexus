@@ -96,6 +96,7 @@ class _StorageBackendGuardGroup(click.Group):
         from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.config import PdfConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
+        from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.t2.http_token_store import TokenAdminAuthError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -144,6 +145,12 @@ class _StorageBackendGuardGroup(click.Group):
             # nexus-xzeml: a refused token-admin call is a credential problem
             # the operator has to act on, not a crash.
             raise click.ClickException("\n".join(exc.lines)) from exc
+        except EntityConfigError as exc:
+            # RDR-147 Step 1 (nexus-fai28): entity.collections holds a bad regex or a non-map.
+            # load_config raises it from every verb that reads the config (nx doctor, nx store
+            # list, nx config get); the message names the config file and the key, a traceback
+            # buried both.
+            raise click.ClickException(str(exc)) from exc
         except PdfConfigError as exc:
             # RDR-237 (nexus-tr1rj.2): a [pdf] integer setting holds no integer. Any verb that
             # reads the pdf config (nx index pdf, nx dt index, nx dt capture) gets here; the

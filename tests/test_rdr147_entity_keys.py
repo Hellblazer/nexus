@@ -37,7 +37,7 @@ from nexus.mcp.core import store_put
 _PATTERN = r"CUST-\d{4}|eid_[0-9a-f]{8}"
 _GLOB = "knowledge__herb-*"
 _HERB = "knowledge__herb-core__bge-base-en-v15-768__v1"
-_CODE = "code__herb-code__voyage-code-3__v1"
+_CODE = "code__herb-code__bge-base-en-v15-768__v1"
 
 
 @pytest.fixture()
@@ -101,6 +101,77 @@ def test_an_entity_section_that_is_no_map_fails_at_load(tmp_path, monkeypatch):
         load_config()
 
 
+@pytest.mark.parametrize("value", [[], "", 0, False], ids=["empty-list", "empty-string", "zero", "false"])
+def test_a_falsy_collections_value_that_is_no_map_fails_at_load_naming_key_and_file(repo_cfg, value):
+    """``collections: []`` used to load clean (only a truthy value was checked) and then every
+    non-code put raised. Anything present and not None must be a map."""
+    path = repo_cfg(value)
+    with pytest.raises(EntityConfigError, match=r"entity\.collections") as exc:
+        load_config()
+    assert str(path) in str(exc.value)
+
+
+def test_a_null_collections_value_is_nothing_configured(repo_cfg):
+    repo_cfg(None)
+    assert load_config()["entity"]["collections"] == {}
+
+
+def test_a_bad_regex_names_the_repo_file_it_came_from(repo_cfg):
+    path = repo_cfg({_GLOB: "CUST-(\\d{4"})
+    with pytest.raises(EntityConfigError) as exc:
+        load_config()
+    assert str(path) in str(exc.value)
+
+
+def test_a_bad_regex_in_the_global_file_names_the_global_file_not_the_repo_file(repo_cfg, tmp_path, monkeypatch):
+    repo_path = repo_cfg({"knowledge__ok-*": _PATTERN})
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    global_path = cfg_dir / "config.yml"
+    global_path.write_text(yaml.safe_dump({"entity": {"collections": {_GLOB: "CUST-(\\d{4"}}}))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+    with pytest.raises(EntityConfigError) as exc:
+        load_config()
+    assert str(global_path) in str(exc.value)
+    assert str(repo_path) not in str(exc.value)
+
+
+def test_the_inline_flag_error_says_how_to_scope_it(repo_cfg):
+    repo_cfg({_GLOB: "(?i)cust-\\d{4}"})
+    with pytest.raises(EntityConfigError, match=r"\(\?i:\.\.\.\)"):
+        load_config()
+
+
+def test_a_scoped_inline_flag_loads_and_matches_case_insensitively(repo_cfg):
+    repo_cfg({_GLOB: "(?i:cust-\\d{4})"})
+    assert find_key_tokens("see Cust-0018 and CUST-0042", _HERB) == ["Cust-0018", "CUST-0042"]
+
+
+def test_an_earlier_layers_matching_glob_wins_over_a_later_layers(repo_cfg, tmp_path, monkeypatch):
+    """The merge keeps the global file's globs ahead of the repo file's, and the first match wins: a
+    repo glob that differs from the global one does not override it."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yml").write_text(yaml.safe_dump({"entity": {"collections": {_GLOB: "GLOBAL-\\d+"}}}))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+    repo_cfg({"knowledge__herb-core*": "REPO-\\d+"})
+    pattern = pattern_for_collection(_HERB)
+    assert pattern is not None and pattern.pattern == "GLOBAL-\\d+"
+    repo_cfg({_GLOB: "REPO-\\d+"})  # the SAME glob text replaces the pattern in place
+    pattern = pattern_for_collection(_HERB)
+    assert pattern is not None and pattern.pattern == "REPO-\\d+"
+
+
+@pytest.mark.parametrize("command", [["config", "get", "entity.collections"], ["config", "list"]])
+def test_the_cli_prints_a_bad_entity_config_as_one_line_naming_the_file(repo_cfg, command):
+    path = repo_cfg({_GLOB: "CUST-(\\d{4"})
+    result = CliRunner().invoke(main, command)
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "Traceback" not in result.output
+    assert str(path) in result.output and f'entity.collections["{_GLOB}"]' in result.output
+
+
 # ── find_key_tokens ─────────────────────────────────────────────────────────
 
 
@@ -120,6 +191,15 @@ def test_find_key_tokens_is_empty_without_a_pattern(repo_cfg):
     repo_cfg({_GLOB: _PATTERN})
     assert find_key_tokens("CUST-0018", "knowledge__other-core__bge-base-en-v15-768__v1") == []
     assert find_key_tokens("", _HERB) == []
+
+
+def test_a_hyphen_or_dot_neighbour_does_not_hide_a_key(repo_cfg):
+    """Token boundaries are \\w-based: ``-`` and ``.`` are not word characters, so a suffix after a
+    hyphen leaves the key whole."""
+    repo_cfg({_GLOB: _PATTERN})
+    assert find_key_tokens("CUST-0018-ARCHIVE", _HERB) == ["CUST-0018"]
+    assert find_key_tokens("done: CUST-0042. next", _HERB) == ["CUST-0042"]
+    assert find_key_tokens("CUST-0018_ARCHIVE", _HERB) == []
 
 
 # ── classify_entity ─────────────────────────────────────────────────────────
@@ -169,7 +249,39 @@ def test_resolve_put_key_is_classify_entity_for_a_put(repo_cfg):
     assert resolve_put_key(collection=_HERB, title="CUST-0018") == "CUST-0018"
     assert resolve_put_key(collection=_HERB, title="Customer CUST-0018") == ""
     assert resolve_put_key(collection=_HERB, title="x", explicit=" CUST-0042 ") == "CUST-0042"
-    assert resolve_put_key(collection=_CODE, title="CUST-0018", explicit="CUST-0018") == ""
+    assert resolve_put_key(collection=_CODE, title="CUST-0018") == "", "a title never stamps on code__"
+
+
+def test_resolve_put_key_refuses_an_explicit_key_on_a_code_collection(repo_cfg):
+    repo_cfg({_GLOB: _PATTERN})
+    with pytest.raises(ValueError, match="code"):
+        resolve_put_key(collection=_CODE, title="x", explicit="CUST-0018")
+    assert resolve_put_key(collection=_CODE, title="CUST-0018") == "", "a title-derived key stays silent"
+    assert resolve_put_key(collection=_CODE, title="x", explicit="  ") == "", "a blank key is none given"
+
+
+@pytest.mark.parametrize("key", ["CUST\n0018", "CUST-0018\n", "\tCUST-0018", "CUST\x00", "CUST\x7f1"])
+def test_resolve_put_key_refuses_control_characters(key):
+    with pytest.raises(ValueError, match="control"):
+        resolve_put_key(collection=_HERB, title="x", explicit=key)
+
+
+def test_resolve_put_key_refuses_a_key_over_256_characters_and_takes_256():
+    with pytest.raises(ValueError, match="256"):
+        resolve_put_key(collection=_HERB, title="x", explicit="K" * 257)
+    assert resolve_put_key(collection=_HERB, title="x", explicit="K" * 256) == "K" * 256
+
+
+def test_the_mcp_description_and_the_cli_help_state_the_reput_and_code_rules():
+    import typing  # noqa: PLC0415 — only this pin reads annotations
+
+    from nexus.commands.store import put_cmd  # noqa: PLC0415 — the CLI half of the same pin
+
+    described = typing.get_type_hints(store_put, include_extras=True)["entity_key"].__metadata__[0].description
+    helped = next(o.help for o in put_cmd.params if o.name == "entity_key")
+    for text in (described, helped):
+        assert "re-put without it removes" in text.lower(), text
+        assert "code__" in text and "256" in text, text
 
 
 # ── store_put on the engine substrate ───────────────────────────────────────

@@ -271,6 +271,13 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     }
 
 
+def _own_entity_key(entry: CatalogEntry) -> str:
+    """The entity key a put stamped into the entry's ``meta`` (``""`` when none): an explicit
+    key, or the title a configured pattern matched in full (nexus-fai28)."""
+    value = (entry.meta or {}).get("entity_key")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def export_knowledge_doc(
     entry: CatalogEntry, manifest_rows: list, rows_by_chash: dict[str, dict], summary: ExportSummary,
     owners_by_chash: dict[str, list[str]] | None = None,
@@ -364,6 +371,10 @@ def export_knowledge_doc(
         "tags": keys["tags"],
         "category": keys["category"],
         "ttl_days": keys["ttl_days"],
+        # RDR-147 Step 1 (nexus-fai28): the entity key lives in the catalog entry's meta only and is
+        # not a NOTE_META_KEYS member, so it is read here on its own. Without it an import re-puts
+        # the note with no key, and that put retracts the one the source held.
+        "entity_key": _own_entity_key(entry),
         "content": content,
     }
 
@@ -694,6 +705,8 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         tags=",".join(split_note_tags(rec.get("tags"))), category=rec.get("category", ""),
         ttl_days=_positive_ttl(rec.get("ttl_days")),
         source_agent="recovery-import",
+        # An old bundle has no key (the put then stamps none, as before); a code__ target takes none.
+        entity_key=_importable_entity_key(rec, col_name),
     )
     message = failure_message(outcome, subject=repr(title))
     if message is not None:
@@ -707,6 +720,17 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     message = failure_message(outcome, subject=repr(title))
     if message is not None:
         raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
+
+
+def _importable_entity_key(rec: dict, collection: str) -> str:
+    """The record's ``entity_key`` as a string a put will take, ``""`` when it has none or the
+    target is a ``code__`` collection (nexus-fai28)."""
+    from nexus.entity_keys import is_code_collection  # noqa: PLC0415 — deferred, keeps the module's import graph as it was
+
+    value = rec.get("entity_key")
+    if not isinstance(value, str) or is_code_collection(collection):
+        return ""
+    return value
 
 
 def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
