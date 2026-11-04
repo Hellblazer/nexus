@@ -19,9 +19,9 @@ For each DISTINCT token, in first-seen order, one ``find_by_title_exact`` call:
 The result fits the standard retrieval step-output contract, so ``$stepN.ids`` / ``$stepN.tumblers`` resolve and
 a following ``store_get_many`` (or an operator's auto-hydration) reads it unchanged. ``tumblers`` has one entry
 per resolved DOCUMENT; ``collections``, ``chunk_collections`` and ``chunk_tumblers`` have one entry per ``ids``
-entry, because ``store_get_many`` reads a ``collections`` list the length of ``ids`` as per-id routing and the
-evidence diagnostics, the coverage ledger and the continuation envelope align a tumbler with its id the same way
-(``chunk_tumblers[i]`` is the document that contributed ``ids[i]``).
+entry, because ``store_get_many`` reads a ``collections`` list the length of ``ids`` as per-id routing.
+``chunk_tumblers[i]`` is the document that contributed ``ids[i]``; the runner's evidence source, the coverage
+ledger's repair hits and the continuation envelope read it in place of ``tumblers`` when it lines up with ``ids``.
 
 ``ids`` is deduplicated across documents by ``(chash, collection)``: identical chunk text is one T3 row, so two
 resolved documents that share a chunk list it once. ``by_token`` is built BEFORE that dedup and gives each

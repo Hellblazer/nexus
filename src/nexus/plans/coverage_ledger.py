@@ -765,7 +765,9 @@ def build_anchors(
         if stream is None or not isinstance(ids, list):
             continue
         cols = _per_chunk_collections(out, len(ids))
-        tumblers = out.get("tumblers")
+        tumblers = out.get("chunk_tumblers")  # per id, where the step gives it (resolve)
+        if not (isinstance(tumblers, list) and len(tumblers) == len(ids)):
+            tumblers = out.get("tumblers")
         tums = [str(t) for t in tumblers] if isinstance(tumblers, list) and len(tumblers) == len(ids) else [""] * len(ids)
         for cid, col, tum in zip(ids, cols, tums, strict=True):
             index.setdefault(str(cid).lower(), (stream, col, tum))
@@ -1725,7 +1727,9 @@ def _hits(out: Any) -> list[RepairHit]:
         return []
     ids = out["ids"]
     cols = _per_chunk_collections(out, len(ids))
-    tumblers = out.get("tumblers")
+    tumblers = out.get("chunk_tumblers")  # per id, where the step gives it (resolve)
+    if not (isinstance(tumblers, list) and len(tumblers) == len(ids)):
+        tumblers = out.get("tumblers")
     tums = [str(t) for t in tumblers] if isinstance(tumblers, list) and len(tumblers) == len(ids) else [""] * len(ids)
     hashes = out.get("chunk_text_hash")
     hs = [str(h) for h in hashes] if isinstance(hashes, list) and len(hashes) == len(ids) else [""] * len(ids)

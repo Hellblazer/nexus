@@ -446,3 +446,38 @@ async def test_a_step_reading_missing_from_a_skipped_resolve_step_neither_raises
 
     assert calls == [], "neither step was dispatched"
     assert len(result.steps) == 2
+
+
+# ── readers pair each id with its own document (chunk_tumblers, not per-document tumblers) ──
+
+_RESOLVE_SHAPED = {
+    "tumblers": ["1.1.1", "1.1.2"],          # one per resolved DOCUMENT
+    "ids": ["c1", "c2", "c3"],
+    "collections": ["k", "k", "k"],
+    "chunk_collections": ["k", "k", "k"],
+    "chunk_tumblers": ["1.1.1", "1.1.1", "1.1.2"],
+    "missing": [], "ambiguous": {}, "by_token": {},
+}
+
+
+def test_the_continuation_envelope_pairs_each_id_with_the_document_that_contributed_it():
+    from nexus.plans.continuation_envelope import _harvest_hydrated_bundles
+
+    (bundle,) = _harvest_hydrated_bundles([_RESOLVE_SHAPED], None)
+    assert [it["tumbler"] for it in bundle["items"]] == ["1.1.1", "1.1.1", "1.1.2"]
+
+
+def test_the_repair_hits_pair_each_id_with_the_document_that_contributed_it():
+    from nexus.plans.coverage_ledger import _hits
+
+    assert [h.tumbler for h in _hits(_RESOLVE_SHAPED)] == ["1.1.1", "1.1.1", "1.1.2"]
+
+
+def test_a_check_steps_evidence_source_pairs_each_id_with_the_document_that_contributed_it():
+    from nexus.plans import runner
+
+    resolved = {"ids": ["c1", "c2", "c3"]}
+    out = runner._with_evidence_source(
+        "operator_check", {"ids": "$step1.ids"}, resolved, [_RESOLVE_SHAPED],
+    )
+    assert out[runner._EVIDENCE_SOURCE_KEY]["tumblers"] == ["1.1.1", "1.1.1", "1.1.2"]

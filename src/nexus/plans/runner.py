@@ -2648,7 +2648,9 @@ def _with_evidence_source(
             return [str(v or "") for v in vals] if isinstance(vals, list) and len(vals) == n else [""] * n
 
         out_ids.extend(str(i) for i in ids)
-        tumblers.extend(aligned("tumblers"))
+        per_id = prior.get("chunk_tumblers")  # per id, where the step gives it (resolve)
+        tumblers.extend(aligned("chunk_tumblers") if isinstance(per_id, list) and len(per_id) == n
+                        else aligned("tumblers"))
         hashes.extend(aligned("chunk_text_hash"))
         cols.extend(_per_chunk_collections(prior, n))
     resolved_ids = resolved["ids"]
