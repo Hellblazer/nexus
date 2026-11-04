@@ -6397,7 +6397,17 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   facet stays covered whatever the unread anchors say: a supporting one adds to its evidence, a
   contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) is recorded as covered
   with the reason `conflicted_from_contradicted` when an unread anchor supports it, and the run stays `partial` with its notice;
-  it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
+  it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). With
+  `NX_ANSWER_RESOLUTION_REPAIR=1` (off by default; RDR-147 Step 4, nexus-qpimy) the repair may instead take an
+  exact-key branch, and `repair` then adds keys, only once the branch was considered (with the switch off the
+  wire is unchanged): `resolution_entered` (the branch resolved keys in place of the semantic queries) and
+  `resolution_reason` (why a considered branch did not enter: `confined_run`, `entity_config_error` or
+  `no_key_tokens`), `resolution_tokens` (distinct keys sent to `resolve`, at most 12), `resolved`, `missing`
+  and `ambiguous` (the keys by outcome), `joined_added` (joined items that reached the reduction),
+  `joined_dropped` (each pair a cap, the caller's scope or a missing record left out as `<key>@<anchor item_id>`,
+  and each key the cap kept from being resolved, as the bare key) and `anchor_key_ids` (every distinct key the
+  anchors named). The outcome stays one of the existing ones: `completed`, `no_new_evidence` when no key
+  yielded a joined item, `retrieval_failed` when the resolve or the record fetch failed. `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,

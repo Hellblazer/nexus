@@ -14614,7 +14614,10 @@ async def nx_answer(
     # fallback re-run below gets the same one. With NX_ANSWER_COVERAGE off (on by default since nexus-jypmj.17) none
     # is passed: every run is then unassessed and this call is what it was before Phase 3. The single_query fast path
     # never gets here (no reduction).
-    from nexus.plans.switches import coverage_enabled as _coverage_enabled  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.switches import (  # noqa: PLC0415 — deferred; matches this module's convention
+        coverage_enabled as _coverage_enabled,
+        resolution_repair_enabled as _resolution_repair_enabled,
+    )
 
     if _coverage_enabled(_os.environ):
         from nexus.plans.coverage_ledger import CoverageBoundary as _CoverageBoundary  # noqa: PLC0415 — deferred; matches this module's convention
@@ -14625,6 +14628,8 @@ async def nx_answer(
             primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
             dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
             confinement=_document_confinement,
+            # RDR-147 Step 4 (nexus-qpimy): the exact-key resolution branch of the one repair; off unless set to an on value.
+            resolution_repair=_resolution_repair_enabled(_os.environ),
         )
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline

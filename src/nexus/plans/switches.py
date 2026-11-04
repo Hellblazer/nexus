@@ -13,6 +13,10 @@ other way round from the two switches above: a value in neither vocabulary (``di
 is read as OFF and logs the same one warning. A typo of either intent therefore lands on the unassessed
 behaviour, which changes no answer; only an explicit on value (``1``, ``true``, ``yes``, ``on``) or leaving the
 variable unset runs the assessment.
+
+``NX_ANSWER_RESOLUTION_REPAIR`` (RDR-147 Step 4, nexus-qpimy) is the opposite default: OFF unless set to an on
+value (``1``, ``true``, ``yes``, ``on``). Unset, blank, an off value and an unrecognised value (one warning) all
+read as off, so a typo never turns the exact-key resolution branch of the coverage repair on.
 """
 from __future__ import annotations
 
@@ -25,10 +29,13 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "ANSWER_COVERAGE_ENABLED",
     "ANSWER_COVERAGE_ENV",
+    "ANSWER_RESOLUTION_REPAIR_ENABLED",
+    "ANSWER_RESOLUTION_REPAIR_ENV",
     "OFF_VALUES",
     "ON_VALUES",
     "coverage_enabled",
     "reset_warned",
+    "resolution_repair_enabled",
     "warn_unrecognised",
 ]
 
@@ -86,4 +93,29 @@ def coverage_enabled(environ: Mapping[str, str]) -> bool:
     if not raw:
         return ANSWER_COVERAGE_ENABLED
     warn_unrecognised(ANSWER_COVERAGE_ENV, raw, read_as="off")
+    return False
+
+
+#: The switch of the exact-key resolution branch inside the coverage repair (RDR-147 Step 4, nexus-qpimy).
+ANSWER_RESOLUTION_REPAIR_ENV = "NX_ANSWER_RESOLUTION_REPAIR"
+#: What an unset or blank :data:`ANSWER_RESOLUTION_REPAIR_ENV` means. Off until the MVV and the single-hop
+#: non-firing count are recorded (RDR-147 Phase 2); one source for the default, a test flips it.
+ANSWER_RESOLUTION_REPAIR_ENABLED: bool = False
+
+
+def resolution_repair_enabled(environ: Mapping[str, str]) -> bool:
+    """Whether the coverage repair may take its exact-key resolution branch, decided now from *environ*.
+
+    An on value (``1``, ``true``, ``yes``, ``on``): on. Unset or blank: :data:`ANSWER_RESOLUTION_REPAIR_ENABLED`
+    (``False``). An off value, or a value in neither vocabulary (one warning per process): off. Off is the repair
+    exactly as it was before RDR-147: the semantic facet queries, no scan of the anchors, no ``resolve`` call.
+    """
+    raw = str(environ.get(ANSWER_RESOLUTION_REPAIR_ENV, "")).strip().lower()
+    if raw in ON_VALUES:
+        return True
+    if raw in OFF_VALUES:
+        return False
+    if not raw:
+        return ANSWER_RESOLUTION_REPAIR_ENABLED
+    warn_unrecognised(ANSWER_RESOLUTION_REPAIR_ENV, raw, read_as="off")
     return False

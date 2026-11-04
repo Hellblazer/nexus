@@ -61,6 +61,7 @@ __all__ = [
     "REPAIR_RESULTS_PER_QUERY",
     "REPAIR_RESULTS_PER_QUERY_UNFILTERED",
     "REPAIR_RETRIEVAL_SHARE",
+    "RESOLUTION_REASONS",
     "RepairHit",
     "RepairOutcome",
     "RepairQuery",
@@ -121,6 +122,10 @@ def repair_reason(*, unsupported: bool, unread_tail: bool) -> str:
     return "unread_tail" if unread_tail else "unsupported" if unsupported else ""
 
 
+#: Why a considered resolution branch (RDR-147 Step 4) did not enter: the run is confined to one document, the entity
+#: config is malformed, or no anchor names a key its collection's pattern matches.
+RESOLUTION_REASONS: tuple[str, ...] = ("confined_run", "entity_config_error", "no_key_tokens")
+
 RepairOutcome = Literal[
     "not_attempted", "completed", "no_new_evidence", "not_merged", "retrieval_failed", "no_target",
     "skipped_deadline", "skipped_budget", "unavailable",
@@ -159,14 +164,40 @@ class RepairReport:
     #: of their anchors unread (nexus-z6yvk, nexus-se11w).
     reason: str = ""
     unread_facet_ids: tuple[str, ...] = ()
+    #: RDR-147 Step 4 (nexus-qpimy), the exact-key resolution branch. ``resolution_entered``: the branch ran its
+    #: ``resolve`` call in place of the semantic facet queries. ``resolution_reason`` names why a considered branch did
+    #: not enter (:data:`RESOLUTION_REASONS`); both are empty while the switch is off. ``resolution_tokens`` is how many
+    #: distinct tokens went to ``resolve`` (at most :data:`MAX_REPAIR_ITEMS`); ``resolved``, ``missing`` and
+    #: ``ambiguous`` are the tokens by outcome; ``joined_added`` the joined items that reached the reduction.
+    #: ``joined_dropped`` names every pair a cap, the caller's scope or a missing record text left out, as
+    #: ``<token>@<anchor id>``, and every token the cap kept from being resolved, as the bare token. ``anchor_key_ids``
+    #: is every distinct key the first ledger's anchors named: the MVV's join-completeness domain.
+    resolution_entered: bool = False
+    resolution_reason: str = ""
+    resolution_tokens: int = 0
+    resolved: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    ambiguous: tuple[str, ...] = ()
+    joined_added: int = 0
+    joined_dropped: tuple[str, ...] = ()
+    anchor_key_ids: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        wire: dict[str, Any] = {
             "outcome": self.outcome, "facet_ids": list(self.facet_ids), "queries": self.queries,
             "items_found": self.items_found, "items_merged": self.items_merged, "latency_ms": self.latency_ms,
             "detail": self.detail, "noted_facets": self.noted_facets,
             "reason": self.reason, "unread_facet_ids": list(self.unread_facet_ids),
         }
+        if self.resolution_entered or self.resolution_reason:
+            # Additive, and only once the branch was considered: with the switch off the wire is what it was.
+            wire.update({
+                "resolution_entered": self.resolution_entered, "resolution_reason": self.resolution_reason,
+                "resolution_tokens": self.resolution_tokens, "resolved": list(self.resolved),
+                "missing": list(self.missing), "ambiguous": list(self.ambiguous), "joined_added": self.joined_added,
+                "joined_dropped": list(self.joined_dropped), "anchor_key_ids": list(self.anchor_key_ids),
+            })
+        return wire
 
 
 @dataclass(frozen=True)
