@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5126
+provisioned_tests = 5128
 tolerance_tests = 0
+# 5126 -> 5128 (nexus-z7ddd, 2026-11-04): +2. tests/hooks/test_subagent_start_preflight_row.py drives the SubagentStart hook
+# as a child process in two throwaway git repos (with and without the worktree preflight script) and reads its real
+# injection; the hook's T2 scan reaches the engine, so each takes a tenant, as the hook module's own tests do.
 # 5124 -> 5126 (nexus-dm617, 2026-11-04): +2. tests/test_rename_vs_tuple_tasks.py is two real-engine tests of the default
 # (tuples) aspect producer across a collection rename: the deterministic journey and the threaded race. Both need a real
 # tenant, because the subject is what the engine's rename does to queued tasks while the Python producer writes them.

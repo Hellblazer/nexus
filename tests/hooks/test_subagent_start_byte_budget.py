@@ -332,6 +332,11 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
     main_repo = tmp_path / "the-real-project"
     main_repo.mkdir()
     subprocess.run(["git", "init", "-q", str(main_repo)], check=True)
+    # nexus-z7ddd: the worktree Preflight row goes only to a project that has the
+    # script, as the nexus repo does; seed it so this measures the largest case.
+    preflight = main_repo / "scripts" / "agent-worktree-preflight.sh"
+    preflight.parent.mkdir()
+    preflight.write_text("#!/bin/sh\n")
     subprocess.run(
         ["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@t",
          "commit", "-q", "--allow-empty", "-m", "init"],
@@ -345,6 +350,7 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
 
     conexus_ctx = _run_conexus(home=tmp_path / "home", cwd=str(worktree_dir))
     _assert_seeds_reached(conexus_ctx)
+    assert "| Preflight |" in conexus_ctx, "the worktree Preflight row is not in the measured injection"
     worktree_payload = json.dumps({
         "session_id": "budget-census-session",
         "hook_event_name": "SubagentStart",

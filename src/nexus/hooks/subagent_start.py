@@ -175,7 +175,7 @@ def _worktree_preflight_row(repo_root: str) -> str:
     worktree agent outside the nexus repo was told to run, as its first action, a
     script its project does not have.
     """
-    if repo_root and (Path(repo_root) / _WORKTREE_PREFLIGHT_SCRIPT).is_file():
+    if repo_root and os.path.isfile(os.path.join(repo_root, _WORKTREE_PREFLIGHT_SCRIPT)):
         return _WORKTREE_PREFLIGHT
     return ""
 
