@@ -307,7 +307,7 @@ Recommend a next agent only when a NAMED trigger fired, and name exactly one:
 
 Otherwise end with your result and hand back. Do not recommend the routine
 review gate — the caller owns the review-gate-commit tail already
-(`~/.claude/CLAUDE.md` § Review Discipline; `orchestration/SKILL.md` Quick
+(`${CLAUDE_PLUGIN_ROOT}/skills/orchestration/SKILL.md` Quick
 Routing), and a per-agent reminder to dispatch it is compounding scaffolding:
 it restates standing policy the caller already knows, and gets paid for again
 on every subsequent turn that re-reads your output. This section removes the

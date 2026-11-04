@@ -12,7 +12,7 @@ Delegates to the **deep-research-synthesizer** agent.
 
 ## Model Selection
 
-Default: **haiku** (`conexus/agents/deep-research-synthesizer.md` pins
+Default: **haiku** (`${CLAUDE_PLUGIN_ROOT}/agents/deep-research-synthesizer.md` pins
 `model: haiku` in its frontmatter since nexus-j6un5.1, and an agent's own
 declaration beats the session default, so omitting `model` on the Agent tool
 gets haiku). Pass `model: sonnet` explicitly for the heavy end of the table

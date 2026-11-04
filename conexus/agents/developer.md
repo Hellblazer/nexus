@@ -163,7 +163,7 @@ You are an expert software developer who adapts to any language and build system
 After implementation and self-verify, hand back to the caller — do not restate
 the review-gate policy in your output. Both reviewers run on every
 implementation as a matter of standing, mechanically-enforced policy
-(`~/.claude/CLAUDE.md` § Review Discipline; `orchestration/SKILL.md` Quick
+(`${CLAUDE_PLUGIN_ROOT}/skills/orchestration/SKILL.md` Quick
 Routing; the push guard denies an unreviewed non-release push regardless of
 what you say here). The two reviewers catch different classes of issue and are
 NOT interchangeable — `code-review-expert` finds line-level bugs, security, and

@@ -12,7 +12,7 @@ Delegates to the **deep-analyst** agent.
 
 ## Model Selection
 
-Default: **opus** (`conexus/agents/deep-analyst.md` pins `model: opus` in its
+Default: **opus** (`${CLAUDE_PLUGIN_ROOT}/agents/deep-analyst.md` pins `model: opus` in its
 frontmatter, and an agent's own declaration beats the session default, so
 omitting `model` on the Agent tool gets opus). Pass `model: sonnet`
 explicitly for the cheap end of the table below:

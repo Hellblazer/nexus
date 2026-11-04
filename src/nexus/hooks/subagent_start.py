@@ -164,6 +164,21 @@ _WORKTREE_PREFLIGHT = (
     "on any PREFLIGHT_FAIL line (nexus-5kwkf) |\n"
 )
 
+#: Relative to the project's main repo root. Only the nexus repo ships it.
+_WORKTREE_PREFLIGHT_SCRIPT: str = "scripts/agent-worktree-preflight.sh"
+
+
+def _worktree_preflight_row(repo_root: str) -> str:
+    """The Preflight row, only for a project that has the script.
+
+    nexus-z7ddd: the row used to go into every dispatch in every project, so a
+    worktree agent outside the nexus repo was told to run, as its first action, a
+    script its project does not have.
+    """
+    if repo_root and (Path(repo_root) / _WORKTREE_PREFLIGHT_SCRIPT).is_file():
+        return _WORKTREE_PREFLIGHT
+    return ""
+
 #: nexus-mtheb: the T1 contract, first in every injection, review and code-nav
 #: agents included. Five rounds of T1 design faded because the guidance was
 #: buried or pointed elsewhere: this block used to be absent for reviewers, and the
@@ -572,7 +587,7 @@ def run(payload: dict | None) -> HookResult:
 
     parts.append(_RELAY)
     parts.append(_ORCH)
-    parts.append(_WORKTREE_PREFLIGHT)
+    parts.append(_worktree_preflight_row(repo_root))
 
     skip_storage_docs, skip_operators = _classify(agent_type, task_text)
 
