@@ -9495,6 +9495,26 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     if pending and isinstance(oldest_pending_age_s, (int, float)):
         pending_desc += f" (oldest {oldest_pending_age_s:.0f}s)"
 
+    if alive and status.get("gate_stalled"):
+        # nexus-w4l00 follow-on: the waiter runs and ticks, but every send timed
+        # out on the initialized gate, so no push is delivered. The client
+        # connected in an era that sends no `notifications/initialized` (or has
+        # not finished its handshake). A hard failure, not a warning: the row
+        # would otherwise read as a healthy waiter.
+        since = status.get("gate_stalled_since")
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                "the waiter is running but the client never sent notifications/initialized, so channel "
+                f"pushes are not delivered (stalled since {since or 'unknown'}); announced={announced}. "
+                "Mail still arrives via the drain hook at the next prompt."
+            ),
+            fix_suggestions=[
+                "Restart the MCP server: /mcp (if it recurs, upgrade conexus; the client connected in a "
+                "protocol era that sends no notifications/initialized, nexus-w4l00)",
+            ],
+        )]
+
     if not alive or stale:
         # bead nexus-vsipz review round: a dead waiter names WHY it stopped
         # when it knows -- `stopped_reason` is set only by the two loud stops
@@ -9556,6 +9576,122 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
             f"waiter alive; last wake {wake_desc}; announced={announced}, {pending_desc}"
         ),
     )]
+
+
+_CLAUDE_CODE_MCP_CONNECTION_LABEL = "mcp.claude_code_connection"
+
+#: Claude Code writes one log file per connection under
+#: ``<cache>/<mangled cwd>/<mcp-logs-...>/``; these two directories hold the
+#: nexus server (the plugin install, and the ``server:nexus`` dev channel).
+_CLAUDE_CODE_NEXUS_LOG_DIRS = ("mcp-logs-plugin-conexus-nexus", "mcp-logs-nexus")
+
+#: The connect lines are the first few in a file; a long session's tail is
+#: thousands of tool-call lines nobody needs to read here.
+_CLAUDE_CODE_LOG_READ_BYTES = 128 * 1024
+
+
+def _claude_code_cache_root(platform: str, home: Path, env: "dict[str, str] | os._Environ[str]") -> Path | None:
+    """Where Claude Code keeps its MCP logs (the ``env-paths`` cache directory
+    for the app name ``claude-cli``). Confirmed on macOS; the Linux and Windows
+    paths follow the same library's convention and are not verified here.
+    ``None`` where the location cannot be derived."""
+    if platform == "darwin":
+        return home / "Library" / "Caches" / "claude-cli-nodejs"
+    if platform == "win32":
+        local = env.get("LOCALAPPDATA")
+        return Path(local) / "claude-cli-nodejs" / "Cache" if local else None
+    xdg = env.get("XDG_CACHE_HOME")
+    return (Path(xdg) if xdg else home / ".cache") / "claude-cli-nodejs"
+
+
+def _claude_code_project_dir_name(cwd: Path) -> str:
+    """Claude Code names a project's log directory after the cwd with every
+    non-alphanumeric character replaced by ``-``."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def _check_claude_code_mcp_connection(
+    *, cache_root: Path | None = None, cwd: Path | None = None,
+) -> list[HealthResult]:
+    """Claude Code's own record of its newest connection to the nexus MCP
+    server (nexus-w4l00 follow-on).
+
+    ``nx-mcp`` serves the handshake era only: Claude Code probes the modern
+    era first, is refused, and falls back to ``initialize``, which is the only
+    path that carries the ``claude/channel`` capability. If Claude Code ever
+    stops falling back, the server loses its channel (or every tool), and
+    nothing on the server side can see it. This row reads the client's side:
+    a FAILURE when the newest connection logged "did not declare claude/channel
+    capability" or "Connection failed". "not in --channels list" is a launch
+    choice, not a fault, and a connection with neither line (still starting, or
+    an older Claude Code that logs nothing) is informational.
+
+    Not applicable where no Claude Code log directory exists for the current
+    directory. *cache_root* and *cwd* are test seams.
+    """
+    label = _CLAUDE_CODE_MCP_CONNECTION_LABEL
+    na = lambda why: [HealthResult(label=label, ok=True, detail=f"informational — {why}")]  # noqa: E731
+    if cache_root is None:
+        cache_root = _claude_code_cache_root(sys.platform, Path.home(), os.environ)
+    if cache_root is None:
+        return na("no Claude Code log location is known on this platform")
+    project = cache_root / _claude_code_project_dir_name(cwd if cwd is not None else Path.cwd())
+    files = sorted(
+        (f for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (project / d).glob("*.jsonl")),
+        key=lambda f: f.name,
+    )
+    if not files:
+        return na("no Claude Code MCP log for the nexus server under this directory")
+    newest = files[-1]
+    try:
+        with newest.open("rb") as fh:
+            raw = fh.read(_CLAUDE_CODE_LOG_READ_BYTES)
+    except OSError as exc:
+        return na(f"could not read {newest.name}: {exc.strerror or exc}")
+
+    channel_missing = False
+    registered = False
+    connect_failure: str | None = None
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # the read bound can cut the last line
+        message = entry.get("debug") or entry.get("error") if isinstance(entry, dict) else None
+        if not isinstance(message, str):
+            continue
+        if message.startswith("Connection failed"):
+            connect_failure = connect_failure or message[:160]
+        elif message.startswith("Channel notifications skipped: server did not declare claude/channel capability"):
+            channel_missing = True
+        elif message.startswith("Channel notifications registered"):
+            registered = True
+
+    if connect_failure is not None:
+        return [HealthResult(
+            label=label, ok=False,
+            detail=f"Claude Code's newest connection to the nexus MCP server failed: {connect_failure} (log {newest.name})",
+            fix_suggestions=["Run nx-mcp by hand to see why it exits, then restart the MCP server: /mcp"],
+        )]
+    if channel_missing:
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                "Claude Code's newest connection to the nexus MCP server skipped the channel: the server did not "
+                f"declare claude/channel capability (log {newest.name}). Push delivery is off; mail still arrives "
+                "at the next prompt."
+            ),
+            fix_suggestions=[
+                "Restart Claude Code on the current conexus (nx-mcp serves the handshake era so Claude Code falls "
+                "back to initialize, nexus-w4l00); if it still skips, Claude Code may have dropped that fallback: report it",
+            ],
+        )]
+    if registered:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"Claude Code's newest connection to the nexus MCP server registered the channel (log {newest.name})",
+        )]
+    return na(f"Claude Code's newest nexus connection ({newest.name}) logged no channel verdict")
 
 
 _BEADS_PRIME_LABEL = "Beads PRIME.md (user-level)"
@@ -12911,6 +13047,7 @@ def run_health_checks(
     # publishes (no engine call). Degrades internally to informational
     # whenever no session, or no record, is resolvable.
     results.extend(_check_tuple_channel_delivery())
+    results.extend(_check_claude_code_mcp_connection())  # nexus-w4l00: the client side of the handshake fallback
     # nexus-cnzei.8: read-only informational row; [] when beads is not
     # detected on this machine at all.
     results.extend(_check_beads_prime())

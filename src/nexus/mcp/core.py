@@ -16292,10 +16292,12 @@ def main():
         # "stdio") -- anyio.run(mcp.run_stdio_async) -- declares no
         # experimental capabilities (MCPServer calls
         # create_initialization_options() bare). channel.
-        # run_stdio_with_channel drives the exact same low-level
-        # Server.run() call MCPServer would have, plus the
-        # "claude/channel" capability that makes Claude Code register a
-        # channel listener (Phase 1 Step 0 spike). Every other transport
+        # run_stdio_with_channel runs the same lifespan, then serve_loop
+        # (the handshake era only, nexus-w4l00; Server.run would also serve
+        # the 2026-07-28 era, whose discover result has no channel
+        # capability), declaring the "claude/channel" capability that makes
+        # Claude Code register a channel listener (Phase 1 Step 0 spike).
+        # Every other transport
         # (SSE, streamable-http) is untouched -- this substitution is
         # stdio-only, matching where nx-mcp actually runs.
         import anyio  # noqa: PLC0415 — rare/branch-local path; stdlib-adjacent import deferred to call site

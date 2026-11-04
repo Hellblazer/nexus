@@ -1454,6 +1454,34 @@ class TestCheckTupleChannelDelivery:
         assert "pending=0" in r.detail
         assert "oldest" not in r.detail
 
+    def test_a_gate_that_never_opened_is_a_failure_not_a_healthy_waiter(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """nexus-w4l00 follow-on: the waiter is alive and ticking, but its
+        sends time out on the initialized gate, so no push is delivered. That
+        is a failure (not a warning, not OK) with a one-line remedy."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(
+            tmp_path, "sess-1", alive=True, last_wake=now, announced=0,
+            gate_stalled=True, gate_stalled_since=now,
+        )
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False
+        assert r.warn is False
+        assert "notifications/initialized" in r.detail
+        assert len(r.fix_suggestions) == 1
+        assert "/mcp" in r.fix_suggestions[0]
+
+    def test_gate_stalled_false_leaves_a_healthy_waiter_ok(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=True, last_wake=now, gate_stalled=False, gate_stalled_since=None)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+
     def test_not_alive_is_warn(self, monkeypatch, tmp_path: Path) -> None:
         """Mutation-check target: dropping the `not alive` half of the
         WARN condition must fail this test."""
@@ -1649,3 +1677,136 @@ def test_new_channel_delivery_row_absent_from_fresh_install_mvv_allowlist() -> N
     allowlist_regex = match.group(1)
     assert "channel_delivery" not in allowlist_regex
     assert "tuples.channel_delivery" not in source
+
+
+# ── Claude Code's own MCP log: the handshake fallback nx-mcp depends on ─────
+# (nexus-w4l00 follow-on). nx-mcp serves the handshake era only; if Claude
+# Code ever stops falling back to `initialize`, the server loses every tool
+# and nothing in nexus notices. This row reads the client's side of the
+# connection.
+
+
+def _mcp_log(root: Path, project_dir: str, server_dir: str, name: str, *lines: str) -> Path:
+    d = root / project_dir / server_dir
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    f.write_text(
+        "".join(json.dumps({"debug": line, "timestamp": "2026-11-04T18:10:59.162Z"}) + "\n" for line in lines),
+        encoding="utf-8",
+    )
+    return f
+
+
+class TestCheckClaudeCodeMcpConnection:
+    def test_directory_name_mangles_every_non_alphanumeric_character(self) -> None:
+        assert h._claude_code_project_dir_name(Path("/Users/hal.hildebrand/git/nexus")) == (
+            "-Users-hal-hildebrand-git-nexus"
+        )
+        assert h._claude_code_project_dir_name(Path("/private/tmp/cc-validation-exp1")) == (
+            "-private-tmp-cc-validation-exp1"
+        )
+
+    def test_cache_root_follows_the_platform_convention(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        assert h._claude_code_cache_root("darwin", home, {}) == home / "Library" / "Caches" / "claude-cli-nodejs"
+        assert h._claude_code_cache_root("linux", home, {}) == home / ".cache" / "claude-cli-nodejs"
+        assert h._claude_code_cache_root("linux", home, {"XDG_CACHE_HOME": str(tmp_path / "xdg")}) == (
+            tmp_path / "xdg" / "claude-cli-nodejs"
+        )
+        assert h._claude_code_cache_root("win32", home, {"LOCALAPPDATA": str(tmp_path / "lad")}) == (
+            tmp_path / "lad" / "claude-cli-nodejs" / "Cache"
+        )
+        assert h._claude_code_cache_root("win32", home, {}) is None
+
+    def test_no_log_directory_is_not_applicable(self, tmp_path: Path) -> None:
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path / "none", cwd=Path("/w/p"))[0]
+        assert r.ok is True and "informational" in r.detail
+
+    def test_a_connection_that_registered_the_channel_is_ok(self, tmp_path: Path) -> None:
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Starting connection with timeout of 30000ms",
+            "Successfully connected (transport: stdio) in 900ms",
+            "Channel notifications registered",
+        )
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0]
+        assert r.ok is True and r.warn is False
+        assert "registered" in r.detail
+
+    def test_channel_skipped_for_a_missing_capability_is_a_failure(self, tmp_path: Path) -> None:
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Successfully connected (transport: stdio) in 900ms",
+            "Channel notifications skipped: server did not declare claude/channel capability",
+        )
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0]
+        assert r.ok is False and r.warn is False
+        assert "claude/channel" in r.detail
+        assert len(r.fix_suggestions) == 1
+
+    def test_a_failed_connect_is_a_failure(self, tmp_path: Path) -> None:
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Starting connection with timeout of 30000ms",
+            "Connection failed after 120ms: MCP error -32000: Connection closed",
+        )
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0]
+        assert r.ok is False and r.warn is False
+        assert "Connection failed" in r.detail
+        assert len(r.fix_suggestions) == 1
+
+    def test_a_session_not_launched_with_the_channel_flag_is_not_a_failure(self, tmp_path: Path) -> None:
+        """'not in --channels list' is the user's launch choice, and the drain
+        hook still delivers: the row must not call it broken."""
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Successfully connected (transport: stdio) in 900ms",
+            "Channel notifications skipped: server plugin:conexus:nexus not in --channels list for this session",
+        )
+        r = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0]
+        assert r.ok is True
+
+    def test_only_the_newest_connection_counts(self, tmp_path: Path) -> None:
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T09-00-00-000Z.jsonl",
+            "Channel notifications skipped: server did not declare claude/channel capability",
+        )
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Channel notifications registered",
+        )
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is True
+
+    def test_the_dev_channel_server_log_is_read_too(self, tmp_path: Path) -> None:
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-nexus", "2026-11-04T11-00-00-000Z.jsonl",
+            "Channel notifications skipped: server did not declare claude/channel capability",
+        )
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Channel notifications registered",
+        )
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is False
+
+    def test_a_connection_still_starting_is_not_a_failure(self, tmp_path: Path) -> None:
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Starting connection with timeout of 30000ms",
+        )
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is True
+
+    def test_a_failure_line_past_the_read_bound_is_never_read(self, tmp_path: Path) -> None:
+        """The scan reads only the start of the file (a long session's log holds
+        thousands of tool-call lines)."""
+        filler = ["Calling MCP tool: memory_get"] * 5000
+        _mcp_log(
+            tmp_path, "-w-p", "mcp-logs-plugin-conexus-nexus", "2026-11-04T10-00-00-000Z.jsonl",
+            "Channel notifications registered", *filler,
+            "Connection failed: MCP error -32000: Connection closed",
+        )
+        assert h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"))[0].ok is True
+
+    def test_the_row_is_wired_into_the_doctor_run(self) -> None:
+        import inspect
+
+        assert "_check_claude_code_mcp_connection()" in inspect.getsource(h.run_health_checks)

@@ -14,6 +14,7 @@ real stdio, the way ``nx-mcp`` runs it.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -157,14 +158,11 @@ _SERVER_SCRIPT = textwrap.dedent(
 )
 
 
-def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notification(
-    tmp_path,
-) -> None:
-    """Real stdio, newline-delimited JSON-RPC: initialize, initialized, one tools/call.
-
-    The notification is read raw because the SDK's typed client has no member for
-    ``notifications/claude/channel``.
-    """
+@contextlib.contextmanager
+def _stdio_session(tmp_path):
+    """Start ``_SERVER_SCRIPT`` as a real stdio server and yield ``(send, recv)``
+    for newline-delimited JSON-RPC. ``recv`` fails the test with the server's
+    stderr tail when nothing arrives in time; the process is always reaped."""
     script = tmp_path / "stdio_server.py"
     script.write_text(_SERVER_SCRIPT, encoding="utf-8")
     home = tmp_path / "home"
@@ -193,11 +191,35 @@ def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notificat
         proc.stdin.flush()
 
     def recv(timeout: float = 30.0) -> dict[str, Any]:
-        item = lines.get(timeout=timeout)
+        try:
+            item = lines.get(timeout=timeout)
+        except queue.Empty:
+            proc.kill()
+            err = proc.stderr.read() if proc.stderr else ""
+            raise AssertionError(f"no reply from the stdio server; stderr tail: {err[-800:]}") from None
         assert item is not None, "server closed stdout"
         return json.loads(item)
 
     try:
+        yield send, recv
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
+
+
+def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notification(
+    tmp_path,
+) -> None:
+    """Real stdio, newline-delimited JSON-RPC: initialize, initialized, one tools/call.
+
+    The notification is read raw because the SDK's typed client has no member for
+    ``notifications/claude/channel``.
+    """
+    with _stdio_session(tmp_path) as (send, recv):
         send({"id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": {"name": "contract", "version": "1"},
@@ -208,17 +230,6 @@ def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notificat
         send({"method": "notifications/initialized"})
         send({"id": 2, "method": "tools/call", "params": {"name": "notify", "arguments": {}}})
         seen: list[dict[str, Any]] = [recv(), recv()]
-    except queue.Empty:
-        proc.kill()
-        err = proc.stderr.read() if proc.stderr else ""
-        raise AssertionError(f"no reply from the stdio server; stderr tail: {err[-800:]}") from None
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait(timeout=10)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream:
-                stream.close()
 
     notes = [m for m in seen if m.get("method") == "notifications/claude/channel"]
     replies = [m for m in seen if m.get("id") == 2]
@@ -241,44 +252,12 @@ def test_a_client_probing_the_modern_era_first_falls_back_to_the_handshake_and_g
     ``run_stdio_with_channel`` serves the handshake era only: the probe is
     refused, the client falls back to ``initialize``, and the capability and the
     notification arrive as they did on mcp 1.x."""
-    script = tmp_path / "stdio_server.py"
-    script.write_text(_SERVER_SCRIPT, encoding="utf-8")
-    home = tmp_path / "home"
-    home.mkdir()
-    env = {k: v for k, v in os.environ.items() if k not in {"NX_SERVICE_URL", "NEXUS_CONFIG_DIR"}}
-    env.update(HOME=str(home), USERPROFILE=str(home), NEXUS_CONFIG_DIR=str(home / "cfg"), NX_NO_TELEMETRY="1")
-
-    proc = subprocess.Popen(  # noqa: S603 — the interpreter running this test, a script this test wrote
-        [sys.executable, "-I", str(script)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, env=env, cwd=str(tmp_path),
-    )
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def pump() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            lines.put(line)
-        lines.put(None)
-
-    threading.Thread(target=pump, daemon=True).start()
-
-    def send(message: dict[str, Any]) -> None:
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
-        proc.stdin.flush()
-
-    def recv(timeout: float = 30.0) -> dict[str, Any]:
-        item = lines.get(timeout=timeout)
-        assert item is not None, "server closed stdout"
-        return json.loads(item)
-
     envelope = {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.317"},
         "io.modelcontextprotocol/clientCapabilities": {},
     }
-    try:
+    with _stdio_session(tmp_path) as (send, recv):
         send({"id": 0, "method": "server/discover", "params": {"_meta": envelope}})
         probe = recv()
         assert probe["id"] == 0, probe
@@ -295,17 +274,6 @@ def test_a_client_probing_the_modern_era_first_falls_back_to_the_handshake_and_g
         send({"method": "notifications/initialized"})
         send({"id": 2, "method": "tools/call", "params": {"name": "notify", "arguments": {}}})
         seen: list[dict[str, Any]] = [recv(), recv()]
-    except queue.Empty:
-        proc.kill()
-        err = proc.stderr.read() if proc.stderr else ""
-        raise AssertionError(f"no reply from the stdio server; stderr tail: {err[-800:]}") from None
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait(timeout=10)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream:
-                stream.close()
 
     notes = [m for m in seen if m.get("method") == "notifications/claude/channel"]
     replies = [m for m in seen if m.get("id") == 2]

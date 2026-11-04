@@ -8,8 +8,9 @@ reaches the tool through the dispatcher, the ``Server.middleware`` chain and the
 in-memory streams and takes that whole path, so a test that wants "what a client
 sees" uses these helpers instead of poking a private structure.
 
-``mode="legacy"`` forces the ``initialize`` handshake, which is what Claude Code
-speaks today. The server's lifespan runs on entry, so use these on a purpose-built
+``mode="legacy"`` forces the ``initialize`` handshake. Claude Code probes the
+modern era first and falls back to ``initialize`` when ``nx-mcp`` refuses the probe
+(``nexus.mcp.channel.serve_handshake_era``), so that is the exchange it ends up in. The server's lifespan runs on entry, so use these on a purpose-built
 ``MCPServer``; for ``nexus.mcp.core.mcp`` (whose lifespan opens T1) call the
 middleware directly, as ``tests/test_mcp_tool_call_log.py`` does.
 """

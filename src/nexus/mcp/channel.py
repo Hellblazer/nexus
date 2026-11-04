@@ -323,6 +323,20 @@ _write_stream: Any | None = None
 _initialized_event: asyncio.Event | None = None
 
 
+#: How long one send waits for the initialized gate before giving up
+#: (nexus-w4l00 follow-on). A client that completes its handshake does so
+#: within seconds of the connection; one that never will (it connected in an
+#: era that sends no ``notifications/initialized``) used to park the waiter's
+#: first send for the life of the process, with the status record still
+#: saying ``alive``. Read at call time so a test can shorten it.
+GATE_WAIT_TIMEOUT_S: float = 30.0
+
+
+class ChannelGateTimeout(Exception):
+    """The client did not send ``notifications/initialized`` within
+    :data:`GATE_WAIT_TIMEOUT_S`, so the notification was not sent."""
+
+
 async def _on_initialized(_ctx: Any, _params: Any) -> None:
     if _initialized_event is not None:
         _initialized_event.set()
@@ -337,28 +351,64 @@ def install_initialized_gate(server: Any) -> None:
     server.add_notification_handler("notifications/initialized", types.NotificationParams, _on_initialized)
 
 
+async def serve_handshake_era(server: Any, read_stream: Any, write_stream: Any) -> None:
+    """Run *server*'s lifespan and serve one connection in the handshake era
+    only, declaring ``claude/channel`` in the initialize result (nexus-w4l00).
+
+    This is what ships: :func:`run_stdio_with_channel` calls it on the stdio
+    streams and the in-process tests in ``tests/test_mcp_channel.py`` call it
+    on memory streams, so they cover the driver itself.
+
+    ``Server.run`` is the lifespan plus ``serve_dual_era_loop``, which serves
+    the 2026-07-28 era to a client whose first request carries its envelope.
+    Claude Code 2.1.317 opens that way (an enveloped ``server/discover``); the
+    SDK's discover result has no ``experimental`` map, so Claude Code
+    connected modern, skipped the channel ("server did not declare
+    claude/channel capability") and never sent ``notifications/initialized``,
+    which left every send parked on the gate. ``serve_loop`` refuses the
+    probe, the client falls back to ``initialize``, and the capability rides
+    its result, as on mcp 1.x. The lifespan is entered here as ``Server.run``
+    does.
+
+    Cost: a client that speaks only the modern era (a version-pinned
+    ``Client``) cannot connect to ``nx-mcp``; Claude Code and ``ClientSession``
+    are unaffected. Revisit when Claude Code carries ``claude/channel`` in
+    modern-era discover.
+    """
+    # ``serve_loop`` is not documented SDK API; the pin is ``mcp>=2.3,<3``.
+    # The tripwire is the enveloped-discover-then-initialize pin in
+    # ``tests/test_mcp_sdk_contract.py``, which fails if the symbol moves or the
+    # probe is answered again.
+    from mcp.server.runner import serve_loop  # noqa: PLC0415 — deferred: only needed for the stdio driver
+
+    async with server.lifespan(server) as lifespan_state:
+        await serve_loop(
+            server,
+            read_stream,
+            write_stream,
+            lifespan_state=lifespan_state,
+            init_options=server.create_initialization_options(
+                experimental_capabilities=CHANNEL_CAPABILITY,
+            ),
+        )
+
+
 async def run_stdio_with_channel(mcp: "MCPServer") -> None:
     """Replaces ``mcp.run(transport="stdio")`` -> ``anyio.run(self.
     run_stdio_async)`` at the one call site in :func:`nexus.mcp.core.main`.
 
-    Byte-identical to ``MCPServer.run_stdio_async`` except for the one line
-    this bead exists to add: ``experimental_capabilities=
-    CHANNEL_CAPABILITY`` on ``create_initialization_options``.
-    ``MCPServer.run_stdio_async`` itself passes none (it calls
-    ``create_initialization_options()`` with no arguments), so declaring
-    the capability requires driving the low-level ``Server.run`` call
-    directly -- which is also what hands this function the write stream
-    early enough to stash it before any tool call, or the lifespan's
-    waiter task, could need it.
+    Opens the stdio streams, stashes the write stream and the initialized
+    gate for :func:`send_channel_notification` before any tool call or the
+    lifespan's waiter task could need them, and hands the connection to
+    :func:`serve_handshake_era` (the lifespan plus ``serve_loop``, handshake
+    era only, ``claude/channel`` declared). It no longer calls
+    ``Server.run`` or ``MCPServer.run_stdio_async``.
 
     ``mcp._lowlevel_server.lifespan`` is already ``_t1_lifespan`` wrapped by
     MCPServer's own ``lifespan_wrapper`` (set at ``MCPServer.__init__`` time
-    from ``settings.lifespan``), so calling ``Server.run`` here runs the
-    EXACT SAME lifespan MCPServer would have run through
-    ``run_stdio_async`` -- nothing about lifespan behavior changes, only
-    the initialize options passed alongside it.
+    from ``settings.lifespan``), so the lifespan that runs is the one
+    ``run_stdio_async`` would have run.
     """
-    from mcp.server.runner import serve_loop  # noqa: PLC0415 — deferred: only needed for the stdio driver
     from mcp.server.stdio import stdio_server  # noqa: PLC0415 — deferred: only needed for the stdio driver
 
     global _write_stream, _initialized_event
@@ -370,27 +420,7 @@ async def run_stdio_with_channel(mcp: "MCPServer") -> None:
         _write_stream = write_stream
         _initialized_event = asyncio.Event()
         try:
-            # Handshake era only (nexus-w4l00). ``Server.run`` is the lifespan
-            # plus ``serve_dual_era_loop``, which serves the 2026-07-28 era to a
-            # client whose first request carries its envelope. Claude Code
-            # 2.1.317 opens that way (an enveloped ``server/discover``); the
-            # SDK's discover result has no ``experimental`` map, so Claude Code
-            # connected modern, skipped the channel ("server did not declare
-            # claude/channel capability") and never sent
-            # ``notifications/initialized``, which left every send parked on
-            # the gate. ``serve_loop`` refuses the probe, the client falls back
-            # to ``initialize``, and the capability rides its result, as on
-            # mcp 1.x. The lifespan is entered here as ``Server.run`` does.
-            async with server.lifespan(server) as lifespan_state:
-                await serve_loop(
-                    server,
-                    read_stream,
-                    write_stream,
-                    lifespan_state=lifespan_state,
-                    init_options=server.create_initialization_options(
-                        experimental_capabilities=CHANNEL_CAPABILITY,
-                    ),
-                )
+            await serve_handshake_era(server, read_stream, write_stream)
         finally:
             _write_stream = None
             _initialized_event = None
@@ -402,7 +432,10 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
     exception) when there is no live write stream -- outside stdio
     transport, before the connection is up, or after it has torn down --
     or the client has not yet completed its own initialize handshake, so
-    every caller in this module can call this unconditionally.
+    every caller in this module can call this unconditionally. The one
+    exception is a handshake that does not complete within
+    :data:`GATE_WAIT_TIMEOUT_S`: that raises :class:`ChannelGateTimeout`, which
+    :class:`ChannelWaiter` catches and reports.
     """
     import mcp.types as types  # noqa: PLC0415 — deferred: only needed when actually sending
     from mcp.shared.message import SessionMessage  # noqa: PLC0415 — deferred: only needed when actually sending
@@ -412,7 +445,12 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
     if ws is None or ev is None:
         return False
     if not ev.is_set():
-        await ev.wait()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=GATE_WAIT_TIMEOUT_S)
+        except TimeoutError:
+            raise ChannelGateTimeout(
+                f"no notifications/initialized within {GATE_WAIT_TIMEOUT_S:g}s"
+            ) from None
         if _write_stream is None:  # torn down while we waited
             return False
     message = types.JSONRPCNotification(
@@ -840,6 +878,9 @@ class ChannelWaiter:
         self._announced_total = 0
 
         self._alive = False
+        #: nexus-w4l00 follow-on: when the first send to time out on the
+        #: initialized gate did so, or `None` while sends get through.
+        self._gate_stalled_since: datetime | None = None
         self._stopped = False
         #: `None` while running, or the running (never alive-and-stopped)
         #: waiter's own stop cause once `_stopped` flips (review round,
@@ -923,7 +964,36 @@ class ChannelWaiter:
             # fallen back to the client-side drop for an engine that refuses
             # the combination.
             "board_since_supported": self._board_since_supported,
+            # nexus-w4l00 follow-on: sends are timing out on the initialized
+            # gate, so `alive` does not mean push delivery works.
+            "gate_stalled": self._gate_stalled_since is not None,
+            "gate_stalled_since": self._gate_stalled_since.isoformat() if self._gate_stalled_since else None,
         }
+
+    async def _send(self, content: str, meta: dict[str, str]) -> bool:
+        """Call the sender; `False` when the initialized gate stayed shut
+        (nexus-w4l00 follow-on). The first such timeout logs one warning and
+        publishes the stall; the waiter keeps ticking, and the engine's own
+        re-announce cadence retries a MAILBOX row later. A board post is
+        stamped delivered once per subscriber (`max=1`), so one lost to a shut
+        gate is not re-pushed; it stays readable with `tuple_rd`. A send that
+        gets through clears the stall."""
+        try:
+            await self.sender(content, meta)
+        except ChannelGateTimeout as exc:
+            if self._gate_stalled_since is None:
+                self._gate_stalled_since = datetime.now(UTC)
+                _log.warning(
+                    "channel_gate_stalled", session_id=self.session_id, error=str(exc),
+                    hint="the client never sent notifications/initialized; push delivery is not happening",
+                )
+                self._publish_status()
+            return False
+        if self._gate_stalled_since is not None:
+            self._gate_stalled_since = None
+            _log.info("channel_gate_recovered", session_id=self.session_id)
+            self._publish_status()
+        return True
 
     def _publish_status(self) -> None:
         """Best-effort refresh of the on-disk record (bead nexus-rplay.13)
@@ -1424,7 +1494,8 @@ class ChannelWaiter:
             content = _board_notification_content(
                 subspace, row.id, case=case, session=canonical_session(row.sender_session),
             )
-            await self.sender(content, meta)
+            if not await self._send(content, meta):
+                return
         else:
             first, last = kept[0], kept[-1]
             kinds: dict[str, int] = {}
@@ -1461,7 +1532,8 @@ class ChannelWaiter:
                 subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
                 unverified=unverified,
             )
-            await self.sender(content, meta)
+            if not await self._send(content, meta):
+                return
         self._board_batches += 1
         last = kept[-1]
         if last.created_at:
@@ -1487,7 +1559,8 @@ class ChannelWaiter:
             subspace, row.id, to_address, case=case,
             session=canonical_session(row.sender_session),
         )
-        await self.sender(content, meta)
+        if not await self._send(content, meta):
+            return
         if row.announce_count == 1:
             self._announced_total += 1
         self._last_seen[subspace] = (row.announce_count or 0, time.monotonic())

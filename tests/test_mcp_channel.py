@@ -20,7 +20,7 @@ past, cannot lose that row.
 Layers, cheapest first:
 
 - ``TestCapabilityDeclaration``: the SDK's own in-process memory-stream
-  harness (``mcp.shared.memory``) drives a REAL low-level `Server.run()`
+  harness (``mcp.shared.memory``) drives a REAL low-level `Server` through `channel.serve_handshake_era`
   round trip and reads the returned `InitializeResult` -- no stdio, no
   engine.
 - ``TestChannelWaiterFakeStore``: a `_FakeTupleStore` -- a minimally
@@ -57,9 +57,9 @@ from nexus.mcp import channel
 
 class TestCapabilityDeclaration:
     """The SDK's own ``create_client_server_memory_streams`` harness --
-    no stdio, no engine -- drives `Server.run()` exactly as
-    `channel.run_stdio_with_channel` does, minus the stdio transport
-    itself. Structured after `mcp.shared.memory.
+    no stdio, no engine -- drives `channel.serve_handshake_era` (the lifespan
+    plus `serve_loop`, the driver `channel.run_stdio_with_channel` calls on the
+    stdio streams), minus the stdio transport itself. Structured after `mcp.shared.memory.
     create_connected_server_and_client_session`'s own body (an anyio
     task group whose `cancel_scope` tears the server task down once the
     client has its answer -- the server's own message loop runs forever
@@ -79,12 +79,7 @@ class TestCapabilityDeclaration:
             server_read, server_write = server_streams
 
             async with anyio.create_task_group() as tg:
-                tg.start_soon(
-                    lambda: server.run(
-                        server_read, server_write,
-                        server.create_initialization_options(experimental_capabilities=channel.CHANNEL_CAPABILITY),
-                    )
-                )
+                tg.start_soon(channel.serve_handshake_era, server, server_read, server_write)
                 try:
                     async with ClientSession(read_stream=client_read, write_stream=client_write) as client_session:
                         result = await client_session.initialize()
@@ -119,9 +114,7 @@ class TestCapabilityDeclaration:
             server_read, server_write = server_streams
 
             async with anyio.create_task_group() as tg:
-                tg.start_soon(
-                    lambda: server.run(server_read, server_write, server.create_initialization_options())
-                )
+                tg.start_soon(channel.serve_handshake_era, server, server_read, server_write)
                 try:
                     async with ClientSession(read_stream=client_read, write_stream=client_write) as client_session:
                         await client_session.initialize()
@@ -163,12 +156,7 @@ class TestCapabilityDeclaration:
                 return item.message
 
             async with anyio.create_task_group() as tg:
-                tg.start_soon(
-                    lambda: server.run(
-                        server_read, server_write,
-                        server.create_initialization_options(experimental_capabilities=channel.CHANNEL_CAPABILITY),
-                    )
-                )
+                tg.start_soon(channel.serve_handshake_era, server, server_read, server_write)
                 try:
                     await client_write.send(SessionMessage(message=JSONRPCRequest(
                         jsonrpc="2.0", id=1, method="initialize", params={
@@ -1719,6 +1707,134 @@ class TestChannelStatusPublish:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not valid json{{{", encoding="utf-8")
         assert channel.read_channel_status(tmp_path, session_id) is None
+
+
+class TestInitializedGateIsBounded:
+    """nexus-w4l00 follow-on: a gate that never opens (a client that connects in
+    an era that never sends ``notifications/initialized``) used to park the
+    waiter's first send forever, with the status file still saying
+    ``alive: true`` and nothing in ``nx doctor``. The wait is now bounded; the
+    waiter reports the stall and keeps going."""
+
+    @pytest.mark.asyncio
+    async def test_send_raises_when_the_gate_stays_shut(self, monkeypatch) -> None:
+        monkeypatch.setattr(channel, "_write_stream", object())
+        monkeypatch.setattr(channel, "_initialized_event", asyncio.Event())
+        monkeypatch.setattr(channel, "GATE_WAIT_TIMEOUT_S", 0.05)
+        with pytest.raises(channel.ChannelGateTimeout):
+            await asyncio.wait_for(channel.send_channel_notification("c", {}), timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_send_waits_for_a_gate_that_opens_inside_the_bound(self, monkeypatch) -> None:
+        sent: list[object] = []
+
+        class _Stream:
+            async def send(self, message: object) -> None:
+                sent.append(message)
+
+        ev = asyncio.Event()
+        monkeypatch.setattr(channel, "_write_stream", _Stream())
+        monkeypatch.setattr(channel, "_initialized_event", ev)
+        monkeypatch.setattr(channel, "GATE_WAIT_TIMEOUT_S", 5.0)
+        task = asyncio.ensure_future(channel.send_channel_notification("c", {"k": "v"}))
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        ev.set()
+        assert await asyncio.wait_for(task, timeout=5) is True
+        assert len(sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_stalled_gate_is_reported_in_status_and_the_published_record(self, tmp_path) -> None:
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "hello")
+        sender = _GateSender(stalled=True)
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender, state_dir=tmp_path,
+            wait_timeout_s=1,
+        )
+        assert waiter.status()["gate_stalled"] is False
+
+        await waiter.tick()  # must not raise, must not park
+
+        status = waiter.status()
+        assert status["gate_stalled"] is True
+        assert status["gate_stalled_since"] is not None
+        assert channel.read_channel_status(tmp_path, session_id)["gate_stalled"] is True
+        # nothing was delivered, so nothing is credited as announced
+        assert status["announced"] == 0
+        assert waiter._last_seen == {}  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_the_stall_logs_one_warning_however_many_sends_hit_it(self, tmp_path) -> None:
+        from structlog.testing import capture_logs
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "hello")
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=_GateSender(stalled=True),
+            state_dir=tmp_path, reannounce_interval_s=0.0, wait_timeout_s=1,
+        )
+        with capture_logs() as logs:
+            for _ in range(3):
+                await waiter.tick()  # reannounce is always due: three sends, three timeouts
+        stalls = [e for e in logs if e["event"] == "channel_gate_stalled"]
+        assert len(stalls) == 1
+        assert stalls[0]["log_level"] == "warning"
+
+    @pytest.mark.asyncio
+    async def test_a_send_after_the_gate_opens_clears_the_stall(self, tmp_path) -> None:
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "hello")
+        sender = _GateSender(stalled=True)
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender, state_dir=tmp_path,
+            reannounce_interval_s=0.0, wait_timeout_s=1,
+        )
+        await waiter.tick()
+        assert waiter.status()["gate_stalled"] is True
+
+        sender.stalled = False  # the client finally sent notifications/initialized
+        await waiter.tick()
+
+        status = waiter.status()
+        assert status["gate_stalled"] is False
+        assert status["gate_stalled_since"] is None
+        assert channel.read_channel_status(tmp_path, session_id)["gate_stalled"] is False
+        assert status["announced"] == 1 or status["pending"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_board_send_into_a_shut_gate_is_not_credited(self, tmp_path) -> None:
+        session_id = str(uuid.uuid4())
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(_FakeTupleStore()), _subs(session_id),
+            sender=_GateSender(stalled=True), state_dir=tmp_path,
+        )
+        row = _FakeTupleStore().seed("board/x", "b1", "hi", dims={"from": "a"})
+        await waiter._deliver_board_rows("board/x", [row], None)  # noqa: SLF001
+        assert waiter.status()["gate_stalled"] is True
+        assert waiter.status()["board_batches"] == 0
+        assert "board/x" not in waiter._board_last_delivered  # noqa: SLF001
+
+
+class _GateSender:
+    """A sender that behaves as `send_channel_notification` does while the
+    initialized gate is shut (raises the bounded-wait error) or open."""
+
+    def __init__(self, *, stalled: bool) -> None:
+        self.stalled = stalled
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    async def __call__(self, content: str, meta: dict[str, str]) -> bool:
+        if self.stalled:
+            raise channel.ChannelGateTimeout("gate shut")
+        self.calls.append((content, meta))
+        return True
 
 
 class TestDoctorProbeNeverStartsAWaiter:
