@@ -57,6 +57,8 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "MANAGED_SETTINGS", (settings / "managed" / "managed-settings.json",))
     monkeypatch.setattr(crs, "USER_SETTINGS", settings / "user-settings.json")
     monkeypatch.setattr(crs, "MARKETPLACES", settings / "marketplaces")
+    monkeypatch.setattr(crs, "KNOWN_MARKETPLACES", settings / "known_marketplaces.json")
+    monkeypatch.setattr(crs, "INSTALLED", settings / "installed_plugins.json")
     monkeypatch.setattr(crs, "KEEP_DEV_CHANNEL", False)
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
 
@@ -348,6 +350,19 @@ def test_an_unset_plugin_falls_back_to_default_enabled(crs, monkeypatch, tmp_pat
         crs.USER_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
         crs.USER_SETTINGS.write_text(json.dumps({"enabledPlugins": {"conexus@nexus-plugins": user}}), encoding="utf-8")
     assert _swapped(crs) is swapped
+
+
+def test_default_enabled_reads_a_directory_marketplace_where_known_marketplaces_puts_it(crs, monkeypatch, tmp_path) -> None:
+    """A marketplace added from a local directory has no copy under plugins/marketplaces; its
+    installLocation in known_marketplaces.json is the catalogue's home."""
+    _installed(monkeypatch, crs, tmp_path, {"conexus@nexus-plugins": [{"scope": "user"}]})
+    checkout = tmp_path / "checkout"
+    (checkout / ".claude-plugin").mkdir(parents=True)
+    (checkout / ".claude-plugin" / "marketplace.json").write_text(
+        json.dumps({"plugins": [{"name": "conexus", "defaultEnabled": False}]}), encoding="utf-8")
+    crs.KNOWN_MARKETPLACES.parent.mkdir(parents=True, exist_ok=True)
+    crs.KNOWN_MARKETPLACES.write_text(json.dumps({"nexus-plugins": {"installLocation": str(checkout)}}), encoding="utf-8")
+    assert _swapped(crs) is False
 
 
 @pytest.mark.parametrize(("where", "value", "swapped"), [
@@ -2154,7 +2169,7 @@ def test_a_roll_withdraws_every_ready_ask_first_and_retries_at_the_end(crs, rd, 
     monkeypatch.setattr(crs, "withdraw_ask",
                         lambda sid, tid="", what="": order.append(f"withdraw {tid}") or outcomes[tid].pop(0))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: order.append("roll") or 0)
-    monkeypatch.setattr(crs, "footprint_report", lambda *a, **_k: order.append("report") or [])
+    monkeypatch.setattr(crs, "footprint_report", lambda *a: order.append("report") or [])
     monkeypatch.setattr(crs, "update_plugins", lambda: order.append("update"))
     code, _ = _run_main(crs, monkeypatch, ["--resume", "--force", "--detached"])
     assert code == 0
@@ -2177,7 +2192,7 @@ def test_a_round_started_during_the_roll_is_left_alone(crs, rd, tmpdirs, monkeyp
 
     monkeypatch.setattr(crs, "_roll", roll)
     reported: list = []
-    monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs, manifest=None, **_k: reported.append(manifest["stamp"]))
+    monkeypatch.setattr(crs, "footprint_report", lambda found, handoffs, manifest=None: reported.append(manifest["stamp"]))
     code, _ = _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force", "--detached"])
     assert code == 0
     assert withdrawn == ["t-a", "t-a"]  # the new round's t-new is not touched
@@ -2355,54 +2370,88 @@ def test_the_footprint_removes_the_marker_directory_when_it_is_empty(crs, rd, tm
     crs.footprint_report([], {}, None)  # absent directory: nothing to do
 
 
-def _aged(path: Path, age_s: float) -> Path:
+def _expired(path: Path, ago_s: float) -> Path:
+    """A marker whose ask expired *ago_s* seconds ago (a negative value: one still live)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
-    then = time.time() - age_s
+    then = time.time() - ago_s
     os.utime(path, (then, then))
     return path
 
 
-def test_the_stale_marker_sweep_removes_only_old_empty_markers(crs, rd) -> None:
-    """nexus-drza4: markers leak when the round file is malformed or missing, or after a SIGKILL. The
-    sweep removes a file only when it is named like a marker, is an empty regular file and is older
-    than the age given, so a newer round's markers (younger by construction) survive it."""
-    day = crs.MARKER_SWEEP_AGE_S
-    leaked = _aged(crs.ask_marker({"sessionId": "aaaa1111-rest"}, "/tmp/h.md"), day + 60)
-    newer = _aged(crs.ask_marker({"sessionId": "bbbb2222-rest"}, "/tmp/h.md"), 60)
-    not_empty = _aged(crs.ask_marker({"sessionId": "cccc3333-rest"}, "/tmp/h.md"), day + 60)
-    not_empty.write_text("x")
-    os.utime(not_empty, (time.time() - day - 60,) * 2)
-    foreign = _aged(crs.ASK_MARKERS / "notes.txt", day + 60)
-    sub = crs.ASK_MARKERS / "aaaa1111-0123456789ab"
-    if sub.exists():
-        sub.unlink()
-    sub.mkdir()
-    os.utime(sub, (time.time() - day - 60,) * 2)
+def test_mail_ask_stamps_the_marker_with_its_ask_s_expiry(crs, rd, monkeypatch) -> None:
+    """nexus-drza4: the marker's mtime is when its ask expires, so the sweep needs no TTL of its own."""
+    monkeypatch.setattr(crs, "_nx_binary", lambda: "nx")
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "tuple_id: t-1\n", ""))
+    s = {"sessionId": "ffff6666-rest", "name": "f", "pane": "%1"}
+    before = time.time()
+    crs.mail_ask(s, "/tmp/h.md", "me", ttl=86400 * 3)
+    mtime = crs.ask_marker(s, "/tmp/h.md").stat().st_mtime
+    assert before + 86400 * 3 - 5 <= mtime <= time.time() + 86400 * 3 + 5
 
-    assert crs.sweep_stale_markers(day) == 1
+
+def test_the_stale_marker_sweep_removes_only_markers_whose_asks_expired_long_ago(crs, rd) -> None:
+    """Markers leak when the round file is malformed or missing, or after a SIGKILL. The sweep removes a
+    file only when it is named like a marker, is an empty regular file and its ask expired more than
+    the margin ago, so a live ask's marker (expiry ahead) survives, whatever its TTL."""
+    m = crs.MARKER_SWEEP_MARGIN_S
+    leaked = _expired(crs.ask_marker({"sessionId": "aaaa1111-rest"}, "/tmp/h.md"), m + 60)
+    recent = _expired(crs.ask_marker({"sessionId": "bbbb2222-rest"}, "/tmp/h.md"), m - 60)
+    live = _expired(crs.ask_marker({"sessionId": "bbbb3333-rest"}, "/tmp/h.md"), -86400 * 3)
+    not_empty = _expired(crs.ask_marker({"sessionId": "cccc3333-rest"}, "/tmp/h.md"), m + 60)
+    not_empty.write_text("x")
+    os.utime(not_empty, (time.time() - m - 60,) * 2)
+    foreign = _expired(crs.ASK_MARKERS / "notes.txt", m + 60)
+    sub = crs.ASK_MARKERS / "aaaa1111-0123456789ab"
+    sub.mkdir()
+    os.utime(sub, (time.time() - m - 60,) * 2)
+    target = _expired(crs.ASK_MARKERS.parent / "outside", m + 60)
+    link = crs.ASK_MARKERS / "aaaa1111-ba9876543210"
+    link.symlink_to(target)
+    fifo = crs.ASK_MARKERS / "aaaa1111-fedcba987654"  # empty and old, but not a regular file
+    os.mkfifo(fifo)
+    os.utime(fifo, (time.time() - m - 60,) * 2)
+
+    assert crs.sweep_stale_markers() == 1
     assert not leaked.exists()
-    assert newer.exists() and not_empty.exists() and foreign.exists() and sub.is_dir()
+    assert recent.exists() and live.exists() and not_empty.exists() and foreign.exists()
+    assert sub.is_dir() and link.is_symlink() and target.exists() and fifo.exists()
+
+
+def test_a_marker_mailed_again_is_not_swept(crs, rd, monkeypatch) -> None:
+    """A later round mailing the same session and path re-stamps the marker with the new ask's expiry."""
+    monkeypatch.setattr(crs, "_nx_binary", lambda: "nx")
+    setattr_in(monkeypatch, crs, "subprocess.run",
+               lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "tuple_id: t-2\n", ""))
+    s = {"sessionId": "abab1212-rest", "name": "g", "pane": "%2"}
+    marker = _expired(crs.ask_marker(s, "/tmp/h.md"), crs.MARKER_SWEEP_MARGIN_S + 60)
+    crs.mail_ask(s, "/tmp/h.md", "me")
+    assert crs.sweep_stale_markers() == 0 and marker.exists()
 
 
 def test_the_stale_marker_sweep_tolerates_an_absent_directory(crs) -> None:
     assert not crs.ASK_MARKERS.exists()
-    assert crs.sweep_stale_markers(crs.MARKER_SWEEP_AGE_S) == 0
+    assert crs.sweep_stale_markers() == 0
+
+
+def test_a_ready_round_sweeps_a_marker_its_unreadable_predecessor_left(crs, rd, monkeypatch) -> None:
+    """The bead's case: the previous round file is malformed, so withdraw_ready_asks has nothing to read
+    and its marker would stay; the next ready round sweeps it once its ask is long expired."""
+    _live(rd, "alpha")
+    crs.READY_MANIFEST.write_text("{not json", encoding="utf-8")
+    leaked = _expired(crs.ask_marker({"sessionId": "dede4545-rest"}, "/tmp/h.md"), crs.MARKER_SWEEP_MARGIN_S + 60)
+    monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender, out=None: [])
+    a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
+    crs.ready_round(a, _found(crs), _found(crs))
+    assert not leaked.exists()
 
 
 def test_the_footprint_sweeps_a_leaked_marker_and_then_removes_the_directory(crs, rd, tmpdirs) -> None:
-    """A marker no round file records (its round file was lost) goes once it is old enough, and the
-    directory with it."""
-    leaked = _aged(crs.ask_marker({"sessionId": "dddd4444-rest"}, "/tmp/h.md"), crs.MARKER_SWEEP_AGE_S + 60)
+    """A marker no round file records goes once its ask is long expired, and the directory with it."""
+    leaked = _expired(crs.ask_marker({"sessionId": "dddd4444-rest"}, "/tmp/h.md"), crs.MARKER_SWEEP_MARGIN_S + 60)
     crs.footprint_report([], {}, None)
     assert not leaked.exists() and not crs.ASK_MARKERS.exists()
-
-
-def test_the_footprint_keeps_a_leaked_marker_younger_than_the_runs_ask_ttl(crs, rd, tmpdirs) -> None:
-    """A run with a long handoff timeout passes a longer age: a marker inside it is kept."""
-    marker = _aged(crs.ask_marker({"sessionId": "eeee5555-rest"}, "/tmp/h.md"), crs.MARKER_SWEEP_AGE_S + 60)
-    crs.footprint_report([], {}, None, stale_after=crs.MARKER_SWEEP_AGE_S * 2)
-    assert marker.exists()
 
 
 # ---- the restart's footprint (nexus-xwijj Phase 3) ----
@@ -2475,7 +2524,7 @@ def test_the_roll_reports_its_footprint_even_when_it_raises(crs, rd, tmpdirs, mo
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)  # the real one would stay installed in pytest
     reported: list = []
     monkeypatch.setattr(crs, "footprint_report",
-                        lambda found, handoffs, manifest=None, **_k: reported.append([s["sessionId"] for s in found]))
+                        lambda found, handoffs, manifest=None: reported.append([s["sessionId"] for s in found]))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mid-roll")))
     _live(rd, "alpha")
     with pytest.raises(RuntimeError):
@@ -2487,7 +2536,7 @@ def test_the_detached_child_turns_term_and_hup_into_an_exit(crs, rd, tmpdirs, mo
     installed: dict = {}
     setattr_in(monkeypatch, crs, "signal.signal", lambda sig, fn: installed.__setitem__(sig, fn))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: 0)
-    monkeypatch.setattr(crs, "footprint_report", lambda *a, **_k: [])
+    monkeypatch.setattr(crs, "footprint_report", lambda *a: [])
     _live(rd, "alpha")
     code, _ = _run_main(crs, monkeypatch, ["--resume", "--no-update", "--force", "--detached"])
     assert code == 0

@@ -151,10 +151,10 @@ READY_MANIFEST = Path.home() / ".claude" / "restart-ready.json"
 #: without a permission prompt, where a read of LOG is denied until someone approves it (nexus-acp8p,
 #: Claude Code 2.1.317).
 ASK_MARKERS = Path.home() / ".claude" / "restart-asks"
-#: How old a marker no round records must be before sweep_stale_markers removes it (nexus-drza4): far
-#: past any ask's TTL (a ready ask 1200 s, a handoff ask --handoff-timeout + 300 s), so a newer round's
-#: markers, which are younger by construction, are never touched.
-MARKER_SWEEP_AGE_S = 24 * 3600
+#: How long after its ask expired sweep_stale_markers leaves a marker (nexus-drza4). mail_ask sets each
+#: marker's mtime to its ask's expiry (now + the TTL), so the sweep needs no TTL of its own and a live
+#: ask's marker, whatever its --handoff-timeout, is never past it.
+MARKER_SWEEP_MARGIN_S = 3600
 #: The name ask_marker gives: the session id's first 8 characters, a dash, 12 hex digits.
 MARKER_NAME = re.compile(r"[^/]{8}-[0-9a-f]{12}")
 #: The last restart run's mode and options, so a bare run after a --fresh one is refused.
@@ -186,8 +186,10 @@ ENDPOINT = "https://api.conexus-nexus.com"
 PLUGINS = ("conexus@nexus-plugins", "sn@nexus-plugins")  # required: must be installed
 MARKETPLACE = "nexus-plugins"
 INSTALLED = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-#: Where Claude Code keeps each added marketplace's catalogue (<name>/.claude-plugin/marketplace.json).
+#: Where Claude Code keeps each added marketplace's catalogue (<name>/.claude-plugin/marketplace.json);
+#: KNOWN_MARKETPLACES' installLocation names it instead for one added from a local directory or file.
 MARKETPLACES = Path.home() / ".claude" / "plugins" / "marketplaces"
+KNOWN_MARKETPLACES = Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
 
 
 def script_sha256(path: Path | None = None) -> str:
@@ -420,15 +422,18 @@ def _default_enabled(cwd: str) -> bool:
     (settings-reference, enabledPlugins: "unset plugins fall back to defaultEnabled"; plugins
     manifest-reference: defaults to true, and the marketplace entry's value overrides the manifest's).
     Read from this machine's copy of the marketplace and the installed plugin.json (nexus-tkwe4)."""
-    catalogue = _json_object(MARKETPLACES / MARKETPLACE / ".claude-plugin" / "marketplace.json")
+    known = _json_object(KNOWN_MARKETPLACES).get(MARKETPLACE)
+    where = known.get("installLocation") if isinstance(known, dict) else None
+    root = Path(where) if isinstance(where, str) and where else MARKETPLACES / MARKETPLACE
+    catalogue = _json_object(root / ".claude-plugin" / "marketplace.json")
     entries = catalogue.get("plugins")
     for e in entries if isinstance(entries, list) else []:
         if isinstance(e, dict) and e.get("name") == "conexus" and isinstance(e.get("defaultEnabled"), bool):
             return e["defaultEnabled"]
     install = _install_entry(cwd)
-    root = install.get("installPath") if install else None
-    if isinstance(root, str) and root:
-        value = _json_object(Path(root) / ".claude-plugin" / "plugin.json").get("defaultEnabled")
+    path = install.get("installPath") if install else None
+    if isinstance(path, str) and path:
+        value = _json_object(Path(path) / ".claude-plugin" / "plugin.json").get("defaultEnabled")
         if isinstance(value, bool):
             return value
     return True
@@ -436,7 +441,11 @@ def _default_enabled(cwd: str) -> bool:
 
 def _disabled(cwd: str, managed: list[dict]) -> bool:
     """True when the effective enabledPlugins value for conexus is false (user, project, local, then managed win in turn),
-    or, with no entry in any of them, when its defaultEnabled is false."""
+    or, with no entry in any of them, when its defaultEnabled is false.
+
+    Not read, of the sources Claude Code documents: a --settings file or --add-dir directory named
+    on the session's command line, and the rule that a plugin an enabled plugin depends on starts
+    enabled regardless (no nexus plugin declares dependencies)."""
     layers = [_json_object(USER_SETTINGS)]
     if cwd:
         layers += [_json_object(Path(cwd) / ".claude" / n) for n in ("settings.json", "settings.local.json")]
@@ -1015,11 +1024,12 @@ MADE_MARKERS: set[Path] = set()
 SENT_MARKERS: dict[str, Path] = {}
 
 
-def sweep_stale_markers(older_than: float, now: float | None = None) -> int:
+def sweep_stale_markers(now: float | None = None) -> int:
     """Remove ask markers no round accounts for any more (nexus-drza4): those left when the previous
     round file was malformed or missing, so withdraw_ready_asks had nothing to read, or when a run was
-    killed. Only an empty regular file directly in ASK_MARKERS, named as ask_marker names one and last
-    modified more than *older_than* seconds ago, is removed. Returns how many were."""
+    killed. Only an empty regular file directly in ASK_MARKERS, named as ask_marker names one, whose
+    mtime (its ask's expiry, set by mail_ask) is more than MARKER_SWEEP_MARGIN_S in the past, is
+    removed. Returns how many were."""
     now = time.time() if now is None else now
     removed = 0
     try:
@@ -1033,12 +1043,12 @@ def sweep_stale_markers(older_than: float, now: float | None = None) -> int:
             st = f.lstat()
         except OSError:
             continue
-        if not stat.S_ISREG(st.st_mode) or st.st_size or now - st.st_mtime <= older_than:
+        if not stat.S_ISREG(st.st_mode) or st.st_size or st.st_mtime + MARKER_SWEEP_MARGIN_S >= now:
             continue
         if drop_marker(f):
             removed += 1
     if removed:
-        log(f"swept {removed} ask marker(s) older than {int(older_than)}s that no round recorded")
+        log(f"swept {removed} ask marker(s) whose asks expired over {MARKER_SWEEP_MARGIN_S}s ago")
     return removed
 
 
@@ -1120,6 +1130,8 @@ def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "r
     try:  # the session checks it exists before acting: without it the mail would read as forged
         marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         marker.touch(mode=0o600)
+        expires = time.time() + ttl  # the marker's mtime is its ask's expiry (sweep_stale_markers)
+        os.utime(marker, (expires, expires))
     except OSError as e:
         log(f"WARN {label(s)}: could not create the ask marker {marker} ({e}); not mailed")
         return False
@@ -1926,7 +1938,7 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
     # The round starts before the first ask: a session can answer while later ones are still being
     # asked, and read_reply rejects a reply older than the round's `at` (review r2).
     withdraw_ready_asks(load_manifest()[0], final=True)  # the previous round's asks: this round replaces them
-    sweep_stale_markers(MARKER_SWEEP_AGE_S)  # and any an unreadable round file or a killed run left
+    sweep_stale_markers()  # and any an unreadable round file or a killed run left
     if UNWITHDRAWN:
         print("asks of the previous round not withdrawn (they expire with their TTL): " + "; ".join(UNWITHDRAWN))
     exit_on_stop_signals()
@@ -2155,8 +2167,7 @@ def main() -> int:
         return _roll(a, found, others, callers, ready, guard)
     finally:
         withdraw_ready_asks(round_used)
-        footprint_report(found, LAST_HANDOFFS, round_used,
-                         stale_after=max(MARKER_SWEEP_AGE_S, a.handoff_timeout + 300 + 3600))
+        footprint_report(found, LAST_HANDOFFS, round_used)
 
 
 #: The handoffs write_handoffs returned for this run, for the footprint report (empty until then).
@@ -2192,8 +2203,7 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
 TMP = Path("/tmp")
 
 
-def footprint_report(found: list[dict], handoffs: dict[str, str] | None, manifest: dict | None = None,
-                     stale_after: float = MARKER_SWEEP_AGE_S) -> list[str]:
+def footprint_report(found: list[dict], handoffs: dict[str, str] | None, manifest: dict | None = None) -> list[str]:
     """What this restart leaves behind, logged as footprint lines, after removing its own typed-ask
     instruction files (``rh-<sid8>.txt``, ``rr-<sid8>-<stamp>.txt``), which nothing reads once the
     round is over. Kept on purpose and named: each handoff and its draft (the back-out path, and
@@ -2220,7 +2230,7 @@ def footprint_report(found: list[dict], handoffs: dict[str, str] | None, manifes
     # newer round's survive, as its rr- file does). An empty directory goes with them.
     for m in sorted({*MADE_MARKERS, *(Path(t["marker"]) for t in manifest["targets"] if t.get("marker"))}):
         removed += drop_marker(m)
-    removed += sweep_stale_markers(stale_after)  # leaked by a lost round file or a killed run
+    removed += sweep_stale_markers()  # leaked by a lost round file or a killed run
     try:
         ASK_MARKERS.rmdir()
     except OSError:
