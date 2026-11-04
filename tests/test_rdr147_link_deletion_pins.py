@@ -124,7 +124,8 @@ def _restore_link_fks(tenant: str) -> None:
     for name, col in (("fk_catalog_links_from_document", "from_tumbler"),
                       ("fk_catalog_links_to_document", "to_tumbler")):
         adds.append(
-            f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}') THEN "
+            f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}' "
+            "AND conrelid = 'nexus.catalog_links'::regclass) THEN "
             f"ALTER TABLE nexus.catalog_links ADD CONSTRAINT {name} "
             f"FOREIGN KEY (tenant_id, {col}) REFERENCES nexus.catalog_documents (tenant_id, tumbler) "
             "ON DELETE CASCADE ON UPDATE CASCADE; END IF;"
@@ -258,7 +259,7 @@ def test_traverse_does_not_reach_a_trashed_document_and_it_is_no_relay(cat):
 
     # Outbound from A exercises the join's to-side filter; inbound from B its from-side filter
     # (edge D->B has D as its from endpoint), so dropping either half goes red.
-    for seed, direction, relayed in ((a, "out", b), (b, "in", a)):
+    for seed, direction in ((a, "out"), (b, "in")):
         nodes, edges = reach(seed, direction)  # positive control, before the trash
         assert {a, d, b} <= nodes, (direction, nodes)
         assert {(a, d, _LINK_TYPE), (d, b, _LINK_TYPE)} <= edges, (direction, edges)
