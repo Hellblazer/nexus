@@ -2237,3 +2237,141 @@ def test_knowledge_collections_returns_empty_on_t3_exception(monkeypatch) -> Non
         lambda: (_ for _ in ()).throw(RuntimeError("engine down")),
     )
     assert cc._knowledge_collections() == []
+
+
+# ---------------------------------------------------------------------------
+# (h) Pruning old handoff files at write time (nexus-2v7da)
+# ---------------------------------------------------------------------------
+
+from nexus.commands import command_context as _cc  # noqa: E402 -- the section's seam, bound before any fixture patches it
+
+_REAL_PRUNE_AT_WRITE = _cc._prune_handoffs_at_write
+
+
+@pytest.fixture(autouse=True)
+def _never_prune_the_real_tmp(monkeypatch) -> None:
+    """Every CliRunner run of ``continuation`` in this file would otherwise delete old handoffs from the
+    developer's real /tmp. Tests that pin the prune put the real function back (``_REAL_PRUNE_AT_WRITE``)
+    and point ``_continuation_dir`` at a tmp_path."""
+    monkeypatch.setattr(_cc, "_prune_handoffs_at_write", lambda _out_dir: None)
+
+
+_DAY = 24 * 3600.0
+
+
+def _touch(path: Path, age_days: float, now: float) -> Path:
+    path.write_text("x", encoding="utf-8")
+    os.utime(path, (now - age_days * _DAY, now - age_days * _DAY))
+    return path
+
+
+def test_prune_removes_only_old_files_matching_the_exact_handoff_name(tmp_path: Path) -> None:
+    """59 handoffs sat in /tmp never pruned. Old + exact name => removed; everything else is left alone."""
+    import time
+
+    from nexus.commands.command_context import prune_continuation_files
+
+    now = time.time()
+    old = _touch(tmp_path / "nexus-continuation-nexus-main-2026-01-01.md", 8, now)
+    old_restart = _touch(tmp_path / "nexus-continuation-restart-linda-1a2b3c4d-20260101-101010.md", 30, now)
+    fresh = _touch(tmp_path / "nexus-continuation-nexus-main-2026-11-04.md", 6, now)
+    not_md = _touch(tmp_path / "nexus-continuation-nexus-main-2026-01-01.md.draft.txt", 40, now)
+    other_prefix = _touch(tmp_path / "other-nexus-continuation-x-2026-01-01.md", 40, now)
+    unrelated = _touch(tmp_path / "notes.md", 40, now)
+    near_miss = _touch(tmp_path / "nexus-continuations-x.md", 40, now)
+    subdir = tmp_path / "nexus-continuation-dir.md"
+    subdir.mkdir()
+    os.utime(subdir, (now - 40 * _DAY, now - 40 * _DAY))
+    nested = _touch(subdir / "nexus-continuation-inner-2026-01-01.md", 40, now)
+
+    removed = prune_continuation_files(tmp_path, now=now)
+
+    assert sorted(p.name for p in removed) == sorted([old.name, old_restart.name])
+    assert not old.exists() and not old_restart.exists()
+    for kept in (fresh, not_md, other_prefix, unrelated, near_miss, nested):
+        assert kept.exists(), kept
+    assert subdir.is_dir(), "a directory with a matching name is not a handoff file"
+
+
+def test_prune_boundary_is_seven_days(tmp_path: Path) -> None:
+    import time
+
+    from nexus.commands.command_context import prune_continuation_files
+
+    now = time.time()
+    just_over = _touch(tmp_path / "nexus-continuation-a-2026-01-01.md", 7.01, now)
+    just_under = _touch(tmp_path / "nexus-continuation-b-2026-01-01.md", 6.99, now)
+    prune_continuation_files(tmp_path, now=now)
+    assert not just_over.exists() and just_under.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_prune_never_follows_or_removes_a_symlink(tmp_path: Path) -> None:
+    import time
+
+    from nexus.commands.command_context import prune_continuation_files
+
+    now = time.time()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = _touch(outside / "precious.md", 400, now)
+    link = tmp_path / "nexus-continuation-link-2026-01-01.md"
+    link.symlink_to(target)
+    os.utime(link, (now - 40 * _DAY, now - 40 * _DAY), follow_symlinks=False)
+    prune_continuation_files(tmp_path, now=now)
+    assert link.is_symlink() and target.exists()
+
+
+def test_prune_tolerates_a_missing_directory_and_a_vanishing_file(tmp_path: Path, monkeypatch) -> None:
+    import time
+
+    from nexus.commands.command_context import prune_continuation_files
+
+    assert prune_continuation_files(tmp_path / "absent", now=time.time()) == []
+    now = time.time()
+    _touch(tmp_path / "nexus-continuation-a-2026-01-01.md", 9, now)
+    real_unlink = Path.unlink
+
+    def raced(self: Path, *a, **k):
+        real_unlink(self, *a, **k)
+        raise FileNotFoundError(self)
+
+    monkeypatch.setattr(Path, "unlink", raced)
+    assert prune_continuation_files(tmp_path, now=now) == [], "an unlink that failed is not reported as removed"
+
+
+def test_the_continuation_command_prunes_the_directory_it_names_the_target_in(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """The prune runs at write time: the command that names the new handoff's path, in that directory."""
+    import time
+
+    from nexus.cli import main
+    from nexus.commands import command_context as cc
+
+    out_dir = tmp_path / "tmpdir"
+    out_dir.mkdir()
+    now = time.time()
+    old = _touch(out_dir / "nexus-continuation-x-2026-01-01.md", 9, now)
+    keep = _touch(out_dir / "keep.md", 90, now)
+    monkeypatch.setattr(cc, "_continuation_dir", lambda: out_dir)
+    monkeypatch.setattr(cc, "_prune_handoffs_at_write", _REAL_PRUNE_AT_WRITE)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["command-context", "continuation"])
+    assert result.exit_code == 0, result.output
+    assert not old.exists() and keep.exists()
+    assert str(out_dir / "nexus-continuation-") in result.output
+
+
+def test_a_prune_failure_never_fails_the_command(tmp_path: Path, monkeypatch, stub_continuation_subprocess) -> None:
+    from nexus.cli import main
+    from nexus.commands import command_context as cc
+
+    def boom(*_a, **_k):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(cc, "prune_continuation_files", boom)
+    monkeypatch.setattr(cc, "_prune_handoffs_at_write", _REAL_PRUNE_AT_WRITE)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["command-context", "continuation"])
+    assert result.exit_code == 0, result.output

@@ -52,4 +52,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/nexus/SKILL.md` (nexus-0vh80): `plan_save` takes a required `answer_kind`, and a saved plan serves only that kind, in its own project.
 - `conexus/skills/nexus/reference.md` (nexus-0vh80): the saved provenance, its narrow eligibility and the retrieval-only shape veto.
 
+- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-2v7da): on a compact start with nothing to restore (no checkpoint file, or the stub post writes when pre did not run), inject now emits a short notice saying no restore is available and pointing at the threads board entry and the working tree. It said nothing before, so a resumed session could not tell "nothing was lost" from "nothing was saved". A foreign session, a stamp past the prune window and an already-injected checkpoint are still silent.
+
 ## Deferred to the next client release

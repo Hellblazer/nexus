@@ -812,6 +812,38 @@ class TestInject:
         assert str(env.checkpoints / f"{SID}.md") in ctx.splitlines()[-1]
         assert "SUMMARY-SENTINEL" not in ctx, "the summary is already in the new context; do not repeat it"
 
+    def test_a_stub_checkpoint_tells_the_resumed_session_no_restore_is_available(self, mod, env, monkeypatch) -> None:
+        """nexus-2v7da: post wrote a stub (no unused pre-compaction checkpoint), so inject has nothing to
+        restore. It said nothing, and the resumed session could not tell "nothing was lost" from "nothing
+        was saved". It now gets a short notice that names where to look instead."""
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "SUMMARY-SENTINEL"})
+        stub = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
+        assert mod._STUB_BODY in stub and "- written:" not in stub
+        self._no_process(mod, monkeypatch)
+        code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert code == 0
+        ctx = self._ctx(out)
+        assert "no working-state checkpoint" in ctx and "nothing is restored" in ctx
+        assert "threads" in ctx and SID in ctx and "git" in ctx
+        assert "SUMMARY-SENTINEL" not in ctx, "the summary is already in the new context"
+        assert len(ctx.encode("utf-8")) < 1024, "a notice, not a checkpoint"
+
+    def test_a_missing_checkpoint_on_a_compact_start_gets_the_same_notice(self, mod, env, monkeypatch) -> None:
+        """Live, inject runs BEFORE post (nexus-702gy), so when pre did not run there is no stub yet at
+        inject time: the file is simply absent. A start that says it is a compact one and finds no file
+        is the same fact."""
+        code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert code == 0 and "no working-state checkpoint" in self._ctx(out)
+
+    def test_a_missing_checkpoint_without_a_compact_source_stays_silent(self, mod, env, monkeypatch) -> None:
+        assert run(mod, monkeypatch, "inject", {"session_id": SID}) == (0, "")
+        assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "startup"}) == (0, "")
+
+    def test_a_stub_notice_is_not_a_restore_and_leaves_no_sidecar(self, mod, env, monkeypatch) -> None:
+        run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "s"})
+        run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+        assert not (env.checkpoints / f"{SID}.injected").exists()
+
     def test_a_foreign_session_gets_nothing(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload())
         code, out = run(mod, monkeypatch, "inject", {"session_id": OTHER_SID})
@@ -904,7 +936,10 @@ class TestInject:
         run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "the summary of this compaction"})
         code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
-        assert code == 0 and out == ""
+        # The old state is not injected; the session is told there is none (nexus-2v7da).
+        ctx = self._ctx(out)
+        assert code == 0 and "no working-state checkpoint" in ctx
+        assert "state: building" not in ctx and "the previous summary" not in ctx
 
     def test_the_intro_states_the_checkpoints_age_and_trigger(self, mod, env, monkeypatch) -> None:
         run(mod, monkeypatch, "pre", pre_payload(trigger="auto"))
@@ -955,7 +990,9 @@ class TestInject:
             assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"}) == (0, "")
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "summary two"})
         if not inject_first:
-            assert run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"}) == (0, "")
+            code, out = run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})
+            ctx = self._ctx(out)  # the stub's notice (nexus-2v7da), never compaction 1's state
+            assert code == 0 and "no working-state checkpoint" in ctx and "state: building" not in ctx
         text = path.read_text(encoding="utf-8")
         assert "no pre-compaction checkpoint for this compaction" in text and "summary two" in text
         assert "summary one" not in text
@@ -1229,9 +1266,9 @@ class TestProbe:
         run(mod, monkeypatch, "post", {"session_id": SID, "compact_summary": "orphan"})
         run(mod, monkeypatch, "inject", {"session_id": SID, "source": "compact"})  # a stub: nothing to emit
         inject_none, post_stub, inject_stub = self.lines(env)
-        assert "outcome=skipped: no checkpoint file" in inject_none
+        assert "outcome=emitted: no restore (no checkpoint file)" in inject_none
         assert "outcome=wrote stub" in post_stub
-        assert "outcome=skipped: no usable written: stamp" in inject_stub
+        assert "outcome=emitted: no restore (stub)" in inject_stub
         assert "event=-" in inject_none, "a payload without hook_event_name logs a dash"
 
     def test_the_board_route_and_a_missing_session_id_are_in_the_outcome(self, mod, env, monkeypatch) -> None:

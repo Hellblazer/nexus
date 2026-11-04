@@ -62,8 +62,10 @@ the summary precomputed (prepared while the session was idle, after the checkpoi
 intro gives the checkpoint's age; an age alone never claims a failed pre. It reads one file and
 writes the sidecar: no network, no ``nx`` call, because
 the same event runs seven other verbs and must stay light (nexus-75w5d). It prints
-nothing when no checkpoint exists for this session id, the stamp is missing or past
-the prune window, the file is a stub, or the sidecar holds its stamp.
+nothing for a foreign session id, a stamp that is missing or past the prune window, or a
+sidecar that holds the stamp. When a compact start has no checkpoint to restore (no file, or a stub
+post wrote because pre did not run) it prints a short notice instead, saying so and pointing at the
+threads board entry and the working tree (nexus-2v7da).
 
 Every verb run logs one INFO ``probe`` line: verb, the sorted payload keys (by name only) and the
 outcome. The values of ``hook_event_name``, ``source``, ``trigger`` and ``precomputed`` are logged
@@ -787,7 +789,7 @@ def run_post(payload: dict) -> str:
             _archive_and_prune(directory, session_id, time.time())
         _log("WARNING", f"post: no unused pre-compaction checkpoint for session {session_id} "
                         f"({'an older one was archived' if existing is not None else 'none exists'}); "
-                        "writing a stub, which inject does not emit")
+                        "writing a stub, for which inject emits only the no-restore notice")
         existing = f"# Compaction checkpoint\n\n- session: {session_id}\n\n{_STUB_BODY}\n"
         stub = True
     stamp = _now().isoformat(timespec="seconds")
@@ -856,6 +858,28 @@ def _age_label(age: float) -> str:
     return f"{minutes // 60} h {minutes % 60} min"
 
 
+def _emit_context(context: str) -> None:
+    sys.stdout.write(json.dumps(
+        {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
+    ) + "\n")
+    sys.stdout.flush()
+
+
+def _no_restore_notice(session_id: str) -> str:
+    """The context a compact start gets when there is no checkpoint to restore (nexus-2v7da).
+
+    Without it the resumed session cannot tell "nothing was lost" from "nothing was saved". A few
+    hundred bytes, far under ``_INJECT_CAP_BYTES``; it names where the state lives instead.
+    """
+    return (
+        "The conexus PreCompact hook has no working-state checkpoint for this compaction (its pre step "
+        "did not run or failed), so nothing is restored here and the compact summary is all you have. "
+        "Recover your state before acting on it: read your threads board entry (project threads, titled "
+        f"with your session name, or the entry whose first line is `session: {session_id}`), then check "
+        "git status, the branch and `bd list --status=in_progress`.\n"
+    )
+
+
 def run_inject(payload: dict) -> str:
     """Print the checkpoint as context. Returns the outcome the probe line reports."""
     session_id = _session_id(payload)
@@ -865,14 +889,26 @@ def run_inject(payload: dict) -> str:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
+        if payload.get("source") == "compact":
+            # Live, inject runs before post, so a compaction whose pre did not run has no stub yet:
+            # the file is simply absent. Only a start that says it is a compact one is told.
+            _emit_context(_no_restore_notice(session_id))
+            return "emitted: no restore (no checkpoint file)"
         return "skipped: no checkpoint file"
     except ValueError as exc:
         _log("WARNING", f"inject: {path} is not valid UTF-8 ({exc}); nothing injected")
         return "skipped: checkpoint is not valid UTF-8"
     age = _written_age(text)
+    if age is None and _STUB_BODY in text and _written_stamp(text) is None:
+        # post wrote a stub: pre did not run for this compaction. No sidecar: there is no stamp to
+        # record, and a later compaction whose pre also failed is owed the same notice.
+        _log("INFO", f"inject: {path} is a stub (no pre-compaction checkpoint for this compaction); "
+                     "emitting the no-restore notice")
+        _emit_context(_no_restore_notice(session_id))
+        return "emitted: no restore (stub)"
     if age is None:
         _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
-                     "missing, or a stub); nothing injected")
+                     "or missing); nothing injected")
         return "skipped: no usable written: stamp"
     written = _written_stamp(text)
     sidecar = path.with_name(f"{session_id}{_INJECTED_SUFFIX}")
@@ -913,10 +949,7 @@ def run_inject(payload: dict) -> str:
              "not in the summary.\n\n")
     footer = f"Full checkpoint (with the compact summary): {path}\n"
     context = _fit(intro + body, footer)
-    sys.stdout.write(json.dumps(
-        {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
-    ) + "\n")
-    sys.stdout.flush()
+    _emit_context(context)
     # Record it in the sidecar, never the checkpoint (post may be rewriting that one), so a
     # later compaction whose pre did not run cannot inject it again.
     if written is not None:

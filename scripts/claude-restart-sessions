@@ -2181,6 +2181,49 @@ def main() -> int:
 #: The handoffs write_handoffs returned for this run, for the footprint report (empty until then).
 LAST_HANDOFFS: dict[str, str] = {}
 
+#: A handoff file by whole name (this script's restart handoffs and `nx command-context continuation`'s).
+#: A draft (`.draft.txt`), a ready reply or a lookalike never matches.
+_HANDOFF_NAME_RE = re.compile(r"nexus-continuation-[A-Za-z0-9._-]+\.md")
+HANDOFF_MAX_AGE_S = 7 * 24 * 3600.0
+
+
+def prune_old_handoffs(directory: Path, *, now: float) -> list[str]:
+    """Remove handoff files in `directory` over 7 days old; return the paths removed (nexus-2v7da).
+
+    Candidates are regular files directly in `directory` whose whole name matches
+    `nexus-continuation-<...>.md`: no glob delete, no recursion, no directory, and a symlink is
+    neither followed nor removed. A missing directory or a file that cannot be removed is skipped.
+    """
+    removed: list[str] = []
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return removed
+    for entry in entries:
+        if not _HANDOFF_NAME_RE.fullmatch(entry.name):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if now - entry.stat(follow_symlinks=False).st_mtime <= HANDOFF_MAX_AGE_S:
+                continue
+            os.unlink(entry.path)
+        except OSError:
+            continue
+        removed.append(entry.path)
+    return removed
+
+
+def _prune_handoffs_at_write() -> None:
+    """Prune old handoffs from TMP just before a roll writes new ones. Never raises."""
+    try:
+        removed = prune_old_handoffs(TMP, now=time.time())
+    except Exception as e:  # noqa: BLE001 -- housekeeping must not stop a roll
+        log(f"handoff prune skipped: {e}")
+        return
+    if removed:
+        log(f"pruned {len(removed)} handoff file(s) older than 7 days from {TMP}")
+
 
 def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers: list[dict], ready: set[str],
           guard: Callable[[dict], str] | None) -> int:
@@ -2188,6 +2231,7 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
     handoffs: dict[str, str] | None = None
     if a.fresh:
         sender = callers[0]["sessionId"] if callers else "claude-restart-sessions"
+        _prune_handoffs_at_write()
         handoffs = write_handoffs(found, ready, a.wait, a.handoff_timeout, sender)
         LAST_HANDOFFS.update(handoffs)
         if a.nx and not converge(a.nx, Path(a.repo), a.endpoint, False, False, install=True):

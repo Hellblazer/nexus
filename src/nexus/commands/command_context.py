@@ -688,6 +688,52 @@ def compute_continuation_path(
     return base
 
 
+#: A handoff file this module (and ``scripts/claude-restart-sessions``) writes, whole name.
+#: ``fullmatch`` on the entry name: a draft (``.md.draft.txt``) or a lookalike is not a handoff.
+_HANDOFF_NAME_RE = re.compile(r"nexus-continuation-[A-Za-z0-9._-]+\.md")
+#: Handoffs older than this are removed when a new one is about to be written (nexus-2v7da).
+_HANDOFF_MAX_AGE_S = 7 * 24 * 3600.0
+
+
+def prune_continuation_files(out_dir: Path, *, now: float) -> list[Path]:
+    """Remove handoff files in *out_dir* whose mtime is more than 7 days before *now*.
+
+    Only regular files directly in *out_dir* whose whole name matches
+    ``nexus-continuation-<...>.md`` are candidates: no glob delete, no recursion, no symlink
+    (never followed, never removed), no directory. Returns the paths actually removed; a
+    missing directory or a file that cannot be removed is skipped, never raised.
+    """
+    removed: list[Path] = []
+    try:
+        entries = list(os.scandir(out_dir))
+    except OSError:
+        return removed
+    for entry in entries:
+        if not _HANDOFF_NAME_RE.fullmatch(entry.name):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if now - entry.stat(follow_symlinks=False).st_mtime <= _HANDOFF_MAX_AGE_S:
+                continue
+            path = Path(entry.path)
+            path.unlink()
+        except OSError:
+            continue
+        removed.append(path)
+    return removed
+
+
+def _prune_handoffs_at_write(out_dir: Path) -> None:
+    """Prune old handoffs from the directory the new one is named in. Never raises."""
+    import time  # noqa: PLC0415 — only the write-time call needs it
+
+    try:
+        prune_continuation_files(out_dir, now=time.time())
+    except Exception:  # noqa: BLE001 — housekeeping must not fail the command that names the handoff
+        pass
+
+
 def _continuation_dir() -> Path:
     """Where a continuation handoff is written: ``/tmp`` on POSIX, the user's
     temp directory on Windows, where ``/tmp`` names ``\\tmp`` on the current
@@ -1553,11 +1599,13 @@ def continuation(args: tuple[str, ...]) -> None:
     # ---- Compute output path ------------------------------------------------
     from nexus.session import resolve_explicit_session_id  # noqa: PLC0415 — command-local import (session)
 
+    out_dir = _continuation_dir()
+    _prune_handoffs_at_write(out_dir)
     out = compute_continuation_path(
         repo_safe=repo_safe,
         slug=slug,
         now=datetime.now(),
-        out_dir=_continuation_dir(),
+        out_dir=out_dir,
         exists=Path.exists,
         session=_sanitize_slug((resolve_explicit_session_id() or "")[:8]),
     )
