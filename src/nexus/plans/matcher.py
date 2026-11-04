@@ -27,6 +27,7 @@ Side effect: every returned plan increments
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import structlog
@@ -177,6 +178,38 @@ def _is_always_failing(row: dict) -> bool:
     except (TypeError, ValueError):
         return False
     return successes == 0 and failures >= _ALWAYS_FAILING_MIN_FAILURES
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    """Parse an engine ISO-8601 timestamp as an aware UTC datetime, or None."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _is_expired(row: dict, *, now: datetime | None = None) -> bool:
+    """True when *row* is past its TTL by the engine's own rule (nexus-a0ksy).
+
+    Mirrors ``PlanRepository.notExpiredCondition``: a row with a ``ttl`` is
+    expired once ``now - coalesce(last_used, created_at)`` exceeds ``ttl``
+    days. The T1 plan cache refreshes from ``list_active_plans`` only every
+    90 s and ``get_plan`` applies no TTL, so without this check an expired
+    plan matched in that window would run, and its run-start write would
+    stamp ``last_used = now()`` and bring it back to life. A row whose
+    timestamps cannot be read is kept: the engine stays the authority.
+    """
+    ttl = row.get("ttl")
+    if ttl is None:
+        return False
+    anchor = _parse_utc(row.get("last_used")) or _parse_utc(row.get("created_at"))
+    if anchor is None:
+        return False
+    age_days = ((now or datetime.now(UTC)) - anchor).total_seconds() / 86400
+    return age_days > float(ttl)
 
 
 #: Comma-token that marks a plan as CATEGORY-level: a hand-authored
@@ -751,6 +784,13 @@ def plan_match(
         raw_confidence_by_plan_id: dict[int, float] = {}
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
+            if row is not None and _is_expired(row):
+                # nexus-a0ksy: the cache still holds a plan the engine now
+                # counts as expired. Drop it before it can run (a run start
+                # would reset last_used and undo the expiry) and evict it.
+                import structlog  # noqa: PLC0415 — deferred import, branch-local
+                structlog.get_logger(__name__).info("plan_match_expired_cache_hit", plan_id=plan_id)
+                row = None
             if row is None:
                 # Search review I-4: the plan was deleted from T2 but the
                 # T1 cache still carries its embedding. Evict it now so
