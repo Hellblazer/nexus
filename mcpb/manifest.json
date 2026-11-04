@@ -90,7 +90,7 @@
     },
     {
       "name": "memory_put",
-      "description": "Store a memory entry in T2 (per-project SQLite). Upserts by (project, title)."
+      "description": "Store a memory entry in T2 (project-scoped, PostgreSQL behind the engine). Upserts by (project, title)."
     },
     {
       "name": "memory_get",
@@ -102,7 +102,7 @@
     },
     {
       "name": "memory_search",
-      "description": "Full-text (FTS5) search across T2 memory entries."
+      "description": "Full-text search across T2 memory entries (plain text matched against title, content and tags; no query grammar)."
     },
     {
       "name": "memory_consolidate",

@@ -266,11 +266,11 @@ mcp__plugin_conexus_nexus__memory_delete(project="{repo}", title="stale-finding"
 
 ### memory_search
 
-Full-text search across T2 memory entries. Searches title, content, and tags fields via FTS5.
+Full-text search across T2 memory entries: PostgreSQL full-text search over the title, content, and tags fields.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `query` | str | required | Search query (FTS5 syntax — matches tokens in title, content, and tags) |
+| `query` | str | required | Plain-text search query, matched against title, content, and tags (no query grammar or operators) |
 | `project` | str | `""` | Optional project filter |
 | `limit` | int | `20` | Page size |
 | `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
@@ -346,7 +346,7 @@ mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", pro
 
 **Promote return value** (RDR-057 Phase 1c): The promote action returns a `PromotionReport` rendered in the response string:
 - `(action=new)` — clean write, no overlap detected
-- `(action=overlap_detected)` — FTS5 found a similar existing T2 entry. The new entry is still written as a separate row; the agent must decide whether to also call `memory_consolidate(action="merge")` to dedupe.
+- `(action=overlap_detected)` — the full-text check found a similar existing T2 entry. The new entry is still written as a separate row; the agent must decide whether to also call `memory_consolidate(action="merge")` to dedupe.
 
 **Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
 
@@ -428,7 +428,7 @@ nx mineru stop                             # stop server
 - **T2 memory**: cross-session state, agent relay notes, active project context
 - **T3 knowledge**: validated findings, architectural decisions, reusable patterns — anything worth keeping permanently
 
-**Collection naming** (RDR-103): always `__` as separator (colons are invalid in ChromaDB collection names). The conformant shape is `<content_type>__<owner>__<embedding_model>__v<n>`, for example `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. Operators may type the short legacy form (`knowledge__topic`) at the `--collection` boundary; `t3_collection_name` auto-promotes to the 4-segment shape before any T3 write. Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
+**Collection naming** (RDR-103): always `__` as separator (the RDR-103 name grammar uses `__` and refuses colons). The conformant shape is `<content_type>__<owner>__<embedding_model>__v<n>`, for example `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. Operators may type the short legacy form (`knowledge__topic`) at the `--collection` boundary; `t3_collection_name` auto-promotes to the 4-segment shape before any T3 write. Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
 
 **Title conventions** (use hyphens, not colons):
 - `research-{topic}` — research findings
@@ -438,12 +438,12 @@ nx mineru stop                             # stop server
 
 ## T2 Search
 
-memory_search uses FTS5 full-text search — it matches literal tokens, not semantic meaning. Rules:
+memory_search uses PostgreSQL full-text search: it matches words, not semantic meaning, and the query is plain text with no operators. Rules:
 
 - Searches all three fields: **title**, **content**, and **tags**
-- Use exact terms from the stored document, not conceptual paraphrases
-- `"retain slash commands"` works if those words appear verbatim
-- Multi-word queries are AND-matched: all tokens must appear somewhere in the document
+- Use the terms the stored document uses, not conceptual paraphrases; English words match across stemming (`indexing` finds `indexed`), and accents are folded
+- `"retain slash commands"` works if those words appear in the document
+- Multi-word queries match documents that contain all the words; a query made only of English stopwords matches through titles and tags alone
 - When results are empty: drop one term at a time to identify which token has no match. Use memory_get with empty title to browse titles directly
 
 ## Code Search: When to Use search vs Grep
