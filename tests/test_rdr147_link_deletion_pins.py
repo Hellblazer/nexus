@@ -81,6 +81,21 @@ def _in(cat, t: str) -> set[tuple[str, str, str]]:
     return {_pair(lk) for lk in cat.links_to(t)}
 
 
+def _rows(tumbler: str) -> set[tuple[str, str, str]]:
+    """The link rows touching *tumbler*, read from ``nexus.catalog_links`` itself (tenant-scoped).
+
+    Pins 1 and 2 observe rows here rather than through ``links_from`` / ``links_to``: those readers
+    are what pin 4 says may change (RDR-147 R8), and a filtering reader would hide a dangling row
+    from pin 1 or hide a kept row from pin 2."""
+    out = _psql_superuser(
+        _pg_state(),
+        "SELECT from_tumbler || '|' || to_tumbler || '|' || link_type FROM nexus.catalog_links "
+        f"WHERE tenant_id = {_lit(ambient_tenant())} "
+        f"AND (from_tumbler = {_lit(tumbler)} OR to_tumbler = {_lit(tumbler)})",
+    )
+    return {tuple(line.split("|")) for line in out.splitlines() if line}  # type: ignore[misc]
+
+
 def _age_tombstone(tumbler: str, days: int = 3) -> None:
     """Backdate a tombstone past the 1 day grace window (the engine refuses ``older_than_days < 1``,
     so a fresh tombstone is never purgeable). Substrate SQL, as ``tests/_reapable_age.py`` does for
@@ -94,11 +109,53 @@ def _age_tombstone(tumbler: str, days: int = 3) -> None:
     assert int(out) == 1, f"no tombstone to age for {tumbler}"
 
 
+# Set while the link FKs are dropped; the module's autouse teardown restores them if the
+# context manager's own restore did not run or failed, so a dropped FK never outlives its test.
+_FK_RESTORE_PENDING: list[str | None] = [None]
+
+
+def _restore_link_fks(tenant: str) -> None:
+    """Delete this tenant's dangling link rows, then re-add each link FK that is missing, exactly
+    as ``catalog-032-links-tumbler-fk.xml`` defines it (plain, validated, CASCADE / CASCADE).
+    Idempotent: a constraint already present is left alone. PG and its DDL are per xdist worker
+    (``ensure_engine`` is process-memoized), so no other worker sees the window."""
+    t = _lit(tenant)
+    adds = []
+    for name, col in (("fk_catalog_links_from_document", "from_tumbler"),
+                      ("fk_catalog_links_to_document", "to_tumbler")):
+        adds.append(
+            f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}') THEN "
+            f"ALTER TABLE nexus.catalog_links ADD CONSTRAINT {name} "
+            f"FOREIGN KEY (tenant_id, {col}) REFERENCES nexus.catalog_documents (tenant_id, tumbler) "
+            "ON DELETE CASCADE ON UPDATE CASCADE; END IF;"
+        )
+    _psql_superuser(
+        _pg_state(),
+        f"DELETE FROM nexus.catalog_links l WHERE l.tenant_id = {t} AND (NOT EXISTS "
+        "(SELECT 1 FROM nexus.catalog_documents d WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.from_tumbler) "
+        "OR NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d "
+        "WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.to_tumbler)); "
+        "DO $$ BEGIN " + " ".join(adds) + " END $$;",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _link_fk_backstop():
+    yield
+    tenant = _FK_RESTORE_PENDING[0]
+    if tenant is not None:
+        _restore_link_fks(tenant)
+        _FK_RESTORE_PENDING[0] = None
+
+
 @contextmanager
 def _link_fks_dropped():
     """Vacuity control for the cascade pin: with the two link FKs gone, a hard delete must leave
     the links behind, proving the cascade (and nothing else) is what removes them. Restored on
-    exit: the dangling rows the block leaves are deleted, then the constraints are re-added valid."""
+    exit (this tenant's dangling rows deleted, the constraints re-added valid), and again by the
+    module's autouse teardown if that restore did not complete."""
+    tenant = ambient_tenant()
+    _FK_RESTORE_PENDING[0] = tenant
     _psql_superuser(
         _pg_state(),
         "ALTER TABLE nexus.catalog_links DROP CONSTRAINT fk_catalog_links_from_document; "
@@ -107,18 +164,8 @@ def _link_fks_dropped():
     try:
         yield
     finally:
-        _psql_superuser(
-            _pg_state(),
-            "DELETE FROM nexus.catalog_links l WHERE NOT EXISTS (SELECT 1 FROM nexus.catalog_documents d "
-            "WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.from_tumbler) OR NOT EXISTS "
-            "(SELECT 1 FROM nexus.catalog_documents d WHERE d.tenant_id = l.tenant_id AND d.tumbler = l.to_tumbler); "
-            "ALTER TABLE nexus.catalog_links ADD CONSTRAINT fk_catalog_links_from_document "
-            "FOREIGN KEY (tenant_id, from_tumbler) REFERENCES nexus.catalog_documents (tenant_id, tumbler) "
-            "ON DELETE CASCADE ON UPDATE CASCADE; "
-            "ALTER TABLE nexus.catalog_links ADD CONSTRAINT fk_catalog_links_to_document "
-            "FOREIGN KEY (tenant_id, to_tumbler) REFERENCES nexus.catalog_documents (tenant_id, tumbler) "
-            "ON DELETE CASCADE ON UPDATE CASCADE;",
-        )
+        _restore_link_fks(tenant)
+        _FK_RESTORE_PENDING[0] = None
 
 
 def _purge_one_aged(cat, tumbler: str) -> None:
@@ -127,6 +174,13 @@ def _purge_one_aged(cat, tumbler: str) -> None:
     _age_tombstone(tumbler)
     result = cat.purge_trash(older_than_days=1, dry_run=False)
     assert result["documents_purged"] >= 1, result
+    # Tied to the victim, not just "something was purged": its row is physically gone.
+    gone = _psql_superuser(
+        _pg_state(),
+        f"SELECT count(*) FROM nexus.catalog_documents WHERE tenant_id = {_lit(ambient_tenant())} "
+        f"AND tumbler = {_lit(tumbler)}",
+    )
+    assert int(gone) == 0, f"purge_trash left {tumbler} in place"
 
 
 # ── 1. hard delete cascades links, both directions ───────────────────────────
@@ -139,9 +193,8 @@ def _hard_delete_scenario(cat):
     g.link(victim, live)   # outbound from the purged document
     g.link(live, victim)   # inbound to the purged document
     g.link(live, other)    # unrelated, must survive
-    # Positive control: both links exist, and are visible from the surviving side, before the purge.
-    assert (victim, live, _LINK_TYPE) in _in(cat, live)
-    assert (live, victim, _LINK_TYPE) in _out(cat, live)
+    # Positive control: both link rows exist before the purge.
+    assert {(victim, live, _LINK_TYPE), (live, victim, _LINK_TYPE)} <= _rows(victim)
     _purge_one_aged(cat, victim)
     return live, victim, other
 
@@ -149,23 +202,23 @@ def _hard_delete_scenario(cat):
 def test_hard_delete_removes_the_documents_links_in_both_directions(cat):
     live, victim, other = _hard_delete_scenario(cat)
 
-    assert (victim, live, _LINK_TYPE) not in _in(cat, live), "outbound link of the purged doc survived"
-    assert (live, victim, _LINK_TYPE) not in _out(cat, live), "inbound link of the purged doc survived"
-    assert _out(cat, victim) == set() and _in(cat, victim) == set()
+    assert _rows(victim) == set(), "a link row of the purged document survived"
     # The cascade is scoped to the purged document: an unrelated link is untouched.
-    assert (live, other, _LINK_TYPE) in _out(cat, live)
+    assert (live, other, _LINK_TYPE) in _rows(live)
 
 
 def test_the_cascade_is_the_fk_not_something_else(cat):
-    """Vacuity control for the pin above: with the two FKs dropped the same purge leaves the links."""
+    """Vacuity control for the pin above: with the two FKs dropped the same purge leaves the links.
+    Deliberately FK-specific: it would also go red if the cascade moved to an explicit delete in
+    ``purge_trash`` (the design RDR-194 D2 rejected), which would be a decision to revisit here."""
     g = _Graph(cat)
     live, victim = g.doc("live"), g.doc("victim")
     g.link(victim, live)
     g.link(live, victim)
     with _link_fks_dropped():
         _purge_one_aged(cat, victim)
-        assert (victim, live, _LINK_TYPE) in _in(cat, live), "no FK, yet the link is gone: the pin is vacuous"
-        assert (live, victim, _LINK_TYPE) in _out(cat, live)
+        assert {(victim, live, _LINK_TYPE), (live, victim, _LINK_TYPE)} <= _rows(victim), (
+            "no FK, yet the links are gone: the pin is vacuous")
 
 
 # ── 2. trash keeps links, restore returns them ───────────────────────────────
@@ -181,8 +234,8 @@ def test_trash_keeps_the_links_and_restore_brings_the_document_back_with_them(ca
     assert before_out and before_in, "positive control: the links exist before the trash"
 
     assert cat.delete_document(victim) is True
-    assert (victim, live, _LINK_TYPE) in _in(cat, live), "trash dropped the outbound link"
-    assert (live, victim, _LINK_TYPE) in _out(cat, live), "trash dropped the inbound link"
+    assert {(victim, live, _LINK_TYPE), (live, victim, _LINK_TYPE)} <= _rows(victim), (
+        "trash dropped a link row")
 
     assert cat.restore_document(victim) is True
     # Same rows, not re-created ones: created_at is part of the row's identity here.
@@ -199,20 +252,24 @@ def test_traverse_does_not_reach_a_trashed_document_and_it_is_no_relay(cat):
     g.link(a, d)
     g.link(d, b)
 
-    def reach() -> tuple[set[str], set[tuple[str, str, str]]]:
-        r = cat.graph_many([a], depth=2, direction="out", link_types=[_LINK_TYPE])
+    def reach(seed: str, direction: str) -> tuple[set[str], set[tuple[str, str, str]]]:
+        r = cat.graph_many([seed], depth=2, direction=direction, link_types=[_LINK_TYPE])
         return {str(n.tumbler) for n in r["nodes"]}, {_pair(e) for e in r["edges"]}
 
-    nodes, edges = reach()  # positive control: before the trash, D and B are reached
-    assert {a, d, b} <= nodes, nodes
-    assert {(a, d, _LINK_TYPE), (d, b, _LINK_TYPE)} <= edges, edges
+    # Outbound from A exercises the join's to-side filter; inbound from B its from-side filter
+    # (edge D->B has D as its from endpoint), so dropping either half goes red.
+    for seed, direction, relayed in ((a, "out", b), (b, "in", a)):
+        nodes, edges = reach(seed, direction)  # positive control, before the trash
+        assert {a, d, b} <= nodes, (direction, nodes)
+        assert {(a, d, _LINK_TYPE), (d, b, _LINK_TYPE)} <= edges, (direction, edges)
 
     assert cat.delete_document(d) is True
-    nodes, edges = reach()
-    assert d not in nodes, "traverse reached a trashed document"
-    assert b not in nodes, "a trashed document acted as a relay to B"
-    assert all(d not in (f, t) for f, t, _ in edges), edges
-    assert a in nodes
+    for seed, direction, relayed in ((a, "out", b), (b, "in", a)):
+        nodes, edges = reach(seed, direction)
+        assert d not in nodes, f"traverse ({direction}) reached a trashed document"
+        assert relayed not in nodes, f"a trashed document acted as a relay ({direction})"
+        assert all(d not in (f, t) for f, t, _ in edges), (direction, edges)
+        assert seed in nodes
 
 
 # ── 4. links_from / links_to still show a trashed endpoint (current behaviour) ──
