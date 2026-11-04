@@ -18,7 +18,7 @@ What counts as a channel, and how each is checked:
 - **MCP tool descriptions and parameter descriptions**, from the live tool registry of both servers.
 - **CLI help and option help**, from the live click command tree.
 - **Every other string constant in ``src/nexus``** (error and hint text, ``click.echo`` text, doctor
-  suggestions), found by AST. Docstrings and bare string statements are developer text, comments are not in the
+  suggestions), found by AST. The same scan covers the plugins' Python (hook and launcher text). Docstrings and bare string statements are developer text, comments are not in the
   AST at all; the click and MCP docstrings that DO reach a user are covered by the two runtime scans above.
 
 A path is repo-only when it starts at a top-level directory of the nexus checkout and names something that exists
@@ -137,6 +137,15 @@ _EVAL_CASE_PREFIX = "conexus/evals/"
 _EVAL_README = "conexus/evals/README.md"
 _PLUGIN_DIRS = ("conexus", "sn", "prose-edit", "tool-spill")
 
+#: Files another session is rewriting at the same time, so this change leaves them alone to avoid a merge fight:
+#: {file: why}. Each still holds a violation (``test_every_deferral_still_has_something_to_defer`` fails the day
+#: one is clean, so the entry cannot outlive its reason). The links this change would have made are in the hand-off
+#: patch for these two READMEs: GitHub links for the test, script and doc paths they name.
+_DEFERRED_FILES: dict[str, str] = {
+    "conexus/README.md": "being rewritten for dead nx verbs and count drift by the marginalia session (nexus-z7ddd, 2026-11-04)",
+    "sn/README.md": "being rewritten for dead nx verbs and count drift by the marginalia session (nexus-z7ddd, 2026-11-04)",
+}
+
 
 # --------------------------------------------------------------------------------------------------------------
 # Plugin markdown
@@ -149,7 +158,8 @@ def _plugin_markdown(repo_root: Path = REPO_ROOT) -> list[Path]:
     rels = {p: p.relative_to(repo_root).as_posix() for p in files}
     return [
         p for p, rel in rels.items()
-        if rel not in _MARKDOWN_EXEMPT and not (rel.startswith(_EVAL_CASE_PREFIX) and rel != _EVAL_README)
+        if rel not in _MARKDOWN_EXEMPT and rel not in _DEFERRED_FILES
+        and not (rel.startswith(_EVAL_CASE_PREFIX) and rel != _EVAL_README)
     ]
 
 
@@ -282,7 +292,8 @@ def test_the_plugin_markdown_census_covers_all_four_plugins_and_skips_only_the_l
     for d in _PLUGIN_DIRS:
         assert any(f.startswith(d + "/") for f in files), d
     assert "conexus/resources/agent-shared/MAINTENANCE.md" in files
-    assert "conexus/README.md" in files
+    assert not files & set(_DEFERRED_FILES)
+    assert "conexus/hooks/scripts/routing/README.md" in files
     assert "prose-edit/README.md" in files
     assert "conexus/evals/README.md" in files
     assert not any(f.startswith("conexus/evals/") and f != "conexus/evals/README.md" for f in files)
@@ -455,7 +466,8 @@ def test_every_github_link_this_lint_asks_for_names_something_in_the_tree() -> N
     texts: list[tuple[str, str]] = []
     for path in _plugin_markdown():
         texts.append((path.relative_to(REPO_ROOT).as_posix(), path.read_text(encoding="utf-8")))
-    for path in sorted((REPO_ROOT / "src" / "nexus").rglob("*.py")):
+    py_files = [p for d in ("src/nexus", "conexus", "sn", "prose-edit") for p in sorted((REPO_ROOT / d).rglob("*.py"))]
+    for path in py_files:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         skip = _developer_text_ids(tree)
         texts += [
@@ -468,3 +480,39 @@ def test_every_github_link_this_lint_asks_for_names_something_in_the_tree() -> N
     assert n_links >= 60, f"only {n_links} links: the pattern saw nothing"
     missing = _missing_github_targets(texts)
     assert not missing, "\n".join(missing)
+
+
+def test_no_string_constant_in_the_plugins_python_names_a_repo_only_file() -> None:
+    """Hook and launcher text reaches the user's model too (the SessionStart and SubagentStart injections)."""
+    bad: list[str] = []
+    examined = 0
+    for d in ("conexus", "sn", "prose-edit"):
+        found, n = _string_violations(REPO_ROOT / d)
+        bad += found
+        examined += n
+    print(f"plugin python: examined {examined} string constants")
+    assert examined >= 5000, f"only {examined} string constants examined: wrong roots?"
+    assert not bad, "\n".join(bad)
+
+
+def test_the_credential_guard_deny_message_links_the_wrapper_it_names() -> None:
+    """The guard ships to every user of the plugin; the wrapper it names exists only in the nexus repo, so the
+    message carries the GitHub link (a bare file name reads as something to run; no path rule sees it)."""
+    src = (REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "credential_print_guard.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    messages = [
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "claude_credentials.py status" in n.value
+        and "Harnesses never read" in n.value
+    ]
+    assert len(messages) == 1, messages
+    assert "https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py" in messages[0]
+
+
+def test_every_deferral_still_has_something_to_defer() -> None:
+    for rel, why in _DEFERRED_FILES.items():
+        assert why.strip(), rel
+        path = REPO_ROOT / rel
+        assert path.is_file(), rel
+        assert _markdown_violations([path]), f"{rel} is clean now: delete its _DEFERRED_FILES entry"
