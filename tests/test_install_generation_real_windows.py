@@ -151,6 +151,91 @@ class TestRealWindows:
         assert (target / "data.txt").read_text(encoding="utf-8") == "data"
         assert any("unrecognised generation symlink" in e for e in errors)
 
+    # -- the installer-rebuild rollback on real junctions (nexus-ff366) --------
+
+    @staticmethod
+    def _flipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """``current`` on a rebuilt generation and ``previous`` on the one it replaced, both
+        real junctions; the user PATH and the logon task are the machine's, so the Windows flip
+        step is the flip alone."""
+        from nexus.commands import self_cmd  # noqa: PLC0415
+
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        older, original, rebuilt = (tools / f"gen-2026100{n}T000000Z" for n in (1, 2, 3))
+        for generation in (older, original, rebuilt):
+            generation.mkdir()
+        gen_core.flip_current(older, tools)
+        gen_core.flip_current(original, tools)
+        gen_core.flip_current(rebuilt, tools)  # current -> rebuilt, previous -> original
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+        monkeypatch.setattr(
+            self_cmd, "_windows_flip_and_path",
+            lambda generation, *, tools, bootstrap=False: gen_core.flip_current(generation, tools, platform="win32"),
+        )
+        return tools, older, original, rebuilt
+
+    def test_remove_link_drops_a_junction_and_never_what_it_names(self, tmp_path: Path) -> None:
+        target = tmp_path / "precious"
+        target.mkdir()
+        (target / "data.txt").write_text("data", encoding="utf-8")
+        link = tmp_path / "previous"
+        gen_core.LinkOps().create(str(target), link)
+        assert lc.is_link(link)
+        lc.remove_link(link)
+        assert not os.path.lexists(link), "the junction is gone"
+        assert (target / "data.txt").read_text(encoding="utf-8") == "data", "its target is untouched"
+        real = tmp_path / "real-dir"
+        real.mkdir()
+        (real / "keep.txt").write_text("keep", encoding="utf-8")
+        with pytest.raises(lc.LayoutError, match="not a link"):
+            lc.remove_link(real)
+        assert (real / "keep.txt").exists(), "a real directory is refused, not emptied"
+
+    def test_restore_current_generation_drops_previous_when_its_target_is_gone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The ``keep_previous=False`` branch: ``layout_core.remove_link`` on the junction the
+        flip left as ``previous``, with the generation it names still in place."""
+        from nexus.commands import self_cmd  # noqa: PLC0415
+
+        tools, older, original, rebuilt = self._flipped(tmp_path, monkeypatch)
+        shutil.rmtree(older)
+        self_cmd.restore_current_generation(original, previous=str(older))
+        assert lc.compare_key(lc.read_link(tools / "current")) == lc.compare_key(str(original))
+        assert not os.path.lexists(tools / "previous"), "previous is dropped, not left on the flip's generation"
+        assert rebuilt.is_dir() and original.is_dir(), "no generation was deleted through a junction"
+
+    def test_put_current_back_on_real_junctions_restores_both_pointers_and_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus import pdf_stack  # noqa: PLC0415
+
+        tools, older, original, rebuilt = self._flipped(tmp_path, monkeypatch)
+        assert pdf_stack._put_current_back(original, str(older)) == f"; current is back on {original.name}"
+        assert lc.compare_key(lc.read_link(tools / "current")) == lc.compare_key(str(original))
+        assert lc.compare_key(lc.read_link(tools / "previous")) == lc.compare_key(str(older))
+
+    def test_put_current_back_reads_one_directory_spelled_in_another_case_as_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``current`` is compared with ``replaced`` by ``Path ==`` and ``previous`` by
+        ``compare_key``. Measured on native Windows: a junction written from a target spelled in
+        another case reads back in that case, and both comparisons fold it, so the account says
+        nothing false about a pointer that did move. Other spellings do not survive a junction
+        (an extended-length prefix reads back unstripped, a ``..`` segment is stored raw), so the
+        two comparisons cannot disagree on anything a real pointer holds, and no change to
+        ``_put_current_back`` was needed."""
+        from nexus import pdf_stack  # noqa: PLC0415
+
+        tools, older, original, rebuilt = self._flipped(tmp_path, monkeypatch)
+        replaced = Path(str(original).upper())
+        assert str(replaced) != str(original), "the fixture must spell the directory differently"
+        line = pdf_stack._put_current_back(replaced, str(older).upper())
+        assert lc.compare_key(lc.read_link(tools / "current")) == lc.compare_key(str(original))
+        assert lc.compare_key(lc.read_link(tools / "previous")) == lc.compare_key(str(older))
+        assert line == f"; current is back on {replaced.name}", line
+
 
 def _build_demo_wheel(directory: Path) -> Path:
     """A one-module wheel whose console script prints ``sys.prefix``: a real

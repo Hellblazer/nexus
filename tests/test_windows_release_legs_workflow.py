@@ -748,8 +748,13 @@ WINDOWS_TEST_SET = (
     "tests/hooks/",
     # RDR-228 Phase 3: the PowerShell installer's tests; the self-hosted lab pool has no pwsh.
     "tests/test_install_ps1.py",
+    # The installer-rebuild rollback on real junctions, the uv receipt lookup and the PDF
+    # stack's per-platform wording: 18 of these failed on native Windows while nothing ran them.
+    "tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py",
     "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
+#: Windows-set test files that are deliberately not workflow triggers (the loop that reads this).
+RIDES_ALONG = ("tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py")
 #: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
 PHASE4_WINDOWS_PATHS = (
     "mcpb/src/bootstrap.py", "conexus/hooks/**", "tests/_hook_wiring.py",
@@ -769,7 +774,10 @@ def test_the_rehearsal_triggers_on_every_phase3_windows_module_and_its_tests() -
         # A test file triggers the workflow. tests/hooks/ and the two tests/test_context.py
         # classes do not (nexus-3fme8): with no per-job filter a test-only edit would rebuild
         # the bundle and the engine, so they run with the next change to the code they test.
-        if test == "tests/hooks/" or "::" in test:
+        # The three installer test files join them: they change with src/nexus/pdf_stack.py and
+        # self_cmd.py, which are not triggers either, and a trigger on them would rebuild the PG
+        # bundle and the engine for a client-only edit.
+        if test == "tests/hooks/" or "::" in test or test in RIDES_ALONG:
             continue
         assert test in paths, test
     assert "src/nexus/hooks/**" in paths, "the hook suite rides on its source path"

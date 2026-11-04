@@ -24,6 +24,8 @@ from pathlib import Path
 import pytest
 
 from nexus import _vcrt, install_layout, pdf_stack
+from nexus._install import generation_core as gen_core
+from nexus._install import layout_core as lc
 from nexus.commands import self_cmd
 from nexus.commands import upgrade as upgrade_cmd
 
@@ -465,35 +467,71 @@ def test_the_default_run_asks_the_row() -> None:
 
 # ── a failed post-check puts current (and previous) back (nexus-ff366) ───────
 
-#: These tests drive the POSIX flip: ``self_cmd._sh`` runs the bash helpers
-#: ``nx_flip_current`` and ``_nx_symlink_swap`` on real ``os.symlink`` links and read
-#: them back with ``os.readlink``. Windows never runs those helpers: ``current`` and
-#: ``previous`` are junctions moved by ``generation_core`` (``restore_current_generation``
-#: branches on ``_is_windows()``), so there is no bash flip to drive there. The Windows
-#: branch of the same rollback is pinned by
-#: ``test_on_windows_the_rollback_goes_through_the_junction_helpers_and_retargets_the_task``
-#: below and the real-junction flip by ``tests/test_install_generation_real_windows.py``.
-posix_links = pytest.mark.skipif(
-    os.name == "nt", reason="drives the POSIX bash flip helpers on symlinks; Windows flips junctions via generation_core",
-)
+#: The pointer fixtures here are REAL on every host: ``current`` and ``previous`` are
+#: symlinks on POSIX and directory junctions on Windows (``generation_core.LinkOps``, the
+#: pointer kind the Windows installer itself makes), read back through ``layout_core`` so the
+#: Windows reading (extended prefix stripped, case folded) is the one under test. The flip
+#: that a faked build performs is the host's own: the bash ``nx_flip_current`` on POSIX,
+#: ``generation_core.flip_current`` on Windows. Nothing here is skipped on Windows.
+#: What a Windows run does NOT drive is ``_windows_flip_and_path``'s user-PATH write and logon-task
+#: retarget (the registry and the task scheduler are the machine's, not the test's): they are
+#: stubbed to the flip alone, and pinned on their own by
+#: ``test_on_windows_the_rollback_goes_through_the_junction_helpers_and_retargets_the_task``.
 
+
+def _link(target: Path, link: Path) -> None:
+    """A real pointer *link* at *target*: a junction on Windows (no symlink privilege
+    needed), a symlink elsewhere."""
+    if os.name == "nt":
+        gen_core.LinkOps().create(str(target), link)
+    else:
+        os.symlink(str(target), link)
+
+
+def _points_at(link: Path, generation: Path) -> bool:
+    """Whether the pointer at *link* names *generation*, spelled however the host spells it."""
+    return lc.is_link(link) and lc.compare_key(lc.read_link(link)) == lc.compare_key(str(generation))
+
+
+def _flip(generation: Path, tools: Path) -> None:
+    """What the build's flip does: move ``current`` to *generation*, recording the old one as
+    ``previous``, through the host's own helper."""
+    if os.name == "nt":
+        gen_core.flip_current(generation, tools)
+    else:
+        self_cmd._sh(self_cmd.packaged_install_dir(), f'nx_flip_current "{generation}" "{tools}"')
+
+
+@pytest.fixture
+def machine_left_alone(monkeypatch, tmp_path):
+    """On Windows ``restore_current_generation`` and the reap would write the user PATH, retarget
+    the logon task and remove launchers from uv's bin directory. Keep the real junction flip and
+    the real reap and point the rest at tmp_path. A no-op elsewhere."""
+    if os.name != "nt":
+        return
+
+    def flip_only(generation, *, tools, bootstrap=False):
+        gen_core.flip_current(generation, tools, platform=self_cmd._plat())
+
+    monkeypatch.setattr(self_cmd, "_windows_flip_and_path", flip_only)
+    monkeypatch.setattr(gen_core, "uv_bin_dir", lambda **kw: tmp_path / "uv-bin")
 
 
 def _layout_with_a_real_flip(bed, monkeypatch, tmp_path: Path, *, with_previous: bool):
-    """Real ``current``/``previous`` links under the bed's tools dir, and a faked build that
+    """Real ``current``/``previous`` pointers under the bed's tools dir, and a faked build that
     flips to a new generation with the REAL flip helper, as ``perform_self_install`` does."""
     tools = tmp_path / "tools"
     tools.mkdir()
     older, original, rebuilt = (tools / f"gen-2026100{n}T000000Z" for n in (1, 2, 3))
     for generation in (older, original, rebuilt):
         generation.mkdir()
-    os.symlink(str(original), tools / "current")
+    _link(original, tools / "current")
     if with_previous:
-        os.symlink(str(older), tools / "previous")
+        _link(older, tools / "previous")
 
     def build(extras: tuple[str, ...], *, after_flip=None) -> None:
         bed.builds.append(extras)
-        self_cmd._sh(self_cmd.packaged_install_dir(), f'nx_flip_current "{rebuilt}" "{tools}"')
+        _flip(rebuilt, tools)
         bed.current = _receipt(constraints=bed.leaves, extras=list(extras))
         if after_flip is not None:
             after_flip(rebuilt)
@@ -502,36 +540,35 @@ def _layout_with_a_real_flip(bed, monkeypatch, tmp_path: Path, *, with_previous:
     return tools, older, original, rebuilt
 
 
-@posix_links
 @pytest.mark.parametrize("with_previous", [True, False])
 def test_a_build_that_leaves_current_unpinned_ends_with_current_and_previous_back_where_they_were(
-    bed, monkeypatch, tmp_path, with_previous,
+    bed, monkeypatch, tmp_path, with_previous, machine_left_alone,
 ) -> None:
     bed.leaves = "none"
     tools, older, original, rebuilt = _layout_with_a_real_flip(bed, monkeypatch, tmp_path, with_previous=with_previous)
     line = pdf_stack.rebuild_stale_installer(auto_mode=True)
     assert len(bed.builds) == 1
-    assert os.readlink(tools / "current") == str(original), "current is back on the generation it replaced"
+    assert _points_at(tools / "current", original), "current is back on the generation it replaced"
     if with_previous:
-        assert os.readlink(tools / "previous") == str(older), "previous is what it was before the flip"
+        assert _points_at(tools / "previous", older), "previous is what it was before the flip"
     else:
-        assert not (tools / "previous").is_symlink(), "there was no previous, and the flip's is dropped"
+        assert not lc.is_link(tools / "previous"), "there was no previous, and the flip's is dropped"
     assert rebuilt.is_dir() and original.is_dir(), "no generation was deleted by the rollback"
     assert (Path(os.environ["NEXUS_CONFIG_DIR"]) / SENTINEL).exists(), "the backoff marker is still written"
     assert line is not None and "could not be rebuilt" in line and original.name in line
 
 
-@posix_links
-def test_a_build_that_applies_the_lock_leaves_current_on_the_new_generation(bed, monkeypatch, tmp_path) -> None:
+def test_a_build_that_applies_the_lock_leaves_current_on_the_new_generation(
+    bed, monkeypatch, tmp_path, machine_left_alone,
+) -> None:
     tools, older, original, rebuilt = _layout_with_a_real_flip(bed, monkeypatch, tmp_path, with_previous=True)
     assert "rebuilt" in pdf_stack.rebuild_stale_installer()
-    assert os.readlink(tools / "current") == str(rebuilt)
-    assert os.readlink(tools / "previous") == str(original)
+    assert _points_at(tools / "current", rebuilt)
+    assert _points_at(tools / "previous", original)
 
 
-@posix_links
 def test_a_rollback_that_cannot_run_is_reported_and_leaves_current_on_a_working_generation(
-    bed, monkeypatch, tmp_path,
+    bed, monkeypatch, tmp_path, machine_left_alone,
 ) -> None:
     bed.leaves = "none"
     tools, older, original, rebuilt = _layout_with_a_real_flip(bed, monkeypatch, tmp_path, with_previous=True)
@@ -542,7 +579,7 @@ def test_a_rollback_that_cannot_run_is_reported_and_leaves_current_on_a_working_
     monkeypatch.setattr(self_cmd, "restore_current_generation", refuse)
     line = pdf_stack.rebuild_stale_installer(auto_mode=True)
     assert line is not None and "could not be moved back" in line
-    assert os.readlink(tools / "current") == str(rebuilt) and rebuilt.is_dir(), "current names a built generation"
+    assert _points_at(tools / "current", rebuilt) and rebuilt.is_dir(), "current names a built generation"
 
 
 def test_on_windows_the_rollback_goes_through_the_junction_helpers_and_retargets_the_task(
@@ -608,9 +645,9 @@ def _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path: 
         generation.mkdir()
         # a COMPLETE generation: the reap counts receipted trees against keep and keeps a
         # recently written receipt-less one as a build in progress
-        (generation / install_layout.RECEIPT_NAME).write_text(_receipt().to_json())
-    os.symlink(str(gens[2]), tools / "current")
-    os.symlink(str(gens[1]), tools / "previous")
+        (generation / install_layout.RECEIPT_NAME).write_text(_receipt().to_json(), encoding="utf-8")
+    _link(gens[2], tools / "current")
+    _link(gens[1], tools / "previous")
     monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
     monkeypatch.setattr(pdf_stack, "_rebuild_generation", _REAL_REBUILD_GENERATION)
     monkeypatch.setattr(self_cmd, "running_generation", lambda: gens[2])
@@ -618,7 +655,7 @@ def _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path: 
 
     def fake_build(build, **kwargs):
         bed.builds.append(build)
-        self_cmd._sh(self_cmd.packaged_install_dir(), f'nx_flip_current "{gens[5]}" "{tools}"')
+        _flip(gens[5], tools)
         bed.current = _receipt(constraints=bed.leaves)
         return gens[5]
 
@@ -626,25 +663,23 @@ def _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path: 
     return tools, gens
 
 
-@posix_links
 def test_a_failed_post_check_rolls_back_before_the_reap_can_remove_the_old_previous(
-    bed, monkeypatch, tmp_path,
+    bed, monkeypatch, tmp_path, machine_left_alone,
 ) -> None:
     bed.leaves = "none"
     tools, gens = _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path)
     line = pdf_stack.rebuild_stale_installer(auto_mode=True)
-    assert os.readlink(tools / "current") == str(gens[2])
-    assert os.readlink(tools / "previous") == str(gens[1]), "the generation previous named is still the rollback target"
+    assert _points_at(tools / "current", gens[2])
+    assert _points_at(tools / "previous", gens[1]), "the generation previous named is still the rollback target"
     assert gens[1].is_dir(), "the keep-3 reap did not take it before the check ran"
     assert line is not None and "current is back on" in line and "previous was" not in line
 
 
-@posix_links
-def test_a_passing_post_check_reaps_after_it(bed, monkeypatch, tmp_path) -> None:
+def test_a_passing_post_check_reaps_after_it(bed, monkeypatch, tmp_path, machine_left_alone) -> None:
     tools, gens = _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path)
     assert "rebuilt" in pdf_stack.rebuild_stale_installer()
-    assert os.readlink(tools / "current") == str(gens[5])
-    assert os.readlink(tools / "previous") == str(gens[2])
+    assert _points_at(tools / "current", gens[5])
+    assert _points_at(tools / "previous", gens[2])
     assert not gens[1].exists(), "an ordinary upgrade still reaps what keep-3 releases"
 
 
@@ -680,37 +715,39 @@ def _flipped_layout(tmp_path: Path):
     older, original, rebuilt = (tools / f"gen-2026100{n}T000000Z" for n in (1, 2, 3))
     for generation in (older, original, rebuilt):
         generation.mkdir()
-    os.symlink(str(rebuilt), tools / "current")
-    os.symlink(str(original), tools / "previous")
+    _link(rebuilt, tools / "current")
+    _link(original, tools / "previous")
     return tools, older, original, rebuilt
 
 
-@posix_links
-def test_a_previous_that_was_removed_after_the_flip_is_not_claimed_as_restored(monkeypatch, tmp_path) -> None:
+def test_a_previous_that_was_removed_after_the_flip_is_not_claimed_as_restored(
+    monkeypatch, tmp_path, machine_left_alone,
+) -> None:
     tools, older, original, rebuilt = _flipped_layout(tmp_path)
     monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
     shutil.rmtree(older)
     line = pdf_stack._put_current_back(original, str(older))
-    assert os.readlink(tools / "current") == str(original)
+    assert _points_at(tools / "current", original)
     assert "current is back on" in line and "previous was gen-20261001T000000Z" in line
     assert "no rollback target" in line
+    assert not lc.is_link(tools / "previous"), "the dangling previous was dropped, link only"
+    assert original.is_dir() and rebuilt.is_dir(), "dropping a pointer deleted no generation"
 
 
-@posix_links
 def test_a_previous_swap_that_fails_after_current_moved_back_does_not_say_current_stays(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, machine_left_alone,
 ) -> None:
     tools, older, original, rebuilt = _flipped_layout(tmp_path)
     monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
     real_restore = self_cmd.restore_current_generation
 
     def moves_current_then_fails(generation, *, previous):
-        self_cmd._sh(self_cmd.packaged_install_dir(), f'nx_flip_current "{generation}" "{tools}"')
+        _flip(generation, tools)
         raise self_cmd.click.ClickException("could not restore `previous`")
 
     monkeypatch.setattr(self_cmd, "restore_current_generation", moves_current_then_fails)
     line = pdf_stack._put_current_back(original, str(older))
-    assert os.readlink(tools / "current") == str(original)
+    assert _points_at(tools / "current", original)
     assert "stays on the rebuilt generation" not in line
     assert "current is back on" in line and "previous was gen-20261001T000000Z" in line
     assert real_restore is not moves_current_then_fails

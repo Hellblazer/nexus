@@ -25,6 +25,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 from nexus import _vcrt, pdf_stack
+from tests._child_encoding import PYTHON_CHILD_ENCODING
 from tests._module_seam import setattr_in
 from nexus.pdf_stack import (
     Outcome,
@@ -121,7 +122,7 @@ def test_pins_read_from_the_shipped_constraints_keep_only_this_platforms_line() 
     # torch can have several marker lines in the file; exactly one holds here.
     # Compared with the lock's own torch entries, not a literal: a literal
     # failed the full suite the day the lock moved torch (nexus-13z79).
-    lock = tomllib.loads((Path(__file__).resolve().parents[1] / "uv.lock").read_text())
+    lock = tomllib.loads((Path(__file__).resolve().parents[1] / "uv.lock").read_text(encoding="utf-8"))
     locked = {p["version"].split("+")[0] for p in lock["package"] if p["name"] == "torch"}
     assert locked, "uv.lock carries no torch entry"
     assert pins["torch"] in locked, (pins["torch"], locked)
@@ -209,7 +210,9 @@ def test_state_never_imports_torch() -> None:
         "heavy = sorted(m for m in ('torch', 'torchvision', 'mineru') if m in sys.modules)\n"
         "assert not heavy, heavy\n"
     )
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING, check=False,
+    )
     assert proc.returncode == 0, proc.stderr
 
 

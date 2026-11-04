@@ -86,14 +86,14 @@ def _write_receipt(
         created_at="2026-08-26T01:00:00Z",
         extras=extras or [],
     )
-    install_layout.receipt_path(generation).write_text(receipt.to_json())
+    install_layout.receipt_path(generation).write_text(receipt.to_json(), encoding="utf-8")
     return receipt
 
 
 def _write_uv_receipt(home: Path, body: str) -> Path:
     receipt = home / _UV_TOOLS_UNDER_HOME / "conexus" / "uv-receipt.toml"
     receipt.parent.mkdir(parents=True, exist_ok=True)
-    receipt.write_text(body)
+    receipt.write_text(body, encoding="utf-8")
     return receipt
 
 

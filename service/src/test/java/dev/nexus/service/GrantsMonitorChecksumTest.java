@@ -21,8 +21,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * checkout. The text is part of the changeset's checksum, and the changeset is {@code runAlways}
  * and already recorded in every migrated database's {@code databasechangelog}, so the edit carries
  * a {@code <validCheckSum>} for the text engines up to and including engine-service-v0.1.178
- * shipped (the old checksum only; the wildcard test below says why). This class pins the checksum arithmetic without a database; the boot-on-an-old-row proof
- * is {@code SchemaMigratorIntegrationTest#grants004_migratedWithTheOldChecksum_stillBoots_...}.
+ * shipped. Only the old checksum is listed; the wildcard test below says why.
+ *
+ * <p>This class pins the checksum arithmetic without a database. The boot-on-an-old-row proof is
+ * {@code SchemaMigratorIntegrationTest#grants004_migratedWithTheOldChecksum_stillBoots}.
  *
  * <p>The old text lives in {@code db/grants-004-old-text/changelog.xml}, a byte copy of the
  * changeset from the v0.1.178 tag (the body never changed in any shipped tag since v0.1.75: the
@@ -92,6 +94,10 @@ class GrantsMonitorChecksumTest {
     void theValidListHoldsOnlyTheOldChecksum_theCurrentOneWouldMakeItAWildcard() throws Exception {
         ChangeSet head = parse(HEAD_FILE);
         assertThat(head.getValidCheckSums().stream().map(CheckSum::toString))
+            .as("the changeset's own current checksum must never be a validCheckSum (it makes "
+                + "validation accept every stored value); an edit to this SQL adds the checksum "
+                + "of the text it REPLACES, never its own")
+            .doesNotContain(checksum(head))
             .containsExactly(OLD_CHECKSUM);
         assertThat(head.isCheckSumValid(CheckSum.parse("9:00000000000000000000000000000000")))
             .as("a checksum nobody shipped must fail validation (non-vacuity: the list is not a wildcard)")
