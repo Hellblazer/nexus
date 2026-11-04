@@ -40,8 +40,10 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5117
+provisioned_tests = 5122
 tolerance_tests = 0
+# 5117 -> 5122 (nexus-fai28, 2026-11-04): +5. tests/test_rdr147_entity_keys.py runs five store_put tests (explicit key, title stamp, unconfigured
+# collection, re-put, CLI/MCP parity) on a real engine tenant: the claim is that the key lands in the catalog document's meta and in no chunk's metadata.
 # 5115 -> 5117 (nexus-yr2um, 2026-11-04): +2. tests/test_rdr189_grown_plan_ttl.py gains a two-case real-engine test (a failed and an
 # unscored nx_answer run reset the disuse clock), which needs a tenant to grow, import and run plans.
 # 5114 -> 5115 (nexus-a0ksy, 2026-11-04): +1. tests/test_plan_match_expired_cache_hit.py has one real-engine test (backdated

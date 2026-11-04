@@ -1374,6 +1374,13 @@ _DEFAULTS: dict[str, Any] = {
         "mineru_page_batch": 1,
         "ladder_breaker": 3,
     },
+    "entity": {
+        # RDR-147 Step 1 (nexus-fai28): collection-name glob -> regex naming an entity key such as
+        # CUST-0018. Empty (the default) gives no collection a pattern, so nothing changes. An
+        # invalid regex fails at load, naming entity.collections["<glob>"]; code__ is always excluded.
+        # See nexus.entity_keys.
+        "collections": {},
+    },
     "taxonomy": {
         # Glob patterns for collections to exclude from auto-discover
         # in LOCAL MODE ONLY. Local mode uses MiniLM which clusters
@@ -1844,5 +1851,12 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
 
     # Env var overrides
     config = _empty_none_sections(_apply_env_overrides(config))
+
+    # RDR-147 Step 1: a bad entity.collections regex fails here, naming the key.
+    entity_section = config.get("entity")
+    if not isinstance(entity_section, dict) or entity_section.get("collections"):
+        from nexus.entity_keys import validate_entity_config  # noqa: PLC0415 — light module, imported only when a pattern is configured (or the section is malformed)
+
+        validate_entity_config(config)
 
     return config

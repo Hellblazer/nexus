@@ -63,6 +63,10 @@ def store() -> None:
 @click.option("--category", default="", help="Category label")
 @click.option("--ttl", default="permanent", show_default=True,
               help="TTL: Nd, Nw, or permanent")
+@click.option("--entity-key", default="",
+              help="Stable identifier this document names, such as CUST-0018, stamped into the "
+                   "catalog document's metadata (never a chunk's). Unset: a collection configured "
+                   "with an entity-key pattern stamps the title when the whole title matches it.")
 @click.option("--session-id", default="", hidden=True)
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
@@ -72,6 +76,7 @@ def put_cmd(
     tags: str,
     category: str,
     ttl: str,
+    entity_key: str,
     session_id: str,
     agent: str,
 ) -> None:
@@ -166,7 +171,7 @@ def put_cmd(
         outcome = put_note(
             content=content, collection=col_name, title=title, tags=tags,
             category=category, source_agent=agent,
-            ttl_days=ttl_days,
+            ttl_days=ttl_days, entity_key=entity_key,
         )
     except (PutOversizedError, NoteUriEngineTooOldError) as exc:
         # put_note refuses an over-quota note, or one the serving engine is too old to hold

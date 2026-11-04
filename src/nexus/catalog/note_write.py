@@ -642,6 +642,7 @@ def put_note(
     ttl_days: int | None = None,
     content_type: str | None = None,
     cat: Any = None,
+    entity_key: str = "",
 ) -> PutNoteOutcome:
     """Register, fence, write and settle one note. The whole caller protocol in one place.
 
@@ -667,6 +668,11 @@ def put_note(
        note the fence could not be told about: ``_fence_fail`` and nothing else, since the note may
        exist.
        On any other exception: remove a minted row (or restore the stamp), ``_fence_fail``, re-raise.
+
+    *entity_key* (RDR-147 Step 1, nexus-fai28) is the caller's entity key for the document. It is
+    stamped into the catalog document's ``meta`` and never into a chunk's metadata (RDR-236). With
+    none, a collection whose ``entity.collections`` pattern matches the whole title stamps the title
+    (:func:`nexus.entity_keys.resolve_put_key`); a ``code__`` collection stamps nothing.
 
     *collection* is the full T3 collection name. Raises ``PutOversizedError`` for an over-quota
     note, ``ValueError`` for empty *content* or a bad ``ttl_days``, and
@@ -701,12 +707,18 @@ def put_note(
         status=NO_CATALOG, collection=collection, pieces=pieces, manifest_metadatas=manifest_metadatas,
         chunk_ids=[m.get("chunk_text_hash", "") for m in manifest_metadatas])
 
+    # Resolved before the register, outside its swallow: a config that does not load (a bad
+    # entity.collections regex) is the operator's to fix, not a "catalog registration failed".
+    from nexus.entity_keys import resolve_put_key  # noqa: PLC0415 — deferred: reads config, only a put needs it
+
+    resolved_key = resolve_put_key(collection=collection, title=title, explicit=entity_key)
     pre_call: dict[str, Any] = {}
     cause: dict[str, str] = {}
     try:
         out.catalog_doc_id, out.minted = sh.catalog_store_hook_tracked(
             title=title, doc_id=first_chash, collection_name=collection, pre_call_doc_id_out=pre_call,
-            error_out=cause, tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent)
+            error_out=cause, tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent,
+            entity_key=resolved_key)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning and the NO_CATALOG outcome
         cause["error"] = f"{type(exc).__name__}: {exc}"
         _log.warning(

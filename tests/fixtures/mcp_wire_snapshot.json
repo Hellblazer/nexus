@@ -1192,6 +1192,10 @@
           "content": {
             "type": "string"
           },
+          "entity_key": {
+            "default": "",
+            "type": "string"
+          },
           "session": {
             "default": "",
             "type": "string"

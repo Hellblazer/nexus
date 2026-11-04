@@ -227,6 +227,22 @@ taxonomy:
 | `local_exclude_collections` | `["code__*"]` | Glob patterns for collections to skip in local mode. Cloud mode (Voyage embeddings) ignores this — set to `[]` to enable all collections locally. |
 | `collection_prefixes` | `["docs", "code", "knowledge", "rdr"]` | Prefix whitelist for `nx taxonomy validate-refs`. Extend this when your project adds a new user-facing collection prefix (e.g. `"custom"`). Internal-prefix collections (`taxonomy__*`, `plans__*`) are implementation-fixed and intentionally excluded. |
 
+## Entity keys
+
+An entity key is a stable identifier such as `CUST-0018` that names one record and appears verbatim in other artifacts (RDR-147 Step 1). A collection opts in by naming a pattern:
+
+```yaml
+entity:
+  collections:
+    "knowledge__herb-*": "CUST-\\d{4}|eid_[0-9a-f]{8}"   # collection glob -> regex; default {} (none)
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `entity.collections` | `{}` | Map of collection-name glob to regex. The glob is matched against the FULL collection name (`knowledge__herb-core__<model>__v1`), first match in config order wins; set it in the global config or the per-repo `.nexus.yml`. An invalid regex fails when the config loads and names the key (`entity.collections["<glob>"]`). `code__` collections never have a pattern, whatever the glob. |
+
+What reads it: `store_put` (MCP) and `nx store put` stamp `entity_key` into the catalog document's `meta` (never a chunk's metadata). The caller can set it (`entity_key` on `store_put`, `--entity-key` on the CLI); when it is unset and the collection has a pattern, the title is stamped if the whole title matches the pattern (`CUST-0018` is a key; `Customer CUST-0018` is not). A re-put replaces the key like the other note keys: one that gives none removes it. `nexus.entity_keys` holds `classify_entity` and `find_key_tokens` (whole-token matches only). Key extraction for `nx index md` / `nx index pdf` and a `where entity_key=` filter are not built.
+
 ## Aspects
 
 Which `docs__` collections get aspect extraction (nexus-kk4ut). `knowledge__` and `rdr__` collections are always extracted; `docs__` collections are extracted only when opted in, because every document costs an LLM call each time it changes.

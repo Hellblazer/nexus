@@ -5853,6 +5853,13 @@ def store_put(
     session: Annotated[str, Field(
         description="Optional explicit session_id override. Falls back to the NX_SESSION_ID env var.",
     )] = "",
+    entity_key: Annotated[str, Field(
+        description=(
+            "Optional stable identifier this document names, such as \"CUST-0018\", stamped into the "
+            "catalog document's metadata (never a chunk's). Unset: a collection configured with an "
+            "entity-key pattern stamps the title when the whole title matches it."
+        ),
+    )] = "",
 ) -> str:
     """Store content as a permanent T3 knowledge document.
 
@@ -5877,6 +5884,7 @@ def store_put(
       untitled document; a repeated untitled put of the same text reuses
       it, and it never adopts a titled note.
     - `ttl` accepts "Nd", "Nw", or "permanent" (default).
+    - `entity_key` is optional and never changes the stored chunks.
     """
     try:
         if not content:
@@ -5951,7 +5959,7 @@ def store_put(
             outcome = put_note(
                 content=content, collection=col_name, title=title, tags=tags,
                 category=category, source_agent=agent_arg,
-                ttl_days=ttl_days,
+                ttl_days=ttl_days, entity_key=entity_key,
             )
         except NoteUriEngineTooOldError as exc:
             # RDR-231 (nexus-bivz3.13): the serving engine cannot hold a note's nx-note:// URI. Raised

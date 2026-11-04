@@ -816,7 +816,16 @@ NOTE_META_KEYS: tuple[str, ...] = ("tags", "category", "ttl_days", "source_agent
 #: ``ttl_days`` of 0 is that sentinel, not an accepted input (``put_note`` and ``write_note`` reject 0;
 #: the chunk row spells permanent as ``None``/absent): readers treat 0 and absent as permanent. The
 #: unset ``tags`` is the empty array; a legacy ``""`` reads as unset too (:func:`_note_key_unset`).
-_NOTE_META_UNSET: dict[str, Any] = {"tags": [], "category": "", "ttl_days": 0, "source_agent": "", "put_at": ""}
+_NOTE_META_UNSET: dict[str, Any] = {
+    "tags": [], "category": "", "ttl_days": 0, "source_agent": "", "put_at": "", "entity_key": ""}
+
+#: The keys one put writes to the catalog entry's ``meta``: the note keys plus ``entity_key``
+#: (RDR-147 Step 1, nexus-fai28). ``entity_key`` is NOT in :data:`NOTE_META_KEYS` on purpose: that
+#: tuple answers "did a put stamp this entry" for the recovery export, the backfill and the ladder
+#: rungs, and an entity key (caller-set, or the title read against a config pattern) says nothing
+#: about it. It is written, retracted by a re-put that gives none, and restored on a failed put
+#: exactly as the note keys are.
+_PUT_META_KEYS: tuple[str, ...] = (*NOTE_META_KEYS, "entity_key")
 
 
 def split_note_tags(tags: object) -> list[str]:
@@ -846,7 +855,7 @@ def _note_key_unset(key: str, value: Any) -> bool:
 
 def note_catalog_meta(
     *, tags: str | list[str] = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
-    put_at: str = "", prior: dict[str, Any] | None = None,
+    put_at: str = "", prior: dict[str, Any] | None = None, entity_key: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The note keys one put writes to its catalog entry's ``meta``, and what undoes them.
 
@@ -865,16 +874,20 @@ def note_catalog_meta(
     *put_at* (nexus-6pfgb.15) is the time of this put, an ISO-8601 stamp. Every put sends it, so the
     TTL clock of a re-put note restarts as the chunk row's does, and a failed put restores the old
     stamp with the rest.
+
+    *entity_key* (RDR-147 Step 1, nexus-fai28) is the document's entity key, already resolved by the
+    caller (:func:`nexus.entity_keys.resolve_put_key`); it travels with the note keys, catalog ``meta``
+    only, never the chunk row.
     """
     given: dict[str, Any] = {
         "tags": split_note_tags(tags), "category": category or "",
         "ttl_days": ttl_days if ttl_days and ttl_days > 0 else 0, "source_agent": source_agent or "",
-        "put_at": put_at or "",
+        "put_at": put_at or "", "entity_key": entity_key or "",
     }
     prior = prior or {}
     write: dict[str, Any] = {}
     revert: dict[str, Any] = {}
-    for key in NOTE_META_KEYS:
+    for key in _PUT_META_KEYS:
         unset = _NOTE_META_UNSET[key]
         if not _note_key_unset(key, given[key]):
             write[key] = given[key]
@@ -917,7 +930,7 @@ def catalog_store_hook_tracked(
     pre_call_doc_id_out: dict[str, Any] | None = None,
     error_out: dict[str, str] | None = None,
     tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
-    put_at: str | None = None,
+    put_at: str | None = None, entity_key: str = "",
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
@@ -1017,6 +1030,9 @@ def catalog_store_hook_tracked(
             ``pre_call_doc_id_out["note_meta"]`` carries what
             :func:`restore_pre_call_stamp` needs to put them back and
             ``["note_meta_stamped"]`` what this call wrote (its compare-and-set).
+        entity_key: the document's entity key (RDR-147 Step 1, nexus-fai28), already resolved by
+            :func:`nexus.entity_keys.resolve_put_key`; written to ``meta.entity_key`` with the note
+            keys, and retracted by a re-put that gives none. Catalog ``meta`` only, never a chunk.
         put_at: the time of this put, written with them as ``meta.put_at``, the clock the
             note's own ``ttl_days`` counts from (nexus-6pfgb.15, :mod:`nexus.catalog.note_ttl`).
             ``None`` (the default) stamps the current time; tests pass a fixed one.
@@ -1069,6 +1085,7 @@ def catalog_store_hook_tracked(
             and the note keys. Records the note keys' undo in ``pre_call_doc_id_out``."""
             write, revert = note_catalog_meta(
                 tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent, put_at=put_at_stamp,
+                entity_key=entity_key,
                 prior=(getattr(entry, "meta", None) or {}) if entry is not None else None)
             if pre_call_doc_id_out is not None and revert:
                 pre_call_doc_id_out["note_meta"] = revert

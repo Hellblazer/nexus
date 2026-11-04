@@ -2454,7 +2454,7 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 
 | Subcommand | Description |
 |------------|-------------|
-| `put FILE_OR_DASH` | Store document (use `-` for stdin) |
+| `put FILE_OR_DASH` | Store document (use `-` for stdin). `--entity-key KEY` stamps a stable identifier such as `CUST-0018` into the catalog document's metadata (see [Configuration](configuration.md#entity-keys)) |
 | `get DOC_ID` | Retrieve entry by 64-char hex ID (from `nx store list`) |
 | `list` | List stored entries |
 | `delete` | Delete a single entry by ID or title |
