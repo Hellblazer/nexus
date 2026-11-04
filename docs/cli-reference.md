@@ -3563,6 +3563,15 @@ instead of a raw `[WinError 4551]`. See
 POSIX, and also on a Windows that has no Smart App Control (the registry value
 does not exist, as on Windows 10 and older Windows 11).
 
+**Local PostgreSQL version row (nexus-90flw).** "Local PostgreSQL version"
+reads the bundled cluster's `PG_VERSION` marker (no connection) and fails below
+PostgreSQL 17, the engine's floor (the service exits with
+`event=pg_version_below_floor`; a cluster keeps the version that created it).
+With no local cluster in use, an old data directory left under
+`~/.config/nexus/postgres` is a warning, since local provisioning would keep it.
+The remedy is in [migration-runbook](migration-runbook.md#a-local-cluster-older-than-postgresql-17).
+The row is absent on a virgin box and where no old directory is left.
+
 **Local PostgreSQL authentication row (nexus-ja4pq).** "Local PostgreSQL
 authentication" reads the bundled cluster's own `pg_hba.conf` (no connection, no
 password) and fails while any active line still says `trust`, which let any

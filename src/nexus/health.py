@@ -6355,6 +6355,81 @@ def _check_local_pg_auth(config_dir: Path | None = None) -> list[HealthResult]:
     )]
 
 
+#: The lowest PostgreSQL major the engine boots on: service PgVersionFloor.MIN_SERVER_VERSION_NUM is this
+#: times 10000 (pinned equal by tests/test_doctor_local_pg_version.py).
+PG_VERSION_FLOOR: int = 17
+
+
+def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult]:
+    """nexus-90flw: was the nx-managed local cluster created by a PostgreSQL the engine boots on?
+
+    The engine exits at boot below PostgreSQL 17 (``event=pg_version_below_floor``), and an established
+    cluster keeps whatever PostgreSQL created it, so a data directory from before the bundle leaves the
+    operator with only exit 1. This row reads the data directory's ``PG_VERSION`` marker (no connection),
+    names the version and the floor, and points at the upgrade.
+
+    Not applicable (no row) where there is no bundled cluster: a virgin box, a managed Postgres (no
+    ``PG_DATA``), or a data directory initdb has not filled. A marker that cannot be read gets a failing
+    row, since "could not look" must not read as "fine". With no local cluster in use but an old one left
+    at ``<config>/postgres`` (a box that moved to cloud mode, keeping its pre-bundle data directory), the
+    row is a warning: unused now, but local provisioning keeps an existing cluster, and the engine would
+    then refuse it.
+    """
+    try:
+        if config_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+            config_dir = _config.nexus_config_dir()
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials  # noqa: PLC0415 — deferred, heavy module
+
+        creds_path = config_dir / CREDENTIALS_FILENAME
+        pg_data = _read_credentials(creds_path).get("PG_DATA", "").strip() if creds_path.is_file() else ""
+        in_use = bool(pg_data)
+        marker = (Path(pg_data) if in_use else config_dir / "postgres") / "PG_VERSION"
+        if not marker.is_file():
+            return []
+        text = marker.read_text(encoding="utf-8").strip()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_local_pg_version_check_failed", error=str(exc))
+        return []
+    label = "Local PostgreSQL version"
+    head = text.split(".", 1)[0]
+    if not in_use:
+        if head.isdigit() and int(head) >= PG_VERSION_FLOOR:
+            return []
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"a PostgreSQL {text} data directory is left at {marker.parent}; nothing uses it in this mode, "
+                f"but local provisioning keeps an existing cluster and the engine refuses one below "
+                f"PostgreSQL {PG_VERSION_FLOOR}"
+            ),
+            fix_suggestions=[
+                "before switching this machine to local mode, upgrade it (docs/migration-runbook.md, "
+                "'A local cluster older than PostgreSQL 17'), or move the directory aside if its data is not needed",
+            ],
+        )]
+    if not head.isdigit():
+        return [HealthResult(
+            label=label, ok=False,
+            detail=f"the cluster's PG_VERSION marker could not be read ({text[:40]!r}) at {marker}",
+        )]
+    if int(head) >= PG_VERSION_FLOOR:
+        return [HealthResult(label=label, ok=True, detail=f"PostgreSQL {text} (the engine needs {PG_VERSION_FLOOR} or newer)")]
+    return [HealthResult(
+        label=label, ok=False,
+        detail=(
+            f"the bundled cluster at {pg_data} was created by PostgreSQL {text}; the engine refuses to start "
+            f"below PostgreSQL {PG_VERSION_FLOOR} (event=pg_version_below_floor in the service log), and the "
+            "cluster keeps the version that created it"
+        ),
+        fix_suggestions=[
+            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade: "
+            "docs/migration-runbook.md, 'A local cluster older than PostgreSQL 17'",
+        ],
+    )]
+
+
 #: Microsoft's VC++ redistributable, the manual remedy (nexus-lqjll).
 VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
@@ -12817,6 +12892,7 @@ def run_health_checks(
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
     results.extend(_check_setup_status())  # nexus-sv2wx.19; not applicable where no setup has run
     results.extend(_check_local_pg_auth())  # nexus-ja4pq
+    results.extend(_check_local_pg_version())  # nexus-90flw
     results.extend(_check_vc_runtime())  # nexus-lqjll; [] off Windows
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
