@@ -205,7 +205,9 @@ deselects them, so no census has said which of them touch storage.
   branch adds against its merge base with origin/develop, per changed module (nexus-g37hn; the marker,
   or `t2_tenant`/`t2_service_env` in the fixture closure, counted at collection). The push script runs
   it as a `PUSH_TENANT_HINT` line on stderr when the pushed range changes a test module; it never
-  refuses (`NX_PUSH_TENANT_CHECK=0` skips it).
+  refuses (`NX_PUSH_TENANT_CHECK=0` skips it). A `WARNING:` line means a count was not taken: a module
+  the merge base could not collect (named, with its head count; `--strict` fails on it), or the whole
+  count (over its budget, or a head module that does not collect); count that module by hand.
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`
   (`tests/test_storage_touch_guard.py`), never a bare `ret != 0` or `== 1`: under the default
