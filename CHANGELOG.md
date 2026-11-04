@@ -6,7 +6,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [7.95.0] - 2026-11-05
+## [7.95.0] - 2026-11-04
 
 Pairs with engine-service-v0.1.178 (REQUIRED_ENGINE_VERSION 0.1.175 -> 0.1.178). The MCP servers move to mcp 2.3 (nexus-sgmyl). The engine must be deployed to the managed service before this client tag (every wire-ledger entry is additive).
 
@@ -45,6 +45,7 @@ Pairs with engine-service-v0.1.178 (REQUIRED_ENGINE_VERSION 0.1.175 -> 0.1.178).
 
 ### Fixed
 
+- **`nx agents install worktree-developer` resolves every plugin path in the composed agent** (nexus-z7ddd; client-only). The composed file is not a plugin file, so nothing substitutes `${CLAUDE_PLUGIN_ROOT}` in it; the command used to rewrite only the agent-shared links and now resolves every such path against the installed conexus directory.
 - **A worktree-isolated subagent outside the nexus repo is no longer told to run `scripts/agent-worktree-preflight.sh` first** (nexus-z7ddd; client-only). The SubagentStart injection gives the Preflight row only when the project's repo has that script; before, every dispatch in every project got it, and only the nexus repo has the script.
 - **`nx doctor --check-quotas` says what the running engine embeds in local mode, not only what the config would write with** (nexus-9oplr; client-only). The engine takes one embedding posture per boot (RDR-210), so after a `local.embed_model` edit with no restart the report named the new model while the engine still embedded the old one. It now reads the engine's `/version` and lists the models it serves, warns with the restart command when the config writes with a model the engine does not serve, and says plainly when `/version` could not be read.
 
