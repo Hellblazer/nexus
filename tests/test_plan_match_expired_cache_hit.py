@@ -49,7 +49,9 @@ def library(tmp_path: Path):
     return T2Database(tmp_path / "m.db").plans
 
 
-def _import(library, query: str, *, created_days: float, last_used_days: float | None) -> int:
+def _import(
+    library, query: str, *, created_days: float, last_used_days: float | None, disabled: bool = False,
+) -> int:
     return library.import_plan(
         project="nexus",
         query=query,
@@ -62,28 +64,45 @@ def _import(library, query: str, *, created_days: float, last_used_days: float |
         match_text=query,
         created_at=_iso(created_days),
         last_used=None if last_used_days is None else _iso(last_used_days),
+        disabled_at=_iso(0) if disabled else None,
     )
 
 
 @pytest.mark.t2_tenant
-def test_expired_cache_hit_is_dropped_and_evicted(library) -> None:
-    from nexus.plans.matcher import plan_match
+def test_inactive_cache_hits_are_dropped_evicted_and_not_resurrected(library) -> None:
+    from nexus.plans.matcher import _is_expired, plan_match
 
     never_used = _import(library, "a0ksy never used", created_days=400, last_used_days=None)
     long_unused = _import(library, "a0ksy long unused", created_days=400, last_used_days=200)
+    just_past = _import(library, "a0ksy just past ttl", created_days=400, last_used_days=_TTL_DAYS + 0.5)
+    just_inside = _import(library, "a0ksy just inside ttl", created_days=400, last_used_days=_TTL_DAYS - 0.5)
+    disabled = _import(library, "a0ksy disabled", created_days=1, last_used_days=None, disabled=True)
     live = _import(library, "a0ksy used recently", created_days=400, last_used_days=5)
-    # The engine agrees on which rows are expired, so the test rule matches its rule.
+    inactive = [never_used, long_unused, just_past, disabled]
+
+    # The engine is the oracle: the client rule must agree with list_active_plans on every row,
+    # the half-day either side of the boundary included.
     active = {r["id"] for r in library.list_active_plans(outcome="success")}
-    assert live in active and never_used not in active and long_unused not in active
+    assert active >= {live, just_inside} and not active & set(inactive), active
+    for plan_id in (never_used, long_unused, just_past, just_inside, live):
+        assert _is_expired(library.get_plan(plan_id)) is (plan_id not in active), plan_id
+    before = {plan_id: library.get_plan(plan_id)["last_used"] for plan_id in inactive}
 
-    cache = _RecordingCache([(never_used, 0.01), (long_unused, 0.02), (live, 0.03)])
-    matches = plan_match(intent="a0ksy probe", library=library, cache=cache, min_confidence=0.5, n=5)
+    hits = [(plan_id, 0.01 * (i + 1)) for i, plan_id in enumerate([*inactive, just_inside, live])]
+    cache = _RecordingCache(hits)
+    # The intent repeats an expired plan's own question, so the verbatim-repeat override would
+    # force it through if the drop came after it.
+    matches = plan_match(intent="a0ksy never used", library=library, cache=cache, min_confidence=0.5, n=10)
 
-    assert [m.plan_id for m in matches] == [live]
-    assert sorted(cache.removed) == sorted([never_used, long_unused])
-    # Nothing touched the expired rows: their last_used is what was imported.
-    assert library.get_plan(never_used)["last_used"] is None
-    assert library.get_plan(long_unused)["last_used"].startswith(_iso(200)[:10])
+    assert {m.plan_id for m in matches} == {just_inside, live}
+    assert sorted(cache.removed) == sorted(inactive)
+    # Run every match the way nx_answer does at run start. Only matched plans are touched, so the
+    # inactive rows keep their last_used and stay out of the active set: nothing resurrected them.
+    for m in matches:
+        library.increment_run_started(m.plan_id)
+    active_after = {r["id"] for r in library.list_active_plans(outcome="success")}
+    assert not active_after & set(inactive), active_after
+    assert {plan_id: library.get_plan(plan_id)["last_used"] for plan_id in inactive} == before
 
 
 def test_permanent_plan_never_expires() -> None:
@@ -116,3 +135,19 @@ def test_unreadable_timestamp_keeps_the_row() -> None:
     from nexus.plans.matcher import _is_expired
 
     assert not _is_expired({"ttl": _TTL_DAYS, "created_at": "not a date", "last_used": None}, now=T0)
+
+
+def test_unreadable_last_used_is_still_the_anchor() -> None:
+    from nexus.plans.matcher import _is_expired
+
+    # The engine's coalesce picks last_used whenever it is non-null; a 400-day-old created_at must
+    # not take over and expire the row.
+    assert not _is_expired({"ttl": _TTL_DAYS, "created_at": _iso(400), "last_used": "garbage"}, now=T0)
+
+
+@pytest.mark.parametrize("stamp", ["+00:00", "+0000", ""])
+def test_offset_and_naive_timestamps_read_as_utc(stamp) -> None:
+    from nexus.plans.matcher import _is_expired
+
+    base = (T0 - timedelta(days=_TTL_DAYS + 1)).strftime("%Y-%m-%dT%H:%M:%S")
+    assert _is_expired({"ttl": _TTL_DAYS, "created_at": base + stamp, "last_used": None}, now=T0)

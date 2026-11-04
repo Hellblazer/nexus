@@ -200,12 +200,18 @@ def _is_expired(row: dict, *, now: datetime | None = None) -> bool:
     90 s and ``get_plan`` applies no TTL, so without this check an expired
     plan matched in that window would run, and its run-start write would
     stamp ``last_used = now()`` and bring it back to life. A row whose
-    timestamps cannot be read is kept: the engine stays the authority.
+    anchor timestamp cannot be read is kept: the engine stays the authority.
+    The ages are in days, so clock skew between client and engine moves the
+    boundary by only that many seconds; the engine's row reads truncate to
+    the second.
     """
     ttl = row.get("ttl")
     if ttl is None:
         return False
-    anchor = _parse_utc(row.get("last_used")) or _parse_utc(row.get("created_at"))
+    # Same precedence as the engine's coalesce: a non-null last_used is the
+    # anchor even when it does not parse, and then the row is kept.
+    raw = row.get("last_used") or row.get("created_at")
+    anchor = _parse_utc(raw)
     if anchor is None:
         return False
     age_days = ((now or datetime.now(UTC)) - anchor).total_seconds() / 86400
@@ -784,12 +790,16 @@ def plan_match(
         raw_confidence_by_plan_id: dict[int, float] = {}
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
-            if row is not None and _is_expired(row):
-                # nexus-a0ksy: the cache still holds a plan the engine now
-                # counts as expired. Drop it before it can run (a run start
-                # would reset last_used and undo the expiry) and evict it.
-                import structlog  # noqa: PLC0415 — deferred import, branch-local
-                structlog.get_logger(__name__).info("plan_match_expired_cache_hit", plan_id=plan_id)
+            if row is not None and (row.get("disabled_at") or _is_expired(row)):
+                # nexus-a0ksy: the cache still holds a plan that
+                # list_active_plans no longer returns, because it expired
+                # or was disabled after the last cache refresh. Drop it
+                # before it can run (a run start would reset last_used
+                # and undo an expiry) and evict it.
+                _log.info(
+                    "plan_match_inactive_cache_hit", plan_id=plan_id,
+                    reason="disabled" if row.get("disabled_at") else "expired",
+                )
                 row = None
             if row is None:
                 # Search review I-4: the plan was deleted from T2 but the
