@@ -453,6 +453,10 @@ public final class CatalogHandler implements HttpHandler {
         // body may contain both owner fields and document fields; repo handles the split
         if (rejectIfBadOwnerPrefix(exchange, (String) body.get("tumbler_prefix"))) return;
         if (rejectIfBadDocumentTumbler(exchange, (String) body.get("tumbler"))) return;
+        // nexus-rfvyy.6.6: the owner row and the document row are separate transactions, so a non-boolean
+        // 'sensitive' must be refused (IllegalArgumentException, the ladder's 400) BEFORE the owner write, or a
+        // refused request would leave an owner row behind.
+        if (body.containsKey("tumbler")) CatalogRepository.sensitiveFlag(body);
         // Owner upsert (if tumbler_prefix present)
         if (body.containsKey("tumbler_prefix")) {
             repo.upsertOwner(tenant, body);

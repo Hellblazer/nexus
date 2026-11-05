@@ -228,6 +228,35 @@ class CatalogHandlerSensitivityTest {
     }
 
     @Test
+    void aNonBooleanSensitive_onRegisterWithAnOwnerPrefix_writesNeitherTheOwnerNorTheDocument() throws Exception {
+        String t = tenant();
+        for (String bad : List.of("1", "\"yes\"", "[true]")) {
+            Resp r = call(t, "POST", "/v1/catalog/register",
+                "{\"tumbler_prefix\":\"49.2\",\"name\":\"owner-x\",\"owner_type\":\"repo\","
+                    + "\"tumbler\":\"49.2.1\",\"title\":\"s\",\"sensitive\":" + bad + "}", null);
+            assertThat(r.status).as("sensitive=%s -> %s", bad, r.body).isEqualTo(400);
+            assertThat(r.json().get("error").asText()).contains("'sensitive' must be a boolean");
+        }
+        try (Connection su = pg.createConnection("")) {
+            var d = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(d.fetchOne("SELECT count(*)::int FROM nexus.catalog_owners WHERE tenant_id = ?", t)
+                .get(0, Integer.class)).as("the owner row is written only after the flag validates").isZero();
+            assertThat(d.fetchOne("SELECT count(*)::int FROM nexus.catalog_documents WHERE tenant_id = ?", t)
+                .get(0, Integer.class)).as("no document row").isZero();
+        }
+        // the same body with a real boolean writes both
+        Resp ok = call(t, "POST", "/v1/catalog/register",
+            "{\"tumbler_prefix\":\"49.2\",\"name\":\"owner-x\",\"owner_type\":\"repo\","
+                + "\"tumbler\":\"49.2.1\",\"title\":\"s\",\"sensitive\":true}", null);
+        assertThat(ok.status).as(ok.body).isEqualTo(200);
+        assertThat(flag(t, "49.2.1")).isTrue();
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchOne(
+                "SELECT count(*)::int FROM nexus.catalog_owners WHERE tenant_id = ?", t).get(0, Integer.class)).isOne();
+        }
+    }
+
+    @Test
     void badRequests_areRefused() throws Exception {
         String t = tenant();
         String doc = register(t, "e", false);
