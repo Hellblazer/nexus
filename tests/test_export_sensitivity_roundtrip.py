@@ -256,3 +256,53 @@ def test_the_flag_is_raised_before_the_post_store_chains_fire(t3, tmp_path, monk
     write_bundle(path, [_rec("sens order", sensitive=True)], [], ExportSummary())
     assert import_bundle(None, None, t3, path).docs_imported == 1
     assert seen == [True], "an aspect hook fired by the chains must already see the flag"
+
+
+def test_a_flagged_restore_over_an_existing_note_writes_nothing_when_the_flag_cannot_be_raised(
+    t3, tmp_path, monkeypatch,
+) -> None:
+    """Fix round 1 (nexus-rfvyy.6.19): the import hands the flag to ``put_note`` (which flags a document it
+    resolves BEFORE any chunk is written), so a failed flag leaves the note's stored text untouched. The earlier
+    code raised the flag after the write, leaving the new text in T3 unflagged."""
+    import hashlib
+
+    path_plain, path_sens = tmp_path / "plain.jsonl", tmp_path / "sens.jsonl"
+    old = _rec("sens late")
+    write_bundle(path_plain, [old], [], ExportSummary())
+    assert import_bundle(None, None, t3, path_plain).docs_imported == 1
+    tumbler = str(_entry("sens late", t3).tumbler)
+
+    def manifest_chashes() -> list[str]:
+        rows = make_catalog_reader().get_manifests([tumbler])[tumbler]
+        return [m.chash for m in rows]
+
+    assert manifest_chashes() == [hashlib.sha256(old["content"].encode()).hexdigest()]
+
+    def refuse(self, tumblers, sensitive, *, reason=""):
+        raise RuntimeError("the audited route is down")
+
+    monkeypatch.setattr(hcc.HttpCatalogClient, "set_sensitivity", refuse)
+    new = {**_rec("sens late", sensitive=True), "content": "rfvyy619 a different body that must not land"}
+    write_bundle(path_sens, [new], [], ExportSummary())
+    summary = import_bundle(None, None, t3, path_sens)
+
+    assert (summary.docs_imported, summary.docs_failed) == (0, 1)
+    assert manifest_chashes() == [hashlib.sha256(old["content"].encode()).hexdigest()], "the new text landed"
+    assert _entry("sens late", t3).sensitive is False
+
+
+def test_the_restore_passes_the_flag_to_put_note(t3, tmp_path, monkeypatch) -> None:
+    import nexus.catalog.note_write as nw
+
+    seen: list[bool] = []
+    real = nw.put_note
+
+    def spy(**kw):
+        seen.append(kw.get("sensitive", False))
+        return real(**kw)
+
+    monkeypatch.setattr(nw, "put_note", spy)
+    path = tmp_path / "b.jsonl"
+    write_bundle(path, [_rec("sens passed", sensitive=True), _rec("sens plain two")], [], ExportSummary())
+    assert import_bundle(None, None, t3, path).docs_imported == 2
+    assert seen == [True, False]

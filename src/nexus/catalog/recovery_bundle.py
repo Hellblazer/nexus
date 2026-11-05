@@ -689,6 +689,10 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
       stamped (the engine refused the stamp, or it failed after the chains fired): raises
       :class:`ImportDocUncertain` too, the document staying ``indexing``.
 
+    A record with ``sensitive: true`` (RDR-243) passes the flag to ``put_note``, which sets it before any
+    chunk is written (born flagged when the put mints the note), after the engine-capability refusal; a flag
+    that cannot be set fails the record with nothing written.
+
     Deferred imports: this module sits below ``commands/`` and the writer's pieces live in sibling
     modules with heavy import graphs. *t3* is used only to resolve the target collection.
     """
@@ -719,14 +723,17 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         # An old bundle has no key: the put stamps the title if a configured pattern matches it in
         # full, else none, as before. A code__ target takes none.
         entity_key=_importable_entity_key(rec, col_name),
+        # RDR-243: the note is born flagged, or flagged BEFORE any chunk is written when the put resolves an
+        # existing note; a flag that cannot be set raises with nothing written (SensitiveFlagNotSetError, a
+        # RuntimeError: this record's definitive failure). Never raised after the write, which would leave the
+        # new text in T3 unflagged.
+        sensitive=sensitive,
     )
     message = failure_message(outcome, subject=repr(title))
     if message is not None:
         if outcome.status == UNCERTAIN:
             raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
         raise RuntimeError(message)
-    if sensitive:
-        _raise_flag(outcome.catalog_doc_id, title)
     fire_note_chains(outcome, rec["content"])
     # The completion stamp, LAST (RDR-223, nexus-z0o2p.34): a kill in a chain above leaves the fence
     # 'indexing', so the next import of the note redoes the write and fires the chains again.
@@ -734,29 +741,6 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     message = failure_message(outcome, subject=repr(title))
     if message is not None:
         raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
-
-
-def _raise_flag(tumbler: str, title: str) -> None:
-    """Raise the sensitivity flag on a restored note through the audited route (RDR-243, nexus-rfvyy.6.12).
-
-    Runs after ``put_note`` stored the note and BEFORE the post-store chains fire, so an aspect or
-    enrichment hook sees the flag. ``put_note`` is not given the flag because the store verbs own that
-    parameter (nexus-rfvyy.6.9). A failure raises, which counts the record as failed and, since no stamp
-    was sent, leaves the fence ``indexing`` so the next import redoes the note; until then the note
-    exists in T3 unflagged, which the message says.
-    """
-    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred, factory has a heavy import graph
-
-    writer = make_catalog_writer()
-    try:
-        writer.set_sensitivity([tumbler], True, reason="recovery bundle import")
-    except Exception as exc:  # noqa: BLE001 — worded for the operator; the import records this record as failed
-        raise RuntimeError(
-            f"note {title!r} was restored but could not be flagged sensitive ({exc}); it is in T3 UNFLAGGED "
-            f"until an import of this bundle succeeds, or `nx catalog sensitive {tumbler}` flags it"
-        ) from exc
-    finally:
-        writer.close()
 
 
 def _importable_entity_key(rec: dict, collection: str) -> str:
