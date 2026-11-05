@@ -13,6 +13,9 @@ import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.SQLDataType;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
@@ -22,6 +25,8 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HexFormat;
@@ -117,6 +122,84 @@ public final class PciCatalog {
     private static final Pattern LIST_BOUND =
         Pattern.compile("^FOR VALUES IN \\('((?:[^']++|'')*+)'\\)$", Pattern.DOTALL);
 
+    /** The anchor's format version: {@code "nexus_pci":1}. */
+    public static final int ANCHOR_VERSION = 1;
+    /** {@link Anchor#origin()} of an index the builder built and anchored right after the build. */
+    public static final String ORIGIN_BUILT = "built";
+    /** {@link Anchor#origin()} of an index found with no parseable anchor and anchored by the pass that saw it. */
+    public static final String ORIGIN_ADOPTED = "adopted";
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * The index's anchor (RDR-230 Technical Design 1): what the builder knew when the index was built, kept as the
+     * index's PostgreSQL comment,
+     * {@code {"nexus_pci":1,"built_at":"<ISO-8601 Z>","rows":N,"bytes":N,"origin":"built"}}. A comment follows the
+     * index through {@code REINDEX CONCURRENTLY} and goes with it when it is dropped.
+     *
+     * @param builtAt when the index was built (adopted: when it was first seen), truncated to microseconds
+     * @param rows    the collection's uncapped row count on its leaf at that moment
+     * @param bytes   {@code pg_relation_size} of the index at that moment
+     * @param origin  {@link #ORIGIN_BUILT} or {@link #ORIGIN_ADOPTED} (a parsed anchor may carry another word)
+     */
+    public record Anchor(Instant builtAt, long rows, long bytes, String origin) {
+        public Anchor {
+            Objects.requireNonNull(builtAt, "builtAt");
+            Objects.requireNonNull(origin, "origin");
+            if (rows < 0 || bytes < 0) {
+                throw new IllegalArgumentException("rows and bytes must not be negative");
+            }
+            builtAt = builtAt.truncatedTo(ChronoUnit.MICROS);
+        }
+
+        /**
+         * The comment text. It is built from numbers, a timestamp and one of two fixed words, so nothing in it needs
+         * escaping.
+         *
+         * @throws IllegalStateException when the origin is neither {@link #ORIGIN_BUILT} nor {@link #ORIGIN_ADOPTED}
+         */
+        public String toJson() {
+            if (!ORIGIN_BUILT.equals(origin) && !ORIGIN_ADOPTED.equals(origin)) {
+                throw new IllegalStateException("not an origin this engine writes: " + origin);
+            }
+            return "{\"nexus_pci\":" + ANCHOR_VERSION + ",\"built_at\":\"" + builtAt + "\",\"rows\":" + rows
+                + ",\"bytes\":" + bytes + ",\"origin\":\"" + origin + "\"}";
+        }
+    }
+
+    /**
+     * The anchor in {@code comment}, or empty when there is none: a null or blank comment, text that is not a JSON
+     * object, a {@code nexus_pci} other than {@value #ANCHOR_VERSION}, or a field that is missing or of the wrong
+     * type. Unknown fields are ignored. Never throws.
+     */
+    public static Optional<Anchor> parseAnchor(String comment) {
+        if (comment == null || comment.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            JsonNode n = JSON.readTree(comment);
+            if (n == null || !n.isObject()) {
+                return Optional.empty();
+            }
+            JsonNode version = n.get("nexus_pci");
+            JsonNode builtAt = n.get("built_at");
+            JsonNode rows = n.get("rows");
+            JsonNode bytes = n.get("bytes");
+            JsonNode origin = n.get("origin");
+            if (version == null || !version.isIntegralNumber() || version.asInt() != ANCHOR_VERSION
+                || builtAt == null || !builtAt.isTextual()
+                || rows == null || !rows.isIntegralNumber() || !rows.canConvertToLong() || rows.asLong() < 0
+                || bytes == null || !bytes.isIntegralNumber() || !bytes.canConvertToLong() || bytes.asLong() < 0
+                || origin == null || !origin.isTextual() || origin.asText().isBlank()) {
+                return Optional.empty();
+            }
+            return Optional.of(new Anchor(Instant.parse(builtAt.asText()), rows.asLong(), bytes.asLong(),
+                origin.asText()));
+        } catch (JsonProcessingException | DateTimeParseException e) {
+            return Optional.empty();
+        }
+    }
+
     /**
      * One {@code pci_} index on a leaf.
      *
@@ -126,8 +209,10 @@ public final class PciCatalog {
      * @param leftoverOf   the collection its predicate selects when the index is a REINDEX CONCURRENTLY leftover
      *                     (see the class comment), else {@code null}; never set together with {@code collection}, and
      *                     never set on a valid index (the constructor refuses both)
+     * @param comment      the index's PostgreSQL comment as the read saw it ({@code obj_description}), or {@code null}
+     *                     when it has none; {@link #anchor()} parses it
      */
-    public record Index(String name, boolean valid, String collection, String leftoverOf) {
+    public record Index(String name, boolean valid, String collection, String leftoverOf, String comment) {
         public Index {
             if (collection != null && leftoverOf != null) {
                 throw new IllegalArgumentException("an index is parsed or a leftover, not both: " + name);
@@ -139,9 +224,14 @@ public final class PciCatalog {
             }
         }
 
-        /** An index that is parsed or plain unparsed, not a leftover. */
+        /** An index with no comment. */
+        public Index(String name, boolean valid, String collection, String leftoverOf) {
+            this(name, valid, collection, leftoverOf, null);
+        }
+
+        /** An index that is parsed or plain unparsed, not a leftover, with no comment. */
         public Index(String name, boolean valid, String collection) {
-            this(name, valid, collection, null);
+            this(name, valid, collection, null, null);
         }
 
         /** False for an unparsed index and for a leftover: no consumer may route to or build against it. */
@@ -152,6 +242,11 @@ public final class PciCatalog {
         /** True for a REINDEX CONCURRENTLY leftover, the one kind of non-parsed index the reconciler drops. */
         public boolean leftover() {
             return leftoverOf != null;
+        }
+
+        /** The anchor in {@link #comment()}, or empty when there is none or it does not parse. */
+        public Optional<Anchor> anchor() {
+            return parseAnchor(comment);
         }
     }
 
@@ -179,6 +274,7 @@ public final class PciCatalog {
     public static final class Snapshot implements PciIndexSet {
         private final List<Leaf> leaves;
         private final Map<Key, String> valid;
+        private final Map<Key, Anchor> anchors;
         private final int validCount;
         private final int invalidCount;
         private final int unparsedCount;
@@ -187,6 +283,7 @@ public final class PciCatalog {
         Snapshot(List<Leaf> leaves) {
             this.leaves = List.copyOf(leaves);
             Map<Key, String> validKeys = new LinkedHashMap<>();
+            Map<Key, Anchor> validAnchors = new LinkedHashMap<>();
             int validIndexes = 0;
             int invalidIndexes = 0;
             int unparsedIndexes = 0;
@@ -199,13 +296,18 @@ public final class PciCatalog {
                         unparsedIndexes++;
                     } else if (index.valid()) {
                         validIndexes++;
-                        validKeys.putIfAbsent(new Key(leaf.model(), leaf.tenant(), index.collection()), index.name());
+                        Key key = new Key(leaf.model(), leaf.tenant(), index.collection());
+                        if (!validKeys.containsKey(key)) {
+                            validKeys.put(key, index.name());
+                            index.anchor().ifPresent(a -> validAnchors.put(key, a));
+                        }
                     } else {
                         invalidIndexes++;
                     }
                 }
             }
             this.valid = Collections.unmodifiableMap(validKeys);
+            this.anchors = Collections.unmodifiableMap(validAnchors);
             this.validCount = validIndexes;
             this.invalidCount = invalidIndexes;
             this.unparsedCount = unparsedIndexes;
@@ -231,6 +333,15 @@ public final class PciCatalog {
         public Optional<ValidIndex> validIndex(String model, String tenant, String collection) {
             String name = valid.get(new Key(model, tenant, collection));
             return name == null ? Optional.empty() : Optional.of(new ValidIndex(name, Instant.EPOCH));
+        }
+
+        /**
+         * The anchor on the valid index this read saw for the key, or empty when there is no valid index or its
+         * comment does not parse (the DDL half adopts it on its next pass).
+         */
+        @Override
+        public Optional<Anchor> anchor(String model, String tenant, String collection) {
+            return Optional.ofNullable(anchors.get(new Key(model, tenant, collection)));
         }
 
         /** The keys that have a valid parsed index, for the sweep's history. */
@@ -452,12 +563,16 @@ public final class PciCatalog {
         Field<String> indexMethod = col("am", "amname", String.class);
         Field<String> indexPredicate = DSL.function(DSL.name("pg_catalog", "pg_get_expr"), SQLDataType.CLOB,
             col("i", "indpred"), indexTable);
+        // The anchor (RDR-230) is the index's comment: obj_description reads pg_description and locks nothing.
+        Field<String> indexComment = DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB,
+            col("ix", "oid"), DSL.inline("pg_class"));
         Table<?> pci = ctx.select(
                 indexTable.as("indrelid"),
                 indexName.as("index_name"),
                 indexValid.as("index_valid"),
                 indexPredicate.as("index_predicate"),
-                indexMethod.as("index_method"))
+                indexMethod.as("index_method"),
+                indexComment.as("index_comment"))
             .from(catalog("pg_index", "i"))
             .join(catalog("pg_class", "ix")).on(col("ix", "oid").eq(col("i", "indexrelid")))
             .join(catalog("pg_am", "am")).on(col("am", "oid").eq(col("ix", "relam")))
@@ -468,6 +583,7 @@ public final class PciCatalog {
         Field<Boolean> pciValid = pci.field("index_valid", Boolean.class);
         Field<String> pciPredicate = pci.field("index_predicate", String.class);
         Field<String> pciMethod = pci.field("index_method", String.class);
+        Field<String> pciComment = pci.field("index_comment", String.class);
         // Read in the statement that deparses the predicates, so the two are of one instant.
         Field<String> stringsSetting = DSL.function("current_setting", SQLDataType.VARCHAR,
             DSL.inline("standard_conforming_strings")).as("scs");
@@ -486,7 +602,7 @@ public final class PciCatalog {
 
         Result<? extends Record> rows = ctx
             .select(leafSchemaName, leafName, leafBound, modelBound, pciName, pciValid, pciPredicate, pciMethod,
-                stringsSetting)
+                stringsSetting, pciComment)
             .from(leaf)
             .join(leafSchema).on(col("ln", "oid").eq(col("l", "relnamespace")))
             .join(toModel).on(col("i1", "inhrelid").eq(leafOid))
@@ -507,7 +623,7 @@ public final class PciCatalog {
                     parseBoundValue(row.get(leafBound)).orElse(null)));
             if (row.get(pciName) != null) {
                 b.add(row.get(pciName), row.get(pciValid), row.get(pciPredicate), row.get(pciMethod),
-                    row.get(stringsSetting));
+                    row.get(stringsSetting), row.get(pciComment));
             }
         }
         List<Leaf> out = new ArrayList<>(leaves.size());
@@ -531,7 +647,8 @@ public final class PciCatalog {
             this.tenant = tenant;
         }
 
-        void add(String indexName, Boolean valid, String predicate, String method, String stringsSetting) {
+        void add(String indexName, Boolean valid, String predicate, String method, String stringsSetting,
+                 String comment) {
             // An index cannot be attributed to a (model, tenant) when either bound did not parse.
             String collection = attributedCollection(indexName, method, predicate,
                 model != null && tenant != null, stringsSetting).orElse(null);
@@ -539,7 +656,7 @@ public final class PciCatalog {
             String leftoverOf = collection != null ? null
                 : leftoverCollection(indexName, method, predicate, model != null && tenant != null, stringsSetting,
                     isValid).orElse(null);
-            indexes.add(new Index(indexName, isValid, collection, leftoverOf));
+            indexes.add(new Index(indexName, isValid, collection, leftoverOf, comment));
         }
 
         Leaf build() {

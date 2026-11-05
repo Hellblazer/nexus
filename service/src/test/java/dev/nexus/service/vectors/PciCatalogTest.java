@@ -224,4 +224,79 @@ class PciCatalogTest {
         assertThat(snap.unparsedCount()).isZero();
         assertThat(snap.hasValidIndex("m", "t", "c")).isFalse();
     }
+
+    // -- RDR-230 P1.1: the anchor ------------------------------------------------------------------------
+
+    private static final String ANCHOR_TEXT =
+        "{\"nexus_pci\":1,\"built_at\":\"2026-10-20T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
+            + "\"origin\":\"built\"}";
+
+    @Test
+    void anchor_writesTheRdrsExactText_andParsesItBack() {
+        var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-10-20T08:00:00Z"), 58588, 480116736,
+            PciCatalog.ORIGIN_BUILT);
+
+        assertThat(anchor.toJson()).isEqualTo(ANCHOR_TEXT);
+        assertThat(PciCatalog.parseAnchor(ANCHOR_TEXT)).contains(anchor);
+        // A time with a fraction round-trips at the microsecond PostgreSQL keeps, and no finer.
+        var fine = new PciCatalog.Anchor(java.time.Instant.parse("2026-10-20T08:00:00.123456789Z"), 0, 0, "adopted");
+        assertThat(fine.builtAt()).isEqualTo(java.time.Instant.parse("2026-10-20T08:00:00.123456Z"));
+        assertThat(PciCatalog.parseAnchor(fine.toJson())).contains(fine);
+    }
+
+    @Test
+    void anchor_aTextWeDoNotWrite_isRefusedByTheWriter_andReadableByTheParser() {
+        // Phase 2 adds an origin of its own; a reader of today still reads it, and this engine writes only two.
+        String future = ANCHOR_TEXT.replace("\"built\"", "\"reindexed\"");
+        assertThat(PciCatalog.parseAnchor(future)).hasValueSatisfying(a -> assertThat(a.origin()).isEqualTo("reindexed"));
+        assertThatThrownBy(() -> new PciCatalog.Anchor(java.time.Instant.EPOCH, 0, 0, "reindexed").toJson())
+            .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> new PciCatalog.Anchor(java.time.Instant.EPOCH, -1, 0, "built"))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void parseAnchor_everythingThatIsNotOneAnchorIsEmpty_andNothingThrows() {
+        for (String text : new String[] {
+            null, "", "   ", "an operator's note", "[]", "[1]", "\"x\"", "42", "null", "{", "{}",
+            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":2"),
+            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":\"1\""),
+            ANCHOR_TEXT.replace("\"nexus_pci\":1,", ""),
+            ANCHOR_TEXT.replace("\"built_at\":\"2026-10-20T08:00:00Z\",", ""),
+            ANCHOR_TEXT.replace("2026-10-20T08:00:00Z", "yesterday"),
+            ANCHOR_TEXT.replace("\"rows\":58588", "\"rows\":-1"),
+            ANCHOR_TEXT.replace("\"rows\":58588", "\"rows\":1.5"),
+            ANCHOR_TEXT.replace("\"rows\":58588", "\"rows\":\"58588\""),
+            ANCHOR_TEXT.replace("\"bytes\":480116736", "\"bytes\":99999999999999999999999"),
+            ANCHOR_TEXT.replace(",\"origin\":\"built\"", ""),
+            ANCHOR_TEXT.replace("\"origin\":\"built\"", "\"origin\":\"\""),
+            ANCHOR_TEXT.replace("\"origin\":\"built\"", "\"origin\":7")}) {
+            assertThat(PciCatalog.parseAnchor(text)).as(String.valueOf(text)).isEmpty();
+        }
+        // A well-formed anchor with an unknown field is still an anchor.
+        assertThat(PciCatalog.parseAnchor(ANCHOR_TEXT.replace("}", ",\"future\":{\"a\":1}}"))).isPresent();
+    }
+
+    @Test
+    void anIndexCarriesItsAnchor_andTheSnapshotAnswersWithTheValidIndexsOnly() {
+        var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-10-20T08:00:00Z"), 58588, 480116736, "built");
+        var leaf = new PciCatalog.Leaf("nexus", "l", "m", "t", java.util.List.of(
+            new PciCatalog.Index(GOOD_NAME, true, "c", null, ANCHOR_TEXT),
+            new PciCatalog.Index("pci_" + "b".repeat(24), true, "unparsable", null, "not json"),
+            new PciCatalog.Index("pci_" + "c".repeat(24), true, "uncommented"),
+            new PciCatalog.Index("pci_" + "d".repeat(24), false, "building", null, ANCHOR_TEXT)));
+
+        PciCatalog.Snapshot snap = new PciCatalog.Snapshot(java.util.List.of(leaf));
+
+        assertThat(leaf.indexes().get(0).anchor()).contains(anchor);
+        assertThat(leaf.indexes().get(1).anchor()).isEmpty();
+        assertThat(leaf.indexes().get(2).comment()).isNull();
+        assertThat(snap.anchor("m", "t", "c")).contains(anchor);
+        assertThat(snap.anchor("m", "t", "unparsable")).as("a comment that does not parse").isEmpty();
+        assertThat(snap.anchor("m", "t", "uncommented")).isEmpty();
+        assertThat(snap.anchor("m", "t", "building")).as("an index that is not valid is not routed").isEmpty();
+        assertThat(snap.anchor("m", "other", "c")).isEmpty();
+        assertThat(((PciIndexSet) snap).anchor("m", "t", "c")).contains(anchor);
+        assertThat(PciIndexSet.NONE.anchor("m", "t", "c")).isEmpty();
+    }
 }

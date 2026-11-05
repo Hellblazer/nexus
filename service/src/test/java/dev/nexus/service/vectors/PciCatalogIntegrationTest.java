@@ -646,4 +646,46 @@ class PciCatalogIntegrationTest {
                 }
             });
     }
+
+    // -- RDR-230 P1.1: the anchor is read from the index's comment -------------------------------------------
+
+    @Test
+    void theReadCarriesEachIndexsComment_andTheAnchorInIt() throws Exception {
+        String anchored = SHARED + "-anchored";
+        String plain = SHARED + "-uncommented";
+        String garbled = SHARED + "-garbled";
+        for (String c : List.of(anchored, plain, garbled)) {
+            buildIndex(M1024, T1, c);
+        }
+        String leafName = leafName(M1024, T1);
+        var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-11-05T08:00:00Z"), 7, 8192,
+            PciCatalog.ORIGIN_ADOPTED);
+        String text = anchor.toJson();
+        var builder = new PciBuilderSession(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword(), "pcicat01",
+            new PgSession.PciSettings(true, 20_000, 600, 16));
+        try (PciBuilderSession.Pass pass = builder.open()) {
+            PciCatalog.Leaf before = leaf(catalog.read(), M1024, T1);
+            assertThat(pass.comment(before, new PciCatalog.Index(PciCatalog.indexName(M1024, T1, anchored), true,
+                anchored), anchor)).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+        }
+        asSuperuser(su -> PgContainerHelper.commentIndexNotAnAnchor(su, "nexus",
+            PciCatalog.indexName(M1024, T1, garbled)));
+
+        PciCatalog.Snapshot snap = catalog.read();
+        PciCatalog.Leaf leaf = leaf(snap, M1024, T1);
+
+        assertThat(leaf.name()).isEqualTo(leafName);
+        PciCatalog.Index a = index(leaf, PciCatalog.indexName(M1024, T1, anchored)).orElseThrow();
+        assertThat(a.comment()).isEqualTo(text);
+        assertThat(a.anchor()).contains(anchor);
+        assertThat(snap.anchor(M1024, T1, anchored)).isPresent();
+        PciCatalog.Index g = index(leaf, PciCatalog.indexName(M1024, T1, garbled)).orElseThrow();
+        assertThat(g.comment()).isEqualTo("see the wiki");
+        assertThat(g.anchor()).isEmpty();
+        assertThat(snap.anchor(M1024, T1, garbled)).isEmpty();
+        PciCatalog.Index p = index(leaf, PciCatalog.indexName(M1024, T1, plain)).orElseThrow();
+        assertThat(p.comment()).isNull();
+        assertThat(snap.anchor(M1024, T1, plain)).isEmpty();
+        assertThat(snap.anchor(M1024, T2, anchored)).as("another tenant's leaf").isEmpty();
+    }
 }

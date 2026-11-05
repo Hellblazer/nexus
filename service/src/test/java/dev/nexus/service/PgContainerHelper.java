@@ -2413,6 +2413,41 @@ public final class PgContainerHelper {
             "databasechangelog_test_reindex_index", Map.of("schema", schema, "index", index));
     }
 
+    /**
+     * {@code COMMENT ON INDEX schema.index IS 'see the wiki'} (nexus-4lnn1.1.1), through
+     * {@code db.changelog-test-index-comment-not-an-anchor.xml}: jOOQ has no COMMENT ON INDEX. The text is fixed in the
+     * changelog; both names go through {@link #requireTestIdentifier}.
+     */
+    public static void commentIndexNotAnAnchor(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-not-an-anchor.xml",
+            "databasechangelog_test_index_comment_not_an_anchor", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code COMMENT ON INDEX schema.index} with a well-formed PCI anchor of {@code "nexus_pci":2}
+     * (nexus-4lnn1.1.1), through {@code db.changelog-test-index-comment-wrong-version.xml}. The text is fixed in the
+     * changelog; both names go through {@link #requireTestIdentifier}.
+     */
+    public static void commentIndexWrongVersion(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-wrong-version.xml",
+            "databasechangelog_test_index_comment_wrong_version", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code COMMENT ON INDEX schema.index IS NULL} (nexus-4lnn1.1.1), through
+     * {@code db.changelog-test-index-comment-clear.xml}. Both names go through {@link #requireTestIdentifier}.
+     */
+    public static void clearIndexComment(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-clear.xml",
+            "databasechangelog_test_index_comment_clear", Map.of("schema", schema, "index", index));
+    }
+
     /** Which text of a product changeset {@link #replayPart} runs. */
     private enum ChangesetPart { FORWARD, ROLLBACK }
 

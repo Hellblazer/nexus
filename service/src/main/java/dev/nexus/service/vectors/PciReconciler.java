@@ -108,6 +108,20 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * ends (a migration, a lost connection, a privilege error) the remaining actions are not sent, and a build that never
  * started, or whose backend was terminated, is not charged to backoff.
  *
+ * <p><b>The anchor</b> (RDR-230 Technical Design 1 and 2, nexus-4lnn1.1.1). An index's anchor is its PostgreSQL
+ * comment ({@link PciCatalog.Anchor}). After each successful BUILD the pass counts the collection's rows (uncapped, in
+ * a counting transaction of its own) and writes {@code origin=built}; a failed count or comment leaves the index
+ * unanchored and the next pass adopts it. Every pass, inside the leaf's counting transaction, reads each valid parsed
+ * index's comment and {@code pg_relation_size} and the leaf's {@code pg_stat_user_tables} row. An index with no
+ * parseable anchor is adopted once ({@code origin=adopted}, the current rows and bytes, the adoption time as
+ * {@code built_at}; {@code event=pci_anchor_adopted reason=missing|unparsable}); an anchored one is not written
+ * again. The uncapped row count and {@code written_since} are taken only when the leaf's deletes or non-HOT updates
+ * advanced since this engine last looked, a statistics reset moved them backward, the index's last count is older
+ * than {@link #RECOUNT_AFTER}, or the anchor is not the one the last count was taken against. What was read is kept
+ * in memory ({@link IndexReading}) and, like the retry state, is lost on restart: the first look after a boot counts.
+ * A leaf whose pass is skipped keeps its previous readings, and a leaf's baseline moves only when its transaction
+ * commits.
+ *
  * <p><b>Retry state is in memory, per engine, and is lost on restart.</b> After a failed build of
  * (leaf, collection) the first retry comes no sooner than {@link #FIRST_RETRY} later, doubling to
  * {@link #MAX_RETRY}; the collection is handed to the planner as backed off until then. After
@@ -154,6 +168,12 @@ public final class PciReconciler {
 
     /** Consecutive failed builds after which a collection counts as failing. */
     static final int FAILING_AFTER = 3;
+
+    /** How long an index's row count and {@code written_since} stand with no delete or update to move them. */
+    static final Duration RECOUNT_AFTER = Duration.ofHours(24);
+
+    /** How long the counting transaction waits for a lock on an index it sizes; a longer wait skips the leaf. */
+    private static final String SIZE_LOCK_TIMEOUT = "5s";
 
     /** SQLSTATE: query_canceled (a statement timeout). */
     private static final String QUERY_CANCELED = "57014";
@@ -213,6 +233,26 @@ public final class PciReconciler {
 
     private record LeafKey(String leaf, String collection) { }
 
+    /**
+     * What the DDL half last read of one valid parsed index (RDR-230 Technical Design 2).
+     *
+     * @param anchor       the anchor on the index when read (adopted or written since)
+     * @param bytes        {@code pg_relation_size} when read
+     * @param rows         the collection's uncapped row count at {@code countedAt}
+     * @param writtenSince rows whose {@code last_written_at} is later than {@code anchor.builtAt()}, at {@code countedAt}
+     * @param countedAt    when {@code rows} and {@code writtenSince} were taken, on this engine's clock
+     */
+    record IndexReading(PciCatalog.Anchor anchor, long bytes, long rows, long writtenSince, Instant countedAt) { }
+
+    /** An index with no parseable anchor, and what to write on it. */
+    private record Adoption(Index index, String reason, long rows, long bytes) { }
+
+    /** What the counting transaction read for anchors; applied only once the transaction has committed. */
+    private record AnchorReads(PciAnchorReads.LeafStats stats, Map<String, IndexReading> readings,
+                               List<Adoption> adoptions) {
+        static final AnchorReads NONE = new AnchorReads(null, Map.of(), List.of());
+    }
+
     private record Failure(int consecutive, Instant nextRetryAt) { }
 
     private final Supplier<PciCatalog.Snapshot> catalog;
@@ -228,6 +268,9 @@ public final class PciReconciler {
     private final IntSupplier ringExpiry;
 
     private final Map<LeafKey, Failure> failures = new ConcurrentHashMap<>();
+    /** Per leaf id, the statistics at the last committed look; per (leaf, index name), what that look read. */
+    private final Map<String, PciAnchorReads.LeafStats> lastStats = new ConcurrentHashMap<>();
+    private final Map<LeafKey, IndexReading> readings = new ConcurrentHashMap<>();
     private final AtomicReference<String> building = new AtomicReference<>();
     private final AtomicInteger passes = new AtomicInteger();
     private volatile boolean holder;
@@ -324,6 +367,11 @@ public final class PciReconciler {
     /** Passes started since boot, for tests. */
     int passes() {
         return passes.get();
+    }
+
+    /** What the last committed look read of {@code indexName} on {@code leaf}, or {@code null}; for tests. */
+    IndexReading reading(Leaf leaf, String indexName) {
+        return readings.get(new LeafKey(leafId(leaf), indexName));
     }
 
     /** Collections with a failure entry (any count), for tests; {@link #status()} reports only the failing ones. */
@@ -544,19 +592,21 @@ public final class PciReconciler {
         tally.processedLeaves++;
         tally.sumCountMillis += planned.countMillis();
         tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
-        execute(pass, leaf, planned.dimension(), planned.actions(), tally);
+        applyReadings(leaf, planned.anchors());
+        execute(pass, leaf, planned.dimension(), planned.anchors().adoptions(), planned.actions(), tally);
         return true;
     }
 
     // -- counting and planning, inside the transaction ---------------------------------------------------------
 
-    private record Planned(List<Action> actions, int dimension, long countMillis) { }
+    private record Planned(List<Action> actions, int dimension, long countMillis, AnchorReads anchors) { }
 
-    /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
-    private Planned countAndPlan(DSLContext tx, Leaf leaf) {
-        long startedNanos = System.nanoTime();
+    /**
+     * The first statements of every counting transaction: the per-statement timeout, a custom plan, the leaf's tenant,
+     * and a read-back of it. False (and logged) when the tenant did not take, and the transaction must do nothing more.
+     */
+    private boolean beginCounting(DSLContext tx, Leaf leaf) {
         String tenant = leaf.tenant();
-        String model = leaf.model();
         // setLocal binds the matching network timeout with the statement timeout (nexus-u9zkn); the pass puts the
         // connection's own, longer one back when the transaction ends.
         PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
@@ -569,6 +619,17 @@ public final class PciReconciler {
             log.error("event=pci_count_tenant_mismatch leaf={} expected_tenant={} actual_tenant={} "
                 + "detail=\"counts under the wrong tenant read other rows or none; the leaf is skipped\"",
                 leafId(leaf), tenant, bound);
+            return false;
+        }
+        return true;
+    }
+
+    /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
+    private Planned countAndPlan(DSLContext tx, Leaf leaf) {
+        long startedNanos = System.nanoTime();
+        String tenant = leaf.tenant();
+        String model = leaf.model();
+        if (!beginCounting(tx, leaf)) {
             return null;
         }
 
@@ -641,12 +702,79 @@ public final class PciReconciler {
             }
         }
         List<Action> actions = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, settings);
+        AnchorReads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
         // line stays DEBUG (one per leaf per pass is a lot of lines at 20,000 collections); the pass line is INFO.
         long tookMs = (System.nanoTime() - startedNanos) / 1_000_000;
         log.debug("event=pci_count_done leaf={} counted={} recounted={} actions={} took_ms={}", leafId(leaf),
             counts.size(), recounted ? candidates.size() : 0, actions.size(), tookMs);
-        return new Planned(actions, dimension, tookMs);
+        return new Planned(actions, dimension, tookMs, anchors);
+    }
+
+    /**
+     * RDR-230 Technical Design 2, inside the counting transaction: for each valid parsed index the plan does not drop,
+     * its comment and size now; for the leaf, its statistics row. The counts are taken only when the class comment's
+     * conditions say so. Nothing here changes the engine's memory: the result is applied once the transaction commits
+     * ({@link #applyReadings}), so a rolled-back or timed-out transaction cannot move a baseline past deletes it never
+     * counted.
+     */
+    private AnchorReads readAnchors(DSLContext tx, Leaf leaf, int dim, List<Action> actions, Instant now) {
+        Set<String> dropping = new HashSet<>();
+        for (Action action : actions) {
+            if (action instanceof Drop d) {
+                dropping.add(d.name());
+            }
+        }
+        List<Index> subjects = leaf.indexes().stream()
+            .filter(i -> i.parsed() && i.valid() && !dropping.contains(i.name())).toList();
+        if (subjects.isEmpty()) {
+            return AnchorReads.NONE;
+        }
+        // A lock held on an index (a non-concurrent REINDEX or DROP) must not stall the leaf to its statement bound.
+        PgSession.setLocal(tx, "lock_timeout", SIZE_LOCK_TIMEOUT);
+        String id = leafId(leaf);
+        PciAnchorReads.LeafStats stats = PciAnchorReads.leafStats(tx, leaf.schema(), leaf.name());
+        PciAnchorReads.LeafStats before = lastStats.get(id);
+        boolean moved = before == null || stats.deleted() != before.deleted()
+            || stats.nonHotUpdated() != before.nonHotUpdated();
+        Map<String, IndexReading> read = new java.util.LinkedHashMap<>();
+        List<Adoption> adoptions = new java.util.ArrayList<>();
+        for (Index index : subjects) {
+            PciAnchorReads.IndexFacts facts = PciAnchorReads.indexFacts(tx, leaf.schema(), index.name());
+            if (facts == null) {
+                continue;   // dropped since the snapshot
+            }
+            java.util.Optional<PciCatalog.Anchor> anchor = PciCatalog.parseAnchor(facts.comment());
+            if (anchor.isEmpty()) {
+                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
+                adoptions.add(new Adoption(index, facts.comment() == null ? "missing" : "unparsable", rows,
+                    facts.bytes()));
+                continue;
+            }
+            IndexReading last = readings.get(new LeafKey(id, index.name()));
+            boolean count = moved || last == null || !last.anchor().equals(anchor.get())
+                || Duration.between(last.countedAt(), now).compareTo(RECOUNT_AFTER) > 0;
+            if (count) {
+                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
+                long written = PciAnchorReads.writtenSince(tx, dim, leaf.model(), leaf.tenant(),
+                    index.collection(), anchor.get().builtAt());
+                read.put(index.name(), new IndexReading(anchor.get(), facts.bytes(), rows, written, now));
+            } else {
+                read.put(index.name(), new IndexReading(anchor.get(), facts.bytes(), last.rows(),
+                    last.writtenSince(), last.countedAt()));
+            }
+        }
+        return new AnchorReads(stats, read, adoptions);
+    }
+
+    /** Make a committed transaction's reads the engine's last look at the leaf. */
+    private void applyReadings(Leaf leaf, AnchorReads reads) {
+        String id = leafId(leaf);
+        if (reads.stats() != null) {
+            lastStats.put(id, reads.stats());
+        }
+        readings.keySet().removeIf(k -> k.leaf().equals(id) && !reads.readings().containsKey(k.collection()));
+        reads.readings().forEach((name, reading) -> readings.put(new LeafKey(id, name), reading));
     }
 
     /**
@@ -663,7 +791,15 @@ public final class PciReconciler {
 
     // -- execution, in autocommit ------------------------------------------------------------------------------
 
-    private void execute(PciBuilderSession.Pass pass, Leaf leaf, int dim, List<Action> actions, Tally tally) {
+    private void execute(PciBuilderSession.Pass pass, Leaf leaf, int dim, List<Adoption> adoptions,
+                         List<Action> actions, Tally tally) {
+        // Adoptions are quick and independent of the plan; a build can hold the pass for half an hour.
+        for (Adoption adoption : adoptions) {
+            if (!pass.live() || Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            adopt(pass, leaf, adoption);
+        }
         for (Action action : actions) {
             if (!pass.live() || Thread.currentThread().isInterrupted()) {
                 return;
@@ -675,6 +811,71 @@ public final class PciReconciler {
                 case Drop d -> drop(pass, leaf, d, tally);
                 case Build b -> build(pass, leaf, dim, b, tally);
             }
+        }
+    }
+
+    private void adopt(PciBuilderSession.Pass pass, Leaf leaf, Adoption adoption) {
+        Index index = adoption.index();
+        var anchor = new PciCatalog.Anchor(clock.instant(), adoption.rows(), adoption.bytes(),
+            PciCatalog.ORIGIN_ADOPTED);
+        DdlOutcome outcome = pass.comment(leaf, index, anchor);
+        if (outcome == DdlOutcome.DONE) {
+            readings.put(new LeafKey(leafId(leaf), index.name()),
+                new IndexReading(anchor, adoption.bytes(), adoption.rows(), 0, anchor.builtAt()));
+            log.info("event=pci_anchor_adopted reason={} index={} leaf={} rows={} bytes={}", adoption.reason(),
+                index.name(), leafId(leaf), adoption.rows(), adoption.bytes());
+        } else {
+            log.info("event=pci_anchor_not_written origin=adopted index={} leaf={} outcome={} detail=\"the next pass "
+                + "adopts it again\"", index.name(), leafId(leaf), outcome);
+        }
+    }
+
+    /**
+     * After a successful build: count the collection's rows (uncapped) and the index's size in a counting transaction
+     * and write {@code origin=built}. {@code built_at} is taken before the count, so a row written during it counts in
+     * {@code written_since} as well as in {@code rows}: the figure errs toward more work. Anything that goes wrong
+     * leaves the index unanchored, which the next pass adopts; the build itself stands.
+     */
+    private void anchorAfterBuild(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build) {
+        Instant builtAt = clock.instant();
+        Index index = new Index(build.name(), true, build.collection());
+        long[] figures;
+        try {
+            figures = pass.transaction(tx -> {
+                if (!beginCounting(tx, leaf)) {
+                    return null;
+                }
+                PgSession.setLocal(tx, "lock_timeout", SIZE_LOCK_TIMEOUT);
+                PciAnchorReads.IndexFacts facts = PciAnchorReads.indexFacts(tx, leaf.schema(), build.name());
+                if (facts == null) {
+                    return null;
+                }
+                return new long[] {
+                    PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), build.collection()),
+                    facts.bytes()};
+            });
+        } catch (DataAccessException e) {
+            log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_failed sqlstate={} "
+                + "detail=\"the index stands; the next pass adopts it\"", build.name(), leafId(leaf), e.sqlState());
+            return;
+        }
+        if (figures == null) {
+            log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_skipped "
+                + "detail=\"the tenant did not bind or the index is gone; the next pass adopts it if it exists\"",
+                build.name(), leafId(leaf));
+            return;
+        }
+        var anchor = new PciCatalog.Anchor(builtAt, figures[0], figures[1], PciCatalog.ORIGIN_BUILT);
+        DdlOutcome outcome = pass.comment(leaf, index, anchor);
+        if (outcome == DdlOutcome.DONE) {
+            readings.put(new LeafKey(leafId(leaf), build.name()),
+                new IndexReading(anchor, figures[1], figures[0], 0, builtAt));
+            log.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", build.name(),
+                leafId(leaf), figures[0], figures[1]);
+            refreshSweep("anchor", false);
+        } else {
+            log.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"the next pass "
+                + "adopts it\"", build.name(), leafId(leaf), outcome);
         }
     }
 
@@ -718,6 +919,9 @@ public final class PciReconciler {
                 log.info("event=pci_index_built leaf={} index={} collection={}", leafId(leaf), build.name(),
                     build.collection());
                 refreshSweep("build", false);
+                if (pass.live()) {
+                    anchorAfterBuild(pass, leaf, dim, build);
+                }
             }
             case FAILED, REJECTED -> {
                 tally.failedBuilds++;

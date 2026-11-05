@@ -984,6 +984,13 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, WAITER_LOCAL);
             }
             notKeyed.put("PciReconciler.failures", PCI_OFF);
+            // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
+            // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
+            // AnchorReads fields are one counting transaction's result, applied once it commits.
+            notKeyed.put("PciReconciler.lastStats", PCI_OFF);
+            notKeyed.put("PciReconciler.readings", PCI_OFF);
+            notKeyed.put("PciReconciler.AnchorReads.readings", PCI_OFF);
+            notKeyed.put("PciReconciler.AnchorReads.adoptions", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
             notKeyed.put("EngineSingletonLock.connection", SINGLETON_LOCK);
             notKeyed.put("EngineSingletonLock.onRegained", SINGLETON_LOCK);
@@ -991,6 +998,7 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("EngineSingletonLock.staleTerminationWait", SINGLETON_LOCK);
             notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);
             notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
+            notKeyed.put("PciCatalog.Snapshot.anchors", PCI_OFF);
             notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);
             notKeyed.put("PciIndexSet.NONE", PCI_OFF);
             notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
