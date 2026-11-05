@@ -18,10 +18,14 @@
 # from the plugin, or when the reference no longer fails with that class. Remove
 # or fix it then.
 #
-# This file ships empty on purpose: the way to deal with a failing reference is
-# to fix the text (a GitHub link, inline text, a path relative to the file). An
-# entry is a recorded decision for the rare reference that must stay as written.
+# The way to deal with a failing reference is to fix the text (a GitHub link,
+# inline text, a path relative to the file). An entry is a recorded decision for
+# the rare reference that must stay as written; today those are the two guarded
+# conditionals below ("when the project has ..." with a fallback for every other
+# project), which the repo-only-references lint also pins as guarded sites.
 #
 # Not covered by this gate at all (so not listed here): the text that
 # src/nexus/session_start_guidance.py and src/nexus/hooks/subagent_start.py
 # generate and inject. It is Python source outside every plugin tree.
+conexus | commands/continuation.md | tests/e2e/lib/commit_scope_audit.sh | REPO-ONLY | guarded by 'when the project has' the script, with a by-hand comparison for every other project, so a session outside a nexus checkout takes the other branch
+conexus | skills/composition-probe/SKILL.md | scripts/mvnw-leased.sh | REPO-ONLY | guarded by 'when the project has that script', with ./mvnw or mvn for every other project, so a session outside a nexus checkout takes the other branch

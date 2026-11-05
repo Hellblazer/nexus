@@ -826,7 +826,9 @@ mkhooks "$CACHE/sn/$V" sn "$V"
 mkdir -p "$CACHE/conexus-tool-spill/$V/.claude-plugin"; printf '{"name": "conexus-tool-spill", "version": "%s"}\n' "$V" >"$CACHE/conexus-tool-spill/$V/.claude-plugin/plugin.json"
 mkplugin "$CACHE/conexus-prose-edit/$V" conexus-prose-edit "$V"
 export NX_GATE_CONEXUS_FLOOR="1 1"   # the fixtures are one-agent, one-skill plugins; the real floor is tested on its own below
-run_inst() { NX_GATE_PLUGIN_CACHE="$CACHE" bash "$GATE" --installed "$V" --static-only 2>&1; }
+# the checked-in allowlist names real conexus files, which these one-agent fixtures lack (its entries would read stale)
+NOALLOW="$WORKDIR/no-allowlist.txt"; : >"$NOALLOW"
+run_inst() { NX_GATE_PLUGIN_CACHE="$CACHE" bash "$GATE" --installed "$V" --static-only --allowlist "$NOALLOW" 2>&1; }
 out="$(run_inst)"; rc=$?
 expect_eq "four installed plugins, all clean: exit 0" 0 "$rc"
 expect_has "conexus passed" "$out" "conexus                PASSED"
@@ -882,7 +884,7 @@ out="$(NX_GATE_PLUGIN_CACHE="$CACHE" NX_GATE_CLAUDE="$WORKDIR/no-such-claude" ba
 expect_eq "with claude absent the canary is due: UNVERIFIED, exit 2" 2 "$rc"
 expect_has "the closing verdict is UNVERIFIED" "$(printf '%s\n' "$out" | tail -1)" "PLUGIN OUT-OF-REPO GATE UNVERIFIED"
 : >"$STUB_LOG"; rm -rf "$STUB_STATE"; mkdir -p "$STUB_STATE"
-out="$(NX_GATE_PLUGIN_CACHE="$CACHE" NX_GATE_CLAUDE="$STUBW" bash "$GATE" --installed "$V" 2>&1)"; rc=$?
+out="$(NX_GATE_PLUGIN_CACHE="$CACHE" NX_GATE_CLAUDE="$STUBW" bash "$GATE" --installed "$V" --allowlist "$NOALLOW" 2>&1)"; rc=$?
 expect_eq "four installed plugins with the stub: static + canary, once" 0 "$rc"
 expect_has "one closing verdict naming the canary" "$(printf '%s\n' "$out" | tail -1)" "PLUGIN OUT-OF-REPO GATE PASSED (static + canary) -- installed $V: 2 passed, 2 not applicable"
 expect_eq "the canary ran once for the whole run (5 sessions), not once per plugin" 5 "$(grep -c '^ARGV' "$STUB_LOG")"
