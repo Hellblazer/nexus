@@ -228,7 +228,8 @@ def refuse_external_existing(existing: object, *, ack: bool, what: str) -> None:
 def import_ack_help() -> str:
     """Help for ``--ack-external-embedder`` on ``nx store import`` (RDR-243 item 8)."""
     return (
-        "Accept that a document the file flags sensitive is written to a Voyage collection, which sends its "
+        "Accept that a document the file flags sensitive, or the catalog already flags under the same source "
+        "URI, is written to a Voyage collection, which sends its "
         "text to Voyage AI to be embedded. Without it, an import of a flagged document into a Voyage "
         "collection (or one whose embedder cannot be told) refuses before anything is written; import "
         "into a local-embedder (bge) collection with --collection instead. With it, a one-line disclosure "

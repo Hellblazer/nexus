@@ -1694,7 +1694,8 @@ def import_collection(
         vector stay, and the record still gets its owner row. Without it every
         record is written with the file's vector, which replaces a stored one.
     ack_external_embedder:
-        RDR-243 (nexus-rfvyy.6.20): a document the file flags sensitive is refused, before anything is
+        RDR-243 (nexus-rfvyy.6.20): a document the file flags sensitive, or the catalog already flags (by
+        source_uri; an unreadable catalog reads as flagged), is refused, before anything is
         registered or written, when the target collection embeds with Voyage (or its embedder cannot
         be told) and this is False; True accepts Voyage for it and prints the one-line disclosure.
         A bge target imports a flagged document as before.
@@ -1980,8 +1981,8 @@ def import_collection(
     # A first read of the file, for counts only: each document's record count says which page is its
     # last (when it is swept and stamped), and its highest position says where a colliding row goes.
     # See _prepass_groups. It also tells which documents the file flags sensitive, which is read before
-    # anything is registered or written (RDR-243 item 8, nexus-rfvyy.6.20): the flag comes from the file,
-    # so the gate does not ask the catalog.
+    # anything is registered or written (RDR-243 item 8, nexus-rfvyy.6.20). The gate also asks the catalog about
+    # a document the file does not flag (by source_uri), for a Voyage target only.
     prepass = _prepass_groups(
         input_path, fallback_source_uri=file_fallback_source_uri,
         fallback_title=file_fallback_title, fallback_content_type=default_content_type,
