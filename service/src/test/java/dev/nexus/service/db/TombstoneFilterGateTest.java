@@ -269,6 +269,21 @@ class TombstoneFilterGateTest {
      * particular gate mechanism did.
      */
     private static final List<ExemptEntry> TOMBSTONE_EXEMPT = List.of(
+        new ExemptEntry("CatalogRepository.java", "mostRecentTombstoned",
+            "nexus-rfvyy.6.4 (RDR-243): reading the most recent TOMBSTONED row of a source URI is the contract. "
+            + "A delete-then-re-index registers a NEW tumbler, and the new row inherits the sensitive flag from "
+            + "the deleted predecessor while that tombstone exists; the query requires DELETED_AT.isNotNull() "
+            + "(the mirror of the live filter), orders newest first, and returns only the tumbler and the flag"),
+        new ExemptEntry("CatalogRepository.java", "mostRecentTombstonedMany",
+            "nexus-rfvyy.6.4 (RDR-243): the batched form of mostRecentTombstoned for registerDocumentMany, one "
+            + "query over the batch's source URIs, DELETED_AT.isNotNull() on purpose for the same reason; "
+            + "returns only (source_uri, tumbler, sensitive)"),
+        new ExemptEntry("CatalogRepository.java", "raiseWrittenRows",
+            "nexus-rfvyy.6.6 (RDR-243): raises sensitive (false to true) on the rows an upsert or import has just "
+            + "written for a flagged request, live OR tombstoned, and audits exactly the rows its own RETURNING "
+            + "names. An upsert un-tombstones its row and an import raises the flag on a tombstoned row too; "
+            + "either way the flag changed and the audit row is owed. It only ever sets the flag to true on "
+            + "tumblers the same transaction has just written"),
         new ExemptEntry("CatalogRepository.java", "tombstonedChashHolders",
             "nexus-6pfgb.58: naming the manifest rows of TOMBSTONED documents is the contract. The manifest-"
             + "section-labels rung copies a chunk row's label onto a legacy row only when the chash has one "
