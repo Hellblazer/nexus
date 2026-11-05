@@ -392,14 +392,21 @@ inferred, not read).
 - `registerDocument`, when it finds a live row with the same source URI
   and the request carries `sensitive = true`, raises the flag on that row
   (`UPDATE ... SET sensitive = true WHERE NOT sensitive`) and records the
-  change in the audit table. It never lowers it.
-- A new registration for a source URI whose most recent tombstoned row was
-  sensitive inherits the flag, with an audit row naming the predecessor.
+  change in the audit table. It never lowers it. A fresh registration that
+  carries `sensitive = true` writes a `register_set` audit row too (actor
+  `engine`, since the repository call has no caller principal). Every
+  flagged document gets a first audit row: an upsert or import that inserts
+  a fresh row carrying `sensitive = true` writes `upsert_set` or
+  `import_set`. A fresh row that is flagged by its request and also
+  inherits from a sensitive tombstone gets one audit row, the inheritance.
+- A new registration, and an upsert or import that inserts a fresh row, for
+  a source URI whose most recent tombstoned row was sensitive inherits the
+  flag, with an audit row naming the predecessor.
   Delete-then-re-index keeps the protection while the tombstone exists
   (`nx catalog purge-trash` removes it); the audited route can still clear
   it.
-- `nx catalog merge` leaves the canonical document sensitive when either
-  side was.
+- `nx catalog merge` raises both the canonical and the duplicate when
+  either side was sensitive, with an audit row for each row that changes.
 - `.nxexp` export and the recovery bundle write the column; import reads
   it.
 - Clearing: `POST /v1/catalog/sensitivity {tumblers, sensitive, reason}`.
@@ -1053,3 +1060,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-04: fix round on the revision's fix check (`nexus_rdr/243-fix-check-bb08311f3`): two `GET /version` capability keys (catalog in phase 1, vectors in phase 2) with the conexus edge allowlist; the input-side external rules move into phase 1 and registry rows carry their enforcing phase; the stub `get` read path; engine egress under `EgressGuardCensus`; the stub's per-row field.
 - 2026-11-04: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `5d5d93d30`; critique `nexus_rdr/243-gate-critique-2026-11-04-r3`.
 - 2026-11-04: Accepted. Round-3 residual dispositions: S-A `nexus-rfvyy.1` (Phase 3); S-B `nexus-rfvyy.2` (Phase 1 Step 3); S-C `nexus-rfvyy.3` (Phase 2, needs Sam); S-D `nexus-rfvyy.4` (Phase 1 Step 3); S-E `nexus-rfvyy.5` (Phase 1 Step 5).
+- 2026-11-05: Sam's rulings on the Phase 1 engine review: merge duplicate adopts the flag; fresh flagged registration is audited; upsert and import inherit from a sensitive tombstone.

@@ -148,7 +148,42 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, byPath)).isTrue();
         assertThat(repo.registerDocument(t, OWNER, fields("p", "", "only-by-path.md", null))).isEqualTo(byPath);
         assertThat(flag(t, byPath)).as("file_path match, request without the flag").isTrue();
-        assertThat(audit(t)).as("neither lowering attempt wrote an audit row").isEmpty();
+        assertThat(audit(t)).as("the two fresh flagged registrations are audited (register_set); neither lowering attempt wrote a row")
+            .containsExactly(byUri + "|false|true|register_set|engine", byPath + "|false|true|register_set|engine");
+    }
+
+    // ── nexus-rfvyy.6.23: a fresh flagged registration is audited ───────
+
+    @Test
+    void register_freshFlagged_writesARegisterSetRow_singleAndBatch_andAPlainOrInheritedOneWritesNone() throws Exception {
+        String t = tenant();
+        String fresh = repo.registerDocument(t, OWNER, fields("s", "file:///r/s.md", "s.md", true));
+        String plain = repo.registerDocument(t, OWNER, fields("q", "file:///r/q.md", "q.md", false));
+        assertThat(flag(t, fresh)).isTrue();
+        assertThat(flag(t, plain)).isFalse();
+        assertThat(audit(t)).as("single path: one row for the flagged fresh registration, none for sensitive=false")
+            .containsExactly(fresh + "|false|true|register_set|engine");
+
+        List<String> out = repo.registerDocumentMany(t, OWNER, List.of(
+            fields("b1", "file:///r/b1.md", "b1.md", true),
+            fields("b2", "file:///r/b2.md", "b2.md", null),
+            fields("b3", "file:///r/b3.md", "b3.md", true)));
+        assertThat(audit(t)).as("batch path: one register_set row per fresh flagged entry, none for the plain one")
+            .containsExactly(fresh + "|false|true|register_set|engine",
+                out.get(0) + "|false|true|register_set|engine", out.get(2) + "|false|true|register_set|engine");
+
+        // a flagged request that also matches a sensitive tombstone is ONE row (the row changes once); the
+        // inheritance takes precedence and names its predecessor, on the single and the batch path alike
+        String dead = repo.registerDocument(t, OWNER, fields("d", "file:///r/dead.md", "dead.md", true));
+        repo.deleteDocument(t, dead);
+        String both = repo.registerDocument(t, OWNER, fields("d", "file:///r/dead.md", "dead.md", true));
+        assertThat(audit(t).stream().filter(a -> a.startsWith(both + "|")).toList())
+            .containsExactly(both + "|false|true|register_inherit predecessor=" + dead + "|engine");
+        String dead2 = repo.registerDocument(t, OWNER, fields("d2", "file:///r/dead2.md", "dead2.md", true));
+        repo.deleteDocument(t, dead2);
+        String bothMany = repo.registerDocumentMany(t, OWNER, List.of(fields("d2", "file:///r/dead2.md", "dead2.md", true))).get(0);
+        assertThat(audit(t).stream().filter(a -> a.startsWith(bothMany + "|")).toList())
+            .containsExactly(bothMany + "|false|true|register_inherit predecessor=" + dead2 + "|engine");
     }
 
     @Test
@@ -202,11 +237,14 @@ class CatalogDocumentSensitivityWriteRulesTest {
             .anyMatch(r -> r.equals(raise + "|false|true|register_raise|engine"))
             .anyMatch(r -> r.startsWith(out.get(2) + "|false|true|register_inherit") && r.contains(dead)
                 && r.endsWith("|engine"))
-            .hasSize(2);
+            .anyMatch(r -> r.equals(out.get(4) + "|false|true|register_set|engine"))
+            .anyMatch(r -> r.equals(keep + "|false|true|register_set|engine"))
+            .anyMatch(r -> r.equals(dead + "|false|true|register_set|engine"))
+            .hasSize(5);
 
         // the same batch again: nothing new to raise or inherit
         repo.registerDocumentMany(t, OWNER, docs);
-        assertThat(audit(t)).as("a repeated batch writes no audit row").hasSize(2);
+        assertThat(audit(t)).as("a repeated batch writes no audit row").hasSize(5);
     }
 
     // ── tombstone then re-index ─────────────────────────────────────────
@@ -221,8 +259,9 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(outcome.created()).isTrue();
         assertThat(outcome.tumbler()).isNotEqualTo(first);
         assertThat(flag(t, outcome.tumbler())).as("delete-then-re-index keeps the protection").isTrue();
-        assertThat(audit(t)).hasSize(1);
-        assertThat(audit(t).get(0)).startsWith(outcome.tumbler() + "|false|true|register_inherit")
+        assertThat(audit(t)).hasSize(2);
+        assertThat(audit(t).get(0)).as("the first, flagged registration").isEqualTo(first + "|false|true|register_set|engine");
+        assertThat(audit(t).get(1)).startsWith(outcome.tumbler() + "|false|true|register_inherit")
             .contains(first).endsWith("|engine");
     }
 
@@ -252,7 +291,8 @@ class CatalogDocumentSensitivityWriteRulesTest {
     void upsertDocument_orsTheFlag_includingThroughTheUnTombstoneArm() throws Exception {
         String t = tenant();
         repo.upsertDocument(t, importRow("48.1", "u1", true));
-        assertThat(audit(t)).as("a fresh row born flagged has no old value to audit here").isEmpty();
+        assertThat(audit(t)).as("a fresh row born flagged by its request is audited (nexus-rfvyy.6.23)")
+            .containsExactly("48.1|false|true|upsert_set|engine");
         repo.upsertDocument(t, importRow("48.1", "u1 again", false));
         assertThat(flag(t, "48.1")).as("false over true stays true").isTrue();
         repo.upsertDocument(t, importRow("48.1", "u1 once more", null));
@@ -262,24 +302,26 @@ class CatalogDocumentSensitivityWriteRulesTest {
         repo.upsertDocument(t, importRow("48.1", "u1 resurrected", false));
         assertThat(flag(t, "48.1")).as("the un-tombstone arm keeps the old row's flag").isTrue();
         repo.upsertDocument(t, importRow("48.1", "u1 flagged again", true));
-        assertThat(audit(t)).as("true over true changes nothing, so nothing is audited").isEmpty();
+        assertThat(audit(t)).as("true over true changes nothing, so nothing more is audited")
+            .containsExactly("48.1|false|true|upsert_set|engine");
 
         repo.upsertDocument(t, importRow("48.2", "u2", false));
         assertThat(flag(t, "48.2")).isFalse();
-        assertThat(audit(t)).as("a plain upsert raises nothing").isEmpty();
+        assertThat(audit(t)).as("a plain upsert raises nothing").hasSize(1);
         repo.upsertDocument(t, importRow("48.2", "u2", true));
         assertThat(flag(t, "48.2")).as("true over false raises").isTrue();
         assertThat(audit(t)).as("the raise is audited (false to true, reason upsert_raise, actor engine)")
-            .containsExactly("48.2|false|true|upsert_raise|engine");
+            .containsExactly("48.1|false|true|upsert_set|engine", "48.2|false|true|upsert_raise|engine");
         repo.upsertDocument(t, importRow("48.2", "u2", true));
-        assertThat(audit(t)).as("raising an already-raised row writes no second row").hasSize(1);
+        assertThat(audit(t)).as("raising an already-raised row writes no second row").hasSize(2);
 
         // a tombstoned plain row raised through the un-tombstone arm is a false-to-true change too
         repo.upsertDocument(t, importRow("48.3", "u3", false));
         repo.deleteDocument(t, "48.3");
         repo.upsertDocument(t, importRow("48.3", "u3 back", true));
         assertThat(flag(t, "48.3")).isTrue();
-        assertThat(audit(t)).containsExactly("48.2|false|true|upsert_raise|engine", "48.3|false|true|upsert_raise|engine");
+        assertThat(audit(t)).containsExactly("48.1|false|true|upsert_set|engine",
+            "48.2|false|true|upsert_raise|engine", "48.3|false|true|upsert_raise|engine");
     }
 
     @Test
@@ -288,17 +330,20 @@ class CatalogDocumentSensitivityWriteRulesTest {
         repo.importDocument(t, importRow("48.10", "i1", true));
         repo.importDocument(t, importRow("48.10", "i1", false));
         assertThat(flag(t, "48.10")).as("importDocument: false over true").isTrue();
-        assertThat(audit(t)).as("fresh flagged row and a lowering attempt write nothing").isEmpty();
+        assertThat(audit(t)).as("the fresh flagged row is audited once (import_set); the lowering attempt writes nothing")
+            .containsExactly("48.10|false|true|import_set|engine");
         repo.importDocument(t, importRow("48.11", "i2", false));
         repo.importDocument(t, importRow("48.11", "i2", true));
         assertThat(flag(t, "48.11")).as("importDocument: true over false").isTrue();
-        assertThat(audit(t)).containsExactly("48.11|false|true|import_raise|engine");
+        assertThat(audit(t)).containsExactly("48.10|false|true|import_set|engine", "48.11|false|true|import_raise|engine");
 
         repo.importDocumentsBatch(t, List.of(
             importRow("48.20", "b1", true),
             importRow("48.21", "b2", false),
             importRow("48.22", "b3", null)));
-        assertThat(audit(t)).as("a first batch creates rows; nothing to audit").hasSize(1);
+        assertThat(audit(t)).as("a first batch creates rows: the flagged one is audited (import_set), the others are not")
+            .containsExactly("48.10|false|true|import_set|engine", "48.11|false|true|import_raise|engine",
+                "48.20|false|true|import_set|engine");
         repo.importDocumentsBatch(t, List.of(
             importRow("48.20", "b1", false),
             importRow("48.21", "b2", true),
@@ -307,9 +352,138 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, "48.21")).as("batch: true over false").isTrue();
         assertThat(flag(t, "48.22")).as("batch: absent over plain").isFalse();
         assertThat(audit(t)).as("only 48.21 changed in the batch")
-            .containsExactly("48.11|false|true|import_raise|engine", "48.21|false|true|import_raise|engine");
+            .containsExactly("48.10|false|true|import_set|engine", "48.11|false|true|import_raise|engine",
+                "48.20|false|true|import_set|engine", "48.21|false|true|import_raise|engine");
         repo.importDocumentsBatch(t, List.of(importRow("48.21", "b2", true)));
-        assertThat(audit(t)).as("a repeat raise writes nothing").hasSize(2);
+        assertThat(audit(t)).as("a repeat raise writes nothing").hasSize(4);
+    }
+
+    // ── nexus-rfvyy.6.24: a fresh upsert or import row inherits from a sensitive tombstone ──────────
+
+    /** A tombstoned sensitive row {@code tumbler} carrying {@code uri}, set up through the engine. */
+    private void tombstonedSensitive(String t, String tumbler, String uri, boolean sensitive) throws Exception {
+        var d = importRow(tumbler, "old", sensitive);
+        d.put("source_uri", uri);
+        repo.upsertDocument(t, d);
+        repo.deleteDocument(t, tumbler);
+    }
+
+    private Map<String, Object> importRowAt(String tumbler, String uri, Boolean sensitive) {
+        var d = importRow(tumbler, "new", sensitive);
+        d.put("source_uri", uri);
+        return d;
+    }
+
+    @Test
+    void upsertDocument_aFreshRow_inheritsFromASensitiveTombstoneOfTheSameSourceUri_andAuditsIt() throws Exception {
+        String t = tenant();
+        tombstonedSensitive(t, "48.50", "file:///r/up.md", true);
+        repo.upsertDocument(t, importRowAt("48.51", "file:///r/up.md", null));
+        assertThat(flag(t, "48.51")).as("delete-then-re-index through upsert keeps the protection").isTrue();
+        assertThat(auditExceptSetRows(t)).containsExactly("48.51|false|true|upsert_inherit predecessor=48.50|engine");
+
+        // an explicit sensitive=false does not stop it
+        tombstonedSensitive(t, "48.52", "file:///r/up2.md", true);
+        repo.upsertDocument(t, importRowAt("48.53", "file:///r/up2.md", false));
+        assertThat(flag(t, "48.53")).isTrue();
+
+        // a plain tombstone, a different uri, and an empty uri all leave the fresh row plain
+        tombstonedSensitive(t, "48.54", "file:///r/up3.md", false);
+        repo.upsertDocument(t, importRowAt("48.55", "file:///r/up3.md", null));
+        repo.upsertDocument(t, importRowAt("48.56", "file:///r/other.md", null));
+        repo.upsertDocument(t, importRowAt("48.57", "", null));
+        assertThat(flag(t, "48.55")).as("plain predecessor").isFalse();
+        assertThat(flag(t, "48.56")).as("no predecessor").isFalse();
+        assertThat(flag(t, "48.57")).as("empty source_uri has no predecessor identity").isFalse();
+
+        // only a FRESH row inherits: a re-upsert of an existing plain row beside a sensitive tombstone changes nothing
+        int before = audit(t).size();   // the setup rows included
+        repo.upsertDocument(t, importRowAt("48.55", "file:///r/up3.md", null));
+        repo.upsertDocument(t, importRowAt("48.56", "file:///r/other.md", null));
+        assertThat(audit(t)).hasSize(before);
+        tombstonedSensitive(t, "48.58", "file:///r/up4.md", true);
+        repo.upsertDocument(t, importRowAt("48.59", "file:///r/up4-other.md", null));
+        repo.upsertDocument(t, importRowAt("48.59", "file:///r/up4.md", null));   // existing row moves onto the uri
+        assertThat(flag(t, "48.59")).as("an existing row is not 'fresh'").isFalse();
+    }
+
+    @Test
+    void importDocument_andImportDocumentsBatch_aFreshRow_inheritFromASensitiveTombstone_andAuditIt() throws Exception {
+        String t = tenant();
+        tombstonedSensitive(t, "48.60", "file:///r/im.md", true);
+        repo.importDocument(t, importRowAt("48.61", "file:///r/im.md", null));
+        assertThat(flag(t, "48.61")).isTrue();
+        assertThat(auditExceptSetRows(t)).containsExactly("48.61|false|true|import_inherit predecessor=48.60|engine");
+
+        tombstonedSensitive(t, "48.62", "file:///r/b1.md", true);
+        tombstonedSensitive(t, "48.63", "file:///r/b2.md", false);
+        repo.importDocumentsBatch(t, List.of(
+            importRowAt("48.64", "file:///r/b1.md", null),     // inherits
+            importRowAt("48.65", "file:///r/b2.md", null),     // plain predecessor
+            importRowAt("48.66", "file:///r/b3.md", null),     // none
+            importRowAt("48.67", "", null)));                  // no uri
+        assertThat(flag(t, "48.64")).isTrue();
+        assertThat(flag(t, "48.65")).isFalse();
+        assertThat(flag(t, "48.66")).isFalse();
+        assertThat(flag(t, "48.67")).isFalse();
+        assertThat(auditExceptSetRows(t)).containsExactly("48.61|false|true|import_inherit predecessor=48.60|engine",
+            "48.64|false|true|import_inherit predecessor=48.62|engine");
+
+        // a re-import of the existing rows inherits nothing more
+        repo.importDocumentsBatch(t, List.of(importRowAt("48.65", "file:///r/b2.md", null), importRowAt("48.64", "file:///r/b1.md", null)));
+        assertThat(auditExceptSetRows(t)).hasSize(2);
+
+        // only a FRESH row inherits: an EXISTING plain row re-imported onto the uri of a sensitive tombstone stays plain
+        tombstonedSensitive(t, "48.68", "file:///r/im4.md", true);
+        repo.importDocument(t, importRowAt("48.69", "file:///r/im4-other.md", null));
+        repo.importDocumentsBatch(t, List.of(importRowAt("48.70", "file:///r/im5-other.md", null)));
+        tombstonedSensitive(t, "48.71", "file:///r/im5.md", true);
+        repo.importDocument(t, importRowAt("48.69", "file:///r/im4.md", null));
+        repo.importDocumentsBatch(t, List.of(importRowAt("48.70", "file:///r/im5.md", null)));
+        org.assertj.core.api.SoftAssertions.assertSoftly(soft -> {
+            try {
+                soft.assertThat(flag(t, "48.69")).as("single import: an existing row is not 'fresh'").isFalse();
+                soft.assertThat(flag(t, "48.70")).as("batch import: an existing row is not 'fresh'").isFalse();
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        });
+        assertThat(auditExceptSetRows(t)).hasSize(2);
+    }
+
+    // ── nexus-rfvyy.6.23 (Sam 2026-11-05): every flagged document gets a first audit row ─────────────
+
+    @Test
+    void upsertAndImport_aFreshRowBornFlaggedByItsRequest_writesOneSetRow_andInheritanceTakesPrecedence() throws Exception {
+        String t = tenant();
+        repo.upsertDocument(t, importRow("48.80", "s1", true));
+        repo.importDocument(t, importRow("48.81", "s2", true));
+        repo.importDocumentsBatch(t, List.of(
+            importRow("48.82", "s3", true),
+            importRow("48.83", "s4", null),
+            importRow("48.84", "s5", false),
+            importRow("48.85", "s6", false), importRow("48.85", "s6", true)));   // OR over repeated copies: flagged
+        assertThat(audit(t)).as("one set row per fresh flagged row, none for plain ones, the repeated copy counted once")
+            .containsExactly("48.80|false|true|upsert_set|engine", "48.81|false|true|import_set|engine",
+                "48.82|false|true|import_set|engine", "48.85|false|true|import_set|engine");
+
+        // a fresh row that is flagged by its request AND has a sensitive tombstone: ONE row, the inheritance names why
+        tombstonedSensitive(t, "48.86", "file:///r/both-u.md", true);
+        tombstonedSensitive(t, "48.87", "file:///r/both-i.md", true);
+        tombstonedSensitive(t, "48.88", "file:///r/both-b.md", true);
+        repo.upsertDocument(t, importRowAt("48.90", "file:///r/both-u.md", true));
+        repo.importDocument(t, importRowAt("48.91", "file:///r/both-i.md", true));
+        repo.importDocumentsBatch(t, List.of(importRowAt("48.92", "file:///r/both-b.md", true)));
+        assertThat(audit(t).stream().filter(a -> a.startsWith("48.90|") || a.startsWith("48.91|") || a.startsWith("48.92|")).toList())
+            .containsExactly("48.90|false|true|upsert_inherit predecessor=48.86|engine",
+                "48.91|false|true|import_inherit predecessor=48.87|engine",
+                "48.92|false|true|import_inherit predecessor=48.88|engine");
+
+        // an existing row is never "born": a flagged re-upsert of a plain row is the raise, not a set
+        repo.upsertDocument(t, importRow("48.93", "p", false));
+        repo.upsertDocument(t, importRow("48.93", "p", true));
+        assertThat(audit(t).stream().filter(a -> a.startsWith("48.93|")).toList())
+            .containsExactly("48.93|false|true|upsert_raise|engine");
     }
 
     // ── the intra-batch alias and the race-lost raises ──────────────────
@@ -329,7 +503,9 @@ class CatalogDocumentSensitivityWriteRulesTest {
             fields("b", "file:///r/alias2.md", "alias2.md", true),
             fields("b2", "file:///r/alias2.md", "alias2-dup.md", null)));
         assertThat(flag(t, firstFlagged.get(0))).isTrue();
-        assertThat(audit(t)).as("both rows were born flagged: nothing changed on an existing row").isEmpty();
+        assertThat(audit(t)).as("both rows were born flagged by a request: one register_set row each, nothing on an existing row")
+            .containsExactlyInAnyOrder(laterFlagged.get(0) + "|false|true|register_set|engine",
+                firstFlagged.get(0) + "|false|true|register_set|engine");
     }
 
     @Test
@@ -408,7 +584,8 @@ class CatalogDocumentSensitivityWriteRulesTest {
         repo.importDocumentsBatch(t, List.of(importRow("48.33", "e", false)));
         repo.importDocumentsBatch(t, List.of(importRow("48.33", "e", true), importRow("48.33", "e", false)));
         assertThat(flag(t, "48.33")).isTrue();
-        assertThat(audit(t)).containsExactly("48.33|false|true|import_raise|engine");
+        assertThat(audit(t)).containsExactly("48.30|false|true|import_set|engine", "48.31|false|true|import_set|engine",
+            "48.33|false|true|import_raise|engine");
     }
 
     // ── concurrency: one audit row per false-to-true write, and no deadlock between batches ──────────
@@ -568,9 +745,10 @@ class CatalogDocumentSensitivityWriteRulesTest {
                 pool.shutdownNow();
             }
             assertThat(flag(t, tumbler)).as("writer %s re-raised the cleared row", w).isTrue();
-            assertThat(audit(t)).as("writer %s: the clear, then exactly one audited raise", w).hasSize(2);
-            assertThat(audit(t).get(0)).isEqualTo(tumbler + "|true|false|test clear|tester");
-            assertThat(audit(t).get(1)).startsWith(tumbler + "|false|true|").endsWith("|engine");
+            assertThat(audit(t)).as("writer %s: the setup's upsert_set, the clear, then exactly one audited raise", w).hasSize(3);
+            assertThat(audit(t).get(0)).isEqualTo(tumbler + "|false|true|upsert_set|engine");
+            assertThat(audit(t).get(1)).isEqualTo(tumbler + "|true|false|test clear|tester");
+            assertThat(audit(t).get(2)).startsWith(tumbler + "|false|true|").endsWith("|engine");
         }
     }
 
@@ -589,8 +767,8 @@ class CatalogDocumentSensitivityWriteRulesTest {
             // the row is absent when the writer starts; the racer's plain insert commits while the writer waits
             withRacingWinner(t, tumbler, "", () -> { writers.get(idx).accept(t, tumbler); return null; });
             assertThat(flag(t, tumbler)).as("writer %s raised the racer's row", w).isTrue();
-            assertThat(audit(t)).as("writer %s: one audited raise of the racer's plain row", w).hasSize(1);
-            assertThat(audit(t).get(0)).startsWith(tumbler + "|false|true|").endsWith("|engine");
+            assertThat(auditExceptSetRows(t)).as("writer %s: one audited raise of the racer's plain row (a fresh flagged sibling in the batch owes its own set row)", w).hasSize(1);
+            assertThat(auditExceptSetRows(t).get(0)).startsWith(tumbler + "|false|true|").endsWith("|engine");
         }
     }
 
@@ -638,29 +816,44 @@ class CatalogDocumentSensitivityWriteRulesTest {
 
     // ── merge and rename ────────────────────────────────────────────────
 
+    /** The audit rows of one tenant that are NOT born-flagged set rows (register_set, upsert_set, import_set). */
+    private List<String> auditExceptSetRows(String t) throws Exception {
+        return audit(t).stream().filter(a -> !a.matches(".*\\|(register|upsert|import)_set\\|.*")).toList();
+    }
+
     @Test
-    void merge_leavesTheCanonicalSensitiveWhenEitherSideWas() throws Exception {
+    void merge_raisesBothRowsWhenEitherSideWas_andAuditsEachRowThatChanged() throws Exception {
         String t = tenant();
+        // nexus-rfvyy.6.22 (Sam, 2026-11-05): the duplicate adopts the flag; both rows are raised.
         String dupFlagged = repo.registerDocument(t, OWNER, fields("d1", "file:///r/d1.md", "d1.md", true));
         String canonPlain = repo.registerDocument(t, OWNER, fields("c1", "file:///r/c1.md", "c1.md", null));
         repo.mergeDocuments(t, dupFlagged, canonPlain);
-        assertThat(flag(t, canonPlain)).as("duplicate sensitive, canonical plain").isTrue();
+        assertThat(flag(t, canonPlain)).as("duplicate sensitive, canonical plain: canonical raised").isTrue();
         assertThat(flag(t, dupFlagged)).as("the duplicate keeps its own flag").isTrue();
-        assertThat(audit(t)).hasSize(1);
-        assertThat(audit(t).get(0)).startsWith(canonPlain + "|false|true|merge").contains(dupFlagged)
+        assertThat(auditExceptSetRows(t)).as("only the canonical changed: one row").hasSize(1);
+        assertThat(auditExceptSetRows(t).get(0)).startsWith(canonPlain + "|false|true|merge").contains(dupFlagged)
             .endsWith("|engine");
 
         String dupPlain = repo.registerDocument(t, OWNER, fields("d2", "file:///r/d2.md", "d2.md", null));
         String canonFlagged = repo.registerDocument(t, OWNER, fields("c2", "file:///r/c2.md", "c2.md", true));
         repo.mergeDocuments(t, dupPlain, canonFlagged);
         assertThat(flag(t, canonFlagged)).as("canonical sensitive, duplicate plain: stays sensitive").isTrue();
-        assertThat(flag(t, dupPlain)).isFalse();
+        assertThat(flag(t, dupPlain)).as("the duplicate adopts the canonical's flag").isTrue();
+        assertThat(auditExceptSetRows(t)).as("the duplicate's raise is audited").hasSize(2);
+        assertThat(auditExceptSetRows(t).get(1)).startsWith(dupPlain + "|false|true|merge").contains(canonFlagged)
+            .endsWith("|engine");
 
         String dupPlain3 = repo.registerDocument(t, OWNER, fields("d3", "file:///r/d3.md", "d3.md", null));
         String canonPlain3 = repo.registerDocument(t, OWNER, fields("c3", "file:///r/c3.md", "c3.md", null));
         repo.mergeDocuments(t, dupPlain3, canonPlain3);
         assertThat(flag(t, canonPlain3)).as("neither side sensitive").isFalse();
-        assertThat(audit(t)).as("only the first merge changed a flag").hasSize(1);
+        assertThat(flag(t, dupPlain3)).as("neither side sensitive").isFalse();
+
+        String dupFlagged4 = repo.registerDocument(t, OWNER, fields("d4", "file:///r/d4.md", "d4.md", true));
+        String canonFlagged4 = repo.registerDocument(t, OWNER, fields("c4", "file:///r/c4.md", "c4.md", true));
+        repo.mergeDocuments(t, dupFlagged4, canonFlagged4);
+        assertThat(auditExceptSetRows(t)).as("both sides already sensitive: nothing changed, nothing audited")
+            .hasSize(2);
     }
 
     @Test
