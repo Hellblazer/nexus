@@ -2646,7 +2646,7 @@ def _pdf_chunks(
     from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     source_title = title_override or resolve_pdf_title(result.metadata, pdf_path, result.text)
     bib: dict = {}
-    if bib_enrich_enabled:
+    if bib_enrich_enabled and not sensitive:  # RDR-243 rows 7 and 8: a sensitive document's title is never sent
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
     if extraction_stats is not None and bib:
@@ -3192,6 +3192,27 @@ def index_pdf(
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
             return 0
 
+    # RDR-243 (fix round 1): the external legs key on the CATALOG row, not only on this run's
+    # --sensitive option. A document flagged earlier is handled as sensitive on this run too: local
+    # extraction (no MinerU server), no --enrich lookup, and no write into a Voyage collection
+    # without --ack-external-embedder. A flag the catalog cannot answer reads as sensitive. After the
+    # staleness skip, so an unchanged document costs no extra catalog read.
+    ext_sensitive = sensitive
+    if not dry_run:
+        from nexus.sensitive_write import external_legs_gate  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        try:
+            ext_sensitive = external_legs_gate(
+                doc_id, col_name, sensitive=sensitive, enrich=enrich, ack=ack_external_embedder,
+                what="nx index pdf")
+        except Exception as exc:
+            _rollback_if_freshly_minted(exc)
+            raise
+    if ext_sensitive and extractor == "mineru":
+        _log.warning(
+            "sensitive_mineru_server_skipped", pdf=str(pdf_path), doc_id=doc_id,
+            reason="flag" if sensitive else "catalog",
+            note="a sensitive document is extracted by a local MinerU subprocess; no MinerU server is contacted")
+
     # Streaming pipeline routing: check page count before full extraction.
     if streaming in ("auto", "always"):
         try:
@@ -3227,7 +3248,7 @@ def index_pdf(
                     on_write_started=_note_write_started,
                     extraction_stats=_extraction_stats,
                     enrich=enrich,
-                    **({"sensitive": True} if sensitive else {}),
+                    **({"sensitive": True} if ext_sensitive else {}),
                 )
             except Exception as exc:
                 _rollback_if_freshly_minted(exc)
@@ -3450,7 +3471,7 @@ def index_pdf(
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
         extraction_stats=_extraction_stats, title_override=title_override,
         collection_name=col_name,
-        **({"sensitive": True} if sensitive else {}),
+        **({"sensitive": True} if ext_sensitive else {}),
     )
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
@@ -4221,6 +4242,17 @@ def index_markdown(
         doc_id, _doc_just_created = _reg_result, False
     if sensitive and not doc_id:
         _raise_sensitive_unregistered(md_path)
+    # RDR-243 (fix round 1): a document flagged earlier is not written to a Voyage collection on a run that
+    # does not pass --sensitive (see index_pdf). Markdown has no MinerU or --enrich leg.
+    from nexus.sensitive_write import external_legs_gate  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+    try:
+        external_legs_gate(
+            doc_id, col_name, sensitive=sensitive, enrich=False, ack=ack_external_embedder, what="nx index md")
+    except Exception as exc:
+        if _doc_just_created:
+            from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.store_hook)
+            rollback_minted_catalog_entry(doc_id, original_error=str(exc))
+        raise
     chunk_fn = partial(
         _markdown_chunks,
         base_path=base_path,

@@ -252,6 +252,9 @@ def test_hop_2_taxonomy_labelling_pool_dispatches_inside_the_scope(
         def get_topic_doc_ids(self, topic_id: int, limit: int = 0) -> list[str]:
             return []
 
+        def get_projection_counts_by_collection(self) -> dict[str, int]:
+            return {}
+
     persisted: list[Any] = []
     monkeypatch.setattr(mcp_infra, "t2_index_write", lambda fn: persisted.append(fn))
     main_thread = threading.get_ident()

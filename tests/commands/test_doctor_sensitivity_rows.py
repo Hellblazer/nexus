@@ -194,11 +194,82 @@ def test_nx_doctor_supplementary_rows_are_not_applicable_on_a_virgin_tenant_and_
     assert out.count("not applicable") == 2 and "[✓]" not in out
 
 
-def test_nx_doctor_supplementary_fail_row_prints_and_does_not_raise(monkeypatch, capsys) -> None:
+def _failing_report() -> dict:
+    return {"name": sd.WITH_ASPECTS, "status": sd.FAIL, "reason": "", "sensitive_documents": 1,
+            "findings": [{"tumbler": "1.1.1", "collection": "c", "why": "has an aspect row"}]}
+
+
+def test_nx_doctor_supplementary_fail_row_prints_its_remedy_and_reports_the_failure(monkeypatch, capsys) -> None:
+    """RDR-243 item 10: the FAIL row gates the sweep. The row prints (it never raises Exit into the
+    supplementary runner) and RETURNS True so the sweep can fail; a pass or not-applicable row returns False."""
     from nexus.commands import doctor as doctor_mod
 
-    failing = {"name": sd.WITH_ASPECTS, "status": sd.FAIL, "reason": "", "sensitive_documents": 1,
-               "findings": [{"tumbler": "1.1.1", "collection": "c", "why": "has an aspect row"}]}
-    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: failing)
-    doctor_mod._run_check_sensitive_with_aspects()  # non-gating: a supplementary row never raises Exit
+    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: _failing_report())
+    assert doctor_mod._run_check_sensitive_with_aspects() is True
     assert "nx enrich delete --tumbler 1.1.1" in capsys.readouterr().out
+
+    ok = {**_failing_report(), "status": sd.PASS, "findings": []}
+    na = {**_failing_report(), "status": sd.NOT_APPLICABLE, "findings": [], "reason": "no sensitive documents"}
+    for report in (ok, na):
+        monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda report=report, **kw: report)
+        assert doctor_mod._run_check_sensitive_with_aspects() is False
+
+
+def _only_the_sensitive_rows(monkeypatch) -> None:
+    from nexus.commands import doctor as doctor_mod
+
+    for name in dir(doctor_mod):
+        if name.startswith("_run_check_") and name not in (
+            "_run_check_sensitive_with_aspects", "_run_check_sensitive_in_aspect_eligible",
+        ):
+            monkeypatch.setattr(doctor_mod, name, lambda *a, **k: None)
+
+
+def test_the_supplementary_sweep_reports_a_failed_sensitive_row_and_only_that_one(monkeypatch, capsys) -> None:
+    from nexus.commands import doctor as doctor_mod
+
+    _only_the_sensitive_rows(monkeypatch)
+    warn = {**_failing_report(), "name": sd.IN_ELIGIBLE, "status": sd.WARN}
+    monkeypatch.setattr(sd, "check_sensitive_in_aspect_eligible", lambda **kw: warn)
+    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: {**_failing_report(), "status": sd.PASS, "findings": []})
+    assert doctor_mod._run_supplementary_checks() is False, "a WARN row, and a PASS row, do not gate"
+
+    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: _failing_report())
+    assert doctor_mod._run_supplementary_checks() is True
+    assert "FAIL" in capsys.readouterr().out
+
+
+@substrate
+def test_nx_doctor_exits_non_zero_when_the_sensitive_with_aspects_row_fails(monkeypatch) -> None:
+    """The sweep's exit code: a healthy main sweep plus a FAIL sensitive_with_aspects row is exit 1."""
+    import nexus.commands.doctor as doctor_mod
+    import nexus.health as health_mod
+    from nexus.health import HealthResult
+
+    monkeypatch.setattr(health_mod, "run_health_checks", lambda *a, **k: ([HealthResult(label="ok", ok=True)], False))
+    _only_the_sensitive_rows(monkeypatch)
+    monkeypatch.setattr(sd, "check_sensitive_in_aspect_eligible", lambda **kw: {**_failing_report(), "status": sd.PASS, "findings": [], "name": sd.IN_ELIGIBLE})
+
+    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: _failing_report())
+    failing = CliRunner().invoke(main, ["doctor"])
+    assert failing.exit_code == 1, failing.output
+    assert "nx enrich delete --tumbler 1.1.1" in failing.output
+
+    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: {**_failing_report(), "status": sd.PASS, "findings": []})
+    clean = CliRunner().invoke(main, ["doctor"])
+    assert clean.exit_code == 0, clean.output
+
+
+def test_the_row_does_not_walk_the_catalog_when_the_engine_cannot_hold_the_flag() -> None:
+    walked: list[int] = []
+
+    class Unsupported(_Reader):
+        def all_documents(self, limit=0):
+            walked.append(1)
+            return super().all_documents(limit)
+
+    for check, kw in ((sd.check_sensitive_with_aspects, {"queue": object(), "queued_doc_ids": lambda q: set()}),
+                      (sd.check_sensitive_in_aspect_eligible, {"select": lambda c: object()})):
+        report = check(reader=Unsupported([_doc("1.1.1")], supported=False), aspects=_Aspects(), **kw)
+        assert report["status"] == sd.NOT_APPLICABLE
+    assert walked == [], "the full-catalog walk is skipped when the engine does not advertise the capability"

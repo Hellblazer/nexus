@@ -60,10 +60,10 @@ def _entry_flag(entry: Any) -> bool:
 def flagged(tumblers: Iterable[str], *, cat: Any = None) -> set[str]:
     """The subset of *tumblers* whose catalog row is sensitive.
 
-    One batched read for the tumblers the batch route answers; a tumbler it did not return (an
-    alias, which the batch route does not follow, or a tombstone) is read once on its own with
-    alias following, so an alias of a sensitive document is flagged too. Blank tumblers are
-    ignored. Raises :class:`SensitivityUnknown` when the catalog cannot be read."""
+    One batched read for the tumblers the batch route answers. The batch route does not follow
+    ``alias_of``: it returns a merged duplicate's own live row, so a row with ``alias_of`` set is
+    resolved again with alias following and the canonical's flag counts. A tumbler the route did not
+    return at all (a tombstone) is read once on its own. Blank tumblers are ignored. Raises :class:`SensitivityUnknown` when the catalog cannot be read."""
     wanted = sorted({t for t in tumblers if t})
     if not wanted:
         return set()
@@ -72,7 +72,17 @@ def flagged(tumblers: Iterable[str], *, cat: Any = None) -> set[str]:
         if cat is None:
             raise RuntimeError("no catalog reader")
         entries = cat.resolve_many(wanted) or {}
-        out = {t for t, e in entries.items() if _entry_flag(e)}
+        out: set[str] = set()
+        for t, e in entries.items():
+            if _entry_flag(e):
+                out.add(t)
+            elif getattr(e, "alias_of", ""):
+                # The batch route returns a merged duplicate's own live row, with its own flag, not the
+                # canonical's (the canonical owns the chunks and is what gets flagged). Ask for the
+                # canonical, following the alias, before saying "not sensitive".
+                resolved = cat.resolve(t, follow_alias=True)
+                if resolved is not None and _entry_flag(resolved):
+                    out.add(t)
         for t in wanted:
             if t in entries:
                 continue

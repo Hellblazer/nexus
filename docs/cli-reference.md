@@ -2531,7 +2531,7 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 | `--tags TAG,TAG` | Comma-separated tags |
 | `--category LABEL` | Category label |
 | `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`; default: `permanent`) |
-| `--sensitive` | Mark the note sensitive (RDR-243); see `nx index md`. A re-put raises the flag on the existing note |
+| `--sensitive` | Mark the note sensitive (RDR-243); see `nx index md`. A re-put raises the flag on the existing note, in the collection the note is in. In local mode, if a live note with the same title is already in the Voyage collection, the put refuses (nothing is written) unless `--ack-external-embedder` is given, because routing it to the bge collection would leave the original note unflagged beside a new one; with the ack the existing note is flagged in place on Voyage |
 | `--ack-external-embedder` | With `--sensitive`: accept a Voyage collection. Without it, local mode stores into the bge collection of the same subject and cloud mode refuses |
 
 A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.
@@ -3631,8 +3631,9 @@ whose collection has an aspect extractor or already holds aspect rows (warn), an
 document that already has an aspect row or a queued aspect task (fail; one `nx enrich delete
 --tumbler <t>` line each). Both read `[ ]` not applicable, never a pass, on a tenant with no
 sensitive documents, on an engine without the sensitivity column, and when the catalog or the
-aspect store cannot be read. As supplementary rows they print and never change the exit code;
-`nx catalog doctor --sensitive-with-aspects` exits 1 on a fail.
+aspect store cannot be read. The warn row prints and never changes the exit code; a `sensitive-with-aspects`
+fail is the one supplementary finding that gates: `nx doctor` (text mode) exits 1 on it, as
+`nx catalog doctor --sensitive-with-aspects` does.
 `ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names

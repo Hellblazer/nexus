@@ -180,9 +180,12 @@ def test_dt_crossref_gapfill_skips_a_sensitive_document_loudly(
 class _Taxonomy:
     """The taxonomy store, with the reads the label and review passes make."""
 
-    def __init__(self, topics: list[dict[str, Any]], members: dict[int, list[str]]) -> None:
+    def __init__(
+        self, topics: list[dict[str, Any]], members: dict[int, list[str]], projection: dict[str, int] | None = None,
+    ) -> None:
         self._topics = topics
         self._members = members
+        self._projection = projection or {}
         self.labels: dict[int, str] = {}
         self.reviewed: dict[int, str] = {}
 
@@ -197,6 +200,9 @@ class _Taxonomy:
 
     def get_all_topic_doc_ids(self, topic_id: int) -> list[str]:
         return list(self._members[topic_id])
+
+    def get_projection_counts_by_collection(self) -> dict[str, int]:
+        return dict(self._projection)
 
     def update_topic_label(self, topic_id: int, label: str) -> None:
         self.labels[topic_id] = label
@@ -293,3 +299,49 @@ def test_taxonomy_fails_closed_when_the_catalog_cannot_say(
     monkeypatch.setattr("nexus.doc_sensitivity._catalog_reader", unreadable)
     assert taxonomy_cmd.relabel_topics(store, collection=collection, workers=1) == 0
     assert prompts == [] and store.labels == {}, "nothing was sent on a guess"
+
+
+# ── Cross-collection projection (fix round 1, nexus-rfvyy.6.20) ─────────────────────────────────
+
+
+@pytest.mark.parametrize("own_collection_has_a_sensitive_document", [True, False], ids=["own-flagged", "own-clean"])
+def test_a_topic_holding_a_sensitive_chunk_projected_from_another_collection_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch, logs: _Log, own_collection_has_a_sensitive_document: bool,
+) -> None:
+    import nexus.mcp_infra as infra
+
+    tag = uuid.uuid4().hex[:8]
+    collection = f"knowledge__projdst-{tag}__{MODEL_BGE}__v1"
+    source = f"knowledge__projsrc-{tag}__{MODEL_BGE}__v1"
+    clean_source = f"knowledge__projclean-{tag}__{MODEL_BGE}__v1"
+    control = _seed(collection, "ctrl", f"10.5555/ctrl.{tag}", "2501.33333", sensitive=False)
+    if own_collection_has_a_sensitive_document:
+        _seed(collection, "own-sens", f"10.5555/own.{tag}", "2501.44444", sensitive=True)
+    foreign = _seed(source, "foreign-sens", f"10.5555/foreign.{tag}", "2501.55555", sensitive=True)
+    clean_foreign = _seed(clean_source, "foreign-clean", f"10.5555/fclean.{tag}", "2501.66666", sensitive=False)
+    # Topic 1 holds a sensitive chunk projected in from `source`; topic 2 only a plain one projected in from a
+    # source with no sensitive document; topic 3 only its own plain chunk.
+    store = _Taxonomy(
+        [_topic(1, collection, "projterm"), _topic(2, collection, "cleanprojterm"), _topic(3, collection, "ctrlterm")],
+        {1: [control.chash, foreign.chash], 2: [clean_foreign.chash], 3: [control.chash]},
+        projection={source: 1, clean_source: 1},
+    )
+    prompts: list[str] = []
+
+    async def dispatch(prompt: str, schema: dict, **kw: Any) -> dict:
+        prompts.append(prompt)
+        n = prompt.count("terms=[")
+        return {"labels": [{"idx": i, "label": f"Label number {i}"} for i in range(1, n + 1)]}
+
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", dispatch)
+    db = SimpleNamespace(taxonomy=store, memory=SimpleNamespace(get=lambda **kw: None))
+    monkeypatch.setattr(infra, "t2_index_write", lambda fn, **kw: fn(db))
+
+    assert taxonomy_cmd._topics_with_sensitive_members(store, store.get_all_topics()) == {1}
+
+    count = taxonomy_cmd.relabel_topics(store, collection=collection, workers=1)
+
+    joined = "\n".join(prompts)
+    assert "projterm" not in joined.replace("cleanprojterm", ""), "the topic with the projected sensitive chunk was sent"
+    assert "cleanprojterm" in joined and "ctrlterm" in joined, "the other topics WERE dispatched (the surface ran)"
+    assert count == 2 and set(store.labels) == {2, 3}, f"topic 1 keeps its terms label: {store.labels}"

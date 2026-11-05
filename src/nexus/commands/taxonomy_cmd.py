@@ -1721,19 +1721,35 @@ def _topics_with_sensitive_members(taxonomy: Any, topics: list[dict[str, Any]]) 
     sample names point at, the sensitive document's text. Raises
     :class:`~nexus.doc_sensitivity.SensitivityUnknown` when the catalog cannot say.
 
-    Residual: a sensitive chunk of ANOTHER collection projected into this collection's topic
-    (cross-collection ``project_against`` assignments) is not found, because only the topic's own
-    collection is listed."""
+    A topic also holds chunks PROJECTED in from other collections (cross-collection
+    ``project_against`` assignments). The taxonomy store names the collections that have projected
+    anything (``get_projection_counts_by_collection``); the sensitive chunks of each of those are
+    matched against a topic's members too, so a projected sensitive chunk keeps its topic off the
+    model. A chunk that exists in both collections counts (the shared row cannot be told apart). A
+    projection read that fails reads as unknown."""
     from nexus import doc_sensitivity  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     ids_by_collection: dict[str, list[int]] = {}
     for topic in topics:
         ids_by_collection.setdefault(topic.get("collection", "") or "", []).append(topic["id"])
+    try:
+        projected_from = {c for c, n in taxonomy.get_projection_counts_by_collection().items() if c and n}
+    except Exception as exc:  # noqa: BLE001 - boundary: a projection read that fails is "unknown", never "none projected"
+        raise doc_sensitivity.SensitivityUnknown(f"projection sources: {type(exc).__name__}: {exc}"[:300]) from exc
+    sensitive_by_collection: dict[str, set[str]] = {}
+
+    def sensitive_chashes(collection: str) -> set[str]:
+        if collection not in sensitive_by_collection:
+            sensitive_by_collection[collection] = doc_sensitivity.sensitive_chashes(collection)
+        return sensitive_by_collection[collection]
+
     flagged: set[int] = set()
     for collection, topic_ids in ids_by_collection.items():
         if not collection:
             continue
-        chashes = doc_sensitivity.sensitive_chashes(collection)
+        chashes = set(sensitive_chashes(collection))
+        for source in sorted(projected_from - {collection}):
+            chashes |= sensitive_chashes(source)
         if not chashes:
             continue
         for topic_id in topic_ids:

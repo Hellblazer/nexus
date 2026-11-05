@@ -24,10 +24,11 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 __all__ = [
-    "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveFlagNotSetError", "ack_help",
-    "bge_sibling", "cloud_disclosure", "cloud_refusal_text", "is_external_embedder", "raise_flag",
-    "refuse_external_existing", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help",
-    "route_for_index", "sensitive_write_kwargs",
+    "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
+    "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
+    "cloud_refusal_text", "external_legs_gate", "is_external_embedder", "raise_flag", "refuse_external_existing",
+    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
+    "sensitive_write_kwargs",
 ]
 
 #: The audit reason recorded when a verb raises the flag on an existing document.
@@ -75,6 +76,12 @@ class ExternalEmbedderRefusedError(click.ClickException, RuntimeError):
 
     Both a ``ClickException`` (a verb prints it and exits non-zero) and a ``RuntimeError`` (a batch loop
     that survives a per-record ``RuntimeError`` survives this one, and MCP words it with ``_fail``)."""
+
+
+class SensitiveEnrichRefusedError(click.ClickException, RuntimeError):
+    """``--enrich`` on a sensitive document: its title would go to Semantic Scholar or CrossRef (rows 7 and 8).
+
+    A ``ClickException`` (a verb prints it) and a ``RuntimeError`` (a ``--dir`` batch isolates it to the file)."""
 
 
 def _parse_collection(collection_name: str) -> Any:
@@ -217,6 +224,91 @@ def refuse_external_existing(existing: object, *, ack: bool, what: str) -> None:
     )
 
 
+def refuse_external_existing_note(collection: str, title: str, *, ack: bool, what: str) -> None:
+    """Refuse a ``--sensitive`` note put whose title already names a live note in the Voyage *collection*.
+
+    The store verbs route a sensitive put to the bge sibling in local mode. When the title already has a
+    live note in the Voyage collection, the re-route writes a new note there and leaves the original,
+    unflagged and Voyage-embedded, beside it. Same rule as :func:`refuse_external_existing`: refuse before
+    anything is written; with *ack* the put goes to the Voyage collection and flags the existing note in
+    place. A blank title, a local-embedder collection and the ack never ask the catalog. A catalog that
+    cannot answer refuses (it cannot be told there is no twin).
+    """
+    if ack or not title or not is_external_embedder(collection):
+        return
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: the factory pulls the catalog client
+
+    try:
+        cat = make_catalog_reader()
+        try:
+            existing = [e for e in cat.find_by_title_exact(title) if e.physical_collection == collection]
+        finally:
+            close = getattr(cat, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:  # noqa: BLE001 — boundary: an unanswerable twin check refuses, it never guesses
+        raise ExternalEmbedderRefusedError(
+            f"{what} refused: could not check whether a note titled {title!r} already exists in the Voyage "
+            f"collection {collection} ({type(exc).__name__}: {exc}). Nothing was written."
+        ) from exc
+    if existing:
+        refuse_external_existing(existing[0], ack=False, what=what)
+
+
+def catalog_sensitive(doc_id: str) -> bool:
+    """True when the catalog row of *doc_id* is flagged sensitive, or when the catalog cannot say.
+
+    The index paths call this after they resolved the document, so a document flagged earlier (``nx
+    catalog sensitive``, or a previous ``--sensitive`` run) is protected on a run that does not pass the
+    flag. A read that fails reads as sensitive: the external legs refuse rather than guess. A blank
+    *doc_id* (no catalog row to ask about) is not flagged.
+    """
+    if not doc_id:
+        return False
+    from nexus.doc_sensitivity import SensitivityUnknown, is_sensitive  # noqa: PLC0415 — deferred: reads the catalog client
+
+    try:
+        return is_sensitive(doc_id)
+    except SensitivityUnknown as exc:
+        _log.warning("sensitive_flag_unreadable_treated_as_sensitive", doc_id=doc_id, detail=exc.detail)
+        return True
+
+
+def external_legs_gate(
+    doc_id: str, collection: str, *, sensitive: bool, enrich: bool, ack: bool, what: str,
+) -> bool:
+    """Decide whether this index run treats the document as sensitive, and refuse its external legs if so.
+
+    The document is sensitive when the verb said so (*sensitive*) or when its catalog row is flagged (or
+    unreadable). For a sensitive document: ``--enrich`` refuses (no title to Semantic Scholar or
+    CrossRef); a write into a Voyage collection refuses without *ack* when the verb did not already
+    route it (the verb's own ``--sensitive`` path chose *collection* through
+    :func:`resolve_sensitive_collection`); and the caller builds a local-only extractor from the return
+    value. Returns that decision. Nothing has been written when this raises.
+    """
+    from_catalog = not sensitive and catalog_sensitive(doc_id)
+    if not (sensitive or from_catalog):
+        return False
+    if enrich:
+        raise SensitiveEnrichRefusedError(
+            f"{what}: --enrich sends the title and identifiers to Semantic Scholar or CrossRef, and "
+            f"document {doc_id or '<new>'} is sensitive"
+            f"{' in the catalog' if from_catalog else ''}. Nothing was written. Drop --enrich."
+        )
+    if from_catalog:
+        if not ack and is_external_embedder(collection):
+            raise ExternalEmbedderRefusedError(
+                f"{what} refused: document {doc_id} is sensitive in the catalog and {collection} embeds "
+                f"with Voyage AI, which would send its text off this machine. Nothing was written. Pass "
+                f"--sensitive --ack-external-embedder to accept Voyage, or index into a local-embedder "
+                f"collection."
+            )
+        click.echo(f"sensitive: document {doc_id} is flagged in the catalog and is handled as a sensitive "
+                   f"document: MinerU runs as a local subprocess (no MinerU server is contacted) and no "
+                   f"title lookup is made.", err=True)
+    return True
+
+
 def require_catalog_sensitivity(cat: Any, *, what: str = "a sensitive write") -> None:
     """The refusal every ``--sensitive`` write calls (a name here so the module a verb imports is the one a pin patches)."""
     from nexus.catalog.http_catalog_client import require_catalog_sensitivity as _require  # noqa: PLC0415 — deferred: the client module is heavy
@@ -250,7 +342,7 @@ def sensitive_write_kwargs(
 
     Order: usage errors first (``--ack-external-embedder`` means nothing without ``--sensitive``;
     ``--enrich`` sends the title to Semantic Scholar or CrossRef, census rows 7 and 8, which a
-    sensitive document must not, until the document gates land in Step 4b), then the cloud rule
+    sensitive document must not), then the cloud rule
     (every cloud collection is Voyage: refuse without *ack*, disclose with it, census row 22), then the
     engine refusal. A dry run writes nothing, so it skips the last two. The keyword rides only when
     set, so a test double or an older indexer signature is untouched when the flag is off.

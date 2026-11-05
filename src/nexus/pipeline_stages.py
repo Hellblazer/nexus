@@ -2617,7 +2617,7 @@ def pipeline_index_pdf(
                 source_uri=source_uri,
                 extraction=extraction_record(_meta),
             )
-            if enrich:
+            if enrich and not sensitive:  # RDR-243 rows 7 and 8: a sensitive document's title is never sent
                 # Best effort as a whole, the lookup included: ``enrich`` catches only httpx and
                 # ValueError, and ``_catalog_pdf_bib_hook`` closes its clients in a ``finally``,
                 # so either can raise into the tail that has not yet stamped the document complete.
