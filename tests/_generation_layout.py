@@ -13,9 +13,26 @@ unfalsified without an explicit opt-in like this one.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from nexus import install_layout
+
+
+def point_current(link: Path, target: Path) -> None:
+    """Make *link* point at *target* the way the product does on this OS.
+
+    On Windows the product's pointer is a directory junction
+    (``generation_core.LinkOps``), which needs no privilege; ``symlink_to``
+    needs SeCreateSymbolicLinkPrivilege and fails with WinError 1314 on the CI
+    runner's account. Elsewhere it is a symlink. *target* need not exist.
+    """
+    if os.name == "nt":
+        import _winapi  # noqa: PLC0415 -- exists only on Windows
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target)
 
 
 def build(tmp_path: Path, monkeypatch, *, stamp: str = "20260826T010000Z") -> Path:
@@ -27,6 +44,6 @@ def build(tmp_path: Path, monkeypatch, *, stamp: str = "20260826T010000Z") -> Pa
     gen = tools / f"gen-{stamp}"
     (gen / "bin").mkdir(parents=True)
     (gen / install_layout.RECEIPT_NAME).write_text("{}")
-    (tools / install_layout.CURRENT_LINK_NAME).symlink_to(gen)
+    point_current(tools / install_layout.CURRENT_LINK_NAME, gen)
     monkeypatch.setenv(install_layout.TOOLS_DIR_ENV, str(tools))
     return gen

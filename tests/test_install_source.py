@@ -35,7 +35,7 @@ import pytest
 
 from nexus import install_advice, install_layout, upgrade_finish
 
-from tests._generation_layout import build as build_generation
+from tests._generation_layout import build as build_generation, point_current
 
 
 #: Where uv keeps its tools under a home directory: the XDG-shaped default on
@@ -312,7 +312,7 @@ def test_a_dangling_current_falls_back_to_uv(tmp_path, monkeypatch) -> None:
     _write_uv_receipt(tmp_path, _UV_UNPINNED)
     tools = tmp_path / "reaped-tools"
     tools.mkdir()
-    (tools / install_layout.CURRENT_LINK_NAME).symlink_to(tools / "gen-gone")
+    point_current(tools / install_layout.CURRENT_LINK_NAME, tools / "gen-gone")
     monkeypatch.setenv(install_layout.TOOLS_DIR_ENV, str(tools))
 
     assert upgrade_finish.install_source() == (
