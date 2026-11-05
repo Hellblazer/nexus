@@ -24,6 +24,7 @@ from nexus.tables import llm_surfaces as ls
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POLICY = REPO_ROOT / "docs" / "privacy-policy.md"
+SENSITIVITY = REPO_ROOT / "docs" / "sensitivity.md"
 
 
 def _listed(phase: int) -> list[ls.SurfaceRow]:
@@ -154,6 +155,7 @@ def test_a_stale_policy_is_caught(tmp_path, monkeypatch) -> None:
     stale = tmp_path / "privacy-policy.md"
     stale.write_text(POLICY.read_text(encoding="utf-8").replace("OpenAlex", "OpenAlexx", 1), encoding="utf-8")
     monkeypatch.setattr(gen, "POLICY", stale)
+    monkeypatch.setattr(gen, "SENSITIVITY", SENSITIVITY)
     assert gen.main(["--check"]) == 1
 
 
@@ -167,11 +169,15 @@ def test_a_missing_marker_is_caught(tmp_path, monkeypatch) -> None:
 def test_write_then_check_is_clean(tmp_path, monkeypatch) -> None:
     doc = tmp_path / "privacy-policy.md"
     doc.write_text(POLICY.read_text(encoding="utf-8").replace("OpenAlex", "OpenAlexx", 1), encoding="utf-8")
+    sens = tmp_path / "sensitivity.md"
+    sens.write_text(SENSITIVITY.read_text(encoding="utf-8").replace("Voyage AI", "Voyage AIx", 1), encoding="utf-8")
     monkeypatch.setattr(gen, "POLICY", doc)
+    monkeypatch.setattr(gen, "SENSITIVITY", sens)
     assert gen.main(["--check"]) == 1
     assert gen.main(["--write"]) == 0
     assert gen.main(["--check"]) == 0
     assert doc.read_text(encoding="utf-8") == POLICY.read_text(encoding="utf-8")
+    assert sens.read_text(encoding="utf-8") == SENSITIVITY.read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -220,3 +226,97 @@ def test_a_row_edit_changes_the_rendered_table() -> None:
     base = list(ls.rows())
     edited = [dataclasses.replace(r, sends=r.sends + " (edited)") if r.census_row == 7 else r for r in base]
     assert ls.render_policy_table(2, edited) != ls.render_policy_table(2, base)
+
+
+# --------------------------------------------------------------------------- #
+# The line about rows not yet enforced (RDR-243 accept residual S-E, nexus-rfvyy.5), and docs/sensitivity.md.
+# --------------------------------------------------------------------------- #
+
+
+def _enforce(rows: list[ls.SurfaceRow], *, predicate) -> list[ls.SurfaceRow]:
+    """A fixture registry in which the rows *predicate* picks are enforced in phase 1."""
+    return [dataclasses.replace(r, phase=1) if predicate(r) else r for r in rows]
+
+
+def _session_model_withhold(r: ls.SurfaceRow) -> bool:
+    return "session-model" in r.endpoints and r.behaviour == "withhold"
+
+
+def _voyage(r: ls.SurfaceRow) -> bool:
+    return "voyage" in r.endpoints
+
+
+def test_the_session_model_rows_the_line_derives_from_exist_above_the_release_phase() -> None:
+    """Non-vacuity: the line has something to be derived from."""
+    pending = [r for r in ls.rows() if r.phase > ls.RELEASE_ENFORCED_PHASE]
+    assert any(_session_model_withhold(r) for r in pending)
+    assert any(_voyage(r) for r in pending)
+
+
+@pytest.mark.parametrize("phase", [1, 2])
+def test_the_help_and_the_table_each_carry_the_line_exactly_once(phase: int) -> None:
+    line = ls.not_yet_enforced_line(phase)
+    assert line and "\n" not in line
+    assert "still shown to the session model" in line
+    help_text, table = ls.render_sensitive_help(phase), ls.render_policy_table(phase)
+    assert help_text.count(line) == 1
+    assert table.count(line) == 1
+
+
+def test_the_line_names_the_rows_it_is_derived_from() -> None:
+    line = ls.not_yet_enforced_line(2)
+    for r in ls.rows():
+        if r.phase > 2 and (_session_model_withhold(r) or _voyage(r)):
+            assert r.label in line, r.name
+
+
+def test_the_real_policy_and_the_real_help_carry_the_line_once() -> None:
+    line = ls.not_yet_enforced_line(ls.RELEASE_ENFORCED_PHASE)
+    assert POLICY.read_text(encoding="utf-8").count(line) == 1
+    assert ls.render_sensitive_help().count(line) == 1
+
+
+def test_the_line_is_absent_once_every_row_it_derives_from_is_enforced() -> None:
+    fixture = _enforce(list(ls.rows()), predicate=lambda r: _session_model_withhold(r) or _voyage(r))
+    assert ls.not_yet_enforced_line(2, fixture) == ""
+    assert "Not yet enforced" not in ls.render_sensitive_help(2, fixture)
+    assert "Not yet enforced" not in ls.render_policy_table(2, fixture)
+
+
+def test_the_line_is_absent_when_the_release_phase_is_three() -> None:
+    assert ls.not_yet_enforced_line(3) == ""
+
+
+def test_the_two_clauses_leave_independently() -> None:
+    base = list(ls.rows())
+    only_voyage = ls.not_yet_enforced_line(2, _enforce(base, predicate=_session_model_withhold))
+    assert "session model" not in only_voyage and "Voyage" in only_voyage
+    only_shown = ls.not_yet_enforced_line(2, _enforce(base, predicate=_voyage))
+    assert "still shown to the session model" in only_shown and "Voyage AI" not in only_shown
+
+
+def test_the_line_does_not_depend_on_the_text_of_a_neighbouring_row() -> None:
+    """A row that is not session-model/withhold or voyage, edited, leaves the line unchanged."""
+    base = list(ls.rows())
+    edited = [dataclasses.replace(r, label=r.label + " x") if r.census_row == 7 else r for r in base]
+    assert ls.not_yet_enforced_line(2, edited) == ls.not_yet_enforced_line(2, base)
+
+
+def test_sensitivity_doc_regions_equal_what_the_generator_renders_now() -> None:
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    for path, name, region in gen.regions():
+        if path != gen.SENSITIVITY:
+            continue
+        begin, end = gen.begin_marker(name), gen.end_marker(name)
+        m = re.search(re.escape(begin) + r"\n(.*?)\n" + re.escape(end), text, re.DOTALL)
+        assert m, f"docs/sensitivity.md has no {name} region"
+        assert m.group(1) == region, "docs/sensitivity.md is stale; run scripts/gen_privacy_policy_table.py --write"
+
+
+def test_sensitivity_stub_has_its_sections_and_points_at_the_rdr() -> None:
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    assert "## What `--sensitive` enforces in this release" in text
+    assert "## What it does not enforce" in text
+    assert "rdr/rdr-243-first-class-document-sensitivity.md" in text
+    assert "T2 note" in text
+    assert ls.not_yet_enforced_line(ls.RELEASE_ENFORCED_PHASE) in text

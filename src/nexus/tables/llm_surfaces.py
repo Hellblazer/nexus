@@ -246,8 +246,13 @@ def not_yet_enforced_line(
 
 def render_policy_table(
     phase: int = RELEASE_ENFORCED_PHASE, table_rows: Sequence[SurfaceRow] | None = None,
+    *, include_pending_line: bool = True,
 ) -> str:
-    """The privacy-policy section 2 table for the release enforcing *phase*, byte for byte (no trailing newline)."""
+    """The privacy-policy section 2 table for the release enforcing *phase*, byte for byte (no trailing newline).
+
+    The table ends with :func:`not_yet_enforced_line` unless *include_pending_line* is false (``docs/sensitivity.md``
+    prints that line in its own section).
+    """
     listed = listed_rows(phase, table_rows)
     out = [
         "Each row is a feature that sends document-derived text off the machine or to a model. A destination "
@@ -260,7 +265,7 @@ def render_policy_table(
     for r in listed:
         where = "; ".join(ENDPOINT_DESTINATIONS[e] for e in r.endpoints if e != "none")
         out.append(f"| {r.label} | {r.sends} | {where} | {BEHAVIOUR_PHRASES[r.behaviour]} |")
-    line = not_yet_enforced_line(phase, table_rows)
+    line = not_yet_enforced_line(phase, table_rows) if include_pending_line else ""
     if line:
         out += ["", line]
     return "\n".join(out)
