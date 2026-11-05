@@ -106,7 +106,7 @@ def test_the_refusal_is_a_runtime_error_too(db, tmp_path) -> None:
         import_collection(db=db, input_path=_voyage_file(tmp_path, ("secret memo", True)))
 
 
-def test_a_collection_override_into_voyage_is_refused_the_same_way(db, tmp_path) -> None:
+def test_a_collection_override_into_voyage_is_refused_the_same_way(db, tmp_path, cloud_mode) -> None:
     """The gate reads the TARGET, not the file's header: a bge export imported into a Voyage name is Voyage."""
     path = _file(tmp_path, BGE, ("secret memo", True), model="voyage-context-3", dim=1024)
     with pytest.raises(ExternalEmbedderRefusedError):

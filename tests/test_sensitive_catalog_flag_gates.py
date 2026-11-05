@@ -539,7 +539,7 @@ def test_the_repo_prose_path_skips_a_flagged_file_for_voyage_and_indexes_it_for_
 
 
 def test_the_repo_code_path_skips_a_flagged_file_for_voyage_code_3_and_indexes_it_for_bge(
-    t2_service_env, tmp_path: Path,
+    t2_service_env, tmp_path: Path, cloud_mode,
 ) -> None:
     from nexus.code_indexer import index_code_file
 
@@ -756,7 +756,7 @@ class _FlaggedManifests:
 
 
 def test_reembed_holds_back_the_chunks_of_a_flagged_document_in_a_voyage_collection(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, cloud_mode,
 ) -> None:
     from nexus.commands.collection import _reembed_collection
 
@@ -784,7 +784,7 @@ def test_reembed_of_a_bge_collection_reads_no_flags(monkeypatch: pytest.MonkeyPa
     assert db.written == ["a" * 64]
 
 
-def test_reembed_of_a_voyage_collection_refuses_when_the_catalog_cannot_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reembed_of_a_voyage_collection_refuses_when_the_catalog_cannot_answer(monkeypatch: pytest.MonkeyPatch, cloud_mode) -> None:
     import click
 
     from nexus.commands.collection import _reembed_collection
@@ -855,7 +855,7 @@ def test_the_reput_refusal_is_worded_for_every_caller_of_the_note_writer(
     assert "bge" in text, "and the way out every caller has"
 
 
-def test_the_refused_reput_puts_the_identity_stamp_back(t2_service_env, tmp_path: Path) -> None:
+def test_the_refused_reput_puts_the_identity_stamp_back(t2_service_env, tmp_path: Path, cloud_mode) -> None:
     """Fix round 3 (nexus-rfvyy.6.20): a REAL reconcile branch (``by_source_uri``) stamps ``meta.doc_id`` with the new
     text's first chash before the write; the refusal must put the old value back, or the stamp names a chunk that was
     never written. ``catalog_store_hook_tracked`` is not patched, so ``pre_call`` is filled by the real branch."""
