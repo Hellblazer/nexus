@@ -312,15 +312,12 @@ class GrantsNexusDiagViewAccessIntegrationTest {
      * one included. That is the established diag boundary for the legacy era, not a defect of this table.
      * The catalog-047 changeset header names the same limit.
      *
-     * <p>This replaces the Java-constant pin in {@code Catalog047DocumentSensitivitySchemaLiquibaseTest}
-     * ({@code NEXUS_DIAG_READABLE_TABLES} lacks the name), which no grant change could fail.
+     * <p><b>The pin is the last block: a real {@code nexus_diag} connection that must be refused with
+     * {@code permission denied}.</b> A Java constant such as {@code NEXUS_DIAG_READABLE_TABLES} is not a pin, no
+     * grant change could fail it, and the test that asserted it on the table was removed.
      */
     @Test
     void catalogSensitivityChanges_svcHasDml_diagIsDenied() throws Exception {
-        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
-            .as("the sensitivity audit table is deliberately not diag-readable (nexus-rfvyy.6.6)")
-            .doesNotContain("catalog_sensitivity_changes");
-
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);

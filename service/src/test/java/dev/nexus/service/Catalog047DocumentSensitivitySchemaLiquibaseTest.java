@@ -224,13 +224,6 @@ class Catalog047DocumentSensitivitySchemaLiquibaseTest {
             .hasMessageContaining("row-level security");
     }
 
-    @Test
-    void auditTable_isNotReadableByNexusDiag() {
-        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
-            .as("the sensitivity audit trail is tenant-scoped; nexus_diag bypasses RLS and is granted nothing on it")
-            .doesNotContain("catalog_sensitivity_changes");
-    }
-
     // ── seeding and reading ─────────────────────────────────────────────
 
     private static String hex(String seed) {
