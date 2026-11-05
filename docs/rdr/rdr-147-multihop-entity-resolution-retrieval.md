@@ -487,7 +487,7 @@ Three changes. Only the first two are on the path to the MVV.
    entered AND merged at least one joined item, since an entered branch whose
    pairs all dropped joined nothing. Then a final ledger that leaves the facets
    uncovered does not stop generation. Every answer generated with a merged join
-   leads with a notice that it rests on an exact-key join, as Sam's wording asks;
+   leads with a notice that it rests on an exact-key join, as the chosen option's text asks;
    when the final ledger was uncovered, the notice adds that the coverage check
    did not confirm it. The facet states stay as the re-check judged them. The gate is the signal
    itself: an unsupported facet AND entity-key tokens in the evidence. A question
@@ -582,18 +582,25 @@ did not confirm this answer` added when `generated_on_join` is true. It leads
 the prose of every answer generated with a merged join, ahead of the existing
 `[insufficient-evidence: ...]` notice on a partial answer (that notice's own
 wording would contradict an uncovered answer, so it is not reused for it).
-Readers that took an uncovered final state to mean a withheld answer consult
-`generated_on_join`: `answer_text_class` (a redacted row stays `redacted`
-rather than `non_answer/uncovered`) and `nx answer-runs` (a leading join line
-does not hide a partial answer). The risk is an answer the coverage check did
+The generator gets no unresolved-facets note on these runs: `_note_unresolved`
+serves only `partial` and `complete` ledgers and skips an `unavailable` one, and
+this ledger stays `unavailable`; whether such a note would help is unmeasured and
+not built. Readers that took an uncovered final state to mean a withheld answer
+are handled in two ways. `answer_text_class` consults `generated_on_join` (a
+redacted row of such an answer stays `redacted` rather than
+`non_answer/uncovered`); `nx answer-runs` does not read the flag, it skips a
+leading join line so that the line does not hide a partial answer. The risk is an answer the coverage check did
 not confirm. The join fixes which record a key names, not whether the anchor
 message answers the question; that relevance is what the re-check judged, and
 nothing else on the coverage path checks it (R9). The 2026-11-05 precision (pooled 1.00 in every
 run, 147-research-12, 147-research-13) covers only answers the re-check
-accepted, plus one template-7 answer that never reached the coverage
-boundary: the rejected joins produced non-answers, so the answers that only
-option 1 admits are unmeasured until the fresh MVV, which reports precision
-split by `generated_on_join`.
+accepted: 11 company-naming runs, 4 in `mvv-2026-11-05.jsonl` and 7 in
+`mvv-2026-11-05.run1.jsonl`, each of precision 1.00. The one template-7 row (a listing that named no
+company, which never reached the coverage boundary) is outside the precision
+mean, as is any run that names no company, and the 4 backend-question runs (2 in
+each file, the branch not entered) named none. The rejected joins produced
+non-answers, so the answers that only option 1 admits are unmeasured until the
+fresh MVV, which reports precision split by `generated_on_join`.
 
 **Entity-key classification (Step 1).** A per-collection pattern in config, for
 example `entity.collections: {"knowledge__herb-*": "CUST-\\d{4}|eid_[0-9a-f]{8}"}`,
@@ -818,7 +825,8 @@ controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
   147-research-9).
 
 Reported, not gated: issue5 company recall and F1 beside the script's
-0.7642857142857142 (asserted exactly, as the diagnostic baseline). Hop-1
+0.7642857142857142 (asserted exactly, as the diagnostic baseline), and precision
+split by `generated_on_join`. Hop-1
 retrieval recall, which sets the remaining gap (measured issue5 F1 0.7167), is
 separate later work.
 
@@ -929,7 +937,7 @@ a `$ref` step") is dropped: it already works.
    not an answer keeps the `no_usable_answer` downgrade; with an uncovered
    ledger, a run where the branch did not enter, merged nothing, ran confined,
    or ran with the switch off is still a non-answer with no notice; a redacted
-   row is not classed as a non-answer. The harness splits precision
+   row of a `generated_on_join` answer is not classed as a non-answer. The harness splits precision
    by `generated_on_join` and counts answered held-out outcomes. Then a fresh
    MVV run.
 
@@ -1048,3 +1056,4 @@ linker conditional.
 - 2026-11-05: option 1 taken after the MVV rerun (Sam, T2 `nexus/rdr147-option1-decision-2026-11-05`, 147-research-13): an entered exact-key join generates whatever the re-check says, with a notice; Assumption #6 weakened to 11 of 15; Step 4 sub-step 4 added. Fix-check observations of f2f669cba applied (floor in the table and Scope Verification, the 0.9667 citation, the fresh-run clause).
 - 2026-11-05: fix-check 0c5053f53 findings applied: the option 1 outcome mapping (answered shape, `no_grow`, `generated_on_join`, its own notice), the notice scoped to uncovered answers, "merged at least one" marked as this RDR's reading, stale Assumption #6 and Jointness sites, R9, the precision-evidence caveat, the fresh-run clause, sizes.
 - 2026-11-05: text brought into line with the option 1 code (e023bd52a) and fix check 2c2063948: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
+- 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
