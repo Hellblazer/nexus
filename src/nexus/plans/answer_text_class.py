@@ -102,6 +102,11 @@ def _redacted_coverage_class(summary: object) -> str | None:
         return None
     block = summary.get("coverage")
     reason = block.get("reason") if isinstance(block, dict) else None
+    if reason is None and summary.get("outcome") == "success":
+        # The ``coverage`` block was cut and a recorded success cannot be a non-answer (every unavailable run that returned a
+        # non-answer is recorded ``failure``): the one unavailable success is an RDR-147 option 1 answer, whose ``repair`` block
+        # (and its ``resolution_generated_on_join``) may have been cut with it.
+        return None
     if reason == "uncovered":
         repair = summary.get("repair")
         if isinstance(repair, dict) and repair.get("resolution_generated_on_join") is True:

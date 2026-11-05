@@ -16,7 +16,10 @@ variable unset runs the assessment.
 
 ``NX_ANSWER_RESOLUTION_REPAIR`` (RDR-147 Step 4, nexus-qpimy) is the opposite default: OFF unless set to an on
 value (``1``, ``true``, ``yes``, ``on``). Unset, blank, an off value and an unrecognised value (one warning) all
-read as off, so a typo never turns the exact-key resolution branch of the coverage repair on.
+read as off, so a typo never turns the exact-key resolution branch of the coverage repair on. With it on, a run whose
+re-check leaves every facet uncovered after a merged exact-key join is generated, leads with the ``[exact-key join: ...]``
+notice, counts as an answer and never grows a plan (``repair.generated_on_join``; ``coverage.state`` stays
+``unavailable``), the one exception to ``NX_ANSWER_COVERAGE``'s "unavailable is a failure".
 """
 from __future__ import annotations
 
@@ -99,7 +102,9 @@ def coverage_enabled(environ: Mapping[str, str]) -> bool:
 #: The switch of the exact-key resolution branch inside the coverage repair (RDR-147 Step 4, nexus-qpimy).
 ANSWER_RESOLUTION_REPAIR_ENV = "NX_ANSWER_RESOLUTION_REPAIR"
 #: What an unset or blank :data:`ANSWER_RESOLUTION_REPAIR_ENV` means. Off until the MVV and the single-hop
-#: non-firing count are recorded (RDR-147 Phase 2); one source for the default, a test flips it.
+#: non-firing count are recorded (RDR-147 Phase 2); one source for the default, a test flips it. On, an uncovered re-check
+#: after a merged exact-key join is generated and counts as an answer behind the ``[exact-key join: ...]`` notice
+#: (``repair.generated_on_join``; ``coverage.state`` stays ``unavailable``), the one exception to "unavailable is a failure".
 ANSWER_RESOLUTION_REPAIR_ENABLED: bool = False
 
 

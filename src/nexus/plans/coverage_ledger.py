@@ -1119,13 +1119,14 @@ class CoverageBoundary:
     def _generate_on_join(self, result: CoverageResult) -> CoverageResult:
         """RDR-147 Step 4 sub-step 4 (nexus-irndi), option 1: the one exception to RDR-232's rule that a ledger covering no
         facet stops generation. It applies when the FINAL ledger is ``unavailable`` / ``uncovered``, the resolution branch
-        entered, and at least one joined item was merged into the reduction's input, under the switch (``resolution_repair``).
+        entered, and at least one joined item was merged into the reduction's input (and a merged key reached ``joined_keys``, so the answer
+        can carry its notice), under the switch (``resolution_repair``).
         Generation then runs (``skip_generation`` false) and the report says ``generated_on_join``; the ledger is not
         rewritten, so the facets keep the re-check's states and the final coverage state stays ``unavailable`` /
         ``uncovered`` (``decide_outcome`` turns that into the answered shape and sets no-grow). Every other run is returned as is."""
         r = result.repair
         if not (
-            self.resolution_repair and r.resolution_entered and r.joined_added > 0
+            self.resolution_repair and r.resolution_entered and r.joined_added > 0 and r.joined_keys
             and (result.state, result.reason) == ("unavailable", "uncovered")
         ):
             return result
@@ -1582,7 +1583,7 @@ class CoverageBoundary:
                 in_input = {strip_source_note(t) for t in texts if isinstance(t, str)}
                 merged = sum(1 for i in new if strip_source_note(i.text) in in_input)
                 if entered and resolution is not None:  # ``new`` is the branch's items, parallel to ``resolution.keys``
-                    joined_keys.extend(dict.fromkeys(k for i, k in zip(new, resolution.keys, strict=False) if strip_source_note(i.text) in in_input))
+                    joined_keys.extend(dict.fromkeys(k for i, k in zip(new, resolution.keys, strict=True) if strip_source_note(i.text) in in_input))
                 if merged == 0:
                     view.install_supplement(())
                     if not unread_first:

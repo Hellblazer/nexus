@@ -137,7 +137,7 @@ class TestRedactedRows:
             assert _classify_degenerate_row(row) == "redacted"
 
     def test_a_recorded_other_on_a_redacted_row_still_yields_to_the_coverage_verdict(self) -> None:
-        unavailable = {**_recorded("other", 5), "trace": False, "coverage_state": "unavailable", "coverage_unavailable": 1}
+        unavailable = {**_recorded("other", 5), "trace": False, "coverage_state": "unavailable", "coverage_unavailable": 1, "outcome": "failure"}
         assert _classify_degenerate_row(_redacted_row(summary=unavailable)) == "non_answer/no_usable_answer"
         assert _classify_degenerate_row(_redacted_row(summary={**_recorded("other", 5), "trace": False})) == "other"
 

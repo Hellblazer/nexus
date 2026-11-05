@@ -158,14 +158,36 @@ async def test_with_the_switch_off_an_uncovered_ledger_is_a_non_answer_and_the_w
     assert wire == {k: v for k, v in wire.items() if not k.startswith("resolution") and not k.startswith("joined")}, "the switch off keeps the wire form"
 
 
-@pytest.mark.asyncio
-async def test_the_unread_tail_only_repair_does_not_generate_on_join() -> None:
-    """A repair that never entered the resolution branch (``resolution_entered`` False) cannot carry the flag even
-    with a merged-looking ``joined_added``: the flag needs the entered branch."""
-    d = _uncovered_simple(2)
-    cov = _cov(await _run(d, on()))
-    forged = replace(cov, skip_generation=True, repair=replace(cov.repair, resolution_entered=False, generated_on_join=False))
-    assert forged.repair.generated_on_join is False and forged.skip_generation is True
+def _pre_generation(**repair_kw: Any) -> CoverageResult:
+    """An uncovered final ledger with a repair report as the boundary hands it to ``_generate_on_join``: generation is
+    still skipped, and *repair_kw* sets (or forges) the report's join fields."""
+    findings = (FacetFinding("f1", "unsupported", (), "no_supporting_evidence"), FacetFinding("f2", "unsupported", (), "no_supporting_evidence"))
+    fields: dict[str, Any] = {"resolution_entered": True, "joined_added": 2, "joined_keys": ("CUST-0001", "CUST-0002")}
+    fields.update(repair_kw)
+    return CoverageResult(
+        state="unavailable", reason="uncovered", skip_generation=True,
+        ledger=CoverageLedger(findings=findings), repair=RepairReport("completed", ("f1", "f2"), **fields))
+
+
+def test_generate_on_join_fires_for_an_entered_branch_that_merged_keys() -> None:
+    """The control for the refusals below: the same fixture, un-forged, generates."""
+    out = on()._generate_on_join(_pre_generation())
+    assert out.skip_generation is False and out.repair.generated_on_join is True
+
+
+@pytest.mark.parametrize("forged", [
+    {"resolution_entered": False},   # the branch never entered: a merged-looking joined_added cannot carry the flag
+    {"joined_added": 0},             # nothing merged
+    {"joined_keys": ()},             # diverged: items counted as merged but no key reached the notice (invariant: generated_on_join implies a notice)
+])
+def test_generate_on_join_refuses_a_report_that_is_not_an_entered_branch_with_merged_keys(forged: dict[str, Any]) -> None:
+    out = on()._generate_on_join(_pre_generation(**forged))
+    assert out.skip_generation is True and out.repair.generated_on_join is False
+
+
+def test_generate_on_join_is_refused_with_the_switch_off() -> None:
+    out = CoverageBoundary(request=_request(3), resolution_repair=False)._generate_on_join(_pre_generation())
+    assert out.skip_generation is True and out.repair.generated_on_join is False
 
 
 # ── which keys the notice names: the merged items', not every resolved key ────────────────────────────────────
@@ -202,6 +224,26 @@ async def test_joined_keys_are_those_of_the_merged_items_not_of_every_resolved_k
     assert r.resolved == (_tok(1), _tok(2), _tok(3)) and r.items_found == 3
     assert r.joined_added == 1 and r.joined_keys == (_tok(1),), "one item merged: its key only, not the three resolved"
     assert r.generated_on_join is True and cov.skip_generation is False
+
+
+@pytest.mark.asyncio
+async def test_a_branch_whose_keys_are_not_parallel_to_its_items_fails_the_repair_instead_of_naming_a_short_key_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_Resolution.keys`` is parallel to ``items`` by construction; if they ever diverge the zip must raise (the repair
+    then reports ``retrieval_failed`` and the first ledger stands) rather than truncate and name fewer keys than merged."""
+    real = CoverageBoundary._resolve_anchors
+
+    async def short_keys(self: CoverageBoundary, *a: Any, **k: Any) -> Any:
+        res = await real(self, *a, **k)
+        return replace(res, keys=res.keys[:-1])
+
+    d = _uncovered_simple(3)
+    control = _cov(await _run(d, on()))
+    assert control.repair.outcome == "completed" and len(control.repair.joined_keys) == 3
+    monkeypatch.setattr(CoverageBoundary, "_resolve_anchors", short_keys)
+    d = _uncovered_simple(3)
+    cov = _cov(await _run(d, on()))
+    assert cov.repair.outcome == "retrieval_failed" and cov.repair.generated_on_join is False
+    assert cov.skip_generation is True and _generations(d) == 0
 
 
 @pytest.mark.asyncio
@@ -321,10 +363,24 @@ def test_the_notice_of_a_covered_or_partial_run_has_no_unconfirmed_clause() -> N
 
 def test_has_merged_join_needs_an_entered_branch_and_a_merged_item() -> None:
     assert has_merged_join(_uncovered(join=True)) is True
-    assert has_merged_join(replace(_uncovered(join=True), repair=replace(_uncovered(join=True).repair, joined_added=0, joined_keys=()))) is False
+    assert has_merged_join(replace(_uncovered(join=True), repair=replace(_uncovered(join=True).repair, generated_on_join=False, joined_added=0, joined_keys=()))) is False
     assert has_merged_join(_uncovered(join=False, merged=0)) is False
     assert has_merged_join(replace(_uncovered(join=True), repair=RepairReport("completed", ("f1",)))) is False
     assert has_merged_join(None) is False
+
+
+def test_an_answer_with_generated_on_join_always_carries_the_notice() -> None:
+    """The invariant: ``generated_on_join`` implies ``has_merged_join``, whatever else the report holds (a forged or
+    diverged report included), so the unconfirmed answer is never returned without its notice."""
+    base = _uncovered(join=True)
+    for repair in (
+        replace(base.repair, joined_keys=()),
+        replace(base.repair, joined_added=0, joined_keys=()),
+        replace(base.repair, resolution_entered=False, joined_added=0, joined_keys=()),
+    ):
+        assert repair.generated_on_join is True
+        assert has_merged_join(replace(base, repair=repair)) is True
+    assert has_merged_join(replace(base, repair=replace(base.repair, generated_on_join=False, joined_added=0, joined_keys=()))) is False, "control"
 
 
 def test_the_notice_names_only_the_merged_keys_and_counts_them() -> None:
@@ -489,6 +545,22 @@ def test_a_redacted_row_of_a_generated_on_join_answer_is_not_classed_a_non_answe
     assert heuristic_class(cut) == "non_answer/no_usable_answer"
 
 
+def test_a_redacted_row_whose_coverage_block_was_cut_is_a_non_answer_only_when_the_run_did_not_succeed() -> None:
+    """``fit_summary`` can cut the ``coverage`` block (and its reason) and the ``repair`` block, keeping ``outcome`` and
+    ``coverage_state``. A recorded ``success`` with an unavailable ledger is a generated-on-join answer (every other
+    unavailable run is recorded ``failure``), so the fallback must not class it a non-answer."""
+    from nexus.plans.answer_text_class import heuristic_class  # noqa: PLC0415
+
+    def row(outcome: str) -> dict[str, Any]:
+        return {
+            "final_text": "[redacted]", "question": "q", "step_count": 5,
+            "run_summary": {"kind": "nx_answer", "outcome": outcome, "coverage_state": "unavailable", "coverage": None, "repair": None},
+        }
+
+    assert heuristic_class(row("success")) == "redacted"
+    assert heuristic_class(row("failure")) == "non_answer/no_usable_answer", "control: a failed run keeps the fallback"
+
+
 @pytest.mark.asyncio
 async def test_a_trace_false_option1_answer_is_recorded_as_an_answer_not_a_non_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     """The row ``trace=False`` writes has the text redacted, so ``answer_text_class`` reads its run summary: the summary
@@ -531,8 +603,9 @@ async def test_nx_answer_option1_whose_generation_returns_nothing_is_a_failure_w
 
 
 @pytest.mark.asyncio
-async def test_an_option1_run_is_not_a_skipped_generation_for_the_continuation_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    """core.py hands nothing off only when ``skip_generation`` is true; an option-1 run generated, so its coverage says so."""
+async def test_the_run_summary_of_an_option1_run_records_skip_generation_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The summary's ``coverage.skip_generation`` is the flag core.py's continuation check reads: an option-1 run generated,
+    so it records false; the switch-off run records true. (This pins the recorded flag, not the check itself.)"""
     _env_on(monkeypatch)
     run = await _drive(plan_id=7, dispatcher=_uncovered_simple(3, answer=PROSE), request=_request(3))
     assert run.summary["coverage"]["skip_generation"] is False

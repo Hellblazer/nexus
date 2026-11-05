@@ -12901,7 +12901,7 @@ async def nx_answer(
     Use `search`/`query` directly for a single-step, known-shape lookup:
     this tool reduces from many documents and is NOT sub-second
     (p50 ~80s, p95 ~217s). Matches a saved plan (an inline planner grows
-    one on a miss), runs it, and returns the synthesized answer.
+    one on a miss), runs it, and returns the answer.
 
     Returns the final step's output as a string, or with `structured=True`
     an envelope (`{final_text, chunks, plan_id, step_count, answer_shape,
@@ -12916,19 +12916,19 @@ async def nx_answer(
       in `scope_diagnostics` (text mode: a `[scope conflict: ...]` line).
     - `continuation=True` needs a matching `nx_answer_report` call.
     - The coverage check is on by default: it adds model calls (latency,
-      about 0.02 USD a run; the times above predate it) and can withhold
+      about 0.02 USD a run) and can withhold
       an answer as "uncovered". `NX_ANSWER_COVERAGE=0` turns it off.
     - `answer_shape` says what `final_text` is. Prose follows for
       "answered" and "insufficient_evidence" (opens with
       `[insufficient-evidence: <n> unresolved]`, names each unsettled
-      part, then answers). Any other value, "uncovered" (no
-      part is covered) included, is a one-line notice, never the
-      raw payload.
+      part, then answers). Any other value ("uncovered" included) is
+      a one-line notice, never the raw payload.
     - `run_summary.persistence` (persisted, dropped, unsupported,
       unverified, not_recorded): only "persisted" means the engine kept
       the run's coverage summary.
     - Text mode opens a degraded answer with `[budget exhausted ...]`,
-      `[non-answer: <shape>]` or `[insufficient-evidence: ...]`.
+      `[non-answer: <shape>]` or `[insufficient-evidence: ...]`. A
+      merged exact-key join puts `[exact-key join: ...]` first.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path

@@ -6496,8 +6496,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `[exact-key join: <n> record(s) joined by exact key (<keys>)]` (`<n>` is the distinct records, ahead of the
   insufficient-evidence notice on a partial answer). When the final ledger covers no facet (`unavailable` /
   `uncovered`), the run still generates, the line ends `; the coverage check did not confirm this answer`, `repair`
-  adds `generated_on_join: true`, the answer counts as an answer and is never grown; `coverage_state` stays
-  `unavailable`, and `repair.resolution_generated_on_join` in the run summary says which of those runs answered. The outcome stays one of the existing ones: `completed`,
+  adds `generated_on_join: true`; when the generated text is an answer it counts as one and is never grown (text that is not an answer takes the usual `no_usable_answer` downgrade); `coverage_state` stays
+  `unavailable`, and `repair.resolution_generated_on_join` in the run summary means generation was permitted on the join, not that the run answered: it stays true after a `no_usable_answer` downgrade. The outcome stays one of the existing ones: `completed`,
   `no_new_evidence` when no key yielded a joined item, `retrieval_failed` when the resolve or the record fetch failed. `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),

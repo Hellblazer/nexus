@@ -132,8 +132,12 @@ def decide_outcome(coverage: CoverageResult | None, classified: AnswerShape) -> 
 
 def has_merged_join(coverage: CoverageResult | None) -> bool:
     """Whether the resolution branch entered and merged at least one joined item into the reduction's input (RDR-147):
-    the condition for an answer to carry the exact-key-join notice, whatever the final ledger."""
-    return coverage is not None and coverage.repair.resolution_entered and coverage.repair.joined_added > 0 and bool(coverage.repair.joined_keys)
+    the condition for an answer to carry the exact-key-join notice, whatever the final ledger. A report that says
+    ``generated_on_join`` always carries it: an answer the coverage check did not confirm is never returned without its notice."""
+    if coverage is None:
+        return False
+    r = coverage.repair
+    return r.generated_on_join or (r.resolution_entered and r.joined_added > 0 and bool(r.joined_keys))
 
 
 def render_exact_key_join_notice(coverage: CoverageResult, prose: str) -> str:
