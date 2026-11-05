@@ -25,7 +25,9 @@ def point_current(link: Path, target: Path) -> None:
     On Windows the product's pointer is a directory junction
     (``generation_core.LinkOps``), which needs no privilege; ``symlink_to``
     needs SeCreateSymbolicLinkPrivilege and fails with WinError 1314 on the CI
-    runner's account. Elsewhere it is a symlink. *target* need not exist.
+    runner's account. Elsewhere it is a symlink. *target* must exist when the
+    pointer is made (``CreateJunction`` refuses a missing one); to leave a
+    dangling pointer, remove the target afterwards.
     """
     if os.name == "nt":
         import _winapi  # noqa: PLC0415 -- exists only on Windows

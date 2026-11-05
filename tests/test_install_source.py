@@ -312,7 +312,10 @@ def test_a_dangling_current_falls_back_to_uv(tmp_path, monkeypatch) -> None:
     _write_uv_receipt(tmp_path, _UV_UNPINNED)
     tools = tmp_path / "reaped-tools"
     tools.mkdir()
-    point_current(tools / install_layout.CURRENT_LINK_NAME, tools / "gen-gone")
+    reaped = tools / "gen-gone"
+    reaped.mkdir()  # a junction needs a live target when made; the reap comes after
+    point_current(tools / install_layout.CURRENT_LINK_NAME, reaped)
+    reaped.rmdir()
     monkeypatch.setenv(install_layout.TOOLS_DIR_ENV, str(tools))
 
     assert upgrade_finish.install_source() == (
