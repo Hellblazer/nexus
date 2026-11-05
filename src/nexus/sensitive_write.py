@@ -16,6 +16,7 @@ write runs.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import click
@@ -272,6 +273,66 @@ def catalog_sensitive(doc_id: str) -> bool:
     except SensitivityUnknown as exc:
         _log.warning("sensitive_flag_unreadable_treated_as_sensitive", doc_id=doc_id, detail=exc.detail)
         return True
+
+
+#: The event each kind of skip logs (literal names, so a grep for one finds its site).
+_SKIP_EVENTS: dict[str, str] = {
+    "md": "sensitive_md_skipped_external_embedder",
+    "prose": "sensitive_prose_skipped_external_embedder",
+    "code": "sensitive_code_skipped_external_embedder",
+}
+
+
+class SensitiveDocs:
+    """The flagged subset of one batch of catalog documents, read once (a membership test, no I/O).
+
+    ``unknown`` is the catalog that could not answer: every non-blank id then reads as sensitive, the
+    same rule :func:`catalog_sensitive` applies to a single document. A blank id has no catalog row and
+    is never flagged.
+    """
+
+    __slots__ = ("ids", "unknown")
+
+    def __init__(self, ids: frozenset[str] = frozenset(), *, unknown: bool = False) -> None:
+        self.ids = ids
+        self.unknown = unknown
+
+    def __contains__(self, doc_id: object) -> bool:
+        return bool(doc_id) and (self.unknown or doc_id in self.ids)
+
+
+def sensitive_docs(doc_ids: Iterable[str]) -> SensitiveDocs:
+    """One batched catalog read: which of *doc_ids* are flagged. A read that fails reads as all sensitive."""
+    from nexus.doc_sensitivity import SensitivityUnknown, flagged  # noqa: PLC0415 — deferred: reads the catalog client
+
+    try:
+        return SensitiveDocs(frozenset(flagged(doc_ids)))
+    except SensitivityUnknown as exc:
+        _log.warning("sensitive_flag_unreadable_treated_as_sensitive", detail=exc.detail, batch=True)
+        return SensitiveDocs(unknown=True)
+
+
+def skip_sensitive_for_external(
+    doc_id: str, collection: str, path: object, kind: str, known: SensitiveDocs | None = None,
+) -> bool:
+    """True (after a loud warning) when a repo or batch run must not embed *path* into *collection*.
+
+    The document is flagged sensitive in the catalog (or the catalog cannot say) and *collection* embeds
+    with Voyage. Such a run has no ``--ack-external-embedder``, so the document is skipped, not refused:
+    ``nx index pdf --sensitive --ack-external-embedder`` is the way to accept Voyage for it. *known* is
+    the batch's flag read; without it the document is read on its own. A local-embedder collection is
+    never gated, and costs no read. *kind* (``md``, ``prose`` or ``code``) picks the event, ``sensitive_<kind>_skipped_external_embedder``.
+    """
+    if not doc_id or not is_external_embedder(collection):
+        return False
+    if not (doc_id in known if known is not None else catalog_sensitive(doc_id)):
+        return False
+    event = _SKIP_EVENTS[kind]
+    _log.warning(
+        event, path=str(path), doc_id=doc_id, collection=collection,
+        note="a sensitive document is not written to a Voyage collection from a repo or batch run; "
+             "index it with nx index pdf --sensitive --ack-external-embedder to accept Voyage")
+    return True
 
 
 def external_legs_gate(

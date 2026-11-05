@@ -4370,6 +4370,44 @@ def batch_index_pdfs(
     return results
 
 
+def _sensitive_paths_for_external(
+    paths: list[Path], collection_name: str | None, base_path: Path | None,
+) -> set[Path]:
+    """The *paths* a batch run must not send to a Voyage collection: their catalog row is flagged sensitive.
+
+    Two batched reads for the whole batch, none when *collection_name* embeds locally (or is not named: the
+    per-file gate in :func:`index_markdown` is then the only check). The paths are looked up as the catalog
+    stores them (absolute, and relative to *base_path*); a path that names several documents is held back
+    when any of them is flagged. A catalog that cannot answer holds back every file.
+    """
+    if not collection_name or not paths:
+        return set()
+    from nexus.sensitive_write import is_external_embedder, sensitive_docs  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+
+    if not is_external_embedder(collection_name):
+        return set()
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+
+    forms: dict[Path, list[str]] = {}
+    for p in paths:
+        absolute = str(p.resolve())
+        rel = []
+        if base_path is not None:
+            try:
+                rel = [str(p.resolve().relative_to(base_path.resolve()))]
+            except ValueError:
+                pass
+        forms[p] = [absolute, *rel]
+    try:
+        found = make_catalog_reader().find_all_by_file_paths(sorted({f for fs in forms.values() for f in fs}))
+    except Exception as exc:  # noqa: BLE001 — a catalog that cannot answer reads as sensitive
+        _log.warning("sensitive_flag_unreadable_treated_as_sensitive", detail=f"{type(exc).__name__}: {exc}"[:300], batch=True)
+        return set(paths)
+    owners = {p: [str(e.tumbler) for f in fs for e in found.get(f, ())] for p, fs in forms.items()}
+    flagged = sensitive_docs(t for ts in owners.values() for t in ts)
+    return {p for p, ts in owners.items() if any(t in flagged for t in ts)}
+
+
 def batch_index_markdowns(
     paths: list[Path],
     corpus: str,
@@ -4415,9 +4453,21 @@ def batch_index_markdowns(
     absolute path (nexus-njn1a, see :func:`_curator_identity`).
     """
     results: dict[str, str] = {}
+    held_back = _sensitive_paths_for_external(paths, collection_name, base_path)
     for path in paths:
         count: int = 0
         t0 = time.monotonic()
+        if path in held_back:
+            # RDR-243 (fix round 2): the catalog flags this document sensitive and the collection embeds with
+            # Voyage; a batch has no --ack-external-embedder, so it is skipped, not failed.
+            _log.warning(
+                "sensitive_md_skipped_external_embedder", path=str(path), collection=collection_name,
+                note="a sensitive document is not written to a Voyage collection from a batch run; "
+                     "index it with nx index md --sensitive --ack-external-embedder to accept Voyage")
+            results[str(path)] = "skipped"
+            if on_file:
+                on_file(path, 0, time.monotonic() - t0)
+            continue
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
                                  content_type=content_type, force=force,
@@ -4426,6 +4476,17 @@ def batch_index_markdowns(
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
+            from nexus.sensitive_write import ExternalEmbedderRefusedError  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+            if isinstance(e, ExternalEmbedderRefusedError):
+                # Backstop for what the batch read above could not see (no collection_name given, or a
+                # catalog path in another form): index_markdown's own gate refused it. Same outcome: a skip.
+                _log.warning(
+                    "sensitive_md_skipped_external_embedder", path=str(path), collection=collection_name,
+                    note=str(e)[:300])
+                results[str(path)] = "skipped"
+                if on_file:
+                    on_file(path, 0, time.monotonic() - t0)
+                continue
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
             if on_error is not None:

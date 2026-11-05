@@ -763,6 +763,21 @@ def put_note(
             raise
         finally:
             flag_writer.close()
+    if not sensitive and not out.minted:
+        # RDR-243 (fix round 2): a re-put onto a note the catalog flags sensitive (``nx catalog sensitive``, or an
+        # earlier ``--sensitive`` put) must not embed its text with Voyage unacknowledged. A note this call
+        # minted cannot be flagged yet. Raised outside the swallow above, with the identity stamp put back, like
+        # the flag-raise refusal; a catalog that cannot answer reads as sensitive.
+        from nexus.sensitive_write import ExternalEmbedderRefusedError, catalog_sensitive, is_external_embedder  # noqa: PLC0415 — deferred: only a re-put needs it
+
+        if is_external_embedder(collection) and catalog_sensitive(doc):
+            sh.restore_pre_call_stamp(
+                doc, pre_call.get("doc_id", ""), out.doc_id, pre_call.get("note_meta"),
+                pre_call.get("note_meta_stamped"))
+            raise ExternalEmbedderRefusedError(
+                f"store put refused: note {doc} is sensitive in the catalog and {collection} embeds with Voyage AI, "
+                f"which would send its text off this machine. Nothing was written. Pass --sensitive "
+                f"--ack-external-embedder to accept Voyage, or put it into a local-embedder collection.")
     content_hash = sh.note_content_hash(content, manifest_metadatas)
     _fence_begin(doc, content_hash, collection)
     try:

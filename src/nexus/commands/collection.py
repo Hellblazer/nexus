@@ -1731,8 +1731,26 @@ def _reembed_collection(
     # the document is deleted. A document restored later keeps its pre-repair
     # vectors until the next run, which sees them live. The chunks left on the
     # old model are counted by the caller and reported.
+    # RDR-243 (fix round 2): this walk re-sends stored chunk text to Voyage. A chunk of a document the
+    # catalog now flags sensitive stays as it is (counted as skipped, one warning per run); a catalog that
+    # cannot say refuses the run. One read per collection, none for a collection that embeds locally.
+    held_back: frozenset[str] = frozenset()
+    if not dry_run:
+        from nexus.sensitive_write import is_external_embedder  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        if is_external_embedder(col_name):
+            from nexus.doc_sensitivity import SensitivityUnknown, sensitive_chashes  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            try:
+                held_back = frozenset(c[:32] for c in sensitive_chashes(col_name))
+            except SensitivityUnknown as exc:
+                raise click.ClickException(
+                    f"collection {col_name!r} embeds with Voyage AI and the catalog could not say which of its "
+                    f"documents are sensitive ({exc.detail}); nothing was re-embedded."
+                )
     processed = 0
     skipped = 0
+    held_count = 0
     page = QUOTAS.MAX_QUERY_RESULTS  # 300
     offset = 0
     while offset < total:
@@ -1750,6 +1768,10 @@ def _reembed_collection(
             i for i, d in enumerate(documents)
             if isinstance(d, str) and d.strip()
         ]
+        if held_back:
+            kept = [i for i in valid_idx if str(ids[i])[:32] not in held_back]
+            held_count += len(valid_idx) - len(kept)
+            valid_idx = kept
         skipped += len(ids) - len(valid_idx)
         if not valid_idx:
             offset += page
@@ -1822,6 +1844,10 @@ def _reembed_collection(
             on_progress(processed, total)
         offset += page
 
+    if held_count:
+        _log.warning(
+            "sensitive_reembed_held_back", collection=col_name, held_back=held_count,
+            note="chunks of documents flagged sensitive in the catalog were not re-sent to Voyage")
     return processed, skipped
 
 

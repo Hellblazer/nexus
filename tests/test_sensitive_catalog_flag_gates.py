@@ -348,3 +348,367 @@ def test_nx_dt_index_refuses_a_catalog_flagged_record_for_a_voyage_collection(
 
     with pytest.raises(ExternalEmbedderRefusedError, match="--ack-external-embedder"):
         dtmod._index_record("U-FLAGGED", str(md), collection=_VOYAGE_DOCS, corpus=CORPUS, dry_run=False)
+
+
+# --------------------------------------------------------------------------- #
+# Fix round 2 (nexus-rfvyy.6.20): the markdown, prose and code paths of a repo or batch run.
+# A repo run and a batch run have no --ack-external-embedder: a flagged document going to a Voyage
+# collection is SKIPPED with a warning; one going to a bge collection is indexed normally.
+# --------------------------------------------------------------------------- #
+
+def _prose_ctx(file: Path, collection: str, tumbler: str, embedded: list[int], **extra: Any):
+    """An IndexContext whose embed function is the seam under watch: it records the call and stops the file."""
+    from nexus.index_context import IndexContext
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        embedded.append(len(texts))
+        raise Stop
+
+    return IndexContext(
+        col=object(), db=object(), voyage_key="", voyage_client=None, repo_path=file.parent, corpus=collection,
+        embedding_model="m", now_iso="2026-01-01T00:00:00+00:00", force=True, embed_fn=embed,
+        doc_id_resolver=lambda f: tumbler, **extra)
+
+
+def _skips(logs: list[dict], event: str) -> list[dict]:
+    return [e for e in logs if e.get("event") == event]
+
+
+@pytest.mark.parametrize("suffix,event", [(".md", "sensitive_md_skipped_external_embedder"),
+                                          (".txt", "sensitive_prose_skipped_external_embedder")])
+def test_the_repo_prose_path_skips_a_flagged_file_for_voyage_and_indexes_it_for_bge(
+    t2_service_env, tmp_path: Path, suffix: str, event: str,
+) -> None:
+    from nexus.prose_indexer import index_prose_file
+
+    f = tmp_path / f"flagged{suffix}"
+    f.write_text(f"# flagged\n\n{'the harbour lease memo, second draft. ' * 12}\n", encoding="utf-8")
+    tumbler = _register_in(f, _BGE_DOCS)
+    control_embedded: list[int] = []
+    with pytest.raises(Stop):  # control: an unflagged document reaches the embedder in the Voyage collection
+        index_prose_file(_prose_ctx(f, _VOYAGE_DOCS, tumbler, control_embedded), f)
+    assert control_embedded
+    _flag(tumbler)
+
+    embedded: list[int] = []
+    with structlog.testing.capture_logs() as logs:
+        assert index_prose_file(_prose_ctx(f, _VOYAGE_DOCS, tumbler, embedded), f) == 0
+    assert embedded == [], "a flagged document reached the embedder of a Voyage collection"
+    (skip,) = _skips(logs, event)
+    assert skip["log_level"] == "warning" and skip["doc_id"] == tumbler and skip["collection"] == _VOYAGE_DOCS
+
+    with pytest.raises(Stop):  # a flagged document in a local collection is indexed
+        index_prose_file(_prose_ctx(f, _BGE_DOCS, tumbler, embedded), f)
+    assert embedded
+
+
+def test_the_repo_code_path_skips_a_flagged_file_for_voyage_code_3_and_indexes_it_for_bge(
+    t2_service_env, tmp_path: Path,
+) -> None:
+    from nexus.code_indexer import index_code_file
+
+    f = tmp_path / "flagged.py"
+    f.write_text("def lease_memo():\n    return 'harbour'\n\n\ndef second_draft():\n    return lease_memo()\n", encoding="utf-8")
+    tumbler = _register_in(f, f"code__{CORPUS}__{BGE}__v1")
+    voyage_code = f"code__{CORPUS}__voyage-code-3__v1"
+    control: list[int] = []
+    with pytest.raises(Stop):
+        index_code_file(_prose_ctx(f, voyage_code, tumbler, control), f)
+    assert control
+    _flag(tumbler)
+
+    embedded: list[int] = []
+    with structlog.testing.capture_logs() as logs:
+        assert index_code_file(_prose_ctx(f, voyage_code, tumbler, embedded), f) == 0
+    assert embedded == []
+    (skip,) = _skips(logs, "sensitive_code_skipped_external_embedder")
+    assert skip["log_level"] == "warning" and skip["collection"] == voyage_code
+
+    with pytest.raises(Stop):
+        index_code_file(_prose_ctx(f, f"code__{CORPUS}__{BGE}__v1", tumbler, embedded), f)
+    assert embedded
+
+
+def test_an_unreadable_catalog_skips_a_voyage_prose_file_and_a_run_read_is_used_when_given(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.prose_indexer import index_prose_file
+    from nexus.sensitive_write import SensitiveDocs
+
+    f = tmp_path / "unknown.md"
+    f.write_text("# unknown\n\n" + "the harbour lease memo. " * 20, encoding="utf-8")
+    tumbler = _register_in(f, _BGE_DOCS)
+    monkeypatch.setattr("nexus.doc_sensitivity._catalog_reader", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    embedded: list[int] = []
+    assert index_prose_file(_prose_ctx(f, _VOYAGE_DOCS, tumbler, embedded), f) == 0
+    assert embedded == []
+    # The run's read wins over a per-file read: an empty run read lets the file through with no catalog call.
+    with pytest.raises(Stop):
+        index_prose_file(_prose_ctx(f, _VOYAGE_DOCS, tumbler, embedded, sensitive_docs=SensitiveDocs()), f)
+    assert embedded
+
+
+def test_the_batch_markdown_path_skips_a_flagged_file_for_voyage_with_one_batched_read(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus import doc_sensitivity
+    from nexus.doc_indexer import batch_index_markdowns
+
+    files = [_md(tmp_path, f"b{i}.md") for i in range(3)]
+    tumblers = [_register_in(f, _VOYAGE_DOCS) for f in files]
+    _flag(tumblers[1])
+    indexed: list[str] = []
+    monkeypatch.setattr(
+        "nexus.doc_indexer.index_markdown", lambda path, *a, **k: indexed.append(path.name) or 1)
+    reads: list[int] = []
+    real_flagged = doc_sensitivity.flagged
+    monkeypatch.setattr(doc_sensitivity, "flagged", lambda ts, **k: reads.append(1) or real_flagged(ts, **k))
+
+    with structlog.testing.capture_logs() as logs:
+        result = batch_index_markdowns(files, CORPUS, collection_name=_VOYAGE_DOCS)
+
+    assert result == {str(files[0]): "indexed", str(files[1]): "skipped", str(files[2]): "indexed"}, result
+    assert indexed == ["b0.md", "b2.md"], "the flagged file reached index_markdown"
+    assert len(reads) == 1, f"one batched flag read per batch, got {len(reads)}"
+    (skip,) = _skips(logs, "sensitive_md_skipped_external_embedder")
+    assert skip["log_level"] == "warning" and skip["path"] == str(files[1])
+
+
+def test_the_batch_markdown_path_indexes_a_flagged_file_for_bge_and_reads_nothing(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus import doc_sensitivity
+    from nexus.doc_indexer import batch_index_markdowns
+
+    files = [_md(tmp_path, f"l{i}.md") for i in range(2)]
+    _flag(_register_in(files[0], _BGE_DOCS))
+    indexed: list[str] = []
+    monkeypatch.setattr("nexus.doc_indexer.index_markdown", lambda path, *a, **k: indexed.append(path.name) or 1)
+    reads: list[int] = []
+    monkeypatch.setattr(doc_sensitivity, "flagged", lambda ts, **k: reads.append(1) or set())
+
+    result = batch_index_markdowns(files, CORPUS, collection_name=_BGE_DOCS)
+
+    assert set(result.values()) == {"indexed"} and indexed == ["l0.md", "l1.md"]
+    assert reads == [], "a local collection costs no flag read"
+
+
+def test_the_batch_markdown_path_with_an_unreadable_catalog_skips_every_file_for_voyage(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.doc_indexer import batch_index_markdowns
+
+    files = [_md(tmp_path, f"u{i}.md") for i in range(2)]
+    for f in files:
+        _register_in(f, _VOYAGE_DOCS)
+    indexed: list[str] = []
+    monkeypatch.setattr("nexus.doc_indexer.index_markdown", lambda path, *a, **k: indexed.append(path.name) or 1)
+    monkeypatch.setattr("nexus.doc_sensitivity._catalog_reader", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+
+    result = batch_index_markdowns(files, CORPUS, collection_name=_VOYAGE_DOCS)
+
+    assert indexed == [] and set(result.values()) == {"skipped"}, result
+
+
+def test_the_batch_backstop_turns_the_per_file_refusal_into_a_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No collection_name: the batch cannot tell the collection up front, so index_markdown's own gate may refuse
+    a flagged file for Voyage; the batch reports a skip (not a failure, no on_error) and keeps going."""
+    from nexus.doc_indexer import batch_index_markdowns
+    from nexus.sensitive_write import ExternalEmbedderRefusedError
+
+    a, b = _md(tmp_path, "refused.md"), _md(tmp_path, "fine.md")
+
+    def fake_index(path, *args, **kwargs):
+        if path.name == "refused.md":
+            raise ExternalEmbedderRefusedError("nx index md refused: --ack-external-embedder")
+        return 1
+
+    monkeypatch.setattr("nexus.doc_indexer.index_markdown", fake_index)
+    failures: list[BaseException] = []
+    with structlog.testing.capture_logs() as logs:
+        result = batch_index_markdowns([a, b], CORPUS, on_error=lambda p, e: failures.append(e))
+
+    assert result == {str(a): "skipped", str(b): "indexed"}, result
+    assert failures == []
+    (skip,) = _skips(logs, "sensitive_md_skipped_external_embedder")
+    assert skip["log_level"] == "warning" and skip["path"] == str(a)
+
+
+def test_a_repo_run_reads_the_flags_once_and_skips_only_the_flagged_files_for_voyage(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``index_repository`` end to end: three markdown files and a code file, one markdown file and the
+    code file flagged after a first run; a second run whose collections read as Voyage skips those two alone, with one batched
+    flag read for the run."""
+    import subprocess
+
+    from nexus import doc_sensitivity
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for name in ("a.md", "secret.md", "c.md"):
+        (repo / name).write_text(f"# {name}\n\n{'the harbour lease memo, second draft. ' * 12}\n", encoding="utf-8")
+    (repo / "m.py").write_text("def lease_memo():\n    return 'harbour'\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"], check=True)
+    first = CliRunner().invoke(main, ["index", "repo", str(repo), "--no-taxonomy"])
+    assert first.exit_code == 0, first.output
+    (entry,) = _reader().find_all_by_file_path("secret.md")  # a repo owner registers the path relative to the repo
+    _flag(str(entry.tumbler))
+    (code_entry,) = _reader().find_all_by_file_path("m.py")
+    _flag(str(code_entry.tumbler))
+
+    monkeypatch.setattr("nexus.sensitive_write.is_external_embedder", lambda name: True)
+    reads: list[int] = []
+    real_flagged = doc_sensitivity.flagged
+    monkeypatch.setattr(doc_sensitivity, "flagged", lambda ts, **k: reads.append(1) or real_flagged(ts, **k))
+    second = CliRunner().invoke(main, ["index", "repo", str(repo), "--no-taxonomy", "--force"])
+    assert second.exit_code == 0, second.output
+
+    # The CLI configures its own logging, so the warnings are read from its output.
+    lines = second.output.splitlines()
+    md_skips = [ln for ln in lines if "event='sensitive_md_skipped_external_embedder'" in ln]
+    assert len(md_skips) == 1 and "secret.md" in md_skips[0], md_skips
+    code_skips = [ln for ln in lines if "event='sensitive_code_skipped_external_embedder'" in ln]
+    assert len(code_skips) == 1 and "m.py" in code_skips[0], code_skips
+    assert "a.md — 1 chunks" in second.output and "c.md — 1 chunks" in second.output, second.output
+    assert len(reads) == 1, f"one batched flag read for the run, got {len(reads)}"
+
+
+# --------------------------------------------------------------------------- #
+# nx collection reembed: it re-sends STORED chunk text to Voyage, so a chunk of a flagged document is held back.
+# --------------------------------------------------------------------------- #
+
+class _ReembedDb:
+    """A one-page collection handle that records every chunk id handed to ``upsert_chunks``."""
+
+    def __init__(self, ids: list[str]) -> None:
+        self.ids, self.written = ids, []
+
+    def get_collection(self, name: str):
+        outer = self
+
+        class Col:
+            def count(self) -> int:
+                return len(outer.ids)
+
+            def get(self, *, limit, offset, include):
+                ids = outer.ids[offset:offset + limit]
+                return {"ids": ids, "documents": [f"text {i}" for i in ids], "metadatas": [{} for _ in ids]}
+
+        return Col()
+
+    def upsert_chunks(self, name, ids, docs, metadatas=None, force_re_embed=False):
+        self.written += list(ids)
+
+
+class _FlaggedManifests:
+    """A catalog reader with one flagged document in the collection, whose manifest names ``chashes``."""
+
+    def __init__(self, chashes: list[str]) -> None:
+        self.chashes = chashes
+
+    def list_by_collection(self, collection, *, limit=None):
+        return [type("E", (), {"tumbler": "1.1.9", "sensitive": True})()]
+
+    def get_manifests(self, doc_ids):
+        return {"1.1.9": [type("M", (), {"chash": c, "collection": None})() for c in self.chashes]}
+
+    def close(self) -> None:
+        return None
+
+
+def test_reembed_holds_back_the_chunks_of_a_flagged_document_in_a_voyage_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.commands.collection import _reembed_collection
+
+    flagged_id, plain_id = "a" * 64, "b" * 64
+    monkeypatch.setattr("nexus.doc_sensitivity._catalog_reader", lambda: _FlaggedManifests([flagged_id]))
+    db = _ReembedDb([flagged_id, plain_id])
+    with structlog.testing.capture_logs() as logs:
+        processed, skipped = _reembed_collection(
+            db, f"docs__{CORPUS}__voyage-context-3__v1", "voyage-context-3", dry_run=False, hooks=_NullHooks())
+    assert db.written == [plain_id], "a chunk of a flagged document was re-sent to Voyage"
+    assert (processed, skipped) == (1, 1)
+    (held,) = _skips(logs, "sensitive_reembed_held_back")
+    assert held["log_level"] == "warning" and held["held_back"] == 1
+
+
+def test_reembed_of_a_bge_collection_reads_no_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.commands.collection import _reembed_collection
+
+    def never() -> Any:
+        raise AssertionError("a local collection must not read the catalog")
+
+    monkeypatch.setattr("nexus.doc_sensitivity._catalog_reader", never)
+    db = _ReembedDb(["a" * 64])
+    _reembed_collection(db, _BGE_DOCS, "bge-base-en-v15-768", dry_run=False, hooks=_NullHooks())
+    assert db.written == ["a" * 64]
+
+
+def test_reembed_of_a_voyage_collection_refuses_when_the_catalog_cannot_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    import click
+
+    from nexus.commands.collection import _reembed_collection
+
+    monkeypatch.setattr("nexus.doc_sensitivity._catalog_reader", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    db = _ReembedDb(["a" * 64])
+    with pytest.raises(click.ClickException, match="sensitiv"):
+        _reembed_collection(
+            db, f"docs__{CORPUS}__voyage-context-3__v1", "voyage-context-3", dry_run=False, hooks=_NullHooks())
+    assert db.written == []
+
+
+class _NullHooks:
+    def fire_store_chains(self, *a, **k) -> None:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Notes: nx store put, MCP store_put, nx memory promote and the recovery import all write through put_note.
+# --------------------------------------------------------------------------- #
+
+def _note_put(monkeypatch: pytest.MonkeyPatch, tumbler: str, collection: str, *, minted: bool = False):
+    """``put_note`` of a re-put onto the registered document *tumbler*; ``write_note`` records instead of writing."""
+    from nexus.catalog import note_write
+
+    written: list[str] = []
+    monkeypatch.setattr(
+        "nexus.catalog.store_hook.catalog_store_hook_tracked", lambda **k: (tumbler, minted))
+    monkeypatch.setattr(note_write, "write_note", lambda **k: written.append(k["collection"]) or (_ for _ in ()).throw(Stop()))
+    return written, lambda **kw: note_write.put_note(
+        content="the harbour lease memo", collection=collection, title="flagged note", tags="", category="",
+        source_agent="test", ttl_days=None, entity_key="", **kw)
+
+
+def test_a_reput_of_a_flagged_note_into_a_voyage_collection_is_refused_before_any_write(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.sensitive_write import ExternalEmbedderRefusedError
+
+    tumbler = _register_in(_md(tmp_path, "note.md"), _VOYAGE_DOCS)
+    _flag(tumbler)
+    written, put = _note_put(monkeypatch, tumbler, _VOYAGE_DOCS)
+
+    with pytest.raises(ExternalEmbedderRefusedError, match="--ack-external-embedder"):
+        put()
+    assert written == [], "a flagged note was written to a Voyage collection"
+
+
+def test_a_reput_of_a_flagged_note_into_a_bge_collection_and_an_unflagged_one_into_voyage_proceed(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flagged = _register_in(_md(tmp_path, "n1.md"), _BGE_DOCS)
+    _flag(flagged)
+    written, put = _note_put(monkeypatch, flagged, _BGE_DOCS)
+    with pytest.raises(Stop):
+        put()
+    assert written == [_BGE_DOCS]
+
+    plain = _register_in(_md(tmp_path, "n2.md"), _VOYAGE_DOCS)
+    written, put = _note_put(monkeypatch, plain, _VOYAGE_DOCS)
+    with pytest.raises(Stop):
+        put()
+    assert written == [_VOYAGE_DOCS]

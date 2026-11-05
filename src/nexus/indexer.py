@@ -3448,6 +3448,7 @@ def _index_code_file(
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
     batcher: object | None = None,
+    sensitive_docs: object | None = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
@@ -3494,6 +3495,7 @@ def _index_code_file(
         staleness_cache=staleness_cache,
         hooks=hooks,
         batcher=batcher,
+        sensitive_docs=sensitive_docs,
     )
     return index_code_file(ctx, file)
 
@@ -3518,6 +3520,7 @@ def _index_prose_file(
     hooks: "HookRegistry | None" = None,
     batcher: object | None = None,
     force_re_embed: bool = False,
+    sensitive_docs: object | None = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -3555,6 +3558,7 @@ def _index_prose_file(
         staleness_cache=staleness_cache,
         hooks=hooks,
         batcher=batcher,
+        sensitive_docs=sensitive_docs,
     )
     return index_prose_file(ctx, file)
 
@@ -7137,6 +7141,16 @@ def _run_index(
     def _on_skip(file: Path, reason: str, error_class: str) -> None:
         _skipped_files.append((str(file), reason, error_class))
 
+    # RDR-243 (fix round 2): a repo run has no --ack-external-embedder, so a document flagged sensitive in
+    # the catalog is skipped for a Voyage collection (code, prose, markdown and RDR alike; the PDF path
+    # makes the same call in _index_pdf_file). ONE batched catalog read for the whole run, and none when
+    # every collection embeds locally. A read that cannot answer reads every file as sensitive.
+    from nexus.sensitive_write import is_external_embedder as _is_external, sensitive_docs as _sensitive_docs  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+    _sens_kw: dict = {}
+    if any(c and _is_external(c) for c in (code_collection, docs_collection, rdr_col_name)):
+        _sens_kw = {"sensitive_docs": _sensitive_docs(
+            _doc_id_resolver(f) for _, f in (*_dispatch_code, *_dispatch_prose, *_dispatch_rdr))}
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
     # patching nexus.indexer._index_code_file continue to intercept correctly.
@@ -7168,6 +7182,7 @@ def _run_index(
             staleness_cache=code_staleness,
             hooks=hooks,
             batcher=_batcher,
+            **_sens_kw,
         ), file)
 
     # nexus-qgc4b: tally files that actually wrote chunks across all three
@@ -7222,6 +7237,7 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
             batcher=_batcher,
+            **_sens_kw,
         ), file)
 
     _prose_written = run_file_loop(
@@ -7366,6 +7382,7 @@ def _run_index(
             staleness_cache=rdr_staleness,
             hooks=hooks,
             batcher=_batcher,
+            **_sens_kw,
         ), file)
 
     _rdr_written = run_file_loop(

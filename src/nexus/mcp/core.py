@@ -6003,7 +6003,7 @@ def store_put(
         # and the recovery import run the same sequence. This tool only words
         # the result.
         from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
-        from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
+        from nexus.sensitive_write import ExternalEmbedderRefusedError, SensitiveFlagNotSetError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
 
         try:
             outcome = put_note(
@@ -6014,6 +6014,9 @@ def store_put(
         except SensitiveFlagNotSetError as exc:
             # RDR-243: the existing document could not be marked, so nothing was written to it.
             return _fail(f"Error: store_put: {exc}")
+        except ExternalEmbedderRefusedError as exc:
+            # RDR-243: the note is flagged sensitive in the catalog and this collection embeds with Voyage.
+            return _fail(f"Error: store_put: {exc.message}")
         except NoteUriEngineTooOldError as exc:
             # RDR-231 (nexus-bivz3.13): the serving engine cannot hold a note's nx-note:// URI. Raised
             # before the register and the write, so nothing changed; the message carries the remedy.
