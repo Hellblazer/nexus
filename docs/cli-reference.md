@@ -1787,7 +1787,8 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 ```
 nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-text-dedup]
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity]
-                  [--link-coverage] [--visible-outside-manifest] [--json]
+                  [--link-coverage] [--visible-outside-manifest]
+                  [--sensitive-in-aspect-eligible] [--sensitive-with-aspects] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
@@ -1802,6 +1803,8 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--store-put-integrity`: store_put-origin integrity (nexus-b6enc, GH #1419 Issue 8) — for `content_type='knowledge'` documents with no `file_path`: FAIL on `chunk_count` != manifest-row count (drift) and on ghosts (catalog row with zero manifest rows AND zero T3 chunks), reporting title + tumbler so the content can be re-created while it is still remembered.
 - `--link-coverage` (7.16.4, nexus-glivh): per-content-type link coverage. FAILs only on a content type holding at least 10 documents with ZERO links — which means no generator has ever run for that type, not that its documents are unrelated. Percentages are reported and never flagged: a measured full generator pass over this corpus yields 133 links, so a low percentage is the natural ceiling of filepath extraction and no available remedy moves it. Index-time generation only links NEWLY registered tumblers, so a corpus can sit permanently unlinked with every other check green. Remediate with `nx catalog generate-links --dry-run` first.
 - `--visible-outside-manifest` (nexus-wbfpw.26, RDR-192 Step 14): a canary for a live(c) regression. Under live(c) a chunk with no manifest row in its own collection is hidden from search and get. For each `knowledge__` collection the check takes the manifest-less census's `superseded` bucket (chunks whose owning note is live and whose manifest names a different chash) and asks the normal `get` reader, never the stored-row one (no `include_non_live`), whether each is visible. A visible chunk is a finding naming the collection, the note's tumbler and title, and the chash, and fails the check (exit 1); the census and the probe are separate reads, so re-run to confirm a finding. A healthy engine finds none; a finding means live(c), or a predicate that drifted from it, stopped hiding the chunk. A split note legitimately has several live chunks, so the check does not count chunks per title; it flags only chunks the census classes as superseded. It probes `get` only, not search: a search probe needs the superseded chunk's text, and the engine never returns text for a stored row that live(c) hides. It reads at most 300 per call, probes each census page as it lands, probes at most 5,000 chunks and checks a 120-second budget between calls (one call can run to the 120-second HTTP timeout, so a run can take about 240 seconds), and prints `checked N of M` so a clean result says what it covered. A run cut short by either budget says so and still passes if it probed something and found nothing visible; a run cut short before it probed anything reads **INCONCLUSIVE** and exits 1. When the superseded bucket is empty in every collection (the steady state once the reaper has drained it) it reads **nothing to probe** (exit 0, no PASS word, `vacuous: true` in `--json`): that run could not have detected a regression. It reads **not applicable** (exit 0, no PASS line) on a box with no `knowledge__` collection and against an engine without the census route. Needs an engine that carries `POST /v1/vectors/manifest-less-census`.
+- `--sensitive-in-aspect-eligible` (RDR-243, nexus-rfvyy.6.17): WARN for each sensitive document whose collection has an aspect extractor (`select_config`, which includes an opted-in `docs__` collection) or already holds aspect rows. Does not change the exit status. Reads **not applicable**, never a pass, on a tenant with no sensitive documents, on an engine without `catalog_sensitivity_supported`, and when the catalog or the aspect store cannot be read.
+- `--sensitive-with-aspects` (RDR-243, nexus-rfvyy.6.17): FAIL (exit 1) for each sensitive document that already has an aspect row or a queued aspect task in either side of the queue, with `nx enrich delete --tumbler <t>` printed per document. Same not-applicable rule. Both rows read the catalog's documents once to find the sensitive ones.
 
 Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
 
@@ -3605,8 +3608,8 @@ run `nx init`, or one using a managed Postgres.
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-`ghost-sweep`, `harness-grant`, `docs-aspects-config`
-(the last four have no `--check-ghost-sweep` / `--check-harness-grant` /
+`ghost-sweep`, `harness-grant`, `docs-aspects-config`, `sensitive-in-aspect-eligible`, `sensitive-with-aspects`
+(the last six have no `--check-ghost-sweep` / `--check-harness-grant` /
 `--check-docs-aspects-config` flag; they only run as part of this
 supplementary set).
 `docs-aspects-config` (nexus-l46pu round 2) warns when a local
@@ -3615,6 +3618,15 @@ whose engine `aspects_enabled` is not yet `True` — the engine is
 authoritative once it has an opinion (see [Aspects](configuration.md#aspects)),
 so an unsynced local match is silent cross-machine drift. N/A on a machine
 with an empty `docs_collections` list.
+`sensitive-in-aspect-eligible` and `sensitive-with-aspects` (RDR-243,
+nexus-rfvyy.6.17) are the same two rows `nx catalog doctor
+--sensitive-in-aspect-eligible` and `--sensitive-with-aspects` print: a sensitive document
+whose collection has an aspect extractor or already holds aspect rows (warn), and a sensitive
+document that already has an aspect row or a queued aspect task (fail; one `nx enrich delete
+--tumbler <t>` line each). Both read `[ ]` not applicable, never a pass, on a tenant with no
+sensitive documents, on an engine without the sensitivity column, and when the catalog or the
+aspect store cannot be read. As supplementary rows they print and never change the exit code;
+`nx catalog doctor --sensitive-with-aspects` exits 1 on a fail.
 `ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
