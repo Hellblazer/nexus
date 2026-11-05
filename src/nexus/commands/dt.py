@@ -30,7 +30,7 @@ import structlog
 import nexus.devonthink as dt_mod
 from nexus.config import DEFAULT_EXTRACTOR, EXTRACTOR_CHOICES, get_pdf_extractor, resolve_extractor
 from nexus.devonthink import DTNotAvailableError, _is_darwin
-from nexus.sensitive_write import sensitive_help, sensitive_write_kwargs
+from nexus.sensitive_write import ack_help, resolve_sensitive_collection, sensitive_help, sensitive_write_kwargs
 
 _log = structlog.get_logger(__name__)
 
@@ -251,6 +251,7 @@ def _index_record(
     force: bool = False,
     force_re_embed: bool = False,
     sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]], str]:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
@@ -313,7 +314,7 @@ def _index_record(
     from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415 — command-local import (doc_indexer)
 
     # RDR-243: the keyword rides only when set, so an indexer double without it is untouched.
-    sens_kw = {"sensitive": True} if sensitive else {}
+    sens_kw = {"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}
 
     # NAME THE DEVONthink IDENTITY when the document is already catalogued
     # (nexus-z0lu4). index_pdf/index_markdown already take source_uri and
@@ -719,6 +720,7 @@ def _index_dt_content_record(
     force: bool = False,
     force_re_embed: bool = False,
     sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> bool:
     """RDR-139 Layer D: index a non-file-backed DT record from DT-extracted
     text (rather than an on-disk file).
@@ -847,7 +849,7 @@ def _index_dt_content_record(
             extraction_source=extraction_source,
             force=force,
             force_re_embed=force_re_embed,
-            **({"sensitive": True} if sensitive else {}),
+            **({"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}),
         )
         if not count:
             # We had non-empty text above, so a 0-chunk return is the
@@ -1070,6 +1072,7 @@ def dt() -> None:
     ),
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -1090,6 +1093,7 @@ def index_cmd(
     re_embed: bool,
     allow_page_gap: bool = False,
     sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -1105,7 +1109,8 @@ def index_cmd(
             "re-embed."
         )
     # RDR-243: the engine refusal and the --enrich refusal, before DEVONthink is read or any record touched.
-    sens_kw = sensitive_write_kwargs(sensitive, "nx dt index --sensitive", dry_run=dry_run, enrich=enrich)
+    sens_kw = sensitive_write_kwargs(
+        sensitive, "nx dt index --sensitive", ack=ack_external_embedder, dry_run=dry_run, enrich=enrich)
 
     selectors_used = sum([
         use_selection,
@@ -1257,6 +1262,14 @@ def index_cmd(
             # exactly as before.
             if dt_content_active:
                 dt_collection = _resolve_dt_collection(collection, corpus, ext)
+                if sensitive:
+                    try:
+                        dt_collection = resolve_sensitive_collection(
+                            dt_collection, ack=ack_external_embedder, what="nx dt index --sensitive")
+                    except RuntimeError as exc:
+                        failed.append((uuid, path, str(exc)))
+                        errored_failed += 1
+                        continue
                 try:
                     content_indexed = _index_dt_content_record(
                         uuid, collection=dt_collection, corpus=corpus, force=force,
@@ -1364,6 +1377,14 @@ def index_cmd(
             not_attempted.append((uuid, path, f"not attempted (the run stopped at {mineru_stop.name})"))
             continue
         resolved_collection = _resolve_dt_collection(collection, corpus, ext)
+        if sensitive:
+            try:
+                resolved_collection = resolve_sensitive_collection(
+                    resolved_collection, ack=ack_external_embedder, what="nx dt index --sensitive")
+            except RuntimeError as exc:
+                failed.append((uuid, path, str(exc)))
+                errored_failed += 1
+                continue
         try:
             _result = _index_record(
                 uuid,
@@ -2067,6 +2088,7 @@ def _capture_is_pdf(url: str | None, doi: str | None, file_path: str | None, cap
                    "math; pymupdf = text layer only, needs no PDF support; auto and docling "
                    "are older names that run as mineru).")
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
 @click.pass_context
 def capture_cmd(
     ctx: click.Context,
@@ -2083,6 +2105,7 @@ def capture_cmd(
     enrich: bool,
     extractor: str | None,
     sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> None:
     """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
 
@@ -2109,7 +2132,7 @@ def capture_cmd(
 
     # RDR-243: refuse before DEVONthink is touched. A capture that created the record and then
     # failed to flag the index would leave an unprotected record behind.
-    sensitive_write_kwargs(sensitive, "nx dt capture --sensitive", enrich=enrich)
+    sensitive_write_kwargs(sensitive, "nx dt capture --sensitive", ack=ack_external_embedder, enrich=enrich)
 
     from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
@@ -2179,6 +2202,7 @@ def capture_cmd(
             enrich=enrich,
             extractor=extractor,
             sensitive=sensitive,
+            ack_external_embedder=ack_external_embedder,
         )
     except click.ClickException:
         # Capture succeeded but indexing failed: the DT record exists but is

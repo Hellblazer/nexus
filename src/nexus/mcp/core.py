@@ -5928,8 +5928,15 @@ def store_put(
             # collection embeds through Voyage, so cloud mode refuses before any engine contact. Then item 3:
             # an engine that cannot hold the flag stops the write here, before the T3 handle, the register
             # call and any embedding (it would drop the flag without an error).
-            from nexus.sensitive_write import require_sensitive_engine  # noqa: PLC0415 — deferred: only a flagged put needs it
+            from nexus.sensitive_write import (  # noqa: PLC0415 — deferred: only a flagged put needs it
+                cloud_refusal_text,
+                require_sensitive_engine,
+            )
 
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: config is heavy
+
+            if not is_local_mode():
+                return _fail(f"Error: store_put: {cloud_refusal_text('store_put(sensitive=True)')}")
             try:
                 require_sensitive_engine("store_put(sensitive=True)")
             except RuntimeError as exc:
@@ -5943,6 +5950,22 @@ def store_put(
         # a genuinely new corpus mints strictly (raises loud if
         # local.embed_model is voyage-shaped with no key configured).
         col_name = t3_collection_name(collection, t3=t3, for_write=True)
+        routed_note = ""
+        if sensitive:
+            # RDR-243 Q3 (local mode): a Voyage collection is not written to; the bge collection of the
+            # same subject is. No acknowledgement exists on this tool.
+            from nexus.sensitive_write import (  # noqa: PLC0415 — deferred: only a flagged put needs it
+                ExternalEmbedderRefusedError,
+                resolve_sensitive_collection,
+            )
+
+            try:
+                routed = resolve_sensitive_collection(col_name, ack=False, what="store_put(sensitive=True)")
+            except ExternalEmbedderRefusedError as exc:
+                return _fail(f"Error: store_put: {exc.message}")
+            if routed != col_name:
+                routed_note = f"\nsensitive: {col_name} embeds with Voyage AI; stored in {routed}, which embeds on this machine."
+                col_name = routed
 
         # RDR-101 Phase 3 PR δ Stage B.5: pre-register the catalog entry
         # so the T3 chunk can carry the resulting tumbler as ``doc_id``
@@ -6091,7 +6114,7 @@ def store_put(
             f" ({len(pieces)} chunks, split to the embedding model's token window)"
             if len(pieces) > 1 else ""
         )
-        stored = f"Stored: {doc_id} -> {col_name}{split_note}"
+        stored = f"Stored: {doc_id} -> {col_name}{split_note}{routed_note}"
         # RDR-192 Step 13: a second line, only when the re-put's sweep removed chunks or did not finish.
         superseded = superseded_line(outcome)
         return f"{stored}\n{superseded}" if superseded else stored

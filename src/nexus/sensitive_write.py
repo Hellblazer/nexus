@@ -18,13 +18,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import click
 import structlog
 
 _log = structlog.get_logger(__name__)
 
 __all__ = [
-    "SENSITIVE_REASON", "SensitiveFlagNotSetError", "raise_flag", "require_sensitive_engine", "sensitive_help",
-    "sensitive_write_kwargs",
+    "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveFlagNotSetError", "ack_help",
+    "bge_sibling", "cloud_disclosure", "cloud_refusal_text", "is_external_embedder", "raise_flag",
+    "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help",
+    "route_for_index", "sensitive_write_kwargs",
 ]
 
 #: The audit reason recorded when a verb raises the flag on an existing document.
@@ -38,8 +41,146 @@ def sensitive_help() -> str:
     return ls.render_sensitive_help(ls.RELEASE_ENFORCED_PHASE)
 
 
+def _bge_token() -> str:
+    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL  # noqa: PLC0415 — deferred: leaf module, read once
+
+    return _MODEL_TOKENS[_TIER1_MODEL]
+
+
+#: The bge collection-name token a sensitive document is routed to in local mode, read from the one table the
+#: write path reads, so the sibling name cannot drift from the collection the engine embeds.
+BGE_TOKEN: str = _bge_token()
+
+
+def ack_help() -> str:
+    """Help for ``--ack-external-embedder`` (RDR-243 Q3). Names the bge sibling of every prefix and the cloud rule."""
+    return (
+        "With --sensitive: accept that this document's text is sent to an external embedder. Without it, a "
+        "sensitive document in local mode is written to the bge collection of the same subject, which "
+        "embeds on this machine: knowledge__S, docs__S, rdr__S and code__S go to "
+        f"<prefix>__S__{BGE_TOKEN}__v1. A sensitive document already registered in a Voyage collection is "
+        "not moved; the run refuses (delete the document and index it again, or pass this flag to index "
+        "it in place). In cloud mode every collection embeds through Voyage and the tenant stores the "
+        "text, so --sensitive refuses without this flag; with it, a one-line disclosure names the endpoint "
+        "and the embedder. MCP store_put has no way to pass it, so it refuses in cloud mode."
+    )
+
+
 class SensitiveFlagNotSetError(RuntimeError):
     """A ``--sensitive`` write could not put the flag on the document, so nothing was written to it."""
+
+
+class ExternalEmbedderRefusedError(click.ClickException, RuntimeError):
+    """A ``--sensitive`` write would send the document to an external embedder without the acknowledgement.
+
+    Both a ``ClickException`` (a verb prints it and exits non-zero) and a ``RuntimeError`` (a batch loop
+    that survives a per-record ``RuntimeError`` survives this one, and MCP words it with ``_fail``)."""
+
+
+def is_external_embedder(collection_name: str) -> bool:
+    """True when *collection_name* is embedded off this machine, or when that cannot be told.
+
+    A conformant name carries its embedder token: the local tokens (bge, MiniLM) embed here, anything
+    else (Voyage) does not. A name without a token (a legacy two-segment name) is unknown, and an
+    unknown embedder reads as external, never as safe.
+    """
+    from nexus.corpus import LOCAL_EMBEDDING_MODELS, embedding_model_for_collection_name  # noqa: PLC0415 — deferred: corpus is heavy
+
+    token = embedding_model_for_collection_name(collection_name)
+    return token is None or token not in LOCAL_EMBEDDING_MODELS
+
+
+def bge_sibling(collection_name: str) -> str | None:
+    """``<prefix>__<subject>__bge-base-en-v15-768__v1`` for a conformant *collection_name*, else ``None``.
+
+    Works for every prefix (``knowledge__``, ``docs__``, ``rdr__``, ``code__``). The version segment is
+    ``v1``: the sibling is a different collection, not a newer version of the Voyage one.
+    """
+    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred: corpus is heavy
+
+    if not is_conformant_collection_name(collection_name):
+        return None
+    parts = parse_conformant_collection_name(collection_name)
+    return f"{parts['content_type']}__{parts['owner_id']}__{BGE_TOKEN}__v1"
+
+
+def _cloud_endpoint() -> str:
+    try:
+        from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib, branch-local
+
+        from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deferred: endpoint resolution reads config
+
+        host = urlsplit(resolve_service_endpoint()[0]).hostname
+        return host or "the managed service"
+    except Exception:  # noqa: BLE001 — a disclosure line must never fail the write it describes
+        return "the managed service"
+
+
+def cloud_refusal_text(what: str) -> str:
+    """Why *what* refuses in cloud mode without the acknowledgement. One sentence for the CLI and MCP alike."""
+    return (
+        f"{what} refused: in cloud mode every collection is embedded by Voyage AI and stored in the managed "
+        f"tenant, so this document's text would leave this machine. Nothing was written. "
+        f"Use local mode, where a sensitive document is embedded on this machine, or pass "
+        f"--ack-external-embedder to accept the cloud tenant and Voyage."
+    )
+
+
+def cloud_disclosure() -> str:
+    """The one-line disclosure for census row 22 (cloud tenant storage), shown with the acknowledgement."""
+    return (
+        f"sensitive: acknowledged. This document's chunk text and its Voyage embeddings are stored in the "
+        f"managed cloud tenant at {_cloud_endpoint()} and sent to Voyage AI to be embedded. It stays out of "
+        f"model-bound surfaces on this machine; the tenant and Voyage hold a copy."
+    )
+
+
+def route_for_index(collection: str | None, corpus: str, *, ack: bool, what: str) -> str:
+    """:func:`resolve_sensitive_collection` for ``nx index pdf`` / ``md``: with no ``--collection`` the
+    collection is the docs leaf of *corpus*, resolved here so the decision sees the name it will write."""
+    if collection is None:
+        from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — deferred: corpus is heavy
+
+        collection = docs_leaf_fallback_collection_name(corpus)
+    return resolve_sensitive_collection(collection, ack=ack, what=what)
+
+
+def resolve_sensitive_collection(name: str, *, ack: bool, what: str) -> str:
+    """Decide where a sensitive document goes, given the collection its verb resolved (RDR-243 item 8, Q3).
+
+    * an embedder on this machine: *name* unchanged;
+    * a Voyage collection with *ack*: *name* unchanged, with a one-line notice;
+    * a Voyage collection without *ack*, local mode: the bge sibling of the same subject, with a notice;
+      refused when the install embeds with Voyage this boot (no bge route exists) or *name* has no sibling;
+    * cloud mode without *ack*: refused (every collection is Voyage there).
+    """
+    from nexus.config import is_local_mode, local_embed_profile  # noqa: PLC0415 — deferred: config is heavy
+
+    if not is_external_embedder(name):
+        return name
+    if ack:
+        if is_local_mode():
+            click.echo(
+                f"sensitive: acknowledged. This document's text is sent to Voyage AI to be embedded "
+                f"(collection {name}).", err=True)
+        return name
+    if not is_local_mode():
+        raise ExternalEmbedderRefusedError(cloud_refusal_text(what))
+    if local_embed_profile() == "voyage":
+        raise ExternalEmbedderRefusedError(
+            f"{what} refused: collection {name} embeds with Voyage AI, and this install's engine embeds with "
+            f"Voyage this boot, so there is no local bge collection to route a sensitive document to. "
+            f"Nothing was written. Pass --ack-external-embedder to accept Voyage, or start the engine on "
+            f"the bge profile.")
+    sibling = bge_sibling(name)
+    if sibling is None:
+        raise ExternalEmbedderRefusedError(
+            f"{what} refused: cannot tell which embedder collection {name} uses, and it has no bge sibling "
+            f"to route to. Nothing was written. Use a conformant collection name, or pass "
+            f"--ack-external-embedder.")
+    click.echo(f"sensitive: {name} embeds with Voyage AI; this document goes to {sibling}, which embeds on "
+               f"this machine.", err=True)
+    return sibling
 
 
 def require_catalog_sensitivity(cat: Any, *, what: str = "a sensitive write") -> None:
@@ -67,17 +208,21 @@ def require_sensitive_engine(what: str) -> None:
             close()
 
 
-def sensitive_write_kwargs(sensitive: bool, what: str, *, dry_run: bool = False, enrich: bool = False) -> dict[str, bool]:
-    """The CLI front door of a ``--sensitive`` verb: ``{}`` when the flag is off, else the engine
-    refusal and ``{"sensitive": True}`` to splat into the indexer calls.
+def sensitive_write_kwargs(
+    sensitive: bool, what: str, *, ack: bool = False, dry_run: bool = False, enrich: bool = False,
+) -> dict[str, bool]:
+    """The CLI front door of a ``--sensitive`` verb: ``{}`` when the flag is off, else the refusals and
+    the keywords to splat into the indexer calls (``sensitive``, and ``ack_external_embedder`` when given).
 
-    The keyword rides only when set, so a test double or an older indexer signature is untouched
-    when the flag is off. A dry run writes nothing, so it skips the engine probe. ``--enrich``
-    sends the document's title to Semantic Scholar or CrossRef (census rows 7 and 8), which a
-    sensitive document must not: refused here until the document gates land (Step 4b).
+    Order: usage errors first (``--ack-external-embedder`` means nothing without ``--sensitive``;
+    ``--enrich`` sends the title to Semantic Scholar or CrossRef, census rows 7 and 8, which a
+    sensitive document must not, until the document gates land in Step 4b), then the cloud rule
+    (every cloud collection is Voyage: refuse without *ack*, disclose with it, census row 22), then the
+    engine refusal. A dry run writes nothing, so it skips the last two. The keyword rides only when
+    set, so a test double or an older indexer signature is untouched when the flag is off.
     """
-    import click  # noqa: PLC0415 — deferred: this module also loads under MCP
-
+    if ack and not sensitive:
+        raise click.UsageError("--ack-external-embedder only means something with --sensitive.")
     if not sensitive:
         return {}
     if enrich:
@@ -86,11 +231,17 @@ def sensitive_write_kwargs(sensitive: bool, what: str, *, dry_run: bool = False,
             f"a sensitive document is not sent there. Drop one of the two flags."
         )
     if not dry_run:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: config is heavy
+
+        if not is_local_mode():
+            if not ack:
+                raise click.ClickException(cloud_refusal_text(what))
+            click.echo(cloud_disclosure(), err=True)
         try:
             require_sensitive_engine(what)
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
-    return {"sensitive": True}
+    return {"sensitive": True, **({"ack_external_embedder": True} if ack else {})}
 
 
 def raise_flag(writer: Any, tumbler: str, *, what: str) -> None:

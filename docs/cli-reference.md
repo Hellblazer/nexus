@@ -152,7 +152,8 @@ The cause after each name is `register_failed` (the per-file register raised), `
 |------|-------------|
 | `--corpus NAME` | Corpus name for the `docs__` collection (default: `default`) |
 | `--collection NAME` | T3 collection name, overriding `--corpus` when set. Bare names are normalized through `t3_collection_name()` (e.g. `delos` becomes the conformant `docs__delos__<model>__vN` shape); a fully-qualified name (e.g. `knowledge__delos`) is honoured as given |
-| `--sensitive` | Mark the document sensitive (RDR-243): kept from every model-bound surface; one-way, cleared only by `nx catalog sensitive --clear --reason`. Refuses before the register call unless the engine advertises `catalog_sensitivity_supported`. A re-index of an existing document raises the flag on it. Cannot be combined with `--enrich` |
+| `--sensitive` | Mark the document sensitive (RDR-243): kept from every model-bound surface; one-way, cleared only by `nx catalog sensitive --clear --reason`. Refuses before the register call unless the engine advertises `catalog_sensitivity_supported`. A `pdf` is never sent to any MinerU URL (loopback included; extraction runs as the local subprocess). Cannot be combined with `--enrich` |
+| `--ack-external-embedder` | With `--sensitive`: accept an external embedder. Without it, local mode writes a sensitive document to the bge collection of the same subject (`<prefix>__<subject>__bge-base-en-v15-768__v1` for `knowledge__`, `docs__`, `rdr__` and `code__`), cloud mode refuses (every cloud collection embeds through Voyage; with the flag a one-line disclosure names the endpoint and Voyage), and a document already registered in a Voyage collection refuses rather than moves |
 | `--source-uri URI` | Resolve catalog identity by URI (e.g. `x-devonthink-item://<UUID>`) INSTEAD of by file path (nexus-y8qtj). Use when re-indexing a document that was originally registered under an out-of-band identity — a plain path-based re-index misses it and forks a second catalog Document, leaving the original's chunks live and un-swept. **Fail-loud, no silent fallback:** a URI that resolves to no live document is an error (never registers a new document); a URI that resolves to a document in a *different* `--collection` than this run targets is also an error (a move, not a re-index — use `nx catalog update` to move it deliberately). `pdf --source-uri` is mutually exclusive with `--dir` |
 
 At the end of an index run, if the freshly-indexed document shares more than
@@ -2508,6 +2509,7 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 | `--category LABEL` | Category label |
 | `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`; default: `permanent`) |
 | `--sensitive` | Mark the note sensitive (RDR-243); see `nx index md`. A re-put raises the flag on the existing note |
+| `--ack-external-embedder` | With `--sensitive`: accept a Voyage collection. Without it, local mode stores into the bge collection of the same subject and cloud mode refuses |
 
 A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.
 

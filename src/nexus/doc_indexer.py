@@ -989,9 +989,12 @@ def _register_or_lookup_doc_id(
     source_uri: str = "",
     with_created: bool = False,
     sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> str | tuple[str, bool]:
     """RDR-102 D1 pre-flight catalog registration for the doc_indexer family.
 
+    *ack_external_embedder* (RDR-243 Q3) is the acknowledgement a sensitive run carries; the refusal that
+    reads it for a document already registered in a Voyage collection is nexus-rfvyy.2's.
 
     *sensitive* (RDR-243, nexus-rfvyy.6.9) puts the flag on the document this call resolves, before
     the caller writes any chunk and before the post-store chains fire: a fresh registration carries
@@ -2534,8 +2537,12 @@ def _pdf_chunks(
     extraction_stats: dict | None = None,
     title_override: str = "",
     collection_name: str = "",
+    sensitive: bool = False,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
+
+    *sensitive* (RDR-243 row 21, nexus-rfvyy.6.10): the extractor never resolves or contacts a
+    MinerU server; see :class:`~nexus.pdf_extractor.PDFExtractor`.
 
     *collection_name* decides the token window (the model token the engine
     embeds the collection with), not *target_model*: on a service-backed
@@ -2581,7 +2588,7 @@ def _pdf_chunks(
     # pipeline row (it extracts, then chunks and embeds in memory). The RDR's Progress section
     # says both callers pass one; the bead (nexus-tr1rj.2) records the decision that there is
     # nothing to stamp.
-    result = PDFExtractor().extract(
+    result = (PDFExtractor(sensitive=True) if sensitive else PDFExtractor()).extract(
         pdf_path, extractor=extractor,
         allow_degraded=allow_degraded_extraction,
     )
@@ -2775,6 +2782,7 @@ def index_pdf(
     title_override: str = "",
     on_extraction: Callable[[dict], None] | None = None,
     sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -3056,7 +3064,7 @@ def index_pdf(
             physical_collection=col_name,
             source_uri=source_uri,
             with_created=True,
-            **({"sensitive": True} if sensitive else {}),
+            **({"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}),
         )
         if isinstance(_reg_result, tuple):
             doc_id, _doc_id_freshly_minted = _reg_result
@@ -3206,6 +3214,7 @@ def index_pdf(
                     on_write_started=_note_write_started,
                     extraction_stats=_extraction_stats,
                     enrich=enrich,
+                    **({"sensitive": True} if sensitive else {}),
                 )
             except Exception as exc:
                 _rollback_if_freshly_minted(exc)
@@ -3428,6 +3437,7 @@ def index_pdf(
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
         extraction_stats=_extraction_stats, title_override=title_override,
         collection_name=col_name,
+        **({"sensitive": True} if sensitive else {}),
     )
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
@@ -3552,6 +3562,7 @@ def index_pdf(
             physical_collection=col_name,
             source_uri=source_uri,
             with_created=True,
+            **({"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}),
         )
         if isinstance(_reg_result, tuple):
             _catalog_doc_id_for_batch, _batch_created = _reg_result
@@ -4054,6 +4065,7 @@ def index_markdown(
     source_uri: str = "",
     on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
     sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
 
@@ -4188,7 +4200,7 @@ def index_markdown(
         base_path=base_path,
         source_uri=source_uri,
         with_created=True,
-        **({"sensitive": True} if sensitive else {}),
+        **({"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}),
     )
     if isinstance(_reg_result, tuple):
         doc_id, _doc_just_created = _reg_result

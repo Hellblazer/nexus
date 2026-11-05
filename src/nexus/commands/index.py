@@ -16,7 +16,12 @@ from tqdm import tqdm
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import EXTRACTOR_CHOICES
-from nexus.sensitive_write import sensitive_help, sensitive_write_kwargs as _sensitive_write_kwargs
+from nexus.sensitive_write import (
+    ack_help,
+    route_for_index as _route_sensitive_index,
+    sensitive_help,
+    sensitive_write_kwargs as _sensitive_write_kwargs,
+)
 
 from nexus import pdf_stack
 
@@ -3162,7 +3167,8 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     ),
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool, sensitive: bool = False) -> None:
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -3243,7 +3249,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             "skips never reaches the server, so there is nothing to "
             "re-embed."
         )
-    sens_kw = _sensitive_write_kwargs(sensitive, "nx index pdf --sensitive", dry_run=dry_run, enrich=enrich)
+    sens_kw = _sensitive_write_kwargs(
+        sensitive, "nx index pdf --sensitive", ack=ack_external_embedder, dry_run=dry_run, enrich=enrich)
 
     # nexus-2k66t.4.2: the PDF stack is the `pdf` extra. Make sure it is here
     # BEFORE any catalog or T3 write: installed now (and this command re-run in
@@ -3315,6 +3322,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # raises loud if local.embed_model is voyage-shaped with no
             # key configured, never silently mints a bge collection.
             collection = t3_collection_name(collection, for_write=True)
+        if sensitive:
+            collection = _route_sensitive_index(
+                collection, corpus, ack=ack_external_embedder, what="nx index pdf --dir --sensitive")
 
         total = len(pdfs)
         total_chunks = 0
@@ -3323,7 +3333,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # Check if MinerU server is available for batch performance. The probe can START a
         # server (PDFExtractor._mineru_server_available autostarts), so the text-only
         # ``pymupdf`` extractor (RDR-237) stays out of it: MinerU is never probed or started.
-        if extractor == "mineru":
+        if extractor == "mineru" and sens_kw:
+            # RDR-243 row 21: a sensitive batch never probes (or starts) a MinerU server.
+            click.echo("Sensitive run: MinerU runs as a local subprocess; no MinerU server is contacted.")
+        elif extractor == "mineru":
             from nexus.pdf_extractor import PDFExtractor  # noqa: PLC0415 — deliberate function-local import (heavy PDF-extractor dep deferred; rare branch)
             _extractor = PDFExtractor()
             server_up = _extractor._mineru_server_available()
@@ -3521,6 +3534,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # loud if local.embed_model is voyage-shaped with no key configured.
     if collection is not None:
         collection = t3_collection_name(collection, for_write=True)
+    if sensitive and not dry_run:
+        # RDR-243 Q3: a Voyage target needs --ack-external-embedder; without it the bge sibling of the subject.
+        collection = _route_sensitive_index(
+            collection, corpus, ack=ack_external_embedder, what="nx index pdf --sensitive")
 
     path = path.resolve()
 
@@ -3813,7 +3830,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     ),
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
-def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, re_embed: bool, monitor: bool, source_uri: str | None, sensitive: bool = False) -> None:
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, re_embed: bool, monitor: bool, source_uri: str | None, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         EmbeddingProfileMismatchError,
@@ -3838,7 +3856,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
             "skips never reaches the server, so there is nothing to "
             "re-embed."
         )
-    sens_kw = _sensitive_write_kwargs(sensitive, "nx index md --sensitive")
+    sens_kw = _sensitive_write_kwargs(sensitive, "nx index md --sensitive", ack=ack_external_embedder)
 
     # Normalize --collection through t3_collection_name() so bare names like
     # "mynotes" become "knowledge__mynotes__voyage-context-3__v1", matching
@@ -3852,6 +3870,10 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # No extractor warning for knowledge__ targets: aspect extraction
         # routes each document by shape (scholarly-paper-v1 for papers,
         # general-prose-v1 for prose; c79909c4b, nexus-kk4ut).
+    if sensitive:
+        # RDR-243 Q3: a Voyage target needs --ack-external-embedder; without it the bge sibling of the subject.
+        collection = _route_sensitive_index(
+            collection, corpus, ack=ack_external_embedder, what="nx index md --sensitive")
 
     path = path.resolve()
 
