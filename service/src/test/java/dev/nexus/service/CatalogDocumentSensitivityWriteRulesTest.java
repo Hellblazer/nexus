@@ -345,6 +345,100 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(audit(t)).as("a repeat raise writes nothing").hasSize(2);
     }
 
+    // ── nexus-rfvyy.6.24: a fresh upsert or import row inherits from a sensitive tombstone ──────────
+
+    /** A tombstoned sensitive row {@code tumbler} carrying {@code uri}, set up through the engine. */
+    private void tombstonedSensitive(String t, String tumbler, String uri, boolean sensitive) throws Exception {
+        var d = importRow(tumbler, "old", sensitive);
+        d.put("source_uri", uri);
+        repo.upsertDocument(t, d);
+        repo.deleteDocument(t, tumbler);
+    }
+
+    private Map<String, Object> importRowAt(String tumbler, String uri, Boolean sensitive) {
+        var d = importRow(tumbler, "new", sensitive);
+        d.put("source_uri", uri);
+        return d;
+    }
+
+    @Test
+    void upsertDocument_aFreshRow_inheritsFromASensitiveTombstoneOfTheSameSourceUri_andAuditsIt() throws Exception {
+        String t = tenant();
+        tombstonedSensitive(t, "48.50", "file:///r/up.md", true);
+        repo.upsertDocument(t, importRowAt("48.51", "file:///r/up.md", null));
+        assertThat(flag(t, "48.51")).as("delete-then-re-index through upsert keeps the protection").isTrue();
+        assertThat(audit(t)).hasSize(1);
+        assertThat(audit(t).get(0)).isEqualTo("48.51|false|true|upsert_inherit predecessor=48.50|engine");
+
+        // an explicit sensitive=false does not stop it
+        tombstonedSensitive(t, "48.52", "file:///r/up2.md", true);
+        repo.upsertDocument(t, importRowAt("48.53", "file:///r/up2.md", false));
+        assertThat(flag(t, "48.53")).isTrue();
+
+        // a plain tombstone, a different uri, and an empty uri all leave the fresh row plain
+        tombstonedSensitive(t, "48.54", "file:///r/up3.md", false);
+        repo.upsertDocument(t, importRowAt("48.55", "file:///r/up3.md", null));
+        repo.upsertDocument(t, importRowAt("48.56", "file:///r/other.md", null));
+        repo.upsertDocument(t, importRowAt("48.57", "", null));
+        assertThat(flag(t, "48.55")).as("plain predecessor").isFalse();
+        assertThat(flag(t, "48.56")).as("no predecessor").isFalse();
+        assertThat(flag(t, "48.57")).as("empty source_uri has no predecessor identity").isFalse();
+
+        // only a FRESH row inherits: a re-upsert of an existing plain row beside a sensitive tombstone changes nothing
+        int before = audit(t).size();
+        repo.upsertDocument(t, importRowAt("48.55", "file:///r/up3.md", null));
+        repo.upsertDocument(t, importRowAt("48.56", "file:///r/other.md", null));
+        assertThat(audit(t)).hasSize(before);
+        tombstonedSensitive(t, "48.58", "file:///r/up4.md", true);
+        repo.upsertDocument(t, importRowAt("48.59", "file:///r/up4-other.md", null));
+        repo.upsertDocument(t, importRowAt("48.59", "file:///r/up4.md", null));   // existing row moves onto the uri
+        assertThat(flag(t, "48.59")).as("an existing row is not 'fresh'").isFalse();
+    }
+
+    @Test
+    void importDocument_andImportDocumentsBatch_aFreshRow_inheritFromASensitiveTombstone_andAuditIt() throws Exception {
+        String t = tenant();
+        tombstonedSensitive(t, "48.60", "file:///r/im.md", true);
+        repo.importDocument(t, importRowAt("48.61", "file:///r/im.md", null));
+        assertThat(flag(t, "48.61")).isTrue();
+        assertThat(audit(t)).containsExactly("48.61|false|true|import_inherit predecessor=48.60|engine");
+
+        tombstonedSensitive(t, "48.62", "file:///r/b1.md", true);
+        tombstonedSensitive(t, "48.63", "file:///r/b2.md", false);
+        repo.importDocumentsBatch(t, List.of(
+            importRowAt("48.64", "file:///r/b1.md", null),     // inherits
+            importRowAt("48.65", "file:///r/b2.md", null),     // plain predecessor
+            importRowAt("48.66", "file:///r/b3.md", null),     // none
+            importRowAt("48.67", "", null)));                  // no uri
+        assertThat(flag(t, "48.64")).isTrue();
+        assertThat(flag(t, "48.65")).isFalse();
+        assertThat(flag(t, "48.66")).isFalse();
+        assertThat(flag(t, "48.67")).isFalse();
+        assertThat(audit(t)).containsExactly("48.61|false|true|import_inherit predecessor=48.60|engine",
+            "48.64|false|true|import_inherit predecessor=48.62|engine");
+
+        // a re-import of the existing rows inherits nothing more
+        repo.importDocumentsBatch(t, List.of(importRowAt("48.65", "file:///r/b2.md", null), importRowAt("48.64", "file:///r/b1.md", null)));
+        assertThat(audit(t)).hasSize(2);
+
+        // only a FRESH row inherits: an EXISTING plain row re-imported onto the uri of a sensitive tombstone stays plain
+        tombstonedSensitive(t, "48.68", "file:///r/im4.md", true);
+        repo.importDocument(t, importRowAt("48.69", "file:///r/im4-other.md", null));
+        repo.importDocumentsBatch(t, List.of(importRowAt("48.70", "file:///r/im5-other.md", null)));
+        tombstonedSensitive(t, "48.71", "file:///r/im5.md", true);
+        repo.importDocument(t, importRowAt("48.69", "file:///r/im4.md", null));
+        repo.importDocumentsBatch(t, List.of(importRowAt("48.70", "file:///r/im5.md", null)));
+        org.assertj.core.api.SoftAssertions.assertSoftly(soft -> {
+            try {
+                soft.assertThat(flag(t, "48.69")).as("single import: an existing row is not 'fresh'").isFalse();
+                soft.assertThat(flag(t, "48.70")).as("batch import: an existing row is not 'fresh'").isFalse();
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        });
+        assertThat(audit(t)).hasSize(2);
+    }
+
     // ── the intra-batch alias and the race-lost raises ──────────────────
 
     @Test
