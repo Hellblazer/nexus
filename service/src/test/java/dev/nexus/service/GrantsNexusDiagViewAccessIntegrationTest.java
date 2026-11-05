@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.TreeSet;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
@@ -331,12 +332,13 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
                 TenantScope scope = new TenantScope(svcDs);
                 String tenant = "sens-audit-grants";
-                int inserted = scope.withTenant(tenant, ctx -> ctx.execute(
-                    "INSERT INTO nexus.catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, actor) "
-                        + "VALUES (?, '1.1.1', false, true, 'set', 'tester')", tenant));
+                int inserted = scope.withTenant(tenant, ctx -> ctx.insertInto(CATALOG_SENSITIVITY_CHANGES,
+                        CATALOG_SENSITIVITY_CHANGES.TENANT_ID, CATALOG_SENSITIVITY_CHANGES.TUMBLER,
+                        CATALOG_SENSITIVITY_CHANGES.OLD, CATALOG_SENSITIVITY_CHANGES.NEW,
+                        CATALOG_SENSITIVITY_CHANGES.REASON, CATALOG_SENSITIVITY_CHANGES.ACTOR)
+                    .values(tenant, "1.1.1", false, true, "set", "tester").execute());
                 assertThat(inserted).as("nexus_svc INSERT").isEqualTo(1);
-                Integer seen = scope.withTenant(tenant, ctx -> ctx.fetchOne(
-                    "SELECT count(*)::int FROM nexus.catalog_sensitivity_changes").get(0, Integer.class));
+                Integer seen = scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_SENSITIVITY_CHANGES));
                 assertThat(seen).as("nexus_svc SELECT").isEqualTo(1);
             }
 

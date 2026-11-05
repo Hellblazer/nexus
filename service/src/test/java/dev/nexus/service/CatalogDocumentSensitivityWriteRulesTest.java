@@ -18,6 +18,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -29,8 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * rename keeps the row; the general update route still refuses the column.
  *
  * <p>Runs on PostgreSQL as the NOBYPASSRLS service role, so row-level security applies. The flag and the
- * audit rows are read back over a superuser connection with plain SQL, so the test does not depend on the
- * generated jOOQ symbols for the column it is pinning.
+ * audit rows are read back over a superuser connection with typed jOOQ.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CatalogDocumentSensitivityWriteRulesTest {
@@ -90,10 +91,10 @@ class CatalogDocumentSensitivityWriteRulesTest {
 
     private boolean flag(String tenant, String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var r = DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT sensitive FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?", tenant, tumbler);
+            var r = DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_DOCUMENTS.SENSITIVE).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).fetchOne();
             assertThat(r).as("row %s/%s exists", tenant, tumbler).isNotNull();
-            return r.get(0, Boolean.class);
+            return r.value1();
         }
     }
 
@@ -101,10 +102,14 @@ class CatalogDocumentSensitivityWriteRulesTest {
     private List<String> audit(String tenant) throws Exception {
         try (Connection su = pg.createConnection("")) {
             var out = new ArrayList<String>();
-            for (var r : DSL.using(su, SQLDialect.POSTGRES).fetch(
-                    "SELECT tumbler, old, new, reason, actor FROM nexus.catalog_sensitivity_changes "
-                        + "WHERE tenant_id = ? ORDER BY id", tenant)) {
-                out.add(r.get(0) + "|" + r.get(1) + "|" + r.get(2) + "|" + r.get(3) + "|" + r.get(4));
+            for (var r : DSL.using(su, SQLDialect.POSTGRES)
+                    .select(CATALOG_SENSITIVITY_CHANGES.TUMBLER, CATALOG_SENSITIVITY_CHANGES.OLD,
+                        CATALOG_SENSITIVITY_CHANGES.NEW, CATALOG_SENSITIVITY_CHANGES.REASON,
+                        CATALOG_SENSITIVITY_CHANGES.ACTOR)
+                    .from(CATALOG_SENSITIVITY_CHANGES)
+                    .where(CATALOG_SENSITIVITY_CHANGES.TENANT_ID.eq(tenant))
+                    .orderBy(CATALOG_SENSITIVITY_CHANGES.ID).fetch()) {
+                out.add(r.value1() + "|" + r.value2() + "|" + r.value3() + "|" + r.value4() + "|" + r.value5());
             }
             return out;
         }
@@ -112,9 +117,8 @@ class CatalogDocumentSensitivityWriteRulesTest {
 
     private void setFlagDirect(String tenant, String tumbler, boolean v) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            DSL.using(su, SQLDialect.POSTGRES).execute(
-                "UPDATE nexus.catalog_documents SET sensitive = ? WHERE tenant_id = ? AND tumbler = ?",
-                v, tenant, tumbler);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, v)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).execute();
         }
     }
 
@@ -546,16 +550,13 @@ class CatalogDocumentSensitivityWriteRulesTest {
         var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
         try (Connection win = pg.createConnection(""); Connection probe = pg.createConnection("")) {
             win.setAutoCommit(false);
-            DSL.using(win, SQLDialect.POSTGRES).execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) VALUES (?, ?, 'winner', ?)",
-                tenant, winnerTumbler, uri);
+            DSL.using(win, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
+                    CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.SOURCE_URI)
+                .values(tenant, winnerTumbler, "winner", uri).execute();
             var future = pool.submit(loser);
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
             while (true) {
-                Integer waiting = DSL.using(probe, SQLDialect.POSTGRES).fetchOne(
-                    "SELECT count(*)::int FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted")
-                    .get(0, Integer.class);
-                if (waiting != null && waiting > 0) break;
+                if (PgCatalogProbes.transactionIdLockWaiters(DSL.using(probe, SQLDialect.POSTGRES)) > 0) break;
                 assertThat(future.isDone()).as("the loser must be blocked on the winner, not finished").isFalse();
                 assertThat(System.nanoTime()).as("timed out waiting for the loser to block").isLessThan(deadline);
                 Thread.sleep(20);
@@ -592,12 +593,7 @@ class CatalogDocumentSensitivityWriteRulesTest {
 
     /** Backend pids currently waiting on a lock, sorted by pid. */
     private static List<Integer> lockWaiters(Connection probe) {
-        var out = new ArrayList<Integer>();
-        for (var r : DSL.using(probe, SQLDialect.POSTGRES).fetch(
-                "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid() ORDER BY pid")) {
-            out.add(r.get(0, Integer.class));
-        }
-        return out;
+        return PgCatalogProbes.lockWaiterPids(DSL.using(probe, SQLDialect.POSTGRES));
     }
 
     /** Blocks until {@code n} backends wait on a lock; fails if one of {@code running} finishes first. */
@@ -614,8 +610,9 @@ class CatalogDocumentSensitivityWriteRulesTest {
     }
 
     private static void lockRowForUpdate(Connection h, String tenant, String tumbler) {
-        DSL.using(h, SQLDialect.POSTGRES).fetch(
-            "SELECT 1 FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ? FOR UPDATE", tenant, tumbler);
+        DSL.using(h, SQLDialect.POSTGRES).selectOne().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+            .forUpdate().fetch();
     }
 
     /** The outcome of a future: null when it completed, else the failure's chain rendered with SQLSTATEs. */
@@ -658,9 +655,7 @@ class CatalogDocumentSensitivityWriteRulesTest {
             // Y is now queued behind X (X holds or heads the queue for the later row); give it a bounded wait
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
             while (System.nanoTime() < deadline) {
-                var blockers = DSL.using(probe, SQLDialect.POSTGRES).fetchOne(
-                    "SELECT pg_blocking_pids(?)::text", yPid).get(0, String.class);
-                if (blockers.contains(String.valueOf(xPid))) break;
+                if (PgCatalogProbes.blockingPids(DSL.using(probe, SQLDialect.POSTGRES), yPid).contains(xPid)) break;
                 Thread.sleep(20);
             }
             h.commit();
@@ -733,9 +728,13 @@ class CatalogDocumentSensitivityWriteRulesTest {
                 // the audited route's work, held open: the row is cleared and the clear is audited, uncommitted
                 h.setAutoCommit(false);
                 var hd = DSL.using(h, SQLDialect.POSTGRES);
-                hd.execute("UPDATE nexus.catalog_documents SET sensitive = false WHERE tenant_id = ? AND tumbler = ?", t, tumbler);
-                hd.execute("INSERT INTO nexus.catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, actor) "
-                    + "VALUES (?, ?, true, false, 'test clear', 'tester')", t, tumbler);
+                hd.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, false)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).execute();
+                hd.insertInto(CATALOG_SENSITIVITY_CHANGES, CATALOG_SENSITIVITY_CHANGES.TENANT_ID,
+                        CATALOG_SENSITIVITY_CHANGES.TUMBLER, CATALOG_SENSITIVITY_CHANGES.OLD,
+                        CATALOG_SENSITIVITY_CHANGES.NEW, CATALOG_SENSITIVITY_CHANGES.REASON,
+                        CATALOG_SENSITIVITY_CHANGES.ACTOR)
+                    .values(t, tumbler, true, false, "test clear", "tester").execute();
                 final int idx = w;
                 var f = pool.submit(() -> { writers.get(idx).accept(t, tumbler); return null; });
                 awaitLockWaiters(probe, 1, f);
@@ -798,8 +797,7 @@ class CatalogDocumentSensitivityWriteRulesTest {
         }
         assertThat(flag(t, live)).as("a refused request raised nothing").isFalse();
         try (Connection su = pg.createConnection("")) {
-            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT count(*)::int FROM nexus.catalog_documents WHERE tenant_id = ?", t).get(0, Integer.class))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(t)))
                 .as("nothing but the one seeded row exists: every refusal rolled back").isEqualTo(1);
         }
         assertThat(audit(t)).isEmpty();
@@ -866,9 +864,9 @@ class CatalogDocumentSensitivityWriteRulesTest {
         repo.renameCollection(t, COLL_OLD, COLL_NEW);
         assertThat(flag(t, doc)).as("rename rewrites physical_collection in place").isTrue();
         try (Connection su = pg.createConnection("")) {
-            var r = DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT physical_collection FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?", t, doc);
-            assertThat(r.get(0, String.class)).isEqualTo(COLL_NEW);
+            var r = DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))).fetchOne();
+            assertThat(r.value1()).isEqualTo(COLL_NEW);
         }
     }
 

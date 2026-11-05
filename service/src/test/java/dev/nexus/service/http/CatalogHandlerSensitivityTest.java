@@ -32,6 +32,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -42,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * derived from the request's principal. The general update route still refuses the column (400 single, -1 per
  * entry in a batch). The document JSON carries {@code sensitive} on every reader, and
  * {@code /manifest/chash_positions} carries it per (chash, doc_id) row. Runs on PostgreSQL as the NOBYPASSRLS
- * service role; flag and audit rows are read back over a superuser connection with plain SQL.
+ * service role; flag and audit rows are read back over a superuser connection with typed jOOQ.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CatalogHandlerSensitivityTest {
@@ -218,8 +221,7 @@ class CatalogHandlerSensitivityTest {
             }
         }
         try (Connection su = pg.createConnection("")) {
-            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT count(*)::int FROM nexus.catalog_documents WHERE tenant_id = ?", t).get(0, Integer.class))
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(t)))
                 .as("no refused request wrote a row").isZero();
         }
         // real booleans and null still pass
@@ -243,10 +245,10 @@ class CatalogHandlerSensitivityTest {
         }
         try (Connection su = pg.createConnection("")) {
             var d = DSL.using(su, SQLDialect.POSTGRES);
-            assertThat(d.fetchOne("SELECT count(*)::int FROM nexus.catalog_owners WHERE tenant_id = ?", t)
-                .get(0, Integer.class)).as("the owner row is written only after the flag validates").isZero();
-            assertThat(d.fetchOne("SELECT count(*)::int FROM nexus.catalog_documents WHERE tenant_id = ?", t)
-                .get(0, Integer.class)).as("no document row").isZero();
+            assertThat(d.fetchCount(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID.eq(t)))
+                .as("the owner row is written only after the flag validates").isZero();
+            assertThat(d.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(t)))
+                .as("no document row").isZero();
         }
         // the same body with a real boolean writes both
         Resp ok = call(t, "POST", "/v1/catalog/register",
@@ -255,8 +257,7 @@ class CatalogHandlerSensitivityTest {
         assertThat(ok.status).as(ok.body).isEqualTo(200);
         assertThat(flag(t, "49.2.1")).isTrue();
         try (Connection su = pg.createConnection("")) {
-            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT count(*)::int FROM nexus.catalog_owners WHERE tenant_id = ?", t).get(0, Integer.class)).isOne();
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID.eq(t))).isOne();
         }
     }
 
@@ -369,10 +370,8 @@ class CatalogHandlerSensitivityTest {
         register(b, "t1", false);
         call(a, "POST", "/v1/catalog/sensitivity", "{\"tumblers\":[\"" + docA + "\"],\"sensitive\":true}", null);
 
-        int rowsSeenByB = tenantScope.withTenant(b, ctx -> ctx.fetchOne(
-            "SELECT count(*)::int FROM nexus.catalog_sensitivity_changes").get(0, Integer.class));
-        int rowsSeenByA = tenantScope.withTenant(a, ctx -> ctx.fetchOne(
-            "SELECT count(*)::int FROM nexus.catalog_sensitivity_changes").get(0, Integer.class));
+        int rowsSeenByB = tenantScope.withTenant(b, ctx -> ctx.fetchCount(CATALOG_SENSITIVITY_CHANGES));
+        int rowsSeenByA = tenantScope.withTenant(a, ctx -> ctx.fetchCount(CATALOG_SENSITIVITY_CHANGES));
         assertThat(rowsSeenByA).isEqualTo(1);
         assertThat(rowsSeenByB).as("RLS keeps A's audit rows out of B's reads").isZero();
 
@@ -398,10 +397,10 @@ class CatalogHandlerSensitivityTest {
 
     private boolean flag(String tenant, String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var r = DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT sensitive FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ?", tenant, tumbler);
+            var r = DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_DOCUMENTS.SENSITIVE).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).fetchOne();
             assertThat(r).as("row %s/%s exists", tenant, tumbler).isNotNull();
-            return r.get(0, Boolean.class);
+            return r.value1();
         }
     }
 
@@ -409,10 +408,14 @@ class CatalogHandlerSensitivityTest {
     private List<String> audit(String tenant) throws Exception {
         try (Connection su = pg.createConnection("")) {
             var out = new ArrayList<String>();
-            for (var r : DSL.using(su, SQLDialect.POSTGRES).fetch(
-                    "SELECT tumbler, old, new, reason, actor FROM nexus.catalog_sensitivity_changes "
-                        + "WHERE tenant_id = ? ORDER BY id", tenant)) {
-                out.add(r.get(0) + "|" + r.get(1) + "|" + r.get(2) + "|" + r.get(3) + "|" + r.get(4));
+            for (var r : DSL.using(su, SQLDialect.POSTGRES)
+                    .select(CATALOG_SENSITIVITY_CHANGES.TUMBLER, CATALOG_SENSITIVITY_CHANGES.OLD,
+                        CATALOG_SENSITIVITY_CHANGES.NEW, CATALOG_SENSITIVITY_CHANGES.REASON,
+                        CATALOG_SENSITIVITY_CHANGES.ACTOR)
+                    .from(CATALOG_SENSITIVITY_CHANGES)
+                    .where(CATALOG_SENSITIVITY_CHANGES.TENANT_ID.eq(tenant))
+                    .orderBy(CATALOG_SENSITIVITY_CHANGES.ID).fetch()) {
+                out.add(r.value1() + "|" + r.value2() + "|" + r.value3() + "|" + r.value4() + "|" + r.value5());
             }
             return out;
         }

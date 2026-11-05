@@ -124,6 +124,8 @@ class SqlStringLiteralGateTest {
     private static final Map<String, Integer> TEXT = Map.ofEntries(
         // input to the changelog bulk-grant scanner under test
         Map.entry("dev/nexus/service/ChangelogBulkGrantConformanceTest.java", 4),
+        // input to the audit-table writer scanner under test (UPDATE, DELETE, TRUNCATE and INSERT spellings; RDR-243)
+        Map.entry("dev/nexus/service/CatalogDocumentWriterCensusTest.java", 4),
         // input to DdlLogParser under test
         Map.entry("dev/nexus/service/DdlLogParserTest.java", 28),
         // input to the extension-bootstrap site scanner under test
@@ -153,7 +155,7 @@ class SqlStringLiteralGateTest {
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 67;
+    private static final int TEXT_TOTAL = 71;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(

@@ -13,6 +13,8 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.nexus.Routines;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -28,6 +30,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -202,9 +206,7 @@ class Catalog047DocumentSensitivitySchemaLiquibaseTest {
         seedDoc(a, "47.2.1", COLL_C, chash);
         setSensitive(a, "47.2.1", true);
         seedDoc(b, "47.2.1", COLL_C, chash);      // tenant B's own, plain, owner of the same chash
-        scope.withTenant(a, ctx -> ctx.execute(
-            "INSERT INTO nexus.catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, actor) "
-                + "VALUES (?, ?, false, true, 'set', 'tester')", a, "47.2.1"));
+        scope.withTenant(a, ctx -> insertAudit(ctx, a, "47.2.1", "set"));
 
         assertThat(sensitive(a, a, COLL_C, chash)).as("tenant A sees its own sensitive owner").isTrue();
         assertThat(sensitive(b, a, COLL_C, chash))
@@ -217,9 +219,7 @@ class Catalog047DocumentSensitivitySchemaLiquibaseTest {
         assertThat(sensitiveDocumentCount(b)).as("tenant B sees none of A's flagged documents").isZero();
         assertThat(sensitiveDocumentCount(a)).isEqualTo(1);
 
-        assertThatThrownBy(() -> scope.withTenant(b, ctx -> ctx.execute(
-                "INSERT INTO nexus.catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, actor) "
-                    + "VALUES (?, '47.2.1', false, true, 'forged', 'tester')", a)))
+        assertThatThrownBy(() -> scope.withTenant(b, ctx -> insertAudit(ctx, a, "47.2.1", "forged")))
             .as("WITH CHECK refuses a row for another tenant")
             .hasMessageContaining("row-level security");
     }
@@ -267,35 +267,37 @@ class Catalog047DocumentSensitivitySchemaLiquibaseTest {
     }
 
     private void setSensitive(String tenant, String tumbler, boolean value) throws Exception {
-        scope.withTenant(tenant, ctx -> ctx.execute(
-            "UPDATE nexus.catalog_documents SET sensitive = ? WHERE tenant_id = ? AND tumbler = ?",
-            value, tenant, tumbler));
+        scope.withTenant(tenant, ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, value)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).execute());
     }
 
     /** chunk_sensitive called under {@code guc}'s tenant GUC, asking about {@code asked}'s chunk. */
     private boolean sensitive(String guc, String asked, String collection, String chashHex) {
         byte[] chash = Chash.fromHex(chashHex).toBytes();
-        return Boolean.TRUE.equals(scope.withTenant(guc, ctx -> ctx.fetchValue(
-            "SELECT nexus.chunk_sensitive(?, ?, ?)", asked, collection, chash)));
+        return Boolean.TRUE.equals(scope.withTenant(guc, ctx -> ctx.select(Routines.chunkSensitive(asked, collection, chash))
+            .fetchOne(0, Boolean.class)));
     }
 
     private List<Boolean> sensitiveMany(String guc, String asked, String collection, String... chashHex) {
-        // hex text[] decoded to bytea[] in SQL, keeping the order (a byte[][] bind would read as varargs)
-        Object[] binds = {asked, collection, chashHex};
-        return scope.withTenant(guc, ctx -> ctx.fetch(
-            "SELECT sensitive FROM nexus.chunk_sensitive_many(?, ?, "
-                + "(SELECT array_agg(decode(t.h, 'hex') ORDER BY t.o) FROM unnest(?::text[]) WITH ORDINALITY AS t(h, o)))",
-            binds).getValues("sensitive", Boolean.class));
+        byte[][] chashes = new byte[chashHex.length][];
+        for (int i = 0; i < chashHex.length; i++) chashes[i] = Chash.fromHex(chashHex[i]).toBytes();
+        var many = Routines.chunkSensitiveMany(asked, collection, chashes);
+        return scope.withTenant(guc, ctx -> ctx.selectFrom(many).fetch(many.SENSITIVE));
+    }
+
+    private static int insertAudit(DSLContext ctx, String tenant, String tumbler, String reason) {
+        return ctx.insertInto(CATALOG_SENSITIVITY_CHANGES, CATALOG_SENSITIVITY_CHANGES.TENANT_ID,
+                CATALOG_SENSITIVITY_CHANGES.TUMBLER, CATALOG_SENSITIVITY_CHANGES.OLD, CATALOG_SENSITIVITY_CHANGES.NEW,
+                CATALOG_SENSITIVITY_CHANGES.REASON, CATALOG_SENSITIVITY_CHANGES.ACTOR)
+            .values(tenant, tumbler, false, true, reason, "tester").execute();
     }
 
     private int auditRows(String tenant) {
-        return scope.withTenant(tenant, ctx -> ctx.fetchOne(
-            "SELECT count(*)::int FROM nexus.catalog_sensitivity_changes").get(0, Integer.class));
+        return scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_SENSITIVITY_CHANGES));
     }
 
     private int sensitiveDocumentCount(String tenant) {
-        return scope.withTenant(tenant, ctx -> ctx.fetchOne(
-            "SELECT count(*)::int FROM nexus.catalog_documents WHERE sensitive").get(0, Integer.class));
+        return scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.SENSITIVE.isTrue()));
     }
 
     // ── catalog metadata reads (JDBC metadata and pg_catalog) ───────────
@@ -322,49 +324,31 @@ class Catalog047DocumentSensitivitySchemaLiquibaseTest {
         }
     }
 
-    private static String partialIndexDef(Connection su) throws Exception {
-        try (var st = su.createStatement();
-             ResultSet rs = st.executeQuery("SELECT indexdef FROM pg_indexes WHERE schemaname = 'nexus' "
-                 + "AND indexname = 'idx_catalog_documents_sensitive_live'")) {
-            return rs.next() ? rs.getString(1) : null;
-        }
+    private static String partialIndexDef(Connection su) {
+        return PgCatalogProbes.indexDef(DSL.using(su, SQLDialect.POSTGRES), "nexus",
+            "idx_catalog_documents_sensitive_live");
     }
 
     /** relrowsecurity, relforcerowsecurity, policy count. */
-    private static List<Object> auditRlsFlags(Connection su) throws Exception {
-        try (var st = su.createStatement();
-             ResultSet rs = st.executeQuery("SELECT c.relrowsecurity, c.relforcerowsecurity, "
-                 + "(SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = c.oid) "
-                 + "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                 + "WHERE n.nspname = 'nexus' AND c.relname = 'catalog_sensitivity_changes'")) {
-            assertThat(rs.next()).isTrue();
-            return List.of(rs.getBoolean(1), rs.getBoolean(2), rs.getInt(3));
-        }
+    private static List<Object> auditRlsFlags(Connection su) {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        var rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "catalog_sensitivity_changes");
+        assertThat(rls).isNotNull();
+        return List.of(rls.enabled(), rls.forced(),
+            PgCatalogProbes.policies(ctx, "nexus", "catalog_sensitivity_changes").size());
     }
 
-    private static List<String> functionNames(Connection su) throws Exception {
-        List<String> out = new ArrayList<>();
-        try (var st = su.createStatement();
-             ResultSet rs = st.executeQuery("SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-                 + "WHERE n.nspname = 'nexus'")) {
-            while (rs.next()) out.add(rs.getString(1));
-        }
-        return out;
+    private static List<String> functionNames(Connection su) {
+        return PgCatalogProbes.routineNamesLike(DSL.using(su, SQLDialect.POSTGRES), "nexus", "%");
     }
 
     /** provolatile, prosecdef, language, return type name. */
-    private static List<Object> functionTraits(Connection su, String name) throws Exception {
-        try (var st = su.createStatement();
-             ResultSet rs = st.executeQuery("SELECT p.provolatile::text, p.prosecdef, l.lanname, "
-                 + "(SELECT typname FROM pg_type t WHERE t.oid = p.prorettype)::text "
-                 + "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-                 + "JOIN pg_language l ON l.oid = p.prolang "
-                 + "WHERE n.nspname = 'nexus' AND p.proname = '" + name + "'")) {
-            assertThat(rs.next()).as(name + " exists").isTrue();
-            List<Object> out = List.of(rs.getString(1), rs.getBoolean(2), rs.getString(3), rs.getString(4));
-            assertThat(rs.next()).as(name + " has one overload").isFalse();
-            return out;
-        }
+    private static List<Object> functionTraits(Connection su, String name) {
+        var traits = PgCatalogProbes.routineTraits(DSL.using(su, SQLDialect.POSTGRES), "nexus", name);
+        assertThat(traits).as(name + " exists").isNotEmpty();
+        assertThat(traits).as(name + " has one overload").hasSize(1);
+        var t = traits.get(0);
+        return List.of(t.volatility(), t.securityDefiner(), t.language(), t.returnType());
     }
 
     private static void migrateUpTo(Connection conn, String targetChangesetId) throws Exception {
