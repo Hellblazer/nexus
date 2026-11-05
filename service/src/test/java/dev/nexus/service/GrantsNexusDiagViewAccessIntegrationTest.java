@@ -299,6 +299,60 @@ class GrantsNexusDiagViewAccessIntegrationTest {
     }
 
     /**
+     * nexus-rfvyy.6.6 (RDR-243, catalog-047-2): after a full production-shaped walk, nexus_svc can INSERT
+     * into and SELECT from {@code nexus.catalog_sensitivity_changes} (the grants-nexus-svc-1 loop and its
+     * default privileges), and nexus_diag holds NOTHING on it: the audit trail is tenant-scoped, nexus_diag
+     * bypasses RLS, and a grant would show every tenant's flagged tumblers and reasons.
+     *
+     * <p><b>Grant era covered: the VIEW era only.</b> {@link #provisionAndMigrate} walks the changelog twice
+     * with nexus_diag provisioned BEFORE it, so {@code nexus.diag_chash_conformance} exists, grants-nexus-diag-1
+     * returns at its era guard and grants-nexus-diag-2's per-relation REVOKE loop strips whatever the table
+     * would otherwise carry. The LEGACY era (no counts view) is not covered, and there nexus_diag does read
+     * every table by design (grants-nexus-diag-1: GRANT SELECT ON ALL TABLES plus default privileges), this
+     * one included. That is the established diag boundary for the legacy era, not a defect of this table.
+     * The catalog-047 changeset header names the same limit.
+     *
+     * <p>This replaces the Java-constant pin in {@code Catalog047DocumentSensitivitySchemaLiquibaseTest}
+     * ({@code NEXUS_DIAG_READABLE_TABLES} lacks the name), which no grant change could fail.
+     */
+    @Test
+    void catalogSensitivityChanges_svcHasDml_diagIsDenied() throws Exception {
+        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
+            .as("the sensitivity audit table is deliberately not diag-readable (nexus-rfvyy.6.6)")
+            .doesNotContain("catalog_sensitivity_changes");
+
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(pg.getJdbcUrl());
+            cfg.setUsername("nexus_svc");
+            cfg.setPassword("nexus_svc_pass");
+            cfg.setMaximumPoolSize(2);
+            cfg.setAutoCommit(true);
+            try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                TenantScope scope = new TenantScope(svcDs);
+                String tenant = "sens-audit-grants";
+                int inserted = scope.withTenant(tenant, ctx -> ctx.execute(
+                    "INSERT INTO nexus.catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, actor) "
+                        + "VALUES (?, '1.1.1', false, true, 'set', 'tester')", tenant));
+                assertThat(inserted).as("nexus_svc INSERT").isEqualTo(1);
+                Integer seen = scope.withTenant(tenant, ctx -> ctx.fetchOne(
+                    "SELECT count(*)::int FROM nexus.catalog_sensitivity_changes").get(0, Integer.class));
+                assertThat(seen).as("nexus_svc SELECT").isEqualTo(1);
+            }
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> countAs(diag, "nexus", "catalog_sensitivity_changes"))
+                    .as("nexus_diag must hold no SELECT on nexus.catalog_sensitivity_changes (view era)")
+                    .hasMessageContaining("permission denied for table catalog_sensitivity_changes");
+            }
+        }
+    }
+
+    /**
      * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): after a full production-shaped walk, nexus_svc holds
      * SELECT, INSERT, UPDATE and DELETE on {@code nexus.reembed_jobs} and {@code nexus.reembed_job_moves}
      * (from the grants-nexus-svc-1 loop and its default privileges, with no per-table edit; job_id is

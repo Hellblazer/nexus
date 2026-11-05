@@ -22,9 +22,11 @@
                    and its default privileges give nexus_svc DML on every table in the schema and the RDR does not
                    ask for them to be withheld. The id column is BIGSERIAL (the catalog-018 gc_audit precedent), so
                    two changes of one tumbler inside one transaction (equal now()) never collide.
-                   nexus_diag is granted nothing on the table (the reembed tables precedent; RDR-243 is silent, so
-                   the audit trail stays tenant-scoped); GrantsNexusDiagViewAccess pins it through
-                   CatalogRepository.NEXUS_DIAG_READABLE_TABLES.
+                   nexus_diag is granted nothing on the table in the VIEW era (the reembed tables precedent; RDR-243
+                   is silent, so the audit trail stays tenant-scoped). GrantsNexusDiagViewAccessIntegrationTest.
+                   catalogSensitivityChanges_svcHasDml_diagIsDenied pins it by connecting as nexus_diag after a
+                   production-shaped walk. The LEGACY era (no diag_chash_conformance view) is not covered:
+                   grants-nexus-diag-1 grants nexus_diag SELECT on every table there, this one included.
 
     catalog-047-3  nexus.chunk_sensitive(tenant, collection, chash) and its batched form
                    nexus.chunk_sensitive_many(tenant, collection, chashes): true when ANY LIVE owner of the chunk
