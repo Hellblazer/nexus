@@ -12,7 +12,8 @@ row's enforcing phase, never a row name.
 
 The registry landed at nexus-rfvyy.6.16. Each ``refuse`` or ``skip`` row at or below
 ``PHASE_UNDER_TEST`` is a case, and a case with no driver in ``SURFACE_DRIVERS`` FAILS naming the
-row: that red is expected until the driver and the gate land (nexus-rfvyy.6.21). An absent
+row; the Phase 1 drivers landed at nexus-rfvyy.6.21 (``tests/test_sensitivity_canary_drivers.py``
+holds that every selected row has one and that none is stale). An absent
 table still becomes one ``registry-missing`` case whose body fails, never a collection error.
 
 How a row is judged, and why it cannot pass vacuously:
@@ -33,8 +34,13 @@ How a row is judged, and why it cannot pass vacuously:
 
 Drivers: a row's surface is invoked by ``SURFACE_DRIVERS[row.target]``, keyed
 by the row's ``module:function``. A selected row with no driver FAILS naming the
-row; adding a row to the table means adding its driver here. The drivers land
-with their gates (nexus-rfvyy.6.21).
+row; adding a row to the table means adding its driver here.
+
+A driver runs the surface to the point where the row's own gate is the only protection: where a
+deeper layer would refuse the same document too (the extractor's refusal under the worker drain and
+under ``nx enrich aspects`` selection), the driver stands an ungated recorder in for that layer, and
+says so. The leg a surface sends on is captured where it leaves: the LLM funnels, the ``httpx``
+transport, the ``claude -p`` spawn, a store write, or the DEVONthink seam.
 
 No live-store writes: the corpus is seeded into the test substrate's minted
 tenant with ``tests/_chunk_seed.py``; the LLM backend and every non-engine
@@ -50,6 +56,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -59,6 +66,12 @@ import pytest
 from tests._llm_surfaces import Surface, load_surfaces, registry_missing_message
 
 pytestmark = pytest.mark.t2_tenant
+
+
+@pytest.fixture(autouse=True)
+def _no_document_is_sensitive() -> None:
+    """Overrides tests/conftest.py's fixture of this name: the canary's subject is the gates, so
+    every surface reads the real catalog, where the sensitive document is flagged."""
 
 #: Behaviours the canary judges. ``exclude`` and ``withhold`` are read-side
 #: behaviours (phase 2 and 3) with their own scenarios; ``disclose`` and the
@@ -106,15 +119,47 @@ class Capture:
     llm_payloads: list[str] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
     spawns: list[str] = field(default_factory=list)
+    stores: list[str] = field(default_factory=list)
     engine_request_count: int = 0
+    #: What the capturing backend answers a schema-less request with.
+    reply_text: str = "{}"
+    #: ``(request) -> Response | None`` answerers a driver adds so a fake server (MinerU) can answer
+    #: what the default empty-JSON reply would break. The first non-None answer wins; the request is
+    #: recorded either way.
+    responders: list[Callable[[httpx.Request], httpx.Response | None]] = field(default_factory=list)
 
     def record_spawn(self, argv: list[str], stdin: str = "") -> None:
         """A driver's fake of a ``claude -p`` spawn calls this with what it was handed."""
         self.spawns.append(json.dumps({"argv": argv, "stdin": stdin}))
 
+    def record_llm(self, label: str, **kw: Any) -> None:
+        """A driver's stand-in for a model call that is not routed through the two LLM funnels
+        (the extractor the worker or ``nx enrich aspects`` hands a document to)."""
+        self.llm_payloads.append(json.dumps({"label": label, **kw}, default=_json_default, sort_keys=True))
+
+    def record_outbound(self, label: str, **kw: Any) -> None:
+        """An outward call that is not an ``httpx`` request (the DEVONthink CrossRef leg)."""
+        self.requests.append(json.dumps({"label": label, **kw}, default=_json_default, sort_keys=True))
+
+    def record_store(self, label: str, **kw: Any) -> None:
+        """What a surface handed to persistence (a queue row): content written to a store is content
+        that left the surface, and it is read back by the drain."""
+        self.stores.append(json.dumps({"label": label, **kw}, default=_json_default, sort_keys=True))
+
     @property
     def everything(self) -> str:
-        return "\n".join([*self.llm_payloads, *self.requests, *self.spawns])
+        return "\n".join([*self.llm_payloads, *self.requests, *self.spawns, *self.stores])
+
+    def where(self, needle: str) -> str:
+        """Which sinks hold *needle*, for the failure message."""
+        found = [
+            f"{name}[{i}]"
+            for name, sink in (
+                ("llm", self.llm_payloads), ("request", self.requests), ("spawn", self.spawns), ("store", self.stores),
+            )
+            for i, entry in enumerate(sink) if needle in entry
+        ]
+        return ", ".join(found) or "nowhere"
 
 
 def _json_default(obj: Any) -> str:
@@ -158,7 +203,7 @@ class CapturingBackend:
             "mcp_servers": req.mcp_servers,
         }, default=_json_default, sort_keys=True))
         if req.json_schema is None:
-            return DispatchResult(text="")
+            return DispatchResult(text=self._capture.reply_text)
         return DispatchResult(structured=_schema_default(req.json_schema))
 
 
@@ -176,7 +221,11 @@ def _mock_handler(capture: Capture) -> Callable[[httpx.Request], httpx.Response]
         except Exception:  # noqa: BLE001 - an unreadable streaming body is recorded as such, not fatal
             body = "<unreadable body>"
         capture.requests.append(json.dumps({"method": request.method, "url": str(request.url), "body": body}))
-        return httpx.Response(200, json={})
+        for responder in capture.responders:
+            answer = responder(request)
+            if answer is not None:
+                return answer
+        return httpx.Response(200, json={"data": [], "results": [], "total": 0, "meta": {"count": 0}})
 
     return handler
 
@@ -290,7 +339,11 @@ def _arm_pool_probe(monkeypatch: pytest.MonkeyPatch) -> _PoolProbe:
 
 @dataclass(frozen=True)
 class CanaryWorld:
-    """The seeded corpus and what the capture saw."""
+    """The seeded corpus and what the capture saw.
+
+    Each document carries its canary string in three places a surface can send: the chunk text,
+    the title, and a DOI printed in the text (``10.5555/<canary>``), because the bib and CrossRef rows
+    send titles and DOIs and the taxonomy rows send topic terms, never chunk text."""
 
     canary_sensitive: str
     canary_control: str
@@ -300,23 +353,43 @@ class CanaryWorld:
     collection_minilm: str
     capture: Capture
     probe: _PoolProbe
+    text_sensitive: str = ""
+    text_control: str = ""
+    title_sensitive: str = ""
+    title_control: str = ""
+    chash_sensitive: str = ""
+    chash_control: str = ""
+    monkeypatch: pytest.MonkeyPatch | None = None
+    workdir: Path | None = None
 
     @property
     def collections(self) -> list[str]:
         return [self.collection_bge, self.collection_minilm]
 
+    @property
+    def doi_sensitive(self) -> str:
+        return f"10.5555/{self.canary_sensitive}"
 
-def _seed_document(collection: str, owner: str, text: str) -> str:
-    """One catalog document with one live chunk in *collection*; returns its tumbler."""
+    @property
+    def doi_control(self) -> str:
+        return f"10.5555/{self.canary_control}"
+
+    def text_of(self, tumbler: str) -> str:
+        """The seeded text of the document at *tumbler*; any other tumbler is a driver bug."""
+        return {self.sensitive_tumbler: self.text_sensitive, self.control_tumbler: self.text_control}[str(tumbler)]
+
+
+def _seed_document(collection: str, owner: str, title: str, text: str) -> tuple[str, str]:
+    """One catalog document with one live chunk in *collection*; returns ``(tumbler, chash)``."""
     from tests._catalog_fixture_ops import give_chunks_a_live_owner  # noqa: PLC0415 - substrate-backed helper
     from tests._chunk_seed import seed_chunks_direct  # noqa: PLC0415 - as above
 
     chash = hashlib.sha256(f"{collection}:{text}".encode()).hexdigest()
     seed_chunks_direct(
         collection, ids=[chash], documents=[text], embed=True,
-        metadatas=[{"chunk_text_hash": chash, "title": f"{owner}.md"}],
+        metadatas=[{"chunk_text_hash": chash, "title": title}],
     )
-    return give_chunks_a_live_owner(collection, [chash], title=f"{owner}.md", owner_name=owner)
+    return give_chunks_a_live_owner(collection, [chash], title=title, owner_name=owner), chash
 
 
 def _flag_sensitive(tumbler: str) -> None:
@@ -333,7 +406,9 @@ def _flag_sensitive(tumbler: str) -> None:
     assert out["updated"] == [1], f"the canary document was not flagged: {out}"
 
 
-def build_world(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> CanaryWorld:
+def build_world(
+    monkeypatch: pytest.MonkeyPatch, *, flag: bool = True, workdir: Path | None = None,
+) -> CanaryWorld:
     """Seed the pair across two embedding models and arm the captures.
 
     The sensitive document goes in the bge collection (where Q3 routes a
@@ -345,14 +420,19 @@ def build_world(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> Canary
     canary_control = f"CANARY-CONTROL-{uuid.uuid4().hex}"
     col_bge = f"knowledge__canary-{tag}-a__{MODEL_BGE}__v1"
     col_minilm = f"knowledge__canary-{tag}-b__{MODEL_MINILM}__v1"
-    sensitive = _seed_document(
-        col_bge, f"canary-sensitive-{tag}",
-        f"Quarterly lease renewal memo. {canary_sensitive}. The tuple lease renewal does not change attempts.",
-    )
-    control = _seed_document(
-        col_minilm, f"canary-control-{tag}",
-        f"Quarterly lease renewal memo. {canary_control}. The tuple lease renewal does not change attempts.",
-    )
+
+    def body(canary: str, title: str) -> str:
+        return (
+            f"{title}. Abstract. Quarterly lease renewal memo. {canary}. We study lease renewal. "
+            f"doi: 10.5555/{canary}. The tuple lease renewal does not change attempts. References follow."
+        )
+
+    title_sensitive = f"{canary_sensitive} lease memo"
+    title_control = f"{canary_control} lease memo"
+    text_sensitive = body(canary_sensitive, title_sensitive)
+    text_control = body(canary_control, title_control)
+    sensitive, chash_sensitive = _seed_document(col_bge, f"canary-sensitive-{tag}", title_sensitive, text_sensitive)
+    control, chash_control = _seed_document(col_minilm, f"canary-control-{tag}", title_control, text_control)
     if flag:
         _flag_sensitive(sensitive)
     capture = Capture()
@@ -365,6 +445,10 @@ def build_world(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> Canary
         sensitive_tumbler=sensitive, control_tumbler=control,
         collection_bge=col_bge, collection_minilm=col_minilm,
         capture=capture, probe=probe,
+        text_sensitive=text_sensitive, text_control=text_control,
+        title_sensitive=title_sensitive, title_control=title_control,
+        chash_sensitive=chash_sensitive, chash_control=chash_control,
+        monkeypatch=monkeypatch, workdir=workdir,
     )
 
 
@@ -377,6 +461,413 @@ def build_world(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> Canary
 #: funnels. Phase 1 drivers land with their gates at nexus-rfvyy.6.21; each
 #: names the census row it covers.
 SURFACE_DRIVERS: dict[str, Callable[[CanaryWorld], None]] = {}
+
+
+def driver(target: str) -> Callable[[Callable[[CanaryWorld], None]], Callable[[CanaryWorld], None]]:
+    """Register a driver under the registry row's primary ``module:function``."""
+
+    def register(fn: Callable[[CanaryWorld], None]) -> Callable[[CanaryWorld], None]:
+        assert target not in SURFACE_DRIVERS, f"two drivers for {target}"
+        SURFACE_DRIVERS[target] = fn
+        return fn
+
+    return register
+
+
+def _mp(world: CanaryWorld) -> pytest.MonkeyPatch:
+    assert world.monkeypatch is not None, "this driver needs build_world(monkeypatch, ...)"
+    return world.monkeypatch
+
+
+def _pairs(world: CanaryWorld) -> list[tuple[str, str, str, str]]:
+    """``(collection, tumbler, title, text)`` for the sensitive document and its control twin."""
+    return [
+        (world.collection_bge, world.sensitive_tumbler, world.title_sensitive, world.text_sensitive),
+        (world.collection_minilm, world.control_tumbler, world.title_control, world.text_control),
+    ]
+
+
+def _an_aspect_record(collection: str, source_path: str) -> Any:
+    from nexus.aspect_extractor import AspectRecord  # noqa: PLC0415 - after the substrate is pinned
+
+    return AspectRecord(
+        collection=collection, source_path=source_path, problem_formulation="P", proposed_method="M",
+        experimental_datasets=["d"], experimental_baselines=["b"], experimental_results="R", extras={},
+        confidence=0.9, extracted_at="2026-11-05T00:00:00+00:00", model_version="canary", extractor_name="canary",
+    )
+
+
+# Rows 1-2 -- the aspect queue. ----------------------------------------------------------------
+
+
+@driver("nexus.aspect_worker:aspect_extraction_enqueue_hook")
+def _drive_enqueue_hook(world: CanaryWorld) -> None:
+    """Census row 1. The hook fires for each document as an indexer fires it; persistence is a recorder
+    at the ``t2_index_write`` seam, so what the hook handed to the queue (the document text rides in the
+    row) is what the canary reads. Nothing downstream of the hook runs, so the hook's own gate is the
+    only protection."""
+    import nexus.mcp_infra as infra  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.aspect_worker import aspect_extraction_enqueue_hook  # noqa: PLC0415 - as above
+
+    capture = world.capture
+
+    class _Queue:
+        def enqueue(self, collection: str, source_path: str, *, content: str = "", doc_id: str = "") -> None:
+            capture.record_store(
+                "aspect_queue.enqueue", collection=collection, source_path=source_path, content=content, doc_id=doc_id,
+            )
+
+    class _T2:
+        aspect_queue = _Queue()
+
+    _mp(world).setattr(infra, "t2_index_write", lambda fn, **kw: fn(_T2()))
+    for collection, tumbler, title, text in _pairs(world):
+        aspect_extraction_enqueue_hook(f"/docs/{title}.md", collection, text, doc_id=tumbler)
+
+
+@driver("nexus.aspect_worker:AspectExtractionWorker._process_row")
+def _drive_worker_drain(world: CanaryWorld) -> None:
+    """Census row 2. Both documents sit in the retired table queue (the drain still reads it); the
+    worker drains them one by one (``_process_row``) and as a batch (``_process_batch``). The extractor
+    the worker calls is an UNGATED recorder (it sends what it is handed to the capture), so the drain's
+    own gate is the only protection: the extractor's refusal (rows 3 and 4) is not in the way."""
+    import nexus.mcp_infra as infra  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.aspect_worker import AspectExtractionWorker  # noqa: PLC0415 - as above
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 - as above
+    from tests._aspect_table_producer import table_producer  # noqa: PLC0415 - as above
+
+    mp = _mp(world)
+    assert world.workdir is not None
+    capture = world.capture
+    mp.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
+    mp.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
+    db = T2Database(world.workdir / "t2.db")
+    try:
+        mp.setattr("nexus.commands._helpers.default_db_path", lambda: world.workdir / "t2.db")
+        mp.setattr(infra, "t2_index_write", lambda fn, **kw: fn(db))
+
+        def single(content: str = "", source_path: str = "", collection: str = "", **kw: Any) -> Any:
+            capture.record_llm("aspect_extract", content=content, source_path=source_path, collection=collection)
+            return _an_aspect_record(collection, source_path)
+
+        def batch(items: Any, **kw: Any) -> list[Any]:
+            capture.record_llm("aspect_extract_batch", items=[list(i) for i in items])
+            return [_an_aspect_record(i[0], i[1]) for i in items]
+
+        mp.setattr("nexus.aspect_worker._extract_aspects", single)
+        mp.setattr("nexus.aspect_worker._extract_aspects_batch", batch)
+        worker = AspectExtractionWorker(poll_interval=0.1)
+        for label in ("single", "batch"):
+            with table_producer():
+                for collection, tumbler, title, text in _pairs(world):
+                    db.aspect_queue.enqueue(collection, f"/docs/{label}/{title}.md", content=text, doc_id=tumbler)
+                rows = db.aspect_queue.claim_batch(10)
+            assert len(rows) == 2, f"harness: both documents were queued and claimed ({label}): {rows}"
+            if label == "single":
+                for row in rows:
+                    worker._process_row(row)
+            else:
+                worker._process_batch(rows)
+    finally:
+        db.close()
+
+
+# Rows 3-4 -- the extractor. -------------------------------------------------------------------
+
+
+def _extract_both(world: CanaryWorld) -> None:
+    """``extract_aspects`` (one document) and ``extract_aspects_batch`` over the pair, as the worker and
+    ``nx enrich aspects`` call them. A refusal is the surface working, so it is not an error here."""
+    import contextlib  # noqa: PLC0415 - stdlib, scoped to the driver
+
+    from nexus.aspect_extractor import extract_aspects, extract_aspects_batch  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.sensitivity import SensitiveDocumentRefused  # noqa: PLC0415 - as above
+
+    for collection, tumbler, title, text in _pairs(world):
+        with contextlib.suppress(SensitiveDocumentRefused):
+            extract_aspects(text, f"/docs/{title}.md", collection, doc_id_lookup=lambda c, s, t=tumbler: t)
+    extract_aspects_batch([(collection, f"/docs/b/{title}.md", text, tumbler) for collection, tumbler, title, text in _pairs(world)])
+
+
+@driver("nexus.aspect_extractor:_run_claude_isolated")
+def _drive_extract_via_cli(world: CanaryWorld) -> None:
+    """Census row 3. The `claude -p` spawn is a recorder of the argv and the prompt on stdin."""
+    import subprocess  # noqa: PLC0415 - stdlib, scoped to the driver
+
+    mp = _mp(world)
+    mp.setattr("nexus.aspect_extractor._selected_api_backend", lambda: None)
+
+    def spawn(prompt: str, timeout: float, *, model: str | None = None, _argv: list[str] | None = None) -> Any:
+        world.capture.record_spawn(["claude", "-p"], stdin=prompt)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps({"result": '{"papers": []}'}), stderr="")
+
+    mp.setattr("nexus.aspect_extractor._run_claude_isolated", spawn)
+    _extract_both(world)
+
+
+@driver("nexus.aspect_extractor:_api_inner_text")
+def _drive_extract_via_api(world: CanaryWorld) -> None:
+    """Census row 4. The API backend is the capturing backend behind ``run_text_sync``."""
+    mp = _mp(world)
+    mp.setattr("nexus.aspect_extractor._selected_api_backend", lambda: "anthropic")
+    world.capture.reply_text = '{"papers": []}'
+    _extract_both(world)
+
+
+# Rows 5-6 -- nx enrich aspects. -----------------------------------------------------------------
+
+
+@driver("nexus.commands.enrich:enrich_aspects")
+def _drive_enrich_aspects(world: CanaryWorld) -> None:
+    """Census row 5. ``nx enrich aspects --all`` runs over each collection; the extraction it hands
+    its selected entries to is an UNGATED recorder (it sends each entry's document text to the
+    capture), so the selection drop is the only protection: the extractor's refusal (rows 3 and 4)
+    is not in the way."""
+    from click.testing import CliRunner  # noqa: PLC0415 - scoped to the driver
+
+    from nexus.commands import enrich as enrich_mod  # noqa: PLC0415 - after the substrate is pinned
+
+    mp = _mp(world)
+    assert world.workdir is not None
+    mp.setenv("NEXUS_CONFIG_DIR", str(world.workdir))
+    mp.setattr(enrich_mod, "_require_llm_backend", lambda: None)
+
+    def extraction(entries: list[Any], collection: str, config: Any) -> list[Any]:
+        for entry in entries:
+            world.capture.record_llm(
+                "aspect_extract", collection=collection, title=entry.title, content=world.text_of(str(entry.tumbler)),
+            )
+        return []
+
+    mp.setattr(enrich_mod, "_run_extraction", extraction)
+    for collection in world.collections:
+        result = CliRunner().invoke(enrich_mod.enrich_aspects, [collection, "--all"])
+        assert result.exit_code == 0, result.output
+
+
+@driver("nexus.commands.enrich:_run_validation_sample")
+def _drive_validation_sample(world: CanaryWorld) -> None:
+    """Census row 6. The pair is extracted (one record each, the claim carrying the document's canary)
+    and a 100% validation sample is drawn over each collection. The verifier call is the real
+    ``_verify`` through the capturing backend; the evidence is the indexed text of the sampled
+    document, read from the seeded chunks."""
+    from nexus.commands import enrich as enrich_mod  # noqa: PLC0415 - after the substrate is pinned
+
+    assert world.workdir is not None
+    for collection, tumbler, title, text in _pairs(world):
+        record = _an_aspect_record(collection, title)
+        record.problem_formulation = f"How the lease memo says: {text[:80]}"
+        record.proposed_method = title
+        enrich_mod._run_validation_sample(
+            [(title, record, title)], collection=collection, sample_pct=100,
+            validation_out=str(world.workdir / "failures.jsonl"), validation_all_out=str(world.workdir / "all.jsonl"),
+        )
+
+
+# Rows 7-8 -- bibliographic enrichment. ---------------------------------------------------------
+
+
+@driver("nexus.commands.enrich:run_bib_enrichment")
+def _drive_enrich_bib(world: CanaryWorld) -> None:
+    """Census row 7. ``nx enrich bib`` over each collection, against Semantic Scholar and against
+    OpenAlex (both are the mock transport). The title, and the DOI scanned from the chunks, are what
+    the lookup sends."""
+    from nexus.commands import enrich as enrich_mod  # noqa: PLC0415 - after the substrate is pinned
+
+    for source in ("s2", "openalex"):
+        for collection in world.collections:
+            enrich_mod.run_bib_enrichment(collection, delay=0, source=source)
+
+
+@driver("nexus.commands.enrich:_dt_crossref_bib")
+def _drive_dt_crossref(world: CanaryWorld) -> None:
+    """Census row 8. The DEVONthink CrossRef gap-fill (``nx dt index --enrich`` runs exactly this
+    pass). DEVONthink is an MCP stdio call, not an ``httpx`` request, so the seam
+    ``dt_resolve_doi`` is a recorder that puts the DOI it was handed into the capture. The driver
+    asserts the control's DOI reached that seam, so the CrossRef leg itself ran."""
+    from nexus.commands import enrich as enrich_mod  # noqa: PLC0415 - after the substrate is pinned
+
+    mp = _mp(world)
+    mp.setattr("nexus.mcp_client.devonthink.available", lambda: True)
+    # The primary lookup (Semantic Scholar) is a silent stub, so a title sent there cannot stand in for the
+    # CrossRef leg: whatever this run sends is sent through the gap-fill.
+    mp.setattr(enrich_mod, "_resolve_bib_backend", lambda source: ("s2", lambda *a, **k: {}, "semantic_scholar_id"))
+
+    def resolve(doi: str) -> None:
+        world.capture.record_outbound("crossref-via-dt", doi=doi)
+
+    mp.setattr("nexus.mcp_client.devonthink.dt_resolve_doi", resolve)
+    for collection in world.collections:
+        enrich_mod.run_bib_enrichment(collection, delay=0, source="dt")
+    assert any(
+        '"crossref-via-dt"' in r and world.canary_control in r for r in world.capture.requests
+    ), "harness: the CrossRef gap-fill never asked about the control document's DOI, so the leg did not run"
+
+
+# Rows 9-10 -- the taxonomy passes. ------------------------------------------------------------
+
+
+class _Taxonomy:
+    """The taxonomy store with the reads the label and review passes make, per collection."""
+
+    def __init__(self, topics: list[dict[str, Any]], members: dict[int, list[str]]) -> None:
+        self._topics = topics
+        self._members = members
+        self.labels: dict[int, str] = {}
+        self.reviewed: dict[int, str] = {}
+
+    def _of(self, collection: str) -> list[dict[str, Any]]:
+        return [t for t in self._topics if not collection or t["collection"] == collection]
+
+    def get_unreviewed_topics(self, collection: str = "", limit: int = 0) -> list[dict[str, Any]]:
+        return self._of(collection)
+
+    def get_all_topics(self, collection: str = "") -> list[dict[str, Any]]:
+        return self._of(collection)
+
+    def get_topic_doc_ids(self, topic_id: int, *, limit: int = 3) -> list[str]:
+        return self._members[topic_id][:limit]
+
+    def get_all_topic_doc_ids(self, topic_id: int) -> list[str]:
+        return list(self._members[topic_id])
+
+    def get_projection_counts_by_collection(self) -> dict[str, int]:
+        return {}
+
+    def update_topic_label(self, topic_id: int, label: str) -> None:
+        self.labels[topic_id] = label
+
+    def rename_topic(self, topic_id: int, label: str) -> None:
+        self.labels[topic_id] = label
+
+    def mark_topic_reviewed(self, topic_id: int, status: str) -> None:
+        self.reviewed[topic_id] = status
+
+
+def _taxonomy_world(world: CanaryWorld) -> _Taxonomy:
+    """One pending topic per collection. Its terms are the document's canary string plus ordinary words
+    (a topic's terms come from its documents' text), and its member is the document's chunk."""
+    topics: list[dict[str, Any]] = []
+    members: dict[int, list[str]] = {}
+    for topic_id, (collection, canary, chash) in enumerate(
+        [
+            (world.collection_bge, world.canary_sensitive, world.chash_sensitive),
+            (world.collection_minilm, world.canary_control, world.chash_control),
+        ],
+        start=1,
+    ):
+        terms = [canary, "lease", "renewal"]
+        topics.append({
+            "id": topic_id, "label": " ".join(terms), "terms": json.dumps(terms), "collection": collection,
+            "doc_count": 1, "review_status": "pending",
+        })
+        members[topic_id] = [chash]
+    return _Taxonomy(topics, members)
+
+
+def _arm_taxonomy(world: CanaryWorld, store: _Taxonomy) -> Any:
+    from types import SimpleNamespace  # noqa: PLC0415 - stdlib, scoped to the driver
+
+    import nexus.mcp_infra as infra  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.commands import taxonomy_cmd  # noqa: PLC0415 - as above
+
+    db = SimpleNamespace(taxonomy=store, memory=SimpleNamespace(get=lambda **kw: None))
+    mp = _mp(world)
+    mp.setattr(infra, "t2_index_write", lambda fn, **kw: fn(db))
+    mp.setattr(taxonomy_cmd, "_save_review_cache", lambda *a, **k: None)
+    return db
+
+
+@driver("nexus.commands.taxonomy_cmd:_generate_labels_batch")
+def _drive_taxonomy_label(world: CanaryWorld) -> None:
+    """Census row 9. ``nx taxonomy label`` (``relabel_topics``) over each collection's pending topic;
+    the label request goes through the capturing backend."""
+    from nexus.commands import taxonomy_cmd  # noqa: PLC0415 - after the substrate is pinned
+
+    store = _taxonomy_world(world)
+    _arm_taxonomy(world, store)
+    for collection in world.collections:
+        taxonomy_cmd.relabel_topics(store, collection=collection, workers=1)
+
+
+@driver("nexus.commands.taxonomy_cmd:_generate_review_verdicts_batch")
+def _drive_taxonomy_review(world: CanaryWorld) -> None:
+    """Census row 10. ``nx taxonomy review --auto`` over each collection's pending topic."""
+    from nexus.commands import taxonomy_cmd  # noqa: PLC0415 - after the substrate is pinned
+
+    store = _taxonomy_world(world)
+    db = _arm_taxonomy(world, store)
+    for collection in world.collections:
+        taxonomy_cmd._review_auto(db, collection, limit=50, yes=True, dry_run=False, batch_size=10)
+
+
+# Row 21 -- MinerU remote extraction. ------------------------------------------------------------
+
+
+@driver("nexus.pdf_extractor:PDFExtractor._mineru_run_via_server")
+def _drive_mineru_remote(world: CanaryWorld) -> None:
+    """Census row 21. A PDF per document carries the document's canary string in its page text and in its
+    plain-bytes info dictionary, so the string is in the bytes a MinerU server would be sent. Both are indexed once with
+    the local text extractor to register them; the sensitive one is then flagged in the CATALOG (the
+    state of a document flagged earlier), and both are re-indexed with ``extractor="mineru"`` and no
+    verb flag. The MinerU server is a fake behind the capturing transport (health, ``/file_parse``);
+    the local MinerU subprocess is an in-process fake, because a sensitive document must go there.
+    The server fake sees the PDF bytes of every document that reaches it: the control's, never the
+    sensitive one's."""
+    import re  # noqa: PLC0415 - stdlib, scoped to the driver
+
+    import pymupdf  # noqa: PLC0415 - the PDF stack, scoped to the driver
+
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.doc_indexer import index_pdf  # noqa: PLC0415 - as above
+    from nexus.pdf_extractor import PDFExtractor  # noqa: PLC0415 - as above
+
+    mp = _mp(world)
+    assert world.workdir is not None
+    corpus = f"canary-pdf-{uuid.uuid4().hex[:8]}"
+
+    def make_pdf(name: str, canary: str) -> Path:
+        doc = pymupdf.open()
+        doc.new_page().insert_textbox(
+            pymupdf.Rect(72, 72, 520, 760), f"Lease renewal memo {canary}. " * 6, fontsize=11,
+        )
+        # The page content stream is Flate-compressed, so the canary rides in the document info
+        # dictionary too, which MuPDF writes as plain bytes.
+        doc.set_metadata({"title": canary, "subject": f"lease renewal memo {canary}"})
+        path = world.workdir / name
+        doc.save(str(path), garbage=0, deflate=False)
+        doc.close()
+        assert canary.encode() in path.read_bytes(), f"harness: the canary is not in {name}'s raw bytes"
+        return path
+
+    pdfs = {
+        "sensitive": make_pdf("canary-sensitive.pdf", world.canary_sensitive),
+        "control": make_pdf("canary-control.pdf", world.canary_control),
+    }
+    for pdf in pdfs.values():
+        index_pdf(pdf, corpus=corpus, extractor="pymupdf", force=True, streaming="never")
+    reader = make_catalog_reader()
+    (entry,) = reader.find_all_by_file_path(str(pdfs["sensitive"].resolve()))
+    _flag_sensitive(str(entry.tumbler))
+
+    def server(request: httpx.Request) -> httpx.Response | None:
+        if request.url.path.endswith("/file_parse"):
+            return httpx.Response(200, json={"results": {"served": {
+                "md_content": "Extracted by the remote server.", "content_list": "[]", "middle_json": '{"pdf_info": []}',
+            }}})
+        return httpx.Response(200, json={"status": "ok"})
+
+    world.capture.responders.append(server)
+    mp.setattr("nexus.config.get_mineru_server_url", lambda *a, **k: "http://mineru.canary.invalid:8123")
+    mp.setattr(
+        PDFExtractor, "_mineru_run_subprocess",
+        lambda self, pdf_path, start, end, formula_enable=True, **kw: ("Extracted by the local subprocess.", [], []),
+    )
+    for pdf in pdfs.values():
+        index_pdf(pdf, corpus=corpus, extractor="mineru", force=True, streaming="never")
+    assert re.search(r"/file_parse", world.capture.everything), (
+        "harness: no PDF reached the MinerU server fake, so the leg did not run"
+    )
 
 
 def _run_search_fanout(world: CanaryWorld, tenant: Any) -> list[Any]:
@@ -398,7 +889,7 @@ def _run_search_fanout(world: CanaryWorld, tenant: Any) -> list[Any]:
 
 @pytest.mark.parametrize("surface", _registry_cases())
 def test_canary_is_absent_from_every_payload_of_a_refusing_surface(
-    surface: Surface | None, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch,
+    surface: Surface | None, t2_service_env: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     assert surface is not None, registry_missing_message()
 
@@ -409,7 +900,7 @@ def test_canary_is_absent_from_every_payload_of_a_refusing_surface(
         f"so add a driver for {surface.target!r} to tests/test_sensitivity_canary.py"
     )
 
-    world = build_world(monkeypatch)
+    world = build_world(monkeypatch, workdir=tmp_path)
     assert len({c.split("__")[2] for c in world.collections}) >= MIN_MODELS_IN_CORPUS
     driver(world)
     problem = judge(world, surface.name)
@@ -424,10 +915,13 @@ def judge(world: CanaryWorld, surface_name: str) -> str | None:
     cap = world.capture
     counts = (
         f"{len(cap.llm_payloads)} LLM payload(s), {len(cap.requests)} outbound request(s), "
-        f"{len(cap.spawns)} spawn(s)"
+        f"{len(cap.spawns)} spawn(s), {len(cap.stores)} store write(s)"
     )
     if world.canary_sensitive in cap.everything:
-        return f"surface {surface_name!r} sent the sensitive document's text out: the canary string is in {counts}"
+        return (
+            f"surface {surface_name!r} sent the sensitive document's text out: the canary string is in "
+            f"{cap.where(world.canary_sensitive)} of {counts}"
+        )
     if world.canary_control not in cap.everything:
         return (
             f"surface {surface_name!r} never sent the control document either ({counts}): the run did not "
