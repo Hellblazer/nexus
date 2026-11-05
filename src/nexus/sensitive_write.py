@@ -27,7 +27,7 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
     "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
-    "cloud_refusal_text", "external_legs_gate", "gate_sensitive_import", "import_ack_help", "is_external_embedder", "raise_flag", "refuse_external_existing",
+    "cloud_refusal_text", "external_legs_gate", "gate_sensitive_import", "gate_sensitive_reindex", "import_ack_help", "is_external_embedder", "raise_flag", "refuse_external_existing",
     "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
     "sensitive_write_kwargs",
 ]
@@ -262,6 +262,47 @@ def gate_sensitive_import(flagged: Sequence[str], collection: str, *, ack: bool,
         resolve_sensitive_collection(collection, ack=True, what=what)  # prints the local Voyage notice
     else:
         click.echo(cloud_disclosure(), err=True)
+
+
+def gate_sensitive_reindex(collection: str, cat: Any, *, ack: bool, what: str = "nx collection reindex") -> None:
+    """Refuse, BEFORE anything is deleted, a rebuild of a Voyage collection that holds a flagged document.
+
+    ``nx collection reindex`` deletes the collection and then indexes every source again; the indexers
+    skip or refuse a flagged document bound for Voyage, so by then its chunks are already gone. This reads
+    the flags first. *collection* embeds off this machine (or cannot be told, :func:`is_external_embedder`),
+    *ack* is false, and a live document of it is flagged (or the catalog cannot say): it raises
+    :class:`ExternalEmbedderRefusedError` naming the documents and ``--ack-external-embedder``. With *ack*
+    the rebuild goes ahead, the indexers are told, and a one-line notice is printed.
+    """
+    if not is_external_embedder(collection):
+        return
+    if ack:
+        click.echo(
+            f"sensitive: acknowledged. Any document flagged sensitive in {collection} is rebuilt on Voyage AI, "
+            f"which sends its text off this machine.", err=True)
+        return
+    from nexus.doc_sensitivity import SensitivityUnknown, flagged_in_collection  # noqa: PLC0415 — deferred: reads the catalog client
+
+    try:
+        entries = flagged_in_collection(collection, cat=cat)
+    except SensitivityUnknown as exc:
+        raise ExternalEmbedderRefusedError(
+            f"{what} refused: could not read which documents of {collection} are flagged sensitive "
+            f"({exc.detail}), and {collection} embeds with Voyage AI. Nothing was deleted. Retry when the "
+            f"catalog answers, or pass --ack-external-embedder to accept Voyage."
+        ) from exc
+    if not entries:
+        return
+    named = ", ".join(
+        f"{getattr(e, 'file_path', '') or getattr(e, 'title', '') or '<untitled>'} ({getattr(e, 'tumbler', '?')})"
+        for e in entries[:5])
+    more = f" (and {len(entries) - 5} more)" if len(entries) > 5 else ""
+    raise ExternalEmbedderRefusedError(
+        f"{what} refused: {len(entries)} document(s) of {collection} are flagged sensitive: {named}{more}. "
+        f"{collection} embeds with Voyage AI, so rebuilding would either send their text off this machine or "
+        f"drop their chunks after the delete. Nothing was deleted. Pass --ack-external-embedder to rebuild "
+        f"them on Voyage, or move them to a local-embedder (bge) collection first."
+    )
 
 
 def refuse_external_existing_note(collection: str, title: str, *, ack: bool, what: str) -> None:

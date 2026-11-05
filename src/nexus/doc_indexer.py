@@ -4468,8 +4468,13 @@ def batch_index_markdowns(
     embed_fn: EmbedFn | None = None,
     hooks: "HookRegistry | None" = None,
     on_error: "Callable[[Path, BaseException], None] | None" = None,
+    ack_external_embedder: bool = False,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
+
+    *ack_external_embedder* (RDR-243, nexus-rfvyy.6.20): a caller that already asked the operator (``nx collection
+    reindex --ack-external-embedder``) accepts that a document flagged sensitive in the catalog is written to a Voyage
+    collection. Without it such a document is skipped (a batch has no way to ask).
 
     Pass *collection_name* to override the default ``docs__{corpus}`` target
     (used for RDR collections).
@@ -4499,7 +4504,7 @@ def batch_index_markdowns(
     absolute path (nexus-njn1a, see :func:`_curator_identity`).
     """
     results: dict[str, str] = {}
-    held_back = _sensitive_paths_for_external(paths, collection_name, base_path)
+    held_back = set() if ack_external_embedder else _sensitive_paths_for_external(paths, collection_name, base_path)
     for path in paths:
         count: int = 0
         t0 = time.monotonic()
@@ -4518,7 +4523,8 @@ def batch_index_markdowns(
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
                                  content_type=content_type, force=force,
                                  force_re_embed=force_re_embed,
-                                 base_path=base_path, embed_fn=embed_fn, hooks=hooks)
+                                 base_path=base_path, embed_fn=embed_fn, hooks=hooks,
+                                 **({"ack_external_embedder": True} if ack_external_embedder else {}))
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller

@@ -1029,7 +1029,12 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
 @collection.command("reindex")
 @click.argument("name")
 @click.option("--force", is_flag=True, help="Force reindex even if sourceless entries exist")
-def reindex_cmd(name: str, force: bool) -> None:
+@click.option(
+    "--ack-external-embedder", "ack_external_embedder", is_flag=True,
+    help="Accept that a document flagged sensitive in this collection is rebuilt on Voyage AI, which sends its "
+         "text off this machine. Without it, a Voyage collection (or one whose embedder cannot be told) that holds a "
+         "flagged document refuses before anything is deleted.")
+def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> None:
     """Delete and re-index a collection from its source files."""
     from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
@@ -1236,6 +1241,13 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"Use --force to proceed and accept that loss."
         )
 
+    # 2b'. RDR-243 (fix round 3): the flags are read BEFORE the delete. The indexers below skip or refuse a
+    # document the catalog flags sensitive when the collection embeds with Voyage, and by then its chunks are gone.
+    # A catalog that cannot answer refuses too. Raised as a ClickException: nothing has been deleted.
+    from nexus.sensitive_write import gate_sensitive_reindex  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    gate_sensitive_reindex(name, _cat, ack=ack_external_embedder)
+
     # 2c. The PDF stack (nexus-2k66t.4.2), BEFORE the purge below. The loop
     # that follows indexes each existing .pdf source through index_pdf, which
     # needs MinerU; on a slim install every one of them fails, and
@@ -1377,8 +1389,9 @@ def reindex_cmd(name: str, force: bool) -> None:
                 # register_many pass for these files. Do not add that pass
                 # here without also dropping this call, or the RDR
                 # double-registration bug nexus-3lswy fixed comes back.
-                batch_index_markdowns(
-                    rdr_files, corpus=corpus, collection_name=name, force=True
+                results = batch_index_markdowns(
+                    rdr_files, corpus=corpus, collection_name=name, force=True,
+                    **({"ack_external_embedder": True} if ack_external_embedder else {}),
                 )
             except Exception as exc:  # noqa: BLE001 — boundary catch surfacing re-index failure to user via click.echo + Exit
                 click.echo(
@@ -1388,7 +1401,13 @@ def reindex_cmd(name: str, force: bool) -> None:
                     err=True,
                 )
                 raise click.exceptions.Exit(1)
-            indexed = len(rdr_files)
+            # Count what was indexed, not what was handed in: a file the batch skipped (a flagged
+            # document bound for Voyage, empty content) or failed is not a processed source.
+            indexed = sum(1 for status in (results or {}).values() if status == "indexed") if isinstance(results, dict) else len(rdr_files)
+            if isinstance(results, dict) and (not_indexed := len(results) - indexed):
+                click.echo(
+                    f"Warning: {not_indexed} source(s) were skipped or failed (see the log): "
+                    f"their chunks are not in the rebuilt collection.", err=True)
 
     elif split_candidate_collection_name(name)[0] in ("docs", "knowledge"):
         for sp in source_paths:
@@ -1398,10 +1417,11 @@ def reindex_cmd(name: str, force: bool) -> None:
                 continue
             try:
                 # nexus-8143o: force_re_embed left at its default False -- the collection was just DELETED above, so every chash here is new and there is nothing to skip.
+                _ack = {"ack_external_embedder": True} if ack_external_embedder else {}
                 if p.suffix.lower() == ".pdf":
-                    index_pdf(p, corpus=corpus, collection_name=name, force=True, extractor=pdf_extractor or DEFAULT_EXTRACTOR)
+                    index_pdf(p, corpus=corpus, collection_name=name, force=True, extractor=pdf_extractor or DEFAULT_EXTRACTOR, **_ack)
                 else:
-                    index_markdown(p, corpus=corpus, collection_name=name, force=True)
+                    index_markdown(p, corpus=corpus, collection_name=name, force=True, **_ack)
                 indexed += 1
             except PdfStackError as exc:
                 # The gate at 2c passed, so this is a stack that broke mid-run. It is

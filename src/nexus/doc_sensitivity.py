@@ -30,6 +30,7 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "SensitivityUnknown",
     "flagged",
+    "flagged_in_collection",
     "is_sensitive",
     "refuse_if_sensitive",
     "sensitive_chashes",
@@ -93,6 +94,20 @@ def flagged(tumblers: Iterable[str], *, cat: Any = None) -> set[str]:
     except SensitivityUnknown:
         raise
     except Exception as exc:  # noqa: BLE001 — every failure of the read is "unknown", whatever its class
+        raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
+
+
+def flagged_in_collection(collection: str, *, cat: Any = None) -> list[Any]:
+    """The live catalog entries of *collection* whose row is sensitive (one listing read).
+
+    For a verb that rebuilds a whole collection and must know, before it deletes anything, whether it
+    would move a flagged document. Raises :class:`SensitivityUnknown` when the catalog cannot be read."""
+    try:
+        cat = cat if cat is not None else _catalog_reader()
+        if cat is None:
+            raise RuntimeError("no catalog reader")
+        return [e for e in cat.list_by_collection(collection, limit=1_000_000) if _entry_flag(e)]
+    except Exception as exc:  # noqa: BLE001 — see flagged()
         raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
 
 
