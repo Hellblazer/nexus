@@ -100,7 +100,7 @@ class AnswerShape(str, Enum):
     #: RDR-232 section 4 (nexus-jypmj.3.3): the coverage state was ``partial`` and a usable answer exists, so
     #: ``final_text`` is the marker notice (``[insufficient-evidence: <n> unresolved]``, then the unresolved
     #: facets) followed by the prose; when the run merged an exact-key join (RDR-147) the text opens with
-    #: ``[exact-key join: ...]`` ahead of that marker, and an uncovered ledger that generated on a join is ANSWERED
+    #: ``[exact-key join: ...]`` ahead of that marker, and an uncovered ledger that generated on a join is ANSWERED when its text is an answer
     #: behind the same line (``coverage_outcome.render_exact_key_join_notice``). NOT in :data:`NON_ANSWER_SHAPES`: that set couples ``success=False``, no
     #: plan growth and a notice in place of the prose, and a partial answer needs only the no-grow effect,
     #: which ``nx_answer`` applies through an explicit flag. Set by ``nx_answer`` from the coverage state,
