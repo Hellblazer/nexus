@@ -12,10 +12,49 @@
 # with the vouch list as the only thing the caller supplies: the outbound
 # range must equal the vouched set exactly, or nothing is pushed.
 #
-# Usage: git-push-develop.sh <sha> [<sha> ...]
+# Usage: git-push-develop.sh [flags] <sha> [<sha> ...]
 #   Each argument is a commit the caller made (any revision that resolves
 #   to a commit; short SHAs are fine). With no arguments the script only
 #   reports; a non-empty range is refused, never pushed.
+#
+#   The script is callable with NO environment-variable prefix: every
+#   setting below has a command-line flag, so a push is one command that
+#   starts with the script path (a permission rule that matches on the
+#   leading command is defeated by `FOO=bar cmd`). A typical batch push
+#   from a detached worktree:
+#
+#     scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <sha> [<sha> ...]
+#
+#   Flags (each also takes the `--flag=value` form; a value may not begin
+#   with `--`; a literal `--` ends flag parsing, so everything after it is
+#   a sha). A flag WINS over its environment twin when both are set; the
+#   environment forms keep working unchanged.
+#     --source <ref>              NX_PUSH_SOURCE      (HEAD for a detached worktree)
+#     --remote <name>             NX_PUSH_REMOTE
+#     --branch <name>             NX_PUSH_BRANCH
+#     --allowed-paths <paths>     NX_PUSH_ALLOWED_PATHS. ONE value: a single path
+#                                 or a space-separated list, quoted. Repeatable;
+#                                 the values accumulate. It takes one value, not
+#                                 "everything up to the next flag", because a
+#                                 path and a sha are indistinguishable by shape.
+#     --allowed-paths-from <file> The same list read from a file (whitespace and
+#                                 newlines separate entries). Repeatable, and
+#                                 accumulates with --allowed-paths.
+#     --allowed-paths-from-range  The allowlist is the union of every path touched by
+#                                 every outbound commit
+#                                 (`git log --name-only --format= <remote>/<branch>..<source>`).
+#                                 The list is printed to stderr (PUSH_ALLOWED_PATHS_FROM_RANGE).
+#                                 This is the by-hand allowlist built mechanically:
+#                                 it states what the commits touch and refuses nothing
+#                                 a commit touches, so it does NOT catch a foreign file
+#                                 swept into your commit (nexus-bbriq). Read the printed
+#                                 list; use --allowed-paths when you can name the files.
+#                                 Cannot be combined with --allowed-paths[-from].
+#     --skip-scope-audit <reason> NX_PUSH_SKIP_SCOPE_AUDIT
+#     --skip-lock <reason>        NX_PUSH_SKIP_LOCK
+#     --batch-minutes <n>         NX_PUSH_BATCH_MINUTES
+#     --tenant-check <0|1>        NX_PUSH_TENANT_CHECK (0 skips the tenant hint)
+#   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
 #   commits reachable from its second and later parents that are not yet on
@@ -23,7 +62,7 @@
 #   the merge, so main's release-only commits ride it. Commits under the merge on its FIRST-parent line (a peer's
 #   unpushed work on the local branch) are never covered by it.
 #
-# Environment:
+# Environment (each has the flag twin above; the flag wins when both are set):
 #   NX_PUSH_REMOTE   remote name (default origin)
 #   NX_PUSH_BRANCH   branch name (default develop)
 #   NX_PUSH_SOURCE   the local revision to push (default refs/heads/$branch).
@@ -153,6 +192,8 @@
 #                               only a dev-checkout/venv `nx` is on PATH;
 #                               the installed generation was not found, and
 #                               NX_PUSH_SKIP_LOCK is unset
+#  64  PUSH_REFUSED_USAGE       a flag is unknown, lacks its value, or flags that
+#                               cannot combine were combined; nothing was fetched
 #  11  PUSH_LOCK_RELEASE_FAILED a claim was taken (nx tuple in succeeded)
 #                               but its claim id could not be parsed from
 #                               the response -- the claim is left for its
@@ -256,6 +297,99 @@ _release_push_lock() {
   fi
 }
 trap _release_push_lock EXIT
+
+# ── Command-line flags ───────────────────────────────────────────────────
+# Each flag assigns the NX_PUSH_* variable it is the twin of, so everything
+# below reads one variable and a flag wins over the environment by plain
+# assignment. Parsed before the first remote call: a typo costs nothing.
+_usage_refuse() {
+  echo "PUSH_REFUSED_USAGE $*"
+  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range --skip-scope-audit --skip-lock --batch-minutes --tenant-check (see the header of $0)."
+  exit 64
+}
+_vouch_args=()
+_echo_flags=()          # flags worth repeating in a pasteable suggestion
+_range_allowlist=0
+_flag_allowed=""
+_flag_allowed_given=0
+while [[ $# -gt 0 ]]; do
+  _arg="$1"
+  case "$_arg" in
+  --)
+    shift
+    _vouch_args+=("$@")
+    break
+    ;;
+  --?*)
+    _name="$_arg"
+    _val=""
+    _has_val=0
+    if [[ "$_arg" == --*=* ]]; then
+      _name="${_arg%%=*}"
+      _val="${_arg#*=}"
+      _has_val=1
+    fi
+    case "$_name" in
+    --allowed-paths-from-range)
+      (( _has_val )) && _usage_refuse "$_name takes no value"
+      _range_allowlist=1
+      shift
+      continue
+      ;;
+    --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
+      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check) ;;
+    *) _usage_refuse "unknown flag $_name" ;;
+    esac
+    if (( _has_val )); then
+      shift
+    else
+      [[ $# -ge 2 ]] || _usage_refuse "$_name needs a value"
+      _val="$2"
+      [[ "$_val" == --* ]] && _usage_refuse "$_name needs a value, got '$_val'"
+      shift 2
+    fi
+    [[ -n "$_val" ]] || _usage_refuse "$_name needs a non-empty value"
+    case "$_name" in
+    --source) NX_PUSH_SOURCE="$_val"; _echo_flags+=("$_name" "$_val") ;;
+    --remote) NX_PUSH_REMOTE="$_val"; _echo_flags+=("$_name" "$_val") ;;
+    --branch) NX_PUSH_BRANCH="$_val"; _echo_flags+=("$_name" "$_val") ;;
+    --skip-lock) NX_PUSH_SKIP_LOCK="$_val"; _echo_flags+=("$_name" "$_val") ;;
+    --skip-scope-audit) NX_PUSH_SKIP_SCOPE_AUDIT="$_val" ;;
+    --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
+    --tenant-check)
+      [[ "$_val" == "0" || "$_val" == "1" ]] || _usage_refuse "--tenant-check takes 0 or 1, got '$_val'"
+      NX_PUSH_TENANT_CHECK="$_val"
+      ;;
+    --allowed-paths)
+      _flag_allowed+="${_flag_allowed:+ }$_val"
+      _flag_allowed_given=1
+      ;;
+    --allowed-paths-from)
+      [[ -r "$_val" && -f "$_val" ]] || _usage_refuse "--allowed-paths-from: cannot read file '$_val'"
+      _from_text="$(tr '\n' ' ' < "$_val")"
+      [[ -n "${_from_text//[[:space:]]/}" ]] || _usage_refuse "--allowed-paths-from: '$_val' lists no paths"
+      _flag_allowed+="${_flag_allowed:+ }$_from_text"
+      _flag_allowed_given=1
+      ;;
+    esac
+    ;;
+  *)
+    _vouch_args+=("$_arg")
+    shift
+    ;;
+  esac
+done
+if (( _range_allowlist && _flag_allowed_given )); then
+  _usage_refuse "--allowed-paths-from-range cannot be combined with --allowed-paths or --allowed-paths-from"
+fi
+(( _flag_allowed_given )) && NX_PUSH_ALLOWED_PATHS="$_flag_allowed"
+set -- "${_vouch_args[@]+"${_vouch_args[@]}"}"
+# The flags to repeat in a pasteable line: only the ones that change which
+# push this is, never an allowlist or a skip reason.
+_echo_flag_text=""
+if [[ ${#_echo_flags[@]} -gt 0 ]]; then
+  _echo_flag_text="$(printf '%q ' "${_echo_flags[@]}")"
+fi
 
 remote="${NX_PUSH_REMOTE:-origin}"
 branch="${NX_PUSH_BRANCH:-develop}"
@@ -396,6 +530,27 @@ _outbound_files() {
 # working tree would look correct in the primary checkout (where they
 # coincide) and break anywhere else.
 audit="$_script_dir/../tests/e2e/lib/commit_scope_audit.sh"
+
+# --allowed-paths-from-range: the allowlist is the union of the paths every
+# outbound commit touches, printed so the list used is on the record. The
+# array is filled here, not word-split from a string, so a path with a space
+# in it reaches the audit whole. Not computed when the audit is skipped.
+_allowed_paths=()
+if (( _range_allowlist )) && [[ -z "${NX_PUSH_SKIP_SCOPE_AUDIT:-}" ]]; then
+  while IFS= read -r _p; do
+    [[ -n "$_p" ]] && _allowed_paths+=("$_p")
+  done < <(git -c core.quotePath=false log --name-only --format= "refs/remotes/$remote/$branch..$tip" | sort -u)
+  if [[ ${#_allowed_paths[@]} -eq 0 ]]; then
+    echo "PUSH_REFUSED_SCOPE --allowed-paths-from-range found no files in $remote/$branch..$source (merge commits only?); there is nothing to allowlist."
+    echo "Name the files with --allowed-paths, or skip on the record with --skip-scope-audit '<reason>'."
+    exit 7
+  fi
+  {
+    echo "PUSH_ALLOWED_PATHS_FROM_RANGE n=${#_allowed_paths[@]} (union of the files touched by $remote/$branch..$source; read it, this audit cannot catch a file that is in your commit by mistake):"
+    printf '    %s\n' "${_allowed_paths[@]}"
+  } >&2
+fi
+
 if [[ -n "${NX_PUSH_SKIP_SCOPE_AUDIT:-}" ]]; then
   # stderr, not stdout: stdout is the machine-readable contract. Still
   # visible to a human, which is the whole point of naming the skip.
@@ -404,10 +559,10 @@ elif [[ ! -r "$audit" ]]; then
   # Not a silent pass: the audit is part of the gate, so its absence is
   # reported and refused rather than shrugged off.
   echo "PUSH_REFUSED_SCOPE the scope audit is missing or unreadable: $audit"
-  echo "Restore it, or set NX_PUSH_SKIP_SCOPE_AUDIT='<reason>' to proceed on the record."
+  echo "Restore it, or pass --skip-scope-audit '<reason>' (env NX_PUSH_SKIP_SCOPE_AUDIT) to proceed on the record."
   exit 7
-elif [[ -z "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
-  echo "PUSH_REFUSED_SCOPE NX_PUSH_ALLOWED_PATHS is unset and ${#range[@]} commit(s) are outbound."
+elif (( ! _range_allowlist )) && [[ -z "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
+  echo "PUSH_REFUSED_SCOPE no allowlist (--allowed-paths, NX_PUSH_ALLOWED_PATHS) and ${#range[@]} commit(s) are outbound."
   echo "Vouching is by sha: it proves you MADE the commit, not what is IN it (nexus-bbriq)."
   echo "These are the files the outbound commits touch. Read them, then re-run with:"
   echo
@@ -423,10 +578,14 @@ elif [[ -z "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
   # push is too broad to eyeball.
   files="$(_outbound_files)"
   suggestion="$(printf '%s\n' "$files" | tr '\n' ' ')"
-  echo "    NX_PUSH_ALLOWED_PATHS='${suggestion% }' $0 $*"
+  echo "    $0 ${_echo_flag_text}--allowed-paths '${suggestion% }' $*"
+  echo
+  echo "Or, once you have read that list and it is exactly what you meant to push:"
+  echo
+  echo "    $0 ${_echo_flag_text}--allowed-paths-from-range $*"
   exit 7
-# `read -ra` splits on IFS WITHOUT glob-expanding, which an unquoted
-# ${NX_PUSH_ALLOWED_PATHS} would do: a pathspec like `docs/*` or `*` is a
+# The env allowlist is split with `read -ra`, WITHOUT glob-expanding, which an
+# unquoted ${NX_PUSH_ALLOWED_PATHS} would do: a pathspec like `docs/*` or `*` is a
 # pattern the AUDIT must receive verbatim, and letting this shell expand it
 # against the cwd first would silently narrow the allowlist to whatever
 # happens to exist here.
@@ -439,21 +598,21 @@ elif [[ -z "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
 # newline in it", and it cost a peer session a cycle (nexus-01, 2026-09-19).
 # Folding is not a widening: a newline is a separator here either way, and
 # treating it as one can only ever ADD entries the caller wrote down.
-elif _wildcard_allowlist "${NX_PUSH_ALLOWED_PATHS}"; then
-  echo "PUSH_REFUSED_SCOPE NX_PUSH_ALLOWED_PATHS is '${NX_PUSH_ALLOWED_PATHS}', which matches every file."
+elif (( ! _range_allowlist )) && _wildcard_allowlist "${NX_PUSH_ALLOWED_PATHS}"; then
+  echo "PUSH_REFUSED_SCOPE the allowlist '${NX_PUSH_ALLOWED_PATHS}' matches every file."
   echo "An allowlist that audits nothing satisfies the letter of this gate and produces a clean"
   echo "PUSH_OK, indistinguishable afterwards from a genuinely scoped push. The named skip is the"
   echo "honest way to say the same thing, and it says so out loud:"
   echo
-  echo "    NX_PUSH_SKIP_SCOPE_AUDIT='<reason>' $0 $*"
+  echo "    $0 ${_echo_flag_text}--skip-scope-audit '<reason>' $*"
   exit 7
-elif read -r -a _allowed_paths <<< "$(printf '%s' "${NX_PUSH_ALLOWED_PATHS}" | tr '\n' ' ')" &&
+elif { (( _range_allowlist )) || read -r -a _allowed_paths <<< "$(printf '%s' "${NX_PUSH_ALLOWED_PATHS}" | tr '\n' ' ')"; } &&
      ! _audit_out="$(bash "$audit" "refs/remotes/$remote/$branch..$tip" "${_allowed_paths[@]}" 2>&1)"; then
   # The audit's per-commit listing is captured, not streamed: this script's
   # stdout is a machine-readable contract (PUSH_OK n=<n> tip=<sha>) that
   # callers and tests parse, so a clean audit must add nothing to it.
   printf '%s\n' "$_audit_out"
-  echo "PUSH_REFUSED_SCOPE an outbound commit touches a file outside NX_PUSH_ALLOWED_PATHS (see above)."
+  echo "PUSH_REFUSED_SCOPE an outbound commit touches a file outside the allowlist (see above)."
   echo "A foreign file in your commit is the nexus-bbriq class: a peer's staged work swept in by a"
   echo "whole-index commit. Do not widen the allowlist to unblock yourself — check what you committed."
   exit 7
@@ -503,7 +662,7 @@ else
     echo "reads identically to an unreachable tuple space -- refusing outright here instead so the two are never confused."
     echo "Fix PATH so the installed generation resolves first (avoid 'uv run' / an activated venv for this script), or"
     echo "reinstall it: scripts/reinstall-tool.sh."
-    echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
+    echo "Pass --skip-lock '<reason>' (env NX_PUSH_SKIP_LOCK) to push without the lock, on the record."
     exit 10
   fi
 
@@ -516,7 +675,7 @@ else
   if ! _lock_out_msg="$("$_nx_bin" tuple out "$_lock_subspace" --key "resource=$_lock_resource" 2>&1)"; then
     echo "PUSH_REFUSED_LOCK_UNREACHABLE could not reach the tuple space to claim $_lock_subspace ($_lock_scope_desc):"
     echo "$_lock_out_msg"
-    echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
+    echo "Pass --skip-lock '<reason>' (env NX_PUSH_SKIP_LOCK) to push without the lock, on the record."
     exit 9
   fi
 
@@ -574,7 +733,7 @@ else:
     fi
     echo "PUSH_REFUSED_LOCK_HELD $_lock_subspace ($_lock_scope_desc) is not available: $_lock_holder"
     echo "Wait for the lease to lapse or the holder to release it, then retry."
-    echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
+    echo "Pass --skip-lock '<reason>' (env NX_PUSH_SKIP_LOCK) to push without the lock, on the record."
     exit 8
   fi
 fi

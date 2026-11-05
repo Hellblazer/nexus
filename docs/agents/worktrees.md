@@ -127,14 +127,21 @@ things to avoid carefully; they are impossible.
    into a verdict any more, so read the `conclusion` of the check runs, not
    the board.
 
-8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...`
+8. **Push unchanged**: `scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <sha>...`
    from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`
-   in; `git -C` does not cover it. Direct to `develop` per the project
+   in; `git -C` does not cover it. Every setting is a flag (`--source`,
+   `--allowed-paths`, `--allowed-paths-from <file>`, `--allowed-paths-from-range`,
+   `--skip-lock`, `--skip-scope-audit`), so the command starts with the script
+   path and needs no `NX_PUSH_*=` prefix; the env forms still work and a
+   flag wins when both are set. `--allowed-paths-from-range` allowlists the
+   union of the files the outbound commits touch and prints it on stderr; it
+   states what you are pushing and cannot catch a foreign file in your own
+   commit, so read the list (`--allowed-paths 'a b'` is the stricter form). Direct to `develop` per the project
    rule; the feature branch is a local name that never reaches origin.
    The script itself now takes the `lock/ci-develop-push` tuple-space
    lock immediately before the push and releases it right after
    (nexus-agctp) — a `PUSH_REFUSED_LOCK_HELD` names the holder and lease
-   expiry; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape when the
+   expiry; `--skip-lock '<reason>'` is the named escape when the
    tuple space is unreachable.
 
    **Batch develop pushes** (Sam, 2026-10-21, nexus-cvtxu): develop CI runs
