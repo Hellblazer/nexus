@@ -967,3 +967,4 @@ new dependency.
   Trust model distinguishes mediator and terminal evidence. New risks for
   misread and merged answers; test plan gains mediator evals; metrics, scope,
   proportionality and the CLAUDE.md line updated.
+- 2026-11-05: Gate round 1 — BLOCKED (2 Critical, 7 Significant, 2 ship-blocker(s)); commit `a25923a80`; critique `nexus_rdr/245-gate-critique-2026-11-05-r1`.
