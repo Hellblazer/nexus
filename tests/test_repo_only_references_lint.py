@@ -820,28 +820,6 @@ def test_no_plugin_markdown_links_outside_its_plugin() -> None:
     assert not bad, "\n".join(bad)
 
 
-#: A dated T2 record of the nexus project (``nexus/nx-answer-capability-analysis-2026-08-19``): the maintainers' own
-#: memory, which a user's install does not hold. State the point inline or leave it out.
-_OPERATOR_T2_RECORD = re.compile(r"`(?:nexus|nexus_rdr)/[a-z0-9][a-z0-9-]*-20\d\d-\d\d-\d\d`")
-
-
-def test_a_dated_operator_t2_record_citation_is_flagged() -> None:
-    assert _OPERATOR_T2_RECORD.search("(2026-08, T2 `nexus/nx-answer-capability-analysis-2026-08-19`): p50")
-    assert not _OPERATOR_T2_RECORD.search("write `nexus/your-note` or `myproject/decision-2026-08-19` to T2")
-
-
-def test_plugin_markdown_cites_no_dated_operator_t2_record() -> None:
-    files = _plugin_markdown()
-    bad = [
-        f"{p.relative_to(REPO_ROOT).as_posix()}:{i}: {m.group(0)}"
-        for p in files
-        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
-        for m in _OPERATOR_T2_RECORD.finditer(line)
-    ]
-    assert len(files) >= 84
-    assert not bad, "\n".join(bad)
-
-
 def test_a_plugin_root_placeholder_block_names_one_concrete_file_for_the_real_spelling() -> None:
     """The resource files cannot carry the plugin-root variable, so their template blocks write ``<plugin-root>`` and
     say where to copy the real spelling from. A directory is not an answer (an agent opens it and still has to pick a

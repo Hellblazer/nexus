@@ -12,8 +12,7 @@ commands, agents, resources, the READMEs) and flags every citation form: a
 without a ``T2`` lead-in or a date suffix) and a ``project="nexus"`` /
 ``project="nexus_rdr"`` argument. The release ledger and changelogs record
 history and are skipped. This is the only rule for the class; it replaces the
-dated-suffix-only rule that tests/test_repo_only_references_lint.py carried on
-the sibling branch.
+dated-suffix-only rule that tests/test_repo_only_references_lint.py once carried.
 
 File-only, so it runs in the ``-m lint`` job. A planted fixture proves each
 form fires, and the live check asserts it scanned files.
@@ -45,15 +44,13 @@ _OPTIONAL_OVERRIDE = re.compile(r"\boverrides it\b", re.IGNORECASE)
 #: (file relative to conexus/, text fragment) -> reason. A site that must stay
 #: names why; an entry whose fragment no longer matches is dead weight, delete it.
 _AUDIT_PROMPT_REASON = (
-    "runtime load of the RDR-067 canonical audit prompt from the maintainer's T2; the "
-    "prompt is not shipped with the plugin, so rdr-audit cannot run for a plugin user "
-    "until it is. Delete these entries when the prompt ships (the sibling branch ships it as "
-    "resources/rdr_process/AUDIT-PROMPT.md and rewrites these lines as overrides, which the "
-    "override rule then passes)."
+    "the skill's load step reads the optional T2 override of the shipped "
+    "resources/rdr_process/AUDIT-PROMPT.md with memory_get and falls back to the shipped "
+    "text when it is absent, so a plugin user loses nothing; the lines say 'replaces' or "
+    "'override' rather than 'overrides it', so the override rule does not pass them."
 )
 _ALLOWED: dict[tuple[str, str], str] = {
     ("skills/rdr-audit-checklist/SKILL.md", "067-canonical-prompt-v1"): _AUDIT_PROMPT_REASON,
-    ("commands/rdr-audit.md", "067-canonical-prompt-v1"): _AUDIT_PROMPT_REASON,
 }
 
 
