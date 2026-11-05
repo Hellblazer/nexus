@@ -14,6 +14,10 @@
 #
 # emit fields
 #   census_row  the RDR's Key Discoveries row number, 1..25, unique.
+#   label       the surface as a reader of the privacy policy knows it: a verb or a feature, unique,
+#               no `|` or newline. The generated table and `--sensitive` help print it.
+#   sends       what the surface sends, in the census's words: no `|` or newline. The generated
+#               table prints it as is.
 #   targets     the `module:function` entries that carry the surface, a
 #               non-empty list. The FIRST is the primary entry point: the
 #               canary keys its driver by it, so primaries are distinct. A
@@ -113,6 +117,8 @@ match = { surface = "aspect_enqueue_hook" }
 
 [row.emit]
 census_row = 1
+label = "Aspect extraction: enqueue hook"
+sends = "full document content, queued for later extraction"
 targets = [
     "nexus.aspect_worker:aspect_extraction_enqueue_hook",
   ]
@@ -126,6 +132,8 @@ match = { surface = "aspect_worker_drain" }
 
 [row.emit]
 census_row = 2
+label = "Aspect extraction: worker drain"
+sends = "queued or on-disk document content, passed to the LLM"
 targets = [
     "nexus.aspect_worker:AspectExtractionWorker._process_row",
     "nexus.aspect_worker:AspectExtractionWorker._process_batch",
@@ -140,6 +148,8 @@ match = { surface = "aspect_extraction_cli" }
 
 [row.emit]
 census_row = 3
+label = "Aspect extraction: `claude -p`"
+sends = "document text, passed to `claude -p`"
 targets = [
     "nexus.aspect_extractor:_run_claude_isolated",
     "nexus.aspect_extractor:extract_aspects",
@@ -160,6 +170,8 @@ match = { surface = "aspect_extraction_api" }
 
 [row.emit]
 census_row = 4
+label = "Aspect extraction: API"
+sends = "document text, sent to the Anthropic API or an `openai_compat` endpoint"
 targets = [
     "nexus.aspect_extractor:_api_inner_text",
     "nexus.operators.llm_backend:run_text_sync",
@@ -175,6 +187,8 @@ match = { surface = "enrich_aspects" }
 
 [row.emit]
 census_row = 5
+label = "`nx enrich aspects`"
+sends = "document text, through the aspect extraction above"
 targets = [
     "nexus.commands.enrich:enrich_aspects",
     "nexus.commands.enrich:_select_entries",
@@ -189,6 +203,8 @@ match = { surface = "validate_sample" }
 
 [row.emit]
 census_row = 6
+label = "`nx enrich aspects --validate-sample`"
+sends = "an extracted aspect plus its source evidence"
 targets = [
     "nexus.commands.enrich:_run_validation_sample",
     "nexus.commands.enrich:_verify",
@@ -203,6 +219,8 @@ match = { surface = "enrich_bib" }
 
 [row.emit]
 census_row = 7
+label = "`nx enrich bib`"
+sends = "the title, plus arXiv ids and DOIs scanned from chunks"
 targets = [
     "nexus.commands.enrich:run_bib_enrichment",
     "nexus.commands.enrich:_extract_identifiers_for_title",
@@ -220,6 +238,8 @@ match = { surface = "dt_crossref_gapfill" }
 
 [row.emit]
 census_row = 8
+label = "`nx dt index --enrich`, `nx dt capture --enrich`"
+sends = "a DOI"
 targets = [
     "nexus.commands.enrich:_dt_crossref_bib",
     "nexus.commands.dt:index_cmd",
@@ -236,6 +256,8 @@ match = { surface = "taxonomy_label" }
 
 [row.emit]
 census_row = 9
+label = "Taxonomy labels"
+sends = "topic terms plus sample document names"
 targets = [
     "nexus.commands.taxonomy_cmd:_generate_labels_batch",
   ]
@@ -249,6 +271,8 @@ match = { surface = "taxonomy_review_auto" }
 
 [row.emit]
 census_row = 10
+label = "`nx taxonomy review --auto`"
+sends = "topic label, terms and document names"
 targets = [
     "nexus.commands.taxonomy_cmd:_generate_review_verdicts_batch",
   ]
@@ -262,6 +286,8 @@ match = { surface = "knowledge_map" }
 
 [row.emit]
 census_row = 11
+label = "Knowledge Map in SubagentStart"
+sends = "topic labels, into every agent's context"
 targets = [
     "nexus.hooks.subagent_start:_knowledge_map_section",
   ]
@@ -275,6 +301,8 @@ match = { surface = "nx_answer_operators" }
 
 [row.emit]
 census_row = 12
+label = "`nx_answer` operators"
+sends = "hydrated chunk text"
 targets = [
     "nexus.mcp.core:operator_extract",
     "nexus.mcp.core:operator_rank",
@@ -299,6 +327,8 @@ match = { surface = "nx_answer_bundle" }
 
 [row.emit]
 census_row = 13
+label = "`nx_answer` bundle"
+sends = "bundled step inputs"
 targets = [
     "nexus.plans.bundle:dispatch_bundle",
   ]
@@ -312,6 +342,8 @@ match = { surface = "nx_answer_plan_helpers" }
 
 [row.emit]
 census_row = 14
+label = "`nx_answer` plan miss and request coverage"
+sends = "the question and plan text; coverage may carry search hits"
 targets = [
     "nexus.mcp.core:_nx_answer_plan_miss",
     "nexus.mcp.core:_nx_answer_request_coverage",
@@ -327,6 +359,8 @@ match = { surface = "nx_tidy" }
 
 [row.emit]
 census_row = 15
+label = "`nx_tidy`"
+sends = "prefetched T3 entries, inlined"
 targets = [
     "nexus.mcp.core:nx_tidy",
   ]
@@ -340,6 +374,8 @@ match = { surface = "nx_enrich_beads" }
 
 [row.emit]
 census_row = 16
+label = "`nx_enrich_beads`"
+sends = "bead text, plus the nx MCP tools in the child process"
 targets = [
     "nexus.mcp.core:nx_enrich_beads",
   ]
@@ -353,6 +389,8 @@ match = { surface = "nx_plan_audit" }
 
 [row.emit]
 census_row = 17
+label = "`nx_plan_audit`"
+sends = "plan text, plus the nx MCP tools in the child process"
 targets = [
     "nexus.mcp.core:nx_plan_audit",
   ]
@@ -366,6 +404,8 @@ match = { surface = "memory_rollup" }
 
 [row.emit]
 census_row = 18
+label = "Memory rollup (`memory_consolidate`)"
+sends = "T2 notes"
 targets = [
     "nexus.memory_rollup:dispatch_summarizer",
   ]
@@ -379,6 +419,8 @@ match = { surface = "voyage_embedding" }
 
 [row.emit]
 census_row = 19
+label = "Voyage embedding"
+sends = "chunk text, at index time"
 targets = [
     "nexus.db.http_vector_client:HttpVectorClient.upsert_chunks",
   ]
@@ -392,6 +434,8 @@ match = { surface = "voyage_rerank" }
 
 [row.emit]
 census_row = 20
+label = "Voyage rerank"
+sends = "the query plus candidate chunk text"
 targets = [
     "nexus.search_engine:search_cross_corpus",
   ]
@@ -405,6 +449,8 @@ match = { surface = "mineru_remote" }
 
 [row.emit]
 census_row = 21
+label = "MinerU remote extraction"
+sends = "PDF bytes"
 targets = [
     "nexus.pdf_extractor:PDFExtractor._mineru_run_via_server",
     "nexus.pdf_extractor:PDFExtractor._probe_mineru_health",
@@ -426,6 +472,8 @@ match = { surface = "cloud_tenant_storage" }
 
 [row.emit]
 census_row = 22
+label = "Cloud tenant storage"
+sends = "chunk text and embeddings"
 targets = [
     "nexus.db.http_vector_client:HttpVectorClient.upsert_chunks_with_embeddings",
   ]
@@ -439,6 +487,8 @@ match = { surface = "mcp_read_tools" }
 
 [row.emit]
 census_row = 23
+label = "MCP read tools"
+sends = "content and titles of search hits and fetched documents"
 targets = [
     "nexus.mcp.core:search",
     "nexus.mcp.core:query",
@@ -455,6 +505,8 @@ match = { surface = "cli_search" }
 
 [row.emit]
 census_row = 24
+label = "`nx search` and `nx query` output"
+sends = "result text on stdout, often read by the Bash tool of Claude Code"
 targets = [
     "nexus.commands.search_cmd:search_cmd",
   ]
@@ -468,6 +520,8 @@ match = { surface = "install_ping" }
 
 [row.emit]
 census_row = 25
+label = "Install ping"
+sends = "install id, version and mode; no content"
 targets = [
     "nexus.install_ping:send_ping",
     "nexus.db.minilm_direct:_stream_archive",

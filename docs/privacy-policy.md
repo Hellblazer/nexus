@@ -52,9 +52,42 @@ The local service sends your chunk text and query strings to Voyage AI's API for
 **Managed-cloud mode** (you opt in by pointing Conexus at a hosted nexus-service):
 - **The managed nexus-service** — chunk text + embeddings are stored in the managed service's Postgres for retrieval, under that service operator's policy. Your data leaves your machine for whoever hosts the service.
 - **Voyage AI** — in managed-cloud mode the service embeds chunk text and query strings with Voyage's API server-side. See https://www.voyageai.com/privacy.
+
+**In every mode, when the feature is used** (these do not depend on managed-cloud mode; each fires only when you run the feature and configure its credentials):
 - **Semantic Scholar** (only when you run `nx enrich bib`) — bibliographic metadata lookups for PDFs you ask Conexus to enrich. See https://www.semanticscholar.org/about/privacy.
 - **Anthropic Claude** (only when an MCP operator tool, aspect extraction or topic labelling fires) — chunks passed to `claude -p` subprocesses, or sent directly to `api.anthropic.com` when the LLM backend is `anthropic` (an `anthropic_api_key` and no `claude` on PATH, or `llm.backend: anthropic`), by `operator_*` / `nx_answer` / `nx_tidy` / aspect extraction / topic labelling are sent to Anthropic's API per Anthropic's standard data policy. The direct path sends the API key in the `x-api-key` header and nowhere else.
 - **An `openai_compat` endpoint you configure** (only when `llm.backend` is `openai_compat`) — the same prompts go to the server you named in `llm.openai_compat.base_url` (Ollama or vLLM on your network, or a hosted router such as OpenRouter), under that operator's policy. The endpoint is read from your global config or environment only, never from a repository's `.nexus.yml`.
+
+The table below lists, per feature, what is sent and where, and what `--sensitive` does to a document. It is generated from the LLM-surface registry (`src/nexus/tables/llm-surfaces.toml`) and lists only the rows enforced in this release. Run `uv run python scripts/gen_privacy_policy_table.py --write` after a registry change.
+
+<!-- BEGIN GENERATED: llm-surfaces (scripts/gen_privacy_policy_table.py; edit the registry, not this region) -->
+Each row is a feature that sends document-derived text off the machine or to a model. A destination applies only where your mode and configuration reach it. The last column says what `--sensitive` does to a document in this release.
+
+| Surface | What it sends | Where | With `--sensitive` |
+| --- | --- | --- | --- |
+| Aspect extraction: enqueue hook | full document content, queued for later extraction | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| Aspect extraction: worker drain | queued or on-disk document content, passed to the LLM | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| Aspect extraction: `claude -p` | document text, passed to `claude -p` | Anthropic (`claude -p` or `api.anthropic.com`) | refused |
+| Aspect extraction: API | document text, sent to the Anthropic API or an `openai_compat` endpoint | Anthropic (`claude -p` or `api.anthropic.com`); the endpoint in `llm.openai_compat.base_url` | refused |
+| `nx enrich aspects` | document text, through the aspect extraction above | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| `nx enrich aspects --validate-sample` | an extracted aspect plus its source evidence | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| `nx enrich bib` | the title, plus arXiv ids and DOIs scanned from chunks | Semantic Scholar; OpenAlex | skipped, loudly |
+| `nx dt index --enrich`, `nx dt capture --enrich` | a DOI | CrossRef, through DEVONthink | skipped, loudly |
+| Taxonomy labels | topic terms plus sample document names | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| `nx taxonomy review --auto` | topic label, terms and document names | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| `nx_answer` operators | hydrated chunk text | Anthropic (`claude -p` or `api.anthropic.com`) | excluded |
+| `nx_answer` bundle | bundled step inputs | Anthropic (`claude -p` or `api.anthropic.com`) | excluded |
+| `nx_answer` plan miss and request coverage | the question and plan text; coverage may carry search hits | Anthropic (`claude -p` or `api.anthropic.com`) | excluded |
+| `nx_tidy` | prefetched T3 entries, inlined | Anthropic (`claude -p` or `api.anthropic.com`) | excluded |
+| `nx_enrich_beads` | bead text, plus the nx MCP tools in the child process | Anthropic (`claude -p` or `api.anthropic.com`) | excluded |
+| `nx_plan_audit` | plan text, plus the nx MCP tools in the child process | Anthropic (`claude -p` or `api.anthropic.com`) | excluded |
+| Memory rollup (`memory_consolidate`) | T2 notes | Anthropic (`claude -p` or `api.anthropic.com`) | not covered: a note is not a document |
+| Voyage embedding | chunk text, at index time | Voyage AI (`api.voyageai.com`) | disclosed; needs an acknowledgement |
+| MinerU remote extraction | PDF bytes | the MinerU server at `pdf.mineru_server_url` | skipped, loudly |
+| Cloud tenant storage | chunk text and embeddings | the managed nexus-service (managed-cloud mode) | disclosed; needs an acknowledgement |
+
+Not yet enforced: search results (MCP read tools; `nx search` and `nx query` output) are still shown to the session model until the output posture ships; Voyage rerank still sends the query plus candidate chunk text to Voyage AI until it excludes sensitive documents.
+<!-- END GENERATED: llm-surfaces -->
 
 You control which (if any) of the above are reachable by deciding whether to set the corresponding credentials.
 
