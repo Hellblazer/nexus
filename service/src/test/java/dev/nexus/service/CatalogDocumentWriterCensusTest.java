@@ -28,10 +28,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       unnamed writer fails, and so does a named method with no hit. The census checks METHOD NAMES; it does
  *       not read the inserted flag value, so a new writer is only caught by its name.</li>
  *   <li><b>Assignment census.</b> Every {@code .set(...SENSITIVE, value)} (and every raw {@code SET sensitive =})
- *       anywhere under {@code service/src/main/java} assigns the one-way OR constant, a literal {@code true}, or
- *       {@code sensitive} inside {@code setSensitivity} (the audited route), and its enclosing method also calls
- *       {@code recordSensitivityChanges}. The OR constant's own definition is pinned to
- *       {@code stored OR excluded}.</li>
+ *       anywhere under {@code service/src/main/java} assigns a literal {@code true}, or {@code sensitive} inside
+ *       {@code setSensitivity} (the audited route), and its enclosing method also calls
+ *       {@code recordSensitivityChanges}. The sites are exactly {@code raiseSensitivity}, {@code raiseWrittenRows}
+ *       and {@code setSensitivity}: no ON CONFLICT arm assigns the column (that is what keeps the flag one-way
+ *       on upsert and import, the raise being a separate audited UPDATE), and each of the three insert writers
+ *       that ON CONFLICT-update calls {@code raiseWrittenRows}.</li>
  *   <li><b>Append-only audit table.</b> Outside comments, every mention of {@code catalog_sensitivity_changes}
  *       in {@code service/src/main/java} sits in {@code recordSensitivityChanges}, which inserts and nothing
  *       else; no file under {@code service/src/main} (Java, changesets, SQL) issues an UPDATE, DELETE or
@@ -141,19 +143,45 @@ class CatalogDocumentWriterCensusTest {
     /** Raw SQL assigning the column: {@code SET ... sensitive =}. */
     private static final Pattern RAW_SET = Pattern.compile("(?is)\\bset\\b[^;\"]{0,200}?\\bsensitive\\s*=(?!=)");
 
-    /** The OR constant's declaration must read {@code stored OR excluded}. */
-    private static final Pattern OR_CONSTANT_DEF = Pattern.compile(
-        "EX_DOC_SENSITIVE_OR\\s*=\\s*DSL\\.field\\(DSL\\.condition\\(CATALOG_DOCUMENTS\\.SENSITIVE\\)"
-            + "\\.or\\(DSL\\.condition\\(DSL\\.excluded\\(CATALOG_DOCUMENTS\\.SENSITIVE\\)\\)\\)\\)");
-
-    /** Source with block and line comments blanked to spaces (offsets and newlines kept). */
+    /**
+     * Source with block and line comments blanked to spaces (offsets and newlines kept). String, char and text-block
+     * literals are walked as literals and kept as they are: a {@code //} or {@code /*} inside one is not a comment
+     * (a {@code "file:///x"} must not hide the code after it on the same line), and a quote inside a comment does
+     * not open a literal.
+     */
     static String stripJavaComments(String src) {
         StringBuilder out = new StringBuilder(src);
-        Matcher m = Pattern.compile("(?s)/\\*.*?\\*/|(?m)//[^\\n]*").matcher(src);
-        while (m.find()) {
-            for (int i = m.start(); i < m.end(); i++) if (out.charAt(i) != '\n') out.setCharAt(i, ' ');
+        int n = src.length();
+        int i = 0;
+        while (i < n) {
+            char c = src.charAt(i);
+            if (c == '/' && i + 1 < n && src.charAt(i + 1) == '/') {
+                int end = src.indexOf('\n', i);
+                if (end < 0) end = n;
+                blank(out, i, end);
+                i = end;
+            } else if (c == '/' && i + 1 < n && src.charAt(i + 1) == '*') {
+                int end = src.indexOf("*/", i + 2);
+                end = end < 0 ? n : end + 2;
+                blank(out, i, end);
+                i = end;
+            } else if (c == '"' && src.startsWith("\"\"\"", i)) {
+                i += 3;
+                while (i < n && !src.startsWith("\"\"\"", i)) i += src.charAt(i) == '\\' ? 2 : 1;
+                i = Math.min(n, i + 3);
+            } else if (c == '"' || c == '\'') {
+                i++;
+                while (i < n && src.charAt(i) != c && src.charAt(i) != '\n') i += src.charAt(i) == '\\' ? 2 : 1;
+                i = Math.min(n, i + 1);
+            } else {
+                i++;
+            }
         }
         return out.toString();
+    }
+
+    private static void blank(StringBuilder out, int from, int to) {
+        for (int k = from; k < to; k++) if (out.charAt(k) != '\n') out.setCharAt(k, ' ');
     }
 
     /** XML/SQL text with changeset comments and SQL line comments blanked. */
@@ -209,11 +237,10 @@ class CatalogDocumentWriterCensusTest {
     static List<String> assignmentViolations(List<Assignment> found) {
         List<String> bad = new ArrayList<>();
         for (Assignment a : found) {
-            boolean allowedValue = a.value().equals("EX_DOC_SENSITIVE_OR")
-                || a.value().equals("true")
+            boolean allowedValue = a.value().equals("true")
                 || (a.value().equals("sensitive") && a.method().equals("setSensitivity"));
             if (!allowedValue) bad.add(a.method() + " assigns " + a.value()
-                + " (allowed: EX_DOC_SENSITIVE_OR, true, or `sensitive` in setSensitivity)");
+                + " (allowed: true, or `sensitive` in setSensitivity)");
             else if (!a.methodAudits()) bad.add(a.method() + " assigns " + a.value()
                 + " but never calls recordSensitivityChanges");
         }
@@ -227,7 +254,7 @@ class CatalogDocumentWriterCensusTest {
     }
 
     @Test
-    void everyAssignmentOfTheSensitiveColumnIsTheOrConstantATrueOrTheAuditedRoute() throws IOException {
+    void everyAssignmentOfTheSensitiveColumnIsATrueOrTheAuditedRoute_andNoOnConflictArmAssignsIt() throws IOException {
         List<Assignment> all = new ArrayList<>();
         int files = 0;
         for (Path f : javaFiles(MAIN_JAVA)) {
@@ -235,30 +262,42 @@ class CatalogDocumentWriterCensusTest {
             all.addAll(assignments(Files.readString(f)));
         }
         assertThat(files).as("non-vacuity: the scan walked the main source tree").isGreaterThan(50);
-        assertThat(all).as("non-vacuity: the five known assignment sites (3 OR, raiseSensitivity, setSensitivity); %s", all)
-            .hasSizeGreaterThanOrEqualTo(5);
+        assertThat(all).as("non-vacuity: the three known assignment sites; %s", all).hasSizeGreaterThanOrEqualTo(3);
         assertThat(assignmentViolations(all)).as("assignments of catalog_documents.sensitive: %s", all).isEmpty();
-        Set<String> orMethods = new TreeSet<>();
-        for (Assignment a : all) if (a.value().equals("EX_DOC_SENSITIVE_OR")) orMethods.add(a.method());
-        assertThat(orMethods)
-            .as("the OR constant is assigned by the three ON CONFLICT writers")
-            .containsExactlyInAnyOrder("upsertDocument", "importDocumentsBatch", "doImportDocument");
+        Set<String> methods = new TreeSet<>();
+        for (Assignment a : all) methods.add(a.method());
+        assertThat(methods)
+            .as("the only methods that assign the column: the raise helpers and the audited route, never an "
+                + "ON CONFLICT writer (found %s)", all)
+            .isEqualTo(Set.of("raiseSensitivity", "raiseWrittenRows", "setSensitivity"));
+
+        String repo = stripJavaComments(Files.readString(REPOSITORY));
+        assertThat(repo).as("the stored-OR-excluded constant is gone: no arm assigns the column")
+            .doesNotContain("EX_DOC_SENSITIVE_OR");
+        List<Object[]> decls = methodDecls(repo);
+        for (String writer : List.of("upsertDocument", "importDocumentsBatch", "doImportDocument")) {
+            assertThat(methodBody(repo, decls, writer))
+                .as("%s raises a flagged request's rows through raiseWrittenRows, after its ON CONFLICT write", writer)
+                .contains("raiseWrittenRows(");
+        }
     }
 
-    @Test
-    void theOrConstantIsStoredOrExcluded() throws IOException {
-        String src = stripJavaComments(Files.readString(REPOSITORY));
-        assertThat(OR_CONSTANT_DEF.matcher(src).find())
-            .as("EX_DOC_SENSITIVE_OR must be DSL.field(condition(SENSITIVE).or(condition(excluded(SENSITIVE))))")
-            .isTrue();
+    private static String methodBody(String src, List<Object[]> decls, String method) {
+        for (int k = 0; k < decls.size(); k++) {
+            if (decls.get(k)[1].equals(method)) {
+                int to = k + 1 < decls.size() ? (int) decls.get(k + 1)[0] : src.length();
+                return src.substring((int) decls.get(k)[0], to);
+            }
+        }
+        throw new AssertionError("no method " + method);
     }
 
     @Test
     void theAssignmentScanSeesALoweringAssignmentInEverySpelling() {
         String fake = """
             class X {
-                void upsertDocument() {
-                    ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, EX_DOC_SENSITIVE_OR).execute();
+                void raiseWrittenRows() {
+                    ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, true).execute();
                     recordSensitivityChanges(ctx);
                 }
                 void lowers() {
@@ -285,6 +324,47 @@ class CatalogDocumentWriterCensusTest {
             .anyMatch(v -> v.startsWith("viaExcluded assigns DSL.excluded"))
             .anyMatch(v -> v.startsWith("raw assigns <raw SQL"))
             .anyMatch(v -> v.startsWith("unaudited assigns true but never calls recordSensitivityChanges"));
+    }
+
+    @Test
+    void theCommentStripperIsStringAware_aLiteralWithSlashesDoesNotHideCodeAfterIt() {
+        // the review's case: "file:///x" opens no comment, so the violating assignment on the same line is seen
+        String sameLine = """
+            class X {
+                void sneaky() {
+                    String u = "file:///x"; ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, false).execute();
+                }
+            }
+            """;
+        List<Assignment> found = assignments(sameLine);
+        assertThat(found).as("the assignment after a \"file:///x\" literal on the same line is found").hasSize(1);
+        assertThat(assignmentViolations(found)).hasSize(1).allMatch(v -> v.startsWith("sneaky assigns false"));
+
+        // block-comment opener, escaped quote, char literal and text block are all literals too
+        String literals = """
+            class X {
+                void a() { String s = "/* not a comment"; ctx.set(CATALOG_DOCUMENTS.SENSITIVE, false); }
+                void b() { String s = "say \\"//\\" then"; ctx.set(CATALOG_DOCUMENTS.SENSITIVE, false); }
+                void c() { char q = '"'; ctx.set(CATALOG_DOCUMENTS.SENSITIVE, false); }
+                void d() { String s = \"\"\"
+                    // inside a text block
+                    \"\"\"; ctx.set(CATALOG_DOCUMENTS.SENSITIVE, false); }
+            }
+            """;
+        assertThat(assignments(literals)).extracting(Assignment::method).containsExactly("a", "b", "c", "d");
+
+        // and real comments, including one holding a quote, are still blanked
+        String comments = """
+            class X {
+                void e() {
+                    // it's "quoted" .set(CATALOG_DOCUMENTS.SENSITIVE, false)
+                    /* .set(CATALOG_DOCUMENTS.SENSITIVE, false) */
+                    int x = 1; // trailing .set(CATALOG_DOCUMENTS.SENSITIVE, false)
+                }
+            }
+            """;
+        assertThat(assignments(comments)).isEmpty();
+        assertThat(stripJavaComments(comments)).hasSameSizeAs(comments);
     }
 
     // ── the audit table is append-only by construction of the source ────

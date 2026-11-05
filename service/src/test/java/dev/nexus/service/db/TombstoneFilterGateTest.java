@@ -278,11 +278,12 @@ class TombstoneFilterGateTest {
             "nexus-rfvyy.6.4 (RDR-243): the batched form of mostRecentTombstoned for registerDocumentMany, one "
             + "query over the batch's source URIs, DELETED_AT.isNotNull() on purpose for the same reason; "
             + "returns only (source_uri, tumbler, sensitive)"),
-        new ExemptEntry("CatalogRepository.java", "lockPlainRows",
-            "nexus-rfvyy.6.6 (RDR-243): locks the existing rows, live OR tombstoned, whose sensitive flag an "
-            + "upsert or import is about to raise false to true, so the caller audits exactly those rows. An "
-            + "upsert un-tombstones its row and an import raises the flag on a tombstoned row too; either way the "
-            + "flag changed and the audit row is owed. Returns only tumblers, writes nothing"),
+        new ExemptEntry("CatalogRepository.java", "raiseWrittenRows",
+            "nexus-rfvyy.6.6 (RDR-243): raises sensitive (false to true) on the rows an upsert or import has just "
+            + "written for a flagged request, live OR tombstoned, and audits exactly the rows its own RETURNING "
+            + "names. An upsert un-tombstones its row and an import raises the flag on a tombstoned row too; "
+            + "either way the flag changed and the audit row is owed. It only ever sets the flag to true on "
+            + "tumblers the same transaction has just written"),
         new ExemptEntry("CatalogRepository.java", "tombstonedChashHolders",
             "nexus-6pfgb.58: naming the manifest rows of TOMBSTONED documents is the contract. The manifest-"
             + "section-labels rung copies a chunk row's label onto a legacy row only when the chash has one "

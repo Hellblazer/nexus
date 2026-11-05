@@ -411,6 +411,189 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(audit(t)).containsExactly("48.33|false|true|import_raise|engine");
     }
 
+    // ── concurrency: one audit row per false-to-true write, and no deadlock between batches ──────────
+
+    /** Backend pids currently waiting on a lock, sorted by pid. */
+    private static List<Integer> lockWaiters(Connection probe) {
+        var out = new ArrayList<Integer>();
+        for (var r : DSL.using(probe, SQLDialect.POSTGRES).fetch(
+                "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid() ORDER BY pid")) {
+            out.add(r.get(0, Integer.class));
+        }
+        return out;
+    }
+
+    /** Blocks until {@code n} backends wait on a lock; fails if one of {@code running} finishes first. */
+    private static List<Integer> awaitLockWaiters(Connection probe, int n, java.util.concurrent.Future<?>... running)
+            throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+        while (true) {
+            List<Integer> w = lockWaiters(probe);
+            if (w.size() >= n) return w;
+            for (var f : running) assertThat(f.isDone()).as("a writer must be blocked on the held lock, not finished").isFalse();
+            assertThat(System.nanoTime()).as("timed out waiting for %s lock waiters", n).isLessThan(deadline);
+            Thread.sleep(20);
+        }
+    }
+
+    private static void lockRowForUpdate(Connection h, String tenant, String tumbler) {
+        DSL.using(h, SQLDialect.POSTGRES).fetch(
+            "SELECT 1 FROM nexus.catalog_documents WHERE tenant_id = ? AND tumbler = ? FOR UPDATE", tenant, tumbler);
+    }
+
+    /** The outcome of a future: null when it completed, else the failure's chain rendered with SQLSTATEs. */
+    private static String outcome(java.util.concurrent.Future<?> f) throws Exception {
+        try {
+            f.get(60, java.util.concurrent.TimeUnit.SECONDS);
+            return null;
+        } catch (java.util.concurrent.ExecutionException e) {
+            var sb = new StringBuilder();
+            for (Throwable c = e; c != null; c = c.getCause()) {
+                sb.append(c.getClass().getSimpleName()).append(": ").append(c.getMessage()).append(" | ");
+                if (c instanceof java.sql.SQLException sql) sb.append("SQLSTATE ").append(sql.getSQLState()).append(" | ");
+            }
+            return sb.toString();
+        }
+    }
+
+    /**
+     * Two batches over the same two plain rows, arranged so that batch X queues for the LATER row before batch Y
+     * reaches it. A third connection holds row {@code 48.605} (outer lock) and row {@code 48.601} (inside a
+     * savepoint); both batches block, the savepoint rolls back (releasing only {@code 48.601}), Y takes it and
+     * heads for {@code 48.605} behind X, and the commit then lets X take {@code 48.605} and go for
+     * {@code 48.601}. A writer that locks the rows of a batch in a different order from the other batch
+     * deadlocks here (SQLSTATE 40P01); writers that all lock in tumbler order do not.
+     */
+    private void runOpposingBatches(String t, List<Map<String, Object>> xBatch, List<Map<String, Object>> yBatch)
+            throws Exception {
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try (Connection h = pg.createConnection(""); Connection probe = pg.createConnection("")) {
+            h.setAutoCommit(false);
+            lockRowForUpdate(h, t, "48.605");
+            java.sql.Savepoint sp = h.setSavepoint();
+            lockRowForUpdate(h, t, "48.601");
+            var x = pool.submit(() -> repo.importDocumentsBatch(t, xBatch));
+            int xPid = awaitLockWaiters(probe, 1, x).get(0);
+            var y = pool.submit(() -> repo.importDocumentsBatch(t, yBatch));
+            List<Integer> both = awaitLockWaiters(probe, 2, x, y);
+            int yPid = both.stream().filter(p -> p != xPid).findFirst().orElseThrow();
+            h.rollback(sp);
+            // Y is now queued behind X (X holds or heads the queue for the later row); give it a bounded wait
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
+            while (System.nanoTime() < deadline) {
+                var blockers = DSL.using(probe, SQLDialect.POSTGRES).fetchOne(
+                    "SELECT pg_blocking_pids(?)::text", yPid).get(0, String.class);
+                if (blockers.contains(String.valueOf(xPid))) break;
+                Thread.sleep(20);
+            }
+            h.commit();
+            assertThat(java.util.Arrays.asList(outcome(x), outcome(y)))
+                .as("both batches commit; a null is a commit, anything else is a failure (40P01 is a deadlock)")
+                .containsOnly((String) null);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void twoMixedFlagBatches_overTheSameRows_inOppositeFlagPatterns_doNotDeadlock() throws Exception {
+        String t = tenant();
+        repo.importDocumentsBatch(t, List.of(importRow("48.601", "m1", false), importRow("48.605", "m5", false)));
+        // X flags the later row, Y flags the earlier one: the review's crossing pattern
+        runOpposingBatches(t,
+            List.of(importRow("48.601", "m1", false), importRow("48.605", "m5", true)),
+            List.of(importRow("48.601", "m1", true), importRow("48.605", "m5", false)));
+        assertThat(flag(t, "48.601")).isTrue();
+        assertThat(flag(t, "48.605")).isTrue();
+        assertThat(audit(t)).as("each row was raised once")
+            .containsExactlyInAnyOrder("48.601|false|true|import_raise|engine", "48.605|false|true|import_raise|engine");
+    }
+
+    @Test
+    void twoBatches_listingTheSameRowsInOppositeOrders_doNotDeadlock() throws Exception {
+        String t = tenant();
+        repo.importDocumentsBatch(t, List.of(importRow("48.601", "o1", false), importRow("48.605", "o5", false)));
+        runOpposingBatches(t,
+            List.of(importRow("48.605", "o5", null), importRow("48.601", "o1", null)),
+            List.of(importRow("48.601", "o1", null), importRow("48.605", "o5", null)));
+        assertThat(audit(t)).as("nothing was raised").isEmpty();
+    }
+
+    @Test
+    void twoWritersRaisingTheSamePlainRow_produceExactlyOneAuditRow() throws Exception {
+        String t = tenant();
+        repo.upsertDocument(t, importRow("48.901", "p", false));
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try (Connection h = pg.createConnection(""); Connection probe = pg.createConnection("")) {
+            h.setAutoCommit(false);
+            lockRowForUpdate(h, t, "48.901");
+            var w1 = pool.submit(() -> { repo.upsertDocument(t, importRow("48.901", "p1", true)); return null; });
+            awaitLockWaiters(probe, 1, w1);
+            var w2 = pool.submit(() -> repo.importDocumentsBatch(t, List.of(importRow("48.901", "p2", true))));
+            awaitLockWaiters(probe, 2, w1, w2);
+            h.commit();
+            assertThat(java.util.Arrays.asList(outcome(w1), outcome(w2))).containsOnly((String) null);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(flag(t, "48.901")).isTrue();
+        assertThat(audit(t)).as("the second writer finds the row already raised and audits nothing")
+            .hasSize(1).allMatch(a -> a.startsWith("48.901|false|true|") && a.endsWith("|engine"));
+    }
+
+    @Test
+    void aRaise_thatRacesAnAuditedClear_isAuditedAgainstTheClearedValue() throws Exception {
+        List<java.util.function.BiConsumer<String, String>> writers = List.of(
+            (t, tumbler) -> repo.upsertDocument(t, importRow(tumbler, "w", true)),
+            (t, tumbler) -> repo.importDocument(t, importRow(tumbler, "w", true)),
+            (t, tumbler) -> repo.importDocumentsBatch(t, List.of(importRow(tumbler, "w", true))));
+        for (int w = 0; w < writers.size(); w++) {
+            String t = tenant();
+            String tumbler = "48.70" + w;
+            repo.upsertDocument(t, importRow(tumbler, "c", true));
+            var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try (Connection h = pg.createConnection(""); Connection probe = pg.createConnection("")) {
+                // the audited route's work, held open: the row is cleared and the clear is audited, uncommitted
+                h.setAutoCommit(false);
+                var hd = DSL.using(h, SQLDialect.POSTGRES);
+                hd.execute("UPDATE nexus.catalog_documents SET sensitive = false WHERE tenant_id = ? AND tumbler = ?", t, tumbler);
+                hd.execute("INSERT INTO nexus.catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, actor) "
+                    + "VALUES (?, ?, true, false, 'test clear', 'tester')", t, tumbler);
+                final int idx = w;
+                var f = pool.submit(() -> { writers.get(idx).accept(t, tumbler); return null; });
+                awaitLockWaiters(probe, 1, f);
+                h.commit();
+                assertThat(outcome(f)).isNull();
+            } finally {
+                pool.shutdownNow();
+            }
+            assertThat(flag(t, tumbler)).as("writer %s re-raised the cleared row", w).isTrue();
+            assertThat(audit(t)).as("writer %s: the clear, then exactly one audited raise", w).hasSize(2);
+            assertThat(audit(t).get(0)).isEqualTo(tumbler + "|true|false|test clear|tester");
+            assertThat(audit(t).get(1)).startsWith(tumbler + "|false|true|").endsWith("|engine");
+        }
+    }
+
+    @Test
+    void aRaise_thatConflictsWithARowAnotherTransactionInsertedPlain_isAudited() throws Exception {
+        List<java.util.function.BiConsumer<String, String>> writers = List.of(
+            (t, tumbler) -> repo.upsertDocument(t, importRow(tumbler, "w", true)),
+            (t, tumbler) -> repo.importDocument(t, importRow(tumbler, "w", true)),
+            // a fresh, flagged sibling in the batch is born flagged and owes no audit row
+            (t, tumbler) -> repo.importDocumentsBatch(t, List.of(
+                importRow(tumbler, "w", true), importRow(tumbler + "9", "fresh", true))));
+        for (int w = 0; w < writers.size(); w++) {
+            String t = tenant();
+            String tumbler = "48.80" + w;
+            final int idx = w;
+            // the row is absent when the writer starts; the racer's plain insert commits while the writer waits
+            withRacingWinner(t, tumbler, "", () -> { writers.get(idx).accept(t, tumbler); return null; });
+            assertThat(flag(t, tumbler)).as("writer %s raised the racer's row", w).isTrue();
+            assertThat(audit(t)).as("writer %s: one audited raise of the racer's plain row", w).hasSize(1);
+            assertThat(audit(t).get(0)).startsWith(tumbler + "|false|true|").endsWith("|engine");
+        }
+    }
+
     // ── a non-boolean flag is a 400, never read as false ────────────────
 
     @Test
