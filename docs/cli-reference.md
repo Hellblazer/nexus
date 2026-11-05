@@ -2625,6 +2625,7 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
 | `--skip-existing` | Do not send the text or vector of a record whose chunk the target collection already holds: the stored chunk and vector stay, and the record still gets its owner row. Without it every record is written with the file's vector, which replaces a stored one |
+| `--ack-external-embedder` | Accept that a document the file flags `sensitive` is written to a Voyage collection (RDR-243). Without it, an import of a flagged document into a Voyage collection, or into one whose embedder cannot be told, refuses before anything is written, naming the document; import into a bge collection with `--collection` instead, which needs no flag. With it the import runs and a one-line disclosure names Voyage (cloud mode: the managed tenant and Voyage). The flag is read from the file, never the catalog |
 
 Non-conformant legacy chunk ids (16- or 32-char pre-migration ids that fail
 the service backend's `chash` length constraint) are re-hashed to full 64-char

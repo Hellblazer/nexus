@@ -25,8 +25,10 @@ from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
 from nexus.sensitive_write import (
+    ExternalEmbedderRefusedError,
     SensitiveFlagNotSetError,
     ack_help,
+    import_ack_help,
     refuse_external_existing_note,
     resolve_sensitive_collection,
     sensitive_help,
@@ -1087,12 +1089,15 @@ def export_cmd(
                    "already holds: the stored chunk and vector stay, and the record still gets "
                    "its owner. Without it every record is written with the file's vector, which "
                    "replaces a stored one.")
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False,
+              help=import_ack_help())
 def import_cmd(
     file: str,
     collection: str | None,
     remaps: tuple[str, ...],
     assume_model: str | None,
     skip_existing: bool,
+    ack_external_embedder: bool,
 ) -> None:
     """Import a .nxexp export file into T3.
 
@@ -1169,7 +1174,10 @@ def import_cmd(
                 remaps=parsed_remaps,
                 assume_model=assume_model,
                 skip_existing=skip_existing,
+                ack_external_embedder=ack_external_embedder,
             )
+        except ExternalEmbedderRefusedError:
+            raise  # already a ClickException naming the document and the flag
         except FormatVersionError as exc:
             raise click.ClickException(str(exc)) from exc
         except EmbeddingDimensionMismatch as exc:

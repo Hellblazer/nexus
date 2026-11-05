@@ -16,7 +16,7 @@ write runs.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import click
@@ -27,7 +27,7 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
     "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
-    "cloud_refusal_text", "external_legs_gate", "is_external_embedder", "raise_flag", "refuse_external_existing",
+    "cloud_refusal_text", "external_legs_gate", "gate_sensitive_import", "import_ack_help", "is_external_embedder", "raise_flag", "refuse_external_existing",
     "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
     "sensitive_write_kwargs",
 ]
@@ -223,6 +223,45 @@ def refuse_external_existing(existing: object, *, ack: bool, what: str) -> None:
         f"--ack-external-embedder to index it in place on Voyage, or delete the document "
         f"(nx catalog delete {tumbler}) and index it again."
     )
+
+
+def import_ack_help() -> str:
+    """Help for ``--ack-external-embedder`` on ``nx store import`` (RDR-243 item 8)."""
+    return (
+        "Accept that a document the file flags sensitive is written to a Voyage collection, which sends its "
+        "text to Voyage AI to be embedded. Without it, an import of a flagged document into a Voyage "
+        "collection (or one whose embedder cannot be told) refuses before anything is written; import "
+        "into a local-embedder (bge) collection with --collection instead. With it, a one-line disclosure "
+        "is printed."
+    )
+
+
+def gate_sensitive_import(flagged: Sequence[str], collection: str, *, ack: bool, what: str = "nx store import") -> None:
+    """Refuse an ``.nxexp`` import that would write a document the file flags sensitive into a Voyage collection.
+
+    *flagged* names those documents (empty: nothing to gate). The flag comes from the file, so the
+    catalog is not asked. The rule is the index verbs': *collection* embeds off this machine, or cannot
+    be told (:func:`is_external_embedder`), and *ack* is false, so it refuses before anything is
+    registered or written. The vectors are the file's, so there is no bge sibling to route to; the way
+    out is a bge target (``--collection``) or ``--ack-external-embedder``. With *ack* the import goes
+    ahead and prints the one-line disclosure the verbs print (local: Voyage notice; cloud: row 22).
+    """
+    if not flagged or not is_external_embedder(collection):
+        return
+    if not ack:
+        more = f" (and {len(flagged) - 1} more)" if len(flagged) > 1 else ""
+        raise ExternalEmbedderRefusedError(
+            f"{what} refused: document {flagged[0]}{more} is flagged sensitive in the file and {collection} "
+            f"embeds with Voyage AI, or cannot be told to embed on this machine, which would send its text "
+            f"off this machine. Nothing was written. Pass --ack-external-embedder to accept Voyage, or "
+            f"import into a local-embedder (bge) collection with --collection."
+        )
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: config is heavy
+
+    if is_local_mode():
+        resolve_sensitive_collection(collection, ack=True, what=what)  # prints the local Voyage notice
+    else:
+        click.echo(cloud_disclosure(), err=True)
 
 
 def refuse_external_existing_note(collection: str, title: str, *, ack: bool, what: str) -> None:
