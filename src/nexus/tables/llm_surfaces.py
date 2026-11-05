@@ -41,10 +41,13 @@ BEHAVIOURS: Final[tuple[str, ...]] = (
 PHASES: Final[tuple[int, ...]] = (1, 2, 3)
 
 #: The phase whose rows the release being built enforces (RDR-243 Technical Design item 7). The generated
-#: privacy-policy table and ``--sensitive`` help list the rows at or below it and nothing above it. Phases 1 and 2
-#: ship as one release, so it is 2; a client release bead moves it and regenerates ``docs/privacy-policy.md``
-#: (``scripts/gen_privacy_policy_table.py --write``).
-RELEASE_ENFORCED_PHASE: Final = 2
+#: privacy-policy table and ``--sensitive`` help list the rows at or below it and nothing above it, and name
+#: every pending row that reaches outward or the session model in the "Not yet enforced" line. It is 1 until
+#: Phase 2 (the read filter and the model-bound surfaces) lands: the Phase 2 commit raises it to 2 together with
+#: its canary rows and regenerates ``docs/privacy-policy.md`` and ``docs/sensitivity.md``
+#: (``scripts/gen_privacy_policy_table.py --write``). Raising it earlier makes the docs and every ``--sensitive
+#: --help`` say "excluded" for a surface that still sends the document.
+RELEASE_ENFORCED_PHASE: Final = 1
 
 #: The RDR-243 census has 25 rows; the table has one row for each.
 CENSUS_ROW_COUNT: Final = 25
@@ -229,18 +232,24 @@ def not_yet_enforced_line(
 ) -> str:
     """One line naming what the release does not yet cover, or ``""`` when every such row is enforced.
 
-    Derived from the rows above *phase*, never written by hand: session-model rows that withhold (the output
-    posture, census rows 23 and 24) and rows that send to Voyage (the rerank, census row 20). Omitting a
-    protection is not disclosing its absence, so this line is what the honesty rule of RDR-243 leans on.
+    Derived from the rows above *phase*, never written by hand, and it names EVERY pending row whose endpoint
+    reaches outward or the session model, whatever its behaviour: the search results shown to the session model
+    (the output posture, census rows 23 and 24), and every other pending row with what it still sends and where
+    (the Knowledge Map, the Phase 2 ``nx_answer``, ``nx_tidy``, ``nx_enrich_beads`` and ``nx_plan_audit`` rows,
+    the Voyage rerank). Omitting a protection is not disclosing its absence, so this line is what the honesty
+    rule of RDR-243 leans on.
     """
-    pending = [r for r in _rows_or_default(table_rows) if r.phase > phase]
+    pending = [r for r in _rows_or_default(table_rows) if r.phase > phase and r.endpoints != ("none",)]
     shown = [r for r in pending if "session-model" in r.endpoints and r.behaviour == "withhold"]
-    voyage = [r for r in pending if "voyage" in r.endpoints]
     clauses: list[str] = []
     if shown:
         labels = "; ".join(r.label for r in shown)
         clauses.append(f"search results ({labels}) are still shown to the session model until the output posture ships")
-    clauses.extend(f"{r.label} still sends {r.sends} to Voyage AI until it excludes sensitive documents" for r in voyage)
+    for r in pending:
+        if r in shown:
+            continue
+        where = " and ".join(ENDPOINT_DESTINATIONS[e] for e in r.endpoints)
+        clauses.append(f"{r.label} still reaches {where} until it excludes sensitive documents (it carries {r.sends})")
     return f"Not yet enforced: {'; '.join(clauses)}." if clauses else ""
 
 

@@ -49,9 +49,33 @@ def _section2(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_release_constant_is_two() -> None:
-    """Phases 1 and 2 ship as one release (RDR-243 MVV). A client release bead moves it."""
-    assert ls.RELEASE_ENFORCED_PHASE == 2
+def test_the_release_constant_is_one_until_phase_two_lands() -> None:
+    """Phase 1 ships alone until the Phase 2 read filter and its canary rows land (RDR-243 MVV). The generated
+    text says "excluded" for a Phase 2 row only when the release enforces it, so the Phase 2 commit raises this
+    constant to 2 together with its canary rows and regenerates the docs; raising it earlier over-claims
+    (fix round 1, nexus-rfvyy.6.19 / .6.20 ship-blocker)."""
+    assert ls.RELEASE_ENFORCED_PHASE == 1
+
+
+def _pending_outward(phase: int) -> list[ls.SurfaceRow]:
+    return [r for r in ls.rows() if r.phase > phase and r.endpoints != ("none",)]
+
+
+@pytest.mark.parametrize("phase", [1, 2])
+def test_the_line_names_every_pending_row_that_reaches_outward_or_the_session_model(phase: int) -> None:
+    """Whatever the row's behaviour: a pending Knowledge Map (session-model, exclude) and the Phase 2
+    anthropic rows are named, not only the withhold and Voyage rows."""
+    line = ls.not_yet_enforced_line(phase)
+    pending = _pending_outward(phase)
+    assert pending, "non-vacuity: some row is pending"
+    for r in pending:
+        assert r.label in line, f"{r.name} (phase {r.phase}, {r.behaviour}, {r.endpoints}) is pending and not named"
+
+
+def test_the_pending_rows_include_a_non_withhold_session_model_row_and_anthropic_rows() -> None:
+    """Non-vacuity of the pin above: it covers rows the old filter (withhold, voyage) skipped."""
+    kinds = {(e, r.behaviour) for r in _pending_outward(1) for e in r.endpoints}
+    assert ("session-model", "exclude") in kinds and ("anthropic", "exclude") in kinds
 
 
 def test_the_table_has_rows_of_every_phase_so_the_phase_pins_are_not_vacuous() -> None:
@@ -89,8 +113,8 @@ def test_phase_two_rows_appear_at_two_and_not_at_one() -> None:
     assert p2
     at_one, at_two = ls.render_policy_table(1), ls.render_policy_table(2)
     for r in p2:
-        assert r.label not in at_one
-        assert r.label in at_two
+        assert f"| {r.label} |" not in at_one, "a table ROW; the pending line may name it"
+        assert f"| {r.label} |" in at_two
 
 
 def test_phase_three_rows_never_appear_in_the_release_table() -> None:
@@ -263,13 +287,6 @@ def test_the_help_and_the_table_each_carry_the_line_exactly_once(phase: int) -> 
     assert table.count(line) == 1
 
 
-def test_the_line_names_the_rows_it_is_derived_from() -> None:
-    line = ls.not_yet_enforced_line(2)
-    for r in ls.rows():
-        if r.phase > 2 and (_session_model_withhold(r) or _voyage(r)):
-            assert r.label in line, r.name
-
-
 def test_the_real_policy_and_the_real_help_carry_the_line_once() -> None:
     line = ls.not_yet_enforced_line(ls.RELEASE_ENFORCED_PHASE)
     assert POLICY.read_text(encoding="utf-8").count(line) == 1
@@ -277,7 +294,7 @@ def test_the_real_policy_and_the_real_help_carry_the_line_once() -> None:
 
 
 def test_the_line_is_absent_once_every_row_it_derives_from_is_enforced() -> None:
-    fixture = _enforce(list(ls.rows()), predicate=lambda r: _session_model_withhold(r) or _voyage(r))
+    fixture = _enforce(list(ls.rows()), predicate=lambda r: r.endpoints != ("none",))
     assert ls.not_yet_enforced_line(2, fixture) == ""
     assert "Not yet enforced" not in ls.render_sensitive_help(2, fixture)
     assert "Not yet enforced" not in ls.render_policy_table(2, fixture)
@@ -287,12 +304,15 @@ def test_the_line_is_absent_when_the_release_phase_is_three() -> None:
     assert ls.not_yet_enforced_line(3) == ""
 
 
-def test_the_two_clauses_leave_independently() -> None:
+def test_the_clauses_leave_independently() -> None:
     base = list(ls.rows())
-    only_voyage = ls.not_yet_enforced_line(2, _enforce(base, predicate=_session_model_withhold))
-    assert "session model" not in only_voyage and "Voyage" in only_voyage
-    only_shown = ls.not_yet_enforced_line(2, _enforce(base, predicate=_voyage))
-    assert "still shown to the session model" in only_shown and "Voyage AI" not in only_shown
+    assert "Anthropic" in ls.not_yet_enforced_line(1), "non-vacuity: the anthropic clause exists to leave"
+    shown_enforced = ls.not_yet_enforced_line(2, _enforce(base, predicate=_session_model_withhold))
+    assert "still shown to the session model" not in shown_enforced and "Voyage AI" in shown_enforced
+    voyage_enforced = ls.not_yet_enforced_line(2, _enforce(base, predicate=_voyage))
+    assert "still shown to the session model" in voyage_enforced and "Voyage AI" not in voyage_enforced
+    anthropic_enforced = ls.not_yet_enforced_line(1, _enforce(base, predicate=lambda r: "anthropic" in r.endpoints))
+    assert "Anthropic" not in anthropic_enforced and "Voyage AI" in anthropic_enforced
 
 
 def test_the_line_does_not_depend_on_the_text_of_a_neighbouring_row() -> None:
