@@ -3249,7 +3249,7 @@ def index_pdf(
         try:
             ext_sensitive = external_legs_gate(
                 doc_id, col_name, sensitive=sensitive, enrich=enrich, ack=ack_external_embedder,
-                what="nx index pdf")
+                what="nx index pdf", pdf=True)
         except Exception as exc:
             _rollback_if_freshly_minted(exc)
             raise

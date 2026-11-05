@@ -387,7 +387,7 @@ def test_the_gate_reads_the_catalog_row_not_the_verb_option(t2_service_env, tmp_
 
     pdf = _pdf(tmp_path, "gate.pdf")
     tumbler = _register_in(pdf, _BGE_DOCS)
-    kw = dict(sensitive=False, enrich=False, ack=False, what="nx index pdf")
+    kw = dict(sensitive=False, enrich=False, ack=False, what="nx index pdf", pdf=True)
     assert external_legs_gate(tumbler, _VOYAGE_DOCS, **kw) is False
     assert external_legs_gate("", _VOYAGE_DOCS, **kw) is False
     _flag(tumbler)
@@ -395,6 +395,46 @@ def test_the_gate_reads_the_catalog_row_not_the_verb_option(t2_service_env, tmp_
     with pytest.raises(ExternalEmbedderRefusedError):
         external_legs_gate(tumbler, _VOYAGE_DOCS, **kw)
     assert external_legs_gate(tumbler, _VOYAGE_DOCS, **{**kw, "ack": True}) is True
+
+
+def test_the_gate_says_the_mineru_line_for_a_pdf_only(
+    t2_service_env, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fix round 3 (nexus-rfvyy.6.20): markdown has no MinerU leg, so its line does not mention one."""
+    from nexus.sensitive_write import external_legs_gate
+
+    tumbler = _register_in(_md(tmp_path, "line.md"), _VOYAGE_DOCS)
+    _flag(tumbler)
+    kw = dict(sensitive=False, enrich=False, ack=True, what="nx index md")
+    capsys.readouterr()
+
+    assert external_legs_gate(tumbler, _VOYAGE_DOCS, **kw) is True
+    md_line = capsys.readouterr().err
+    assert "flagged in the catalog" in md_line and "MinerU" not in md_line, md_line
+
+    assert external_legs_gate(tumbler, _VOYAGE_DOCS, **{**kw, "pdf": True}) is True
+    assert "MinerU" in capsys.readouterr().err
+
+
+def test_the_gate_reads_the_catalog_for_markdown_only_when_the_target_is_external(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fix round 3: a batch of N markdown files into a local collection used to pay N catalog reads for a gate that
+    could change nothing (no MinerU, no --enrich, no Voyage). The collection is checked first."""
+    from nexus.sensitive_write import external_legs_gate
+
+    reads: list[str] = []
+    monkeypatch.setattr("nexus.sensitive_write.catalog_sensitive", lambda doc_id: reads.append(doc_id) or False)
+    kw = dict(sensitive=False, enrich=False, ack=False, what="nx index md")
+
+    assert external_legs_gate("1.2.3", _BGE_DOCS, **kw) is False
+    assert reads == [], "a local-embedder markdown target asked the catalog"
+
+    assert external_legs_gate("1.2.3", _VOYAGE_DOCS, **kw) is False
+    assert reads == ["1.2.3"], "control: a Voyage target reads the flag"
+
+    reads.clear()
+    external_legs_gate("1.2.3", _BGE_DOCS, **{**kw, "pdf": True})
+    external_legs_gate("1.2.3", _BGE_DOCS, **{**kw, "enrich": True})
+    assert reads == ["1.2.3", "1.2.3"], "a PDF (MinerU) and an --enrich run read the flag whatever the target"
 
 
 def test_the_repo_pdf_path_indexes_a_flagged_pdf_locally_and_skips_it_for_voyage(
@@ -791,6 +831,62 @@ def test_a_reput_of_a_flagged_note_into_a_voyage_collection_is_refused_before_an
     with pytest.raises(ExternalEmbedderRefusedError, match="--ack-external-embedder"):
         put()
     assert written == [], "a flagged note was written to a Voyage collection"
+
+
+def test_the_reput_refusal_is_worded_for_every_caller_of_the_note_writer(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix round 3 (nexus-rfvyy.6.20): the refusal reaches ``nx store put``, ``nx memory promote``, MCP ``store_put`` and
+    ``nx catalog import``. Only two of them can accept Voyage, so the text names those two and says the others cannot,
+    rather than telling a caller to pass flags its verb does not have."""
+    from nexus.sensitive_write import ExternalEmbedderRefusedError
+
+    tumbler = _register_in(_md(tmp_path, "worded.md"), _VOYAGE_DOCS)
+    _flag(tumbler)
+    _, put = _note_put(monkeypatch, tumbler, _VOYAGE_DOCS)
+
+    with pytest.raises(ExternalEmbedderRefusedError) as exc:
+        put()
+    text = exc.value.message
+    assert "Nothing was written" in text and tumbler in text
+    assert "nx store put --sensitive --ack-external-embedder" in text and "nx catalog import --ack-external-embedder" in text
+    assert "nx memory promote" in text and "store_put" in text, "names the callers that cannot accept Voyage"
+    assert not text.startswith("store put refused"), "the verb is not always store put"
+    assert "bge" in text, "and the way out every caller has"
+
+
+def test_the_refused_reput_puts_the_identity_stamp_back(t2_service_env, tmp_path: Path) -> None:
+    """Fix round 3 (nexus-rfvyy.6.20): a REAL reconcile branch (``by_source_uri``) stamps ``meta.doc_id`` with the new
+    text's first chash before the write; the refusal must put the old value back, or the stamp names a chunk that was
+    never written. ``catalog_store_hook_tracked`` is not patched, so ``pre_call`` is filled by the real branch."""
+    import hashlib
+
+    from nexus.aspect_readers import uri_for
+    from nexus.catalog.factory import make_catalog_writer
+    from nexus.catalog.note_write import put_note
+    from nexus.sensitive_write import ExternalEmbedderRefusedError
+
+    collection = f"knowledge__{CORPUS}__voyage-context-3__v1"
+    title = "stamp restore note"
+    old_chash = hashlib.sha256(b"the old text of the note").hexdigest()
+    writer = make_catalog_writer()
+    try:
+        owner = writer.register_owner("knowledge", "curator")
+        tumbler = str(writer.register(
+            owner=owner, title=title, content_type="knowledge", physical_collection=collection,
+            source_uri=uri_for(collection, title), meta={"doc_id": old_chash}))
+    finally:
+        writer.close()
+    _flag(tumbler)
+
+    with pytest.raises(ExternalEmbedderRefusedError, match="--ack-external-embedder"):
+        put_note(
+            content="the new text of the note, which must never be embedded", collection=collection, title=title,
+            tags="", category="", source_agent="test", ttl_days=None, entity_key="")
+
+    entry = _reader().by_doc_id(tumbler)
+    assert (entry.meta or {}).get("doc_id") == old_chash, \
+        f"the refused re-put left its own stamp on the note: {(entry.meta or {}).get('doc_id')}"
 
 
 def test_a_reput_of_a_flagged_note_into_a_bge_collection_and_an_unflagged_one_into_voyage_proceed(

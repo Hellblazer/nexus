@@ -774,10 +774,15 @@ def put_note(
             sh.restore_pre_call_stamp(
                 doc, pre_call.get("doc_id", ""), out.doc_id, pre_call.get("note_meta"),
                 pre_call.get("note_meta_stamped"))
+            # Worded for every caller of this function (nx store put, nx memory promote, MCP store_put, nx catalog
+            # import): only the first and last take --ack-external-embedder, so the text names them and says the
+            # others cannot accept Voyage. The way out every caller has is a local-embedder (bge) collection.
             raise ExternalEmbedderRefusedError(
-                f"store put refused: note {doc} is sensitive in the catalog and {collection} embeds with Voyage AI, "
-                f"which would send its text off this machine. Nothing was written. Pass --sensitive "
-                f"--ack-external-embedder to accept Voyage, or put it into a local-embedder collection.")
+                f"note write refused: note {doc} is sensitive in the catalog and {collection} embeds with Voyage AI, "
+                f"which would send its text off this machine. Nothing was written. Put the note into a "
+                f"local-embedder (bge) collection. To accept Voyage, use nx store put --sensitive "
+                f"--ack-external-embedder or nx catalog import --ack-external-embedder; nx memory promote and MCP "
+                f"store_put have no way to accept it.")
     content_hash = sh.note_content_hash(content, manifest_metadatas)
     _fence_begin(doc, content_hash, collection)
     try:

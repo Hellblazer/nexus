@@ -53,7 +53,14 @@ def test_the_release_constant_is_one_until_phase_two_lands() -> None:
     """Phase 1 ships alone until the Phase 2 read filter and its canary rows land (RDR-243 MVV). The generated
     text says "excluded" for a Phase 2 row only when the release enforces it, so the Phase 2 commit raises this
     constant to 2 together with its canary rows and regenerates the docs; raising it earlier over-claims
-    (fix round 1, nexus-rfvyy.6.19 / .6.20 ship-blocker)."""
+    (fix round 1, nexus-rfvyy.6.19 / .6.20 ship-blocker).
+
+    This is a bare equality and nothing more: it fails when the constant moves, and says nothing about whether
+    the text is honest. The honesty pins are the pending-line test below
+    (``test_the_line_names_every_pending_row_that_reaches_outward_or_the_session_model``) and the render checks:
+    ``test_the_table_lists_exactly_the_enforced_rows``, ``test_the_help_names_exactly_the_enforced_rows`` and
+    ``test_the_real_policy_and_the_real_help_carry_the_line_once``, which read the generated help and docs against
+    the registry rows."""
     assert ls.RELEASE_ENFORCED_PHASE == 1
 
 

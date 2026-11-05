@@ -450,7 +450,7 @@ def skip_sensitive_for_external(
 
 
 def external_legs_gate(
-    doc_id: str, collection: str, *, sensitive: bool, enrich: bool, ack: bool, what: str,
+    doc_id: str, collection: str, *, sensitive: bool, enrich: bool, ack: bool, what: str, pdf: bool = False,
 ) -> bool:
     """Decide whether this index run treats the document as sensitive, and refuse its external legs if so.
 
@@ -460,7 +460,14 @@ def external_legs_gate(
     route it (the verb's own ``--sensitive`` path chose *collection* through
     :func:`resolve_sensitive_collection`); and the caller builds a local-only extractor from the return
     value. Returns that decision. Nothing has been written when this raises.
+
+    The catalog is read only when the answer can change something: the target embeds off this machine, or a
+    leg is in play whatever the target (*pdf*: a MinerU extraction; *enrich*: a title lookup). Markdown into a
+    local-embedder collection has none of the three, so it pays no read; the return is then the verb's own
+    *sensitive* option. *pdf* also picks the wording of the notice, which names MinerU for a PDF only.
     """
+    if not sensitive and not (pdf or enrich or is_external_embedder(collection)):
+        return False
     from_catalog = not sensitive and catalog_sensitive(doc_id)
     if not (sensitive or from_catalog):
         return False
@@ -478,9 +485,10 @@ def external_legs_gate(
                 f"--sensitive --ack-external-embedder to accept Voyage, or index into a local-embedder "
                 f"collection."
             )
+        legs = ("MinerU runs as a local subprocess (no MinerU server is contacted) and no title lookup is made."
+                if pdf else "its text is not sent to an external embedder without the acknowledgement.")
         click.echo(f"sensitive: document {doc_id} is flagged in the catalog and is handled as a sensitive "
-                   f"document: MinerU runs as a local subprocess (no MinerU server is contacted) and no "
-                   f"title lookup is made.", err=True)
+                   f"document: {legs}", err=True)
     return True
 
 
