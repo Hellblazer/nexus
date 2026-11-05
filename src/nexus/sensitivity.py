@@ -36,7 +36,12 @@ __all__ = [
 
 Posture = Literal["default", "llm_bound"]
 
-#: The environment variable a child process reads its posture from.
+#: The environment variable a child process reads its posture from. It is for nexus parents only: a scoped
+#: nexus process exports it to the children it starts. Setting it by hand (a shell, a hook) puts the process
+#: in the scope without any surface having entered it, which only silences the dispatch-root bug detector
+#: (``assert_llm_bound``: a caller that was never wrapped in ``llm_bound`` would otherwise fail at its first
+#: LLM call). It cannot grant protection: the document gates read the catalog flag whatever the posture, and
+#: Phase 2 reads exclude under ``llm_bound`` by the surface's own entry, never from this variable alone.
 POSTURE_ENV: Final = "NX_SENSITIVITY_POSTURE"
 
 #: ``None`` means "never set on this context": the environment is then consulted.
