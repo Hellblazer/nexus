@@ -106,6 +106,7 @@ from nexus.aspect_readers import ReadFail, ReadOk, file_uri_path, note_uri, read
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 from nexus.operators.dispatch import _write_prompt_file
+from nexus.sensitivity import assert_llm_bound
 from nexus.util.nx_argv import argv_off_cwd
 
 # Re-exported for ergonomic ``from nexus.aspect_extractor import
@@ -2228,6 +2229,8 @@ def _run_claude_isolated(
     inheritance ``Popen`` would have given it implicitly with no ``env=``
     at all.
     """
+    # RDR-243: the first statement, before the prompt file is written or anything is spawned.
+    assert_llm_bound("_run_claude_isolated")
     argv = _argv or [
         "claude", "-p", "--output-format", "json",
         # RDR-196 Gap 4 / audit fold F1 consequence 2 (nexus-nyry9.6): this

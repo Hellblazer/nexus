@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import re
@@ -20,6 +21,7 @@ from nexus.commands._helpers import (
     t2_shared_client_from_context as _command_shared_t2_client,
 )
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.sensitivity import bound_to
 from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
 from nexus.db.t2.taxonomy_compute import (
     MIN_DISCOVER_CHUNKS,
@@ -2089,6 +2091,7 @@ def _save_review_cache(collection: str, cache: dict[int, dict[str, Any]]) -> Non
     )
 
 
+@bound_to("taxonomy_review_auto")
 def _review_auto(
     db: Any,
     collection: str,
@@ -2452,6 +2455,7 @@ def _topic_has_auto_label(topic: dict[str, Any]) -> bool:
     return topic.get("label", "") == " ".join(terms[:3])
 
 
+@bound_to("taxonomy_label")
 def relabel_topics(
     taxonomy: "HttpTaxonomyStore",
     *,
@@ -2570,7 +2574,10 @@ def relabel_topics(
 
     with open_run_log("taxonomy-label") as run_log_path:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_label_batch, b): b for b in batches}
+            # RDR-243 thread hop 2: a pool worker starts with an empty context, so each batch is
+            # submitted through its own copy of this one (one Context cannot be entered by two
+            # threads at once, hence a fresh copy per submit).
+            futures = {pool.submit(contextvars.copy_context().run, _label_batch, b): b for b in batches}
             for future in as_completed(futures):
                 batches_done += 1
                 try:

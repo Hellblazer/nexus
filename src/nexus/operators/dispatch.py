@@ -56,6 +56,7 @@ from nexus.operators.llm_types import (  # noqa: F401 - re-exports
     record_usage,
     warn_on_family_drift,
 )
+from nexus.sensitivity import assert_llm_bound
 from nexus.util.nx_argv import argv_off_cwd
 
 if TYPE_CHECKING:
@@ -1072,6 +1073,10 @@ async def claude_dispatch(
         ValueError: ``NX_DISPATCH_MAX_BUDGET_USD`` is set but is not a
             valid float.
     """
+    # RDR-243: the first statement, before the model normalisation, the budget
+    # parse and the spawn: a caller that never entered the sensitivity scope
+    # fails here, with nothing sent anywhere.
+    assert_llm_bound("claude_dispatch")
     # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert [23032]
     # Important #2): normalize model="" / whitespace-only to None ONCE
     # here, so the argv-append (`if model:`) and the error-clause gate
