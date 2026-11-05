@@ -643,8 +643,16 @@ def put_note(
     content_type: str | None = None,
     cat: Any = None,
     entity_key: str = "",
+    sensitive: bool = False,
 ) -> PutNoteOutcome:
     """Register, fence, write and settle one note. The whole caller protocol in one place.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9): the document is born flagged when this call mints it; a
+    document the call resolves instead (a re-put, a chash or ghost reconcile) is flagged through the
+    audited route BEFORE the fence and before any chunk is written. If that fails the call raises
+    :class:`~nexus.sensitive_write.SensitiveFlagNotSetError` with nothing written, and the identity
+    stamp the reconcile changed is put back. The caller has already passed the engine-capability
+    refusal (:func:`nexus.sensitive_write.require_sensitive_engine`).
 
     1. Split *content* into pieces and refuse an over-quota note before minting anything.
     2. Register the catalog document (reconciling onto an existing (collection, title) row).
@@ -723,7 +731,7 @@ def put_note(
         out.catalog_doc_id, out.minted = sh.catalog_store_hook_tracked(
             title=title, doc_id=first_chash, collection_name=collection, pre_call_doc_id_out=pre_call,
             error_out=cause, tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent,
-            entity_key=resolved_key)
+            entity_key=resolved_key, **({"sensitive": True} if sensitive else {}))
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning and the NO_CATALOG outcome
         cause["error"] = f"{type(exc).__name__}: {exc}"
         _log.warning(
@@ -739,6 +747,22 @@ def put_note(
     from nexus.doc_indexer import _fence_begin, _fence_fail  # noqa: PLC0415 — deferred import; tests patch these names
 
     doc = out.catalog_doc_id
+    if sensitive and not out.minted:
+        # A document this call resolved instead of minting was never registered with the flag.
+        # Raised outside the swallow above: a document that is not protected must not be written to.
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred: only a flagged put needs it
+        from nexus.sensitive_write import raise_flag  # noqa: PLC0415 — deferred: only a flagged put needs it
+
+        flag_writer = make_catalog_writer()
+        try:
+            raise_flag(flag_writer, doc, what="store put --sensitive")
+        except Exception:
+            sh.restore_pre_call_stamp(
+                doc, pre_call.get("doc_id", ""), out.doc_id, pre_call.get("note_meta"),
+                pre_call.get("note_meta_stamped"))
+            raise
+        finally:
+            flag_writer.close()
     content_hash = sh.note_content_hash(content, manifest_metadatas)
     _fence_begin(doc, content_hash, collection)
     try:

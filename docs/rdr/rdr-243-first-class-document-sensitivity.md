@@ -260,8 +260,10 @@ the registry names. The lint reads Python only. Engine egress (rows 19 and
 20, through `EgressProxy`) is already guarded by the engine's own source
 census, `EgressGuardCensus` and `EgressGuardCensusTest`, which pin every
 outbound construct per file (`nexus_rdr/243-research-24`); a new engine
-path fails that test. Row 22 is client egress from `HttpVectorClient`, so
-the Python registry covers it. The local cross-encoder reranker sends
+path fails that test. Row 22 is client egress from `HttpVectorClient`, but
+the lint exempts the engine-client modules (`HttpVectorClient` and the catalog
+clients) and the canary covers the `refuse` and `skip` rows only, so neither
+covers row 22; the cloud tenant disclosure test (Test Plan) does. The local cross-encoder reranker sends
 nothing off the machine (CrossEncoderReranker.java uses ONNX only,
 `nexus_rdr/243-research-15`); Q4 concerns the Voyage reranker only.
 
@@ -515,7 +517,16 @@ without it goes to the bge collection of the same subject instead. MCP
 `store_put(sensitive=True)` has no way to acknowledge: in local mode it
 stores into the bge collection of the subject, and in cloud mode, where
 every collection embeds through Voyage, it refuses and says why (Sam,
-2026-11-04).
+2026-11-04). The bge collection of a subject is
+`<prefix>__<subject>__bge-base-en-v15-768__v1` for each of `knowledge__`,
+`docs__`, `rdr__` and `code__`. A `--sensitive` index of a document already
+registered in a Voyage collection is not re-routed, because registration
+writes none of a matching row's fields: without the acknowledgement it
+refuses, naming the tumbler and the collection, and with it the document is
+indexed in place. In cloud mode every collection embeds through Voyage, so
+`--sensitive` without `--ack-external-embedder` refuses on every verb; with
+it, the verb prints a one-line disclosure naming the endpoint, the managed
+tenant and Voyage (census row 22).
 
 **9. Carrying the flag to results.** `SearchResult.metadata["sensitive"]`
 comes from the engine, never from the chunk row. `sensitive_owners` comes
@@ -695,9 +706,11 @@ does not depend on callers telling the truth.
   root; the fix is to wrap the surface and add its registry row.
 - A sensitive document skipped: a structured log line names the tumbler
   and the surface; the command summary counts skips.
-- An old engine, or a `/version` probe that fails: `exclude` reads and
-  `--sensitive` writes raise, naming the engine version and the minimum
-  required when the probe answered, or the probe failure when it did not.
+- An old engine, or a `/version` probe that fails: the probe never raises
+  and reads a failed or absent answer as unsupported, so `exclude` reads and
+  `--sensitive` writes raise. The message names the engine version and the
+  minimum required when the engine answered without the key, and says it
+  could not confirm support when the probe got no answer.
 - A document that leaked before it was flagged: `nx catalog doctor` fails
   `sensitive_with_aspects` and prints the delete command.
 
@@ -752,7 +765,12 @@ chash-positions rows; the `catalog_sensitivity_supported` key on
 `catalog_sensitivity_supported` probe and the write refusal (item 3); the
 MinerU rule (row 21: `--sensitive` takes the local subprocess path); the
 Q3 `--ack-external-embedder` flag and bge routing, and the MCP `store_put`
-cloud refusal (item 8).
+cloud refusal (item 8); the cloud tenant disclosure of row 22: in cloud mode
+`--sensitive` requires `--ack-external-embedder` and prints, once, before the
+write, one line saying the document's chunk text and Voyage embeddings are
+stored in the managed tenant at the named endpoint and sent to Voyage AI. The
+CLI verbs print it; MCP `store_put` has no acknowledgement, so its cloud
+refusal carries the same reason.
 
 #### Step 4: Scope and document gates
 
@@ -864,6 +882,30 @@ None.
 - **Scenario**: MCP `store_put(sensitive=True)` (phase 1) — **Verify**: cloud mode
   refuses with the reason; local mode stores into the subject's bge
   collection.
+- **Scenario**: Cloud tenant disclosure (phase 1, row 22) — **Verify**: in
+  cloud mode each of `index pdf`, `index md`, `dt index`, `dt capture` and
+  `store put` refuses `--sensitive` without `--ack-external-embedder` before
+  any register call; with it, the one-line disclosure naming the endpoint,
+  the tenant and Voyage is printed before the write.
+- **Scenario**: `--ack-external-embedder` (phase 1) — **Verify**: with the
+  flag, a sensitive write into a Voyage collection keeps that collection and
+  prints the notice; without it, local mode takes the bge sibling and cloud
+  mode refuses.
+- **Scenario**: bge routing in local mode (phase 1) — **Verify**: a
+  `--sensitive` write without the acknowledgement lands in
+  `<prefix>__<subject>__bge-base-en-v15-768__v1`, parametrized over
+  `knowledge__`, `docs__`, `rdr__` and `code__`.
+- **Scenario**: A sensitive PDF and MinerU (phase 1, row 21) — **Verify**:
+  with an explicit non-loopback URL, with a loopback URL and with a pid-file
+  local server, no URL is resolved, probed or contacted and the extraction
+  runs as the local subprocess; with no subprocess the run refuses.
+- **Scenario**: `--sensitive` index of a document already registered in a
+  Voyage collection (phase 1) — **Verify**: matched by source URI and
+  matched by file path, it refuses without the acknowledgement, naming the
+  tumbler and the collection, and changes nothing (no chunk in the bge
+  sibling, `physical_collection` and `sensitive` as before); with the
+  acknowledgement it indexes in place; a document already in a bge
+  collection proceeds without it.
 - **Scenario**: MCP `search` under `withhold` (phase 3) — **Verify**: a
   sensitive hit appears as the stub line with no title and the withheld
   count; the canary string is absent from the response.

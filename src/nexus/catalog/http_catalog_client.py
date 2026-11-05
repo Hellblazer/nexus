@@ -1626,9 +1626,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         source_mtime: float = 0.0,
         source_uri: str = "",
         with_created: bool = False,
+        sensitive: bool = False,
         **kwargs: Any,
     ) -> Tumbler | tuple[Tumbler, bool]:
         """Register a document; returns the server-assigned tumbler.
+
+        *sensitive* (RDR-243, nexus-rfvyy.6.9) rides the request only when true: the engine sets the
+        flag on the new row, and raises it on a live row of the same source URI; it never lowers it.
+        A caller must have passed :func:`require_catalog_sensitivity` first, since an engine without
+        the column drops the key without an error.
 
         Signature matches :meth:`nexus.catalog.catalog.Catalog.register`
         exactly — positional ``owner`` + ``title``, then keyword-only.
@@ -1680,6 +1686,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if head_hash: payload["head_hash"] = head_hash
         if meta:      payload["meta"] = meta
+        if sensitive: payload["sensitive"] = True
         if os.environ.get(_CROSS_PROJECT_OVERRIDE_ENV) == "1":
             payload["allow_cross_project"] = True
         payload.update(kwargs)

@@ -1833,9 +1833,17 @@ class PDFExtractor:
     MinerU is the default and the only layout- and math-aware extractor; a page it
     cannot read descends the RDR-237 ladder. ``extractor="pymupdf"`` reads every
     page's own text layer and needs none of the PDF stack.
+
+    *sensitive* (RDR-243 census row 21, nexus-rfvyy.6.10): the document is sensitive and the PDF
+    bytes never leave this process tree. The instance resolves no MinerU server (an explicit
+    ``pdf.mineru_server_url``, a pid-file local server and the default port are all skipped, since a
+    loopback URL can be a tunnel), makes no health probe, starts no autostart and sends no request;
+    every MinerU attempt runs as the local subprocess, and a host with no subprocess path fails the
+    attempt with its own error. There is no fallback to a server.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, sensitive: bool = False) -> None:
+        self._sensitive: bool = sensitive
         self._mineru_server_checked: bool = False
         self._mineru_server_up: bool = False
         # nexus-5ny9r: when the verdict was "no live server" (not skew), a
@@ -2602,7 +2610,15 @@ class PDFExtractor:
         "rediscovery" of that same refused default, then a full
         ``mineru_ensure_health_timeout`` wait) for a foregone conclusion.
         On skew, skip straight to subprocess with one loud, reasoned log.
+
+        A sensitive instance (RDR-243 row 21) answers False before ANY resolution: no
+        ``get_mineru_server_url`` call (so no pid-file read), no health probe, no autostart.
         """
+        if self._sensitive:
+            self._mineru_server_up = False
+            self._mineru_server_checked = True
+            self._mineru_server_recheck_after = None
+            return False
         if self._mineru_server_checked:
             if self._mineru_server_up or self._mineru_server_recheck_after is None:
                 return self._mineru_server_up
@@ -2755,6 +2771,9 @@ class PDFExtractor:
 
         RDR-237: the request's timeout is ``pdf.mineru_page_timeout_s`` times the pages
         in the range (it was a fixed 300 s), and the request opens with a heartbeat."""
+        if self._sensitive:
+            # Unreachable through _mineru_run_isolated; a direct caller must not send the bytes either.
+            raise RuntimeError("a sensitive document is never sent to a MinerU server (RDR-243)")
         self._beat()
         _mineru_check_range(start, end, self._mineru_run_total_pages)
         from nexus.config import get_mineru_page_timeout_s, get_mineru_server_url, get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
@@ -3125,7 +3144,7 @@ class PDFExtractor:
         tries one restart and retries, then falls to the subprocess. Every attempt below opens
         with a heartbeat, in the primitive that makes it."""
         rung = {} if formula_enable else {"formula_enable": False}
-        if use_server and self._mineru_server_available():
+        if use_server and not self._sensitive and self._mineru_server_available():
             try:
                 result = self._mineru_run_via_server(pdf_path, start, end, **rung)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError,

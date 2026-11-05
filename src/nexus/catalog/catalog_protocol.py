@@ -227,7 +227,7 @@ class CatalogWriter(Protocol):
     def ensure_owner_for_repo(self, repo, *, repo_name=..., description=...) -> object:  # canonical DIVERGENT
         ...
 
-    def register(self, owner, title, *, content_type=..., file_path=..., corpus=..., physical_collection=..., chunk_count=..., head_hash=..., author=..., year=..., meta=..., source_mtime=..., source_uri=..., with_created=...) -> object:  # canonical -- with_created (nexus-vfef0): True returns (tumbler, created) instead of a bare tumbler
+    def register(self, owner, title, *, content_type=..., file_path=..., corpus=..., physical_collection=..., chunk_count=..., head_hash=..., author=..., year=..., meta=..., source_mtime=..., source_uri=..., with_created=..., sensitive=...) -> object:  # canonical -- sensitive (RDR-243): rides the request only when true; with_created (nexus-vfef0): True returns (tumbler, created) instead of a bare tumbler
         ...
 
     def register_many(self, owner, docs, *, with_created=...) -> object:  # canonical — returns list[Tumbler] aligned 1:1 with docs (nexus-9dvqy); with_created=True returns (tumbler, created) pairs (nexus-53cae)

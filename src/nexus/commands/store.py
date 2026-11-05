@@ -24,6 +24,13 @@ from nexus.db.t3 import T3Database
 from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
+from nexus.sensitive_write import (
+    SensitiveFlagNotSetError,
+    ack_help,
+    resolve_sensitive_collection,
+    sensitive_help,
+    sensitive_write_kwargs,
+)
 from nexus.ttl import parse_ttl
 
 # C0 (NUL, tab, CR, LF, ESC ...), DEL and C1 controls: stored chunk text printed to an operator's terminal must
@@ -70,6 +77,8 @@ def store() -> None:
                    "control characters, refused on a code__ collection. Unset: a collection "
                    "configured with an entity-key pattern stamps the title when the whole title "
                    "matches it. A re-put without it removes the stored key.")
+@click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
 @click.option("--session-id", default="", hidden=True)
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
@@ -80,6 +89,8 @@ def put_cmd(
     category: str,
     ttl: str,
     entity_key: str,
+    sensitive: bool,
+    ack_external_embedder: bool,
     session_id: str,
     agent: str,
 ) -> None:
@@ -129,6 +140,10 @@ def put_cmd(
     # itself as defense-in-depth, but this CLI path can never reach it.
     ttl_days = days
 
+    # RDR-243: the usage, cloud and engine refusals, before the T3 handle, the register call and any
+    # embedding. An engine that cannot hold the flag would otherwise drop it without an error.
+    sensitive_write_kwargs(sensitive, "store put --sensitive", ack=ack_external_embedder)
+
     db = _t3()
     # nexus-hmxi: pass t3 so the resolver grandfathers an existing
     # legacy 2-segment collection ahead of the auto-promoted
@@ -140,6 +155,10 @@ def put_cmd(
     # itself a ClickException, so the refusal prints cleanly here and on
     # every other CLI writer without a per-command catch.
     col_name = t3_collection_name(collection, t3=db, for_write=True)
+    if sensitive:
+        # RDR-243 Q3: a Voyage collection needs the acknowledgement; without it the note goes to the
+        # bge collection of the same subject (local mode).
+        col_name = resolve_sensitive_collection(col_name, ack=ack_external_embedder, what="store put --sensitive")
 
     # RDR-223 P2.6 (nexus-z0o2p.16): the note is written by the note writer, the
     # same sequence MCP store_put runs (nexus-z0o2p.12). put_note owns the whole
@@ -174,9 +193,9 @@ def put_cmd(
         outcome = put_note(
             content=content, collection=col_name, title=title, tags=tags,
             category=category, source_agent=agent,
-            ttl_days=ttl_days, entity_key=entity_key,
+            ttl_days=ttl_days, entity_key=entity_key, sensitive=sensitive,
         )
-    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError) as exc:
+    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError, SensitiveFlagNotSetError) as exc:
         # EntityKeyError: an --entity-key the put refuses (a code collection, a control character,
         # over 256 characters; nexus-fai28), raised before any register or write. EntityConfigError
         # names its config file and key. Any other ValueError keeps its traceback.
