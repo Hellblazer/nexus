@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -398,11 +399,12 @@ class TestCli:
 
     def test_an_audit_write_failure_on_a_dry_run_says_no_row_was_changed(self) -> None:
         failing = VectorServiceError("POST ... HTTP 500", code=500, reason="audit_write_failed", engine_body={
-            "error": "x", "reason": "audit_write_failed", "rows_changed": False,
+            "error": "x", "reason": "audit_write_failed", "rows_changed": False, "dry_run": True,
             "audit": {"actor": "root:aa", "tenant": TENANT, "intent_id": 5, "outcome_id": None}})
         result = _run(FakeClient(_dry_report(), error=failing), "--tenant", TENANT)
         assert result.exit_code == rk.EXIT_AUDIT
         assert "no row was changed" in result.output and "WERE changed" not in result.output
+        assert "?" not in result.output and "rows swept" not in result.output, result.output
 
     def test_a_sweep_that_failed_part_way_reports_the_partial_counts_and_exits_6(self) -> None:
         failing = VectorServiceError("POST ... HTTP 500", code=500, reason="sweep_failed", engine_body={
@@ -411,7 +413,27 @@ class TestCli:
         result = _run(FakeClient(_dry_report(), error=failing), "--tenant", TENANT)
         assert result.exit_code == rk.EXIT_AUDIT
         assert "1 rows swept by this call" in result.output and "WERE changed" in result.output
+        assert "confirmed batches" in result.output and "in flight at the failure may also have committed" in result.output
         assert "gc_audit id 6" in result.output
+
+    def test_a_sweep_failure_whose_outcome_row_also_failed_does_not_print_id_none(self) -> None:
+        failing = VectorServiceError("POST ... HTTP 500", code=500, reason="sweep_failed", engine_body={
+            "error": "the sweep failed after 0 rows in 0 batches", "reason": "sweep_failed", "rows_swept": 0,
+            "rows_changed": False, "audit": {"actor": "root:aa", "tenant": TENANT, "intent_id": 5,
+                                             "outcome_id": None}})
+        result = _run(FakeClient(_dry_report(), error=failing), "--tenant", TENANT)
+        assert result.exit_code == rk.EXIT_AUDIT
+        assert "None" not in result.output, result.output
+        assert "outcome row could not be written either" in result.output and "gc_audit id 5" in result.output
+        assert "may still have committed" in result.output   # rows_changed false: still no promise of untouched rows
+
+    def test_the_audit_read_hint_names_the_row_level_security_and_the_sql_route(self) -> None:
+        failing = VectorServiceError("POST ... HTTP 500", code=500, reason="audit_write_failed", engine_body={
+            "error": "x", "reason": "audit_write_failed", "rows_changed": False, "dry_run": True,
+            "audit": {"actor": "root:aa", "tenant": TENANT, "intent_id": 5, "outcome_id": None}})
+        out = _run(FakeClient(_dry_report(), error=failing), "--tenant", TENANT).output
+        for needle in ("row-level security", "BYPASSRLS", "SET nexus.tenant", "--limit N"):
+            assert needle in out, (needle, out)
 
     @pytest.mark.parametrize("reason", ["audit_unavailable", "audit_intent_failed"])
     def test_a_refusal_before_any_read_says_nothing_was_changed_and_exits_1(self, reason: str) -> None:
@@ -419,7 +441,7 @@ class TestCli:
                                      engine_body={"error": f"engine says {reason}", "reason": reason})
         result = _run(FakeClient(_dry_report(), error=refusal), "--tenant", TENANT)
         assert result.exit_code == rk.EXIT_FAILED
-        assert f"engine says {reason}" in result.output and "Nothing was read or changed" in result.output
+        assert f"engine says {reason}" in result.output and "No chunk row was read or changed" in result.output
 
     def test_a_preconditions_refusal_prints_the_audit_rows_it_left(self) -> None:
         refusal = VectorServiceError("refused", code=409, reason="sweep_preconditions_not_met", engine_body={
@@ -594,8 +616,6 @@ class TestCli:
         assert "rerun" in result.output.lower()
 
     def test_a_timed_out_add_through_urllib_is_recognised_too(self) -> None:
-        import urllib.error
-
         client = FakeClient(_dry_report(), error=urllib.error.URLError(TimeoutError("timed out")))
         result = _run(client, "--add-check", "--apply")
         assert result.exit_code == rk.EXIT_FAILED and "may have landed" in result.output
@@ -606,8 +626,6 @@ class TestCli:
         assert "may still be running" in result.output and "validate" in result.output.lower()
 
     def test_a_connection_refused_is_not_called_a_timeout(self) -> None:
-        import urllib.error
-
         client = FakeClient(_dry_report(), error=urllib.error.URLError(ConnectionRefusedError("refused")))
         result = _run(client, "--add-check", "--apply")
         assert "may have landed" not in result.output

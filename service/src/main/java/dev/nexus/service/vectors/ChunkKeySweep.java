@@ -118,6 +118,8 @@ public final class ChunkKeySweep {
     /** Statement and lock bounds for one batch transaction. */
     private static final int BATCH_STATEMENT_MS = 120_000;
     private static final int BATCH_LOCK_MS = 2_000;
+    /** The tenant-registry existence probe's statement bound: well under a managed edge's ~30 s. */
+    private static final int PROBE_STATEMENT_MS = 5_000;
     /** The census of one collection is a per-chunk lateral join; bound it, and read a trip as "not read". */
     static final Duration CENSUS_BOUND = Duration.ofSeconds(120);
     /** Collections sampled for the dry run's cost figure. */
@@ -858,6 +860,18 @@ public final class ChunkKeySweep {
         return scope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
             return (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant));
+        });
+    }
+
+    /**
+     * Whether {@code tenant} holds at least one chunk row, through the tenant-scoped session: an existence probe
+     * (stops at the first row, so a tenant with millions of rows costs the same as one with one) under a short
+     * statement bound, not a count. It reads no row's content and changes nothing.
+     */
+    public boolean hasChunkRows(String tenant) {
+        return scope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, PROBE_STATEMENT_MS, BATCH_LOCK_MS);
+            return ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant));
         });
     }
 

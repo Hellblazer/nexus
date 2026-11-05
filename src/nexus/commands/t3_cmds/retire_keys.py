@@ -23,10 +23,11 @@ the target field ignores it and answers for the credential's own tenant, and a s
 That case is one line and exit 4.
 
 Every sweep the ROOT credential makes is audited by the engine, in the target tenant's ``gc_audit`` (operation
-``retire_keys_sweep``): an intent row before the first read and an outcome row after the work. The answers carry the
+``retire_keys_sweep``): an intent row before the sweep reads or changes any chunk row (only the check that the named
+tenant is registered runs before it) and an outcome row after the work. The answers carry the
 row ids and the actor (a hash prefix of the credential), and the verb prints them. ``--operator LABEL`` is recorded in
 both rows, because one shared root token names no person. If the engine cannot write the audit, it refuses before any
-read or change; if it cannot write the outcome row after the work, the rows ARE changed and the verb exits 6.
+chunk row is read or changed; if it cannot write the outcome row after the work, the rows ARE changed and the verb exits 6.
 
 Pacing: ``--max-rps`` holds every request the verb sends to that rate (the request gate, nexus-ldf2s). Run against
 the cloud, start with ``--max-rps 2``. An apply is a write and goes through the production-write guard
@@ -116,6 +117,14 @@ def _audit_lines(audits: list[tuple[str, dict]]) -> list[str]:
     return [ln for label, a in audits if (ln := _audit_line(label, a))]
 
 
+_READ_AUDIT_HINT = (
+    "  Read the rows: nexus.gc_audit has row-level security keyed on nexus.tenant, so `nx catalog gc-audit list "
+    "--operation retire_keys_sweep --json --limit N` needs a credential bound to the TARGET tenant, and SQL needs a "
+    "BYPASSRLS or superuser role, or SET nexus.tenant = '<tenant>' first. A tenant with no live tenant-bound credential "
+    "is read through SQL; the ids and counts printed above are always available."
+)
+
+
 def _swept_phrase(body: dict, swept_before: int) -> str:
     n = body.get("rows_swept")
     earlier = f" ({swept_before} more in the earlier calls of this run)" if swept_before else ""
@@ -135,17 +144,20 @@ def _engine_error(exc: VectorServiceError, *, swept_before: int = 0,
     if reason in ("tenant_mismatch", "unknown_tenant"):
         _fail("\n".join(lines), EXIT_USAGE)
     if reason in ("audit_unavailable", "audit_intent_failed"):
-        # Refused before any read or change: say so, and that the sweep is not the thing that is wrong.
+        # Refused before any chunk row was read or changed: say so, and that the sweep is not the thing that is wrong.
         lines.append("The sweep records every root-credential call in gc_audit first and refuses when it cannot. "
-                     "Nothing was read or changed; retry once the engine's audit sink is available.")
+                     "No chunk row was read or changed; retry once the engine's audit sink is available.")
         _fail("\n".join(lines + _audit_lines(audits or [])), EXIT_FAILED)
     if reason == "audit_write_failed":
         changed = body.get("rows_changed")
         lines = ["The sweep RAN, but the engine could not write the outcome row of its audit "
                  "(reason audit_write_failed)."]
-        lines.append("  " + _swept_phrase(body, swept_before) + "; "
-                     + ("those rows WERE changed and cannot be taken back." if changed
-                        else "no row was changed (a dry run)."))
+        if body.get("dry_run"):
+            lines.append("  This call was a dry run: no row was changed.")
+        else:
+            lines.append("  " + _swept_phrase(body, swept_before) + "; "
+                         + ("those rows WERE changed and cannot be taken back." if changed
+                            else "no batch was confirmed committed."))
         audit = body.get("audit") or {}
         lines.append(f"  The intent row is gc_audit id {audit.get('intent_id')} in tenant {audit.get('tenant')} "
                      f"(actor {audit.get('actor')}); there is no outcome row for this call.")
@@ -155,18 +167,25 @@ def _engine_error(exc: VectorServiceError, *, swept_before: int = 0,
                          "rows that are left (a repeated apply is safe: it sweeps what is still there).")
         else:
             lines.append("  Re-running the same command is safe: the sweep takes only the rows that are still there.")
-        lines.append("  Read the rows with a credential bound to the target tenant: nx catalog gc-audit list "
-                     "--operation retire_keys_sweep --json")
+        lines.append(_READ_AUDIT_HINT)
         _fail("\n".join(lines), EXIT_AUDIT)
     if reason == "sweep_failed":
         lines = [f"The engine's sweep failed part-way: {body.get('error')}"]
         lines.append("  " + _swept_phrase(body, swept_before) + "; "
-                     + ("those rows WERE changed." if body.get("rows_changed") else "no row was changed."))
+                     + ("those rows WERE changed (the count is of confirmed batches; the batch that was in flight at "
+                        "the failure may also have committed)." if body.get("rows_changed")
+                        else "no batch was confirmed committed (the batch that was in flight at the failure may still "
+                             "have committed)."))
         a = body.get("audit")
-        if a:
+        if a and a.get("outcome_id") is not None:
             lines.append(f"  The outcome row (failed, with the partial counts) is gc_audit id {a.get('outcome_id')}, "
                          f"intent {a.get('intent_id')}, in tenant {a.get('tenant')}.")
+        elif a:
+            lines.append(f"  The outcome row could not be written either; the intent row is gc_audit id "
+                         f"{a.get('intent_id')} in tenant {a.get('tenant')}.")
+        lines.append("  Re-running the same command is safe: the sweep takes only the rows that are still there.")
         lines.extend(_audit_lines(audits or []))
+        lines.append(_READ_AUDIT_HINT)
         _fail("\n".join(lines), EXIT_AUDIT)
     if reason == "sweep_preconditions_not_met":
         report = body.get("report") or {}
@@ -442,8 +461,10 @@ def retire_keys_cmd(tenant: str | None, operator: str | None, dry_run: bool, app
       4. nx t3 retire-keys --validate --apply     VALIDATE (refused while a tenant breaks one)
 
     Every sweep the ROOT credential makes is recorded by the engine in the target tenant's gc_audit (an intent row
-    before the first read, an outcome row after); the verb prints the row ids and the actor. Read them with a
-    credential bound to that tenant: nx catalog gc-audit list --operation retire_keys_sweep --json.
+    before the sweep reads or changes any chunk row, an outcome row after); the verb prints the row ids and the actor.
+    gc_audit has row-level security keyed on the tenant: read the rows with a credential bound to that tenant
+    (nx catalog gc-audit list --operation retire_keys_sweep --json --limit N), or in SQL as a BYPASSRLS or superuser
+    role, or after SET nexus.tenant = '<tenant>'. A tenant with no live tenant-bound credential is read through SQL.
 
     The dry run is the default and writes nothing, locks nothing and runs no UPDATE; its time is the batch SELECT
     only, so the projected duration is a lower bound. Apply refuses while a precondition the engine counts is

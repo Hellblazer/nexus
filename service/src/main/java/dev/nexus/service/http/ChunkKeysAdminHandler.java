@@ -94,7 +94,8 @@ import java.util.function.Supplier;
  * <p><b>Every sweep a root credential makes is audited, whether or not it names a tenant, and naming its own tenant
  * included.</b> Two {@code gc_audit} rows (operation {@code retire_keys_sweep}), both in the TARGET tenant: an
  * <i>intent</i> row ({@code phase: started}: mode, target and caller tenant, the actor, the accept map, batch size,
- * whether the call resumed, and the optional {@code "operator"} label) written BEFORE the first read or batch, and an
+ * whether the call resumed, and the optional {@code "operator"} label) written before the sweep reads or changes any
+ * chunk row (the tenant-registry existence probe of a named tenant is the only statement that runs before it), and an
  * <i>outcome</i> row ({@code finished}, {@code refused} for a 409 preconditions refusal, or {@code failed}) with the
  * counts, in a finally path, so a call that throws in batch N records the rows batches 1..N-1 committed. The actor is a
  * prefix of the credential's hash, never the secret and never the whole hash. Dry run and apply both fail closed: no
@@ -243,7 +244,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         Audit audit = auditSink.get();
         if (root && audit == null) {
             HttpUtil.send(ex, 503, json(Map.of("error",
-                "this engine has no audit sink for a root-credential sweep; nothing was read or swept",
+                "this engine has no audit sink for a root-credential sweep; no chunk row was read or changed",
                 "reason", "audit_unavailable")));
             return;
         }
@@ -257,8 +258,9 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         int budget = dryRun ? 0 : intField(body, "budget_seconds", DEFAULT_BUDGET_SECONDS, 1, MAX_BUDGET_SECONDS);
         ChunkKeySweep.Resume resume = dryRun ? null : resume(body);
 
-        // The intent row goes in BEFORE the first read or batch: a sink that cannot be written refuses the call with
-        // nothing read and nothing changed, instead of being found out after the rows are swept.
+        // The intent row goes in before the sweep reads or changes any chunk row (only the tenant-registry existence
+        // probe above ran before it): a sink that cannot be written refuses the call with no chunk read or changed,
+        // instead of being found out after the rows are swept.
         Trail trail = null;
         if (root) {
             trail = new Trail(audit, tenant, callerTenant, only, dryRun, accepted, batchSize, resume != null, operatorLabel);
@@ -268,7 +270,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 log.error("event=retire_keys_audit_intent_failed tenant={} caller_tenant={} error={}", tenant,
                     callerTenant, e.getMessage(), e);
                 HttpUtil.send(ex, 500, json(Map.of("error",
-                    "the audit row for this sweep could not be written; nothing was read or changed",
+                    "the audit row for this sweep could not be written; no chunk row was read or changed",
                     "reason", "audit_intent_failed")));
                 return;
             }
@@ -348,6 +350,14 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             if (trail == null || failure instanceof IllegalArgumentException) {
                 throw failure;   // unchanged mapping for the credentials that are not audited
             }
+            // The outcome row is already written. Pool exhaustion (or the admission queue full) keeps the shared
+            // mapper's retryable 503, as it does for every other route. Every other error stays sweep_failed: a
+            // constraint violation or a lock timeout inside the work must answer with the partial counts, which the
+            // shared mapper's generic 409 / opaque 500 would drop.
+            if (HttpUtil.isPoolExhausted(failure) && HttpUtil.sendTypedDbError(ex, failure, log, "chunk_keys_admin",
+                    "op=/sweep tenant=" + tenant + " rows_swept=" + progress.rowsSwept())) {
+                return;
+            }
             log.error("event=retire_keys_sweep_failed tenant={} caller_tenant={} rows_swept={} batches={} error={}",
                 tenant, callerTenant, progress.rowsSwept(), progress.batches(), failure.getMessage(), failure);
             Map<String, Object> err = new LinkedHashMap<>();
@@ -418,15 +428,17 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
      * The tenants a root credential may target: the default tenant, a tenant that holds a {@code service_tokens} row
      * (a revoked or expired row still counts), or a tenant that holds chunk rows without one (a data-only tenant
      * whose tokens aged out, e.g.). A name with a control character is never registered; the wildcard is refused.
-     * The chunk-row test is the tenant-scoped count the table-wide routes already use ({@link ChunkKeySweep#rowCount}),
-     * exact on the tenant string, so a case or whitespace variant of a real tenant holds none.
+     * The chunk-row test is a tenant-scoped existence probe ({@link ChunkKeySweep#hasChunkRows}: stops at the first
+     * row, under a short statement bound, reads no content), exact on the tenant string, so a case or whitespace
+     * variant of a real tenant holds none. It is the ONE statement of a root sweep that runs before the intent row:
+     * the registry check comes first so that audit rows are only ever written inside a registered tenant.
      */
     private boolean registered(String tenant) {
         if (TenantConstants.BOOTSTRAP_ANY_TENANT.equals(tenant) || tenant.chars().anyMatch(Character::isISOControl)) {
             return false;
         }
         return TenantConstants.DEFAULT_TENANT.equals(tenant) || tenants.get().contains(tenant)
-            || sweep.rowCount(tenant) > 0;
+            || sweep.hasChunkRows(tenant);
     }
 
     /**

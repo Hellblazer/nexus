@@ -11,13 +11,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenHashing;
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.ChunkKeysAdminHandler;
+import dev.nexus.service.vectors.ChunkKeySweep;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 
+import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.time.OffsetDateTime;
@@ -26,12 +31,13 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The root credential names the target tenant of the retire-keys sweep (the operator path on a cloud whose root token
  * is bound to the default tenant and nothing off-host mints a tenant token), and every sweep a root credential makes is
- * audited: an intent row before the first read, an outcome row after, both failing closed. Through the real service,
+ * audited: an intent row before the sweep reads or changes any chunk row, an outcome row after, both failing closed. Through the real service,
  * its {@code AuthFilter} and a real PostgreSQL, each assertion against rows a superuser reads back. The service runs
  * on the {@code svc_atomic_write_test} role: NOSUPERUSER NOBYPASSRLS and not the owner of the tables, so row-level
  * security binds every sweep here exactly as it binds the product's app role ({@link
@@ -411,7 +417,7 @@ class ChunkKeySweepRootTargetIntegrationTest extends ChunkKeysTestBase {
                 HttpResponse<String> r = sweep(ROOT, body);
                 assertThat(r.statusCode()).as(r.body()).isEqualTo(500);
                 assertThat(json(r).path("reason").asText()).isEqualTo("audit_intent_failed");
-                assertThat(json(r).path("error").asText()).contains("nothing was read or changed");
+                assertThat(json(r).path("error").asText()).contains("no chunk row was read or changed");
             }
         });
 
@@ -535,6 +541,120 @@ class ChunkKeySweepRootTargetIntegrationTest extends ChunkKeysTestBase {
                 DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).dropConstraint("chunks_test_fault").execute();
             }
         }
+    }
+
+    // ---- the registry probe, and a typed database error ---------------------------------------------------------
+
+    /**
+     * A DataSource over {@code real} that records every SQL string prepared on its connections, with the parameters
+     * bound to it, so a test can read the statements a call ran.
+     */
+    private static DataSource recording(DataSource real, List<StringBuilder> log) {
+        return (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(), new Class<?>[] {DataSource.class},
+            (proxy, m, args) -> {
+                Object out = call(m, real, args);
+                if (!"getConnection".equals(m.getName())) return out;
+                return Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[] {Connection.class},
+                    (cp, cm, cargs) -> {
+                        Object r = call(cm, out, cargs);
+                        if (!"prepareStatement".equals(cm.getName())) return r;
+                        StringBuilder entry = new StringBuilder((String) cargs[0]);
+                        log.add(entry);
+                        return Proxy.newProxyInstance(java.sql.PreparedStatement.class.getClassLoader(),
+                            new Class<?>[] {java.sql.PreparedStatement.class}, (pp, pm, pargs) -> {
+                                if (pm.getName().startsWith("set") && pargs != null && pargs.length >= 2) {
+                                    synchronized (entry) {
+                                        entry.append(" | ").append(pargs[1]);
+                                    }
+                                }
+                                return call(pm, r, pargs);
+                            });
+                    });
+            });
+    }
+
+    private static Object call(java.lang.reflect.Method m, Object target, Object[] args) throws Throwable {
+        try {
+            return m.invoke(target, args);
+        } catch (InvocationTargetException e) {
+            throw e.getCause();
+        }
+    }
+
+    @Test
+    void theRegistryProbeStopsAtTheFirstChunkRow_itIsNotACount_andRunsUnderAShortBound() throws Exception {
+        String t = "rt-probe";
+        rowsFor(t, t, 12);   // twelve chunk rows, no service_tokens row
+        List<StringBuilder> sql = new CopyOnWriteArrayList<>();
+        ChunkKeySweep probe = new ChunkKeySweep(new TenantScope(recording(svcDs, sql)), vectors);
+
+        assertThat(probe.hasChunkRows(t)).as("a tenant with rows and no token is found").isTrue();
+        assertThat(probe.hasChunkRows("rt-probe-no-rows")).as("a tenant with none is not").isFalse();
+
+        List<String> all = sql.stream().map(StringBuilder::toString).toList();
+        String chunkSql = String.join("\n", all.stream().filter(q -> q.toLowerCase().contains("chunks")).toList());
+        assertThat(chunkSql).as("the probe read nexus.chunks").isNotBlank();
+        assertThat(chunkSql.toLowerCase()).as("an existence probe, not a count of the tenant's rows")
+            .doesNotContain("count(").contains("exists");
+        assertThat(String.join("\n", all)).as("the statement bound is the probe's short one, not the batch's 120 s")
+            .contains("5000").doesNotContain("120000");
+    }
+
+    @Test
+    void aPoolExhaustedRootSweepKeepsTheTyped503_afterItsOutcomeRowIsWritten() throws Exception {
+        String t = "rt-pool";
+        String col = tenantWithRows(t, 3);
+        ChunkKeysAdminHandler.Audit real = service.chunkKeysAudit();
+        AtomicInteger calls = new AtomicInteger();
+        List<Connection> held = new ArrayList<>();
+        long originalTimeout = svcDs.getConnectionTimeout();
+
+        svcDs.setConnectionTimeout(250);   // the pool's own minimum: an exhausted pool fails fast
+        try {
+            withSink((tenant, row) -> {
+                if (calls.incrementAndGet() == 1) {
+                    long id = real.record(tenant, row);   // the intent goes in
+                    for (int i = 0; i < svcDs.getMaximumPoolSize(); i++) {
+                        try {
+                            held.add(svcDs.getConnection());   // then the pool is taken, so the sweep's borrow times out
+                        } catch (java.sql.SQLException full) {
+                            break;
+                        }
+                    }
+                    return id;
+                }
+                for (Connection c : held) {
+                    try {
+                        c.close();
+                    } catch (java.sql.SQLException ignored) {
+                        // released below by the pool on close
+                    }
+                }
+                held.clear();
+                return real.record(tenant, row);   // the outcome goes in once the pool is free again
+            }, () -> {
+                HttpResponse<String> r = sweep(ROOT, apply("tenant", t));
+
+                assertThat(r.statusCode()).as("the retryable typed answer, not sweep_failed: " + r.body()).isEqualTo(503);
+                assertThat(r.body()).contains("pool exhausted");
+                assertThat(r.body()).doesNotContain("sweep_failed");
+            });
+        } finally {
+            for (Connection c : held) {
+                try {
+                    c.close();
+                } catch (java.sql.SQLException ignored) {
+                    // the pool reclaims it
+                }
+            }
+            svcDs.setConnectionTimeout(originalTimeout);
+        }
+
+        assertThat(calls.get()).as("intent and outcome were both attempted").isEqualTo(2);
+        assertThat(retiredRowCount(t, col)).as("no row was swept").isEqualTo(3);
+        List<AuditRow> audit = auditRows(t);
+        assertThat(audit).hasSize(2);
+        assertThat(audit.get(1).phase()).as("the outcome row records the failure").isEqualTo("failed");
     }
 
     @Test
