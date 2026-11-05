@@ -5422,3 +5422,17 @@ def _suite_runs_inside_the_sensitivity_scope(monkeypatch):
     When a later phase makes the posture change read behaviour (Phase 2 reads exclude under
     ``llm_bound``), a test that reads documents must not inherit this blanket; narrow it then."""
     monkeypatch.setenv("NX_SENSITIVITY_POSTURE", "llm_bound")
+
+
+@pytest.fixture(autouse=True)
+def _no_document_is_sensitive(monkeypatch):
+    """RDR-243 Phase 1 Steps 4b and 4c (nexus-rfvyy.6.14, .6.15): the document gates read the
+    sensitivity flag from the catalog and fail closed when it cannot be read. A test of an extractor,
+    a worker or an enrich verb with a fake LLM has no tenant and no catalog, so every test reads a
+    catalog that holds no sensitive document. A test whose subject is a gate redefines this fixture
+    by name in its own module (it yields without patching) and reads the real catalog:
+    tests/test_aspect_sensitivity_gates.py and tests/test_bib_taxonomy_sensitivity_gates.py."""
+    from nexus import doc_sensitivity  # noqa: PLC0415 — light module; deferred so a collection error stays local to this fixture
+    from tests._doc_sensitivity_fake import NoSensitiveDocuments  # noqa: PLC0415 — as above
+
+    monkeypatch.setattr(doc_sensitivity, "_catalog_reader", NoSensitiveDocuments)

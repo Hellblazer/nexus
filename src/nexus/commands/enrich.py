@@ -27,7 +27,8 @@ import click
 import structlog
 
 from nexus.catalog.membership import unknown_collection_message
-from nexus.sensitivity import bound_to
+from nexus.doc_sensitivity import SensitivityUnknown
+from nexus.sensitivity import SensitiveDocumentRefused, bound_to
 
 _log = structlog.get_logger(__name__)
 
@@ -813,8 +814,12 @@ def run_bib_enrichment(
         for tumbler, (entry, cids) in found.to_look_up.items()
         if tumbler not in chunk_only
     ]
+    # RDR-243 census rows 7 and 8: a sensitive document makes no lookup (the loop below skips it
+    # loudly), so it does not spend the --limit cap meant for API calls.
     if limit > 0:
-        docs_to_process = docs_to_process[:limit]
+        eligible = [d for d in docs_to_process if getattr(d[1], "sensitive", False) is not True]
+        flagged = [d for d in docs_to_process if getattr(d[1], "sensitive", False) is True]
+        docs_to_process = eligible[:limit] + flagged
 
     notes = ""
     if found.untitled:
@@ -846,8 +851,15 @@ def run_bib_enrichment(
     skipped_docs = 0
     by_id_count = 0  # how many documents resolved via DOI / arXiv (nexus-sbzr)
 
+    sensitive_docs = 0  # RDR-243 census row 7: documents never sent to Semantic Scholar or OpenAlex
+    backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
+
     for i, (tumbler, entry, chunk_ids) in enumerate(docs_to_process):
-        if i > 0:
+        # RDR-243 census rows 7 and 8: the flag is the catalog row's own (this listing). A sensitive
+        # document is skipped before any identifier is scanned or any title used, and before the
+        # courtesy delay (no request is made).
+        doc_sensitive = getattr(entry, "sensitive", False) is True
+        if i > 0 and not doc_sensitive:
             time.sleep(delay)
 
         title = entry.title
@@ -858,20 +870,28 @@ def run_bib_enrichment(
         # either the OpenAlex primary path or the DT-CrossRef gap-fill will
         # need them. Sharing the scan keeps the chunk read single-pass.
         ids = None
-        if backend == "openalex" or dt_available:
-            ids = _extract_identifiers_for_title(
-                chunk_ids=chunk_ids, source_paths=title_source_paths, col=col,
+        if doc_sensitive:
+            sensitive_docs += 1
+            _log.info(
+                "enrich_bib_skipped_sensitive", tumbler=tumbler, surface="enrich_bib", collection=collection,
             )
+            click.echo(f"  Skipped {tumbler}: sensitive, not sent to {backend_label}.")
+            bib: dict = {}
+        else:
+            if backend == "openalex" or dt_available:
+                ids = _extract_identifiers_for_title(
+                    chunk_ids=chunk_ids, source_paths=title_source_paths, col=col,
+                )
 
-        bib = _resolve_bib_for_title(
-            title=title,
-            chunk_ids=chunk_ids,
-            source_paths=title_source_paths,
-            col=col,
-            backend=backend,
-            bib_enrich=bib_enrich,
-            ids=ids,
-        )
+            bib = _resolve_bib_for_title(
+                title=title,
+                chunk_ids=chunk_ids,
+                source_paths=title_source_paths,
+                col=col,
+                backend=backend,
+                bib_enrich=bib_enrich,
+                ids=ids,
+            )
         # RDR-139 Layer C: gap-fill still-empty bib_* fields from DT-CrossRef.
         # DT is strictly lowest-precedence — it fills only fields the primary
         # backend left empty/zero and never overwrites a set value. The actual
@@ -883,10 +903,20 @@ def run_bib_enrichment(
             or not all(bib.get(k) for k in ("year", "venue", "authors"))
         ):
             doi = (ids or {}).get("doi") or ""
-            if doi:
+            if doc_sensitive:
+                # RDR-243 census row 8: a DOI would go to CrossRef through DEVONthink. Its own gate,
+                # separate from the Semantic Scholar / OpenAlex one above, and loud.
+                _log.info(
+                    "enrich_dt_crossref_skipped_sensitive",
+                    tumbler=tumbler, surface="dt_crossref_gapfill", collection=collection,
+                )
+                click.echo(f"  skipped DT-CrossRef gap-fill for sensitive {tumbler}")
+            elif doi:
                 dt_bib = _dt_crossref_bib(doi)
                 if dt_bib:
                     bib = _merge_bib_gapfill(bib, dt_bib)
+        if doc_sensitive:
+            continue  # counted in sensitive_docs; neither a lookup miss nor a match
         if bib.get("_resolved_via") in ("doi", "arxiv"):
             by_id_count += 1
             bib = {k: v for k, v in bib.items() if k != "_resolved_via"}
@@ -955,14 +985,14 @@ def run_bib_enrichment(
                 venue=bib.get("venue"),
             )
 
-    backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
     via_id_note = (
         f" ({by_id_count} via DOI/arXiv ID)" if by_id_count else ""
     )
+    sensitive_note = f" {sensitive_docs} sensitive skipped." if sensitive_docs else ""
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across "
         f"{enriched_docs} documents{via_id_note}; "
-        f"{skipped_docs} documents had no {backend_label} match."
+        f"{skipped_docs} documents had no {backend_label} match.{sensitive_note}"
     )
 
     # Auto-generate citation links if the catalog is reachable
@@ -1743,17 +1773,22 @@ def enrich_aspects(
         )
         return
 
+    select_counts: dict[str, int] = {}
     entries = _select_entries(
         collection=collection,
         re_extract=re_extract,
         extract_all=extract_all,
         extractor_version=extractor_version,
+        counts=select_counts,
     )
     if entries is None:  # catalog missing
         return
+    sensitive_note = (
+        f" {select_counts['sensitive']} sensitive skipped." if select_counts.get("sensitive") else ""
+    )
 
     if not entries:
-        click.echo(f"No documents to process in '{collection}'.")
+        click.echo(f"No documents to process in '{collection}'.{sensitive_note}")
         return
 
     # nexus-ow9f: deterministic parsers (parser_fn set, no LLM
@@ -1788,7 +1823,7 @@ def enrich_aspects(
     click.echo(
         f"{len(entries)} document(s) in '{collection}' "
         f"(extractor={extractor_desc}, "
-        f"version={config.model_version}). {cost_str}."
+        f"version={config.model_version}). {cost_str}.{sensitive_note}"
     )
 
     if dry_run:
@@ -1880,9 +1915,14 @@ def _select_entries(
     re_extract: bool,
     extractor_version: str,
     extract_all: bool = False,
+    counts: dict[str, int] | None = None,
 ) -> list | None:
     """Return the catalog entries to process, or None if the catalog
-    is missing (terminal error already echoed)."""
+    is missing (terminal error already echoed).
+
+    RDR-243 census row 5: a sensitive document is dropped here, from the catalog row this
+    listing just read, before any gap-fill filter or cost estimate. ``counts["sensitive"]``
+    receives how many were dropped, for the command's summary."""
     from nexus.aspect_extractor import eligible_extractor_names  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
@@ -1906,6 +1946,22 @@ def _select_entries(
         click.echo(
             f"Skipping {len(non_prose)} non-prose document(s) in {collection} "
             f"(only prose files such as .md, .rst, .adoc and .txt are extracted in docs__)."
+        )
+    # RDR-243 census row 5: a sensitive document is never sent to a model. The flag is the
+    # catalog row's own (this listing), not a T3 chunk's.
+    sensitive_entries = [e for e in entries if getattr(e, "sensitive", False) is True]
+    if sensitive_entries:
+        entries = [e for e in entries if getattr(e, "sensitive", False) is not True]
+        for e in sensitive_entries:
+            _log.info(
+                "aspect_enrich_skipped_sensitive",
+                tumbler=str(getattr(e, "tumbler", "")), surface="enrich_aspects", collection=collection,
+            )
+        if counts is not None:
+            counts["sensitive"] = len(sensitive_entries)
+        click.echo(
+            f"Skipping {len(sensitive_entries)} sensitive document(s) in {collection} "
+            f"(flagged --sensitive; never sent to a model)."
         )
     # nexus-3ygp3: zero catalog rows is a refusal, never "No documents to
     # process" at exit 0 (a bare name select_config prefix-matched but the
@@ -2225,6 +2281,7 @@ def _run_extraction(
     null_fields = 0
     skipped = 0
     skipped_unreadable = 0
+    skipped_sensitive = 0
     write_skipped = 0
     below_floor = 0
     by_reason: dict[str, int] = {}
@@ -2275,14 +2332,36 @@ def _run_extraction(
             # read so --validate-sample can re-fetch the EXACT indexed
             # chunk text the extractor saw (not the raw source bytes).
             lookup_path = _chroma_source_id_for_entry(entry)
-            record = extract_aspects(
-                content="",
-                source_path=source_path,
-                collection=collection,
-                lookup_path=lookup_path,
-                doc_id_lookup=doc_id_lookup,
-                manifest_lookup=manifest_lookup,
-            )
+            try:
+                record = extract_aspects(
+                    content="",
+                    source_path=source_path,
+                    collection=collection,
+                    lookup_path=lookup_path,
+                    doc_id_lookup=doc_id_lookup,
+                    manifest_lookup=manifest_lookup,
+                )
+            except SensitiveDocumentRefused as refused:
+                # The flag landed after selection (or the entry lacked it): the extractor's own
+                # gate refused. Counted, never aborting the run.
+                skipped_sensitive += 1
+                _log.info(
+                    "aspect_enrich_skipped_sensitive",
+                    tumbler=refused.tumbler, surface="enrich_aspects", collection=collection,
+                )
+                click.echo(f"  [{i}/{len(entries)}] {Path(source_path).name}: skipped (sensitive)")
+                continue
+            except SensitivityUnknown as unknown:
+                skipped += 1
+                _log.warning(
+                    "aspect_enrich_sensitivity_unknown",
+                    source_path=source_path, collection=collection, error=unknown.detail,
+                )
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    "skipped (the catalog could not say whether it is sensitive)"
+                )
+                continue
             if record is None:
                 # Defensive — select_config already passed at the parent
                 # level, so this branch should not fire under Phase 1.
@@ -2413,6 +2492,8 @@ def _run_extraction(
         f"{write_skipped} skipped (write-failure), "
         f"{skipped} skipped (other)"
     )
+    if skipped_sensitive:
+        summary += f", {skipped_sensitive} sensitive skipped"
     if by_reason:
         reasons_str = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
         summary += f". by_reason: {reasons_str}"
@@ -2511,6 +2592,21 @@ def _run_validation_sample(
     # cheap to rebuild here so validation is self-contained.
     doc_id_lookup = _build_catalog_doc_id_lookup()
     manifest_lookup = _build_catalog_manifest_lookup()
+
+    # RDR-243 census row 6: the sample frame is the ELIGIBLE documents, so a sensitive document
+    # is never drawn and the sample size is a share of the documents that can be verified. The
+    # flag is the catalog row's. A catalog that cannot answer validates nothing.
+    try:
+        extracted = _eligible_sample_frame(extracted, collection=collection, doc_id_lookup=doc_id_lookup)
+    except SensitivityUnknown as exc:
+        _log.warning(
+            "validate_sample_sensitivity_unknown", collection=collection, surface="validate_sample", error=exc.detail,
+        )
+        click.echo("Validation skipped: the catalog could not say which documents are sensitive.")
+        return
+    if not extracted:
+        click.echo("Validation skipped: no eligible (non-sensitive) extractions to sample.")
+        return
 
     sample_count = max(1, len(extracted) * sample_pct // 100)
     sample_count = min(sample_count, len(extracted))
@@ -2765,6 +2861,36 @@ def _validation_paths(validation_out: str, validation_all_out: str) -> tuple[Pat
             "need separate paths."
         )
     return failures, all_out
+
+
+def _eligible_sample_frame(
+    extracted: list[tuple[str, object, str]],
+    *,
+    collection: str,
+    doc_id_lookup: Callable[[str, str], str] | None,
+) -> list[tuple[str, object, str]]:
+    """*extracted* without the documents the catalog says are sensitive (RDR-243 census row 6).
+
+    The tumbler is the record's own ``doc_id`` when it carries one, else the catalog projection's
+    answer for its source. One batched catalog read. Raises ``SensitivityUnknown``."""
+    from nexus import doc_sensitivity  # noqa: PLC0415 — command-local import; deferred to the validation path
+
+    tumblers = [
+        str(getattr(record, "doc_id", "") or _document_tumbler(doc_id_lookup, collection, lookup_path or source_path) or "")
+        for source_path, record, lookup_path in extracted
+    ]
+    flagged = doc_sensitivity.flagged(tumblers)
+    if not flagged:
+        return list(extracted)
+    kept: list[tuple[str, object, str]] = []
+    for item, tumbler in zip(extracted, tumblers):
+        if tumbler in flagged:
+            _log.info(
+                "validate_sample_skipped_sensitive", tumbler=tumbler, surface="validate_sample", collection=collection,
+            )
+        else:
+            kept.append(item)
+    return kept
 
 
 def _document_tumbler(

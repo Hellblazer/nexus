@@ -6966,11 +6966,16 @@ def _run_index(
                 return
             _t_aspect = time.monotonic()
             try:
+                from nexus.aspect_worker import sensitive_enqueue_filter  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
                 from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
-                t2_index_write(
-                    lambda t2: t2.aspect_queue.enqueue_many(rows),
-                    op="aspect_enqueue",
-                )
+                # RDR-243 census row 1: a sensitive document is never queued. The catalog row is
+                # read here, before the enqueue; a read that fails raises into the handler below.
+                rows = sensitive_enqueue_filter(rows)
+                if rows:
+                    t2_index_write(
+                        lambda t2: t2.aspect_queue.enqueue_many(rows),
+                        op="aspect_enqueue",
+                    )
             except Exception as _enq_exc:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
                 _log.warning(
                     "aspect_enqueue_many_batch_failed",

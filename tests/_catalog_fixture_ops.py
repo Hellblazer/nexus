@@ -51,6 +51,7 @@ def register_real_doc_id(
     title: str = "aspect fixture doc",
     physical_collection: str = "knowledge__delos",
     owner_name: str = "test-aspect-fixture-owner",
+    source_uri: str = "",
 ) -> str:
     """Register a real ``catalog_documents`` row and return its tumbler.
 
@@ -80,6 +81,7 @@ def register_real_doc_id(
             owner, title,
             content_type="paper",
             physical_collection=physical_collection,
+            source_uri=source_uri,
         )
     return str(tumbler)
 
