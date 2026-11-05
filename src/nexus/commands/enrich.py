@@ -3368,12 +3368,11 @@ def _enrich_aspects_delete_tumbler(tumbler: str, *, yes: bool) -> None:
     ``(collection, source_path)`` through the same routed write the positional form uses. Idempotent: no row
     prints a notice and exits 0. A task still waiting in the aspect queue is NOT removed here.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
-    with T2Database(default_db_path()) as db:  # boundary-allow: read-only lookup by tumbler (nexus-rfvyy.6.17)
-        row = db.document_aspects.get_by_doc_id(tumbler)
+    # The lookup goes through the shared service T2 handle too: a second T2Database construction here would
+    # be a new storage-boundary violation (tests/test_storage_boundary_lint.py).
+    row = t2_index_write(lambda db: db.document_aspects.get_by_doc_id(tumbler))
     if row is None:
         click.echo(f"No aspect row for document {tumbler} — nothing to delete.")
         return
