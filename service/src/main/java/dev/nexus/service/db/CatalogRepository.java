@@ -873,7 +873,9 @@ public final class CatalogRepository {
             // nexus-rfvyy.6.24: a row this statement inserted (not updated) inherits from a sensitive tombstone
             // of its source_uri.
             if (Boolean.TRUE.equals(written.get(0).value2())) {
-                inheritIntoFreshRows(ctx, tenant, java.util.Map.of(s(d, "tumbler"), sourceUriOf(d)), SENS_REASON_UPSERT_INHERIT);
+                auditFreshRows(ctx, tenant, java.util.Map.of(s(d, "tumbler"), sourceUriOf(d)),
+                    incomingSensitive ? java.util.Set.of(s(d, "tumbler")) : java.util.Set.of(),
+                    SENS_REASON_UPSERT_INHERIT, SENS_REASON_UPSERT_SET);
             }
             return null;
         }));
@@ -1264,14 +1266,15 @@ public final class CatalogRepository {
                 return new RegisterOutcome(winner.value1(), false);
             }
             // nexus-rfvyy.6.23 (Sam 2026-11-05): a fresh row born flagged is audited too, so a later clear shows
-            // the set that preceded it. One row either way (the flag changes once): the request is the reason
-            // when it asked, else the inheritance names its predecessor. Actor 'engine': this repository call
-            // has no caller principal in scope (see SENS_ACTOR_ENGINE).
-            if (requestedSensitive) {
-                recordSensitivityChange(ctx, tenant, tumbler, false, true, SENS_REASON_REGISTER_SET);
-            } else if (inherited) {
+            // the set that preceded it. One row either way (the flag changes once): the inheritance names its
+            // predecessor when there is one (it takes precedence, as for upsert and import), else the request
+            // is the reason. Actor 'engine': this repository call has no caller principal in scope (see
+            // SENS_ACTOR_ENGINE).
+            if (inherited) {
                 recordSensitivityChange(ctx, tenant, tumbler, false, true,
                     SENS_REASON_REGISTER_INHERIT + " predecessor=" + predecessor.tumbler());
+            } else if (requestedSensitive) {
+                recordSensitivityChange(ctx, tenant, tumbler, false, true, SENS_REASON_REGISTER_SET);
             }
             return new RegisterOutcome(tumbler, true);
         }));
@@ -1479,7 +1482,7 @@ public final class CatalogRepository {
                     out[idx] = tumbler;
                     Predecessor pred = uriOf[idx].isEmpty() ? null : predecessorOf.get(uriOf[idx]);
                     boolean rowSensitive = wantsSensitive[idx] || (pred != null && pred.sensitive());
-                    if (pred != null && pred.sensitive() && !wantsSensitive[idx]) inheritedBy.put(idx, pred);
+                    if (pred != null && pred.sensitive()) inheritedBy.put(idx, pred);
                     // Tentative: this row's own INSERT is about to run. Only
                     // non-empty source_uri rows can lose the cross-transaction
                     // race below (see the TOCTOU backstop comment ahead), so
@@ -1589,9 +1592,9 @@ public final class CatalogRepository {
                     }
                 }
                 // nexus-rfvyy.6.23: a row born flagged by its request is audited as register_set (one row per row;
-                // the request wins over an inheritance, see the single path).
+                // a row that also inherited was audited as the inheritance above, which takes precedence).
                 for (int idx : newIdx) {
-                    if (created[idx] && wantsSensitive[idx]) {
+                    if (created[idx] && wantsSensitive[idx] && !inheritedBy.containsKey(idx)) {
                         recordSensitivityChange(ctx, tenant, out[idx], false, true, SENS_REASON_REGISTER_SET);
                     }
                 }
@@ -12440,13 +12443,18 @@ public final class CatalogRepository {
                       .fetch();
                 raiseWrittenRows(ctx, tenant, batch.stream()
                     .filter(CatalogRepository::sensitiveFlag).map(d -> s(d, "tumbler")).toList(), SENS_REASON_IMPORT_RAISE);
-                // nexus-rfvyy.6.24: the rows this statement inserted (not updated) inherit from a sensitive
-                // tombstone of their source_uri.
+                // nexus-rfvyy.6.24 / .6.23: the rows this statement inserted (not updated) inherit from a sensitive
+                // tombstone of their source_uri, and one born flagged by its request gets its first audit row.
                 var insertedTumblers = new java.util.HashSet<String>();
                 for (var r : written) if (Boolean.TRUE.equals(r.value2())) insertedTumblers.add(r.value1());
                 var freshUris = new java.util.LinkedHashMap<String, String>();
-                for (var d : batch) if (insertedTumblers.contains(s(d, "tumbler"))) freshUris.put(s(d, "tumbler"), sourceUriOf(d));
-                inheritIntoFreshRows(ctx, tenant, freshUris, SENS_REASON_IMPORT_INHERIT);
+                var freshFlagged = new java.util.HashSet<String>();
+                for (var d : batch) {
+                    if (!insertedTumblers.contains(s(d, "tumbler"))) continue;
+                    freshUris.put(s(d, "tumbler"), sourceUriOf(d));
+                    if (sensitiveFlag(d)) freshFlagged.add(s(d, "tumbler"));
+                }
+                auditFreshRows(ctx, tenant, freshUris, freshFlagged, SENS_REASON_IMPORT_INHERIT, SENS_REASON_IMPORT_SET);
             }
             return rows.size();
         });
@@ -12509,7 +12517,9 @@ public final class CatalogRepository {
             // nexus-rfvyy.6.24: a row this statement inserted (not updated) inherits from a sensitive tombstone
             // of its source_uri.
             if (Boolean.TRUE.equals(written.get(0).value2())) {
-                inheritIntoFreshRows(ctx, tenant, java.util.Map.of(s(d, "tumbler"), sourceUriOf(d)), SENS_REASON_IMPORT_INHERIT);
+                auditFreshRows(ctx, tenant, java.util.Map.of(s(d, "tumbler"), sourceUriOf(d)),
+                    incomingSensitive ? java.util.Set.of(s(d, "tumbler")) : java.util.Set.of(),
+                    SENS_REASON_IMPORT_INHERIT, SENS_REASON_IMPORT_SET);
             }
         }
     }
@@ -12963,6 +12973,9 @@ public final class CatalogRepository {
     /** nexus-rfvyy.6.24: a fresh upsert / import row took the flag from a sensitive tombstone of its source_uri. */
     static final String SENS_REASON_UPSERT_INHERIT = "upsert_inherit";
     static final String SENS_REASON_IMPORT_INHERIT = "import_inherit";
+    /** nexus-rfvyy.6.23: a fresh upsert / import row born flagged by its own request (first audit row). */
+    static final String SENS_REASON_UPSERT_SET = "upsert_set";
+    static final String SENS_REASON_IMPORT_SET = "import_set";
     static final String SENS_REASON_MERGE = "merge";
     /** nexus-rfvyy.6.6: upsert (POST /register with a tumbler) raised a stored, plain row. */
     static final String SENS_REASON_UPSERT_RAISE = "upsert_raise";
@@ -13060,20 +13073,34 @@ public final class CatalogRepository {
      * like the registration inherit, the reason naming the predecessor. Same rule as {@code registerDocument}
      * and the same delete-then-re-index protection: without it a delete followed by an upsert or import of the
      * same URI would come back plain. Only inserted rows pass in; an updated row keeps its own flag. A row with
-     * an empty source URI has no predecessor identity and inherits nothing. The raise is
-     * {@link #raiseSensitivity} (the new row is live), so a row already flagged by its request is a no-op.
+     * an empty source URI has no predecessor identity and inherits nothing.
+     *
+     * <p>nexus-rfvyy.6.23 (Sam 2026-11-05, "every flagged document gets a first audit row"): a fresh row that is
+     * sensitive also gets its first audit row when its own request set the flag ({@code bornFlagged}), reason
+     * {@code setReason}. One row per row, the flag changing once: when the row also has a sensitive predecessor
+     * the inheritance names why (inheritance takes precedence). A request-flagged row is already true when
+     * this runs, so its row is written directly (the row is this transaction's own uncommitted insert, so no
+     * other writer can have moved the flag); a row that only inherits is raised through
+     * {@link #raiseSensitivity}.
      *
      * @param freshSourceUriByTumbler the rows the statement inserted, tumbler to canonical source URI
+     * @param bornFlagged             the tumblers among them whose request carried {@code sensitive = true}
      */
-    private static void inheritIntoFreshRows(DSLContext ctx, String tenant,
-                                             java.util.Map<String, String> freshSourceUriByTumbler, String reason) {
+    private static void auditFreshRows(DSLContext ctx, String tenant,
+                                       java.util.Map<String, String> freshSourceUriByTumbler,
+                                       java.util.Set<String> bornFlagged, String inheritReason, String setReason) {
         List<String> uris = freshSourceUriByTumbler.values().stream().filter(u -> !u.isEmpty()).distinct().toList();
-        if (uris.isEmpty()) return;
-        var predecessors = mostRecentTombstonedMany(ctx, tenant, uris);
+        var predecessors = uris.isEmpty() ? java.util.Map.<String, Predecessor>of()
+            : mostRecentTombstonedMany(ctx, tenant, uris);
         for (var e : freshSourceUriByTumbler.entrySet()) {
             Predecessor pred = e.getValue().isEmpty() ? null : predecessors.get(e.getValue());
+            boolean flagged = bornFlagged.contains(e.getKey());
             if (pred != null && pred.sensitive()) {
-                raiseSensitivity(ctx, tenant, List.of(e.getKey()), reason + " predecessor=" + pred.tumbler());
+                String why = inheritReason + " predecessor=" + pred.tumbler();
+                if (flagged) recordSensitivityChange(ctx, tenant, e.getKey(), false, true, why);
+                else raiseSensitivity(ctx, tenant, List.of(e.getKey()), why);
+            } else if (flagged) {
+                recordSensitivityChange(ctx, tenant, e.getKey(), false, true, setReason);
             }
         }
     }
