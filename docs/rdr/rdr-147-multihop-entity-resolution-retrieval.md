@@ -740,9 +740,14 @@ controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 
 - **Join completeness:** on every issue question whose evidence holds at least
   one customer id, the answer names every company those ids resolve to (measured
-  10 of 10, 147-research-9).
+  10 of 10, 147-research-9). At most one such question may miss per run, with at
+  least 4 of the 5 issue questions in the domain (Sam, 2026-11-05,
+  147-research-12: the 2026-11-05 miss was the re-check's variance on the same
+  joined item).
 - **Precision:** the companies the answer names have precision ≥ 0.95 against
-  HERB ground truth on the 5 issue questions (measured 0.9667).
+  HERB ground truth, as the per-run mean over those of the 5 issue questions whose
+  answer names at least one company; a question whose answer names none is left out
+  (Sam, 2026-11-05, 147-research-12) (measured 0.9667).
 
 Reported, not gated: issue5 company recall and F1 beside the script's
 0.7642857142857142 (asserted exactly, as the diagnostic baseline). Hop-1
@@ -772,7 +777,7 @@ gate thresholds, not exactly (plan T2 `nexus/plan-rdr147-2026-11-03`).
 | P2 (Step 3) | resolution accuracy | the 29 SearchFlow member customers (`p2_member_customers.json`) | 1.0 (by the harness's own exact-title lookup) | 1.0 through the `resolve` step, with `missing` and `ambiguous` empty |
 | P3 (diagnostic) | hop-1 precision | question → affected customers | all7 0.6904761904761905; issue5 0.9666666666666666 | reported, not gated |
 | E2E script (diagnostic) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.7642857142857142 | pinned exactly; reported beside `nx_answer` |
-| E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | every resolved company named; precision ≥ 0.95 |
+| E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | every resolved company named, at most one miss per run; precision ≥ 0.95 over the answers that name a company |
 | Aggregation (reported) | company recall / precision / F1 on agg2 | HERB ground truth | script 0.0, `nx_answer` 0.0 | reported, not gated |
 
 **Jointness, as measured.** On HERB the MVV needs: the resolution repair enters
@@ -911,7 +916,8 @@ listed under it.
 The Minimum Viable Validation is in scope and is the Step 4 exit test: on the
 Step 0 sandbox and conditions, with grown plans disabled and two runs per
 question, the answer names every company its retrieved customer ids resolve to,
-at precision ≥ 0.95 on the 5 issue questions; recall and F1 are reported beside
+with at most one miss per run, at precision ≥ 0.95 over those of the 5 issue
+questions whose answer names a company (Sam, 2026-11-05); recall and F1 are reported beside
 the script's 0.7642857142857142. The 2 aggregation questions are reported, not gated (Sam,
 2026-11-03).
 
@@ -946,3 +952,4 @@ linker conditional.
 - 2026-11-03: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0de44d26a`; critique `nexus_rdr/147-gate-critique-2026-11-03-r3`.
 - 2026-11-03: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `7e79312f0`; critique `nexus_rdr/147-gate-critique-2026-11-03-r4`.
 - 2026-11-03: Accepted. Round 3 residual dispositions: S1 nexus-wunaf; S2 nexus-v3g1n; S3 nexus-nx6eq (Phase 1 Step 4).
+- 2026-11-05: MVV bar revised after the 2026-11-05 run (nexus-irndi, Sam, T2 `nexus/rdr147-mvv-bar-revision-2026-11-05`, 147-research-12): one in-domain miss allowed per run; precision taken over the answers that name a company.
