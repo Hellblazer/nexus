@@ -1712,6 +1712,36 @@ _LABEL_SCHEMA: dict = {
 }
 
 
+def _topics_with_sensitive_members(taxonomy: Any, topics: list[dict[str, Any]]) -> set[int]:
+    """Ids of the *topics* that hold a chunk of a sensitive document (RDR-243 census rows 9 and 10).
+
+    Topic members are chunk chashes. The catalog is asked once per collection for its sensitive
+    documents' chunks (a handful), and only a collection that has any has its topics' members read.
+    A topic with a sensitive member is not sent to a model at all: its terms come from, and its
+    sample names point at, the sensitive document's text. Raises
+    :class:`~nexus.doc_sensitivity.SensitivityUnknown` when the catalog cannot say.
+
+    Residual: a sensitive chunk of ANOTHER collection projected into this collection's topic
+    (cross-collection ``project_against`` assignments) is not found, because only the topic's own
+    collection is listed."""
+    from nexus import doc_sensitivity  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    ids_by_collection: dict[str, list[int]] = {}
+    for topic in topics:
+        ids_by_collection.setdefault(topic.get("collection", "") or "", []).append(topic["id"])
+    flagged: set[int] = set()
+    for collection, topic_ids in ids_by_collection.items():
+        if not collection:
+            continue
+        chashes = doc_sensitivity.sensitive_chashes(collection)
+        if not chashes:
+            continue
+        for topic_id in topic_ids:
+            if chashes.intersection(taxonomy.get_all_topic_doc_ids(topic_id)):
+                flagged.add(topic_id)
+    return flagged
+
+
 async def _generate_labels_batch(
     items: list[tuple[list[str], list[str]]],
     glossary_text: str = "",
@@ -2155,6 +2185,38 @@ def _review_auto(
 
     click.echo(f"Auto-reviewing {len(topics)} topic(s) in batches of {batch_size}...")
 
+    # RDR-243 census row 10: a topic with a sensitive member is not sent to the model and stays
+    # pending (as does every topic when the catalog cannot say).
+    from nexus.doc_sensitivity import SensitivityUnknown  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    try:
+        sensitive_topic_ids = _topics_with_sensitive_members(db.taxonomy, topics)
+    except SensitivityUnknown as exc:
+        _log.warning(
+            "taxonomy_review_sensitivity_unknown", surface="taxonomy_review_auto", collection=collection,
+            error=exc.detail,
+        )
+        click.echo(
+            "Review skipped: the catalog could not say which topics hold a sensitive document, "
+            "so no topic was sent to a model.",
+            err=True,
+        )
+        return
+    for t in topics:
+        if t["id"] in sensitive_topic_ids:
+            _log.info(
+                "taxonomy_review_skipped_sensitive",
+                topic_id=t["id"], surface="taxonomy_review_auto", collection=t.get("collection", ""),
+            )
+    if sensitive_topic_ids:
+        click.echo(
+            f"{len(sensitive_topic_ids)} skipped (sensitive member): topic id(s) "
+            f"{', '.join(str(i) for i in sorted(sensitive_topic_ids))} stay pending."
+        )
+        topics = [t for t in topics if t["id"] not in sensitive_topic_ids]
+        if not topics:
+            return
+
     cache = _load_review_cache(db, collection)
 
     parsed_terms: dict[int, list[str]] = {}
@@ -2500,6 +2562,37 @@ def relabel_topics(
 
     if not topics:
         return 0
+
+    # RDR-243 census row 9: a topic with a sensitive member keeps its terms label and is never
+    # sent to the model. A catalog that cannot say sends nothing.
+    from nexus.doc_sensitivity import SensitivityUnknown  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    try:
+        sensitive_topic_ids = _topics_with_sensitive_members(taxonomy, topics)
+    except SensitivityUnknown as exc:
+        _log.warning(
+            "taxonomy_label_sensitivity_unknown", surface="taxonomy_label", collection=collection, error=exc.detail,
+        )
+        click.echo(
+            "Labeling skipped: the catalog could not say which topics hold a sensitive document, "
+            "so no topic was sent to a model.",
+            err=True,
+        )
+        return 0
+    for topic in topics:
+        if topic["id"] in sensitive_topic_ids:
+            _log.info(
+                "taxonomy_label_skipped_sensitive",
+                topic_id=topic["id"], surface="taxonomy_label", collection=topic.get("collection", ""),
+            )
+    if sensitive_topic_ids:
+        _progress(
+            f"    {len(sensitive_topic_ids)} topic(s) hold a sensitive document: "
+            "not sent to a model, terms label kept"
+        )
+        topics = [t for t in topics if t["id"] not in sensitive_topic_ids]
+        if not topics:
+            return 0
 
     # Prepare work items: (topic_id, terms, doc_ids)
     work: list[tuple[int, str, list[str], list[str]]] = []

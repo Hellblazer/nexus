@@ -814,8 +814,12 @@ def run_bib_enrichment(
         for tumbler, (entry, cids) in found.to_look_up.items()
         if tumbler not in chunk_only
     ]
+    # RDR-243 census rows 7 and 8: a sensitive document makes no lookup (the loop below skips it
+    # loudly), so it does not spend the --limit cap meant for API calls.
     if limit > 0:
-        docs_to_process = docs_to_process[:limit]
+        eligible = [d for d in docs_to_process if getattr(d[1], "sensitive", False) is not True]
+        flagged = [d for d in docs_to_process if getattr(d[1], "sensitive", False) is True]
+        docs_to_process = eligible[:limit] + flagged
 
     notes = ""
     if found.untitled:
@@ -847,8 +851,15 @@ def run_bib_enrichment(
     skipped_docs = 0
     by_id_count = 0  # how many documents resolved via DOI / arXiv (nexus-sbzr)
 
+    sensitive_docs = 0  # RDR-243 census row 7: documents never sent to Semantic Scholar or OpenAlex
+    backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
+
     for i, (tumbler, entry, chunk_ids) in enumerate(docs_to_process):
-        if i > 0:
+        # RDR-243 census rows 7 and 8: the flag is the catalog row's own (this listing). A sensitive
+        # document is skipped before any identifier is scanned or any title used, and before the
+        # courtesy delay (no request is made).
+        doc_sensitive = getattr(entry, "sensitive", False) is True
+        if i > 0 and not doc_sensitive:
             time.sleep(delay)
 
         title = entry.title
@@ -859,20 +870,28 @@ def run_bib_enrichment(
         # either the OpenAlex primary path or the DT-CrossRef gap-fill will
         # need them. Sharing the scan keeps the chunk read single-pass.
         ids = None
-        if backend == "openalex" or dt_available:
-            ids = _extract_identifiers_for_title(
-                chunk_ids=chunk_ids, source_paths=title_source_paths, col=col,
+        if doc_sensitive:
+            sensitive_docs += 1
+            _log.info(
+                "enrich_bib_skipped_sensitive", tumbler=tumbler, surface="enrich_bib", collection=collection,
             )
+            click.echo(f"  Skipped {tumbler}: sensitive, not sent to {backend_label}.")
+            bib: dict = {}
+        else:
+            if backend == "openalex" or dt_available:
+                ids = _extract_identifiers_for_title(
+                    chunk_ids=chunk_ids, source_paths=title_source_paths, col=col,
+                )
 
-        bib = _resolve_bib_for_title(
-            title=title,
-            chunk_ids=chunk_ids,
-            source_paths=title_source_paths,
-            col=col,
-            backend=backend,
-            bib_enrich=bib_enrich,
-            ids=ids,
-        )
+            bib = _resolve_bib_for_title(
+                title=title,
+                chunk_ids=chunk_ids,
+                source_paths=title_source_paths,
+                col=col,
+                backend=backend,
+                bib_enrich=bib_enrich,
+                ids=ids,
+            )
         # RDR-139 Layer C: gap-fill still-empty bib_* fields from DT-CrossRef.
         # DT is strictly lowest-precedence — it fills only fields the primary
         # backend left empty/zero and never overwrites a set value. The actual
@@ -884,10 +903,20 @@ def run_bib_enrichment(
             or not all(bib.get(k) for k in ("year", "venue", "authors"))
         ):
             doi = (ids or {}).get("doi") or ""
-            if doi:
+            if doc_sensitive:
+                # RDR-243 census row 8: a DOI would go to CrossRef through DEVONthink. Its own gate,
+                # separate from the Semantic Scholar / OpenAlex one above, and loud.
+                _log.info(
+                    "enrich_dt_crossref_skipped_sensitive",
+                    tumbler=tumbler, surface="dt_crossref_gapfill", collection=collection,
+                )
+                click.echo(f"  skipped DT-CrossRef gap-fill for sensitive {tumbler}")
+            elif doi:
                 dt_bib = _dt_crossref_bib(doi)
                 if dt_bib:
                     bib = _merge_bib_gapfill(bib, dt_bib)
+        if doc_sensitive:
+            continue  # counted in sensitive_docs; neither a lookup miss nor a match
         if bib.get("_resolved_via") in ("doi", "arxiv"):
             by_id_count += 1
             bib = {k: v for k, v in bib.items() if k != "_resolved_via"}
@@ -956,14 +985,14 @@ def run_bib_enrichment(
                 venue=bib.get("venue"),
             )
 
-    backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
     via_id_note = (
         f" ({by_id_count} via DOI/arXiv ID)" if by_id_count else ""
     )
+    sensitive_note = f" {sensitive_docs} sensitive skipped." if sensitive_docs else ""
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across "
         f"{enriched_docs} documents{via_id_note}; "
-        f"{skipped_docs} documents had no {backend_label} match."
+        f"{skipped_docs} documents had no {backend_label} match.{sensitive_note}"
     )
 
     # Auto-generate citation links if the catalog is reachable

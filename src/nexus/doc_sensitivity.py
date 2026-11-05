@@ -32,6 +32,7 @@ __all__ = [
     "flagged",
     "is_sensitive",
     "refuse_if_sensitive",
+    "sensitive_chashes",
     "sensitive_tumbler_for_uri",
     "tumbler_for_path",
 ]
@@ -138,3 +139,24 @@ def sensitive_tumbler_for_uri(uri: str, *, cat: Any = None) -> str:
     if entry is not None and _entry_flag(entry):
         return str(getattr(entry, "tumbler", "") or "")
     return ""
+
+
+def sensitive_chashes(collection: str, *, cat: Any = None) -> set[str]:
+    """The chash of every chunk a SENSITIVE live document of *collection* names in its manifest.
+
+    The taxonomy gates ask which topics hold a sensitive member; topic members are chunk chashes,
+    not tumblers. A collection holds few sensitive documents, so this reads the collection's catalog
+    listing once and the manifests of the flagged documents only, never the owners of every member.
+    A chunk shared with a plain document counts: the shared row cannot be told apart. Raises
+    :class:`SensitivityUnknown` when the catalog cannot be read."""
+    try:
+        cat = cat if cat is not None else _catalog_reader()
+        if cat is None:
+            raise RuntimeError("no catalog reader")
+        tumblers = [str(e.tumbler) for e in cat.list_by_collection(collection, limit=1_000_000) if _entry_flag(e)]
+        if not tumblers:
+            return set()
+        manifests = cat.get_manifests(tumblers)
+        return {m.chash for rows in manifests.values() for m in rows if m.collection in (collection, None)}
+    except Exception as exc:  # noqa: BLE001 — see flagged()
+        raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
