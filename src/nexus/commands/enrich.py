@@ -3270,8 +3270,16 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
 
 
 @enrich.command(name="delete")
-@click.argument("collection")
+@click.argument("collection", required=False, default="")
 @click.argument("source_path", required=False, default="")
+@click.option(
+    "--tumbler", "tumbler", default="", metavar="T",
+    help=(
+        "RDR-243 (nexus-rfvyy.6.17): remove the aspect row of the document with this catalog tumbler, "
+        "whatever its collection (the remedy `nx catalog doctor --sensitive-with-aspects` prints). "
+        "Takes no COLLECTION, SOURCE_PATH or --all. A task still queued for the document is not removed here."
+    ),
+)
 @click.option(
     "--all", "delete_all",
     is_flag=True,
@@ -3291,7 +3299,7 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
     help="Skip the confirmation prompt.",
 )
 def enrich_aspects_delete(
-    collection: str, source_path: str, delete_all: bool, no_dry_run: bool, yes: bool,
+    collection: str, source_path: str, tumbler: str, delete_all: bool, no_dry_run: bool, yes: bool,
 ) -> None:
     """Remove one aspect row by (COLLECTION, SOURCE_PATH), or every row in
     COLLECTION with --all.
@@ -3308,6 +3316,13 @@ def enrich_aspects_delete(
     reports the row count and writes nothing. Pass ``--no-dry-run
     --yes`` (or answer the confirmation prompt) to actually delete.
     """
+    if tumbler:
+        if collection or source_path or delete_all:
+            raise click.UsageError("--tumbler takes no COLLECTION, SOURCE_PATH or --all.")
+        _enrich_aspects_delete_tumbler(tumbler, yes=yes)
+        return
+    if not collection:
+        raise click.UsageError("Pass COLLECTION (with SOURCE_PATH or --all), or --tumbler T.")
     if delete_all and source_path:
         raise click.UsageError("Pass either SOURCE_PATH or --all, not both.")
     if not delete_all and not source_path:
@@ -3344,6 +3359,32 @@ def enrich_aspects_delete(
             f"No aspect row for ({collection!r}, "
             f"{source_path!r}) — nothing to delete."
         )
+
+
+def _enrich_aspects_delete_tumbler(tumbler: str, *, yes: bool) -> None:
+    """RDR-243 (nexus-rfvyy.6.17): remove the one aspect row whose ``doc_id`` is *tumbler*.
+
+    The row is found by tumbler (``document_aspects.doc_id``), then deleted at its own
+    ``(collection, source_path)`` through the same routed write the positional form uses. Idempotent: no row
+    prints a notice and exits 0. A task still waiting in the aspect queue is NOT removed here.
+    """
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    # The lookup goes through the shared service T2 handle too: a second T2Database construction here would
+    # be a new storage-boundary violation (tests/test_storage_boundary_lint.py).
+    row = t2_index_write(lambda db: db.document_aspects.get_by_doc_id(tumbler))
+    if row is None:
+        click.echo(f"No aspect row for document {tumbler} — nothing to delete.")
+        return
+    if not yes:
+        click.confirm(
+            f"Delete the aspect row of {tumbler} ({row.collection!r}, {row.source_path!r})?", abort=True,
+        )
+    deleted = t2_index_write(lambda db: db.document_aspects.delete(row.collection, row.source_path))
+    if deleted:
+        click.echo(f"Deleted aspect row for {tumbler} ({row.collection!r}, {row.source_path!r}).")
+    else:
+        click.echo(f"The aspect row for {tumbler} was already gone — nothing to delete.")
 
 
 def _enrich_aspects_delete_all(collection: str, *, dry_run: bool, yes: bool) -> None:

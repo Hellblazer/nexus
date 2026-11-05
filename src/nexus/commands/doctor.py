@@ -2772,8 +2772,30 @@ def _stale_mineru_server() -> str | None:
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
     "index-failures", "fanout-floor", "ghost-sweep", "harness-grant",
-    "docs-aspects-config",
+    "docs-aspects-config", "sensitive-in-aspect-eligible", "sensitive-with-aspects",
 )
+
+
+def _run_check_sensitive_in_aspect_eligible() -> None:
+    """RDR-243 (nexus-rfvyy.6.17): WARN for a sensitive document whose collection has an aspect extractor or
+    aspect rows. The verdicts and wording are :mod:`nexus.catalog.sensitivity_doctor`'s, shared with ``nx
+    catalog doctor --sensitive-in-aspect-eligible``. Not applicable, never a pass, on a tenant with no
+    sensitive document (nexus-7zhag); never gates (a supplementary row prints and does not raise Exit)."""
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    for line in sd.render_text(sd.check_sensitive_in_aspect_eligible()):
+        click.echo(line)
+
+
+def _run_check_sensitive_with_aspects() -> None:
+    """RDR-243 (nexus-rfvyy.6.17): FAIL row for a sensitive document that already has an aspect row or a
+    queued task, with the ``nx enrich delete --tumbler`` remedy per document. As a supplementary row it
+    prints its FAIL and does not change the sweep's exit code; ``nx catalog doctor
+    --sensitive-with-aspects`` is the gating surface."""
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    for line in sd.render_text(sd.check_sensitive_with_aspects()):
+        click.echo(line)
 
 
 def _run_check_docs_aspects_config() -> None:
@@ -2869,6 +2891,8 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
         "ghost-sweep": _run_check_ghost_sweep,
         "harness-grant": _run_check_harness_grant,
         "docs-aspects-config": _run_check_docs_aspects_config,
+        "sensitive-in-aspect-eligible": _run_check_sensitive_in_aspect_eligible,
+        "sensitive-with-aspects": _run_check_sensitive_with_aspects,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
