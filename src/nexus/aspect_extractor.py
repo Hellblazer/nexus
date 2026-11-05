@@ -106,13 +106,15 @@ from nexus.aspect_readers import ReadFail, ReadOk, file_uri_path, note_uri, read
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 from nexus.operators.dispatch import _write_prompt_file
-from nexus.sensitivity import assert_llm_bound
+from nexus import doc_sensitivity
+from nexus.sensitivity import assert_llm_bound, current_surface
 from nexus.util.nx_argv import argv_off_cwd
 
 # Re-exported for ergonomic ``from nexus.aspect_extractor import
 # AspectRecord``. Phase 2 hook authors land here first; the
 # canonical definition stays with the store.
 __all__ = [
+    "SENSITIVE_DOCUMENT",
     "AspectRecord",
     "ExtractFail",
     "ExtractorConfig",
@@ -143,6 +145,16 @@ def _stamped_with_actual_model(config: "ExtractorConfig") -> "ExtractorConfig":
 
 
 # ── Read-failure sentinel (RDR-096 P1.2) ─────────────────────────────────────
+
+
+#: The :class:`ExtractFail` reason of a batch slot whose document is sensitive (RDR-243 census
+#: row 3). ``extract_aspects`` raises ``SensitiveDocumentRefused`` for the same document; a batch
+#: cannot raise for one slot, so the slot carries the verdict. A verdict on the document, not on
+#: the moment: the worker drops the row and never retries it.
+SENSITIVE_DOCUMENT = "sensitive_document"
+
+#: The registry surface a refusal is logged under when no caller scope names one.
+_SURFACE_EXTRACT = "aspect_extraction_cli"
 
 
 @dataclass(frozen=True)
@@ -1571,6 +1583,15 @@ def extract_aspects(
     if config is None:
         return None
 
+    # RDR-243 census rows 3 and 4: a sensitive document is refused before any read or dispatch,
+    # whatever the caller (the worker, `nx enrich aspects`, a direct call). The tumbler comes from
+    # the caller's own projection, else the catalog by path; the flag is read from the catalog row.
+    # A document the catalog does not know cannot be flagged. A catalog that cannot answer raises
+    # SensitivityUnknown, so nothing is sent on a guess.
+    _tumbler = doc_sensitivity.tumbler_for_path(collection, lookup_path or source_path, doc_id_lookup)
+    if _tumbler:
+        doc_sensitivity.refuse_if_sensitive(_tumbler, current_surface() or _SURFACE_EXTRACT)
+
     if not content:
         # P1.2: URI-based source dispatch. The URI is constructed from
         # ``(collection, lookup_path or source_path)`` at extract-time.
@@ -1772,6 +1793,29 @@ def extract_aspects_batch(
         for i in range(len(normalised))
         if select_config(normalised[i][0]) is not None
     ]
+
+    # RDR-243 census rows 3 and 4: a sensitive document's slot is refused before any read or
+    # dispatch, and the rest of the batch goes on. One batched catalog read for the items that
+    # carry a doc id; an item without one is resolved by path.
+    _tumblers = {
+        i: (queue_doc_id or doc_sensitivity.tumbler_for_path(coll, path, doc_id_lookup))
+        for i, coll, path, _content, queue_doc_id in indexed_inputs
+    }
+    _flagged = doc_sensitivity.flagged(_tumblers.values())
+    if _flagged:
+        _kept: list[tuple[int, str, str, str, str]] = []
+        for item in indexed_inputs:
+            idx = item[0]
+            if _tumblers[idx] in _flagged:
+                _log.info(
+                    "sensitive_document_refused", tumbler=_tumblers[idx],
+                    surface=current_surface() or _SURFACE_EXTRACT,
+                )
+                # No URI: nothing was read, and a refused document is named by its tumbler in the log.
+                out[idx] = ExtractFail(uri="", reason=SENSITIVE_DOCUMENT, detail="document is sensitive")
+            else:
+                _kept.append(item)
+        indexed_inputs = _kept
 
     # nexus-8g79.34: per-row URI-based content sourcing for empty-
     # content rows. Mirrors the single-doc path's pattern at

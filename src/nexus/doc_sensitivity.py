@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Document-keyed sensitivity reads for the pipelines that bypass T3 (RDR-243 Technical Design item 6).
+
+The aspect pipeline, the bib and CrossRef selection, the validation sample frame, the
+taxonomy sample names and the ``aspect_readers`` source reads work from a document, not from a
+search hit, so the engine's read filter (phase 2) cannot see them. Each asks the CATALOG row
+whether the document is sensitive before it reads or sends anything. The flag is never read from
+a T3 chunk row: the chunk store is shared by every document with identical text.
+
+Three rules every gate here shares:
+
+* A document with no live catalog row cannot be flagged and is not refused. The caller decides
+  what a missing row means (the worker drops it as gone).
+* A lookup that fails is :class:`SensitivityUnknown`, never "not sensitive". A gate that cannot
+  tell refuses to send; a drain routes the row to its retry.
+* Nothing is cached. The flag is one-way and can be set after a row was queued; a cache would
+  keep a stale "clear" answer alive past the flag.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from typing import Any
+
+import structlog
+
+from nexus.sensitivity import SensitiveDocumentRefused
+
+_log = structlog.get_logger(__name__)
+
+__all__ = [
+    "SensitivityUnknown",
+    "flagged",
+    "is_sensitive",
+    "refuse_if_sensitive",
+    "sensitive_tumbler_for_uri",
+    "tumbler_for_path",
+]
+
+
+class SensitivityUnknown(RuntimeError):
+    """The catalog could not say whether a document is sensitive (it raised, or was unreachable)."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"could not read the sensitivity flag from the catalog: {detail}")
+
+
+def _catalog_reader() -> Any:
+    """The catalog read handle. The seam tests patch."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: keeps this module's import light
+
+    return make_catalog_reader()
+
+
+def _entry_flag(entry: Any) -> bool:
+    return getattr(entry, "sensitive", False) is True
+
+
+def flagged(tumblers: Iterable[str], *, cat: Any = None) -> set[str]:
+    """The subset of *tumblers* whose catalog row is sensitive.
+
+    One batched read for the tumblers the batch route answers; a tumbler it did not return (an
+    alias, which the batch route does not follow, or a tombstone) is read once on its own with
+    alias following, so an alias of a sensitive document is flagged too. Blank tumblers are
+    ignored. Raises :class:`SensitivityUnknown` when the catalog cannot be read."""
+    wanted = sorted({t for t in tumblers if t})
+    if not wanted:
+        return set()
+    try:
+        cat = cat if cat is not None else _catalog_reader()
+        if cat is None:
+            raise RuntimeError("no catalog reader")
+        entries = cat.resolve_many(wanted) or {}
+        out = {t for t, e in entries.items() if _entry_flag(e)}
+        for t in wanted:
+            if t in entries:
+                continue
+            entry = cat.by_doc_id(t)
+            if entry is not None and _entry_flag(entry):
+                out.add(t)
+        return out
+    except SensitivityUnknown:
+        raise
+    except Exception as exc:  # noqa: BLE001 — every failure of the read is "unknown", whatever its class
+        raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
+
+
+def is_sensitive(tumbler: str, *, cat: Any = None) -> bool:
+    """True when *tumbler*'s catalog row is sensitive. See :func:`flagged`."""
+    return bool(tumbler) and tumbler in flagged([tumbler], cat=cat)
+
+
+def refuse_if_sensitive(tumbler: str, surface: str, *, cat: Any = None) -> None:
+    """Raise :class:`SensitiveDocumentRefused` when *tumbler* is sensitive, after logging the refusal."""
+    if is_sensitive(tumbler, cat=cat):
+        _log.info("sensitive_document_refused", tumbler=tumbler, surface=surface)
+        raise SensitiveDocumentRefused(tumbler, surface)
+
+
+def tumbler_for_path(
+    collection: str,
+    source_path: str,
+    doc_id_lookup: Callable[[str, str], str] | None = None,
+    *,
+    cat: Any = None,
+) -> str:
+    """The tumbler of the document at ``(collection, source_path)``, or ``""`` when the catalog has none.
+
+    The caller's ``doc_id_lookup`` (the queue's own doc id, or the catalog projection the CLI built)
+    answers first. With none, or an empty answer, the catalog is asked by path. A lookup that raises
+    is :class:`SensitivityUnknown`."""
+    try:
+        if doc_id_lookup is not None:
+            found = doc_id_lookup(collection, source_path) or ""
+            if found:
+                return str(found)
+        cat = cat if cat is not None else _catalog_reader()
+        if cat is None:
+            return ""
+        return str(cat.lookup_doc_id_by_collection_and_path(collection, source_path) or "")
+    except Exception as exc:  # noqa: BLE001 — see flagged()
+        raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
+
+
+def sensitive_tumbler_for_uri(uri: str, *, cat: Any = None) -> str:
+    """The tumbler of the catalog document whose ``source_uri`` is *uri* when it is sensitive, else ``""``.
+
+    For the source reads of schemes that carry no collection (``file``, ``https``,
+    ``x-devonthink-item``). A URI the catalog does not know is not flagged. Raises
+    :class:`SensitivityUnknown` when the catalog cannot be read."""
+    try:
+        cat = cat if cat is not None else _catalog_reader()
+        if cat is None:
+            raise RuntimeError("no catalog reader")
+        entry = cat.by_source_uri(uri)
+    except Exception as exc:  # noqa: BLE001 — see flagged()
+        raise SensitivityUnknown(f"{type(exc).__name__}: {exc}"[:300]) from exc
+    if entry is not None and _entry_flag(entry):
+        return str(getattr(entry, "tumbler", "") or "")
+    return ""
