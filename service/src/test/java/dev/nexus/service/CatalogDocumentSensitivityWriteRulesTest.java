@@ -638,29 +638,44 @@ class CatalogDocumentSensitivityWriteRulesTest {
 
     // ── merge and rename ────────────────────────────────────────────────
 
+    /** The audit rows of one tenant that are NOT the setup registrations (register_set). */
+    private List<String> auditExceptRegisterSet(String t) throws Exception {
+        return audit(t).stream().filter(a -> !a.contains("|register_set|")).toList();
+    }
+
     @Test
-    void merge_leavesTheCanonicalSensitiveWhenEitherSideWas() throws Exception {
+    void merge_raisesBothRowsWhenEitherSideWas_andAuditsEachRowThatChanged() throws Exception {
         String t = tenant();
+        // nexus-rfvyy.6.22 (Sam, 2026-11-05): the duplicate adopts the flag; both rows are raised.
         String dupFlagged = repo.registerDocument(t, OWNER, fields("d1", "file:///r/d1.md", "d1.md", true));
         String canonPlain = repo.registerDocument(t, OWNER, fields("c1", "file:///r/c1.md", "c1.md", null));
         repo.mergeDocuments(t, dupFlagged, canonPlain);
-        assertThat(flag(t, canonPlain)).as("duplicate sensitive, canonical plain").isTrue();
+        assertThat(flag(t, canonPlain)).as("duplicate sensitive, canonical plain: canonical raised").isTrue();
         assertThat(flag(t, dupFlagged)).as("the duplicate keeps its own flag").isTrue();
-        assertThat(audit(t)).hasSize(1);
-        assertThat(audit(t).get(0)).startsWith(canonPlain + "|false|true|merge").contains(dupFlagged)
+        assertThat(auditExceptRegisterSet(t)).as("only the canonical changed: one row").hasSize(1);
+        assertThat(auditExceptRegisterSet(t).get(0)).startsWith(canonPlain + "|false|true|merge").contains(dupFlagged)
             .endsWith("|engine");
 
         String dupPlain = repo.registerDocument(t, OWNER, fields("d2", "file:///r/d2.md", "d2.md", null));
         String canonFlagged = repo.registerDocument(t, OWNER, fields("c2", "file:///r/c2.md", "c2.md", true));
         repo.mergeDocuments(t, dupPlain, canonFlagged);
         assertThat(flag(t, canonFlagged)).as("canonical sensitive, duplicate plain: stays sensitive").isTrue();
-        assertThat(flag(t, dupPlain)).isFalse();
+        assertThat(flag(t, dupPlain)).as("the duplicate adopts the canonical's flag").isTrue();
+        assertThat(auditExceptRegisterSet(t)).as("the duplicate's raise is audited").hasSize(2);
+        assertThat(auditExceptRegisterSet(t).get(1)).startsWith(dupPlain + "|false|true|merge").contains(canonFlagged)
+            .endsWith("|engine");
 
         String dupPlain3 = repo.registerDocument(t, OWNER, fields("d3", "file:///r/d3.md", "d3.md", null));
         String canonPlain3 = repo.registerDocument(t, OWNER, fields("c3", "file:///r/c3.md", "c3.md", null));
         repo.mergeDocuments(t, dupPlain3, canonPlain3);
         assertThat(flag(t, canonPlain3)).as("neither side sensitive").isFalse();
-        assertThat(audit(t)).as("only the first merge changed a flag").hasSize(1);
+        assertThat(flag(t, dupPlain3)).as("neither side sensitive").isFalse();
+
+        String dupFlagged4 = repo.registerDocument(t, OWNER, fields("d4", "file:///r/d4.md", "d4.md", true));
+        String canonFlagged4 = repo.registerDocument(t, OWNER, fields("c4", "file:///r/c4.md", "c4.md", true));
+        repo.mergeDocuments(t, dupFlagged4, canonFlagged4);
+        assertThat(auditExceptRegisterSet(t)).as("both sides already sensitive: nothing changed, nothing audited")
+            .hasSize(2);
     }
 
     @Test

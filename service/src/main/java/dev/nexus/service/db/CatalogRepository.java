@@ -4039,10 +4039,13 @@ public final class CatalogRepository {
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .execute();
 
-            // nexus-rfvyy.6.4 (RDR-243): the canonical is sensitive when either side was. The duplicate keeps its
-            // own flag (it stays a live alias row, and its chunks stay covered by it).
-            if (Boolean.TRUE.equals(dup.value3()) && !canonicalSensitive) {
+            // nexus-rfvyy.6.4 / .6.22 (RDR-243, Sam 2026-11-05): when either side was sensitive BOTH rows are
+            // sensitive afterwards. The duplicate stays a live alias row whose own chunks the canonical does not
+            // cover, so it adopts the canonical's flag; each row that actually changes gets its own audit row
+            // (raiseSensitivity skips a row that already carries the flag). Both rows are locked FOR UPDATE above.
+            if (Boolean.TRUE.equals(dup.value3()) || canonicalSensitive) {
                 raiseSensitivity(ctx, tenant, List.of(canonicalTumbler), SENS_REASON_MERGE + " duplicate=" + duplicateTumbler);
+                raiseSensitivity(ctx, tenant, List.of(duplicateTumbler), SENS_REASON_MERGE + " canonical=" + canonicalTumbler);
             }
 
             LinkRemapCounts linkCounts = remapLinksForMerge(ctx, tenant, duplicateTumbler, canonicalTumbler);
