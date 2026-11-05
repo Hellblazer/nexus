@@ -183,7 +183,7 @@ count" below refers to it.
 | # | Surface | file:line | Sends what, where | Proposed behaviour |
 | --- | --- | --- | --- | --- |
 | 1 | Aspect enqueue hook | aspect_worker.py:1868 | full content (MCP path) into the T2 queue for later extraction | skip loudly (`aspect_enqueue_skipped_sensitive`); persist no content |
-| 2 | Aspect worker drain | aspect_worker.py:1140 `_process_row` | queued or on-disk content to the LLM | re-check at drain (the flag may be set after enqueue); mark the row `skipped_sensitive` |
+| 2 | Aspect worker drain | aspect_worker.py:1140 `_process_row` | queued or on-disk content to the LLM | re-check at drain (the flag may be set after enqueue); drop the queue row and log the tumbler and the surface |
 | 3 | Aspect extraction, CLI leg | aspect_extractor.py:2163 `_run_claude_isolated` | document text to `claude -p` (Anthropic) | `extract_aspects` (1517) refuses the document; the root asserts the scope |
 | 4 | Aspect extraction, API leg | aspect_extractor.py:2377 `_api_inner_text` | document text to the Anthropic API or an `openai_compat` endpoint | as row 3 |
 | 5 | `nx enrich aspects` | commands/enrich.py:1670; selection `_select_entries` 1875 | drives rows 3 and 4 | skip at selection; summary reports `N sensitive skipped` |
@@ -524,7 +524,9 @@ without it goes to the bge collection of the same subject instead. MCP
 `store_put(sensitive=True)` has no way to acknowledge: in local mode it
 stores into the bge collection of the subject, and in cloud mode, where
 every collection embeds through Voyage, it refuses and says why (Sam,
-2026-11-04). The bge collection of a subject is
+2026-11-04). On a local install whose engine embeds with Voyage (no bge
+collection exists to route to) it refuses too, and the CLI with
+`--ack-external-embedder` is the way in (Sam, 2026-11-05). The bge collection of a subject is
 `<prefix>__<subject>__bge-base-en-v15-768__v1` for each of `knowledge__`,
 `docs__`, `rdr__` and `code__`. A `--sensitive` index of a document already
 registered in a Voyage collection is not re-routed, because registration
@@ -919,8 +921,8 @@ None.
 - **Scenario**: Doctor rows on a tenant with no sensitive documents —
   **Verify**: not-applicable, not pass.
 - **Scenario**: Aspect drain after a late flag — **Verify**: a row queued
-  before the flag was set is marked `skipped_sensitive` and no content is
-  sent.
+  before the flag was set is dropped from the queue, the log names the
+  tumbler and the surface, and no content is sent.
 
 ## Validation
 
@@ -1061,3 +1063,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-04: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `5d5d93d30`; critique `nexus_rdr/243-gate-critique-2026-11-04-r3`.
 - 2026-11-04: Accepted. Round-3 residual dispositions: S-A `nexus-rfvyy.1` (Phase 3); S-B `nexus-rfvyy.2` (Phase 1 Step 3); S-C `nexus-rfvyy.3` (Phase 2, needs Sam); S-D `nexus-rfvyy.4` (Phase 1 Step 3); S-E `nexus-rfvyy.5` (Phase 1 Step 5).
 - 2026-11-05: Sam's rulings on the Phase 1 engine review: merge duplicate adopts the flag; fresh flagged registration is audited; upsert and import inherit from a sensitive tombstone.
+- 2026-11-05: Sam's rulings: the aspect drain drops a sensitive row (no skipped_sensitive status); a Voyage-profile local install refuses MCP store_put(sensitive); nx store import refuses a flagged document into a Voyage collection without --ack-external-embedder.
