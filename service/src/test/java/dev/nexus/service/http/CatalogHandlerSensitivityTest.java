@@ -175,6 +175,59 @@ class CatalogHandlerSensitivityTest {
     }
 
     @Test
+    void withNoPrincipalAtAll_aBodyActorApplies_elseOperator_andAPrincipalIgnoresTheBodyActor() throws Exception {
+        String t = tenant();
+        String named = register(t, "p1", false);
+        String anon = register(t, "p2", false);
+        String guarded = register(t, "p3", false);
+
+        // a direct handler call outside AuthFilter: no Principal on the thread
+        Resp withActor = callWithoutPrincipal(t,
+            "{\"tumblers\":[\"" + named + "\"],\"sensitive\":true,\"actor\":\"alice\"}");
+        assertThat(withActor.status).as(withActor.body).isEqualTo(200);
+        Resp noActor = callWithoutPrincipal(t, "{\"tumblers\":[\"" + anon + "\"],\"sensitive\":true}");
+        assertThat(noActor.status).as(noActor.body).isEqualTo(200);
+        assertThat(audit(t)).containsExactly(
+            named + "|false|true|set|alice",
+            anon + "|false|true|set|operator");
+
+        // an authenticated caller cannot name someone else
+        Resp withPrincipal = call(t, "POST", "/v1/catalog/sensitivity",
+            "{\"tumblers\":[\"" + guarded + "\"],\"sensitive\":true,\"actor\":\"mallory\"}", "agent-9");
+        assertThat(withPrincipal.status).as(withPrincipal.body).isEqualTo(200);
+        assertThat(audit(t)).last().isEqualTo(guarded + "|false|true|set|agent-9");
+    }
+
+    @Test
+    void aNonBooleanSensitive_onRegisterDocRegisterManyAndImport_is400_andWritesNothing() throws Exception {
+        String t = tenant();
+        for (String bad : List.of("1", "\"yes\"", "\"true\"", "[true]")) {
+            for (String[] route : new String[][] {
+                {"/v1/catalog/register", "{\"tumbler\":\"49.1.77\",\"title\":\"s\",\"sensitive\":" + bad + "}"},
+                {"/v1/catalog/doc/register", "{\"owner_prefix\":\"49.1\",\"title\":\"s\",\"file_path\":\"s.md\",\"sensitive\":" + bad + "}"},
+                {"/v1/catalog/doc/register_many", "{\"owner_prefix\":\"49.1\",\"docs\":[{\"title\":\"s\",\"file_path\":\"s.md\",\"sensitive\":" + bad + "}]}"},
+                {"/v1/catalog/import/document", "{\"tumbler\":\"49.1.78\",\"title\":\"s\",\"sensitive\":" + bad + "}"},
+                {"/v1/catalog/import/document", "{\"rows\":[{\"tumbler\":\"49.1.79\",\"title\":\"s\",\"sensitive\":" + bad + "}]}"}}) {
+                Resp r = call(t, "POST", route[0], route[1], null);
+                assertThat(r.status).as("%s with sensitive=%s -> %s", route[0], bad, r.body).isEqualTo(400);
+                assertThat(r.json().get("error").asText()).contains("'sensitive' must be a boolean");
+            }
+        }
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchOne(
+                "SELECT count(*)::int FROM nexus.catalog_documents WHERE tenant_id = ?", t).get(0, Integer.class))
+                .as("no refused request wrote a row").isZero();
+        }
+        // real booleans and null still pass
+        assertThat(call(t, "POST", "/v1/catalog/register",
+            "{\"tumbler\":\"49.1.80\",\"title\":\"ok\",\"sensitive\":true}", null).status).isEqualTo(200);
+        assertThat(call(t, "POST", "/v1/catalog/register",
+            "{\"tumbler\":\"49.1.81\",\"title\":\"ok\",\"sensitive\":null}", null).status).isEqualTo(200);
+        assertThat(flag(t, "49.1.80")).isTrue();
+        assertThat(flag(t, "49.1.81")).isFalse();
+    }
+
+    @Test
     void badRequests_areRefused() throws Exception {
         String t = tenant();
         String doc = register(t, "e", false);
@@ -334,6 +387,14 @@ class CatalogHandlerSensitivityTest {
 
     private record Resp(int status, String body) {
         JsonNode json() throws Exception { return MAPPER.readTree(body); }
+    }
+
+    /** A direct handler call with NO principal on the thread (outside AuthFilter): only the sensitivity op. */
+    private Resp callWithoutPrincipal(String tenant, String body) throws Exception {
+        CapturingExchange ex = new CapturingExchange("POST", URI.create("/v1/catalog/sensitivity"), body);
+        RequestContext.clear();
+        handler.handleSensitivity(ex, tenant, "POST");
+        return new Resp(ex.status, ex.bodyString());
     }
 
     private Resp call(String tenant, String method, String pathAndQuery, String body, String session) throws Exception {

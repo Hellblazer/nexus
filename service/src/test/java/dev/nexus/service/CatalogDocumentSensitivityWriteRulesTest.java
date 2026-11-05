@@ -164,8 +164,8 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, byUri)).as("raised by the source_uri match").isTrue();
         assertThat(flag(t, byPath)).as("raised by the file_path match").isTrue();
         assertThat(audit(t)).hasSize(2)
-            .anyMatch(r -> r.startsWith(byUri + "|false|true|register_raise|"))
-            .anyMatch(r -> r.startsWith(byPath + "|false|true|register_raise|"));
+            .containsExactlyInAnyOrder(byUri + "|false|true|register_raise|engine",
+                byPath + "|false|true|register_raise|engine");
 
         // a second flagged registration is a no-op: no further audit row
         repo.registerDocument(t, OWNER, fields("u", "file:///r/u.md", "u.md", true));
@@ -199,8 +199,9 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, out.get(3))).as("new and plain").isFalse();
         assertThat(flag(t, out.get(4))).as("new and flagged").isTrue();
         assertThat(audit(t))
-            .anyMatch(r -> r.startsWith(raise + "|false|true|register_raise|"))
-            .anyMatch(r -> r.startsWith(out.get(2) + "|false|true|register_inherit") && r.contains(dead))
+            .anyMatch(r -> r.equals(raise + "|false|true|register_raise|engine"))
+            .anyMatch(r -> r.startsWith(out.get(2) + "|false|true|register_inherit") && r.contains(dead)
+                && r.endsWith("|engine"))
             .hasSize(2);
 
         // the same batch again: nothing new to raise or inherit
@@ -222,7 +223,7 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, outcome.tumbler())).as("delete-then-re-index keeps the protection").isTrue();
         assertThat(audit(t)).hasSize(1);
         assertThat(audit(t).get(0)).startsWith(outcome.tumbler() + "|false|true|register_inherit")
-            .contains(first);
+            .contains(first).endsWith("|engine");
     }
 
     @Test
@@ -251,6 +252,7 @@ class CatalogDocumentSensitivityWriteRulesTest {
     void upsertDocument_orsTheFlag_includingThroughTheUnTombstoneArm() throws Exception {
         String t = tenant();
         repo.upsertDocument(t, importRow("48.1", "u1", true));
+        assertThat(audit(t)).as("a fresh row born flagged has no old value to audit here").isEmpty();
         repo.upsertDocument(t, importRow("48.1", "u1 again", false));
         assertThat(flag(t, "48.1")).as("false over true stays true").isTrue();
         repo.upsertDocument(t, importRow("48.1", "u1 once more", null));
@@ -259,27 +261,44 @@ class CatalogDocumentSensitivityWriteRulesTest {
         repo.deleteDocument(t, "48.1");
         repo.upsertDocument(t, importRow("48.1", "u1 resurrected", false));
         assertThat(flag(t, "48.1")).as("the un-tombstone arm keeps the old row's flag").isTrue();
+        repo.upsertDocument(t, importRow("48.1", "u1 flagged again", true));
+        assertThat(audit(t)).as("true over true changes nothing, so nothing is audited").isEmpty();
 
         repo.upsertDocument(t, importRow("48.2", "u2", false));
         assertThat(flag(t, "48.2")).isFalse();
+        assertThat(audit(t)).as("a plain upsert raises nothing").isEmpty();
         repo.upsertDocument(t, importRow("48.2", "u2", true));
         assertThat(flag(t, "48.2")).as("true over false raises").isTrue();
+        assertThat(audit(t)).as("the raise is audited (false to true, reason upsert_raise, actor engine)")
+            .containsExactly("48.2|false|true|upsert_raise|engine");
+        repo.upsertDocument(t, importRow("48.2", "u2", true));
+        assertThat(audit(t)).as("raising an already-raised row writes no second row").hasSize(1);
+
+        // a tombstoned plain row raised through the un-tombstone arm is a false-to-true change too
+        repo.upsertDocument(t, importRow("48.3", "u3", false));
+        repo.deleteDocument(t, "48.3");
+        repo.upsertDocument(t, importRow("48.3", "u3 back", true));
+        assertThat(flag(t, "48.3")).isTrue();
+        assertThat(audit(t)).containsExactly("48.2|false|true|upsert_raise|engine", "48.3|false|true|upsert_raise|engine");
     }
 
     @Test
-    void importDocument_andImportDocumentsBatch_orTheFlag() throws Exception {
+    void importDocument_andImportDocumentsBatch_orTheFlag_andAuditTheRaise() throws Exception {
         String t = tenant();
         repo.importDocument(t, importRow("48.10", "i1", true));
         repo.importDocument(t, importRow("48.10", "i1", false));
         assertThat(flag(t, "48.10")).as("importDocument: false over true").isTrue();
+        assertThat(audit(t)).as("fresh flagged row and a lowering attempt write nothing").isEmpty();
         repo.importDocument(t, importRow("48.11", "i2", false));
         repo.importDocument(t, importRow("48.11", "i2", true));
         assertThat(flag(t, "48.11")).as("importDocument: true over false").isTrue();
+        assertThat(audit(t)).containsExactly("48.11|false|true|import_raise|engine");
 
         repo.importDocumentsBatch(t, List.of(
             importRow("48.20", "b1", true),
             importRow("48.21", "b2", false),
             importRow("48.22", "b3", null)));
+        assertThat(audit(t)).as("a first batch creates rows; nothing to audit").hasSize(1);
         repo.importDocumentsBatch(t, List.of(
             importRow("48.20", "b1", false),
             importRow("48.21", "b2", true),
@@ -287,6 +306,151 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, "48.20")).as("batch: false over true").isTrue();
         assertThat(flag(t, "48.21")).as("batch: true over false").isTrue();
         assertThat(flag(t, "48.22")).as("batch: absent over plain").isFalse();
+        assertThat(audit(t)).as("only 48.21 changed in the batch")
+            .containsExactly("48.11|false|true|import_raise|engine", "48.21|false|true|import_raise|engine");
+        repo.importDocumentsBatch(t, List.of(importRow("48.21", "b2", true)));
+        assertThat(audit(t)).as("a repeat raise writes nothing").hasSize(2);
+    }
+
+    // ── the intra-batch alias and the race-lost raises ──────────────────
+
+    @Test
+    void registerMany_anIntraBatchAlias_foldsItsFlagIntoTheRowThatInserts() throws Exception {
+        String t = tenant();
+        // the FIRST entry for the uri is plain, the LATER duplicate asks for the flag
+        List<String> laterFlagged = repo.registerDocumentMany(t, OWNER, List.of(
+            fields("a", "file:///r/alias1.md", "alias1.md", null),
+            fields("a2", "file:///r/alias1.md", "alias1-dup.md", true)));
+        assertThat(laterFlagged.get(1)).as("the duplicate aliases to the first entry's tumbler").isEqualTo(laterFlagged.get(0));
+        assertThat(flag(t, laterFlagged.get(0))).as("the alias's request reaches the row that was inserted").isTrue();
+
+        // the FIRST entry asks, the later duplicate is plain: the row stays flagged
+        List<String> firstFlagged = repo.registerDocumentMany(t, OWNER, List.of(
+            fields("b", "file:///r/alias2.md", "alias2.md", true),
+            fields("b2", "file:///r/alias2.md", "alias2-dup.md", null)));
+        assertThat(flag(t, firstFlagged.get(0))).isTrue();
+        assertThat(audit(t)).as("both rows were born flagged: nothing changed on an existing row").isEmpty();
+    }
+
+    @Test
+    void register_singlePath_raceLost_raisesTheWinnerAndAuditsIt() throws Exception {
+        String t = tenant();
+        String uri = "file:///r/race-single.md";
+        String winner = "48.9001";
+        String got = withRacingWinner(t, winner, uri, () ->
+            repo.registerDocument(t, OWNER, fields("loser", uri, "race-single.md", true)));
+        assertThat(got).as("the loser returns the winner's tumbler").isEqualTo(winner);
+        assertThat(flag(t, winner)).as("the flagged request raised the live row it lost to").isTrue();
+        assertThat(audit(t)).containsExactly(winner + "|false|true|register_raise|engine");
+    }
+
+    @Test
+    void registerMany_raceLost_raisesTheWinnerAndAuditsIt() throws Exception {
+        String t = tenant();
+        String uri = "file:///r/race-batch.md";
+        String winner = "48.9002";
+        List<String> got = withRacingWinner(t, winner, uri, () -> repo.registerDocumentMany(t, OWNER, List.of(
+            fields("loser", uri, "race-batch.md", true),
+            fields("other", "file:///r/race-batch-other.md", "race-batch-other.md", null))));
+        assertThat(got.get(0)).as("the batch's racing entry resolves to the winner").isEqualTo(winner);
+        assertThat(flag(t, winner)).as("the flagged request raised the live row it lost to").isTrue();
+        assertThat(flag(t, got.get(1))).as("the other, plain, entry was inserted plain").isFalse();
+        assertThat(audit(t)).containsExactly(winner + "|false|true|register_raise|engine");
+    }
+
+    /**
+     * Makes {@code loser} lose the cross-transaction race on {@code uri} deterministically: a second
+     * transaction inserts a live row for the uri and stays open, {@code loser} runs on its own thread (its
+     * existence SELECT sees nothing, its INSERT then waits on the open transaction's xid), and once the wait
+     * is visible in pg_locks the winner commits. The loser's INSERT ... ON CONFLICT DO NOTHING then does
+     * nothing and takes the race-lost path.
+     */
+    private <T> T withRacingWinner(String tenant, String winnerTumbler, String uri,
+                                   java.util.concurrent.Callable<T> loser) throws Exception {
+        var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection win = pg.createConnection(""); Connection probe = pg.createConnection("")) {
+            win.setAutoCommit(false);
+            DSL.using(win, SQLDialect.POSTGRES).execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) VALUES (?, ?, 'winner', ?)",
+                tenant, winnerTumbler, uri);
+            var future = pool.submit(loser);
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+            while (true) {
+                Integer waiting = DSL.using(probe, SQLDialect.POSTGRES).fetchOne(
+                    "SELECT count(*)::int FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted")
+                    .get(0, Integer.class);
+                if (waiting != null && waiting > 0) break;
+                assertThat(future.isDone()).as("the loser must be blocked on the winner, not finished").isFalse();
+                assertThat(System.nanoTime()).as("timed out waiting for the loser to block").isLessThan(deadline);
+                Thread.sleep(20);
+            }
+            win.commit();
+            return future.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // ── the batch dedupe ORs a repeated tumbler ─────────────────────────
+
+    @Test
+    void importDocumentsBatch_aTumblerRepeatedInOneBatch_isFlaggedWhicheverCopyIsLast() throws Exception {
+        String t = tenant();
+        // fresh tumblers: the dedupe keeps the last copy, so the flag must be the OR over all copies
+        repo.importDocumentsBatch(t, List.of(importRow("48.30", "d1", true), importRow("48.30", "d1", false)));
+        repo.importDocumentsBatch(t, List.of(importRow("48.31", "d2", false), importRow("48.31", "d2", true)));
+        repo.importDocumentsBatch(t, List.of(importRow("48.32", "d3", false), importRow("48.32", "d3", null)));
+        assertThat(flag(t, "48.30")).as("[true, false] for a fresh tumbler").isTrue();
+        assertThat(flag(t, "48.31")).as("[false, true] for a fresh tumbler").isTrue();
+        assertThat(flag(t, "48.32")).as("[false, null] stays plain").isFalse();
+
+        // an existing plain row: one raise, audited once, whichever copy is last
+        repo.importDocumentsBatch(t, List.of(importRow("48.33", "e", false)));
+        repo.importDocumentsBatch(t, List.of(importRow("48.33", "e", true), importRow("48.33", "e", false)));
+        assertThat(flag(t, "48.33")).isTrue();
+        assertThat(audit(t)).containsExactly("48.33|false|true|import_raise|engine");
+    }
+
+    // ── a non-boolean flag is a 400, never read as false ────────────────
+
+    @Test
+    void aNonBooleanSensitive_isRefused_onRegisterUpsertAndBothImports_andWritesNothing() throws Exception {
+        String t = tenant();
+        String live = repo.registerDocument(t, OWNER, fields("live", "file:///r/strict.md", "strict.md", null));
+        for (Object bad : new Object[] {1, 0, "yes", "true", "false", "", List.of(true)}) {
+            assertThatThrownBy(() -> repo.registerDocument(t, OWNER, with(fields("x", "file:///r/x1.md", "x1.md", null), bad)))
+                .as("registerDocument sensitive=%s", bad)
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("'sensitive' must be a boolean");
+            assertThatThrownBy(() -> repo.registerDocument(t, OWNER, with(fields("live", "file:///r/strict.md", "strict.md", null), bad)))
+                .as("registerDocument on a live row, sensitive=%s", bad).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> repo.registerDocumentMany(t, OWNER, List.of(
+                    fields("ok", "file:///r/x2.md", "x2.md", null),
+                    with(fields("x", "file:///r/x3.md", "x3.md", null), bad))))
+                .as("registerDocumentMany sensitive=%s", bad).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> repo.upsertDocument(t, with(importRow("48.40", "u", null), bad)))
+                .as("upsertDocument sensitive=%s", bad).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> repo.importDocument(t, with(importRow("48.41", "i", null), bad)))
+                .as("importDocument sensitive=%s", bad).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> repo.importDocumentsBatch(t, List.of(
+                    importRow("48.42", "b0", null), with(importRow("48.43", "b", null), bad))))
+                .as("importDocumentsBatch sensitive=%s", bad).isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThat(flag(t, live)).as("a refused request raised nothing").isFalse();
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchOne(
+                "SELECT count(*)::int FROM nexus.catalog_documents WHERE tenant_id = ?", t).get(0, Integer.class))
+                .as("nothing but the one seeded row exists: every refusal rolled back").isEqualTo(1);
+        }
+        assertThat(audit(t)).isEmpty();
+        // an explicit JSON null is the same as absent
+        repo.upsertDocument(t, with(importRow("48.44", "n", null), null));
+        assertThat(flag(t, "48.44")).isFalse();
+    }
+
+    private static Map<String, Object> with(Map<String, Object> m, Object sensitive) {
+        var c = new LinkedHashMap<>(m);
+        c.put("sensitive", sensitive);
+        return c;
     }
 
     // ── merge and rename ────────────────────────────────────────────────
@@ -300,7 +464,8 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, canonPlain)).as("duplicate sensitive, canonical plain").isTrue();
         assertThat(flag(t, dupFlagged)).as("the duplicate keeps its own flag").isTrue();
         assertThat(audit(t)).hasSize(1);
-        assertThat(audit(t).get(0)).startsWith(canonPlain + "|false|true|merge").contains(dupFlagged);
+        assertThat(audit(t).get(0)).startsWith(canonPlain + "|false|true|merge").contains(dupFlagged)
+            .endsWith("|engine");
 
         String dupPlain = repo.registerDocument(t, OWNER, fields("d2", "file:///r/d2.md", "d2.md", null));
         String canonFlagged = repo.registerDocument(t, OWNER, fields("c2", "file:///r/c2.md", "c2.md", true));

@@ -706,9 +706,13 @@ public final class CatalogHandler implements HttpHandler {
      * scope ({@code root|tenant|mint|data}), never the credential hash. Only when there is no principal at all
      * (a direct handler call outside {@code AuthFilter}) does a body {@code actor} apply, falling back to
      * {@code "operator"} (the {@code VectorHandler} precedent), so an authenticated caller cannot name someone else.
+     *
+     * <p>Package-private so a test can make that direct call: {@link #handle} refuses a request with no
+     * principal (no tenant) before it routes here, so through the front door the body-actor branch is not
+     * reachable (nexus-rfvyy.6.6).
      */
     @SuppressWarnings("unchecked")
-    private void handleSensitivity(HttpExchange exchange, String tenant, String method) throws IOException {
+    void handleSensitivity(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
         Object raw = body.get("tumblers");
