@@ -537,7 +537,25 @@ def test_files_section_text_reports_planted_and_says_none_for_clean(tmp_path: Pa
     for needle in ("stray.md", "huge.md", "gone.md", "old_one", "unread files: not available"):
         assert needle in out, needle
     assert "RDR-240" in out  # the reason the read counts are absent
-    clean = "\n".join(mc.files_section(_clean_dir(tmp_path)))
+    # The rendered listings themselves, line by line: the needles above are also
+    # satisfied by the unindexed listing, so they cannot see a blanked listing.
+    lines = out.splitlines()
+    oversized = lines.index(f"oversized (over {ms.OVERSIZE_BYTES} bytes, index files excluded): 1")
+    assert lines[oversized + 1].startswith("  - huge.md (")
+    replaced = lines.index("declared replaces still present (delete the old file): 1")
+    assert lines[replaced + 1] == "  - new_one.md replaces old_one -> old_one.md"
+    dup_dir = tmp_path / "mem-dup"
+    dup_dir.mkdir()
+    _w(dup_dir, "MEMORY.md", "- a\n")
+    _w(dup_dir, "uv_a.md", _fm("Use uv for Python packages",
+                               "Always run Python tooling through uv, never pip install"))
+    _w(dup_dir, "uv_b.md", _fm("Use uv, not pip, for Python packages",
+                               "Run Python tooling through uv and never pip install anything"))
+    dup_lines = mc.files_section(dup_dir)
+    head = next(i for i, ln in enumerate(dup_lines) if ln.startswith("likely near-duplicates ("))
+    assert dup_lines[head].endswith(": 1"), dup_lines[head]
+    assert dup_lines[head + 1].startswith("  - uv_a.md ~ uv_b.md ("), dup_lines[head + 1]
+    clean ="\n".join(mc.files_section(_clean_dir(tmp_path)))
     assert "stray.md" not in clean and "huge.md" not in clean
     assert "unindexed: none" in clean and "oversized: none" in clean
     assert "unread files: not available" in clean
@@ -899,8 +917,10 @@ def test_the_command_adds_exactly_one_row_the_report_and_deletes_nothing(
     assert res.exit_code == 0, res.output
     after = _snapshot(db)
     title = f"curation-report-{datetime.now(UTC):%Y-%m-%d}"
-    assert [r for r in after if r not in before] == [r for r in after if r[2] == title] and len(after) == len(before) + 1
+    # The no-delete clause runs first, so a planted delete fails with its own message
+    # instead of on the row count.
     assert all(r in after for r in before), "a row the command did not own was removed or changed"
+    assert [r for r in after if r not in before] == [r for r in after if r[2] == title] and len(after) == len(before) + 1
     assert "alpha-notes" in next(r for r in after if r[2] == title)[3]
 
 

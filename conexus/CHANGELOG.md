@@ -1,5 +1,9 @@
 # Changelog
 
+## [7.95.2] - 2026-11-05
+
+Plugin version aligned with conexus 7.95.2. No plugin-side changes.
+
 ## [7.95.1] - 2026-11-04
 
 Plugin version aligned with conexus 7.95.1. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
