@@ -537,6 +537,29 @@ indexed in place. In cloud mode every collection embeds through Voyage, so
 it, the verb prints a one-line disclosure naming the endpoint, the managed
 tenant and Voyage (census row 22).
 
+*Implementation notes for item 8 (what Phase 1 shipped; not new design).*
+
+- The index paths key on the catalog flag as well as on `--sensitive`. `nx index pdf`, `nx index md`, `nx dt
+  index` and the PDF leg of `nx index repo` read the document's catalog row on every run and treat a flagged
+  document, or one whose flag cannot be read, as sensitive: MinerU runs as a local subprocess, `--enrich` is
+  refused, and a write into a Voyage collection is refused without `--ack-external-embedder`.
+- A repo run or a batch has no acknowledgement to ask for, so it skips a flagged document bound for a Voyage
+  collection, with a logged warning, where the single-document verbs refuse. A bge target is indexed as usual.
+- `nx collection re-embed` holds back the chunks of a flagged document in a Voyage collection.
+- A note put onto a note the catalog flags, into a Voyage collection, refuses before any write, so a plain
+  `nx store put` or `nx memory promote` cannot send a flagged note to Voyage. `nx store put --sensitive
+  --ack-external-embedder` and `nx catalog import --ack-external-embedder` accept Voyage; MCP `store_put` and
+  `nx memory promote` cannot.
+- `nx store import` and the recovery-bundle restore follow the import ruling: a flagged document into a
+  Voyage collection refuses without `--ack-external-embedder`. A document the catalog already flags (matched by
+  `source_uri`) counts as flagged though the file or bundle does not say so, and an unreadable catalog reads as
+  flagged.
+- A dry run reads the flag without writing. `nx index pdf --dry-run` looks the document up read-only (source
+  URI, the repo owner's row, collection and path); a flagged or unreadable result uses the local extractor and
+  refuses `--enrich`. It registers nothing.
+- `nx collection reindex` reads the flags before it deletes anything. A Voyage collection that holds a flagged
+  document, or whose flags cannot be read, refuses without `--ack-external-embedder`, naming the documents.
+
 **9. Carrying the flag to results.** `SearchResult.metadata["sensitive"]`
 comes from the engine, never from the chunk row. `sensitive_owners` comes
 from chash-positions. A reader instruction joins `READER_INSTRUCTION`
@@ -1064,3 +1087,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-04: Accepted. Round-3 residual dispositions: S-A `nexus-rfvyy.1` (Phase 3); S-B `nexus-rfvyy.2` (Phase 1 Step 3); S-C `nexus-rfvyy.3` (Phase 2, needs Sam); S-D `nexus-rfvyy.4` (Phase 1 Step 3); S-E `nexus-rfvyy.5` (Phase 1 Step 5).
 - 2026-11-05: Sam's rulings on the Phase 1 engine review: merge duplicate adopts the flag; fresh flagged registration is audited; upsert and import inherit from a sensitive tombstone.
 - 2026-11-05: Sam's rulings: the aspect drain drops a sensitive row (no skipped_sensitive status); a Voyage-profile local install refuses MCP store_put(sensitive); nx store import refuses a flagged document into a Voyage collection without --ack-external-embedder.
+- 2026-11-05: Implementation notes under Technical Design item 8 record how Phase 1 applies the catalog flag (index paths, repo and batch skips, re-embed hold-back, note re-put, dry runs, reindex). No design change.
