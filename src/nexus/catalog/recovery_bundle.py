@@ -375,6 +375,9 @@ def export_knowledge_doc(
         # not a NOTE_META_KEYS member, so it is read here on its own. Without it an import re-puts
         # the note with no key, and that put retracts the one the source held.
         "entity_key": _own_entity_key(entry),
+        # RDR-243 (nexus-rfvyy.6.12): the document's flag, from the catalog entry and never from a chunk
+        # row. An older bundle has no key and imports as not sensitive, leaving an existing true in place.
+        "sensitive": getattr(entry, "sensitive", False) is True,
         "content": content,
     }
 
@@ -700,6 +703,14 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
 
     col_name = target_collection_for(rec["collection"], t3)
     title = rec.get("title", "")
+    sensitive = rec.get("sensitive") is True
+    if sensitive:
+        # Before anything is written: an engine without the column would restore the note unflagged and
+        # say nothing. A RuntimeError here is this record's definitive failure, counted and reported.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred, factory has a heavy import graph
+        from nexus.catalog.http_catalog_client import require_catalog_sensitivity  # noqa: PLC0415 — deferred, as above
+
+        require_catalog_sensitivity(make_catalog_reader(), what=f"restoring sensitive note {title!r}")
     outcome = put_note(
         content=rec["content"], collection=col_name, title=rec["title"],
         tags=",".join(split_note_tags(rec.get("tags"))), category=rec.get("category", ""),
@@ -714,6 +725,8 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         if outcome.status == UNCERTAIN:
             raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
         raise RuntimeError(message)
+    if sensitive:
+        _raise_flag(outcome.catalog_doc_id, title)
     fire_note_chains(outcome, rec["content"])
     # The completion stamp, LAST (RDR-223, nexus-z0o2p.34): a kill in a chain above leaves the fence
     # 'indexing', so the next import of the note redoes the write and fires the chains again.
@@ -721,6 +734,29 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     message = failure_message(outcome, subject=repr(title))
     if message is not None:
         raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
+
+
+def _raise_flag(tumbler: str, title: str) -> None:
+    """Raise the sensitivity flag on a restored note through the audited route (RDR-243, nexus-rfvyy.6.12).
+
+    Runs after ``put_note`` stored the note and BEFORE the post-store chains fire, so an aspect or
+    enrichment hook sees the flag. ``put_note`` is not given the flag because the store verbs own that
+    parameter (nexus-rfvyy.6.9). A failure raises, which counts the record as failed and, since no stamp
+    was sent, leaves the fence ``indexing`` so the next import redoes the note; until then the note
+    exists in T3 unflagged, which the message says.
+    """
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred, factory has a heavy import graph
+
+    writer = make_catalog_writer()
+    try:
+        writer.set_sensitivity([tumbler], True, reason="recovery bundle import")
+    except Exception as exc:  # noqa: BLE001 — worded for the operator; the import records this record as failed
+        raise RuntimeError(
+            f"note {title!r} was restored but could not be flagged sensitive ({exc}); it is in T3 UNFLAGGED "
+            f"until an import of this bundle succeeds, or `nx catalog sensitive {tumbler}` flags it"
+        ) from exc
+    finally:
+        writer.close()
 
 
 def _importable_entity_key(rec: dict, collection: str) -> str:

@@ -14,13 +14,16 @@ Embeddings are stored as little-endian float32 bytes (numpy tobytes).
 nexus-wbfpw.31 (RDR-192 Step 5, client): each record MAY also carry an
 ``owner`` key -- ``{"source_uri": str, "title": str, "content_type": str,
 "position": int, "index_content_hash": str, "manifest_rows": int,
-"key_registered": bool}`` -- naming
+"key_registered": bool, "sensitive": bool}`` -- naming
 the chunk's LIVE, own-collection catalog document at export time and its
 manifest position within it; the last three (nexus-mjikf, nexus-3ajpd) are that
 document's content key when it is complete ("" otherwise), its manifest row
 count, and whether the document's own registration recorded the same file hash
 (``meta.content_hash`` equals the key), so an import can stamp a document it
-holds whole with the key. This is an
+holds whole with the key. ``sensitive`` (RDR-243, nexus-rfvyy.6.12) is the document's
+sensitivity flag: an import registers the document flagged, or raises the flag on the
+document it finds, and never lowers one; a record without the key reads as not
+sensitive. This is an
 UNKNOWN key to every importer predating this change (older importers
 ignore unrecognized record fields), so ``FORMAT_VERSION`` is not bumped.
 Without it, an imported chunk has no catalog document or manifest row at
@@ -413,6 +416,9 @@ def _resolve_export_owners(
             "index_content_hash": (
                 entry.index_content_hash if stable and entry.index_state == "complete" else ""),
             "manifest_rows": len(manifests.get(chosen, [])),
+            # RDR-243 (nexus-rfvyy.6.12): the document's flag, strict. Read with getattr because test doubles
+            # are plain namespaces and an engine without the column reads False on the entry.
+            "sensitive": getattr(entry, "sensitive", False) is True,
             # nexus-3ajpd: catalog-side evidence that the key is a file hash: the document's own
             # registration recorded the same value. A chunk row cannot say it (its content_hash is
             # the last writer's, so a chunk another document wrote last carries that document's
@@ -753,6 +759,10 @@ def _locate_owner_group(
     # included, withdraws it for the group (applied at consume time, :func:`_whole_source`).
     registered = isinstance(owner_meta, dict) and owner_meta.get("key_registered") is True
     group["registered"] = group.get("registered", True) and registered
+    # RDR-243 (nexus-rfvyy.6.12): the flag is one-way, so a group is sensitive when ANY of its records says
+    # so, and a record without the key (an older export) never lowers it. Only a boolean true counts.
+    group["sensitive"] = group.get("sensitive", False) or (
+        isinstance(owner_meta, dict) and owner_meta.get("sensitive") is True)
     return group, position
 
 
@@ -790,6 +800,23 @@ def _locate_legacy_group(
     return group, position
 
 
+def _require_sensitivity(reader: Any) -> None:
+    """Refuse (``CatalogSensitivityUnsupportedError``, a ``RuntimeError``) unless the engine confirms it can
+    hold the flag; the import records the group as failed and registers or flags nothing for it."""
+    from nexus.catalog.http_catalog_client import require_catalog_sensitivity  # noqa: PLC0415 — deferred, as the module's other catalog imports
+
+    require_catalog_sensitivity(reader, what="importing a sensitive document")
+
+
+def _raise_flag_if_needed(entry: Any, sensitive: bool, reader: Any, writer: Any) -> None:
+    """A sensitive group met a document that already exists: raise the flag through the audited route unless
+    it is up. Never lowers one (RDR-243, nexus-rfvyy.6.12)."""
+    if not sensitive or getattr(entry, "sensitive", False) is True:
+        return
+    _require_sensitivity(reader)
+    writer.set_sensitivity([str(entry.tumbler)], True, reason="nxexp import")
+
+
 def _resolve_owner_document(
     group: dict, collection_name: str, owner_tumbler: Tumbler, reader: Any, writer: Any,
     live_legacy: dict[str, Any] | None = None, minted_out: list[str] | None = None,
@@ -821,8 +848,10 @@ def _resolve_owner_document(
     ``created`` answer), never of one it found: the importer removes those again when the run ends
     before anything was written to them (nexus-z0o2p.35, M4).
     """
+    sensitive = group.get("sensitive") is True
     legacy = (live_legacy or {}).get(group.get("legacy_doc_id") or "")
     if legacy is not None:
+        _raise_flag_if_needed(legacy, sensitive, reader, writer)
         return str(legacy.tumbler)
     source_uri = canonical_note_uri(group["source_uri"])
     existing = reader.by_source_uri(source_uri) if source_uri else None
@@ -830,9 +859,12 @@ def _resolve_owner_document(
         source_uri = f"nxexp://{collection_name}/{source_uri}"
         existing = reader.by_source_uri(source_uri)
     if existing is not None:
+        _raise_flag_if_needed(existing, sensitive, reader, writer)
         return str(existing.tumbler)
     from nexus.catalog.path_ambiguity import created_from_register_result, tumbler_from_register_result  # noqa: PLC0415 — deferred: path_ambiguity imports catalog code
 
+    if sensitive:
+        _require_sensitivity(reader)  # an engine without the column would register it unflagged and say nothing
     result = writer.register(
         owner=owner_tumbler,
         title=group["title"] or group["source_uri"],
@@ -840,6 +872,7 @@ def _resolve_owner_document(
         physical_collection=collection_name,
         source_uri=source_uri,
         with_created=True,
+        **({"sensitive": True} if sensitive else {}),
     )
     tumbler = str(tumbler_from_register_result(result))
     if minted_out is not None and created_from_register_result(result):
