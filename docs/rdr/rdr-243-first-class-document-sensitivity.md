@@ -300,8 +300,10 @@ from indexing an excluded record.
 - **A1:** `nx catalog migrate-fallback` moves each document by rewriting
   `physical_collection` on the existing row and does not mint new tumblers.
   If it mints, it joins the carry list in Technical Design item 2.
-  **Status**: Unverified. **Method**: Source Search (the engine route behind
-  `migration.py`'s per-tumbler proposals).
+  **Status**: Verified 2026-11-05 (`nexus_rdr/243-research-9`): the
+  proposals post `/update`, and `CatalogRepository.updateDocument` updates the
+  existing row by tumbler (CatalogRepository.java:2181, 2277-2279); no
+  tumbler is minted. **Method**: Source Search.
 - **A2:** The only engine statements that insert or wholesale-replace a
   `catalog_documents` row are `registerDocument` (single and batch),
   `upsertDocument`, `importDocumentsBatch` and `doImportDocument`.
@@ -311,20 +313,28 @@ from indexing an excluded record.
 - **A3:** A `NOT EXISTS` over live sensitive owners inside each search
   function keeps `k` results under `hnsw.iterative_scan = strict_order` for
   a corpus where sensitive chunks are a small fraction, and adds latency
-  small enough not to matter. **Status**: Unverified. **Method**: Spike on
-  the engine substrate with a seeded corpus at 0%, 5% and 50% sensitive,
-  comparing result counts and p50/p95 against today.
+  small enough not to matter. **Status**: Verified 2026-11-05
+  (`nexus_rdr/243-research-10`): pgvector 0.8.7, 80k chunks at 768
+  dimensions, 200 queries per cell; every cell returned `k` under both
+  `strict_order` and `relaxed_order` at 0%, 5% and 50% sensitive (random and
+  clustered); added p50 under 0.5 ms at k=10 and about 3.7 ms at k=100 with
+  half the corpus sensitive. **Method**: Spike on a scratch database.
 - **A4:** Every LLM call in the package reaches one of the three dispatch
   roots. **Status**: Verified at 7e2146baf (21 call sites, 2 argv sites);
   the registry lint keeps it true. **Method**: Source Search.
 - **A5:** A child `claude -p` started with the environment from
   `_build_dispatch_env` passes that environment to the stdio nx MCP server
   it launches, so the child's server can read `NX_SENSITIVITY_POSTURE` at
-  startup. **Status**: Unverified. **Method**: Spike (start a child with a
-  marker variable and have its MCP server report it).
+  startup. **Status**: Verified 2026-11-05 on Claude Code 2.1.318
+  (`nexus_rdr/243-research-11`), with and without an env block in the server
+  spec; Step 2.5 keeps a test because a Claude Code upgrade could change it.
+  **Method**: Spike (a marker variable reported by a probe MCP server).
 - **A6:** DEVONthink 4 exposes record-level and database-level AI exclusion
-  as readable AppleScript properties. **Status**: Unverified. **Method**:
-  Spike against DEVONthink 4 (`get properties of record`). Phase 3 only;
+  as readable AppleScript properties. **Status**: Verified 2026-11-05 on
+  DEVONthink 4.4.2 (`nexus_rdr/243-research-12`): boolean `exclude from
+  chat` on both `record` and `database`; a database read true and a record
+  inherited from an excluded group were not observed. **Method**: Spike
+  (`get properties of record`, read-only). Phase 3 only;
   phase 1 does not depend on it.
 - **A7:** No code path that reads chunk text for an LLM surface runs on a
   thread that lacks the caller's context. **Status**: Refuted at 4cf8e820c
@@ -1085,6 +1095,7 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-04: fix round on the revision's fix check (`nexus_rdr/243-fix-check-bb08311f3`): two `GET /version` capability keys (catalog in phase 1, vectors in phase 2) with the conexus edge allowlist; the input-side external rules move into phase 1 and registry rows carry their enforcing phase; the stub `get` read path; engine egress under `EgressGuardCensus`; the stub's per-row field.
 - 2026-11-04: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `5d5d93d30`; critique `nexus_rdr/243-gate-critique-2026-11-04-r3`.
 - 2026-11-04: Accepted. Round-3 residual dispositions: S-A `nexus-rfvyy.1` (Phase 3); S-B `nexus-rfvyy.2` (Phase 1 Step 3); S-C `nexus-rfvyy.3` (Phase 2, needs Sam); S-D `nexus-rfvyy.4` (Phase 1 Step 3); S-E `nexus-rfvyy.5` (Phase 1 Step 5).
+- 2026-11-05: assumptions A1, A3, A5 and A6 verified (`nexus_rdr/243-research-9` to `-12`); Status lines updated.
 - 2026-11-05: Sam's rulings on the Phase 1 engine review: merge duplicate adopts the flag; fresh flagged registration is audited; upsert and import inherit from a sensitive tombstone.
 - 2026-11-05: Sam's rulings: the aspect drain drops a sensitive row (no skipped_sensitive status); a Voyage-profile local install refuses MCP store_put(sensitive); nx store import refuses a flagged document into a Voyage collection without --ack-external-embedder.
 - 2026-11-05: Implementation notes under Technical Design item 8 record how Phase 1 applies the catalog flag (index paths, repo and batch skips, re-embed hold-back, note re-put, dry runs, reindex). No design change.
