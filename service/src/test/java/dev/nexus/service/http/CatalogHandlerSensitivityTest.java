@@ -116,7 +116,8 @@ class CatalogHandlerSensitivityTest {
             assertThat(r.json().get("error").asText()).containsIgnoringCase("reason");
         }
         assertThat(flag(t, doc)).as("nothing was written").isTrue();
-        assertThat(audit(t)).isEmpty();
+        assertThat(audit(t)).as("only the setup registration's register_set row (nexus-rfvyy.6.23)")
+            .containsExactly(doc + "|false|true|register_set|engine");
     }
 
     @Test
@@ -128,14 +129,16 @@ class CatalogHandlerSensitivityTest {
         assertThat(r.status).as(r.body).isEqualTo(200);
         assertThat(r.json().get("updated").get(0).asInt()).isEqualTo(1);
         assertThat(flag(t, doc)).isFalse();
-        assertThat(audit(t)).containsExactly(doc + "|true|false|reviewed with legal 2026-11-03|agent-7");
+        assertThat(audit(t)).as("the setup registration's register_set row (nexus-rfvyy.6.23), then the clear")
+            .containsExactly(doc + "|false|true|register_set|engine",
+                doc + "|true|false|reviewed with legal 2026-11-03|agent-7");
 
         // clearing again is a no-op: the row is already in that state, so no second audit row
         Resp again = call(t, "POST", "/v1/catalog/sensitivity",
             "{\"tumblers\":[\"" + doc + "\"],\"sensitive\":false,\"reason\":\"again\"}", "agent-7");
         assertThat(again.status).isEqualTo(200);
         assertThat(again.json().get("updated").get(0).asInt()).isZero();
-        assertThat(audit(t)).hasSize(1);
+        assertThat(audit(t)).hasSize(2);
     }
 
     @Test
@@ -171,7 +174,8 @@ class CatalogHandlerSensitivityTest {
         assertThat(updated).as("live +1, tombstoned 0, already set 0, unknown 0, a repeat in the same call 0")
             .containsExactly(1, 0, 0, 0, 0);
         assertThat(flag(t, dead)).as("a tombstoned row is not touched").isFalse();
-        assertThat(audit(t)).hasSize(1);
+        assertThat(audit(t)).as("the born-flagged row's register_set (nexus-rfvyy.6.23), then the one live row the call set")
+            .containsExactly(already + "|false|true|register_set|engine", live + "|false|true|set|agent-7");
     }
 
     @Test

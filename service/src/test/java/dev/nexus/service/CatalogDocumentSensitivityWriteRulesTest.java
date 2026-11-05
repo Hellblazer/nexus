@@ -148,7 +148,36 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(flag(t, byPath)).isTrue();
         assertThat(repo.registerDocument(t, OWNER, fields("p", "", "only-by-path.md", null))).isEqualTo(byPath);
         assertThat(flag(t, byPath)).as("file_path match, request without the flag").isTrue();
-        assertThat(audit(t)).as("neither lowering attempt wrote an audit row").isEmpty();
+        assertThat(audit(t)).as("the two fresh flagged registrations are audited (register_set); neither lowering attempt wrote a row")
+            .containsExactly(byUri + "|false|true|register_set|engine", byPath + "|false|true|register_set|engine");
+    }
+
+    // ── nexus-rfvyy.6.23: a fresh flagged registration is audited ───────
+
+    @Test
+    void register_freshFlagged_writesARegisterSetRow_singleAndBatch_andAPlainOrInheritedOneWritesNone() throws Exception {
+        String t = tenant();
+        String fresh = repo.registerDocument(t, OWNER, fields("s", "file:///r/s.md", "s.md", true));
+        String plain = repo.registerDocument(t, OWNER, fields("q", "file:///r/q.md", "q.md", false));
+        assertThat(flag(t, fresh)).isTrue();
+        assertThat(flag(t, plain)).isFalse();
+        assertThat(audit(t)).as("single path: one row for the flagged fresh registration, none for sensitive=false")
+            .containsExactly(fresh + "|false|true|register_set|engine");
+
+        List<String> out = repo.registerDocumentMany(t, OWNER, List.of(
+            fields("b1", "file:///r/b1.md", "b1.md", true),
+            fields("b2", "file:///r/b2.md", "b2.md", null),
+            fields("b3", "file:///r/b3.md", "b3.md", true)));
+        assertThat(audit(t)).as("batch path: one register_set row per fresh flagged entry, none for the plain one")
+            .containsExactly(fresh + "|false|true|register_set|engine",
+                out.get(0) + "|false|true|register_set|engine", out.get(2) + "|false|true|register_set|engine");
+
+        // a flagged request that also matches a sensitive tombstone is ONE row (the row changes once); the request wins
+        String dead = repo.registerDocument(t, OWNER, fields("d", "file:///r/dead.md", "dead.md", true));
+        repo.deleteDocument(t, dead);
+        String both = repo.registerDocument(t, OWNER, fields("d", "file:///r/dead.md", "dead.md", true));
+        assertThat(audit(t).stream().filter(a -> a.startsWith(both + "|")).toList())
+            .containsExactly(both + "|false|true|register_set|engine");
     }
 
     @Test
@@ -202,11 +231,14 @@ class CatalogDocumentSensitivityWriteRulesTest {
             .anyMatch(r -> r.equals(raise + "|false|true|register_raise|engine"))
             .anyMatch(r -> r.startsWith(out.get(2) + "|false|true|register_inherit") && r.contains(dead)
                 && r.endsWith("|engine"))
-            .hasSize(2);
+            .anyMatch(r -> r.equals(out.get(4) + "|false|true|register_set|engine"))
+            .anyMatch(r -> r.equals(keep + "|false|true|register_set|engine"))
+            .anyMatch(r -> r.equals(dead + "|false|true|register_set|engine"))
+            .hasSize(5);
 
         // the same batch again: nothing new to raise or inherit
         repo.registerDocumentMany(t, OWNER, docs);
-        assertThat(audit(t)).as("a repeated batch writes no audit row").hasSize(2);
+        assertThat(audit(t)).as("a repeated batch writes no audit row").hasSize(5);
     }
 
     // ── tombstone then re-index ─────────────────────────────────────────
@@ -221,8 +253,9 @@ class CatalogDocumentSensitivityWriteRulesTest {
         assertThat(outcome.created()).isTrue();
         assertThat(outcome.tumbler()).isNotEqualTo(first);
         assertThat(flag(t, outcome.tumbler())).as("delete-then-re-index keeps the protection").isTrue();
-        assertThat(audit(t)).hasSize(1);
-        assertThat(audit(t).get(0)).startsWith(outcome.tumbler() + "|false|true|register_inherit")
+        assertThat(audit(t)).hasSize(2);
+        assertThat(audit(t).get(0)).as("the first, flagged registration").isEqualTo(first + "|false|true|register_set|engine");
+        assertThat(audit(t).get(1)).startsWith(outcome.tumbler() + "|false|true|register_inherit")
             .contains(first).endsWith("|engine");
     }
 
@@ -329,7 +362,9 @@ class CatalogDocumentSensitivityWriteRulesTest {
             fields("b", "file:///r/alias2.md", "alias2.md", true),
             fields("b2", "file:///r/alias2.md", "alias2-dup.md", null)));
         assertThat(flag(t, firstFlagged.get(0))).isTrue();
-        assertThat(audit(t)).as("both rows were born flagged: nothing changed on an existing row").isEmpty();
+        assertThat(audit(t)).as("both rows were born flagged by a request: one register_set row each, nothing on an existing row")
+            .containsExactlyInAnyOrder(laterFlagged.get(0) + "|false|true|register_set|engine",
+                firstFlagged.get(0) + "|false|true|register_set|engine");
     }
 
     @Test

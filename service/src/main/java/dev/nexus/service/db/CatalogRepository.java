@@ -1257,7 +1257,13 @@ public final class CatalogRepository {
                 if (requestedSensitive) raiseSensitivity(ctx, tenant, List.of(winner.value1()), SENS_REASON_REGISTER_RAISE);
                 return new RegisterOutcome(winner.value1(), false);
             }
-            if (inherited && !requestedSensitive) {
+            // nexus-rfvyy.6.23 (Sam 2026-11-05): a fresh row born flagged is audited too, so a later clear shows
+            // the set that preceded it. One row either way (the flag changes once): the request is the reason
+            // when it asked, else the inheritance names its predecessor. Actor 'engine': this repository call
+            // has no caller principal in scope (see SENS_ACTOR_ENGINE).
+            if (requestedSensitive) {
+                recordSensitivityChange(ctx, tenant, tumbler, false, true, SENS_REASON_REGISTER_SET);
+            } else if (inherited) {
                 recordSensitivityChange(ctx, tenant, tumbler, false, true,
                     SENS_REASON_REGISTER_INHERIT + " predecessor=" + predecessor.tumbler());
             }
@@ -1574,6 +1580,13 @@ public final class CatalogRepository {
                     if (created[e.getKey()]) {
                         recordSensitivityChange(ctx, tenant, out[e.getKey()], false, true,
                             SENS_REASON_REGISTER_INHERIT + " predecessor=" + e.getValue().tumbler());
+                    }
+                }
+                // nexus-rfvyy.6.23: a row born flagged by its request is audited as register_set (one row per row;
+                // the request wins over an inheritance, see the single path).
+                for (int idx : newIdx) {
+                    if (created[idx] && wantsSensitive[idx]) {
+                        recordSensitivityChange(ctx, tenant, out[idx], false, true, SENS_REASON_REGISTER_SET);
                     }
                 }
             }
@@ -12925,6 +12938,8 @@ public final class CatalogRepository {
     /** Audit reasons of the engine's own write rules (the audited route carries the caller's reason). */
     static final String SENS_REASON_REGISTER_RAISE = "register_raise";
     static final String SENS_REASON_REGISTER_INHERIT = "register_inherit";
+    /** nexus-rfvyy.6.23: a fresh registration carrying sensitive=true (the row was born flagged). */
+    static final String SENS_REASON_REGISTER_SET = "register_set";
     static final String SENS_REASON_MERGE = "merge";
     /** nexus-rfvyy.6.6: upsert (POST /register with a tumbler) raised a stored, plain row. */
     static final String SENS_REASON_UPSERT_RAISE = "upsert_raise";
