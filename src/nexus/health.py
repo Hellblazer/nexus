@@ -4294,6 +4294,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
+    # nexus.catalog_sensitivity_changes: RDR-243 (nexus-rfvyy.6.3,
+    # catalog-047-document-sensitivity.xml), the audit record of every change
+    # of catalog_documents.sensitive; ENABLE + FORCE + tenant_isolation.
+    "nexus.catalog_sensitivity_changes",
     # "nexus.chash_index" REMOVED (RDR-187/nexus-piwya.9, .9 review High):
     # the table is dropped, and _check_rls_present LEFT-JOINs this list
     # against live pg_class — a listed-but-dropped table is a PERMANENT

@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-rfvyy.6.3 (RDR-243 Phase 1 Step 2a: first-class document sensitivity, the schema half).
+
+    A document carries a one-way "sensitive" flag: a human marks a document that must not reach an LLM, and the
+    protection has to survive re-registration, import, merge and rename (the write rules are the next bead,
+    nexus-rfvyy.6.4; the audited route and the wire are nexus-rfvyy.6.5). This changeset holds only the objects.
+
+    catalog-047-1  nexus.catalog_documents.sensitive BOOLEAN NOT NULL DEFAULT false, and a partial index on
+                   (tenant_id, physical_collection) WHERE sensitive AND deleted_at IS NULL. The flag is a column and
+                   not a metadata key because the engine replaces document metadata wholesale on upsert; a key one
+                   writer omits is lost without an error (RDR-243 Key Discoveries). ADD COLUMN with a constant
+                   DEFAULT is a catalog-only change in PostgreSQL 11 and later (no table rewrite) and
+                   scripts/data_effect_lint.py's own scope excludes ADD COLUMN, so there is no DATA EFFECT line.
+                   `sensitive` is NOT added to CatalogRepository.UPDATABLE_DOC_COLUMNS: the general update route
+                   refuses it with 400, and only the audited route moves it.
+
+    catalog-047-2  nexus.catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, actor, changed_at), the
+                   audit record of every change of the flag, with the same tenant RLS as its neighbours
+                   (ENABLE + FORCE + tenant_isolation, as vectors-037). Append-only by use: no UPDATE or DELETE is
+                   issued against it, but the grants are not narrowed, because the runAlways grants-nexus-svc loop
+                   and its default privileges give nexus_svc DML on every table in the schema and the RDR does not
+                   ask for them to be withheld. The id column is BIGSERIAL (the catalog-018 gc_audit precedent), so
+                   two changes of one tumbler inside one transaction (equal now()) never collide.
+                   nexus_diag is granted nothing on the table (the reembed tables precedent; RDR-243 is silent, so
+                   the audit trail stays tenant-scoped); GrantsNexusDiagViewAccess pins it through
+                   CatalogRepository.NEXUS_DIAG_READABLE_TABLES.
+
+    catalog-047-3  nexus.chunk_sensitive(tenant, collection, chash) and its batched form
+                   nexus.chunk_sensitive_many(tenant, collection, chashes): true when ANY LIVE owner of the chunk
+                   (joined through catalog_document_chunks) is sensitive. LANGUAGE sql, STABLE, SECURITY INVOKER,
+                   so row-level security applies to the caller's tenant: a function called under tenant B for
+                   tenant A's chunk answers false. Both take the chash as bytea (the stored type since
+                   rdr180-001-bytea-chash.xml, as nexus.chunk_live_owners) and one collection, because a search
+                   response is one collection. The batched form returns one row per input chash, in input order
+                   (unnest WITH ORDINALITY), so a caller can zip it with its hits; it is a RETURNS TABLE function
+                   and so one more jOOQ Record than the scalar one. A chunk owned by a sensitive document that is
+                   tombstoned (deleted_at set) stops counting at once: the "live owner" join is the same one
+                   chunk_live_owners uses. Every column reference is qualified, because the OUT parameter names of
+                   the batched form are visible in a SQL function body.
+
+    Placed after vectors-053-quarantine-restore-chunk-keys-only.xml (the tail when this landed) and before the
+    grants-nexus-svc.xml runAlways block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-047-1" author="nexus-rfvyy.6.3">
+        <comment>Adds nexus.catalog_documents.sensitive BOOLEAN NOT NULL DEFAULT false (RDR-243: the one-way document sensitivity flag) and idx_catalog_documents_sensitive_live, a partial index on (tenant_id, physical_collection) WHERE sensitive AND deleted_at IS NULL. An additive ADD COLUMN (no data mutation of any existing row; every existing document reads false), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN sensitive BOOLEAN NOT NULL DEFAULT false;
+
+CREATE INDEX idx_catalog_documents_sensitive_live
+    ON nexus.catalog_documents (tenant_id, physical_collection)
+    WHERE sensitive AND deleted_at IS NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                DROP INDEX IF EXISTS nexus.idx_catalog_documents_sensitive_live;
+                ALTER TABLE nexus.catalog_documents DROP COLUMN IF EXISTS sensitive;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-047-2" author="nexus-rfvyy.6.3">
+        <comment>Creates nexus.catalog_sensitivity_changes (RDR-243: the audit record of every change of catalog_documents.sensitive: tenant_id, tumbler, old, new, reason, actor, changed_at) with tenant RLS (ENABLE + FORCE + tenant_isolation) like its neighbours. A new table, so no data mutation of existing rows.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.catalog_sensitivity_changes (
+    id         BIGSERIAL   NOT NULL,
+    tenant_id  TEXT        NOT NULL,
+    tumbler    TEXT        NOT NULL,
+    old        BOOLEAN     NOT NULL,
+    new        BOOLEAN     NOT NULL,
+    reason     TEXT        NOT NULL,
+    actor      TEXT        NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT catalog_sensitivity_changes_pk PRIMARY KEY (id)
+);
+
+CREATE INDEX idx_catalog_sensitivity_changes_doc
+    ON nexus.catalog_sensitivity_changes (tenant_id, tumbler, changed_at);
+
+ALTER TABLE nexus.catalog_sensitivity_changes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_sensitivity_changes FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.catalog_sensitivity_changes
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                DROP POLICY IF EXISTS tenant_isolation ON nexus.catalog_sensitivity_changes;
+                DROP TABLE IF EXISTS nexus.catalog_sensitivity_changes;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-047-3" author="nexus-rfvyy.6.3">
+        <comment>nexus.chunk_sensitive(tenant, collection, chash) and nexus.chunk_sensitive_many(tenant, collection, chashes) (RDR-243): true when any live owner of the chunk, joined through catalog_document_chunks, is sensitive. LANGUAGE sql, STABLE, SECURITY INVOKER, so RLS applies. Two new functions and their GRANT EXECUTE; no data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.chunk_sensitive(
+    p_tenant     text,
+    p_collection text,
+    p_chash      bytea
+) RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM nexus.catalog_document_chunks m
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE m.tenant_id  = p_tenant
+           AND m.collection = p_collection
+           AND m.chash      = p_chash
+           AND d.deleted_at IS NULL
+           AND d.sensitive
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.chunk_sensitive_many(
+    p_tenant     text,
+    p_collection text,
+    p_chashes    bytea[]
+) RETURNS TABLE(chash bytea, sensitive boolean)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT u.h,
+           EXISTS (
+               SELECT 1
+                 FROM nexus.catalog_document_chunks m
+                 JOIN nexus.catalog_documents d
+                   ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                WHERE m.tenant_id  = p_tenant
+                  AND m.collection = p_collection
+                  AND m.chash      = u.h
+                  AND d.deleted_at IS NULL
+                  AND d.sensitive
+           )
+      FROM unnest(p_chashes) WITH ORDINALITY AS u(h, ord)
+     ORDER BY u.ord
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.chunk_sensitive(text, text, bytea) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.chunk_sensitive_many(text, text, bytea[]) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+                REVOKE EXECUTE ON FUNCTION nexus.chunk_sensitive_many(text, text, bytea[]) FROM nexus_svc;
+                REVOKE EXECUTE ON FUNCTION nexus.chunk_sensitive(text, text, bytea) FROM nexus_svc;
+                DROP FUNCTION IF EXISTS nexus.chunk_sensitive_many(text, text, bytea[]);
+                DROP FUNCTION IF EXISTS nexus.chunk_sensitive(text, text, bytea);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

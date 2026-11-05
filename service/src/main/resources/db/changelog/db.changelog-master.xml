@@ -2049,6 +2049,16 @@
     <include file="db/changelog/vectors-053-quarantine-restore-chunk-keys-only.xml"/>
 
     <!--
+        Bead nexus-rfvyy.6.3 (RDR-243 Phase 1 Step 2a): the one-way document sensitivity flag, schema half.
+        catalog-047-1 adds catalog_documents.sensitive BOOLEAN NOT NULL DEFAULT false and a partial index on live
+        sensitive documents; catalog-047-2 creates the audit table nexus.catalog_sensitivity_changes (tenant RLS);
+        catalog-047-3 creates nexus.chunk_sensitive and nexus.chunk_sensitive_many and their GRANT EXECUTE; see the
+        included file's own header. ADD COLUMN / CREATE TABLE / CREATE FUNCTION, no DATA EFFECT. After vectors-053
+        (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/catalog-047-document-sensitivity.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when
