@@ -378,6 +378,42 @@ def _doc_id_for_path(file_path: Path) -> str:
         return ""
 
 
+def _flagged_for_dry_run(pdf_path: Path, collection: str, source_uri: str = "") -> bool:
+    """True when a DRY RUN must treat *pdf_path* as sensitive: its catalog row is flagged, or the catalog cannot say.
+
+    RDR-243 fix round 3 (nexus-rfvyy.6.20). A dry run registers nothing, so it holds no ``doc_id``, yet it still
+    extracts (a MinerU server) and, with ``--enrich``, looks the title up. This is the READ-ONLY identity probe
+    that finds the document without writing: the given *source_uri*, the ``file://<abspath>`` the engine derives,
+    the repo owner's row for the path, and the ``(collection, path)`` lookup. The flag is read through
+    :func:`nexus.doc_sensitivity.flagged`, which follows a merged duplicate to its canonical. A document the
+    catalog does not know cannot be flagged. Any failure reads as flagged: the external legs refuse rather than guess.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.doc_sensitivity import flagged  # noqa: PLC0415 — deferred: reads the catalog client
+
+        reader = make_catalog_reader()
+        if reader is None:
+            raise RuntimeError("no catalog reader")
+        resolved = Path(pdf_path).resolve()
+        tumblers: set[str] = set()
+        for uri in dict.fromkeys(u for u in (source_uri, f"file://{resolved}") if u):
+            entry = reader.by_source_uri(uri)
+            if entry is not None:
+                tumblers.add(str(entry.tumbler))
+        repo_entry = _repo_owner_document_for(reader, resolved)
+        if repo_entry is not None:
+            tumblers.add(str(repo_entry.tumbler))
+        by_path = reader.lookup_doc_id_by_collection_and_path(collection, str(resolved))
+        if by_path:
+            tumblers.add(str(by_path))
+        return bool(flagged(tumblers, cat=reader))
+    except Exception as exc:  # noqa: BLE001 — a read that fails reads as sensitive
+        _log.warning("sensitive_flag_unreadable_treated_as_sensitive", path=str(pdf_path), dry_run=True,
+                     detail=f"{type(exc).__name__}: {exc}"[:300])
+        return True
+
+
 def _index_fence_state(doc_id: str) -> tuple[str | None, str]:
     """Read-only lookup of the RUNFENCE fields for *doc_id* (nexus-5xn3k.3,
     design memo §3.4 as amended by T2 nexus/5xn3k-design-amendment-2026-10-26).
@@ -3198,6 +3234,16 @@ def index_pdf(
     # without --ack-external-embedder. A flag the catalog cannot answer reads as sensitive. After the
     # staleness skip, so an unchanged document costs no extra catalog read.
     ext_sensitive = sensitive
+    if dry_run and not sensitive and _flagged_for_dry_run(pdf_path, col_name, source_uri):
+        # A dry run registers nothing, so it has no doc_id for the gate below; the read-only probe above
+        # stands in. It still reaches the MinerU server and, with --enrich, Semantic Scholar.
+        from nexus.sensitive_write import SensitiveEnrichRefusedError  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        if enrich:
+            raise SensitiveEnrichRefusedError(
+                f"nx index pdf --dry-run: --enrich sends the title and identifiers to Semantic Scholar or "
+                f"CrossRef, and {pdf_path} is sensitive in the catalog (or the catalog could not say). "
+                f"Nothing was written. Drop --enrich.")
+        ext_sensitive = True
     if not dry_run:
         from nexus.sensitive_write import external_legs_gate  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
         try:

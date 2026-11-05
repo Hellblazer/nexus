@@ -162,6 +162,102 @@ def test_the_verb_flag_logs_the_mineru_skip_in_the_library_and_says_it_on_the_si
 
 
 # --------------------------------------------------------------------------- #
+# Fix round 3 (nexus-rfvyy.6.20): a DRY RUN reaches the same external legs, so it reads the flag too.
+# --------------------------------------------------------------------------- #
+
+def _dry_run(pdf: Path, *extra: str):
+    return CliRunner().invoke(
+        main, ["index", "pdf", str(pdf), "--corpus", CORPUS, "--dry-run", "--streaming", "never", *extra])
+
+
+def _catalog_rows_for(path: Path) -> list[str]:
+    return sorted(str(e.tumbler) for e in _reader().find_all_by_file_path(str(path.resolve())))
+
+
+def test_a_dry_run_of_a_catalog_flagged_pdf_builds_only_sensitive_extractors_and_registers_nothing(
+    t2_service_env, tmp_path: Path, extractor_flags: list[bool],
+) -> None:
+    pdf = _pdf(tmp_path, "dry-flagged.pdf")
+    assert _index_pdf(pdf).exit_code == 0
+    tumbler = _tumbler_of(pdf)
+    extractor_flags.clear()
+    out = _dry_run(pdf, "--extractor", "pymupdf")
+    assert out.exit_code == 0, out.output
+    assert extractor_flags and not any(extractor_flags), "control: an unflagged dry run builds plain extractors"
+    _flag(tumbler)
+    extractor_flags.clear()
+    rows_before = _catalog_rows_for(pdf)
+
+    out = _dry_run(pdf, "--extractor", "pymupdf")
+
+    assert out.exit_code == 0, out.output
+    assert extractor_flags and all(extractor_flags), f"a dry run of a flagged PDF got a plain extractor: {extractor_flags}"
+    assert _catalog_rows_for(pdf) == rows_before, "a dry run must write nothing to the catalog"
+
+
+def test_a_dry_run_of_a_catalog_flagged_pdf_never_reaches_a_mineru_server(
+    t2_service_env, tmp_path: Path, server_watch: dict[str, list], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.commands import index as index_cmds
+
+    monkeypatch.setattr(index_cmds.pdf_stack, "ensure_or_exit", lambda *a, **k: None)
+    monkeypatch.setattr(index_cmds.pdf_stack, "refuse_bad_mineru_bounds", lambda *a, **k: None)
+    pdf = _pdf(tmp_path, "dry-flagged-mineru.pdf")
+    assert _index_pdf(pdf).exit_code == 0
+    _flag(_tumbler_of(pdf))
+
+    _dry_run(pdf, "--extractor", "mineru")  # the local subprocess may be absent here; only server contact matters
+
+    assert server_watch == {"resolve": [], "probe": [], "http": [], "autostart": []}
+
+
+def test_a_dry_run_with_enrich_of_a_catalog_flagged_pdf_refuses_and_sends_no_title(
+    t2_service_env, tmp_path: Path, bib_calls: list[str],
+) -> None:
+    pdf = _pdf(tmp_path, "dry-flagged-enrich.pdf")
+    assert _index_pdf(pdf).exit_code == 0
+    _dry_run(pdf, "--extractor", "pymupdf", "--enrich")
+    assert len(bib_calls) == 1, "control: an unflagged dry run with --enrich looks the title up"
+    bib_calls.clear()
+    _flag(_tumbler_of(pdf))
+
+    out = _dry_run(pdf, "--extractor", "pymupdf", "--enrich")
+
+    assert out.exit_code != 0, out.output
+    assert "sensitive" in out.output and "--enrich" in out.output, out.output
+    assert bib_calls == []
+
+
+def test_a_dry_run_of_a_pdf_the_catalog_never_saw_is_plain_and_registers_nothing(
+    t2_service_env, tmp_path: Path, extractor_flags: list[bool],
+) -> None:
+    pdf = _pdf(tmp_path, "dry-new.pdf")
+    out = _dry_run(pdf, "--extractor", "pymupdf")
+    assert out.exit_code == 0, out.output
+    assert extractor_flags and not any(extractor_flags)
+    assert _catalog_rows_for(pdf) == []
+
+
+def test_a_dry_run_whose_catalog_cannot_answer_reads_the_pdf_as_sensitive(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extractor_flags: list[bool], bib_calls: list[str],
+) -> None:
+    pdf = _pdf(tmp_path, "dry-unknown.pdf")
+    extractor_flags.clear()
+
+    def unreadable() -> Any:
+        raise RuntimeError("catalog unreachable")
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", unreadable)
+
+    out = _dry_run(pdf, "--extractor", "pymupdf")
+    assert out.exit_code == 0, out.output
+    assert extractor_flags and all(extractor_flags), "an unknown flag must read as sensitive on a dry run"
+
+    out = _dry_run(pdf, "--extractor", "pymupdf", "--enrich")
+    assert out.exit_code != 0 and bib_calls == [], out.output
+
+
+# --------------------------------------------------------------------------- #
 # --enrich: no title leaves for a flagged document.
 # --------------------------------------------------------------------------- #
 
