@@ -239,6 +239,9 @@ class CatalogWriter(Protocol):
     def merge_documents(self, duplicate, canonical) -> object:  # canonical (nexus-z4rpi)
         ...
 
+    def set_sensitivity(self, tumblers, sensitive, *, reason=...) -> object:  # canonical (RDR-243, nexus-rfvyy.6.8)
+        ...
+
     def link(self, from_t, to_t, link_type, created_by, *, from_span=..., to_span=..., allow_dangling=..., **meta) -> object:  # canonical DIVERGENT
         ...
 
@@ -338,6 +341,10 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "register_many",
     "update",
     "merge_documents",
+    # RDR-243 (nexus-rfvyy.6.8): the audited sensitivity route. Whitelisted in the same change that adds the
+    # client method, in the shared set and not _SERVICE_ONLY_WRITE_OPS: missing here it raises AttributeError
+    # through the closed _ServiceCatalogWriter and every getattr capability check reads False (nexus-kgos1).
+    "set_sensitivity",
     "link",
     "link_if_absent",
     "unlink",

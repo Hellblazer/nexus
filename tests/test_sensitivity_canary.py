@@ -322,14 +322,15 @@ def _seed_document(collection: str, owner: str, text: str) -> str:
 def _flag_sensitive(tumbler: str) -> None:
     """Set the one-way flag the way a user does after the fact.
 
-    ASSUMED API (RDR-243 Technical Design item 3; lands at nexus-rfvyy.6.8):
-    ``HttpCatalogClient.set_sensitivity(tumbler, sensitive, reason=...)``. This
-    is the only line that names it. Until then it raises AttributeError naming
-    the missing verb, which is the right failure for a canary that needs the flag."""
+    ``HttpCatalogClient.set_sensitivity(tumblers, sensitive, reason=...)`` (RDR-243 Technical
+    Design item 3, nexus-rfvyy.6.8) takes a LIST of tumblers and returns
+    ``{"updated": [...], "targets": [...]}``; the canary asserts the flag moved, so a
+    document the engine did not change (unknown, tombstoned, already set) fails here."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 - after the substrate is pinned
 
     with HttpCatalogClient() as cat:
-        cat.set_sensitivity(tumbler, True, reason="RDR-243 canary corpus")
+        out = cat.set_sensitivity([tumbler], True, reason="RDR-243 canary corpus")
+    assert out["updated"] == [1], f"the canary document was not flagged: {out}"
 
 
 def build_world(monkeypatch: pytest.MonkeyPatch, *, flag: bool = True) -> CanaryWorld:

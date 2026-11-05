@@ -522,6 +522,52 @@ def _to_entry(d: dict) -> CatalogEntry:
         # fence-aware engine with nothing stamped yet). d.get() alone
         # cannot tell these apart; this dict-membership check is the fix.
         index_state_reported="index_state" in d,
+        # RDR-243 (nexus-rfvyy.6.8): strict, like the capability probes. A missing key (an engine
+        # without the column), a string or a number reads False.
+        sensitive=d.get("sensitive") is True,
+    )
+
+
+#: RDR-243: the first engine release that carries the catalog sensitivity changeset and route. HAND-KEPT:
+#: ``None`` until the engine tag that carries it is cut (nexus-rfvyy.6.8 records the value to fill in); the
+#: refusal text says "not yet released" while it is ``None``. Not a gate: the probe is the gate.
+CATALOG_SENSITIVITY_MIN_ENGINE_VERSION: tuple[int, int, int] | None = None
+
+
+class CatalogSensitivityUnsupportedError(RuntimeError):
+    """A ``--sensitive`` write was refused because the engine did not confirm ``catalog_sensitivity_supported``."""
+
+
+def require_catalog_sensitivity(cat: Any, *, what: str = "a sensitive write") -> None:
+    """Refuse *what* unless *cat*'s engine advertises ``catalog_sensitivity_supported`` as a JSON ``true``.
+
+    Called before the register call of every ``--sensitive`` write path and before ``nx catalog sensitive``'s
+    route call (RDR-243 Technical Design item 3): an engine without the column would drop the flag without an
+    error, so the user would believe a document was protected that is not. An UNKNOWN answer refuses: a probe
+    that failed, an edge that trimmed ``/version``, or a handle with no probe at all.
+    """
+    probe = getattr(cat, "catalog_sensitivity_probe", None)
+    supported, version = False, ""
+    if callable(probe):
+        try:
+            supported, version = probe()
+        except Exception as exc:  # noqa: BLE001 - an unreadable probe is an unknown answer, which refuses
+            _log.warning("http_catalog_client.sensitivity_probe_failed", error=str(exc))
+    if supported is True:
+        return
+    if not version:
+        raise CatalogSensitivityUnsupportedError(
+            f"{what} refused: could not confirm that the engine supports document sensitivity "
+            f"(GET /version gave no answer or no catalog_sensitivity_supported key). Nothing was written."
+        )
+    floor = (
+        ".".join(map(str, CATALOG_SENSITIVITY_MIN_ENGINE_VERSION))
+        if CATALOG_SENSITIVITY_MIN_ENGINE_VERSION is not None
+        else "not yet released (RDR-243 Phase 1)"
+    )
+    raise CatalogSensitivityUnsupportedError(
+        f"{what} refused: engine {version} does not support document sensitivity; minimum engine version: "
+        f"{floor}. An engine without it would drop the flag silently. Nothing was written."
     )
 
 
@@ -1736,6 +1782,55 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if not result or not result.get("tumbler"):
             return None
         return _to_entry(result)
+
+    def set_sensitivity(
+        self, tumblers: "list[Tumbler | str]", sensitive: bool, *, reason: str = "",
+    ) -> dict[str, Any]:
+        """Set or clear the one-way sensitivity flag on documents (RDR-243, nexus-rfvyy.6.8) through the audited
+        ``POST /v1/catalog/sensitivity``; the only route that moves the flag (``update`` refuses ``sensitive``).
+
+        Setting needs no reason. Clearing refuses without a non-blank one, here and before any request, and the
+        engine writes an audit row for every change.
+
+        ALIASES. The engine route does not follow ``alias_of``: flagging an alias tumbler would leave the
+        canonical document, the one that owns the chunks, unflagged. So each tumbler is resolved with
+        ``follow_alias=True`` first and the canonical is what is sent. A failed lookup (anything but a 404)
+        raises with nothing written; a 404 sends the tumbler as given and the engine answers 0 for it.
+
+        Returns ``{"updated": [...], "targets": [...]}``, both aligned with the INPUT: ``targets[i]`` is the
+        canonical tumbler input ``i`` resolved to, ``updated[i]`` is 1 when this call changed it and 0 when it was
+        already in that state, unknown, tombstoned, or a repeat of an earlier input that resolved to the same
+        canonical. Not idempotent on the wire (it appends audit rows), so the transport never resends it blindly.
+
+        Call :func:`require_catalog_sensitivity` first on any path that sets the flag at the user's request.
+        """
+        if isinstance(tumblers, (str, Tumbler)):
+            # Iterating a bare string would split "1.2.3" into one-character tumblers.
+            raise TypeError("'tumblers' must be a list of tumblers, not a single one")
+        if not isinstance(sensitive, bool):
+            raise TypeError(f"'sensitive' must be a bool, got {type(sensitive).__name__}")
+        if not sensitive and not (reason or "").strip():
+            raise ValueError("clearing sensitivity requires a non-blank 'reason'")
+        asked = [str(t) for t in tumblers]
+        if not asked:
+            return {"updated": [], "targets": []}
+        targets: list[str] = []
+        for t in asked:
+            entry = self.resolve(t, follow_alias=True)
+            targets.append(str(entry.tumbler) if entry is not None else t)
+        unique = list(dict.fromkeys(targets))
+        body: dict[str, Any] = {"tumblers": unique, "sensitive": sensitive, "reason": reason or ""}
+        result = self._post("/sensitivity", body, idempotent=False) or {}
+        flags = result.get("updated")
+        if not isinstance(flags, list) or len(flags) != len(unique):
+            raise RuntimeError(
+                f"/sensitivity answered 'updated' {flags!r} for {len(unique)} tumbler(s); refusing to guess which changed"
+            )
+        by_target = dict(zip(unique, flags))
+        updated: list[int] = []
+        for t in targets:
+            updated.append(int(by_target.pop(t, 0)))  # a repeat of a canonical already reported reads 0
+        return {"updated": updated, "targets": targets}
 
     def update(self, tumbler: Tumbler | str, **fields: Any) -> None:
         self._post("/update", {"tumbler": str(tumbler), **fields})
@@ -3102,6 +3197,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``catalog_manifest_row_limit_supported``, nexus-jypmj.6)? Only a JSON ``true`` counts; an engine
         without it ignores the key and returns every row of every document."""
         return self._version_flags().get("catalog_manifest_row_limit_supported") is True
+
+    def supports_catalog_sensitivity(self) -> bool:
+        """Does the engine carry the document sensitivity column and the audited ``/sensitivity`` route (``GET
+        /version``'s ``catalog_sensitivity_supported``, RDR-243, nexus-rfvyy.6.8)? Only a JSON ``true`` counts. An
+        engine without the column would drop the flag without an error, so every ``--sensitive`` write asks
+        first (:func:`require_catalog_sensitivity`) and a failed or edge-trimmed answer reads False."""
+        return self._version_flags().get("catalog_sensitivity_supported") is True
+
+    def catalog_sensitivity_probe(self) -> tuple[bool, str]:
+        """``(supported, engine_version)`` from ONE cached ``/version`` read. ``engine_version`` is the body's
+        ``release_version`` (else ``app_version``), or ``""`` when the probe got no answer: that is how
+        :func:`require_catalog_sensitivity` tells "the engine answered without the flag" from "could not confirm"."""
+        flags = self._version_flags()
+        version = flags.get("release_version") or flags.get("app_version") or ""
+        return flags.get("catalog_sensitivity_supported") is True, str(version) if flags else ""
 
     def _traverse(self, payload: dict) -> dict:
         """POST /v1/catalog/traverse and convert wire dicts to typed objects.
