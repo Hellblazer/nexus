@@ -22,10 +22,11 @@ A site is registered when the registry has a row whose target names its
 enclosing function, or an enclosing class or function of it (a row naming
 ``mod:Class.method`` covers the nested helpers inside that method).
 
-RED TODAY, ON PURPOSE: the registry does not exist yet (nexus-rfvyy.6.16), so
-the main test fails with one message naming the missing table and listing the
-sites it found. The scan does not depend on the table, so its counts are real
-today and ``MIN_SITES_EXAMINED`` is the count at landing.
+The registry landed at nexus-rfvyy.6.16 (``src/nexus/tables/llm-surfaces.toml``, typed
+loader ``nexus.tables.llm_surfaces``). A row names several targets and every one counts as
+registered. The scan does not depend on the table, so its counts are real and
+``MIN_SITES_EXAMINED`` is the count at landing. First run with the table: 61 sites examined
+(claude-argv=2, dispatch=21, httpx=38), 17 engine-client (allowlisted), 44 in scope, 0 unregistered.
 
 Blind spots, stated so nobody reads a green run as more than it is:
 
@@ -268,7 +269,7 @@ def test_every_llm_and_outbound_site_sits_in_a_function_the_registry_names() -> 
         problems.append(registry_missing_message())
         unregistered = in_scope
     else:
-        targets = {s.target for s in surfaces}
+        targets = {t for s in surfaces for t in s.targets}
         unregistered = [s for s in in_scope if not registered_targets(targets, s)]
 
     summary = (
@@ -292,8 +293,8 @@ def test_registry_targets_name_functions_that_exist() -> None:
     assert surfaces is not None, registry_missing_message()
     assert surfaces, "the registry holds no rows"
     missing: list[str] = []
-    for s in surfaces:
-        module, _, qual = s.target.partition(":")
+    for s, target in ((s, t) for s in surfaces for t in s.targets):
+        module, _, qual = target.partition(":")
         path = SRC / Path(*module.split("."))
         file = path.with_suffix(".py") if path.with_suffix(".py").is_file() else path / "__init__.py"
         if not file.is_file():
@@ -303,7 +304,7 @@ def test_registry_targets_name_functions_that_exist() -> None:
             continue
         scopes = {v for v in _scopes(ast.parse(file.read_text(encoding="utf-8"))).values()}
         if qual not in scopes:
-            missing.append(f"{s.name}: {s.target} names no function or class in {file.relative_to(REPO_ROOT)}")
+            missing.append(f"{s.name}: {target} names no function or class in {file.relative_to(REPO_ROOT)}")
     assert not missing, "stale registry rows:\n  " + "\n  ".join(missing)
 
 
