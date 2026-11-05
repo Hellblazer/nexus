@@ -3631,8 +3631,9 @@ whose collection has an aspect extractor or already holds aspect rows (warn), an
 document that already has an aspect row or a queued aspect task (fail; one `nx enrich delete
 --tumbler <t>` line each). Both read `[ ]` not applicable, never a pass, on a tenant with no
 sensitive documents, on an engine without the sensitivity column, and when the catalog or the
-aspect store cannot be read. As supplementary rows they print and never change the exit code;
-`nx catalog doctor --sensitive-with-aspects` exits 1 on a fail.
+aspect store cannot be read. The warn row prints and never changes the exit code; a `sensitive-with-aspects`
+fail is the one supplementary finding that gates: `nx doctor` (text mode) exits 1 on it, as
+`nx catalog doctor --sensitive-with-aspects` does.
 `ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
