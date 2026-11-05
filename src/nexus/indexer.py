@@ -3622,12 +3622,35 @@ def _index_pdf_file(
         def _stage(_name: str):  # type: ignore[misc]
             return nullcontext()
 
+    # Catalog Document.doc_id (RDR-101 Phase 3 PR δ Stage B.3): resolved once per file, before the
+    # extraction, because the sensitivity gate below reads the catalog row. Empty string when no catalog
+    # handle exists; ``normalize`` Step 4c drops the field on the way to T3.
+    catalog_doc_id = doc_id_resolver(file) if doc_id_resolver is not None else ""
+
+    # RDR-243 (fix round 1): a PDF flagged sensitive in the catalog is extracted by a local MinerU
+    # subprocess only, and is not chunked for a Voyage collection (a repo run has no
+    # --ack-external-embedder to accept it). The skip is loud; the flag is read from the catalog row.
+    from nexus.sensitive_write import catalog_sensitive, is_external_embedder  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+    _sensitive_pdf = catalog_sensitive(catalog_doc_id)
+    if _sensitive_pdf and is_external_embedder(collection_name):
+        _log.warning(
+            "sensitive_pdf_skipped_external_embedder", path=str(file), doc_id=catalog_doc_id,
+            collection=collection_name,
+            note="a sensitive document is not written to a Voyage collection from a repo run; "
+                 "index it with nx index pdf --sensitive --ack-external-embedder to accept Voyage")
+        return 0
+    if _sensitive_pdf and extractor == "mineru":
+        _log.warning(
+            "sensitive_mineru_server_skipped", pdf=str(file), doc_id=catalog_doc_id, reason="catalog",
+            note="a sensitive document is extracted by a local MinerU subprocess; no MinerU server is contacted")
+
     _extraction_stats: dict = {}
     with _stage("chunking"):
         prepared = _pdf_chunks(
             file, content_hash_hex, target_model, now_iso, collection_name,
             chunk_chars=chunk_chars, collection_name=collection_name,
             extraction_stats=_extraction_stats, extractor=extractor,
+            **({"sensitive": True} if _sensitive_pdf else {}),
         )
     if not prepared:
         _log.debug("skipped PDF with no chunks", path=str(file))
@@ -3650,11 +3673,6 @@ def _index_pdf_file(
         prefix_parts.append(f"Page: {page_number}")
         prefix = "## " + "  ".join(prefix_parts)
         embed_texts_pdf.append(f"{prefix}\n\n{doc}")
-
-    # Catalog Document.doc_id (RDR-101 Phase 3 PR δ Stage B.3): resolved
-    # once per file. Empty string when no catalog handle exists;
-    # ``normalize`` Step 4c drops the field on the way to T3.
-    catalog_doc_id = doc_id_resolver(file) if doc_id_resolver is not None else ""
 
     # RDR-237 (nexus-tr1rj.3): record the extraction method and the degraded-page map on the
     # catalog document this run registered, so a clean re-extract here clears an old map and a

@@ -3669,6 +3669,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
+    if sens_kw and extractor == "mineru":
+        # RDR-243 row 21, as the --dir branch says it: the skip is stated, not silent. (A document the
+        # catalog flags without this option gets the same line from external_legs_gate and a warning.)
+        click.echo("Sensitive run: MinerU runs as a local subprocess; no MinerU server is contacted.")
     fork_holder: list[tuple[str, int]] = []
     extraction_holder: list[dict] = []  # RDR-237: what index_pdf's on_extraction reports
     if monitor or not sys.stdout.isatty():
