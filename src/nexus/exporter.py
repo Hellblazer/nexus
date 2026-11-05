@@ -1988,8 +1988,14 @@ def import_collection(
         target_collection=collection_name)
     from nexus.sensitive_write import gate_sensitive_import  # noqa: PLC0415 — deferred: sensitive_write is a leaf, read only here
 
+    from nexus.sensitive_write import flagged_for_import  # noqa: PLC0415 — deferred: as above
+
+    # The flag is the file's, and also the catalog's: a document the catalog already flags (matched by source_uri)
+    # but the file writes unflagged is still sensitive, and an unreadable catalog reads as flagged.
     gate_sensitive_import(
-        [f"{g['title']} ({g['source_uri']})" for g in prepass.values() if g.get("sensitive") is True],
+        flagged_for_import(
+            ((f"{g['title']} ({g['source_uri']})", g.get("source_uri", ""), g.get("sensitive") is True)
+             for g in prepass.values()), collection_name),
         collection_name, ack=ack_external_embedder)
     try:
         if owner_import is not None:

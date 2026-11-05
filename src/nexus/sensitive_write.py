@@ -25,7 +25,7 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 __all__ = [
-    "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
+    "BGE_TOKEN", "ExternalEmbedderRefusedError", "catalog_flags_uri", "flagged_for_import", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
     "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
     "cloud_refusal_text", "external_legs_gate", "gate_sensitive_import", "gate_sensitive_reindex", "import_ack_help", "is_external_embedder", "raise_flag", "refuse_external_existing",
     "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
@@ -236,11 +236,45 @@ def import_ack_help() -> str:
     )
 
 
+def catalog_flags_uri(*uris: str) -> bool:
+    """True when the catalog row whose ``source_uri`` is any of *uris* is flagged sensitive, or the catalog cannot say.
+
+    The flag is a one-way property of the DOCUMENT, so a document the file or bundle writes without the flag but
+    that the catalog already flags (matched by ``source_uri``) is still sensitive. A blank URI asks nothing; a read
+    that fails reads as flagged, the same rule :func:`catalog_sensitive` applies.
+    """
+    from nexus.doc_sensitivity import SensitivityUnknown, sensitive_tumbler_for_uri  # noqa: PLC0415 — deferred: reads the catalog client
+
+    for uri in dict.fromkeys(u for u in uris if u):
+        try:
+            if sensitive_tumbler_for_uri(uri):
+                return True
+        except SensitivityUnknown as exc:
+            _log.warning("sensitive_flag_unreadable_treated_as_sensitive", source_uri=uri, detail=exc.detail)
+            return True
+    return False
+
+
+def flagged_for_import(documents: Iterable[tuple[str, str, bool]], collection: str) -> list[str]:
+    """The labels of the documents of an import that count as flagged, for :func:`gate_sensitive_import`.
+
+    *documents* is ``(label, source_uri, flagged_in_file)``. A document is flagged when its file says so, or
+    (only when *collection* embeds off this machine, where the answer matters) when the catalog already flags the
+    document with that ``source_uri``. A bge target asks the catalog nothing.
+    """
+    external = is_external_embedder(collection)
+    out: list[str] = []
+    for label, source_uri, in_file in documents:
+        if in_file or (external and catalog_flags_uri(source_uri)):
+            out.append(label)
+    return out
+
+
 def gate_sensitive_import(flagged: Sequence[str], collection: str, *, ack: bool, what: str = "nx store import") -> None:
     """Refuse an ``.nxexp`` import that would write a document the file flags sensitive into a Voyage collection.
 
-    *flagged* names those documents (empty: nothing to gate). The flag comes from the file, so the
-    catalog is not asked. The rule is the index verbs': *collection* embeds off this machine, or cannot
+    *flagged* names those documents (empty: nothing to gate); :func:`flagged_for_import` builds it from the
+    file's flag and the catalog's (matched by ``source_uri``). The rule is the index verbs': *collection* embeds off this machine, or cannot
     be told (:func:`is_external_embedder`), and *ack* is false, so it refuses before anything is
     registered or written. The vectors are the file's, so there is no bge sibling to route to; the way
     out is a bge target (``--collection``) or ``--ack-external-embedder``. With *ack* the import goes

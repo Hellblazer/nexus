@@ -999,8 +999,10 @@ Find documents by title, author, corpus, or file path. Returns tumbler, content 
 
 ```
 nx catalog export FILE     # write the recovery bundle (run BEFORE a reinstall)
-nx catalog import FILE     # restore it (after reinstall + re-index)
+nx catalog import FILE [--ack-external-embedder]     # restore it (after reinstall + re-index)
 ```
+
+A note flagged sensitive (RDR-243), in the bundle or already in the catalog under the same `source_uri`, is refused when it would be restored into a Voyage collection (or one whose embedder cannot be told), unless `--ack-external-embedder` is given; a catalog that cannot answer reads as flagged. The refusal is that note's failure, counted and listed; the rest of the bundle restores.
 
 One paired recovery verb (GH #1419.9): a human-inspectable JSONL bundle
 carrying the catalog **link graph** and **store_put-origin knowledge
@@ -2625,7 +2627,7 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
 | `--skip-existing` | Do not send the text or vector of a record whose chunk the target collection already holds: the stored chunk and vector stay, and the record still gets its owner row. Without it every record is written with the file's vector, which replaces a stored one |
-| `--ack-external-embedder` | Accept that a document the file flags `sensitive` is written to a Voyage collection (RDR-243). Without it, an import of a flagged document into a Voyage collection, or into one whose embedder cannot be told, refuses before anything is written, naming the document; import into a bge collection with `--collection` instead, which needs no flag. With it the import runs and a one-line disclosure names Voyage (cloud mode: the managed tenant and Voyage). The flag is read from the file, never the catalog |
+| `--ack-external-embedder` | Accept that a document the file flags `sensitive` is written to a Voyage collection (RDR-243). Without it, an import of a flagged document into a Voyage collection, or into one whose embedder cannot be told, refuses before anything is written, naming the document; import into a bge collection with `--collection` instead, which needs no flag. With it the import runs and a one-line disclosure names Voyage (cloud mode: the managed tenant and Voyage). The flag is the file's, and also the catalog's: a document the catalog already flags under the same `source_uri` counts as flagged though the file does not say so, and a catalog that cannot answer reads as flagged (only a Voyage target asks) |
 
 Non-conformant legacy chunk ids (16- or 32-char pre-migration ids that fail
 the service backend's `chash` length constraint) are re-hashed to full 64-char
