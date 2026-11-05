@@ -394,7 +394,11 @@ inferred, not read).
   (`UPDATE ... SET sensitive = true WHERE NOT sensitive`) and records the
   change in the audit table. It never lowers it. A fresh registration that
   carries `sensitive = true` writes a `register_set` audit row too (actor
-  `engine`, since the repository call has no caller principal).
+  `engine`, since the repository call has no caller principal). Every
+  flagged document gets a first audit row: an upsert or import that inserts
+  a fresh row carrying `sensitive = true` writes `upsert_set` or
+  `import_set`. A fresh row that is flagged by its request and also
+  inherits from a sensitive tombstone gets one audit row, the inheritance.
 - A new registration, and an upsert or import that inserts a fresh row, for
   a source URI whose most recent tombstoned row was sensitive inherits the
   flag, with an audit row naming the predecessor.
