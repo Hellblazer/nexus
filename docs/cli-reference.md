@@ -1381,6 +1381,24 @@ nx catalog footnotes docs/rdr/rdr-200.md --refresh    # bodies only, no new mark
 nx catalog footnotes docs/rdr/rdr-200.md --style short
 ```
 
+### nx catalog sensitive
+
+```
+nx catalog sensitive TUMBLER [--json]
+nx catalog sensitive --collection C [--json]
+nx catalog sensitive --path GLOB [--collection C] [--owner OWNER] [--json]
+nx catalog sensitive <target> --clear --reason TEXT
+nx catalog list --sensitive [--owner O] [--type T] [-n N] [--offset K] [--json]
+```
+
+RDR-243. Sets or clears the document sensitivity flag after the document was written. Setting needs no reason; clearing needs `--reason`, and every change writes a row (old, new, reason, actor, time) to the engine's `catalog_sensitivity_changes` table. There is no CLI view of that table yet, and no MCP tool clears the flag.
+
+`TUMBLER` is a dotted tumbler (never a title) and excludes the other options. `--collection C` takes every document in that physical collection. `--path GLOB` is an `fnmatch` pattern on the document's file path (`*` crosses `/`); the engine has no glob, so it reads the catalog, and `--collection` or `--owner` narrows that read first. `--owner` is accepted only with `--path`.
+
+The verb refuses, before it resolves a target or calls the engine, when the engine does not advertise `catalog_sensitivity_supported` (an engine without the column would drop the flag without an error). A target that matches nothing is an error. A large target is sent in batches of 500; a failure part-way names how many documents changed, and re-running the same command finishes the rest.
+
+`nx catalog list --sensitive` keeps only flagged documents. It scans the catalog like `--meta` does, and `-n`/`--offset` page the matches.
+
 ### nx catalog link-generate
 
 ```
