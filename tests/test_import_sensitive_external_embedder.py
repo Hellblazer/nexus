@@ -29,7 +29,7 @@ from nexus.db.t3 import T3Database
 from nexus.errors import NexusError
 from nexus.exporter import import_collection
 from nexus.sensitive_write import ExternalEmbedderRefusedError
-from tests.conftest import make_vector_test_client
+from tests.conftest import make_vector_test_client, patched_mcp_infra_t3
 from tests.test_exporter import _write_nxexp_records
 
 pytestmark = pytest.mark.t2_tenant
@@ -140,8 +140,12 @@ def test_the_acknowledgement_imports_and_prints_the_local_disclosure(db, tmp_pat
 
 def test_the_acknowledgement_in_cloud_mode_prints_the_tenant_disclosure(db, tmp_path, capsys, monkeypatch) -> None:
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-    result = import_collection(
-        db=db, input_path=_voyage_file(tmp_path, ("secret memo", True)), ack_external_embedder=True)
+    # Cloud posture makes the write path's collection-row read (``mcp_infra.get_t3()``) build a real
+    # managed-service client, whose version probe an unstamped test engine fails. Hand it ``db``
+    # instead, so the test no longer depends on which test warmed the singleton first.
+    with patched_mcp_infra_t3(db):
+        result = import_collection(
+            db=db, input_path=_voyage_file(tmp_path, ("secret memo", True)), ack_external_embedder=True)
     assert result["imported_count"] == 1
     assert "managed cloud tenant" in capsys.readouterr().err
 
