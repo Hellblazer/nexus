@@ -36,6 +36,7 @@ __all__ = [
     "AnswerShape",
     "NON_ANSWER_SHAPES",
     "INSUFFICIENT_EVIDENCE_NOTICE_PREFIX",
+    "EXACT_KEY_JOIN_NOTICE_PREFIX",
     "ANSWERING_OPERATORS",
     "is_answering_operator",
     "classify_answer_shape",
@@ -248,6 +249,10 @@ def classify_answer_shape(final_text: str | None) -> AnswerShape:
 #: (a ``trace=True`` row without a run summary), so keep it stable. The marker line carries a count and no
 #: question text, so it survives ``trace=False`` redaction wherever the text itself is kept.
 INSUFFICIENT_EVIDENCE_NOTICE_PREFIX: str = "[insufficient-evidence:"
+
+#: Opening of the one notice line an answer carries when its run merged an exact-key join (RDR-147, nexus-irndi). On a
+#: partial answer it opens the text, ahead of the insufficient-evidence notice, so a reader that keys on that prefix skips it.
+EXACT_KEY_JOIN_NOTICE_PREFIX: str = "[exact-key join:"
 
 
 #: Text-mode notice prefix for a non-answer. ``nx answer-runs`` keys on

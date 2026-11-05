@@ -103,6 +103,12 @@ def _redacted_coverage_class(summary: object) -> str | None:
     block = summary.get("coverage")
     reason = block.get("reason") if isinstance(block, dict) else None
     if reason == "uncovered":
+        repair = summary.get("repair")
+        if isinstance(repair, dict) and repair.get("resolution_generated_on_join") is True:
+            # RDR-147 option 1 (nexus-irndi): the ledger covers no facet and the call returned an ANSWER generated after an
+            # entered exact-key join, so the unavailable state does not mean a non-answer. (Prose that was not an answer
+            # moves the reason to ``no_usable_answer`` and is classed below.)
+            return None
         return "non_answer/uncovered"
     if reason in ("no_evidence", "scope_conflict"):
         return "non_answer/no_evidence"

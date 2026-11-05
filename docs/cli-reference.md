@@ -6491,8 +6491,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `out_of_scope` (the record lies outside the caller's scope), `held` (the input already holds that joined text, or an earlier anchor with the same text made that join in this run) or
   `self` (the anchor is the resolved record itself, which joins nothing)), `tokens_dropped` (the keys the item cap
   kept from being resolved) and `anchor_key_ids` (every distinct key the anchors named, less a key only its own record
-  names). Each of these six lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at
-  its first 3 chunks, and the cut is named in `detail`. The outcome stays one of the existing ones: `completed`,
+  names) and `joined_keys` (the distinct keys of the joined items that were merged). Each of these seven lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at
+  its first 3 chunks, and the cut is named in `detail`. Every answer from a run that merged a joined item opens with
+  `[exact-key join: <n> record(s) joined by exact key (<keys>)]` (`<n>` is the distinct records, ahead of the
+  insufficient-evidence notice on a partial answer). When the final ledger covers no facet (`unavailable` /
+  `uncovered`), the run still generates, the line ends `; the coverage check did not confirm this answer`, `repair`
+  adds `generated_on_join: true`, the answer counts as an answer and is never grown; `coverage_state` stays
+  `unavailable`, and `repair.resolution_generated_on_join` in the run summary says which of those runs answered. The outcome stays one of the existing ones: `completed`,
   `no_new_evidence` when no key yielded a joined item, `retrieval_failed` when the resolve or the record fetch failed. `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),

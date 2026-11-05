@@ -12715,6 +12715,13 @@ def _insufficient_evidence_prefix() -> str:
     return INSUFFICIENT_EVIDENCE_NOTICE_PREFIX
 
 
+def _exact_key_join_prefix() -> str:
+    """``EXACT_KEY_JOIN_NOTICE_PREFIX``, imported on first use (RDR-147, nexus-irndi)."""
+    from nexus.plans.answer_shape import EXACT_KEY_JOIN_NOTICE_PREFIX  # noqa: PLC0415 — deferred: only reached when a notice is composed
+
+    return EXACT_KEY_JOIN_NOTICE_PREFIX
+
+
 #: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
 #: "a stable prefix, followed by call-specific detail" convention as
 #: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX`` above. Written by
@@ -13443,12 +13450,13 @@ async def nx_answer(
         if not _extra_text:
             _text = text
         elif text.startswith(
-            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix(), _insufficient_evidence_prefix())
+            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix(), _insufficient_evidence_prefix(), _exact_key_join_prefix())
         ):
             # The tool contract: a degraded text answer STARTS with its
             # marker. The markers (budget exhausted, non-answer, and the
             # partial answer's insufficient-evidence notice, RDR-232
-            # nexus-jypmj.3.3) keep the leading position and the extra
+            # nexus-jypmj.3.3, and the exact-key-join notice, RDR-147,
+            # which opens a partial answer ahead of that one) keep the leading position and the extra
             # notices (budget warnings, dropped reduce steps, evidence-
             # request disclosures) follow.
             _text = f"{text}\n{_extra_text}"
@@ -15347,7 +15355,12 @@ async def nx_answer(
         render_non_answer_notice as _render_non_answer_notice,
         AnswerShape as _AnswerShape,
     )
-    from nexus.plans.coverage_outcome import decide_outcome as _decide_outcome, render_insufficient_evidence as _render_insufficient_evidence  # noqa: PLC0415 — deferred: plan path only
+    from nexus.plans.coverage_outcome import (  # noqa: PLC0415 — deferred: plan path only
+        decide_outcome as _decide_outcome,
+        has_merged_join as _has_merged_join,
+        render_exact_key_join_notice as _render_exact_key_join_notice,
+        render_insufficient_evidence as _render_insufficient_evidence,
+    )
 
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the post-generation half of the coverage-state table. The boundary
     # decided the state before generation; what generation returned decides whether a usable answer exists, and
@@ -15433,6 +15446,12 @@ async def nx_answer(
         final_text = _render_insufficient_evidence(
             _verdict.coverage, {f.id: f.text for f in _request_coverage.facets}, final_text,
         )
+    # RDR-147 (nexus-irndi): every answer from a run whose resolution branch merged a joined item says so, whatever the
+    # final ledger (covered, partial, or uncovered with generation allowed by option 1); the line adds that the coverage
+    # check did not confirm the answer only in the last case. It opens the text, ahead of the insufficient-evidence
+    # notice on a partial answer. Counter outcome and no-grow flag are the verdict's.
+    if _shape in (_AnswerShape.ANSWERED, _AnswerShape.INSUFFICIENT_EVIDENCE) and _verdict.coverage is not None and _has_merged_join(_verdict.coverage):
+        final_text = _render_exact_key_join_notice(_verdict.coverage, final_text)
 
     _log.info(
         "nx_answer_complete",

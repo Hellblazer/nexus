@@ -202,6 +202,13 @@ class RepairReport:
     tokens_dropped: tuple[str, ...] = ()
     anchors_scanned: int = 0
     anchors_without_pattern: int = 0
+    #: RDR-147 Step 4 sub-step 4 (nexus-irndi), option 1. ``joined_keys`` are the distinct entity keys of the joined items
+    #: that were MERGED into the reduction's input (not every resolved key), in item order; the answer's notice names
+    #: them, on every answer from a run that merged one (covered, partial or uncovered). ``generated_on_join`` is true when the final ledger covers no facet (``unavailable`` / ``uncovered``), the
+    #: branch entered and merged at least one joined item, and generation therefore ran anyway (the one exception to
+    #: RDR-232's skip rule). ``CoverageBoundary.run`` sets it and nothing else does.
+    joined_keys: tuple[str, ...] = ()
+    generated_on_join: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -219,10 +226,13 @@ class RepairReport:
             })
             # The key lists hold entity keys (identifiers the operator configured), never evidence text; each is cut at
             # WIRE_KEY_LIST_CAP entries and says how many it left out.
-            for name in ("resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped", "anchor_key_ids"):
+            for name in ("resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped", "anchor_key_ids", "joined_keys"):
                 values: tuple[str, ...] = getattr(self, name)
                 wire[name] = list(values[:WIRE_KEY_LIST_CAP])
                 wire[f"{name}_truncated"] = max(0, len(values) - WIRE_KEY_LIST_CAP)
+        if self.generated_on_join:
+            # Only on a run that generated on an uncovered ledger (option 1): any other run keeps the wire form it had.
+            wire["generated_on_join"] = True
         return wire
 
 

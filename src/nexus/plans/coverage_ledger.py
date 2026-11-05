@@ -1114,7 +1114,22 @@ class CoverageBoundary:
                 result = replace(first, repair=RepairReport(
                     "retrieval_failed", targets, detail=f"{type(exc).__name__}", **self._why(first)))
                 self._withdraw(view)
-        return self._note_unresolved(view, result)
+        return self._note_unresolved(view, self._generate_on_join(result))
+
+    def _generate_on_join(self, result: CoverageResult) -> CoverageResult:
+        """RDR-147 Step 4 sub-step 4 (nexus-irndi), option 1: the one exception to RDR-232's rule that a ledger covering no
+        facet stops generation. It applies when the FINAL ledger is ``unavailable`` / ``uncovered``, the resolution branch
+        entered, and at least one joined item was merged into the reduction's input, under the switch (``resolution_repair``).
+        Generation then runs (``skip_generation`` false) and the report says ``generated_on_join``; the ledger is not
+        rewritten, so the facets keep the re-check's states and the final coverage state stays ``unavailable`` /
+        ``uncovered`` (``decide_outcome`` turns that into the answered shape and sets no-grow). Every other run is returned as is."""
+        r = result.repair
+        if not (
+            self.resolution_repair and r.resolution_entered and r.joined_added > 0
+            and (result.state, result.reason) == ("unavailable", "uncovered")
+        ):
+            return result
+        return replace(result, skip_generation=False, repair=replace(r, generated_on_join=True))
 
     @staticmethod
     def _why(first: CoverageResult) -> dict[str, Any]:
@@ -1399,17 +1414,19 @@ class CoverageBoundary:
         if cut:
             detail += (f"; {cut} record{'s' if cut != 1 else ''} cut to {'their' if cut != 1 else 'its'} first "
                        f"{RESOLVED_RECORD_MAX_CHUNKS} chunks")
-        return _Resolution(fields, entered=True, items=items, detail=detail)
+        return _Resolution(fields, entered=True, items=items, detail=detail, keys=tuple(token for token, _a, _j in chosen))
 
     async def _repair(self, view: BoundaryView, first: CoverageResult, targets: tuple[str, ...]) -> CoverageResult:
         started = time.monotonic()
 
         resolution_fields: dict[str, Any] = {}  # the resolution branch's RepairReport fields, once it was considered (RDR-147 Step 4)
+        joined_keys: list[str] = []  # the distinct keys of the joined items that reached the reduction's input (option 1's notice)
 
         def done(outcome: RepairOutcome, *, queries: int = 0, found: int = 0, merged: int = 0, detail: str = "", result: CoverageResult | None = None) -> CoverageResult:
             extra = dict(resolution_fields)
             if extra.get("resolution_entered"):
                 extra["joined_added"] = merged  # what reached the reduction's input, not what was built (``found``)
+                extra["joined_keys"] = tuple(joined_keys)
             report = RepairReport(
                 outcome, targets, queries, found, merged, int((time.monotonic() - started) * 1000), detail,
                 **self._why(first), **extra)
@@ -1564,6 +1581,8 @@ class CoverageBoundary:
             else:
                 in_input = {strip_source_note(t) for t in texts if isinstance(t, str)}
                 merged = sum(1 for i in new if strip_source_note(i.text) in in_input)
+                if entered and resolution is not None:  # ``new`` is the branch's items, parallel to ``resolution.keys``
+                    joined_keys.extend(dict.fromkeys(k for i, k in zip(new, resolution.keys, strict=False) if strip_source_note(i.text) in in_input))
                 if merged == 0:
                     view.install_supplement(())
                     if not unread_first:
@@ -1934,13 +1953,15 @@ _JOINED_SEP = "\n\nResolved "
 @dataclass
 class _Resolution:
     """What the exact-key branch did: the :class:`RepairReport` fields it sets, and, when it entered, the joined
-    items to merge, a ``failure`` (the resolve or the fetch failed, nothing was merged) and the report's ``detail``."""
+    items to merge, a ``failure`` (the resolve or the fetch failed, nothing was merged) and the report's ``detail``.
+    ``keys`` is the entity key of each item, parallel to ``items``."""
 
     fields: dict[str, Any]
     entered: bool = False
     items: list[SupplementItem] = field(default_factory=list)
     failure: str = ""
     detail: str = ""
+    keys: tuple[str, ...] = ()
 
 
 def _hits(out: Any) -> list[RepairHit]:

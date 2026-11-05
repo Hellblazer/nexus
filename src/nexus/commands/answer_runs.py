@@ -475,9 +475,13 @@ def _row_is_insufficient_evidence(row: dict) -> bool:
             and summary.get("outcome") == "success"
             and summary.get("coverage_partial") == 1
         )
-    from nexus.plans.answer_shape import INSUFFICIENT_EVIDENCE_NOTICE_PREFIX  # noqa: PLC0415 - deferred: keep CLI startup fast
+    from nexus.plans.answer_shape import EXACT_KEY_JOIN_NOTICE_PREFIX, INSUFFICIENT_EVIDENCE_NOTICE_PREFIX  # noqa: PLC0415 - deferred: keep CLI startup fast
 
-    return str(row.get("final_text") or "").startswith(INSUFFICIENT_EVIDENCE_NOTICE_PREFIX)
+    text = str(row.get("final_text") or "")
+    if text.startswith(EXACT_KEY_JOIN_NOTICE_PREFIX):
+        # RDR-147: a partial answer from a run that merged an exact-key join opens with that one line, then the notice.
+        text = text.split("\n", 1)[1].lstrip("\n") if "\n" in text else ""
+    return text.startswith(INSUFFICIENT_EVIDENCE_NOTICE_PREFIX)
 
 
 def _split_insufficient_evidence(rows: "list[dict]") -> "tuple[list[dict], list[dict]]":

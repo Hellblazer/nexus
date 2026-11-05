@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **With the resolution switch on, an answer built on an exact-key join is no longer withheld when the coverage re-check rejects it** (nexus-irndi, RDR-147 option 1; client-only, behind `NX_ANSWER_RESOLUTION_REPAIR`, off by default). When the resolution branch merged at least one joined item and the final coverage ledger leaves every facet uncovered, the answer is generated anyway: it is answered, it never grows a plan, and its first line is `[exact-key join: <n> record(s) joined by exact key (<keys>); the coverage check did not confirm this answer]`. Every answer from a merged join carries that line, without the last clause when the check did cover it. The repair report gains `joined_keys` and `generated_on_join`, and the run summary `resolution_generated_on_join`. The facet states and the coverage state stay as the re-check left them. What changes for you: nothing unless you set the variable.
+
 ## [7.95.2] - 2026-11-05
 
 Pairs with engine-service-v0.1.179 (REQUIRED_ENGINE_VERSION unchanged from 7.95.1). Client-only patch; the engine is already deployed to the managed service.
