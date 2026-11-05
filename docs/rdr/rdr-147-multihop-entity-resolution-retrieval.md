@@ -485,10 +485,11 @@ Three changes. Only the first two are on the path to the MVV.
    re-check's verdict is not required to generate; the answer notice discloses
    that the answer rests on an exact-key join"). This RDR reads "entered" as
    entered AND merged at least one joined item, since an entered branch whose
-   pairs all dropped has nothing to generate from: then a final ledger that
-   leaves the facets uncovered does not stop generation, and the answer's notice
-   says it rests on an exact-key join the coverage check did not confirm. The
-   facet states stay as the re-check judged them. A covered answer is unchanged. The gate is the signal
+   pairs all dropped joined nothing. Then a final ledger that leaves the facets
+   uncovered does not stop generation. Every answer generated with a merged join
+   leads with a notice that it rests on an exact-key join, as Sam's wording asks;
+   when the final ledger was uncovered, the notice adds that the coverage check
+   did not confirm it. The facet states stay as the re-check judged them. The gate is the signal
    itself: an unsupported facet AND entity-key tokens in the evidence. A question
    with no such tokens never reaches it, so simple questions are untouched
    (Beyond-Static guidance), and no second planning round, new plan dimension or
@@ -542,8 +543,10 @@ if first ledger has an unsupported facet (entry rule: see Step 4 sub-step 1)
      if at least one joined item merged and the final ledger is uncovered:
        generate anyway (option 1); facet states unchanged;
        RepairReport.generated_on_join = true
-       the answer carries a notice that it rests on an exact-key join the
-         coverage check did not confirm, naming the keys of the merged items
+     every answer generated with a merged join leads with the exact-key-join
+       notice naming the distinct keys of the merged items
+       (RepairReport.joined_keys); generated_on_join adds "the coverage check
+       did not confirm this answer"
 ```
 
 When the branch enters, it runs in place of the semantic facet queries, the
@@ -568,18 +571,27 @@ ledger is not rewritten: the facets keep the re-check's states and the final
 coverage state stays `unavailable` / `uncovered`. What changes, in this order:
 the boundary's result has `skip_generation` false; the RepairReport gains
 `generated_on_join: true` (on the wire and in the run summary's `resolution_*`
-counts); `decide_outcome` gives such a run the answered shape, counts it as an
-answer, and sets `no_grow`, so an answer the coverage check did not confirm
-never grows a plan; and the prose gets one notice line,
-`[exact-key join: <n> record(s) joined by exact key (<keys>); the coverage check
-did not confirm this answer]`, in the place the existing
-`[insufficient-evidence: ...]` notice uses (its own wording would contradict
-the answer, so it is not reused). The risk is an answer the coverage check did
+counts as `resolution_generated_on_join`); `decide_outcome` gives such a run
+the answered shape, counts it as an answer, and sets `no_grow`, so an answer the
+coverage check did not confirm never grows a plan, but only when the generated
+text classifies as an answer: other text keeps today's `no_usable_answer`
+downgrade. The notice line is `[exact-key join: <n> record(s) joined by exact
+key (<keys>)]`, where `<keys>` are the distinct keys of the merged items
+(`RepairReport.joined_keys`) and `<n>` their count, with `; the coverage check
+did not confirm this answer` added when `generated_on_join` is true. It leads
+the prose of every answer generated with a merged join, ahead of the existing
+`[insufficient-evidence: ...]` notice on a partial answer (that notice's own
+wording would contradict an uncovered answer, so it is not reused for it).
+Readers that took an uncovered final state to mean a withheld answer consult
+`generated_on_join`: `answer_text_class` (a redacted row stays `redacted`
+rather than `non_answer/uncovered`) and `nx answer-runs` (a leading join line
+does not hide a partial answer). The risk is an answer the coverage check did
 not confirm. The join fixes which record a key names, not whether the anchor
 message answers the question; that relevance is what the re-check judged, and
-nothing else checks it (R9). The 2026-11-05 precision (pooled 1.00 in every
+nothing else on the coverage path checks it (R9). The 2026-11-05 precision (pooled 1.00 in every
 run, 147-research-12, 147-research-13) covers only answers the re-check
-accepted: the rejected joins produced non-answers, so the answers that only
+accepted, plus one template-7 answer that never reached the coverage
+boundary: the rejected joins produced non-answers, so the answers that only
 option 1 admits are unmeasured until the fresh MVV, which reports precision
 split by `generated_on_join`.
 
@@ -757,8 +769,9 @@ where evidence is seen.
 - **R9, option 1 answers what the coverage check did not confirm.** An anchor
   that holds a key but does not concern the question now yields an answer
   instead of a decline. **Mitigation**: only with the switch on and at least one
-  merged join; the notice says so; `no_grow` keeps such answers out of the plan
-  library; the MVV reports precision split by `generated_on_join`, and the held-out
+  merged join; the notice says so; `no_grow` keeps such answers from growing a
+  plan (a library plan that answered still has its success counted, as for a
+  partial answer today); the MVV reports precision split by `generated_on_join`, and the held-out
   set counts answered outcomes as well as firings.
 
 ### Failure Modes
@@ -910,10 +923,13 @@ a `$ref` step") is dropped: it already works.
    one joined item, an uncovered final ledger does not stop generation, and the
    answer carries the exact-key-join notice (§Technical Design, Generation after
    an entered join). Tests pin both sides: an entered join with an uncovered
-   ledger generates, carries the notice, reports `generated_on_join`, and sets
-   `no_grow`; with an uncovered ledger, a run where the branch did not enter,
-   merged nothing, ran confined, or ran with the switch off is still a
-   non-answer; a covered answer carries no notice. The harness splits precision
+   ledger generates, carries the notice with its not-confirmed clause, reports
+   `generated_on_join`, and sets `no_grow`; a covered or partial answer from a
+   merged join carries the notice without the clause; generated text that is
+   not an answer keeps the `no_usable_answer` downgrade; with an uncovered
+   ledger, a run where the branch did not enter, merged nothing, ran confined,
+   or ran with the switch off is still a non-answer with no notice; a redacted
+   row is not classed as a non-answer. The harness splits precision
    by `generated_on_join` and counts answered held-out outcomes. Then a fresh
    MVV run.
 
@@ -951,7 +967,7 @@ No new external packages. New components:
   dry run).
 
 Reused unchanged: `find_by_title_exact` and the by-title route, the coverage
-boundary's budgets (its disclosure gains the exact-key-join notice), `traverse`, the hook registry, catalog typed
+boundary's budgets, `traverse`, the hook registry, catalog typed
 links and the FK cascade.
 
 ## Finalization Gate
@@ -1031,3 +1047,4 @@ linker conditional.
 - 2026-11-05: MVV bar revised after the 2026-11-05 run (nexus-irndi, Sam, T2 `nexus/rdr147-mvv-bar-revision-2026-11-05`, 147-research-12): one in-domain miss allowed per run; precision taken over the answers that name a company.
 - 2026-11-05: option 1 taken after the MVV rerun (Sam, T2 `nexus/rdr147-option1-decision-2026-11-05`, 147-research-13): an entered exact-key join generates whatever the re-check says, with a notice; Assumption #6 weakened to 11 of 15; Step 4 sub-step 4 added. Fix-check observations of f2f669cba applied (floor in the table and Scope Verification, the 0.9667 citation, the fresh-run clause).
 - 2026-11-05: fix-check 0c5053f53 findings applied: the option 1 outcome mapping (answered shape, `no_grow`, `generated_on_join`, its own notice), the notice scoped to uncovered answers, "merged at least one" marked as this RDR's reading, stale Assumption #6 and Jointness sites, R9, the precision-evidence caveat, the fresh-run clause, sizes.
+- 2026-11-05: text brought into line with the option 1 code (e023bd52a) and fix check 2c2063948: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
