@@ -2531,7 +2531,7 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 | `--tags TAG,TAG` | Comma-separated tags |
 | `--category LABEL` | Category label |
 | `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`; default: `permanent`) |
-| `--sensitive` | Mark the note sensitive (RDR-243); see `nx index md`. A re-put raises the flag on the existing note |
+| `--sensitive` | Mark the note sensitive (RDR-243); see `nx index md`. A re-put raises the flag on the existing note, in the collection the note is in. In local mode, if a live note with the same title is already in the Voyage collection, the put refuses (nothing is written) unless `--ack-external-embedder` is given, because routing it to the bge collection would leave the original note unflagged beside a new one; with the ack the existing note is flagged in place on Voyage |
 | `--ack-external-embedder` | With `--sensitive`: accept a Voyage collection. Without it, local mode stores into the bge collection of the same subject and cloud mode refuses |
 
 A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.

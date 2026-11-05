@@ -27,6 +27,7 @@ from nexus.metadata_schema import ttl_listing_label
 from nexus.sensitive_write import (
     SensitiveFlagNotSetError,
     ack_help,
+    refuse_external_existing_note,
     resolve_sensitive_collection,
     sensitive_help,
     sensitive_write_kwargs,
@@ -158,6 +159,9 @@ def put_cmd(
     if sensitive:
         # RDR-243 Q3: a Voyage collection needs the acknowledgement; without it the note goes to the
         # bge collection of the same subject (local mode).
+        # A live note of this title already in the Voyage collection would be left unflagged beside a
+        # new note in the sibling: refuse that without the ack, before anything is written.
+        refuse_external_existing_note(col_name, title, ack=ack_external_embedder, what="store put --sensitive")
         col_name = resolve_sensitive_collection(col_name, ack=ack_external_embedder, what="store put --sensitive")
 
     # RDR-223 P2.6 (nexus-z0o2p.16): the note is written by the note writer, the

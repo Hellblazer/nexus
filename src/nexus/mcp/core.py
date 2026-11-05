@@ -5956,10 +5956,14 @@ def store_put(
             # same subject is. No acknowledgement exists on this tool.
             from nexus.sensitive_write import (  # noqa: PLC0415 — deferred: only a flagged put needs it
                 ExternalEmbedderRefusedError,
+                refuse_external_existing_note,
                 resolve_sensitive_collection,
             )
 
             try:
+                # A live note of this title in the Voyage collection would be left unflagged beside a new
+                # note in the sibling; this tool has no acknowledgement, so it refuses.
+                refuse_external_existing_note(col_name, title, ack=False, what="store_put(sensitive=True)")
                 routed = resolve_sensitive_collection(col_name, ack=False, what="store_put(sensitive=True)")
             except ExternalEmbedderRefusedError as exc:
                 return _fail(f"Error: store_put: {exc.message}")

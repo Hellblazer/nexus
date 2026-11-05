@@ -27,7 +27,7 @@ __all__ = [
     "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
     "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
     "cloud_refusal_text", "external_legs_gate", "is_external_embedder", "raise_flag", "refuse_external_existing",
-    "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
+    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
     "sensitive_write_kwargs",
 ]
 
@@ -222,6 +222,37 @@ def refuse_external_existing(existing: object, *, ack: bool, what: str) -> None:
         f"--ack-external-embedder to index it in place on Voyage, or delete the document "
         f"(nx catalog delete {tumbler}) and index it again."
     )
+
+
+def refuse_external_existing_note(collection: str, title: str, *, ack: bool, what: str) -> None:
+    """Refuse a ``--sensitive`` note put whose title already names a live note in the Voyage *collection*.
+
+    The store verbs route a sensitive put to the bge sibling in local mode. When the title already has a
+    live note in the Voyage collection, the re-route writes a new note there and leaves the original,
+    unflagged and Voyage-embedded, beside it. Same rule as :func:`refuse_external_existing`: refuse before
+    anything is written; with *ack* the put goes to the Voyage collection and flags the existing note in
+    place. A blank title, a local-embedder collection and the ack never ask the catalog. A catalog that
+    cannot answer refuses (it cannot be told there is no twin).
+    """
+    if ack or not title or not is_external_embedder(collection):
+        return
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: the factory pulls the catalog client
+
+    try:
+        cat = make_catalog_reader()
+        try:
+            existing = [e for e in cat.find_by_title_exact(title) if e.physical_collection == collection]
+        finally:
+            close = getattr(cat, "close", None)
+            if callable(close):
+                close()
+    except Exception as exc:  # noqa: BLE001 — boundary: an unanswerable twin check refuses, it never guesses
+        raise ExternalEmbedderRefusedError(
+            f"{what} refused: could not check whether a note titled {title!r} already exists in the Voyage "
+            f"collection {collection} ({type(exc).__name__}: {exc}). Nothing was written."
+        ) from exc
+    if existing:
+        refuse_external_existing(existing[0], ack=False, what=what)
 
 
 def catalog_sensitive(doc_id: str) -> bool:
