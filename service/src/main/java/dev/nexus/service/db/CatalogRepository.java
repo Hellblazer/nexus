@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -10144,7 +10145,15 @@ public final class CatalogRepository {
         // Same audit family as the three above, and re-homed for the same RDR-164 reason:
         // "what happened to THIS collection" (idx_gc_audit_collection) must keep answering
         // after a rename, or incident triage silently loses the collection's GC history.
-        new CollectionScopedTable("gc_audit",                GC_AUDIT,                GC_AUDIT.COLLECTION));
+        new CollectionScopedTable("gc_audit",                GC_AUDIT,                GC_AUDIT.COLLECTION),
+        // nexus-4lnn1.1.2 (RDR-230 P1.2a, vectors-054): the recall canary's persisted query ring. A derived cache of
+        // one collection, so it follows a rename and a re-home with the collection. Its key (tenant_id, collection,
+        // vector_digest) holds the collection, so a re-home that finds the same digest on both sides leaves the
+        // source's row where it is and counts it (movableAtSource derives that from the key), and the target's ring
+        // may then exceed its 32 rows until its next write trims it. The foreign key to catalog_collections
+        // (tenant_id, name, embedding_model) is satisfied by a rename (the new registry row is written first and
+        // copies the model) and by a same-model re-home; see rehomeCollection for the cross-model case.
+        new CollectionScopedTable("canary_query_ring",       CANARY_QUERY_RING,       CANARY_QUERY_RING.COLLECTION));
 
     /**
      * One denorm-collection table: its rename-count key, the table, and its collection
@@ -10187,7 +10196,11 @@ public final class CatalogRepository {
         Map.entry("relevance_log",           CrossModelDisposition.LEAVE),
         Map.entry("search_telemetry",        CrossModelDisposition.LEAVE),
         Map.entry("hook_failures",           CrossModelDisposition.LEAVE),
-        Map.entry("gc_audit",                CrossModelDisposition.LEAVE));
+        Map.entry("gc_audit",                CrossModelDisposition.LEAVE),
+        // RDR-230: the ring holds query vectors in the SOURCE model's space. It is not copied across a re-embed;
+        // the source's rows go with the source's registry row (ON DELETE CASCADE) and the target's ring refills
+        // from live queries.
+        Map.entry("canary_query_ring",       CrossModelDisposition.LEAVE));
 
     /**
      * RDR-235 (bead nexus-5r2sc.2.6): the cross-model disposition of the unconsumed {@code aspects} tasks, which
@@ -10337,7 +10350,11 @@ public final class CatalogRepository {
      * as a separate, independently-verified set rather than a filtered view of this one.
      */
     static final java.util.Set<String> AUDIT_ONLY_TABLES =
-        java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
+        // canary_query_ring (nexus-4lnn1.1.2, RDR-230) is not an audit table but is classified here for the same
+        // reason: it holds no content a merge could lose (a ring of recent query vectors, derived and refilled
+        // by live queries, and removed with its registry row), so rows in it alone must not make a collection
+        // read as non-empty to a rename or keep a ghost registry row alive.
+        java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit", "canary_query_ring");
 
     /**
      * Tables {@code grants-nexus-diag-4} grants {@code nexus_diag} (BYPASSRLS, cross-tenant)
@@ -11044,6 +11061,16 @@ public final class CatalogRepository {
                 // The typed exception, not RehomeRefused: HttpUtil.sendTypedDbError answers it as a 409
                 // carrying reason=collection_model_mismatch, the contract the route documents.
                 throw new CollectionModelMismatchException(source, sourceModel, target, targetModel);
+            }
+            // nexus-4lnn1.1.2 (RDR-230): the recall canary's query ring names its collection AND its model through a
+            // foreign key to the registry, so its rows cannot move to a collection of another model, and they are
+            // vectors of the wrong space for it. The chunks guard above does not reach a source that holds only a
+            // ring (every other model-keyed table is reached through chunks), so drop the source's ring here rather
+            // than fail the whole re-home on the foreign key. It is a derived cache that refills from live queries.
+            if (!sourceModel.equals(targetModel)) {
+                ctx.deleteFrom(CANARY_QUERY_RING)
+                    .where(CANARY_QUERY_RING.TENANT_ID.eq(tenant)).and(CANARY_QUERY_RING.COLLECTION.eq(source))
+                    .execute();
             }
             // RDR-231: the move rewrites note URIs from source to target (moveScopedTable). If a live
             // document would land on a URI a live document already holds, nothing moves: chunks and

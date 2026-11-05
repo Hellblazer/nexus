@@ -26,6 +26,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -55,7 +56,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (nexus-v6za0 is the standing lesson two separate table lists already drifted
  * once).
  *
- * <p>Two of the fourteen {@link CatalogRepository#COLLECTION_SCOPED_TABLES}
+ * <p>Two of the {@link CatalogRepository#COLLECTION_SCOPED_TABLES}
  * entries — {@code catalog_document_chunks} and {@code topic_assignments} —
  * carry a REAL {@code ON DELETE RESTRICT}/{@code ON UPDATE CASCADE} FK to
  * {@code nexus.chunks} ({@code fk_catalog_chunks_chunk} /
@@ -197,6 +198,14 @@ class GhostSweepDormantMarkingTest {
                 // collectionIsEmpty pinned every drained sibling as held forever).
                 // The breadcrumb itself survives (no FK) -- see the assert below.
                 assertThat(row).as("row named only by audit table " + t.countKey() + " is a ghost").isNull();
+                if (t.countKey().equals("canary_query_ring")) {
+                    // nexus-4lnn1.1.2 (RDR-230): the ring is the one table of this set with a foreign key to the
+                    // registry (ON DELETE CASCADE), so reclaiming the ghost takes its ring rows with it; a
+                    // breadcrumb that outlived the registry row would be the foreign key not holding.
+                    assertThat(ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(coll))))
+                        .as("canary_query_ring rows go with the registry row (ON DELETE CASCADE)").isFalse();
+                    return;
+                }
                 assertThat(ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(coll))))
                     .as(t.countKey() + " breadcrumb outlives the registry row").isTrue();
                 return;
@@ -303,6 +312,13 @@ class GhostSweepDormantMarkingTest {
                 .execute();
             case "gc_audit" -> ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
                 .values(TENANT_PARAM, "purge", coll)
+                .execute();
+            case "canary_query_ring" -> ctx.insertInto(CANARY_QUERY_RING, CANARY_QUERY_RING.TENANT_ID,
+                               CANARY_QUERY_RING.COLLECTION, CANARY_QUERY_RING.EMBEDDING_MODEL,
+                               CANARY_QUERY_RING.EMBEDDING_384, CANARY_QUERY_RING.VECTOR_DIGEST,
+                               CANARY_QUERY_RING.ADDED_AT)
+                .values(TENANT_PARAM, coll, PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll),
+                        vector(384), chashBytes(coll + "-ring"), OffsetDateTime.now())
                 .execute();
             default -> throw new IllegalArgumentException(
                 "no seed case for COLLECTION_SCOPED_TABLES entry '" + countKey + "' -- "

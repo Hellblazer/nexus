@@ -297,7 +297,10 @@ class JooqRecordReflectionFeatureTest {
     // function (ChunkSensitiveManyRecord); the scalar nexus.chunk_sensitive returns boolean and generates no Record, +2.
     // 129 -> 128: nexus-hbnml, aspects-005-2 dropped nexus.aspect_extraction_queue, so AspectExtractionQueueRecord is no longer generated, -1.
     // (aspects-005-1's counting helper returns a scalar and is dropped by 005-2 on a fresh walk, so it adds no Record type.)
-    private static final int EXPECTED_RECORD_TYPES = 128;
+    // 128 -> 129: nexus-4lnn1.1.2 (RDR-230 P1.2a), vectors-054-canary-query-ring.xml added the table
+    // nexus.canary_query_ring (CanaryQueryRingRecord) and nexus.canary_query_ring_upsert, which RETURNS integer
+    // (a scalar, no Record type), +1.
+    private static final int EXPECTED_RECORD_TYPES = 129;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

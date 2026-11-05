@@ -4282,6 +4282,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # one row per agent dispatch with its T1 put count; tier_writes RLS shape.
     "nexus.agent_dispatches",
     "nexus.aspect_promotion_log",
+    # nexus.canary_query_ring: RDR-230 P1.2a (nexus-4lnn1.1.2, vectors-054-
+    # canary-query-ring.xml), the recall canary's persisted query ring; ENABLE
+    # + FORCE + tenant_isolation.
+    "nexus.canary_query_ring",
     # nexus.capability_census: nexus-gjv9b PART 1 (telemetry-010-capability-
     # census.xml), replacing capability_census.jsonl. Per-session UPSERT
     # (tenant_id, session_id) with the usual ENABLE + FORCE + tenant_isolation
