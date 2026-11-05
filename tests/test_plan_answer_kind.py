@@ -30,9 +30,12 @@ from nexus.plans.answer_kind import (
     decode_answer_kind,
     decode_declaration,
     declaration_payload,
+    PROVENANCES,
     golden_label_kind,
     grown_plan_json,
+    saved_plan_json,
     strip_declaration,
+    terminal_is_retrieval_only,
     validate_declaration,
 )
 from nexus.plans.schema import (
@@ -247,11 +250,25 @@ class TestValidation:
             {"version": 1, "kind": "lookup", "provenance": "grown"},
             {"version": 1, "kind": "lookup", "provenance": "grown", "route": "guessed"},
             {"version": 1, "kind": "lookup", "provenance": "curated", "extra": 1},
+            {"version": 1, "kind": "lookup", "provenance": "saved", "route": "explicit"},
+            {"version": 1, "kind": "unknown", "provenance": "saved", "route": "explicit"},
+            {"version": 1, "kind": "lookup", "provenance": "saved-ish"},
         ],
     )
     def test_validate_declaration_refuses_a_bad_one_by_name(self, raw: Any) -> None:
         with pytest.raises(AnswerKindError):
             validate_declaration(raw)
+
+    def test_the_provenance_vocabulary_is_curated_grown_and_saved(self) -> None:
+        assert PROVENANCES == {"curated", "grown", "saved"}
+
+    @pytest.mark.parametrize("kind", list(PlanAnswerKind), ids=lambda k: k.value)
+    def test_a_saved_declaration_takes_any_kind_unknown_included_and_no_route(self, kind: PlanAnswerKind) -> None:
+        payload = declaration_payload(kind, "saved")
+        assert payload == {"version": 1, "kind": kind.value, "provenance": "saved"}
+        decl = validate_declaration(payload)
+        assert (decl.kind, decl.provenance, decl.route) == (kind, "saved", None)
+        assert decode_declaration(json.dumps({ANSWER_KIND_KEY: payload})).provenance == "saved"
 
     def test_a_route_source_is_one_of_the_rdrs_three_words(self) -> None:
         assert ROUTE_SOURCES == {"explicit", "heuristic", "model-assisted"}
@@ -315,7 +332,10 @@ class TestReadPathsNeverRetireAPlanForItsDeclaration:
         assert lib.disabled == [99], "only the genuinely non-executable row is retired"
 
 
-def _plan_save(plan: dict[str, Any], tags: str = "") -> tuple[str, list[dict[str, Any]]]:
+def _plan_save(
+    plan: dict[str, Any], tags: str = "", answer_kind: str = "discovery/listing", project: str = "nexus",
+    session: tuple[str, tuple[str, ...]] = ("nexus", ()),
+) -> tuple[str, list[dict[str, Any]]]:
     """Run the plan_save MCP tool against a recording library; returns (reply, save_plan kwargs per call)."""
     from unittest.mock import MagicMock
 
@@ -336,43 +356,208 @@ def _plan_save(plan: dict[str, Any], tags: str = "") -> tuple[str, list[dict[str
     with (
         patch("nexus.mcp.core._t2_index_write", fake_write),
         patch("nexus.mcp.core._record_tier_write"),
+        patch("nexus.mcp.core._nx_answer_session_project", return_value=session[0]),
+        patch("nexus.mcp.core._nx_answer_session_project_aliases", return_value=session[1]),
     ):
-        return plan_save(query="q", plan_json=json.dumps(plan), verb="research", tags=tags), saved
+        return plan_save(
+            query="q", plan_json=json.dumps(plan), verb="research", tags=tags, answer_kind=answer_kind,
+            project=project,
+        ), saved
 
 
-class TestPlanSaveNeverStoresADeclaration:
-    _STEPS = [{"tool": "search", "args": {"query": "$intent"}}]
+#: A plan that ends in an operator, so it may declare any kind; and one that ends in retrieval.
+_ANSWERING = [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]
+_RETRIEVING = [{"tool": "memory_get", "args": {}}, {"tool": "search", "args": {"query": "$intent"}}]
 
-    def test_a_forged_curated_declaration_is_not_stored(self) -> None:
-        forged = declaration_payload(PlanAnswerKind.SYNTHESIS, "curated")
-        out, saved = _plan_save({"steps": self._STEPS, ANSWER_KIND_KEY: forged})
-        assert out.startswith("Saved plan: [7]") and "answer_kind field removed" in out
-        assert ANSWER_KIND_KEY not in json.loads(saved[0]["plan_json"])
-        assert decode_declaration(saved[0]["plan_json"]).provenance is None
 
-    def test_a_forged_grown_route_declaration_is_not_stored(self) -> None:
-        forged = declaration_payload(PlanAnswerKind.LOOKUP, "grown", "explicit")
-        out, saved = _plan_save({"steps": self._STEPS, ANSWER_KIND_KEY: forged})
-        stored = json.loads(saved[0]["plan_json"])
-        assert ANSWER_KIND_KEY not in stored and stored["steps"] == self._STEPS
-        assert decode_answer_kind(saved[0]["plan_json"]) is PlanAnswerKind.UNKNOWN
-        assert "only seeded templates declare an answer kind" in out
+class TestPlanSaveWritesASavedDeclaration:
+    """nexus-0vh80 (Sam, 2026-11-03): a user-saved plan declares its kind, with ``saved`` provenance."""
 
-    def test_a_plan_with_an_unrelated_answer_kind_key_saves_with_the_key_gone(self) -> None:
-        out, saved = _plan_save({"steps": self._STEPS, ANSWER_KIND_KEY: "essay"})
+    @pytest.mark.parametrize("kind", [k.value for k in PlanAnswerKind], ids=str)
+    def test_the_declared_kind_is_stored_as_a_saved_declaration(self, kind: str) -> None:
+        # a listing may end in retrieval; every other known kind needs an operator at the end
+        out, saved = _plan_save({"steps": _ANSWERING}, answer_kind=kind)
         assert out.startswith("Saved plan: [7]"), out
-        assert json.loads(saved[0]["plan_json"]) == {"steps": self._STEPS}
+        stored = json.loads(saved[0]["plan_json"])
+        assert stored[ANSWER_KIND_KEY] == {"version": 1, "kind": kind, "provenance": "saved"}
+        decl = decode_declaration(saved[0]["plan_json"])
+        assert (decl.kind.value, decl.provenance, decl.route) == (kind, "saved", None)
+        assert stored["steps"] == _ANSWERING, "the steps are stored as given"
 
-    def test_a_plan_without_the_key_is_stored_byte_for_byte_and_the_reply_is_unchanged(self) -> None:
-        plan = {"steps": self._STEPS}
-        out, saved = _plan_save(plan)
-        assert saved[0]["plan_json"] == json.dumps(plan)
+    def test_unknown_is_allowed_and_stored_as_a_saved_unknown(self) -> None:
+        out, saved = _plan_save({"steps": _RETRIEVING}, answer_kind="unknown")
+        assert out.startswith("Saved plan: [7]"), out
+        assert decode_declaration(saved[0]["plan_json"]) == decode_declaration(
+            json.dumps({ANSWER_KIND_KEY: declaration_payload(PlanAnswerKind.UNKNOWN, "saved")}))
+
+    @pytest.mark.parametrize("given", ["Lookup", " lookup ", "discovery", "essay", "saved", "1"])
+    def test_a_kind_outside_the_vocabulary_is_refused_and_nothing_is_saved(self, given: str) -> None:
+        out, saved = _plan_save({"steps": _ANSWERING}, answer_kind=given)
+        assert out.startswith("Plan not saved") and "answer_kind" in out and "discovery/listing" in out
+        assert saved == []
+
+    def test_a_save_with_no_kind_is_refused_like_one_with_no_verb(self) -> None:
+        from nexus.mcp.core import plan_save
+
+        out = plan_save(query="q", plan_json=json.dumps({"steps": _ANSWERING}), verb="research", project="nexus")
+        assert out.startswith("Plan not saved") and "answer_kind" in out and "required" in out
+
+    @pytest.mark.parametrize("kind", ["lookup", "synthesis", "comparison", "audit", "debug"])
+    def test_the_shape_veto_refuses_a_plan_that_ends_in_retrieval_under_an_answering_kind(self, kind: str) -> None:
+        out, saved = _plan_save({"steps": _RETRIEVING}, answer_kind=kind)
+        assert out.startswith("Plan not saved") and kind in out and "search" in out, out
+        assert saved == []
+
+    def test_the_veto_would_have_refused_plan_598_as_a_lookup_and_still_allows_a_listing(self) -> None:
+        steps = [{"tool": "memory_get", "args": {}}, {"tool": "memory_get", "args": {}}, {"tool": "search", "args": {}}]
+        out, saved = _plan_save({"steps": steps}, answer_kind="lookup")
+        assert saved == [] and "Plan not saved" in out
+        out, saved = _plan_save({"steps": steps}, answer_kind="discovery/listing")
+        assert out.startswith("Saved plan: [7]") and len(saved) == 1
+
+    def test_a_forged_embedded_declaration_is_replaced_by_the_declared_one(self) -> None:
+        forged = declaration_payload(PlanAnswerKind.SYNTHESIS, "curated")
+        out, saved = _plan_save({"steps": _ANSWERING, ANSWER_KIND_KEY: forged}, answer_kind="lookup")
+        decl = decode_declaration(saved[0]["plan_json"])
+        assert (decl.kind, decl.provenance) == (PlanAnswerKind.LOOKUP, "saved")
+        assert "embedded answer_kind field replaced" in out
+
+    def test_a_forged_grown_declaration_cannot_reach_the_row_either(self) -> None:
+        forged = declaration_payload(PlanAnswerKind.LOOKUP, "grown", "explicit")
+        _, saved = _plan_save({"steps": _ANSWERING, ANSWER_KIND_KEY: forged}, answer_kind="unknown")
+        decl = decode_declaration(saved[0]["plan_json"])
+        assert (decl.kind, decl.provenance, decl.route) == (PlanAnswerKind.UNKNOWN, "saved", None)
+
+    def test_the_reply_stays_plain_when_nothing_was_replaced(self) -> None:
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup")
         assert out == "Saved plan: [7] q"
+
+    def test_a_save_with_no_project_is_stored_and_the_reply_says_it_serves_nothing(self) -> None:
+        out, saved = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="")
+        assert out.startswith("Saved plan: [7]") and "no project" in out and "serves no request" in out
+        assert saved[0]["project"] == ""
+        quiet, _ = _plan_save({"steps": _ANSWERING}, answer_kind="unknown", project="")
+        assert "no project" not in quiet, "an unknown-kind plan has its own note"
+
+    def test_an_unknown_kind_save_says_it_serves_nothing(self) -> None:
+        out, saved = _plan_save({"steps": _ANSWERING}, answer_kind="unknown")
+        assert out.startswith("Saved plan: [7]") and "answer_kind unknown" in out and "serves no request" in out
+        assert len(saved) == 1
+
+    def test_a_project_that_is_not_the_sessions_is_named_in_the_reply(self) -> None:
+        out, saved = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="ART")
+        assert out.startswith("Saved plan: [7]") and "'ART' is not this session's project, nexus" in out
+        assert saved[0]["project"] == "ART", "stored as given: the warning does not change the save"
+
+    def test_a_save_under_the_repos_name_from_a_worktree_session_is_not_warned(self) -> None:
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="nexus", session=("wt-feature", ("nexus",)))
+        assert out == "Saved plan: [7] q"
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="wt-feature", session=("wt-feature", ("nexus",)))
+        assert out == "Saved plan: [7] q", "the session's own directory name matches too"
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project="ART", session=("wt-feature", ("nexus",)))
+        assert "not this session's project, nexus, wt-feature" in out
+
+    def test_the_project_is_compared_stripped(self) -> None:
+        out, _ = _plan_save({"steps": _ANSWERING}, answer_kind="lookup", project=" nexus ")
+        assert out == "Saved plan: [7] q"
+
+    @pytest.mark.parametrize("kind", ["lookup", "synthesis", "discovery/listing", "comparison", "audit", "debug"])
+    def test_the_stored_row_reads_saved_and_serves_its_kind_in_its_project_only(self, kind: str) -> None:
+        from nexus.plans import eligibility as el
+
+        _, saved = _plan_save({"steps": _ANSWERING}, answer_kind=kind, project="nexus")
+        standing = el.classify_plan(saved[0]["tags"], saved[0]["plan_json"])
+        assert (standing.provenance, standing.kind.value, standing.flag) == ("saved", kind, None)
+        for request_kind in PlanAnswerKind:
+            for request_project, here in (("nexus", True), ("ART", False)):
+                verdict = el._judge(
+                    request_kind, saved[0]["tags"], saved[0]["plan_json"], None, 0,
+                    plan_project=saved[0]["project"], request_project=request_project,
+                )[1]
+                assert verdict.eligible is (here and request_kind.value == kind), (kind, request_kind, request_project)
+
+    def test_the_tool_documents_the_argument_and_its_refusals(self) -> None:
+        from nexus.mcp.core import plan_save
+
+        assert "answer_kind" in plan_save.__doc__ and "saved" in plan_save.__doc__
+        assert "ends in retrieval" in plan_save.__doc__ or "retrieval-only" in plan_save.__doc__
+        assert "reads the last step only" in plan_save.__doc__ or "last step is retrieval-only" in plan_save.__doc__
+
+
+@pytest.mark.t2_tenant
+def test_a_real_saved_row_read_back_through_the_library_carries_its_project_and_the_filter_uses_it() -> None:
+    """Engine-backed: the project survives the write and the read, so the filter's project check has something to
+    compare (a fake row that carries ``project`` would pass with a library that dropped it)."""
+    import re
+
+    from nexus.mcp.core import plan_save
+    from nexus.mcp_infra import t2_ctx
+    from nexus.plans.eligibility import EligibilityFilter
+    from nexus.plans.match import Match
+
+    with patch("nexus.mcp.core._nx_answer_session_project", return_value="savedproj"), \
+         patch("nexus.mcp.core._nx_answer_session_project_aliases", return_value=()):
+        out = plan_save(
+            query="where did the saved-provenance round-trip land", plan_json=json.dumps({"steps": _ANSWERING}),
+            verb="query", answer_kind="lookup", project="savedproj", tags="roundtrip",
+        )
+    assert out.startswith("Saved plan: ["), out
+    plan_id = int(re.match(r"Saved plan: \[(\d+)\]", out).group(1))
+    with t2_ctx() as db:
+        row = db.plans.get_plan(plan_id)
+    assert row is not None and row["project"] == "savedproj"
+    assert Match.from_plan_row(row).project == "savedproj"
+    decl = decode_declaration(row["plan_json"])
+    assert (decl.kind, decl.provenance) == (PlanAnswerKind.LOOKUP, "saved")
+    here = EligibilityFilter(PlanAnswerKind.LOOKUP, enforce=True, project="savedproj")
+    assert here.admit(row, "cosine") is True
+    worktree = EligibilityFilter(PlanAnswerKind.LOOKUP, enforce=True, project="wt-x", project_aliases=("savedproj",))
+    assert worktree.admit(row, "cosine") is True
+    elsewhere = EligibilityFilter(PlanAnswerKind.LOOKUP, enforce=True, project="otherproj")
+    assert elsewhere.admit(row, "cosine") is False
+    assert elsewhere.to_wire()["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
+
+
+class TestSavedPlanJson:
+    def test_it_stamps_a_saved_declaration_and_replaces_whatever_the_caller_embedded(self) -> None:
+        plan = {"steps": _ANSWERING, ANSWER_KIND_KEY: declaration_payload(PlanAnswerKind.SYNTHESIS, "curated")}
+        stored = json.loads(saved_plan_json(json.dumps(plan), PlanAnswerKind.LOOKUP))
+        assert stored[ANSWER_KIND_KEY] == {"version": 1, "kind": "lookup", "provenance": "saved"}
+        assert stored["steps"] == _ANSWERING
+
+    def test_a_plan_json_that_is_not_an_object_comes_back_unchanged(self) -> None:
+        assert saved_plan_json("[1]", PlanAnswerKind.LOOKUP) == "[1]"
+        assert saved_plan_json("nope", PlanAnswerKind.LOOKUP) == "nope"
 
     def test_strip_declaration_reports_whether_it_removed_anything(self) -> None:
         assert strip_declaration({"steps": [], ANSWER_KIND_KEY: 1}) == ({"steps": []}, True)
         plan = {"steps": []}
         assert strip_declaration(plan) == (plan, False)
+
+
+class TestTheShapeVeto:
+    @pytest.mark.parametrize(
+        ("steps", "expected"),
+        [
+            pytest.param(_ANSWERING, False, id="ends-in-an-operator"),
+            pytest.param(_RETRIEVING, True, id="ends-in-search"),
+            pytest.param([{"tool": "extract"}, {"tool": "rank"}], False, id="every-operator-counts"),
+            pytest.param([{"tool": "operator_generate"}], False, id="resolved-operator-name"),
+            pytest.param([{"tool": "mcp__plugin_conexus_nexus__operator_summarize"}], False, id="mcp-prefixed-operator"),
+            pytest.param([{"tool": "mcp__plugin_conexus_nexus__summarize"}], False, id="mcp-prefixed-plan-name"),
+            pytest.param([{"tool": "mcp__plugin_conexus_nexus__search"}], True, id="mcp-prefixed-retrieval-still-vetoed"),
+            pytest.param([{"tool": "summarize"}, {"tool": "traverse"}], True, id="only-the-last-step-counts"),
+            pytest.param([], True, id="no-steps"),
+            pytest.param(["x"], True, id="not-a-step"),
+            pytest.param([{"args": {}}], True, id="no-tool"),
+        ],
+    )
+    def test_the_terminal_step_decides(self, steps: list, expected: bool) -> None:
+        assert terminal_is_retrieval_only(json.dumps({"steps": steps})) is expected
+
+    @pytest.mark.parametrize("plan_json", [None, "", "not json", "[]", "{}", json.dumps({"steps": "x"})])
+    def test_an_unreadable_plan_is_retrieval_only_never_raises(self, plan_json: Any) -> None:
+        assert terminal_is_retrieval_only(plan_json) is True
 
 
 class TestPlanSaveNeverStoresProvenanceTags:
@@ -409,7 +594,7 @@ class TestPlanSaveNeverStoresProvenanceTags:
 
         _, saved = _plan_save({"steps": self._STEPS}, tags="grown")
         standing = el.classify_plan(saved[0]["tags"], saved[0]["plan_json"])
-        assert standing.provenance == "unattested"
+        assert standing.provenance == "saved", "never grown: the tag is gone"
         assert not el.eligibility(PlanAnswerKind.LOOKUP, standing.kind, standing.provenance).eligible
 
     def test_the_tool_description_names_the_reserved_tags(self) -> None:
@@ -478,6 +663,81 @@ class TestTemplatesDeclareOnlyAtTemplateLevel:
         assert not result.errors and len(result.inserted) == 1
         decl = decode_declaration(lib.saves[0]["plan_json"])
         assert (decl.kind, decl.provenance) == (PlanAnswerKind.DEBUG, "curated")
+
+
+class TestOnlyTheBuiltinTierClaimsCurated:
+    """nexus-0vh80 (Sam, 2026-11-03, closes nexus-8ofx8): a template under a project, RDR or repo tier is authored
+    by whoever owns that repo, so its declared kind is not a reviewed one. The seed loader writes it ``saved``."""
+
+    def _tier(self, tmp_path: Path, scope: str, *, tags: str | None = None, kind: str = "lookup"):
+        template = _template("hybrid-factual-lookup.yml")
+        template["answer_kind"] = kind
+        if tags is not None:
+            template["tags"] = tags
+        template["dimensions"] = {**template["dimensions"], "scope": scope}
+        directory = tmp_path / scope
+        directory.mkdir()
+        (directory / "t.yml").write_text(yaml.safe_dump(template), encoding="utf-8")
+        lib = _FakeLibrary()
+        result = load_seed_directory(directory, library=lib, reconcile=True, scope_override=scope)
+        assert not result.errors, result.errors
+        return lib.saves[0]
+
+    @pytest.mark.parametrize("scope", ["project", "repo", "rdr-232-answer-kind"])
+    def test_a_builtin_tagged_template_in_another_tier_reads_saved(self, tmp_path: Path, scope: str) -> None:
+        from nexus.plans.eligibility import classify_plan
+
+        saved = self._tier(tmp_path, scope, tags="builtin-template,research")
+        assert "builtin-template" in saved["tags"], "the author's tags are stored as written"
+        decl = decode_declaration(saved["plan_json"])
+        assert (decl.kind, decl.provenance, decl.route) == (PlanAnswerKind.LOOKUP, "saved", None)
+        standing = classify_plan(saved["tags"], saved["plan_json"])
+        assert (standing.kind, standing.provenance, standing.flag) == (PlanAnswerKind.LOOKUP, "saved", None)
+
+    def test_the_global_tier_still_declares_curated(self, tmp_path: Path) -> None:
+        from nexus.plans.eligibility import classify_plan
+
+        saved = self._tier(tmp_path, "global", tags="builtin-template")
+        assert saved["project"] == ""
+        assert decode_declaration(saved["plan_json"]).provenance == "curated"
+        assert classify_plan(saved["tags"], saved["plan_json"]).provenance == "curated"
+
+    def test_the_row_builder_follows_the_templates_scope(self) -> None:
+        template = _template("hybrid-factual-lookup.yml")
+        assert decode_declaration(desired_row_for_template(template).plan_json).provenance == "curated"
+        template["dimensions"] = {**template["dimensions"], "scope": "project"}
+        assert decode_declaration(desired_row_for_template(template).plan_json).provenance == "saved"
+        template["dimensions"] = {k: v for k, v in template["dimensions"].items() if k != "scope"}
+        assert decode_declaration(desired_row_for_template(template).plan_json).provenance == "curated", (
+            "no scope is the global tier's project ('') in the loader's own mapping"
+        )
+
+    def test_a_template_with_no_declared_kind_still_declares_nothing_in_any_tier(self, tmp_path: Path) -> None:
+        template = _template("hybrid-factual-lookup.yml")
+        template.pop("answer_kind")
+        template["dimensions"] = {**template["dimensions"], "scope": "project"}
+        assert ANSWER_KIND_KEY not in json.loads(desired_row_for_template(template).plan_json)
+
+    def test_reseeding_rewrites_a_project_tier_row_that_still_says_curated(self, tmp_path: Path) -> None:
+        template = _template("hybrid-factual-lookup.yml")
+        template["dimensions"] = {**template["dimensions"], "scope": "project"}
+        directory = tmp_path / "p"
+        directory.mkdir()
+        (directory / "t.yml").write_text(yaml.safe_dump(template), encoding="utf-8")
+        lib = _FakeLibrary()
+        stale_row = json.loads(desired_row_for_template(template).plan_json)
+        stale_row[ANSWER_KIND_KEY] = declaration_payload(PlanAnswerKind.LOOKUP, "curated")
+        desired = desired_row_for_template(template)
+        lib.save_plan(
+            query=desired.query, plan_json=json.dumps(stale_row), outcome="success", tags=desired.tags, project="project",
+            name=desired.name, verb=desired.verb, scope=desired.scope,
+            dimensions=canonical_dimensions_json(template["dimensions"]),
+            default_bindings=desired.default_bindings, parent_dims=desired.parent_dims,
+        )
+        lib.saves.clear()
+        result = load_seed_directory(directory, library=lib, reconcile=True, scope_override="project")
+        assert len(result.updated) == 1 and not result.errors
+        assert decode_declaration(lib.saves[0]["plan_json"]).provenance == "saved"
 
 
 class TestGoldenLabelMap:

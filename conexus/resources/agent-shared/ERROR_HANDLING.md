@@ -95,23 +95,25 @@ rejected outright (RDR-194 D5, nexus-tk070.p6b) — never coerced to permanent. 
 did the same until it was retired, nexus-nt76j.) `store_put`'s `ttl` parameter is a string (`"permanent"`, `"Nd"`, `"Nw"`), not the
 integer-or-None shape `memory_put`/`plan_save` use.
 
-**ChromaDB connectivity failure**:
-- Error: search or store_put fails with connection error
-- Fix: Fall back to `nx` CLI via Bash tool (degraded mode)
-- Fallback: Write to T2 memory with note to promote to T3 later:
-  Use memory_put tool: `content="content", project="{project}", title="pending-t3-promotion.md"`
+**Engine (T3 store) connectivity failure**:
+- Error: search or store_put fails with a connection error
+- Fix: nothing can be written until the engine is back. Check it with `nx doctor` (locally,
+  `nx daemon service status`), start it locally with `nx daemon service start`, then retry. The `nx` CLI and T2 go
+  through the same engine, so neither is a fallback: until the retry lands, treat the write as NOT landed, say so in
+  your report, and restate the findings inline (the rule under "Write reported an error" above)
 
 **Voyage AI API limit**:
 - Error: Rate limit or quota exceeded during embedding
 - Fix: Reduce batch size; wait and retry
-- Fallback: Store in T2 with `tags="pending-t3-promotion"` for later batch upload
+- If it still fails: treat the write as NOT landed, say so in your report, and restate the findings inline (the
+  rule under "Write reported an error" above); do not park them in another tier
 
 **Collection name validation**:
 - Collection names use `__` as separator (NOT `::`).
 - Conformant shape (RDR-103): `<content_type>__<owner>__<embedding_model>__v<n>`, e.g. `knowledge__myproject-1-1__voyage-context-3__v1`, `code__nexus-1-1__voyage-code-3__v1`.
 - Operators may type the short form `knowledge__myproject` to MCP / `nx` commands; `t3_collection_name` auto-promotes it to the conformant 4-segment shape before any T3 write.
 - Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
-- Invalid: `knowledge::myproject` (colons are not permitted in ChromaDB collection names).
+- Invalid: `knowledge::myproject` (the RDR-103 name grammar uses `__`; colons are refused).
 
 **Duplicate document ID**:
 - Error: `Document ID already exists`

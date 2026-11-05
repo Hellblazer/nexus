@@ -219,7 +219,7 @@ When your investigation reveals issues requiring planned remediation, your final
 ```
 ## Next Step: strategic-planner
 **Task**: Create remediation plan for [findings summary]
-**Input Artifacts**: [analysis output, nx store titles, files, nx memory keys]
+**Input Artifacts**: [analysis output, T3 store titles, files, T2 memory keys]
 **Deliverable**: Phased execution plan with beads
 ```
 
@@ -234,7 +234,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
   Only store findings you are confident in, not working hypotheses. Storing a hypothesis that
   turns out to be wrong creates noise in future retrievals.
 - **Hypothesis Results**: Document with confidence levels
-- **Relationship Maps**: Include as `--tags` in nx store documents
+- **Relationship Maps**: Include as `--tags` in T3 store documents
 - **Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch
 - **Catalog Links** (if catalog tools available): After storing analysis findings:
   1. `mcp__plugin_conexus_nexus-catalog__search(query="{component} analysis architecture debug")`, find prior analyses, architecture maps, or debug findings on the same component
@@ -261,7 +261,7 @@ Thought 9: Synthesize findings with confidence levels and remaining uncertaintie
 Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to correct earlier reasoning.
 
 Store using these naming conventions:
-- **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **T3 store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: mcp__plugin_conexus_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
@@ -272,7 +272,7 @@ Store using these naming conventions:
 **Sequence** (follow strictly):
 1. **Persist Analysis**: Write findings to the single tier the `<HARD-GATE>` below names — T3 `store_put` by default, or T2 `memory_put` / T1 `scratch` when the dispatching relay specifies that target. Not all three; see the HARD-GATE for the exact rule.
 2. **Document Hypotheses**: Store hypothesis results with confidence levels
-3. **Create Relationship Maps**: Include as `--tags` in nx store documents
+3. **Create Relationship Maps**: Include as `--tags` in T3 store documents
 4. **Verify Persistence**: Confirm the write succeeded
 5. **Generate Response**: Only after the step above completes, generate final analysis response
 
@@ -287,7 +287,7 @@ Store using these naming conventions:
 3. **Persist recovery notes**: Write failure details to nx memory: mcp__plugin_conexus_nexus__memory_put(content="details", project="{project}", title="persistence-failure-{date}.md"
 4. **Continue with response**: Partial data is better than no data - include what succeeded
 
-Example: If nx store write fails but nx memory succeeds, note in response: "Analysis persisted to nx memory. nx store write failed - retry with store_put tool manually."
+Example: If T3 store write fails but T2 memory succeeds, note in response: "Analysis persisted to T2 memory. T3 store write failed - retry with store_put tool manually."
 
 **Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 

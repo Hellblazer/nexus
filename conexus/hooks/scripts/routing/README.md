@@ -19,7 +19,7 @@ nexus-jbt5x, so today only nx ships routing rules.
 
 The framework (`_lib.py` + `_interpreter.py`) is canonical in nx
 and is vendored into any plugin that ships a routing rule; with no
-vendored copy left, the byte-equality guard (`tests/test_routing_lib_drift.py`)
+vendored copy left, the byte-equality guard (`test_routing_lib_drift.py`, in the nexus repo's tests)
 went with sn's copy and should return with the next vendoring. See RDR-125 § A2 / A3 for why vendoring is the
 chosen mechanism (hook scripts run system python with no `conexus`
 venv on `sys.path`; the clean import path is blocked by the stdlib-
@@ -60,7 +60,7 @@ then running it. The guard's own KNOWN LIMITS docstring carries the same list.
 
 The cap is 4. Adding a fifth routing rule in any plugin requires either
 consolidation or a budget revision in a successor RDR. The
-`tests/test_routing_registry_aggregate_cap.py` CI lint enforces this.
+[`tests/test_routing_registry_aggregate_cap.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_routing_registry_aggregate_cap.py) CI lint enforces this.
 
 ## Contract
 
@@ -170,5 +170,5 @@ Every hook gets a test module under ``tests/`` that exercises:
 * **Malformed input**: empty stdin or non-JSON produces ``allow`` (or
   ``deny`` for fail-closed rules).
 
-See ``tests/test_routing_hooks.py`` for the framework-level contract
+See [`tests/test_routing_hooks.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_routing_hooks.py) for the framework-level contract
 tests.

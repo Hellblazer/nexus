@@ -13,6 +13,7 @@ import click
 import numpy as np
 import structlog
 
+from nexus.commands._help_links import PROJECTION_TUNING_EPILOG
 from nexus.commands._helpers import T2_SHARED_CLIENT_CTX_KEY as _T2_SHARED_CLIENT_CTX_KEY
 from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.commands._helpers import (
@@ -1184,8 +1185,8 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
         raise click.UsageError(
             f"DOC_ID {doc_id!r} is not a valid chunk chash: expected 64 lowercase "
             "hex characters (RDR-194 D1). topic_assignments.doc_id is a chunk "
-            "chash, not a free-form identifier; pass the chash reported by "
-            "`nx search` / `nx query`, not a title or tumbler."
+            "chash, not a free-form identifier; pass the chash that "
+            "`nx search --json` reports (its id field), not a title or tumbler."
         )
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
@@ -2672,7 +2673,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
         click.echo(f"Relabeled {count}/{len(target)} topics.")
 
 
-@taxonomy.command("project")
+@taxonomy.command("project", epilog=PROJECTION_TUNING_EPILOG)
 @click.argument("source_collection", default="")
 @click.option(
     "--against", "-a", default="",
@@ -2683,7 +2684,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     help=(
         "Cosine similarity threshold. When omitted, per-corpus-type "
         "defaults apply: code__* → 0.70, knowledge__* → 0.50, "
-        "docs__*/rdr__* → 0.55. See docs/exploration/taxonomy-projection-tuning.md."
+        "docs__*/rdr__* → 0.55. The tuning guide is linked at the end of this help."
     ),
 )
 @click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
@@ -3072,7 +3073,7 @@ def _run_backfill(
     )
 
 
-@taxonomy.command("hubs")
+@taxonomy.command("hubs", epilog=PROJECTION_TUNING_EPILOG)
 @click.option(
     "--min-collections", "-m", default=2, type=int, show_default=True,
     help="Minimum distinct source collections (DF) required to flag a hub.",
@@ -3115,7 +3116,7 @@ def hubs_cmd(
       nx taxonomy hubs --min-collections 5 --max-icf 1.2
       nx taxonomy hubs --warn-stale --explain
 
-    See docs/exploration/taxonomy-projection-tuning.md for guidance on interpreting
+    The projection-tuning guide, linked at the end of this help, covers interpreting
     the output and acting on flagged topics.
     """
     db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
@@ -3174,7 +3175,7 @@ def hubs_cmd(
         db.close()
 
 
-@taxonomy.command("audit")
+@taxonomy.command("audit", epilog=PROJECTION_TUNING_EPILOG)
 @click.option(
     "--collection", "-c", required=True,
     help="Source collection to audit (e.g. code__nexus).",
@@ -3184,8 +3185,8 @@ def hubs_cmd(
     help=(
         "Count projections whose raw cosine similarity falls below this "
         "value. Defaults to the per-corpus-type value "
-        "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). See "
-        "docs/exploration/taxonomy-projection-tuning.md."
+        "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). The tuning "
+        "guide is linked at the end of this help."
     ),
 )
 @click.option(
@@ -3224,7 +3225,7 @@ def audit_cmd(
       * pattern-pollution: receiving topics whose labels contain generic
         stopword tokens (`assert`, `class`, `exception`, ...).
 
-    See docs/exploration/taxonomy-projection-tuning.md for interpretation guidance.
+    The projection-tuning guide, linked at the end of this help, covers interpretation.
 
     ``--fix-doc-count`` replaces the report above entirely with the
     doc_count-drift repair (bead nexus-c0g6e, GH #1529) — see that option's
@@ -3321,7 +3322,7 @@ def _run_fix_doc_count(collection: str, *, apply: bool) -> None:
                     "/topics/recount_doc_count route (bead nexus-c0g6e, GH #1529 — "
                     "needs the engine tag carrying "
                     "taxonomy-016-doc-count-drift-functions.xml; see "
-                    "docs/wire-contract-pending.md). Deploy an engine carrying it "
+                    "https://github.com/Hellblazer/nexus/blob/main/docs/wire-contract-pending.md). Deploy an engine carrying it "
                     "and re-run.",
                     err=True,
                 )

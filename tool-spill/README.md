@@ -43,7 +43,7 @@ Passed through whole:
 - a result at or under the limit (the limit counts UTF-8 bytes, and a cut never splits a character);
 - an errored result or a denied call;
 - a `Read` with an `offset` or a `limit`: the model sliced it itself, so following the note, or reading a slice of a spill file, costs nothing extra and is never cut again;
-- a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/nexus/commands/` also passes whole; either path separator, any case);
+- a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/app/commands/` also passes whole; either path separator, any case);
 - `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath`, or output that starts with its `<persisted-output>` marker; output that only quotes the marker further in is still cut), and image output;
 - a `Bash` call whose command names the spill directory, up to 4 times `limit` (16 KB by default, the slice the `Read` note suggests): it is reading a spill file back (`sed -n`, `head`, `grep` on it), and cutting it would only spill the spill. The match is on the directory's name, `claude-tool-spill-<user>`, so `$TMPDIR/...`, a `cd` into it and either separator count. A larger read is cut and saved like any other;
 - every call a subagent makes;
@@ -77,4 +77,4 @@ claude plugin validate tool-spill
 claude plugin test tool-spill
 ```
 
-`tests/register.test.ts` holds the plugin's tests. `claude plugin test` needs the `claude` CLI, so it runs by hand and is not part of the repository's CI. `tests/test_plugin_structure.py` does hold the manifest's option defaults equal to the module's constants.
+`tests/register.test.ts` holds the plugin's tests. `claude plugin test` needs the `claude` CLI, so it runs by hand and is not part of the repository's CI. [`tests/test_plugin_structure.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py) does hold the manifest's option defaults equal to the module's constants.

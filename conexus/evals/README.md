@@ -14,7 +14,7 @@ prints "`plugin eval` is currently in early access" and exits 1 (`--help`
 renders anyway, because commander prints help before the gate). The
 binary documents its own bypass — set `CLAUDE_CODE_WALNUT_SPIRE=1` in the
 shell env or in `~/.claude/settings.json`'s `env` block (NOT the repo's
-`.claude/settings.json`). With it set the runner works end to end here.
+[`.claude/settings.json`](https://github.com/Hellblazer/nexus/blob/main/.claude/settings.json)). With it set the runner works end to end here.
 
 The earlier "not enabled on this box" was accurate; the implied
 "therefore unrunnable" was not, and it cost this corpus two release
@@ -52,7 +52,7 @@ fails, a single level succeeds). No container flag fixes that; a run
 with a shell needs that sysctl relaxed on the host, or a host whose
 sandbox is not bubblewrap (macOS).
 
-On macOS (hellmini, 2026-10-17, `tests/e2e/prefix-capture/ab/skillroute/pe_mac.sh`,
+On macOS (hellmini, 2026-10-17, [`tests/e2e/prefix-capture/ab/skillroute/pe_mac.sh`](https://github.com/Hellblazer/nexus/blob/main/tests/e2e/prefix-capture/ab/skillroute/pe_mac.sh),
 nexus-fi1qg) the shell works: two full runs scored 15/16 (0.990) and
 14/16 (0.976), with 92 and 105 Bash calls succeeding and no sandbox
 errors. git does not: inside Claude Code's macOS sandbox a bare `git`
@@ -68,7 +68,7 @@ shell but without git; accepted as the baseline (Sam, 2026-10-17).
 ## Layout
 
 ```
-conexus/evals/
+evals/                       (at the plugin root)
   README.md                    this file
   <case-name>/
     prompt.md                  YAML frontmatter (name:) + the user prompt
@@ -153,7 +153,7 @@ absent.
 Outcome cases need `--scaffold` (below): without it the workspace is
 empty and every outcome grader fails. Each `fixture.sh` writes fixed
 content with fixed commit dates and no network, and
-`tests/test_eval_corpus_lint.py` builds each one twice and requires the
+[`tests/test_eval_corpus_lint.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_eval_corpus_lint.py) builds each one twice and requires the
 same commit. Before a grader is trusted it must pass on answers where the
 defect or fact is present and fail on wrong or clearing ones. Each regex
 grader has crafted must-pass and must-fail answers pinned in
@@ -170,8 +170,8 @@ against `claude plugin eval` itself; the first scaffolded run does that.
 ### Dropped: n03, p07, p08 (nexus-dkotg, 2026-08-23)
 
 These three targeted `release` and `engine-release`, which are
-**repo-local** skills at `.claude/skills/` in this checkout, not under
-`conexus/skills/` — so they are not part of the plugin distributed via
+**repo-local** skills at [`.claude/skills/`](https://github.com/Hellblazer/nexus/tree/main/.claude/skills) in this checkout, not under
+[`conexus/skills/`](https://github.com/Hellblazer/nexus/tree/main/conexus/skills) — so they are not part of the plugin distributed via
 `marketplace.json`. The eval sandbox runs in a temp HOME and never loaded
 them: p07 and p08 reported `Skill called 0x` in every run of all three
 full runs, and n03 passed **vacuously**, its claim never actually tested.
@@ -195,8 +195,8 @@ it belongs in a separate repo-local suite with its own invocation.
 ### Dropped: p03 (nexus-cnzei.6, 2026-09-13)
 
 Same reason as n03/p07/p08 above, one skill later: `test-authoring` moved
-to `.claude/skills/test-authoring/` — it was nexus-repo-specific content
-(this repo's own test suite, dev-loop layers, `tests/AGENTS.md`) shipping
+to [`.claude/skills/test-authoring/`](https://github.com/Hellblazer/nexus/tree/main/.claude/skills/test-authoring) — it was nexus-repo-specific content
+(this repo's own test suite, dev-loop layers, [`tests/AGENTS.md`](https://github.com/Hellblazer/nexus/blob/main/tests/AGENTS.md)) shipping
 to every conexus plugin user for no benefit outside this repo. p03's
 positive `tool_used` grader on `conexus:test-authoring` would now fail the
 same way p07/p08 did (the sandbox never loads a repo-local skill), so it
@@ -245,7 +245,7 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   Linux); without one the runner refuses every case. In docker that also
   needs `--security-opt seccomp=unconfined --security-opt
   apparmor=unconfined --security-opt systempaths=unconfined`:
-  `tests/e2e/prefix-capture/ab/skillroute/pe_detach.sh` runs it that way
+  [`tests/e2e/prefix-capture/ab/skillroute/pe_detach.sh`](https://github.com/Hellblazer/nexus/blob/main/tests/e2e/prefix-capture/ab/skillroute/pe_detach.sh) runs it that way
   on chas. Those flags let the sandbox start but not run commands on a
   host that restricts unprivileged user namespaces (see the run notes
   above); check a trace for `apply-seccomp` errors before reading a
@@ -298,8 +298,8 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   parsing `report.json`'s pass/fail language, since the aggregate-result
   schema version could shift under a "v1" label change.
 
-In CI, this suite gates PRs that touch `conexus/skills/*/SKILL.md`,
-`conexus/agents/*.md`, or `.claude-plugin/plugin.json`'s
+In CI, this suite gates PRs that touch [`conexus/skills/*/SKILL.md`](https://github.com/Hellblazer/nexus/tree/main/conexus/skills),
+[`conexus/agents/*.md`](https://github.com/Hellblazer/nexus/tree/main/conexus/agents), or `.claude-plugin/plugin.json`'s
 `experimental.evals` — the surfaces that can silently move which skill a
 given prompt triggers. It does not need to run on every PR; skill
 descriptions change rarely relative to code.
@@ -310,7 +310,7 @@ descriptions change rarely relative to code.
 description or name shares a common word with another skill's trigger
 phrasing (the `nexus-77cct` "plan" class), at least one negative case.**
 This line is written to become a mechanized check later — a script that
-diffs `conexus/skills/*/SKILL.md` against `conexus/evals/*/prompt.md`
+diffs [`conexus/skills/*/SKILL.md`](https://github.com/Hellblazer/nexus/tree/main/conexus/skills) against [`conexus/evals/*/prompt.md`](https://github.com/Hellblazer/nexus/tree/main/conexus/evals)
 target coverage and fails a PR that adds a skill with zero eval cases.
 No such script exists yet; this paragraph is the spec for whoever writes
 it.
@@ -365,7 +365,7 @@ authored against the documented format only, never against a live run:
    without the skill, so repo state was part of what the case measured.
 4. **RESOLVED 2026-08-23 — repo-local skills are out of scope, and the
    cases are dropped.** This was filed as a hypothetical and was already
-   a live defect: the sandbox never loaded `.claude/skills/`, so p07 and
+   a live defect: the sandbox never loaded [`.claude/skills/`](https://github.com/Hellblazer/nexus/tree/main/.claude/skills), so p07 and
    p08 could not pass and n03 passed vacuously, across three full runs.
    Relocation was probed and does not work. n03, p07 and p08 are removed;
    see "Dropped" above. Repo-local skill triggering is an explicit
@@ -374,9 +374,9 @@ authored against the documented format only, never against a live run:
    The `debugging`/`debug` and `query`/`plan-first` disambiguation item
    that used to follow here is moot: `debugging` and `query` were retired
    by nexus-dg7i6.6, and the `debug` command is hidden from the model.
-5. **`experimental.evals` declaration.** `conexus/.claude-plugin/plugin.json`
+5. **`experimental.evals` declaration.** [`conexus/.claude-plugin/plugin.json`](https://github.com/Hellblazer/nexus/blob/main/conexus/.claude-plugin/plugin.json)
    does not currently declare `experimental.evals`. This suite lives at
-   the plugin-root convention (`conexus/evals/`) per the format spec,
+   the plugin-root convention ([`conexus/evals/`](https://github.com/Hellblazer/nexus/tree/main/conexus/evals)) per the format spec,
    which the harness may discover by convention alone — but if explicit
    declaration turns out to be required, add it once the field's real
    shape is confirmed.

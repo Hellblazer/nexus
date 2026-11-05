@@ -41,7 +41,7 @@ mcp__plugin_conexus_nexus__traverse(seeds="1.1.635", purpose="find-implementatio
 mcp__plugin_conexus_nexus__nx_answer(question="rank these approaches by relevance to X"   # plan-matched; operator steps run server-side
 
 # Background hygiene — call and let run (claude -p subprocesses); each requires real args
-mcp__plugin_conexus_nexus__nx_tidy(topic="chromadb quotas", collection="<subject>")   # read-only T3 consolidation report for one collection
+mcp__plugin_conexus_nexus__nx_tidy(topic="embedding quotas", collection="<subject>")   # read-only T3 consolidation report for one collection
 mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<title + description>")  # enriches ONE bead's description
 mcp__plugin_conexus_nexus__nx_plan_audit(plan_json='{"steps": [...]}')                # audits ONE plan against the codebase
 
@@ -60,7 +60,7 @@ mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"       #
 
 # Plan library (T2)
 mcp__plugin_conexus_nexus__plan_search(query="retrieval"                       # find reusable plans
-mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}", verb="research"  # persist a reusable RETRIEVAL plan (verb REQUIRED; impl-plans -> beads/T2)
+mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}", verb="research", answer_kind="synthesis", project="..."  # persist a reusable RETRIEVAL plan (verb and answer_kind REQUIRED, unknown allowed; impl-plans -> beads/T2)
 ```
 
 ## When to reach for each
@@ -106,7 +106,7 @@ nx index repo <path>                 # index repo (classifies into code + docs c
 
 ## Collection Naming
 
-RDR-103 conformant shape: `<content_type>__<owner>__<embedding_model>__v<n>`. Examples: `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. The short legacy form (`knowledge__topic`) is accepted at the `--collection` boundary and auto-promoted by `t3_collection_name`. Pre-existing legacy 2-segment collections remain readable. Always `__` as the segment separator (colons are invalid in ChromaDB names).
+RDR-103 conformant shape: `<content_type>__<owner>__<embedding_model>__v<n>`. Examples: `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. The short legacy form (`knowledge__topic`) is accepted at the `--collection` boundary and auto-promoted by `t3_collection_name`. Pre-existing legacy 2-segment collections remain readable. Always `__` as the segment separator (the RDR-103 name grammar refuses colons).
 
 ## Title Conventions
 

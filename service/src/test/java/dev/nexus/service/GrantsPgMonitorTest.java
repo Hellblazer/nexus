@@ -87,7 +87,10 @@ class GrantsPgMonitorTest {
                 .hasMessageContaining("grants-004-monitor-wal-visibility")
                 .hasMessageContaining("ADMIN OPTION")
                 .hasMessageContaining("GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION")
-                .hasMessageContaining("docs/configuration.md");
+                // An operator running a released engine has no checkout: the remedy names a URL,
+                // never a repo-relative file (the text is the one a validCheckSum covers).
+                .hasMessageContaining("https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md")
+                .satisfies(e -> assertThat(e.getMessage()).doesNotContain("pg_provision.py"));
         }
     }
 

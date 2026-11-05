@@ -27,8 +27,7 @@ data migrations the install actually needs — T2 schema, pre-RDR-108 chunk
 identity, embedder era. (The ChromaDB → Postgres+pgvector move is NOT among
 them on a current release: see "Installs that predate Postgres" below.) Each
 rung detects, converges, and verifies before completion is recorded; the walk is
-idempotent and resumable, and the source store is left byte-untouched as a
-rollback target. An install dormant since 5.x converges the same way a current
+idempotent and resumable. An install dormant since 5.x converges the same way a current
 one no-ops.
 
 ## Reporting before running
@@ -42,23 +41,15 @@ one no-ops.
 
 Both are safe to run unprompted.
 
-## The three genuine decisions
+## What the walk asks
 
-The walk asks only what it cannot derive. Surface these to the user and let them
-choose; never answer on their behalf:
+Nothing, today. The ladder's rungs (`aspect_queue_tuples`, `manifest_section_labels`, `note_tags_array`,
+`rdr192_manifest_backfill`) either finish or DEFER: a deferred rung stays pending and holds back the rungs that depend on it, the walk
+goes on to the rungs that do not, and it retries on a later run (`nx doctor`'s `Upgrade ladder` row says "REPEATEDLY DEFERRED:" once one keeps deferring).
+No rung rolls back, so there is no rollback to choose.
 
-1. **Billed re-embedding** — collections changing embedding model re-embed
-   through a billed Voyage key. The rung shows an estimate-and-confirm prompt
-   first. A walk with nothing billable never prompts.
-2. **A source collection that vanished** — re-acquire or drop. The walk DEFERS
-   rather than guessing; a deferred rung records nothing and retries on a later
-   run.
-3. **Rollback** — never automatic, never derivable. On a validation block the
-   copy stays in place, reads stay degraded-LOUD (never a bare empty index), and
-   the remedy is printed: `nx storage migrate vectors --rollback [--cloud]`.
-   Surface the block; let the user decide.
-
-Everything else is automatic.
+If a rung ever asks a question (a billed re-embed, a choice the walk cannot derive), surface it to the user and let
+them choose; never answer on their behalf.
 
 ## The RDR-192 backfill rung and its failure mode
 
@@ -88,7 +79,7 @@ the wire — the correct id is `sha256(chunk_text)[:32]`, a pure function of tex
 the ETL is already carrying, so **no re-index and no source files are needed**,
 including for `store_put`-only notes that have neither.
 
-If you meet an older diagnostic (or the demoted `nx migrate-to-service` path)
+If you meet an older diagnostic (or the removed `migrate-to-service` path)
 printing "re-index from source" as the remedy for legacy ids: that remedy was
 impossible for source-less notes and is what RDR-185 retired. The answer is
 `nx upgrade`.
@@ -191,11 +182,11 @@ nx upgrade
 
 - **This surface adds no upgrade logic.** It routes to `nx upgrade`. Anything
   needing orchestration belongs in `nexus.upgrade_ladder`, not here.
-- **Do not reach for the demoted primitives.** `nx guided-upgrade`,
-  `nx migrate-to-service`, `nx migration` and `nx migration-audit`
-  are internal primitives — callable, but out of
-  the user story because the ladder does their job. If one seems necessary,
-  that is a finding worth reporting, not a step to take.
+- **Do not reach for the old migration primitives.** `nx migration` is an
+  internal primitive, callable but out of the user story because the ladder
+  does its job; `guided-upgrade`, `migrate-to-service` and `migration-audit`
+  no longer exist. If one seems necessary, that is a
+  finding worth reporting, not a step to take.
 - **A new upgrade verb is never the answer.** New data axes become rungs.
 
 ## Notes

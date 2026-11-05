@@ -87,7 +87,7 @@ class TestMissingPiece:
     def test_unserved_voyage_names_the_key_and_the_restart(self):
         text = rj.missing_piece(VA, [BGE])
         assert text and VA in text and "bge-base-en-v15-768" in text
-        assert "voyage_api_key" in text and "nx daemon service stop && nx daemon service start" in text
+        assert "voyage_api_key" in text and "nx daemon service stop, then nx daemon service start" in text
 
     def test_unserved_bge_names_the_model_files(self):
         text = rj.missing_piece(BGE, [VA])
@@ -116,7 +116,7 @@ class TestEngineRefusalParity:
         from nexus.corpus import _SERVICE_RESTART_COMMAND
 
         assert restart.group(1) == _SERVICE_RESTART_COMMAND
-        src = src.replace('" + RESTART_COMMAND + "', restart.group(1))
+        src = src.replace('" + RESTART_COMMAND + "', restart.group(1)).replace('" + RESTART_COMMAND;', restart.group(1) + '";')
         # Java adjacent-literal concatenation: "a" + "b" and "a"\n + "b" are the string "ab".
         return re.sub(r'"\s*\+\s*"', "", src)
 

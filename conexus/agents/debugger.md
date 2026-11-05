@@ -235,7 +235,7 @@ Your final output MUST include a clearly labeled next-step recommendation for th
 ```
 ## Next Step: developer
 **Task**: Fix [root cause description]
-**Input Artifacts**: [diagnosis findings, affected files, nx memory keys]
+**Input Artifacts**: [diagnosis findings, affected files, T2 memory keys]
 **Deliverable**: Bug fix with tests
 ```
 

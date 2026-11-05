@@ -222,7 +222,7 @@ def test_a_stamp_that_fails_does_not_fail_the_write() -> None:
 
     result = _write(cat)
 
-    assert result.completed or result.chunks_written == 1
+    assert result.completed is True and result.chunks_written == 1
     assert cat.calls == ["update", "begin", "write"], cat.calls
 
 

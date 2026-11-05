@@ -106,7 +106,7 @@ Check `bd ready` for unblocked tasks.
 
 ### Prior Implementation Search (if relay has no conexus artifacts)
 
-If the relay's Input Artifacts section contains no nx store titles and no nx memory paths , 
+If the relay's Input Artifacts section contains no T3 store titles and no T2 memory paths , 
 i.e., no prior knowledge has been assembled, search before starting:
 
 mcp__plugin_conexus_nexus__search(query="similar implementation patterns for {feature}", corpus="knowledge", limit=5

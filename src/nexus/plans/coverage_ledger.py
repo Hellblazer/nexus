@@ -150,6 +150,7 @@ from nexus.plans.coverage_repair import (
     REPAIR_RESULTS_PER_QUERY,
     REPAIR_RESULTS_PER_QUERY_UNFILTERED,
     REPAIR_RETRIEVAL_SHARE,
+    RESOLVED_RECORD_MAX_CHUNKS,
     RepairHit,
     RepairOutcome,
     RepairQuery,
@@ -659,7 +660,9 @@ class CoverageResult:
     def to_wire(self, *, redact: bool = False) -> dict[str, Any]:
         """The ``coverage`` object: the envelope's top-level key (RDR-232 section 4) and ``continuation.coverage``.
 
-        Ids, states, counts and closed names only: never evidence text, never a facet's text. ``requested_facet_ids``
+        Ids, states, counts and closed names only: never evidence text, never a facet's text. The one exception is the
+        repair report's exact-key key lists (RDR-147 Step 4), which carry entity keys, identifiers the operator
+        configured, capped at 50 each. ``requested_facet_ids``
         and ``covered_facet_ids`` name the facets asked for and the ones settled; ``residual_gaps`` is every other
         facet with its state and reason; ``primary_source`` and ``corpus_counts`` say what was read. ``redact`` blanks
         the caller's source wording (source labels, row details).
@@ -920,6 +923,9 @@ class CoverageBoundary:
     max_concurrent_calls: int = MAX_CONCURRENT_ASSESSMENT_CALLS
     call_cost_prior_usd: float = ASSESSMENT_CALL_COST_PRIOR_USD
     max_anchors_per_call: int = MAX_ANCHORS_PER_ASSESSMENT_CALL
+    #: RDR-147 Step 4 (nexus-qpimy): the repair may take the exact-key resolution branch. Off by default; the runner
+    #: caller sets it from ``NX_ANSWER_RESOLUTION_REPAIR`` (:func:`nexus.plans.switches.resolution_repair_enabled`).
+    resolution_repair: bool = False
 
     def stage_allowance(self, remaining: float | None) -> float | None:
         """Seconds the whole assessment stage may use out of *remaining* deadline seconds: ``stage_share`` of
@@ -1221,13 +1227,192 @@ class CoverageBoundary:
             return scope.admits(hit.collection)
         return True
 
+    async def _resolve_anchors(
+        self, view: BoundaryView, first: CoverageResult, *, resolve_until: float, fetch_until: float,
+    ) -> _Resolution:
+        """RDR-147 Step 4 (nexus-qpimy): the exact-key branch of the one repair.
+
+        Scans the first ledger's anchors for the entity keys their own collection's pattern names (Step 1, the config
+        loaded once), resolves the first :attr:`max_repair_items` distinct keys through the run's dispatcher (the
+        ``resolve`` step, Step 3: no model call, an accounted ``sql`` step), fetches the resolved records' chunks (the
+        first :data:`RESOLVED_RECORD_MAX_CHUNKS` of each, in one fetch), and builds one joined item per (anchor, key)
+        pair: the anchor's text, a blank line, ``Resolved <key>: <record text>``, chash the sha256 of that text without
+        its source line (the anchors' convention). The items count against :attr:`max_repair_items`: one per resolved
+        key first, in key order, then further anchors round robin. Every pair left out is named in ``joined_dropped``
+        with its reason (``cap``, ``no_text``, ``out_of_scope``, ``held``, ``self``: the anchor is the resolved record
+        itself, which joins nothing); every key the cap kept from being resolved is in ``tokens_dropped``.
+
+        Not entered, with the reason in the report, for a run confined to one document (a joined item carries another
+        document's text under a new chash, so it cannot pass the confinement's membership test; ``resolve`` is a
+        confined tool for the same reason), a malformed entity config, anchors none of whose collections has a pattern,
+        and anchors that name no key. A caller-scoped run enters, and a record outside the scope is dropped like a
+        repair hit outside it (``_hit_in_scope``). A resolve or fetch failure is an entered branch with ``failure``
+        set: the first ledger stands.
+        """
+        if self.confinement is not None:
+            return _Resolution({"resolution_reason": "confined_run"})
+        from nexus.entity_keys import EntityConfigError, find_key_tokens, pattern_for_collection  # noqa: PLC0415 — deferred: the ledger stays light at import
+
+        pairs: list[tuple[EvidenceAnchor, str]] = []
+        scanned = without_pattern = 0
+        try:
+            from nexus.config import load_config  # noqa: PLC0415 — deferred, as above
+
+            config = load_config()  # once per repair: pattern_for_collection would otherwise reload it per call
+            has_pattern: dict[str, bool] = {}
+            for a in first.ledger.anchors:
+                scanned += 1
+                if a.collection not in has_pattern:
+                    has_pattern[a.collection] = pattern_for_collection(a.collection, config) is not None
+                if not has_pattern[a.collection]:
+                    without_pattern += 1
+                    continue
+                # the source note names the chunk's own document, not what the chunk says: scan the text only
+                pairs += [(a, t) for t in find_key_tokens(strip_source_note(a.content), a.collection, config=config)]
+        except EntityConfigError as exc:
+            _log.warning("nx_answer_coverage_resolution_config_invalid", error=str(exc)[:200])
+            return _Resolution({"resolution_reason": "entity_config_error"})
+        scan: dict[str, Any] = {"anchors_scanned": scanned, "anchors_without_pattern": without_pattern}
+        if scanned and without_pattern == scanned:
+            return _Resolution({**scan, "resolution_reason": "no_pattern_for_anchor_collections"})
+        key_ids = tuple(dict.fromkeys(t for _, t in pairs))
+        if not key_ids:
+            return _Resolution({**scan, "resolution_reason": "no_key_tokens"})
+        cap = max(1, self.max_repair_items)
+        tokens = list(key_ids[:cap])
+        fields: dict[str, Any] = {
+            **scan, "resolution_entered": True, "anchor_key_ids": key_ids, "resolution_tokens": len(tokens),
+            "tokens_dropped": key_ids[cap:],  # never resolved: listed by name
+        }
+
+        def failed(why: str) -> _Resolution:
+            return _Resolution(fields, entered=True, failure=why, detail=why)
+
+        left = resolve_until - time.monotonic()
+        if left < MIN_REPAIR_QUERY_S:
+            return failed("too little of the retrieval allowance was left to resolve the keys")
+        try:
+            out = await view.retrieve("resolve", {"tokens": tokens}, timeout=left)
+        except Exception as exc:  # noqa: BLE001 — a failed resolve leaves the first ledger in force
+            _log.warning("nx_answer_coverage_resolve_failed", error=type(exc).__name__)
+            return failed(f"the resolve call failed: {type(exc).__name__}")
+        by_token = out.get("by_token") if isinstance(out, Mapping) else None
+        if not isinstance(by_token, Mapping):
+            return failed("the resolve call returned no by_token")
+        resolved = tuple(t for t in tokens if t in by_token)
+        fields.update(
+            resolved=resolved, missing=tuple(str(t) for t in out.get("missing") or ()),
+            ambiguous=tuple(str(t) for t in (out.get("ambiguous") or {})),
+        )
+
+        def is_self(anchor: EvidenceAnchor, token: str) -> bool:
+            """The anchor is the record the key resolved to (its document, or one of its chunks): it joins nothing."""
+            entry = by_token.get(token)
+            if not isinstance(entry, Mapping):
+                return False
+            tumbler = str(entry.get("tumbler") or "")
+            if tumbler and anchor.tumbler == tumbler:
+                return True
+            return bool(anchor.chash) and anchor.chash.lower() in {str(i).lower() for i in entry.get("ids") or ()}
+
+        # A key only its own record names is no evidence that a message tied it to the question: not in the domain.
+        fields["anchor_key_ids"] = tuple(dict.fromkeys(t for a, t in pairs if not is_self(a, t)))
+
+        # The record's chunks, inside the caller's scope, the first RESOLVED_RECORD_MAX_CHUNKS of each: the bound is per
+        # record, so a record of many chunks cannot take the slots of the records after it.
+        record_hits: dict[str, list[RepairHit]] = {}
+        out_of_scope: set[str] = set()
+        cut = 0
+        for token in resolved:
+            entry = by_token[token]
+            tumbler = str(entry.get("tumbler") or "")
+            chunks = [RepairHit(str(i), str(c), tumbler, str(i)) for i, c in zip(entry.get("ids") or [], entry.get("collections") or [], strict=False)]
+            kept = [h for h in chunks if self._hit_in_scope(h)]
+            if chunks and not kept:
+                out_of_scope.add(token)
+            if kept:
+                cut += len(kept) > RESOLVED_RECORD_MAX_CHUNKS
+                record_hits[token] = kept[:RESOLVED_RECORD_MAX_CHUNKS]
+        flat = [h for hs in record_hits.values() for h in hs]  # at most len(resolved) * RESOLVED_RECORD_MAX_CHUNKS
+        text_of: dict[str, str] = {}
+        if flat:
+            try:
+                fetched = await view.fetch(flat, timeout=max(MIN_REPAIR_QUERY_S, fetch_until - time.monotonic())) if view.fetch else []
+            except Exception as exc:  # noqa: BLE001 — as above
+                _log.warning("nx_answer_coverage_resolve_fetch_failed", error=type(exc).__name__)
+                return failed(f"the chunk fetch failed: {type(exc).__name__}")
+            for item in fetched:
+                if item.text and item.chash:
+                    text_of.setdefault(item.chash.lower(), strip_source_note(item.text))
+        record_text: dict[str, str] = {}
+        for token, hs in record_hits.items():
+            body = "\n\n".join(text_of[h.chash.lower()] for h in hs if h.chash.lower() in text_of)
+            if body:
+                record_text[token] = body
+
+        # The pairs per resolved key, in anchor order. A pair that makes no item is named with its reason.
+        held = {strip_source_note(t) for t in view.evidence_texts if isinstance(t, str)}
+        dropped: list[str] = []
+        candidates: dict[str, list[tuple[EvidenceAnchor, str]]] = {t: [] for t in resolved}
+        for anchor, token in pairs:
+            if token not in candidates:
+                continue  # missing, ambiguous or past the cap: named in missing, ambiguous or tokens_dropped
+            if is_self(anchor, token):
+                dropped.append(f"{token}@{anchor.item_id}:self")
+            elif token in out_of_scope:
+                dropped.append(f"{token}@{anchor.item_id}:out_of_scope")
+            elif token not in record_text:
+                dropped.append(f"{token}@{anchor.item_id}:no_text")
+            else:
+                joined = f"{anchor.content}{_JOINED_SEP}{token}: {record_text[token]}"
+                if strip_source_note(joined) in held:
+                    dropped.append(f"{token}@{anchor.item_id}:held")
+                else:
+                    held.add(strip_source_note(joined))
+                    candidates[token].append((anchor, joined))
+        chosen: list[tuple[str, EvidenceAnchor, str]] = []
+        depth = 0
+        while len(chosen) < cap:  # one per key first (depth 0), then the further anchors round robin
+            progressed = False
+            for token in resolved:
+                if depth < len(candidates[token]) and len(chosen) < cap:
+                    chosen.append((token, *candidates[token][depth]))
+                    progressed = True
+            if not progressed:
+                break
+            depth += 1
+        taken = {(t, a.item_id) for t, a, _ in chosen}
+        dropped += [f"{t}@{a.item_id}:cap" for t in resolved for a, _ in candidates[t] if (t, a.item_id) not in taken]
+        items = [
+            SupplementItem(
+                # the chash is the anchors' convention: the text without its source line
+                text=joined, chash=hashlib.sha256(strip_source_note(joined).encode("utf-8")).hexdigest(),
+                collection=record_hits[token][0].collection, tumbler=record_hits[token][0].tumbler,
+            )
+            for token, _a, joined in chosen
+        ]
+        fields.update(joined_dropped=tuple(dropped))
+        detail = (
+            f"resolution repair: {len(resolved)} of {len(tokens)} keys resolved, {len(items)} joined items built, "
+            f"{len(dropped)} pairs dropped, {len(fields['missing'])} missing, {len(fields['ambiguous'])} ambiguous"
+        )
+        if cut:
+            detail += (f"; {cut} record{'s' if cut != 1 else ''} cut to {'their' if cut != 1 else 'its'} first "
+                       f"{RESOLVED_RECORD_MAX_CHUNKS} chunks")
+        return _Resolution(fields, entered=True, items=items, detail=detail)
+
     async def _repair(self, view: BoundaryView, first: CoverageResult, targets: tuple[str, ...]) -> CoverageResult:
         started = time.monotonic()
 
+        resolution_fields: dict[str, Any] = {}  # the resolution branch's RepairReport fields, once it was considered (RDR-147 Step 4)
+
         def done(outcome: RepairOutcome, *, queries: int = 0, found: int = 0, merged: int = 0, detail: str = "", result: CoverageResult | None = None) -> CoverageResult:
+            extra = dict(resolution_fields)
+            if extra.get("resolution_entered"):
+                extra["joined_added"] = merged  # what reached the reduction's input, not what was built (``found``)
             report = RepairReport(
                 outcome, targets, queries, found, merged, int((time.monotonic() - started) * 1000), detail,
-                **self._why(first))
+                **self._why(first), **extra)
             return replace(result or first, repair=report)
 
         if view.retrieve is None or view.fetch is None or view.install_supplement is None or view.rehydrate is None:
@@ -1264,10 +1449,22 @@ class CoverageBoundary:
             REPAIR_RESULTS_PER_QUERY_UNFILTERED
             if confinement is not None and not getattr(confinement, "sends_filter", False) else REPAIR_RESULTS_PER_QUERY
         )
+        # retrieval: bounded to its share of the allowance (the queries get three quarters of it, the chunk
+        # fetch the rest), stopped by the first failure
+        retrieval_until = started + allowance * REPAIR_RETRIEVAL_SHARE
+        queries_until = started + allowance * REPAIR_RETRIEVAL_SHARE * 0.75
+        # RDR-147 Step 4: with the switch on and an unsupported facet, the exact-key branch runs in place of the semantic
+        # facet queries (the case 147-research-9 measured), and before the ``no_target`` and ``no_new_evidence``
+        # returns below, which would otherwise end the repair before any re-check. Running both is unmeasured.
+        resolution: _Resolution | None = None
+        if self.resolution_repair and not retrieval_skipped:
+            resolution = await self._resolve_anchors(view, first, resolve_until=queries_until, fetch_until=retrieval_until)
+            resolution_fields.update(resolution.fields)
+        entered = resolution is not None and resolution.entered
         # Retrieval is for the unsupported facets only; the covered and contradicted facets with most anchors unread are
         # reassessed against the unread anchors, never queried for (they were retrieved for already).
         queries: list[RepairQuery] = []
-        if not retrieval_skipped:
+        if not retrieval_skipped and not entered:
             queries = build_repair_queries(
                 [f for f in facets if f.id in unsupported_ids], primary_collections=primary, plan_targets=plan,
                 max_queries=self.max_repair_queries, limit=limit, primary_subtree=primary_subtree,
@@ -1278,10 +1475,6 @@ class CoverageBoundary:
             if not queries:
                 return done("no_target", detail="no primary collection or plan retrieval scope to ask")
 
-        # retrieval: bounded to its share of the allowance (the queries get three quarters of it, the chunk
-        # fetch the rest), stopped by the first failure
-        retrieval_until = started + allowance * REPAIR_RETRIEVAL_SHARE
-        queries_until = started + allowance * REPAIR_RETRIEVAL_SHARE * 0.75
         # Every anchor of the first ledger is held, the unread ones too: a hit on an unread anchor would be fetched
         # only to be dropped by the text de-duplication below (its text is already in the input), at the cost of a
         # fetch slot and an inflated ``found``. The unread anchors are reassessed from the first ledger (``prior``),
@@ -1307,15 +1500,22 @@ class CoverageBoundary:
                 if (hit.chash or hit.id).lower() not in held_hashes and self._hit_in_scope(hit):
                     hits.setdefault(hit.id, hit)
         found = len(hits)
+        if entered:
+            assert resolution is not None
+            found = len(resolution.items)
+            if resolution.failure and not unread_first:
+                return done("retrieval_failed", detail=resolution.failure)
+            if not resolution.items and not unread_first:
+                return done("no_new_evidence", detail=resolution.detail)
         # With unread anchors the repair has something to assess even when the retrieval brings nothing new: the
         # anchors the first round never read are reassessed below, so these early returns apply only without them.
-        if failure and not hits and not unread_first:
+        if not entered and failure and not hits and not unread_first:
             return done("retrieval_failed", queries=issued, detail=f"a repair query failed: {failure}")
-        if not hits and not unread_first:
+        if not entered and not hits and not unread_first:
             return done("no_new_evidence", queries=issued, detail="the targeted queries found nothing not already held")
 
         texts, observed, merged = view.evidence_texts, view.observed, 0
-        new: list[SupplementItem] = []
+        new: list[SupplementItem] = list(resolution.items) if entered and resolution is not None else []
         if hits:
             try:
                 fetched = await view.fetch(list(hits.values())[: self.max_repair_items * 2], timeout=max(MIN_REPAIR_QUERY_S, retrieval_until - time.monotonic()))
@@ -1337,6 +1537,11 @@ class CoverageBoundary:
             return done("no_new_evidence", queries=issued, found=found, detail="the chunks fetched were already held")
         if retrieval_skipped:
             pass  # nothing was asked, so nothing failed or came back empty: the outcome is the reassessment's
+        elif entered and resolution is not None:
+            if resolution.failure:
+                retrieval_note = ("retrieval_failed", resolution.failure)
+            elif not new:
+                retrieval_note = ("no_new_evidence", resolution.detail)
         elif failure and not hits:
             retrieval_note = ("retrieval_failed", f"a repair query failed: {failure}")
         elif not hits:
@@ -1386,6 +1591,8 @@ class CoverageBoundary:
         detail = f"a repair query failed: {failure}; the queries after it were not issued" if failure else ""
         if retrieval_skipped:
             detail = f"no unsupported facet, so no retrieval query was made; the {len(unread_first)} anchors the first round left unread were reassessed"
+        elif entered and resolution is not None:
+            detail = resolution.detail
         return done("completed", queries=issued, found=found, merged=merged, detail=detail, result=final)
 
     async def _assess(
@@ -1718,6 +1925,22 @@ def _pack(anchors: Sequence[EvidenceAnchor]) -> tuple[list[dict[str, str]], list
         included.append(a)
         used += len(a.content)
     return payload, included, len(anchors) - len(included)
+
+
+#: Between an anchor's text and the record it resolves to, in a joined item (RDR-147, 147-research-9).
+_JOINED_SEP = "\n\nResolved "
+
+
+@dataclass
+class _Resolution:
+    """What the exact-key branch did: the :class:`RepairReport` fields it sets, and, when it entered, the joined
+    items to merge, a ``failure`` (the resolve or the fetch failed, nothing was merged) and the report's ``detail``."""
+
+    fields: dict[str, Any]
+    entered: bool = False
+    items: list[SupplementItem] = field(default_factory=list)
+    failure: str = ""
+    detail: str = ""
 
 
 def _hits(out: Any) -> list[RepairHit]:

@@ -133,7 +133,7 @@ You have access to and will actively leverage:
   - mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5 -- chunk-level semantic search
   - mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true -- enumerate all documents (RDR-103: collections are `<content_type>__<owner>__<embedding_model>__v<n>`)
   - mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="title", tags="tags" -- store findings (the bare prefix is auto-promoted to a conformant 4-segment name)
-- **nx code index**: Semantic code search across indexed repositories
+- **T3 code index**: Semantic code search across indexed repositories
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 -- hybrid semantic + git frecency
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 -- repo-specific
 - **T2 memory**: For accessing previous research and contextual information
@@ -156,7 +156,7 @@ Thought 4: Gather evidence from second source — compare and contrast
 Thought 5: Identify contradictions or gaps between sources
 Thought 6: Form synthesis — what does the combined evidence support confidently?
 Thought 7: Assess remaining uncertainty — what is still unclear or contested?
-Thought 8: Determine actionable conclusions and persistence plan (nx store titles)
+Thought 8: Determine actionable conclusions and persistence plan (T3 store titles)
 ```
 
 Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to explore alternatives.
@@ -172,7 +172,7 @@ If your project uses beads for task tracking, consider linking research findings
 
 **Creating Tasks for Follow-Up**:
 - bd create "Implement: finding" -t task
-- Reference research nx store titles in the design field
+- Reference research T3 store titles in the design field
 
 **Consult CLAUDE.md**: Check if your project mandates beads integration for research tracking.
 
@@ -234,7 +234,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 - **Research Synthesis (relay-overridden — T2)**: mcp__plugin_conexus_nexus__memory_put(content="...", project="{relay-specified}", title="{relay-specified}", ttl={relay-specified, default 30}) — use when the dispatching relay specifies a T2 target (e.g. `rdr_process/audit-<project>-<date>` for rdr-audit classifier dispatches)
 - **Source Citations**: Include in document content
 - **Knowledge Gaps**: Create research beads for follow-up
-- **Cross-Reference Maps**: Document in nx store relationships
+- **Cross-Reference Maps**: Document in T3 store relationships
 - **Round Artifacts**: Use T1 scratch to track findings per research round:
   After each round of research:
   mcp__plugin_conexus_nexus__scratch(action="put", content="# Round {N} findings\n{content}", tags="research,round-{N}"
@@ -242,7 +242,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
   mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>", project="{project}", title="research-round-{N}.md"
 
 Store using these naming conventions:
-- **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **T3 store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **nx memory**: mcp__plugin_conexus_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
@@ -282,7 +282,7 @@ You will systematically:
    mcp__plugin_conexus_nexus__search(query="{alternate term or related concept}", corpus="knowledge", limit=5
    Use both result sets before concluding no prior knowledge exists. Once vocabulary is known
    from first results, subsequent targeted queries do not need the alternate formulation.
-2. Search nx code index for implementation examples and patterns: mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20
+2. Search the T3 code index for implementation examples and patterns: mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20
 3. Conduct web research for current best practices and external sources
 6. Check T2 memory for previous related investigations:
    mcp__plugin_conexus_nexus__memory_search(query="topic", project="{project}"

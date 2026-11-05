@@ -3019,8 +3019,8 @@ class StorageServiceSupervisor:
         ``PG_DATA`` presence is the same signal the branch above already
         uses to distinguish "ours to start" from "someone else's". Those
         deployments self-heal via the manual DBA step named in
-        docs/configuration.md prerequisite 2 (the same remedy text the
-        Liquibase changeset itself raises) — pg_provision must never run
+        docs/configuration.md prerequisite 2 (the section the Liquibase
+        changeset's own error links on GitHub) — pg_provision must never run
         against a remote/customer-managed Postgres.
 
         Best-effort by design, matching every other backfill in

@@ -285,7 +285,7 @@ def routing_stats_cmd(
     """Aggregate the routing-hook log into per-rule fire / deny / escape stats.
 
     RDR-121 Phase 3. Reads JSONL records produced by the routing hook
-    framework (`conexus/hooks/scripts/routing/_lib.log_routing_event`) and
+    framework (its `log_routing_event` writer) and
     reports per-rule outcomes. Used at the 30-day soak review to spot
     false positives (high escape rate), inert matchers (zero fires), or
     overly broad blocks (high block rate).

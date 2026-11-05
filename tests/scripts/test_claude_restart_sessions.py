@@ -60,6 +60,9 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "KNOWN_MARKETPLACES", settings / "known_marketplaces.json")
     monkeypatch.setattr(crs, "INSTALLED", settings / "installed_plugins.json")
     monkeypatch.setattr(crs, "KEEP_DEV_CHANNEL", False)
+    # A roll under test must not prune this machine's real /tmp (nexus-2v7da); that prune is pinned in
+    # test_claude_restart_sessions_prune.py.
+    monkeypatch.setattr(crs, "_prune_handoffs_at_write", lambda: None)
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
 
 

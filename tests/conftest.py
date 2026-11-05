@@ -3181,6 +3181,7 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("NX_ANSWER_STRUCTURED_EXTRACT", raising=False)
     monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
+    monkeypatch.delenv("NX_ANSWER_RESOLUTION_REPAIR", raising=False)  # RDR-147 Step 4 ships off; a developer's export must not turn it on
     monkeypatch.setenv("NX_ANSWER_COVERAGE", "0")
     real = _dispatch.claude_dispatch
 

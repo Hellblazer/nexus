@@ -11,6 +11,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.aspect_readers import (
     HTTPS_STAT_MAX_ATTEMPTS,
     HTTPS_STAT_RETRY_DELAYS_S,
@@ -2282,7 +2283,7 @@ def _child_import_remedy(child_error: str, *, in_process: bool = False) -> str:
         return (
             "MinerU cannot find the Visual C++ runtime DLLs it needs: this machine has no redistributable and "
             "nx's own copies are missing or incomplete. Run `nx init` (or `nx upgrade --auto`) to place them, "
-            "or install Microsoft's redistributable from https://aka.ms/vs/17/release/vc_redist.x64.exe."
+            "or install Microsoft's redistributable (https://aka.ms/vs/17/release/vc_redist.x64.exe)."
         )
     if in_process:
         return (
@@ -2294,8 +2295,8 @@ def _child_import_remedy(child_error: str, *, in_process: bool = False) -> str:
             "the import works in this process but not in a fresh child, which is how MinerU's worker and "
             "server run. The child cannot find the Visual C++ runtime DLLs: this machine has no "
             "redistributable and nx's own copies are missing or incomplete. Run `nx init` (or `nx upgrade "
-            "--auto`) to place them, or install Microsoft's redistributable from "
-            "https://aka.ms/vs/17/release/vc_redist.x64.exe."
+            "--auto`) to place them, or install Microsoft's redistributable "
+            "(https://aka.ms/vs/17/release/vc_redist.x64.exe)."
         )
     return (
         "the import works in this process but not in a fresh child, which is how MinerU's worker and "
@@ -2897,7 +2898,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
     )
 
 
-@click.command("doctor")
+@click.command("doctor", epilog=COLLECTIONS_RULES_EPILOG)
 @click.option(
     "--clean-checkpoints",
     is_flag=True,
@@ -2947,7 +2948,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
     is_flag=True,
     default=False,
     help="Run probes 3a and 3b: the name-resolution canary from "
-         "tests/fixtures/name_canaries.py, then a retrieval probe that queries "
+         "nexus's name-canary fixtures, then a retrieval probe that queries "
          "each collection with one of its own chunks and checks that some "
          "OTHER chunk survives the distance threshold. A collection whose "
          "nearest real neighbours all fall past its threshold is a WARNING "
@@ -3143,7 +3144,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
     is_flag=True,
     default=False,
     help="Read-only shape audit of the collection set against "
-         "docs/collections.md (nx collection shape): one row per check "
+         "the collection rules (nx collection shape; linked at the end of this help): one row per check "
          "with a count. Findings never fail doctor; only an unreadable "
          "tenant does (exit 1).",
 )
@@ -4089,7 +4090,7 @@ def _run_check_harness_grant() -> None:
         "[!] Harness dispatch grant: NX_HARNESS_CLAUDE_OAUTH_TOKEN is present -- "
         "LLM dispatch (claude -p children) authenticates via the harness "
         "grant, not the operator's own login (RDR-219). Expected only "
-        "under a harness launched through tests/e2e/lib/claude_mcp_grant.sh."
+        "under a harness launched through the nexus repo's Claude MCP grant wrapper."
     )
 
 
@@ -4115,7 +4116,7 @@ def _run_check_collection_shape() -> None:
     mark = "✓" if not report.findings else "!"
     click.echo(
         f"[{mark}] Collections shape: examined {report.collections_examined}, "
-        f"{warn} warning(s), {info} informational; rules docs/collections.md"
+        f"{warn} warning(s), {info} informational; rules https://github.com/Hellblazer/nexus/blob/main/docs/collections.md"
     )
     rule_of = {c: r for r, cs in CHECKS_BY_RULE.items() for c in cs}
     for check, n in sorted(report.by_check.items(), key=lambda kv: (rule_of[kv[0]], kv[0])):

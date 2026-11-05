@@ -1,6 +1,6 @@
 # nexus-h33x8.6 a1 — single-query fast path.
 #
-# _nx_answer_classify_plan (src/nexus/mcp/core.py) reroutes a matched
+# _nx_answer_classify_plan (in nexus.mcp.core) reroutes a matched
 # plan straight to query() (mean 2.1s, no claude -p) ONLY when the plan
 # has exactly one step whose tool is `query`. Prior to this template,
 # every plan in the builtin library ended in an operator, so that

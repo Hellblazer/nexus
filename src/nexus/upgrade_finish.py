@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -1063,7 +1064,7 @@ def restart_stale(
                 actions.append(
                     f"mineru pid {proc.pid} is stale but autostart policy is "
                     "off (pdf.mineru_autostart / NX_MINERU_AUTOSTART) — cycle "
-                    "it yourself: `nx mineru stop && nx mineru start`"
+                    "it yourself: `nx mineru stop`, then `nx mineru start`"
                 )
                 continue
             # Same pid-recycle re-check as the aspect-worker branch: the
@@ -1085,7 +1086,7 @@ def restart_stale(
                 actions.append(
                     f"mineru pid {proc.pid} is stale but the PDF stack is not installed in the "
                     f"current generation, so it was left running; `{_pdf_repair_command()}` "
-                    "installs it, then `nx mineru stop && nx mineru start`"
+                    "installs it, then `nx mineru stop`, then `nx mineru start`"
                 )
                 continue
             try:
@@ -1268,7 +1269,7 @@ def _uv_install_source() -> str:
         return (
             f"local checkout ({req['directory']}) — `uv tool upgrade` never "
             f"consults PyPI for this install; use "
-            f"{install_advice.upgrade_command('scripts/reinstall-tool.sh')} "
+            f"{install_advice.upgrade_command(shlex.quote(str(req['directory']) + '/scripts/reinstall-tool.sh'))} "
             f"or reinstall from PyPI"
         )
     spec = str(req.get("specifier", ""))
@@ -2002,7 +2003,7 @@ def _restart_and_verify(
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
         actions.append(
             f"NEEDS HUMAN: restarting the storage service raised {exc} — run "
-            "`nx daemon service stop && nx daemon service start` yourself, "
+            "`nx daemon service stop`, then `nx daemon service start` yourself, "
             "then `nx doctor` to confirm the engine converged"
         )
         return actions
@@ -2323,7 +2324,7 @@ def converge_engine(
                 f"release dependency v{req_s} on disk. Not converged, and "
                 "deliberately not auto-fixed: restarting would silently "
                 "DOWNGRADE the running engine. Cycle it yourself if that is "
-                "what you want (`nx daemon service stop && nx daemon service "
+                "what you want (`nx daemon service stop`, then `nx daemon service "
                 "start`)."
             ]
         if running.up and running.version is None:
@@ -3087,7 +3088,7 @@ def converge_service_autostart_unit(
         return [
             f"NOTE: the storage-service autostart unit at {dest} is current "
             f"but not registered for login ({activation.detail}). Not "
-            f"touching it here -- run `{activation.remedy}` to "
+            f"touching it here -- run {activation.remedy} to "
             "re-register it, then `nx doctor` to confirm."
         ]
 
@@ -3103,8 +3104,8 @@ def converge_service_autostart_unit(
         ]
 
     manual_fallback = (
-        "run `nx daemon service stop && nx daemon service uninstall "
-        "--autostart && nx daemon service install --autostart` yourself, "
+        "run `nx daemon service stop`, then `nx daemon service uninstall "
+        "--autostart`, then `nx daemon service install --autostart` yourself, "
         "then `nx doctor` to confirm the service came back up."
     )
 
@@ -3236,7 +3237,7 @@ def converge_service_autostart_unit(
                     # the one remedy every surface (this NOTE, the doctor
                     # row, the ActivationError) names.
                     f"Once a service manager becomes available on this "
-                    f"box, run `{installer.REINSTALL_REMEDY}` to register it."
+                    f"box, run {installer.REINSTALL_REMEDY} to register it."
                 ]
             return [
                 f"NEEDS HUMAN: {note}. {failure_detail}, and {restart_clause} "

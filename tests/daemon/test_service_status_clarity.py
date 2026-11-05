@@ -567,7 +567,7 @@ class TestStopReviewRound3ExitCodes:
 
     CRITICAL: exit code is the only machine-parseable signal
     `service_stop_cmd` has (no --json). The bead's own documented remedy,
-    `nx daemon service stop && nx daemon service start`, silently
+    `nx daemon service stop`, then `nx daemon service start`, silently
     proceeds to `start` whenever `stop` exits 0 — so an UNVERIFIED stop
     (a stubborn survivor, or a process table that could not be checked
     with nothing signalled) must break that chain with a non-zero exit.

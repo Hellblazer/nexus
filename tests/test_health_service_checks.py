@@ -417,13 +417,13 @@ class TestCheckServiceAutostartDrift:
         r = self._row(dest, ActivationProbe(
             ActivationState.NOT_ACTIVE,
             "`launchctl print-disabled gui/501` reports com.nexus.service disabled",
-            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart && nx daemon service install --autostart",
+            "`launchctl enable gui/501/com.nexus.service`, then `nx daemon service uninstall --autostart`, then `nx daemon service install --autostart`",
         ))
         assert r.ok is False and r.warn is True and r.fatal is False
         assert "installed but not registered for login" in r.detail
         assert "reports com.nexus.service disabled" in r.detail
         assert r.fix_suggestions and r.fix_suggestions[0].startswith(
-            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart && nx daemon service install --autostart"
+            "`launchctl enable gui/501/com.nexus.service`, then `nx daemon service uninstall --autostart`, then `nx daemon service install --autostart`"
         ), r.fix_suggestions
 
     def test_local_content_matches_with_no_manager_is_informational_and_states_the_consequence(self, tmp_path):
@@ -433,7 +433,7 @@ class TestCheckServiceAutostartDrift:
         r = self._row(dest, self._activation(ActivationState.NO_MANAGER, "launchctl not found on PATH or at /bin/launchctl"))
         assert r.ok is True and r.warn is False
         assert "no service manager" in r.detail and "will not start at login" in r.detail
-        assert any("uninstall --autostart && nx daemon service install --autostart" in f for f in r.fix_suggestions)
+        assert any("uninstall --autostart`, then `nx daemon service install --autostart`" in f for f in r.fix_suggestions)
 
     def test_local_content_matches_with_an_unreachable_manager_is_informational_never_a_warning(self, tmp_path):
         """No user bus over ssh / no gui domain headless: cannot tell, and a
@@ -484,7 +484,7 @@ class TestCheckServiceAutostartDrift:
         assert r.ok is False and r.warn is True
         assert "installed but not registered for login" in r.detail
         assert "reports com.nexus.service disabled" in r.detail
-        assert r.fix_suggestions[0].startswith("launchctl enable gui/")
+        assert r.fix_suggestions[0].startswith("`launchctl enable gui/")
 
     def test_real_unit_file_and_a_fake_manager_with_no_gui_domain_is_informational(self, tmp_path, monkeypatch):
         r = self._end_to_end(

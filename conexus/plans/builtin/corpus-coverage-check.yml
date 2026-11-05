@@ -23,8 +23,8 @@
 # shape ("does X cover this / have anything / yes-or-no") rather than
 # repeating the noun "corpus", since the noun is exactly what a
 # synthesis question sharing the same corpus/topic vocabulary also
-# contains. Empirically tuned (tests/test_document_lookup_seed_plans.py
-# ::TestDocumentDiscoverySeedPlansDoNotCatchSynthesisQuestions) against
+# contains. Empirically tuned (the nexus repo's seed-plan tests,
+# TestDocumentDiscoverySeedPlansDoNotCatchSynthesisQuestions) against
 # the real bundled-MiniLM cosine path, not by inspection -- MiniLM's
 # short-text similarity is dominated by shared vocabulary, not verb
 # semantics, so small wording changes move scores non-monotonically;

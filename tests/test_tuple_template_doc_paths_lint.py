@@ -42,6 +42,10 @@ _REPO_PATH = re.compile(
     r"(?<![\w/.:-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.(?:sh|md|py|java|yaml|yml|json|xml|toml|txt))(?![\w/-])"
 )
 _RDR_ID = re.compile(r"RDR-(\d{3,4})")
+# A doc block reaches a user who has no checkout (``tuple_registry(doc=true)``), so it links GitHub rather than
+# naming a repo path (nexus-z7ddd; tests/test_repo_only_references_lint.py bans the bare path in these blocks).
+# The link's target is a cited path all the same and must exist.
+_GITHUB_TARGET = re.compile(r"https://github\.com/Hellblazer/nexus/(?:blob|tree)/main/([\w./-]+)")
 
 
 _TRAILING_COMMENT = re.compile(r"\s+#.*$")
@@ -142,6 +146,10 @@ def check_templates(templates_dir: Path, root: Path) -> tuple[list[str], int, in
                 paths += 1
                 if not (root / m.group(1)).exists():
                     problems.append(f"{f.name}: {field} cites {m.group(1)}, which does not exist under {root}")
+            for m in _GITHUB_TARGET.finditer(line):
+                paths += 1
+                if not (root / m.group(1)).exists():
+                    problems.append(f"{f.name}: {field} links {m.group(1)}, which does not exist under {root}")
             for m in _RDR_ID.finditer(line):
                 rdrs += 1
                 if not _rdr_exists(root, m.group(1)):
@@ -285,3 +293,19 @@ def test_a_doc_block_that_is_a_list_is_reported(tmp_path: Path) -> None:
     (tdir / "t.yaml").write_text("name: t\ndoc:\n  - docs/gone.md\n")
     problems, _files, _paths, _rdrs = check_templates(tdir, tmp_path)
     assert any("doc " in p and "cannot be read" in p for p in problems), problems
+
+
+def test_a_github_link_to_a_file_is_a_cited_path_that_must_exist(tmp_path: Path) -> None:
+    """Positive control: the link a doc block uses in place of a repo path is checked like the path was."""
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    (tmp_path / "docs" / "real.md").write_text("x")
+    tdir = tmp_path / "templates"
+    tdir.mkdir()
+    (tdir / "t.yaml").write_text(
+        "name: t\ndoc:\n  summary: s\n  writers:\n"
+        "    - see https://github.com/Hellblazer/nexus/blob/main/docs/real.md\n"
+        "    - see https://github.com/Hellblazer/nexus/blob/main/docs/gone.md\n"
+    )
+    problems, _files, paths, _rdrs = check_templates(tdir, tmp_path)
+    assert paths == 2
+    assert len(problems) == 1 and "docs/gone.md" in problems[0], problems

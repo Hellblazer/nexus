@@ -349,7 +349,7 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
     import nexus.corpus as corpus_mod  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     exc_cls = getattr(corpus_mod, exc_cls_name)
-    message = "content_type='knowledge': this install's configured intent is 'voyage-context-3', but the engine's embedding_profile still says 'bge-base-en-v15-768'. A restart is required: `nx daemon service stop && nx daemon service start`."
+    message = "content_type='knowledge': this install's configured intent is 'voyage-context-3', but the engine's embedding_profile still says 'bge-base-en-v15-768'. A restart is required: `nx daemon service stop`, then `nx daemon service start`."
     # EmbeddingProfileMismatchError builds its message from structured
     # fields since nexus-aotql; the credential error still takes one string.
     if exc_cls_name == "EmbeddingProfileMismatchError":
@@ -372,7 +372,7 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
     assert result.exc_info is not None and result.exc_info[0] is SystemExit, result.exc_info
     assert "Traceback" not in result.output, result.output
     assert result.output.rstrip().splitlines()[-1].startswith("Error: ")
-    assert "nx daemon service stop && nx daemon service start" in result.output
+    assert "nx daemon service stop, then nx daemon service start" in result.output.replace("`", "")
     # RDR-223 Phase 2 joint review: a client-side refusal leads with its own remedy and says
     # nothing was sent; it never says "retry is safe" (a retry fails the same way until the
     # operator acts) or "could not catalog <source>" (the refusal has nothing to do with cataloging).

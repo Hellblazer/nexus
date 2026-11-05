@@ -105,12 +105,17 @@ registered handler for that method, so the handler fires exactly once per
 connection, right when the handshake completes (nexus-sgmyl, verified against
 mcp 2.3.0 ``mcp/server/runner.py``).
 
-Handshake era only. The channel capability rides ``initialize``'s
-``capabilities.experimental``. A client that opens with the 2026-07-28
-per-request envelope skips ``initialize`` and reads ``server/discover``, which
-the SDK builds without our experimental map; Claude Code opens with
-``initialize`` today, and a modern-era client would see no channel capability
-and so register no listener (a documented no-op, not an error).
+Handshake era only, enforced (nexus-w4l00). The channel capability rides
+``initialize``'s ``capabilities.experimental``. A client that opens with the
+2026-07-28 per-request envelope skips ``initialize`` and reads
+``server/discover``, which the SDK builds without our experimental map, and it
+never sends ``notifications/initialized``. Claude Code 2.1.317 opens exactly
+that way, so under ``Server.run`` (dual era) it connected modern, logged
+"Channel notifications skipped: server did not declare claude/channel
+capability", and the first send parked on the gate for the life of the
+session. :func:`run_stdio_with_channel` therefore drives ``serve_loop``
+(handshake only): the enveloped probe is refused and the client falls back to
+``initialize``.
 """
 from __future__ import annotations
 
@@ -318,6 +323,44 @@ _write_stream: Any | None = None
 _initialized_event: asyncio.Event | None = None
 
 
+#: How long one send waits for the initialized gate before giving up
+#: (nexus-w4l00 follow-on). A client that completes its handshake does so
+#: within seconds of the connection; one that never will (it connected in an
+#: era that sends no ``notifications/initialized``) used to park the waiter's
+#: first send for the life of the process, with the status record still
+#: saying ``alive``. Read at call time so a test can shorten it.
+GATE_WAIT_TIMEOUT_S: float = 30.0
+
+
+class ChannelGateTimeout(Exception):
+    """The client did not send ``notifications/initialized`` within
+    :data:`GATE_WAIT_TIMEOUT_S`, so the notification was not sent."""
+
+
+def _gate_is_open() -> bool:
+    """``True`` once the live connection's ``notifications/initialized`` has
+    been seen. ``False`` with no connection at all."""
+    ev = _initialized_event
+    return ev is not None and ev.is_set()
+
+
+def _gate_is_shut() -> bool:
+    """``True`` on a live connection whose client has not yet sent
+    ``notifications/initialized``. ``False`` with no connection (a test, a
+    torn-down stdio session) so the injected sender decides."""
+    ev = _initialized_event
+    return ev is not None and not ev.is_set()
+
+
+#: Board posts a shut gate kept from going out, held in memory and sent when it
+#: opens. A board post is stamped delivered once per subscriber, so the engine
+#: never offers it again; without this a stall would lose it from the push.
+_HELD_BOARD_SENDS_MAX = 64
+
+#: Mailbox rows whose first announce is tracked until one gets through.
+_FIRST_ANNOUNCE_TRACKED_MAX = 1024
+
+
 async def _on_initialized(_ctx: Any, _params: Any) -> None:
     if _initialized_event is not None:
         _initialized_event.set()
@@ -332,26 +375,63 @@ def install_initialized_gate(server: Any) -> None:
     server.add_notification_handler("notifications/initialized", types.NotificationParams, _on_initialized)
 
 
+async def serve_handshake_era(server: Any, read_stream: Any, write_stream: Any) -> None:
+    """Run *server*'s lifespan and serve one connection in the handshake era
+    only, declaring ``claude/channel`` in the initialize result (nexus-w4l00).
+
+    This is what ships: :func:`run_stdio_with_channel` calls it on the stdio
+    streams and the in-process tests in ``tests/test_mcp_channel.py`` call it
+    on memory streams, so they cover the driver itself.
+
+    ``Server.run`` is the lifespan plus ``serve_dual_era_loop``, which serves
+    the 2026-07-28 era to a client whose first request carries its envelope.
+    Claude Code 2.1.317 opens that way (an enveloped ``server/discover``); the
+    SDK's discover result has no ``experimental`` map, so Claude Code
+    connected modern, skipped the channel ("server did not declare
+    claude/channel capability") and never sent ``notifications/initialized``,
+    which left every send parked on the gate. ``serve_loop`` refuses the
+    probe, the client falls back to ``initialize``, and the capability rides
+    its result, as on mcp 1.x. The lifespan is entered here as ``Server.run``
+    does.
+
+    Cost: a client that speaks only the modern era (a version-pinned
+    ``Client``) cannot connect to ``nx-mcp``; Claude Code and ``ClientSession``
+    are unaffected. Revisit when Claude Code carries ``claude/channel`` in
+    modern-era discover.
+    """
+    # ``serve_loop`` is not documented SDK API; the pin is ``mcp>=2.3,<3``.
+    # The tripwire is the enveloped-discover-then-initialize pin in
+    # ``tests/test_mcp_sdk_contract.py``, which fails if the symbol moves or the
+    # probe is answered again.
+    from mcp.server.runner import serve_loop  # noqa: PLC0415 — deferred: only needed for the stdio driver
+
+    async with server.lifespan(server) as lifespan_state:
+        await serve_loop(
+            server,
+            read_stream,
+            write_stream,
+            lifespan_state=lifespan_state,
+            init_options=server.create_initialization_options(
+                experimental_capabilities=CHANNEL_CAPABILITY,
+            ),
+        )
+
+
 async def run_stdio_with_channel(mcp: "MCPServer") -> None:
     """Replaces ``mcp.run(transport="stdio")`` -> ``anyio.run(self.
     run_stdio_async)`` at the one call site in :func:`nexus.mcp.core.main`.
 
-    Byte-identical to ``MCPServer.run_stdio_async`` except for the one line
-    this bead exists to add: ``experimental_capabilities=
-    CHANNEL_CAPABILITY`` on ``create_initialization_options``.
-    ``MCPServer.run_stdio_async`` itself passes none (it calls
-    ``create_initialization_options()`` with no arguments), so declaring
-    the capability requires driving the low-level ``Server.run`` call
-    directly -- which is also what hands this function the write stream
-    early enough to stash it before any tool call, or the lifespan's
-    waiter task, could need it.
+    Opens the stdio streams, stashes the write stream and the initialized
+    gate for :func:`send_channel_notification` before any tool call or the
+    lifespan's waiter task could need them, and hands the connection to
+    :func:`serve_handshake_era` (the lifespan plus ``serve_loop``, handshake
+    era only, ``claude/channel`` declared). It no longer calls
+    ``Server.run`` or ``MCPServer.run_stdio_async``.
 
     ``mcp._lowlevel_server.lifespan`` is already ``_t1_lifespan`` wrapped by
     MCPServer's own ``lifespan_wrapper`` (set at ``MCPServer.__init__`` time
-    from ``settings.lifespan``), so calling ``Server.run`` here runs the
-    EXACT SAME lifespan MCPServer would have run through
-    ``run_stdio_async`` -- nothing about lifespan behavior changes, only
-    the initialize options passed alongside it.
+    from ``settings.lifespan``), so the lifespan that runs is the one
+    ``run_stdio_async`` would have run.
     """
     from mcp.server.stdio import stdio_server  # noqa: PLC0415 — deferred: only needed for the stdio driver
 
@@ -364,11 +444,7 @@ async def run_stdio_with_channel(mcp: "MCPServer") -> None:
         _write_stream = write_stream
         _initialized_event = asyncio.Event()
         try:
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(experimental_capabilities=CHANNEL_CAPABILITY),
-            )
+            await serve_handshake_era(server, read_stream, write_stream)
         finally:
             _write_stream = None
             _initialized_event = None
@@ -380,7 +456,10 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
     exception) when there is no live write stream -- outside stdio
     transport, before the connection is up, or after it has torn down --
     or the client has not yet completed its own initialize handshake, so
-    every caller in this module can call this unconditionally.
+    every caller in this module can call this unconditionally. The one
+    exception is a handshake that does not complete within
+    :data:`GATE_WAIT_TIMEOUT_S`: that raises :class:`ChannelGateTimeout`, which
+    :class:`ChannelWaiter` catches and reports.
     """
     import mcp.types as types  # noqa: PLC0415 — deferred: only needed when actually sending
     from mcp.shared.message import SessionMessage  # noqa: PLC0415 — deferred: only needed when actually sending
@@ -390,7 +469,12 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
     if ws is None or ev is None:
         return False
     if not ev.is_set():
-        await ev.wait()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=GATE_WAIT_TIMEOUT_S)
+        except TimeoutError:
+            raise ChannelGateTimeout(
+                f"no notifications/initialized within {GATE_WAIT_TIMEOUT_S:g}s"
+            ) from None
         if _write_stream is None:  # torn down while we waited
             return False
     message = types.JSONRPCNotification(
@@ -818,6 +902,17 @@ class ChannelWaiter:
         self._announced_total = 0
 
         self._alive = False
+        #: nexus-w4l00 follow-on: when the first send to time out on the
+        #: initialized gate did so, or `None` while sends get through.
+        self._gate_stalled_since: datetime | None = None
+        #: Board sends a shut gate refused: ``(content, meta, on_sent)``, oldest
+        #: first, bounded by :data:`_HELD_BOARD_SENDS_MAX`. ``on_sent`` is the
+        #: bookkeeping the delivery owes once the send gets through.
+        self._held: list[tuple[str, dict[str, str], Callable[[], None]]] = []
+        #: ids of mailbox rows whose FIRST announce (``announce_count == 1``)
+        #: did not get through; the row's later re-announce is credited to
+        #: ``announced`` instead of the first, so the count is not short.
+        self._first_announce_failed: set[str] = set()
         self._stopped = False
         #: `None` while running, or the running (never alive-and-stopped)
         #: waiter's own stop cause once `_stopped` flips (review round,
@@ -884,6 +979,7 @@ class ChannelWaiter:
         seen, or `None` when `pending` is 0."""
         active = [seen for seen in self._last_seen.values() if seen[0] < self.max_announces]
         oldest_pending_age_s = (time.monotonic() - min(seen_at for _, seen_at in active)) if active else None
+        stalled = self._gate_stalled_since is not None and not _gate_is_open()
         return {
             "alive": self._alive,
             "stopped_reason": self._stopped_reason,
@@ -901,7 +997,85 @@ class ChannelWaiter:
             # fallen back to the client-side drop for an engine that refuses
             # the combination.
             "board_since_supported": self._board_since_supported,
+            # nexus-w4l00 follow-on: sends are timing out on the initialized
+            # gate, so `alive` does not mean push delivery works.
+            # Stalled only while the gate is still shut: a gate that opens late
+            # with no later send reads healthy at once, not after the next row.
+            "gate_stalled": stalled,
+            "gate_stalled_since": self._gate_stalled_since.isoformat() if stalled and self._gate_stalled_since else None,
         }
+
+    def _clear_stall_if_open(self) -> None:
+        """Forget a stall once the gate has opened (the late handshake case)."""
+        if self._gate_stalled_since is not None and _gate_is_open():
+            self._gate_stalled_since = None
+            _log.info("channel_gate_recovered", session_id=self.session_id)
+            self._publish_status()
+
+    async def _send(
+        self, content: str, meta: dict[str, str], *, hold: Callable[[], None] | None = None,
+    ) -> bool:
+        """Call the sender; ``False`` when the notification did not go out.
+
+        That is a gate that stayed shut (nexus-w4l00 follow-on) or a sender
+        that answered ``False`` (no live stream). The first gate timeout logs
+        one warning and publishes the stall; the waiter keeps ticking, and while
+        the gate is known to be shut later sends return at once instead of
+        waiting out the bound again, so one stall does not cost a tick 30 s per
+        row. The engine's own re-announce cadence retries a MAILBOX row. A board
+        post is stamped delivered once per subscriber (``max=1``) and would be
+        lost from the push, so a caller passes *hold*, the bookkeeping the
+        delivery owes, and a gate refusal keeps the send in memory for
+        :meth:`_flush_held`. A send that gets through clears the stall."""
+        self._clear_stall_if_open()
+        if self._gate_stalled_since is not None and _gate_is_shut():
+            self._hold(content, meta, hold)
+            return False
+        try:
+            sent = await self.sender(content, meta)
+        except ChannelGateTimeout as exc:
+            if self._gate_stalled_since is None:
+                self._gate_stalled_since = datetime.now(UTC)
+                _log.warning(
+                    "channel_gate_stalled", session_id=self.session_id, error=str(exc),
+                    hint="the client never sent notifications/initialized; push delivery is not happening",
+                )
+                self._publish_status()
+            self._hold(content, meta, hold)
+            return False
+        if sent is False:
+            return False  # no live stream: nothing went out, so nothing is credited or cleared
+        if self._gate_stalled_since is not None:
+            self._gate_stalled_since = None
+            _log.info("channel_gate_recovered", session_id=self.session_id)
+            self._publish_status()
+        return True
+
+    def _hold(self, content: str, meta: dict[str, str], on_sent: Callable[[], None] | None) -> None:
+        if on_sent is None:
+            return
+        self._held.append((content, meta, on_sent))
+        while len(self._held) > _HELD_BOARD_SENDS_MAX:
+            dropped = self._held.pop(0)
+            _log.warning(
+                "channel_held_board_send_dropped", session_id=self.session_id,
+                subspace=dropped[1].get("subspace"), held_max=_HELD_BOARD_SENDS_MAX,
+            )
+
+    async def _flush_held(self) -> None:
+        """Send the board posts a shut gate held, oldest first, once it opens.
+        Stops at the first send that does not get through and keeps the rest."""
+        if not self._held:
+            return
+        self._clear_stall_if_open()
+        if _gate_is_shut():
+            return
+        pending, self._held = self._held, []
+        for i, (content, meta, on_sent) in enumerate(pending):
+            if not await self._send(content, meta):
+                self._held = pending[i:] + self._held
+                return
+            on_sent()
 
     def _publish_status(self) -> None:
         """Best-effort refresh of the on-disk record (bead nexus-rplay.13)
@@ -1148,6 +1322,8 @@ class ChannelWaiter:
         # review): the subscribe/unsubscribe tools mutate the set from
         # worker threads, so the spec builder and the result processor
         # read the SAME list rather than two that may differ.
+        self._clear_stall_if_open()
+        await self._flush_held()
         entries = self.subs.entries()
         live_subspaces = {e["subspace"] for e in entries}
         for subspace in list(self._last_seen):
@@ -1187,6 +1363,7 @@ class ChannelWaiter:
         if self._engine_ignores_subscriber(results):
             self._stop_no_subscriber_support()
             return
+        await self._flush_held()  # a gate that opened during the wait
         await self._process_results(results, entries)
         self._last_wake = datetime.now(UTC)
         self._publish_status()
@@ -1391,6 +1568,13 @@ class ChannelWaiter:
             kept.append(row)
         if not kept:
             return
+        last = kept[-1]
+
+        def delivered() -> None:
+            self._board_batches += 1
+            if last.created_at:
+                self._board_last_delivered[subspace] = (last.created_at, last.id)
+
         if len(kept) == 1:
             row = kept[0]
             meta = {"subspace": subspace, "tuple_id": row.id}
@@ -1402,7 +1586,8 @@ class ChannelWaiter:
             content = _board_notification_content(
                 subspace, row.id, case=case, session=canonical_session(row.sender_session),
             )
-            await self.sender(content, meta)
+            if not await self._send(content, meta, hold=delivered):
+                return
         else:
             first, last = kept[0], kept[-1]
             kinds: dict[str, int] = {}
@@ -1439,11 +1624,9 @@ class ChannelWaiter:
                 subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
                 unverified=unverified,
             )
-            await self.sender(content, meta)
-        self._board_batches += 1
-        last = kept[-1]
-        if last.created_at:
-            self._board_last_delivered[subspace] = (last.created_at, last.id)
+            if not await self._send(content, meta, hold=delivered):
+                return
+        delivered()
 
     async def _reference_mailbox_row(self, subspace: str, row: TupleRow) -> None:
         """Send ONE reference for *row* (claimed or not -- the
@@ -1465,8 +1648,15 @@ class ChannelWaiter:
             subspace, row.id, to_address, case=case,
             session=canonical_session(row.sender_session),
         )
-        await self.sender(content, meta)
-        if row.announce_count == 1:
+        if not await self._send(content, meta):
+            if row.announce_count == 1 and len(self._first_announce_failed) < _FIRST_ANNOUNCE_TRACKED_MAX:
+                self._first_announce_failed.add(row.id)
+            return
+        # The row's first send, or the first to get through after its first
+        # announce was refused: credited once, never on a re-send of a row
+        # already counted.
+        if row.announce_count == 1 or row.id in self._first_announce_failed:
+            self._first_announce_failed.discard(row.id)
             self._announced_total += 1
         self._last_seen[subspace] = (row.announce_count or 0, time.monotonic())
 

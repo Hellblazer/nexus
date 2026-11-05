@@ -17,10 +17,9 @@ Use it for symbol-level tasks. Use Grep for text-pattern tasks.
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_symbol,mcp__plugin_sn_serena__find_symbol")
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_referencing_symbols,mcp__plugin_sn_serena__find_referencing_symbols")
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_get_symbols_overview,mcp__plugin_sn_serena__get_symbols_overview")
-ToolSearch("select:mcp__plugin_sn_serena__jet_brains_type_hierarchy,mcp__plugin_sn_serena__type_hierarchy")
+ToolSearch("select:mcp__plugin_sn_serena__jet_brains_type_hierarchy")
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_rename,mcp__plugin_sn_serena__rename_symbol")
 ToolSearch("select:mcp__plugin_sn_serena__replace_symbol_body,mcp__plugin_sn_serena__insert_before_symbol,mcp__plugin_sn_serena__insert_after_symbol")
-ToolSearch("select:mcp__plugin_sn_serena__search_for_pattern,mcp__plugin_sn_serena__find_file,mcp__plugin_sn_serena__list_dir")
 ```
 
 Then call `mcp__plugin_sn_serena__initial_instructions` for full backend-specific parameter docs.
@@ -36,12 +35,12 @@ Tool names below show `LSP name` / `JetBrains name`. Use whichever resolved in S
 | Find where a symbol is defined | `find_symbol` / `jet_brains_find_symbol` | Grep (finds comments/strings too) |
 | Find all callers of a function | `find_referencing_symbols` / `jet_brains_find_referencing_symbols` | Grep (misses aliased calls) |
 | Inventory all methods in a file | `get_symbols_overview` / `jet_brains_get_symbols_overview` | Read (reads entire file body) |
-| Understand class inheritance | `type_hierarchy` / `jet_brains_type_hierarchy` | Manual import tracing |
+| Understand class inheritance | `jet_brains_type_hierarchy` (JetBrains only; the LSP backend has none) | Manual import tracing |
 | Replace an entire function body | `replace_symbol_body` | Read + Edit (line arithmetic) |
 | Insert code before/after a method | `insert_before/after_symbol` | Read + Edit (fragile on large files) |
 | Rename a symbol across codebase | `rename_symbol` / `jet_brains_rename` | Grep + Edit (corrupts comments/strings) |
-| Pattern search across files | `search_for_pattern` | Grep (prefer Grep — it's faster) |
-| Find files by name | Glob | `find_file` |
+| Pattern search across files | Grep | Serena (its pattern search is not exposed under Claude Code) |
+| Find files by name | Glob | Serena (its file search is not exposed under Claude Code) |
 | Semantic/conceptual search | `mcp__plugin_conexus_nexus__search` | Serena (no semantic search) |
 | Exact text, comments, config | Grep | Serena |
 
@@ -76,7 +75,7 @@ replace_symbol_body("method_name", new_body)  # replace precisely
 
 ```
 get_symbols_overview("path/to/file.py")       # symbols without file body
-type_hierarchy("ClassName")                   # inheritance tree
+jet_brains_type_hierarchy("ClassName")        # inheritance tree (JetBrains only)
 # read only the methods you actually need after this
 ```
 

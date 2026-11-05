@@ -1873,7 +1873,7 @@ def _local_voyage_restart_remedy(code: int, err_message: str) -> str | None:
         "race (nexus-35ok4): the running engine has not picked up "
         "NX_VOYAGE_API_KEY yet — it is only read at process spawn. "
         "Restart the local service so the engine re-reads it: "
-        "`nx daemon service stop && nx daemon service start`."
+        "`nx daemon service stop`, then `nx daemon service start`."
     )
 
 

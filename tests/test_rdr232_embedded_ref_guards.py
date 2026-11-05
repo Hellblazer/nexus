@@ -89,7 +89,7 @@ def _save(plan: dict) -> tuple[str, list]:
         patch("nexus.mcp.core._t2_index_write", fake_write),
         patch("nexus.mcp.core._record_tier_write"),
     ):
-        return plan_save(query="q", plan_json=json.dumps(plan), verb="research"), writes
+        return plan_save(query="q", plan_json=json.dumps(plan), verb="research", answer_kind="unknown"), writes
 
 
 def test_plan_save_refuses_an_embedded_ref_and_names_it_and_writes_nothing() -> None:

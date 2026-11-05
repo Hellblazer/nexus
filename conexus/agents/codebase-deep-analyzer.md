@@ -241,7 +241,7 @@ When your analysis reveals work that needs to be planned (e.g., refactoring, new
 ```
 ## Next Step: strategic-planner
 **Task**: Create execution plan for [findings summary]
-**Input Artifacts**: [analysis output — nx knowledge IDs, files, nx memory keys]
+**Input Artifacts**: [analysis output — T3 knowledge IDs, files, T2 memory keys]
 **Deliverable**: Phased execution plan with beads
 ```
 

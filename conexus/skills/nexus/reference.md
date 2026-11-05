@@ -158,7 +158,7 @@ Each spawns a `claude -p` subprocess (300-600s timeout) and requires real argume
 - **`nx_plan_audit(plan_json, context="")`** — audits ONE plan (passed as `plan_json`) for file-path/dependency/assumption correctness against the current codebase. Not a scan of the stored plan library.
 
 ```
-mcp__plugin_conexus_nexus__nx_tidy(topic="chromadb quotas", collection="<subject>")
+mcp__plugin_conexus_nexus__nx_tidy(topic="embedding quotas", collection="<subject>")
 mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<bead title + description text>")
 mcp__plugin_conexus_nexus__nx_plan_audit(plan_json='{"steps": [...]}')
 ```
@@ -266,11 +266,11 @@ mcp__plugin_conexus_nexus__memory_delete(project="{repo}", title="stale-finding"
 
 ### memory_search
 
-Full-text search across T2 memory entries. Searches title, content, and tags fields via FTS5.
+Full-text search across T2 memory entries: PostgreSQL full-text search over the title, content, and tags fields.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `query` | str | required | Search query (FTS5 syntax — matches tokens in title, content, and tags) |
+| `query` | str | required | Plain-text search query, matched against title, content, and tags (no query grammar or operators) |
 | `project` | str | `""` | Optional project filter |
 | `limit` | int | `20` | Page size |
 | `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
@@ -346,7 +346,7 @@ mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", pro
 
 **Promote return value** (RDR-057 Phase 1c): The promote action returns a `PromotionReport` rendered in the response string:
 - `(action=new)` — clean write, no overlap detected
-- `(action=overlap_detected)` — FTS5 found a similar existing T2 entry. The new entry is still written as a separate row; the agent must decide whether to also call `memory_consolidate(action="merge")` to dedupe.
+- `(action=overlap_detected)` — the full-text check found a similar existing T2 entry. The new entry is still written as a separate row; the agent must decide whether to also call `memory_consolidate(action="merge")` to dedupe.
 
 **Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
 
@@ -368,12 +368,14 @@ Save a query execution plan to the T2 plan library.
 |-----------|------|---------|-------------|
 | `query` | str | required | Original natural-language question |
 | `plan_json` | str | required | JSON string: `{"steps": [...], "tools_used": [...], "outcome_notes": "..."}` |
-| `project` | str | `""` | Project namespace |
+| `verb` | str | required | Retrieval verb (research, analyze, query, review, debug, document) |
+| `answer_kind` | str | required | `lookup`, `synthesis`, `discovery/listing`, `comparison`, `audit`, `debug` or `unknown`. A saved plan serves only a request of this kind, only from `project`; `unknown` serves nothing. A plan ending in retrieval (not an operator) cannot claim lookup, synthesis, comparison, audit or debug |
+| `project` | str | `""` | Project namespace; a saved plan serves only requests from this project |
 | `outcome` | str | `"success"` | Plan outcome: "success" or "partial" |
 | `tags` | str | `""` | Comma-separated tags |
 
 ```
-Use plan_save tool: query="How many ART papers in T3?", plan_json='{"steps": ["collection_list", "store_list docs=true"], "tools_used": ["collection_list", "store_list"], "outcome_notes": "78 papers found"}', project="nexus"
+Use plan_save tool: query="What does RDR-232 say about plan eligibility?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
 ```
 
 ### plan_search
@@ -426,7 +428,7 @@ nx mineru stop                             # stop server
 - **T2 memory**: cross-session state, agent relay notes, active project context
 - **T3 knowledge**: validated findings, architectural decisions, reusable patterns — anything worth keeping permanently
 
-**Collection naming** (RDR-103): always `__` as separator (colons are invalid in ChromaDB collection names). The conformant shape is `<content_type>__<owner>__<embedding_model>__v<n>`, for example `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. Operators may type the short legacy form (`knowledge__topic`) at the `--collection` boundary; `t3_collection_name` auto-promotes to the 4-segment shape before any T3 write. Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
+**Collection naming** (RDR-103): always `__` as separator (the RDR-103 name grammar uses `__` and refuses colons). The conformant shape is `<content_type>__<owner>__<embedding_model>__v<n>`, for example `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. Operators may type the short legacy form (`knowledge__topic`) at the `--collection` boundary; `t3_collection_name` auto-promotes to the 4-segment shape before any T3 write. Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
 
 **Title conventions** (use hyphens, not colons):
 - `research-{topic}` — research findings
@@ -436,12 +438,12 @@ nx mineru stop                             # stop server
 
 ## T2 Search
 
-memory_search uses FTS5 full-text search — it matches literal tokens, not semantic meaning. Rules:
+memory_search uses PostgreSQL full-text search: it matches words, not semantic meaning, and the query is plain text with no operators. Rules:
 
 - Searches all three fields: **title**, **content**, and **tags**
-- Use exact terms from the stored document, not conceptual paraphrases
-- `"retain slash commands"` works if those words appear verbatim
-- Multi-word queries are AND-matched: all tokens must appear somewhere in the document
+- Use the terms the stored document uses, not conceptual paraphrases; English words match across stemming (`indexing` finds `indexed`), and accents are folded
+- `"retain slash commands"` works if those words appear in the document
+- A multi-word query matches a document when every word matches it the same way: all as English stems (title and content), or all as exact words (tags, and the title split at `/ . - _`); a query made only of English stopwords can match only the exact-word way
 - When results are empty: drop one term at a time to identify which token has no match. Use memory_get with empty title to browse titles directly
 
 ## Code Search: When to Use search vs Grep

@@ -297,14 +297,14 @@ _VOYAGE_KEY_REMEDY = (
     "credential: the engine reads NX_VOYAGE_API_KEY only at process spawn. Set "
     "NX_VOYAGE_API_KEY in the SERVICE's own environment (or persist it with "
     "`nx config set voyage_api_key --stdin`), then restart it — `nx daemon service "
-    "stop && nx daemon service start`. If a managed/cloud service was intended, "
+    "stop`, then `nx daemon service start`. If a managed/cloud service was intended, "
     "this process resolved LOCAL mode: `nx config set service_url <url>` and "
     "`nx config set service_token <token>`, then relaunch the client."
 )
 _BGE_FILES_REMEDY = (
     "  - bge collection(s): the engine has no bge model files to serve them. Run "
     "`nx init` to provision the local models, then restart the service — "
-    "`nx daemon service stop && nx daemon service start`. If this client is pointed at "
+    "`nx daemon service stop`, then `nx daemon service start`. If this client is pointed at "
     "a managed or Voyage-only engine, bge collections need a local engine."
 )
 
@@ -437,7 +437,7 @@ class SearchEmbeddingProfileMismatchError(NexusError):
             "already-running service has not picked up the credential: the "
             "engine reads NX_VOYAGE_API_KEY only at process spawn. Fix: set "
             "NX_VOYAGE_API_KEY in the SERVICE's own environment, then "
-            "restart it — `nx daemon service stop && nx daemon service "
+            "restart it — `nx daemon service stop`, then `nx daemon service "
             "start` (a terminal is needed for this step either way)."
         )
 

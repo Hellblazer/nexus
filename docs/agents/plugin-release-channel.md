@@ -6,6 +6,7 @@ Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `prose-edit/`, `.claud
 
 - `scripts/check_plugin_only_eligibility.py` refuses a diff that leaves the plugin surface, reusing the allowlist in `scripts/plugin_channel.py`, and refuses a release whose picked commits name a bead with another commit on `origin/develop` since the tag that touches a refused path.
 - `tests/e2e/release-battery.sh --plugin-only` runs the legs a plugin-only diff can change and reports the rest as skipped.
+- `tests/e2e/plugin-out-of-repo-gate.sh` runs the four plugins from a project outside any nexus checkout: `--all` on the tree (the battery's `plugins` leg: the deterministic static pass plus a live fixture canary judged on events, delivered text and the init event; it needs the model to print a nonce, UNVERIFIED is red, rerun and never waive; the canary loads its own fixture, not the marketplace copies; also in `--plugin-only` mode) and `--installed X.Y.Z --sweep` on the marketplace copies after publish (release skill Step 11c; the per-target model sweep is advisory). References that must stay as written are listed with a reason in `tests/e2e/plugin-out-of-repo-allowlist.txt`.
 - `tests/e2e/plugin-delivery-proof.sh` proves, after publish, that an install of the previous release receives the new plugin files through Claude Code's normal plugin update.
 - `conexus/PENDING_RELEASE.md` is the cherry-pick list, and `tests/test_plugin_release_drift_ledger.py` keeps it honest.
 

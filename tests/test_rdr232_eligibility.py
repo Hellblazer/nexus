@@ -82,6 +82,9 @@ def _expected(request: K, plan: K, provenance: str) -> bool:
         return provenance == "curated" and plan in (S, U)
     if provenance == "unattested":
         plan = U  # nothing was declared, so nothing known: it is an unknown plan
+    if provenance == "saved":
+        # nexus-0vh80 (Sam, 2026-11-03): a saved plan serves only its OWN declared kind, and no unknown-plan row
+        return plan is not U and plan is request
     if plan is not U:
         return plan in _MATRIX[request]
     if provenance == "curated":
@@ -93,7 +96,7 @@ def _expected(request: K, plan: K, provenance: str) -> bool:
 
 
 _ALL_KINDS = list(K)
-_PROVENANCES = ("curated", "grown", "unattested")
+_PROVENANCES = ("curated", "grown", "unattested", "saved")
 
 
 @pytest.mark.parametrize(
@@ -108,10 +111,11 @@ def test_the_matrix_cell(request_kind: K, plan_kind: K, provenance: str) -> None
 
 def test_the_table_has_every_cell_and_the_expected_side_is_not_all_one_way() -> None:
     cells = list(product(_ALL_KINDS, _ALL_KINDS, _PROVENANCES))
-    assert len(cells) == 7 * 7 * 3 == 147
+    assert len(cells) == 7 * 7 * 4 == 196
     admitted = sum(_expected(*c) for c in cells)
-    # 42 admitted before nexus-rflvp (an unattested plan served lookups and listings): 28 now, 14 cells fewer
-    assert admitted == 28, f"{admitted} of 147 admitted: a matrix cell changed"
+    # 42 admitted before nexus-rflvp (an unattested plan served lookups and listings): 28 after it, 14 cells fewer;
+    # the saved column (nexus-0vh80) adds the six known kinds on their own row: 34
+    assert admitted == 34, f"{admitted} of 196 admitted: a matrix cell changed"
 
 
 def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
@@ -120,7 +124,7 @@ def test_a_refusal_names_why_in_the_closed_vocabulary() -> None:
     } - {None}
     assert reasons == {
         "kind_mismatch", "unknown_request_untrusted_plan", "unknown_request_narrow_plan",
-        "untrusted_unknown_plan", "unattested_plan",
+        "untrusted_unknown_plan", "unattested_plan", "saved_unknown_plan",
     }
     assert reasons <= el.REASONS
 
@@ -139,8 +143,10 @@ def test_the_two_named_rdr_cells() -> None:
 # ── provenance: decided from the stored row, failing closed ──────────────────────────────────────────────
 
 
-def _pj(kind: K | None = None, provenance: str = "curated", route: str | None = None) -> str:
-    plan: dict = {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
+def _pj(
+    kind: K | None = None, provenance: str = "curated", route: str | None = None, steps: list | None = None,
+) -> str:
+    plan: dict = {"steps": steps if steps is not None else [{"tool": "search", "args": {"query": "$intent"}}]}
     if kind is not None:
         plan[ANSWER_KIND_KEY] = declaration_payload(kind, provenance, route)
     return json.dumps(plan)
@@ -183,6 +189,16 @@ def _pj(kind: K | None = None, provenance: str = "curated", route: str | None = 
         pytest.param("builtin-template",
                      json.dumps({"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "lookup"}}), U, "unattested",
                      "undeclared_builtin", id="an-invalid-declaration-is-no-declaration"),
+        # nexus-0vh80 (Sam, 2026-11-03): a saved declaration is its own provenance, whatever tags ride with it.
+        pytest.param("", _pj(L, "saved"), L, "saved", None, id="a-saved-declaration-reads-saved-with-its-kind"),
+        pytest.param("research,notes", _pj(D, "saved"), D, "saved", None, id="saved-with-ordinary-tags"),
+        pytest.param("builtin-template", _pj(S, "saved"), S, "saved", None,
+                     id="a-project-tier-builtin-tagged-plan-reads-saved-never-curated"),
+        pytest.param("", _pj(U, "saved"), U, "saved", None, id="saved-unknown"),
+        pytest.param("grown", _pj(L, "saved"), U, "unattested", None, id="a-grown-tag-over-a-saved-declaration-attests-nothing"),
+        pytest.param("", json.dumps({"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "lookup", "provenance": "saved",
+                                                                   "route": "explicit"}}),
+                     U, "unattested", None, id="a-saved-declaration-with-a-route-is-invalid"),
     ],
 )
 def test_provenance_is_decided_from_the_row_and_fails_closed(tags, plan_json, kind, provenance, flag) -> None:
@@ -293,15 +309,15 @@ class _Library:
 
 def _row(
     pid, name, *, kind=None, tags="builtin-template", provenance="curated", route=None, verb="research",
-    strategy=None,
+    strategy=None, steps=None, project="nexus",
 ):
     dims = {"scope": "global", "verb": verb}
     if strategy is not None:
         dims["strategy"] = strategy
     return {
-        "id": pid, "name": name, "query": f"Description for {name}.", "plan_json": _pj(kind, provenance, route),
+        "id": pid, "name": name, "query": f"Description for {name}.", "plan_json": _pj(kind, provenance, route, steps),
         "tags": tags, "verb": verb, "scope": "global",
-        "dimensions": json.dumps(dims), "scope_tags": "", "project": "nexus",
+        "dimensions": json.dumps(dims), "scope_tags": "", "project": project,
         "success_count": 1, "failure_count": 0,
     }
 
@@ -320,17 +336,19 @@ GROWN_LOOKUP_HEURISTIC = _row(903, "grown-lookup-heuristic", kind=L, tags="ad-ho
 LEGACY_BUILTIN = _row(14, "legacy-default", kind=None, tags="builtin-template", verb="research")
 
 
-def _filter(request: K, *, enforce: bool, decision: str = "heuristic") -> el.EligibilityFilter:
-    return el.EligibilityFilter(request_kind=request, decision=decision, enforce=enforce)
+def _filter(request: K, *, enforce: bool, decision: str = "heuristic", project: str = "") -> el.EligibilityFilter:
+    return el.EligibilityFilter(request_kind=request, decision=decision, enforce=enforce, project=project)
 
 
 def _ids(matches) -> list[int]:
     return [m.plan_id for m in matches]
 
 
-def _match(rows, hits, request: K, *, enforce=True, fts=(), cache=True, category_verb=None, n=5, **kw):
+def _match(
+    rows, hits, request: K, *, enforce=True, fts=(), cache=True, category_verb=None, n=5, request_project="", **kw,
+):
     lib = _Library(rows, fts)
-    filt = _filter(request, enforce=enforce)
+    filt = _filter(request, enforce=enforce, project=request_project)
     out = real_plan_match(
         "q", library=lib, cache=_Cache(hits) if cache else None, eligibility=filt, category_verb=category_verb, n=n,
         **kw,
@@ -1434,3 +1452,233 @@ def test_an_undeclared_builtin_is_refused_under_the_builtins_own_reason_not_unat
 
 def test_the_unattested_reason_is_in_the_closed_vocabulary() -> None:
     assert "unattested_plan" in el.REASONS
+
+
+# ── nexus-0vh80 (Sam, 2026-11-03): a saved plan declares a kind and is honoured narrowly ─────────────────────
+#: The terminal step of a plan that ends in an operator: it puts an answer together, so any known kind may claim it.
+_OPERATOR_END = [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]
+_RETRIEVAL_END = [{"tool": "memory_get", "args": {}}, {"tool": "search", "args": {"query": "$intent"}}]
+_KNOWN = [L, S, D, C, A, B]
+
+
+def _saved(pid: int, kind: K, *, project: str = "nexus", steps: list | None = None, tags: str = "") -> dict:
+    return _row(
+        pid, f"saved-{kind.value}", kind=kind, tags=tags, provenance="saved", project=project,
+        steps=steps if steps is not None else _OPERATOR_END,
+    )
+
+
+@pytest.mark.parametrize("plan_kind", _KNOWN, ids=lambda k: k.value)
+@pytest.mark.parametrize("request_kind", _KNOWN, ids=lambda k: k.value)
+def test_a_saved_plan_serves_only_its_own_kinds_request_in_its_own_project(request_kind: K, plan_kind: K) -> None:
+    row = _saved(920, plan_kind)
+    out, filt = _match([row], [(920, 0.05)], request_kind, request_project="nexus")
+    if request_kind is plan_kind:
+        assert _ids(out) == [920]
+    else:
+        assert out == []
+        assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
+
+
+@pytest.mark.parametrize("request_kind", [C, A, B])
+def test_a_saved_synthesis_plan_gets_none_of_the_compatibility_rows_curated_synthesis_has(request_kind: K) -> None:
+    out, _ = _match([_saved(920, S)], [(920, 0.05)], request_kind, request_project="nexus")
+    assert out == []
+    out, _ = _match([SYNTH_12], [(12, 0.05)], request_kind, request_project="nexus")
+    assert _ids(out) == [12], "the curated synthesis plan still serves them"
+
+
+@pytest.mark.parametrize("branch", ["cosine", "fts"])
+def test_a_saved_plan_is_refused_in_another_project_and_says_so(branch: str) -> None:
+    row = _saved(921, L, project="ART")
+    kw = {"fts": [921], "cache": False} if branch == "fts" else {}
+    hits = [] if branch == "fts" else [(921, 0.05)]
+    out, filt = _match([row], hits, L, request_project="nexus", **kw)
+    assert out == [] and filt.excluded_plan_ids == [921]
+    assert filt.to_wire()["branches"][branch]["reasons"] == {"saved_other_project": 1}
+    out, _ = _match([row], hits, L, request_project="ART", **kw)
+    assert _ids(out) == [921], "the same plan serves a request from the project that saved it"
+
+
+@pytest.mark.parametrize(("plan_project", "request_project"), [("", "nexus"), ("nexus", ""), ("", "")])
+def test_a_saved_plan_with_no_saving_project_or_a_request_with_none_serves_nothing(plan_project, request_project) -> None:
+    out, filt = _match([_saved(922, L, project=plan_project)], [(922, 0.05)], L, request_project=request_project)
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
+
+
+def test_the_project_comparison_is_exact_not_a_prefix_or_case_fold() -> None:
+    for saved_in in ("nexus-wt", "Nexus", "nex"):
+        out, _ = _match([_saved(923, L, project=saved_in)], [(923, 0.05)], L, request_project="nexus")
+        assert out == [], saved_in
+
+
+def test_a_saved_plan_is_refused_for_the_unknown_request_in_its_own_project() -> None:
+    for kind in _KNOWN:
+        out, filt = _match([_saved(924, kind)], [(924, 0.05)], U, request_project="nexus")
+        assert out == [], kind
+        assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unknown_request_untrusted_plan": 1}
+
+
+@pytest.mark.parametrize("request_kind", [L, S, D, C, A, B, U], ids=lambda k: k.value)
+def test_a_saved_plan_of_unknown_kind_serves_nothing(request_kind: K) -> None:
+    out, filt = _match([_saved(925, U)], [(925, 0.05)], request_kind, request_project="nexus")
+    assert out == []
+    reason = "unknown_request_untrusted_plan" if request_kind is U else "saved_unknown_plan"
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {reason: 1}
+
+
+@pytest.mark.parametrize("kind", [L, S, C, A, B], ids=lambda k: k.value)
+def test_the_shape_veto_refuses_a_retrieval_only_plan_declared_with_an_answering_kind(kind: K) -> None:
+    row = _saved(926, kind, steps=_RETRIEVAL_END)
+    out, filt = _match([row], [(926, 0.05)], kind, request_project="nexus")
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"saved_retrieval_only": 1}
+
+
+def test_the_shape_veto_does_not_touch_a_listing_or_a_plan_that_ends_in_an_operator() -> None:
+    out, _ = _match([_saved(927, D, steps=_RETRIEVAL_END)], [(927, 0.05)], D, request_project="nexus")
+    assert _ids(out) == [927], "discovery/listing may end in retrieval"
+    out, _ = _match([_saved(928, L, steps=_OPERATOR_END)], [(928, 0.05)], L, request_project="nexus")
+    assert _ids(out) == [928]
+
+
+@pytest.mark.parametrize("body", [{"steps": []}, {"steps": ["x"]}, {"steps": [{"args": {}}]}, {}], ids=["empty", "not-a-step", "no-tool", "no-steps"])
+def test_a_saved_plan_whose_last_step_cannot_be_read_is_vetoed_not_trusted(body: dict) -> None:
+    row = _saved(929, L)
+    row["plan_json"] = json.dumps({**body, ANSWER_KIND_KEY: declaration_payload(L, "saved")})
+    out, filt = _match([row], [(929, 0.05)], L, request_project="nexus")
+    assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"saved_retrieval_only": 1}
+
+
+def test_the_operator_terminals_the_veto_reads_are_the_runners_operators() -> None:
+    from nexus.plans.answer_kind import OPERATOR_TERMINALS
+    from nexus.plans.runner import _OPERATOR_TOOL_MAP
+
+    assert OPERATOR_TERMINALS == frozenset(_OPERATOR_TOOL_MAP) | frozenset(_OPERATOR_TOOL_MAP.values())
+
+
+def test_a_saved_row_with_the_builtin_tag_is_still_judged_saved_and_narrow() -> None:
+    """A project-tier plan the seed loader wrote: tag `builtin-template`, declaration `saved`."""
+    row = _saved(930, L, tags="builtin-template")
+    out, _ = _match([row], [(930, 0.05)], S, request_project="nexus")
+    assert out == []
+    out, _ = _match([row], [(930, 0.05)], L, request_project="ART")
+    assert out == []
+    out, _ = _match([row], [(930, 0.05)], L, request_project="nexus")
+    assert _ids(out) == [930]
+
+
+def test_a_saved_refusal_runs_in_shadow_like_the_matrix() -> None:
+    out, filt = _match([_saved(931, L, project="ART")], [(931, 0.05)], L, enforce=False, request_project="nexus")
+    assert _ids(out) == [931]
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
+    assert filt.enforced_excluded_total == 0
+
+
+def test_the_saved_reasons_are_in_the_closed_vocabulary() -> None:
+    assert {"saved_unknown_plan", "saved_other_project", "saved_retrieval_only"} <= el.REASONS
+
+
+def test_a_saved_lookup_plan_does_not_outscore_its_way_past_the_project_check_in_the_planners_few_shots() -> None:
+    ms = [_as_match(_saved(932, L, project="ART")), _as_match(_saved(933, L, project="nexus")), _as_match(LOOKUP_473)]
+    assert _ids(el.eligible_matches(L, ms, request_project="nexus")) == [933, 473]
+    assert _ids(el.eligible_matches(L, ms)) == [473], "with no project known, no saved plan is offered"
+
+
+def test_a_match_carries_the_project_of_its_row() -> None:
+    assert _as_match(_saved(934, L, project="ART")).project == "ART"
+    assert _as_match({**LOOKUP_473, "project": None}).project == ""
+
+
+def test_nx_answer_hands_the_matcher_the_sessions_project_the_grown_plans_are_filed_under() -> None:
+    from pathlib import Path
+
+    _, _, seen = _drive(LOOKUP_Q, [LOOKUP_473], [(473, 0.1)])
+    assert Path.cwd().name in seen[0]["eligibility"].request_projects
+
+
+def test_through_nx_answer_a_saved_lookup_plan_serves_its_own_project_and_no_other(monkeypatch) -> None:
+    from pathlib import Path
+
+    here = Path.cwd().name
+    mine, theirs = _saved(940, L, project=here), _saved(941, L, project="not-" + here)
+    env, miss, _ = _drive(LOOKUP_Q, [theirs, mine], [(941, 0.05), (940, 0.3)], matcher_floor=0.0)
+    wire = env["plan_eligibility"]
+    assert wire["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
+    assert env["plan_id"] == 940 and not miss.called
+
+
+# ── nexus-0vh80 review round 1: the request's project is the cwd name or the primary checkout's ────────────────
+
+
+def _match_as(rows, hits, request: K, cwd_name: str, aliases=(), **kw):
+    lib = _Library(rows, kw.pop("fts", ()))
+    filt = el.EligibilityFilter(request_kind=request, decision="heuristic", enforce=True, project=cwd_name,
+                                project_aliases=aliases)
+    out = real_plan_match("q", library=lib, cache=_Cache(hits), eligibility=filt, n=5, **kw)
+    return out, filt
+
+
+def test_a_saved_plan_filed_under_the_repo_name_serves_a_session_in_a_worktree_of_it() -> None:
+    row = _saved(950, L, project="nexus")
+    out, _ = _match_as([row], [(950, 0.05)], L, "elsinore-0vh80", aliases=("nexus",))
+    assert _ids(out) == [950]
+    out, _ = _match_as([row], [(950, 0.05)], L, "elsinore-0vh80", aliases=("nexus",))
+    assert _ids(out) == [950]
+
+
+def test_a_worktree_session_still_refuses_another_projects_saved_plan_and_a_plan_with_no_alias_match() -> None:
+    row = _saved(951, L, project="ART")
+    out, filt = _match_as([row], [(951, 0.05)], L, "elsinore-0vh80", aliases=("nexus",))
+    assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"saved_other_project": 1}
+    out, _ = _match_as([_saved(952, L, project="nexus")], [(952, 0.05)], L, "elsinore-0vh80")
+    assert out == [], "with no primary name known only the cwd name counts"
+
+
+@pytest.mark.parametrize(("plan_project", "request_project"), [(" nexus ", "nexus"), ("nexus", " nexus\n"), ("\tnexus", " nexus ")])
+def test_the_project_comparison_strips_whitespace_on_both_sides(plan_project: str, request_project: str) -> None:
+    out, _ = _match([_saved(953, L, project=plan_project)], [(953, 0.05)], L, request_project=request_project)
+    assert _ids(out) == [953]
+
+
+def test_a_whitespace_only_project_is_no_project() -> None:
+    out, _ = _match([_saved(954, L, project="  ")], [(954, 0.05)], L, request_project="  ")
+    assert out == []
+    out, _ = _match([_saved(955, L, project="nexus")], [(955, 0.05)], L, request_project="   ")
+    assert out == []
+
+
+def test_the_few_shot_filter_takes_the_same_names() -> None:
+    ms = [_as_match(_saved(956, L, project="nexus")), _as_match(_saved(957, L, project="ART"))]
+    assert _ids(el.eligible_matches(L, ms, request_project=("elsinore-0vh80", "nexus"))) == [956]
+
+
+def test_the_primary_checkout_name_is_read_from_the_git_common_dir_of_a_worktree(tmp_path) -> None:
+    import subprocess
+
+    from nexus.plans.active_project import primary_checkout_name
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "PATH": __import__("os").environ["PATH"], "HOME": str(tmp_path)}
+    for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "x"],
+                 ["worktree", "add", "-q", str(tmp_path / "wt-feature"), "-b", "feat"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, capture_output=True)
+    sub = tmp_path / "wt-feature" / "deep"
+    sub.mkdir()
+    assert primary_checkout_name(str(repo)) == "myrepo"
+    assert primary_checkout_name(str(tmp_path / "wt-feature")) == "myrepo"
+    assert primary_checkout_name(str(sub)) == "myrepo", "from a subdirectory too"
+    assert primary_checkout_name(str(tmp_path)) == "", "not a git checkout: no name, never raises"
+    assert primary_checkout_name(str(tmp_path / "missing")) == ""
+
+
+def test_nx_answer_hands_the_filter_the_cwd_name_and_the_primary_checkouts_name(monkeypatch) -> None:
+    monkeypatch.setattr("nexus.plans.active_project.primary_checkout_name", lambda cwd: "nexus")
+    from pathlib import Path
+
+    _, _, seen = _drive(LOOKUP_Q, [LOOKUP_473], [(473, 0.1)])
+    filt = seen[0]["eligibility"]
+    assert filt.request_projects == frozenset({Path.cwd().name, "nexus"})

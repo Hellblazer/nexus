@@ -8,7 +8,7 @@ Subagents spawned by Claude Code don't see your CLAUDE.md instructions. They hav
 
 `sn` fixes this by:
 
-1. **Bundling MCP servers**: Serena (code intelligence, JetBrains or LSP backend) and Context7 (live library documentation), both pinned to an exact revision in `.mcp.json`.
+1. **Bundling MCP servers**: Serena (code intelligence, JetBrains or LSP backend) and Context7 (live library documentation). `.mcp.json` pins Serena to an exact revision; Context7 is the hosted HTTP endpoint (`https://mcp.context7.com/mcp`), not pinned.
 2. **Injecting usage guidance**: a `SubagentStart` hook injects the tool routing table and workflow into every subagent's context, and a `SessionStart` hook prints a short reminder into the main conversation.
 3. **Auto-approving read tools**: `PreToolUse` and `PermissionRequest` hooks approve Serena's read and navigation tools and both `mcp__plugin_sn_context7__*` tools, so lookups never hit a permission prompt. Serena's file and memory writers, `jet_brains_debug` (which evaluates arbitrary Groovy/Java in the IDE's JVM), `query_project` (which can run `jet_brains_debug` in another project), `onboarding` (which seeds a memory file) and `restart_language_server` get no decision: a hook allow would skip both your prompt and the auto-mode classifier, so these go through Claude Code's own permission flow, as its Edit and Write do. To stop being asked, add the ones you want to `permissions.allow` in your own settings. The tool list is a generated snapshot of the pinned Serena; each tool in it is classified as a read, a write, or not auto-approved, and an unclassified new tool is not approved. Earlier versions auto-approved every Serena tool (nexus-2lf1v).
 
@@ -73,7 +73,7 @@ nx agents install worktree-developer          # writes ~/.claude/agents/worktree
 nx agents install worktree-developer --check  # exit 1 when the file lags the installed plugins
 ```
 
-The command composes the file from the INSTALLED plugins: this template's frontmatter and activation preamble, then the full `conexus/agents/developer.md` body (pre-flight tier reads, test-first method, circuit breaker, completion protocol), with the developer's `_shared/` links rewritten to the installed conexus directory. Re-run it after a plugin update; the generated header names the source versions. Then add the `mcp__serena-wt__*` tools the agent needs to `permissions.allow` in `~/.claude/settings.json`; the sn auto-approve covers only the plugin's own server. Name them rather than allowing the wildcard: `mcp__serena-wt__*` also allows `jet_brains_debug` (arbitrary Groovy/Java in the IDE's JVM, when the JetBrains backend is configured), `query_project` and every writer, with no prompt. Dispatch with `subagent_type: "worktree-developer"` and `isolation: "worktree"`. The template's frontmatter denies the shared `mcp__plugin_sn_serena__*` server outright (nexus-j6un5.5), so only the private one is in the agent's context.
+The command composes the file from the INSTALLED plugins: this template's frontmatter and activation preamble, then the full `agents/developer.md` body of the conexus plugin (pre-flight tier reads, test-first method, circuit breaker, completion protocol), with the developer's `_shared/` links rewritten to the installed conexus directory. Re-run it after a plugin update; the generated header names the source versions. Then add the `mcp__serena-wt__*` tools the agent needs to `permissions.allow` in `~/.claude/settings.json`; the sn auto-approve covers only the plugin's own server. Name them rather than allowing the wildcard: `mcp__serena-wt__*` also allows `jet_brains_debug` (arbitrary Groovy/Java in the IDE's JVM, when the JetBrains backend is configured), `query_project` and every writer, with no prompt. Dispatch with `subagent_type: "worktree-developer"` and `isolation: "worktree"`. The template's frontmatter denies the shared `mcp__plugin_sn_serena__*` server outright (nexus-j6un5.5), so only the private one is in the agent's context.
 
 Cost: one Serena process plus its language servers per dispatched agent, so a 10 to 60 second startup depending on the language, and a cold `uvx` cache on first use.
 
@@ -99,7 +99,7 @@ Serena is started with `--context claude-code --project-from-cwd`:
 
 ### Pins and the tool snapshot
 
-`.mcp.json` pins Serena to a git revision and Context7 to a package version, so a fresh MCP spawn gets the server the plugin was tested with. `hooks/scripts/serena-tools.txt` is the list of Serena tools available under the `claude-code` context at that revision; `scripts/sync_sn_serena_tools.py` (in the nexus repo) regenerates it from the pin, and `tests/test_sn_plugin.py` fails if the snapshot, the injected section, or the pin disagree. To bump Serena: change the revision in `.mcp.json`, run the script, fix what the tests name.
+`.mcp.json` pins Serena to a git revision, so a fresh MCP spawn gets the server the plugin was tested with; Context7 is the hosted endpoint and is not pinned. `hooks/scripts/serena-tools.txt` is the list of Serena tools available under the `claude-code` context at that revision; [`scripts/sync_sn_serena_tools.py`](https://github.com/Hellblazer/nexus/blob/main/scripts/sync_sn_serena_tools.py) (in the nexus repo) regenerates it from the pin, and [`tests/test_sn_plugin.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_sn_plugin.py) fails if the snapshot, the injected section, or the pin disagree. To bump Serena: change the revision in `.mcp.json`, run the script, fix what the tests name.
 
 ## Plugin Structure
 
@@ -107,7 +107,7 @@ Serena is started with `--context claude-code --project-from-cwd`:
 sn/
 ├── .claude-plugin/
 │   └── plugin.json               # Plugin manifest
-├── .mcp.json                      # Serena + Context7 MCP server configs (pinned)
+├── .mcp.json                      # Serena (pinned) + Context7 (hosted, not pinned) MCP server configs
 ├── hooks/
 │   ├── hooks.json                 # SessionStart, SubagentStart, PreToolUse, PermissionRequest
 │   └── scripts/

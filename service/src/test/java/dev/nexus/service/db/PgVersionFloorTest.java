@@ -31,7 +31,7 @@ class PgVersionFloorTest {
         String msg = PgVersionFloor.refusal(new PgVersionFloor.Found(160004, "16.4 (Debian 16.4-1)")).orElseThrow();
         assertThat(msg).contains("16.4 (Debian 16.4-1)").contains("160004")
             .contains("PostgreSQL 17").contains("170000")
-            .contains("docs/configuration.md");
+            .contains("https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#storage-service-postgres-prerequisites");
     }
 
     @Test

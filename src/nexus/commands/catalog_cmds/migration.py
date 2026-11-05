@@ -243,7 +243,7 @@ def migrate_fallback_cmd(
                 f"--target-model {exc.engine_profile_model!r} to migrate "
                 f"onto the model the engine currently profiles, or restart "
                 f"the service to adopt the configured intent "
-                f"(`nx daemon service stop && nx daemon service start`). "
+                f"(`nx daemon service stop`, then `nx daemon service start`). "
                 f"No document has been re-pointed for {source!r} yet."
             ) from exc
         targets_seen.add(target)

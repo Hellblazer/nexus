@@ -4,6 +4,8 @@
 <p class="thread-headline">{{ headline | safe }}</p>
 {% if not beads.ok %}
 <p class="thread-notice">Could not read the list of beads waiting on you: {{ beads.error }}.</p>
+{% elif beads.skipped %}
+<p class="thread-notice ts">Beads are not shown: {{ beads.skipped }}.</p>
 {% endif %}
 {% if t2_error %}
 <p class="thread-notice">{{ t2_error }}</p>

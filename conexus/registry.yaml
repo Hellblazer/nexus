@@ -340,11 +340,12 @@ rdr_skills:
 # no predecessors/successors (not part of agent pipelines).
 
 standalone_skills:
-  # nexus-cnzei.6: test-authoring MOVED to .claude/skills/test-authoring/ —
-  # it is entirely nexus-repo-specific (this repo's own test suite, dev-loop
-  # layers, tests/AGENTS.md) and was shipping to every conexus plugin user
+  # nexus-cnzei.6: test-authoring MOVED out of the plugin into the nexus
+  # repo's own repo-local skills —
+  # it is entirely nexus-repo-specific (that repo's own test suite, dev-loop
+  # layers, test-authoring directives) and was shipping to every conexus plugin user
   # for no benefit outside this repo (injection audit S6). Repo-local skills
-  # like this one, plus release/ and engine-release/, live in .claude/skills/
+  # like this one, plus release and engine-release, live in the nexus repo
   # and are not part of the plugin's registry.
 
   enrich-plan:
@@ -395,7 +396,7 @@ standalone_skills:
       - "understand file structure before editing"
       - "symbol-level code navigation"
       - "impact analysis before refactoring"
-    tools: [ToolSearch, mcp__plugin_sn_serena__jet_brains_find_symbol, mcp__plugin_sn_serena__find_symbol, mcp__plugin_sn_serena__jet_brains_find_referencing_symbols, mcp__plugin_sn_serena__find_referencing_symbols, mcp__plugin_sn_serena__jet_brains_get_symbols_overview, mcp__plugin_sn_serena__get_symbols_overview, mcp__plugin_sn_serena__jet_brains_type_hierarchy, mcp__plugin_sn_serena__type_hierarchy, mcp__plugin_sn_serena__jet_brains_rename, mcp__plugin_sn_serena__rename_symbol, mcp__plugin_sn_serena__replace_symbol_body, mcp__plugin_sn_serena__insert_before_symbol, mcp__plugin_sn_serena__insert_after_symbol, mcp__plugin_sn_serena__search_for_pattern, mcp__plugin_sn_serena__find_file, mcp__plugin_sn_serena__list_dir]
+    tools: [ToolSearch, mcp__plugin_sn_serena__jet_brains_find_symbol, mcp__plugin_sn_serena__find_symbol, mcp__plugin_sn_serena__jet_brains_find_referencing_symbols, mcp__plugin_sn_serena__find_referencing_symbols, mcp__plugin_sn_serena__jet_brains_get_symbols_overview, mcp__plugin_sn_serena__get_symbols_overview, mcp__plugin_sn_serena__jet_brains_type_hierarchy, mcp__plugin_sn_serena__jet_brains_rename, mcp__plugin_sn_serena__rename_symbol, mcp__plugin_sn_serena__replace_symbol_body, mcp__plugin_sn_serena__insert_before_symbol, mcp__plugin_sn_serena__insert_after_symbol]
 
   cli-controller:
     description: "Expert guidance for controlling interactive CLI applications using tmux-cli"
@@ -668,7 +669,7 @@ utility_commands:
 
   continuation:
     slash_command: /continuation
-    description: "Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers"
+    description: "Write a handoff document under /tmp (the user's temp directory on Windows) capturing session state, branch, beads, T2 entries, and next-step pointers"
     disable_model_invocation: false
 
   plan-audit:

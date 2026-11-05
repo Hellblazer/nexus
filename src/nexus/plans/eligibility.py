@@ -21,6 +21,27 @@ request kind          eligible declared plan kinds
 ``unknown``           curated synthesis and curated unknown only
 ====================  =========================================
 
+That table is for curated plans and, with the limits below, grown ones. A **saved** plan (``plan_save`` with a
+declared kind, or a template in a project, RDR or repo tier; nexus-0vh80, Sam 2026-11-03) is a column of its own:
+
+====================  =========================================
+request kind          eligible saved plans
+====================  =========================================
+a known kind          saved plans of that SAME kind only
+``unknown``           none
+====================  =========================================
+
+A saved plan's kind is its saver's claim, not reviewed, so it is honoured at once but narrowly. It serves only the
+row of its own kind, with none of the compatibility cells a curated plan has (a saved synthesis plan serves no
+comparison, audit or debug request) and none of the unknown-plan allowances (a saved plan of unknown kind serves
+nothing, not even a lookup). It serves only the project that saved it: its row's ``project`` must equal the
+request's (:attr:`EligibilityFilter.request_projects`: the session's directory name, the one a grown plan is filed
+under, and the primary checkout's name, so a session in a linked worktree matches a plan saved under the repository's
+name; compared stripped), and a blank one on either side serves nothing. And a shape veto applies: a plan whose last step is not an operator (it hands back
+what it retrieved) cannot claim lookup, synthesis, comparison, audit or debug (``saved_retrieval_only``;
+``answer_kind.SHAPE_VETOED_KINDS``). Reasons: ``kind_mismatch``, ``saved_unknown_plan``, ``saved_other_project``,
+``saved_retrieval_only``; the ``unknown`` request keeps ``unknown_request_untrusted_plan``.
+
 The ``unknown`` kind in the ``lookup`` and ``discovery/listing`` rows means a curated or a grown plan of unknown
 kind; a plan with no answer-kind declaration (``unattested``) is eligible for neither of those two rows, nor for
 any other (Sam, 2026-11-03, nexus-rflvp; see the provenance rules below).
@@ -56,7 +77,12 @@ plan recorded.
 
 Provenance is decided from the STORED row, failing closed (the rule ``answer_kind.py`` states):
 
-* ``curated``: the ``builtin-template`` tag AND a declaration that says ``curated``;
+* ``curated``: the ``builtin-template`` tag AND a declaration that says ``curated``. Only the builtin tier writes
+  one: the seed loader declares a project, RDR or repo template ``saved`` whatever tags its author wrote
+  (nexus-0vh80; a row seeded before that, which still says ``curated``, reads curated until ``nx plan reseed``
+  rewrites it);
+* ``saved``: a declaration that validates and says ``saved``, with any tags except ``grown`` (the grown tag makes it
+  unattested, as for any declaration but a grown one);
 * ``grown``: a declaration that validates and says ``grown``. The ``grown`` TAG alone is not attestation
   (nexus-3ihve, Sam's nexus-rflvp rule: no declaration means unattested): a row with the tag and no valid
   grown declaration, a curated one included, reads ``unattested`` (plan 517, tagged before declarations
@@ -84,8 +110,8 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is then
   ``undeclared_builtin``, and the library precondition below keeps the whole gate in shadow while any
   reseedable builtin is undeclared, so such a builtin keeps its lookups until the reseed (an orphan builtin no
-  reseed can fix is not counted by that check, and loses them). Plan save writing a declaration, the lasting
-  fix, is nexus-0vh80.
+  reseed can fix is not counted by that check, and loses them). Plan save writes a ``saved`` declaration now
+  (nexus-0vh80), so a plan saved before that stays unattested until it is saved again with a kind.
 
 The session cache's ``answer_provenance`` metadata is not read here: it is stale until a refresh.
 
@@ -143,7 +169,12 @@ from typing import Any
 
 import structlog
 
-from nexus.plans.answer_kind import PlanAnswerKind, decode_declaration
+from nexus.plans.answer_kind import (
+    SHAPE_VETOED_KINDS,
+    PlanAnswerKind,
+    decode_declaration,
+    terminal_is_retrieval_only,
+)
 from nexus.plans.switches import OFF_VALUES, warn_unrecognised
 
 _log = structlog.get_logger(__name__)
@@ -171,6 +202,7 @@ __all__ = [
     "coerce_kind",
     "check_builtins",
     "declared_strategy",
+    "project_names",
     "eligibility",
     "eligibility_enforced",
     "eligible_matches",
@@ -307,7 +339,9 @@ BRANCHES: tuple[str, ...] = ("cosine", "category_route", "fts")
 
 #: Why a plan was refused. ``undeclared_builtin`` and ``untrusted_curated_claim`` name the stored row's
 #: defect and replace the matrix reason when the row has one. ``unattested_plan`` (nexus-rflvp) is the matrix
-#: reason for a plan that declares nothing, asked to serve a lookup or a listing.
+#: reason for a plan that declares nothing, asked to serve a lookup or a listing. ``saved_*`` (nexus-0vh80) are the
+#: saved column's: an unknown kind, another project's (or no) saving project, a retrieval-only plan claiming an
+#: answering kind.
 REASONS: frozenset[str] = frozenset({
     "kind_mismatch",
     "unknown_request_untrusted_plan",
@@ -319,6 +353,9 @@ REASONS: frozenset[str] = frozenset({
     "single_source_synthesis",
     "grown_route_not_lookup",
     "unattested_plan",
+    "saved_unknown_plan",
+    "saved_other_project",
+    "saved_retrieval_only",
     "judge_error",
 })
 
@@ -384,7 +421,7 @@ class PlanStanding:
     """
 
     kind: PlanAnswerKind
-    provenance: str  # "curated" | "grown" | "unattested"
+    provenance: str  # "curated" | "grown" | "saved" | "unattested"
     flag: str | None = None
     route: str | None = None
     recorded_kind: PlanAnswerKind | None = None
@@ -421,6 +458,10 @@ def classify_plan(tags: str | None, plan_json: Any) -> PlanStanding:
             return PlanStanding(declared.kind, "grown", route=declared.route)
         # the request's guessed kind is not the plan's shape: read it as unknown until reviewed
         return PlanStanding(_U, "grown", "unreviewed_route", route=declared.route, recorded_kind=declared.kind)
+    if declared.provenance == "saved":
+        # nexus-0vh80: the saver's own claim, whatever else the tags say (a project-tier template may carry the
+        # builtin tag; the declaration is what the seed loader stamped). Eligibility narrows it.
+        return PlanStanding(declared.kind, "saved")
     if declared.provenance == "curated":
         if BUILTIN_TAG in tokens:
             return PlanStanding(declared.kind, "curated")
@@ -566,8 +607,9 @@ def reset_library_memo() -> None:
 def eligibility(request_kind: PlanAnswerKind, plan_kind: PlanAnswerKind, provenance: str) -> Verdict:
     """May a plan of *plan_kind* and *provenance* serve a request of *request_kind*? (the matrix)
 
-    *provenance* is ``curated``, ``grown`` or ``unattested``. An ``unattested`` plan declared nothing, so
-    whatever kind is passed with it is read as ``unknown``.
+    *provenance* is ``curated``, ``grown``, ``saved`` or ``unattested``. An ``unattested`` plan declared nothing, so
+    whatever kind is passed with it is read as ``unknown``. A ``saved`` plan serves only the request of its own
+    known kind (nexus-0vh80); its project and shape are judged by :func:`_judge`, which has the row.
     """
     if provenance == "unattested":
         plan_kind = _U
@@ -577,6 +619,10 @@ def eligibility(request_kind: PlanAnswerKind, plan_kind: PlanAnswerKind, provena
         if plan_kind not in (_S, _U):
             return Verdict(False, "unknown_request_narrow_plan")
         return _OK
+    if provenance == "saved":
+        if plan_kind is _U:
+            return Verdict(False, "saved_unknown_plan")
+        return _OK if plan_kind is request_kind else Verdict(False, "kind_mismatch")
     if plan_kind is not _U:
         return _OK if plan_kind in _COMPATIBLE[request_kind] else Verdict(False, "kind_mismatch")
     if provenance == "curated":
@@ -601,13 +647,32 @@ def declared_strategy(dimensions: Any) -> str | None:
     return None
 
 
+def project_names(value: str | Iterable[str] | None) -> frozenset[str]:
+    """The non-blank, whitespace-stripped project names in *value* (one name or several)."""
+    if value is None:
+        return frozenset()
+    items = [value] if isinstance(value, str) else list(value)
+    return frozenset(t for t in (i.strip() for i in items if isinstance(i, str)) if t)
+
+
 def _judge(
     request_kind: PlanAnswerKind, tags: str | None, plan_json: Any, dimensions: Any = None, named_source_count: int = 0,
+    *, plan_project: Any = None, request_project: str | Iterable[str] = "",
 ) -> tuple[PlanStanding, Verdict]:
     standing = classify_plan(tags, plan_json)
     verdict = eligibility(request_kind, standing.kind, standing.provenance)
     if not verdict.eligible and standing.flag is not None:
         verdict = Verdict(False, standing.flag)
+    if verdict.eligible and standing.provenance == "saved":
+        # nexus-0vh80: a saved plan serves the project that saved it, compared exactly after stripping whitespace
+        # (the request has one name, or two when the session is in a linked worktree: its own directory and the
+        # primary checkout's); no project on either side means there is no saving project to match. Then the shape
+        # veto: a plan that ends in retrieval cannot claim an answering kind.
+        saving = plan_project.strip() if isinstance(plan_project, str) else ""
+        if not saving or saving not in project_names(request_project):
+            verdict = Verdict(False, "saved_other_project")
+        elif standing.kind in SHAPE_VETOED_KINDS and terminal_is_retrieval_only(plan_json):
+            verdict = Verdict(False, "saved_retrieval_only")
     if (
         verdict.eligible and request_kind in _SINGLE_SOURCE_REQUESTS and named_source_count == 1 and standing.provenance == "curated"
         and declared_strategy(dimensions) in SINGLE_SOURCE_EXCLUDED_STRATEGIES
@@ -623,6 +688,7 @@ def _judge(
 
 def _safe_judge(
     request_kind: PlanAnswerKind, tags: Any, plan_json: Any, dimensions: Any = None, named_source_count: int = 0,
+    *, plan_project: Any = None, request_project: str | Iterable[str] = "",
 ) -> tuple[PlanStanding, Verdict]:
     """:func:`_judge` that never raises: a fault is the ``judge_error`` verdict on an unattested standing.
 
@@ -630,7 +696,10 @@ def _safe_judge(
     gate off cannot fail ``plan_match``; the fault is logged and counted under ``judge_error``.
     """
     try:
-        return _judge(request_kind, tags, plan_json, dimensions, named_source_count)
+        return _judge(
+            request_kind, tags, plan_json, dimensions, named_source_count,
+            plan_project=plan_project, request_project=request_project,
+        )
     except Exception:  # noqa: BLE001 — a judging fault must never fail the caller; logged and counted
         _log.warning("eligibility_judge_failed", exc_info=True)
         return PlanStanding(_U, "unattested", "judge_error"), Verdict(False, "judge_error")
@@ -638,16 +707,20 @@ def _safe_judge(
 
 def eligible_matches(
     request_kind: PlanAnswerKind, matches: Iterable[Any] | None, named_source_count: int = 0,
+    request_project: str | Iterable[str] = "",
 ) -> list[Any]:
     """*matches* without the plans a request of *request_kind* may not use (quiet: no counting).
 
     *named_source_count* is how many sources the request names (the single-source synthesis rule reads it).
+    *request_project* is the request's project name, or its names (the session's directory and the primary
+    checkout's): a saved plan is kept only when its own project equals one of them.
     """
     kept = []
     for m in matches or ():
         _, verdict = _safe_judge(
             request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None),
             getattr(m, "dimensions", None), named_source_count,
+            plan_project=getattr(m, "project", None), request_project=request_project,
         )
         if verdict.eligible:
             kept.append(m)
@@ -664,9 +737,16 @@ class EligibilityFilter:
 
     def __init__(
         self, request_kind: PlanAnswerKind | str, decision: str = "unknown", enforce: bool = False,
-        shadow_reason: str | None = None, named_source_count: int = 0,
+        shadow_reason: str | None = None, named_source_count: int = 0, project: str = "",
+        project_aliases: Iterable[str] = (),
     ) -> None:
         self.request_kind = coerce_kind(request_kind)
+        #: The request's project (nexus-0vh80): a saved plan serves only a request from the project that saved it.
+        #: ``nx_answer`` passes the session's directory name, the name a grown plan is filed under, and in
+        #: *project_aliases* the primary checkout's name (a session in a linked worktree). Blank names count for
+        #: nothing; with none left no saved plan is served.
+        self.project = project
+        self.request_projects = project_names(project) | project_names(project_aliases)
         #: How many distinct sources the request names (nexus-4xmpv): exactly one switches the single-source rule on.
         self.named_source_count = named_source_count
         self.decision = decision
@@ -698,6 +778,7 @@ class EligibilityFilter:
             self.request_kind, row.get("tags") if isinstance(row, Mapping) else None,
             row.get("plan_json") if isinstance(row, Mapping) else None,
             row.get("dimensions") if isinstance(row, Mapping) else None, self.named_source_count,
+            plan_project=row.get("project") if isinstance(row, Mapping) else None, request_project=self.request_projects,
         )
         if isinstance(plan_id, int):
             self._judged[plan_id] = (standing, verdict)
@@ -750,6 +831,7 @@ class EligibilityFilter:
             return _safe_judge(
                 self.request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None),
                 getattr(m, "dimensions", None), self.named_source_count,
+                plan_project=getattr(m, "project", None), request_project=self.request_projects,
             )
 
         self._returned = {

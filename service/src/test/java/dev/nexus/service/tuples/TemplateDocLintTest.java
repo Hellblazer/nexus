@@ -69,6 +69,11 @@ class TemplateDocLintTest {
     private static final Pattern REPO_PATH = Pattern.compile(
             "(?<![\\w/.:-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\\.(?:sh|md|py|java|yaml|yml|json|xml|toml|txt))(?![\\w/-])");
     private static final Pattern RDR_ID = Pattern.compile("RDR-(\\d{3,4})");
+    /** A link to a file of this repository on GitHub. A doc block reaches a user with no checkout
+     *  ({@code tuple_registry(doc=true)}), so it links instead of naming a repo path; the link's
+     *  target is a cited path all the same and must exist (nexus-z7ddd). */
+    private static final Pattern GITHUB_TARGET = Pattern.compile(
+            "https://github\\.com/Hellblazer/nexus/(?:blob|tree)/main/([\\w./-]+)");
 
     private static TemplateRegistry registry;
     private static Path repoRoot;
@@ -258,6 +263,14 @@ class TemplateDocLintTest {
                         paths++;
                         if (!Files.exists(repoRoot.resolve(p.group(1)))) {
                             problems.add(t.name() + ": " + e.getKey() + " cites " + p.group(1)
+                                    + ", which does not exist under " + repoRoot);
+                        }
+                    }
+                    Matcher g = GITHUB_TARGET.matcher(line);
+                    while (g.find()) {
+                        paths++;
+                        if (!Files.exists(repoRoot.resolve(g.group(1)))) {
+                            problems.add(t.name() + ": " + e.getKey() + " links " + g.group(1)
                                     + ", which does not exist under " + repoRoot);
                         }
                     }

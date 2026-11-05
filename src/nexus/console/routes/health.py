@@ -111,14 +111,6 @@ def _collect_health_data() -> dict[str, Any]:
     else:
         data["index_log"] = {"exists": False}
 
-    # Dolt server log
-    dolt_log = nexus_config_dir() / "dolt-server.log"
-    if dolt_log.exists():
-        mtime = dolt_log.stat().st_mtime
-        age = time.time() - mtime
-        data["dolt_server"] = {"exists": True, "age_seconds": int(age)}
-    else:
-        data["dolt_server"] = {"exists": False}
 
     # Aspect-extraction queue (RDR-089 worker depth, nexus-qf48). Mirrors
     # the doctor.py --check-aspect-queue surface (nexus-1pfq) so the

@@ -9,6 +9,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands.store import _t3
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import (
@@ -165,13 +166,16 @@ def _shape_write_model() -> Callable[[str], str | None]:
 #: summarising the rest; ``--full`` or ``--json`` lifts the cap. 151 ghost
 #: rows on the first live run buried the six findings that needed a human.
 _SHAPE_MAX_LISTED_PER_CHECK: int = 10
+#: The rules `nx collection shape` audits against; a GitHub link because the file exists only in a nexus checkout.
+_COLLECTION_RULES_URL: str = "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md"
 
 
-@collection.command("shape")
+@collection.command("shape", epilog=COLLECTIONS_RULES_EPILOG)
 @click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
 @click.option("--full", is_flag=True, help=f"List every collection per check instead of the first {_SHAPE_MAX_LISTED_PER_CHECK}.")
 def shape_cmd(as_json: bool, full: bool) -> None:
-    """Read-only shape audit of the whole collection SET against docs/collections.md.
+    """Read-only shape audit of the whole collection SET against the collection rules
+    (the page is linked at the end of this help).
 
     Distinct from ``nx collection audit NAME`` (the RDR-087 deep dive of one
     collection).
@@ -201,7 +205,7 @@ def shape_cmd(as_json: bool, full: bool) -> None:
         + f"; {len(report.findings)} finding(s)"
     )
     if not report.findings:
-        click.echo("  no findings against docs/collections.md")
+        click.echo(f"  no findings against {_COLLECTION_RULES_URL}")
         return
     by_check: dict[str, list] = {}
     for f in report.findings:
@@ -219,7 +223,7 @@ def shape_cmd(as_json: bool, full: bool) -> None:
         hidden = len(items) - len(shown)
         if hidden > 0:
             click.echo(f"  ... and {hidden} more (--full or --json to list all)")
-    click.echo("\nrules: docs/collections.md  (this command never writes)")
+    click.echo(f"\nrules: {_COLLECTION_RULES_URL}  (this command never writes)")
 
 
 @collection.command("info")
@@ -1865,7 +1869,7 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     if code == 404 and not _ENGINE_404_MESSAGES.match(text):
         return click.ClickException(
             f"this engine does not serve the re-embed routes ({text}); upgrade it "
-            "(nx upgrade, then nx daemon service stop && nx daemon service start)."
+            "(nx upgrade, then nx daemon service stop, then nx daemon service start)."
         )
     if code == 503:
         return click.ClickException(f"the engine refuses the re-embed job: {text}")

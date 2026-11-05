@@ -42,7 +42,7 @@ SEMAPHORE_REMEDY: str = (
     "(`kern.posix.sem.max` on macOS), so any multiprocessing Lock or "
     "ProcessPoolExecutor fails with ENOSPC. The leaked names cannot be "
     "listed or unlinked from userspace on macOS: reboot, or raise the limit "
-    "(`sudo sysctl -w kern.posix.sem.max=<larger>`), then `nx mineru stop && nx mineru start`."
+    "(`sudo sysctl -w kern.posix.sem.max=<larger>`), then `nx mineru stop`, then `nx mineru start`."
 )
 
 SEMAPHORE_REMEDY_LINUX: str = (
@@ -51,7 +51,7 @@ SEMAPHORE_REMEDY_LINUX: str = (
     "fails with ENOSPC. Unlike macOS the leaked names are plain files you can "
     "list and remove: `df -h /dev/shm; ls /dev/shm | head`. Remove `sem.*` "
     "files no running process holds open (`lsof /dev/shm/sem.*`), or enlarge "
-    "/dev/shm, then `nx mineru stop && nx mineru start`."
+    "/dev/shm, then `nx mineru stop`, then `nx mineru start`."
 )
 
 
@@ -290,14 +290,14 @@ def diagnose_server(
             "its working directory was deleted (it was started from a "
             "directory that is gone; any getcwd/abspath call in it or its "
             "libraries fails with FileNotFoundError); restart it with "
-            "`nx mineru stop && nx mineru start`"
+            "`nx mineru stop`, then `nx mineru start`"
         )
     missing = _missing_paths(info)
     if missing:
         faults.append(
             "it was started with paths that no longer exist ("
             + "; ".join(missing)
-            + "); restart it with `nx mineru stop && nx mineru start`"
+            + "); restart it with `nx mineru stop`, then `nx mineru start`"
         )
     sem = semaphores()
     if sem is not None:

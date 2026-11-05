@@ -86,7 +86,7 @@ def put_cmd(
     arbitration was the T2 daemon's job until nexus-i711w Stage 2
     sub-stage B retired it; the storage service does it now, so there
     is nothing for the caller to start by hand. ``--help`` advertised
-    the deleted ``nx daemon t2 start`` until that sub-stage's review.
+    a deleted T2 daemon start verb until that sub-stage's review.
     """
     if content == "-":
         content = read_stdin_utf8()

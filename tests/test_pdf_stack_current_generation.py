@@ -179,7 +179,7 @@ def test_a_newer_current_built_from_a_checkout_is_refused_with_the_command(two_g
         source_kind="directory",
     )
     _point_current(two_generations.tools, newer)
-    with pytest.raises(pdf_stack.PdfStackMissingError, match="NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh"):
+    with pytest.raises(pdf_stack.PdfStackMissingError, match="NX_REINSTALL_EXTRAS=pdf /src/nexus/scripts/reinstall-tool.sh"):
         pdf_stack.ensure("nx index pdf")
     assert two_generations.builds == []
 

@@ -239,7 +239,7 @@ class TestRefusals:
         result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes"])
         assert result.exit_code != 0
         assert f"does not serve {VA}" in result.output and "voyage_api_key" in result.output
-        assert "nx daemon service stop && nx daemon service start" in result.output
+        assert "nx daemon service stop, then nx daemon service start" in result.output
         db.reembed_plan.assert_not_called()
         db.reembed_start.assert_not_called()
 

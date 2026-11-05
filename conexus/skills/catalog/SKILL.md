@@ -14,7 +14,7 @@ Given a file path, title, or RDR name, find its catalog tumbler.
 
 ```
 # By file path (relative — post-RDR-060)
-mcp__plugin_conexus_nexus-catalog__search(query="src/nexus/scoring.py")
+mcp__plugin_conexus_nexus-catalog__search(query="src/app/scoring.py")
 # → Extract tumbler from first result
 
 # By title or RDR name
@@ -39,12 +39,12 @@ Before modifying a file, understand its design context:
 
 ```bash
 # CLI (fast, human-readable)
-nx catalog links-for-file src/nexus/scoring.py
+nx catalog links-for-file src/app/scoring.py
 ```
 
 ```
 # MCP (for agents)
-mcp__plugin_conexus_nexus-catalog__search(query="src/nexus/scoring.py", limit=1)
+mcp__plugin_conexus_nexus-catalog__search(query="src/app/scoring.py", limit=1)
 # → get tumbler
 mcp__plugin_conexus_nexus-catalog__links(tumbler="<tumbler>", direction="both")
 # → {"nodes": [...], "edges": [...]}

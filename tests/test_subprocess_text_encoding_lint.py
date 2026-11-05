@@ -106,7 +106,7 @@ _KWARGS_READ: dict[str, str] = {
         "an ``env`` copy carrying NEXUS_REPO_ROOT (nexus-x3m8e); stdio is the null "
         "device and nothing reads the child as text"
     ),
-    "src/nexus/commands/index.py:2609": (
+    "src/nexus/commands/index.py:2610": (
         "``**isolation_popen_kwargs()`` (inert flags) plus ``**detached_spawn_kwargs()``, "
         "which holds only ``cwd`` (and an ``env`` copy when NEXUS_CONFIG_DIR is relative; "
         "nexus-x3m8e); stdout and stderr are a binary log handle, nothing reads it as text"
@@ -121,7 +121,7 @@ _KWARGS_READ: dict[str, str] = {
         "or text, none passes encoding, so the wrapper's utf-8 default decides; its "
         "children are git, bd, gh and nx"
     ),
-    "src/nexus/daemon/installer.py:935": (
+    "src/nexus/daemon/installer.py:946": (
         "``_run_manager`` funnel into run_bounded: callers pass capture_output (dropped), "
         "text and check; ``_run_manager`` sets ``encoding`` itself before this call, per "
         "the manager (schtasks: console code page; launchctl, systemctl: utf-8)"

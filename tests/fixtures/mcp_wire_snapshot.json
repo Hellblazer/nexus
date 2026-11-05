@@ -576,6 +576,10 @@
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
+          "answer_kind": {
+            "default": "",
+            "type": "string"
+          },
           "outcome": {
             "default": "success",
             "type": "string"

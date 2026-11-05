@@ -44,7 +44,7 @@ _ENGINE_ONNX_LOCAL_REFUSAL = (
 def test_remedy_fires_on_engine_onnx_local_refusal() -> None:
     remedy = _local_voyage_restart_remedy(422, _ENGINE_ONNX_LOCAL_REFUSAL)
     assert remedy is not None
-    assert "nx daemon service stop && nx daemon service start" in remedy
+    assert "`nx daemon service stop`, then `nx daemon service start`" in remedy
     assert "NX_VOYAGE_API_KEY" in remedy
 
 
@@ -102,7 +102,7 @@ def test_post_wraps_onnx_local_refusal_with_restart_remedy() -> None:
         with pytest.raises(VectorServiceError) as exc_info:
             _post("/v1/vectors/upsert-chunks", {})
     assert exc_info.value.code == 422
-    assert "nx daemon service stop && nx daemon service start" in str(exc_info.value)
+    assert "`nx daemon service stop`, then `nx daemon service start`" in str(exc_info.value)
 
 
 def test_get_wraps_onnx_local_refusal_with_restart_remedy() -> None:
@@ -111,7 +111,7 @@ def test_get_wraps_onnx_local_refusal_with_restart_remedy() -> None:
         with pytest.raises(VectorServiceError) as exc_info:
             _get("/v1/vectors/some-collection/count")
     assert exc_info.value.code == 422
-    assert "nx daemon service stop && nx daemon service start" in str(exc_info.value)
+    assert "`nx daemon service stop`, then `nx daemon service start`" in str(exc_info.value)
 
 
 @pytest.mark.t2_tenant

@@ -44,7 +44,7 @@ Also expected:
 
 **Hybrid skills**: Do significant direct work AND dispatch agents. These are still classified as agent-delegating — they must have all four CI-enforced sections above. If a skill dispatches agents at any point, it is agent-delegating.
 
-**Standalone skills** (nexus, serena-code-nav, cli-controller, brainstorming-gate, writing-nx-skills): Provide guidance directly without agent delegation. Listed in `_STANDALONE_SKILLS` in `tests/test_plugin_structure.py`.
+**Standalone skills** (nexus, serena-code-nav, cli-controller, brainstorming-gate, writing-nx-skills): Provide guidance directly without agent delegation. Listed in `_STANDALONE_SKILLS` in [tests/test_plugin_structure.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py).
 Required sections:
 - `## When This Skill Activates`
 - `## Success Criteria` (optional for pure reference)
@@ -84,7 +84,7 @@ Skills that produce outputs must document which tiers they use:
 
 ### Registry Integration
 
-After creating a skill, update `conexus/registry.yaml`:
+After creating a skill, update [conexus/registry.yaml](https://github.com/Hellblazer/nexus/blob/main/conexus/registry.yaml):
 - Agent-delegating: under `agents:` — add model, skill, slash_command, triggers, and entry in `model_summary`
 - Standalone: under `standalone_skills:` with tools and triggers
 - RDR: under `rdr_skills:` with slash_command and triggers
@@ -92,7 +92,7 @@ After creating a skill, update `conexus/registry.yaml`:
 
 ### Routing a new skill
 
-Add it to `conexus/skills/orchestration/reference.md` § Skill Routing so it is discoverable. The SessionStart text (`GUIDANCE_IMPERATIVE` in `src/nexus/session_start_guidance.py`, PyPI wheel) names only the situations and the handful of skills and agents that answer them; it is not a menu. Add a skill there only when it answers a situation the imperative already lists, and mind its byte budget (`tests/test_session_start_guidance.py`, `tests/hooks/test_session_start_combined_budget.py`). Wrapper skills that only dispatch an agent the model already dispatches directly do not earn a place: the six that did (code-review, debugging, development, test-validation, query, using-nx-skills) were retired with zero model loads in 30 days (nexus-dg7i6.6).
+Add it to [conexus/skills/orchestration/reference.md](https://github.com/Hellblazer/nexus/blob/main/conexus/skills/orchestration/reference.md) § Skill Routing so it is discoverable. The SessionStart text (`GUIDANCE_IMPERATIVE` in [src/nexus/session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/src/nexus/session_start_guidance.py), PyPI wheel) names only the situations and the handful of skills and agents that answer them; it is not a menu. Add a skill there only when it answers a situation the imperative already lists, and mind its byte budget ([tests/test_session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_guidance.py), [tests/hooks/test_session_start_combined_budget.py](https://github.com/Hellblazer/nexus/blob/main/tests/hooks/test_session_start_combined_budget.py)). Wrapper skills that only dispatch an agent the model already dispatches directly do not earn a place: the six that did (code-review, debugging, development, test-validation, query, using-nx-skills) were retired with zero model loads in 30 days (nexus-dg7i6.6).
 
 ## Known Pitfalls
 
@@ -126,19 +126,19 @@ This applies to `--description`, `--notes`, `--design`, and any flag that accept
 
 **Convention (not CI-enforced but expected):**
 - [ ] `effort` matches skill type (low=reference, medium=workflow, high=analysis)
-- [ ] Added to `conexus/registry.yaml` (including `model_summary` for agent skills)
-- [ ] Named in `orchestration/reference.md` § Skill Routing
+- [ ] Added to [conexus/registry.yaml](https://github.com/Hellblazer/nexus/blob/main/conexus/registry.yaml) (including `model_summary` for agent skills)
+- [ ] Named in the orchestration skill's `reference.md` § Skill Routing
 
-**Verify before committing:**
+**Verify before committing** (from a nexus checkout, where [tests/test_plugin_structure.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py) lives):
 ```bash
-uv run pytest tests/test_plugin_structure.py -k "skill_name" -v
+uv run pytest <path to test_plugin_structure.py> -k "skill_name" -v
 ```
 
 ## Testing Skills
 
-Run structural validation:
+Run structural validation from a nexus checkout ([tests/test_plugin_structure.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py)):
 ```bash
-pytest tests/test_plugin_structure.py -v -k "skill_name"
+pytest <path to test_plugin_structure.py> -v -k "skill_name"
 ```
 
 For behavioral testing, follow TDD-for-documentation — create pressure scenarios, test baseline without skill, verify compliance with skill.

@@ -14,6 +14,7 @@ real stdio, the way ``nx-mcp`` runs it.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -157,14 +158,11 @@ _SERVER_SCRIPT = textwrap.dedent(
 )
 
 
-def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notification(
-    tmp_path,
-) -> None:
-    """Real stdio, newline-delimited JSON-RPC: initialize, initialized, one tools/call.
-
-    The notification is read raw because the SDK's typed client has no member for
-    ``notifications/claude/channel``.
-    """
+@contextlib.contextmanager
+def _stdio_session(tmp_path):
+    """Start ``_SERVER_SCRIPT`` as a real stdio server and yield ``(send, recv)``
+    for newline-delimited JSON-RPC. ``recv`` fails the test with the server's
+    stderr tail when nothing arrives in time; the process is always reaped."""
     script = tmp_path / "stdio_server.py"
     script.write_text(_SERVER_SCRIPT, encoding="utf-8")
     home = tmp_path / "home"
@@ -193,11 +191,35 @@ def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notificat
         proc.stdin.flush()
 
     def recv(timeout: float = 30.0) -> dict[str, Any]:
-        item = lines.get(timeout=timeout)
+        try:
+            item = lines.get(timeout=timeout)
+        except queue.Empty:
+            proc.kill()
+            err = proc.stderr.read() if proc.stderr else ""
+            raise AssertionError(f"no reply from the stdio server; stderr tail: {err[-800:]}") from None
         assert item is not None, "server closed stdout"
         return json.loads(item)
 
     try:
+        yield send, recv
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
+
+
+def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notification(
+    tmp_path,
+) -> None:
+    """Real stdio, newline-delimited JSON-RPC: initialize, initialized, one tools/call.
+
+    The notification is read raw because the SDK's typed client has no member for
+    ``notifications/claude/channel``.
+    """
+    with _stdio_session(tmp_path) as (send, recv):
         send({"id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": {"name": "contract", "version": "1"},
@@ -208,20 +230,52 @@ def test_run_stdio_with_channel_declares_the_capability_and_delivers_a_notificat
         send({"method": "notifications/initialized"})
         send({"id": 2, "method": "tools/call", "params": {"name": "notify", "arguments": {}}})
         seen: list[dict[str, Any]] = [recv(), recv()]
-    except queue.Empty:
-        proc.kill()
-        err = proc.stderr.read() if proc.stderr else ""
-        raise AssertionError(f"no reply from the stdio server; stderr tail: {err[-800:]}") from None
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait(timeout=10)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream:
-                stream.close()
 
     notes = [m for m in seen if m.get("method") == "notifications/claude/channel"]
     replies = [m for m in seen if m.get("id") == 2]
     assert len(notes) == 1 and len(replies) == 1, seen
     assert notes[0]["params"] == {"content": "contract message", "meta": {"kind": "probe"}}
+    assert replies[0]["result"]["content"][0]["text"] == "sent"
+
+
+def test_a_client_probing_the_modern_era_first_falls_back_to_the_handshake_and_gets_the_channel(
+    tmp_path,
+) -> None:
+    """nexus-w4l00. Claude Code 2.1.317 opens a stdio server with an enveloped
+    ``server/discover`` (the 2026-07-28 era) before ``initialize``. mcp 2.3's
+    ``Server.run`` serves that era: its ``server/discover`` result carries no
+    ``experimental`` map, so Claude Code connected on 2026-07-28, logged
+    "Channel notifications skipped: server did not declare claude/channel
+    capability", and never sent ``notifications/initialized``, so the waiter's
+    first send parked forever on the gate (the restart sandbox, 2026-11-04: no
+    mailed ask started a turn). The channel is a handshake-era capability, so
+    ``run_stdio_with_channel`` serves the handshake era only: the probe is
+    refused, the client falls back to ``initialize``, and the capability and the
+    notification arrive as they did on mcp 1.x."""
+    envelope = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.317"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    with _stdio_session(tmp_path) as (send, recv):
+        send({"id": 0, "method": "server/discover", "params": {"_meta": envelope}})
+        probe = recv()
+        assert probe["id"] == 0, probe
+        assert "error" in probe and "result" not in probe, (
+            f"the modern-era probe must be refused so the client falls back to initialize; got {probe}"
+        )
+        send({"id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "claude-code", "version": "2.1.317"},
+        }})
+        init = recv()
+        assert init["id"] == 1 and "result" in init, init
+        assert init["result"]["capabilities"]["experimental"] == {"claude/channel": {}}
+        send({"method": "notifications/initialized"})
+        send({"id": 2, "method": "tools/call", "params": {"name": "notify", "arguments": {}}})
+        seen: list[dict[str, Any]] = [recv(), recv()]
+
+    notes = [m for m in seen if m.get("method") == "notifications/claude/channel"]
+    replies = [m for m in seen if m.get("id") == 2]
+    assert len(notes) == 1 and len(replies) == 1, seen
     assert replies[0]["result"]["content"][0]["text"] == "sent"

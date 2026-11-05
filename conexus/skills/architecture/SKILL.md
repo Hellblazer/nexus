@@ -29,14 +29,14 @@ explicitly for the cheap end of the table below:
 - **Map system structure**: `get_symbols_overview` for class/interface inventories without reading files
 - **Find architectural patterns**: `find_referencing_symbols` to trace abstraction usage across the codebase
 - **Understand module boundaries**: `find_referencing_symbols` to track cross-module calls
-- **Interface analysis**: `type_hierarchy` to see full implementation tree
+- **Interface analysis**: `jet_brains_type_hierarchy` (JetBrains backend only) to see the full implementation tree
 - **Serena for precision, nx search for semantic discovery**
 
 ### Architecture Discovery Workflow
 ```
 1. nx search --corpus code --hybrid (30-50 results) for semantic discovery
 2. get_symbols_overview to map key classes in discovered files
-3. type_hierarchy to trace abstraction patterns
+3. jet_brains_type_hierarchy (JetBrains only) to trace abstraction patterns
 4. find_referencing_symbols to understand cross-module usage
 5. Synthesize findings with `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
 6. Design architecture with clear boundaries

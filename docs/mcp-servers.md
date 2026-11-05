@@ -17,6 +17,8 @@ The `nexus` and `nexus-catalog` servers register automatically when you install 
 
 ## `nexus` — retrieval + storage (46 tools)
 
+Of the 46 registered tools, 44 are for agents; 2 are internal `hook_*` tools the plugin's own hooks call.
+
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
 ### Retrieval (T3)

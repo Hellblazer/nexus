@@ -3177,10 +3177,11 @@ a voyage-shaped value and configure a key (`nx init` then keeps that value) —
 ```
 nx config set local.embed_model voyage-code-3
 nx config set voyage_api_key <key>
-nx daemon service stop && nx daemon service start   # re-plumb the key into the engine
+nx daemon service stop                               # restart the service so the
+nx daemon service start                              # engine reads the new key
 ```
 
-The engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
+The restart (nx daemon service stop, then nx daemon service start) is needed because the engine only reads `NX_VOYAGE_API_KEY` at process spawn (the supervisor
 resolves it from the credential chain and injects it into the native
 binary's environment), so **a restart is required** after either command
 above for the change to take effect — `nx config set` alone does not
@@ -3562,6 +3563,15 @@ instead of a raw `[WinError 4551]`. See
 [Smart App Control](windows-install.md#smart-app-control). The row is absent on
 POSIX, and also on a Windows that has no Smart App Control (the registry value
 does not exist, as on Windows 10 and older Windows 11).
+
+**Local PostgreSQL version row (nexus-90flw).** "Local PostgreSQL version"
+reads the bundled cluster's `PG_VERSION` marker (no connection) and fails below
+PostgreSQL 17, the engine's floor (a cluster keeps the version that created it;
+the service exits with `event=pg_version_below_floor`, or `pg_ctl` refuses the
+directory as incompatible), and also when the marker cannot be read. The remedy
+is in [migration-runbook](migration-runbook.md#a-local-cluster-older-than-postgresql-17).
+The row is absent where there is no bundled cluster: a box that has not run
+`nx init`, or one using a managed Postgres.
 
 **Local PostgreSQL authentication row (nexus-ja4pq).** "Local PostgreSQL
 authentication" reads the bundled cluster's own `pg_hba.conf` (no connection, no
@@ -4118,6 +4128,26 @@ sorted-unique. Idempotent. `--from-project` (mutually exclusive with `TAGS`)
 stamps scope_tags from the plan's own `project` column, the same recovery
 source as the automatic #1069 fallback in `save_plan`.
 
+### plan_save (MCP tool; there is no `nx plan save`)
+
+```
+plan_save(query, plan_json, verb, answer_kind, project="", outcome="success", tags="", ttl=None, scope_tags="")
+```
+
+`answer_kind` is **required** (nexus-0vh80, Sam 2026-11-03): `lookup`, `synthesis`, `discovery/listing`,
+`comparison`, `audit`, `debug` or `unknown`. A save without one, or with another word, is refused, as a save
+without a `verb` is. It is stored as a `saved` declaration in `plan_json` (`{"version": 1, "kind": ..., "provenance":
+"saved"}`); an `answer_kind` key embedded in `plan_json` is replaced by it, never trusted. `nx_answer` serves a saved
+plan only for a request of the same kind, only from the project that saved it (`project`; a save with none serves no
+request, and the reply says so) and never for a request of unknown kind; a plan saved as `unknown` serves nothing. A
+plan whose last step is not an operator (`summarize`, `generate`, `extract`, `rank`, `compare`, `filter`, `check`,
+`verify`, `groupby`, `aggregate`) is refused when it claims `lookup`, `synthesis`, `comparison`, `audit` or `debug`:
+it hands back what it retrieved, which is a listing; declare `discovery/listing` or `unknown`, or add the step that
+puts the answer together. The check reads the last step only: `search` then `rank`, `filter` or `extract` passes,
+and a caller can still mislabel the kind. `project` is the repository's name (not a worktree's); the reply warns when
+it is not the session's project (its directory name or its primary checkout's) and when the kind is `unknown`. The `grown` and `builtin-template` tags are removed from `tags` (nexus-3ihve). A plan
+saved before this change declares nothing and serves no request; save it again with a kind.
+
 ### nx plan reseed
 
 ```
@@ -4140,6 +4170,13 @@ compatibility and is a no-op**: reconcile is the default, so the flag
 changes nothing. `--insert-only` selects the pre-nexus-f1mbo behavior —
 skip the update leg, insert missing templates only, and leave drifted rows
 alone.
+
+Only the builtin tier (`conexus/plans/builtin`, the global scope) declares its answer kinds `curated`. A
+template under the project, RDR or repo tier (`.nexus/plans`, `docs/rdr/rdr-*/`) that sets `answer_kind` is written
+with `saved` provenance whatever tags it carries (nexus-0vh80; closes nexus-8ofx8). It is never curated, and in
+practice it serves nothing: those rows are filed under the tier's scope name (`project`, `repo`, `rdr-<slug>`), and a
+saved plan serves only a request from the project it is filed under, whose name is a repository's. A row written
+before that, still saying `curated`, is rewritten by the next reconcile.
 
 ### nx plan repair (removed)
 
@@ -5085,7 +5122,7 @@ needs_sam: none
 
 A `#`, `##` or `###` heading starts a thread; fields before any heading belong to a thread named for the session. Fields are `key: value`; `-`, space and `_` in a key are the same (`needs-sam`, `needs sam`, `Needs_Sam`), and a line that fits nothing is kept as a note. A line whose key mentions "sam" or "needs" is shown as an ask whatever its spelling. `session:` and `updated:` lines are ignored (the entry's first line, `session: <session id>`, is the key the compaction-checkpoint hook finds the entry by; the board does not show it): a session's age is the T2 entry's own write time, which every `memory_put` refreshes. The headline says "Nothing needs you" only when both sources were read and at least one session has reported; with a source down it says "At least N things need you" or "Can't tell what needs you right now". "Needs you" comes first: thread asks, then the `needs-sam` beads (a thread that lists a bead's id in `ref:` is shown on that bead's row, not twice). Below it are the session cards, newest first; a session whose entry is older than 24 hours is greyed with its age. The board prints "As of HH:MM" and reloads itself every 60 seconds.
 
-**Health** (`/health`) shows T1 session leases, MinerU, the catalog cache, the index log, the Dolt log, the aspect queue and the `nx doctor` checks.
+**Health** (`/health`) shows T1 session leases, MinerU, the catalog cache, the index log, the aspect queue and the `nx doctor` checks.
 
 | Flag | Description |
 |------|-------------|
@@ -6146,8 +6183,17 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   (a lookup request refusing a grown plan whose discounted recorded kind is not lookup: the
   recorded kind never widens eligibility but does narrow it, nexus-indyo), `unattested_plan`
   (a lookup or discovery/listing request refusing a plan that declares no answer kind, such as a
-  user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp) or `judge_error`
-  (judging the candidate failed; kept when not enforcing, dropped when enforcing).
+  user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp),
+  `saved_unknown_plan` (a saved plan of unknown kind serves no request), `saved_other_project` (a saved
+  plan serves only a request from the project that saved it; a blank project on either side refuses it) or
+  `saved_retrieval_only` (a saved plan whose last step is not an operator, declared lookup, synthesis,
+  comparison, audit or debug; nexus-0vh80), or `judge_error`
+  (judging the candidate failed; kept when not enforcing, dropped when enforcing). A **saved** plan
+  (`plan_save`'s `answer_kind`, or a template in a project, RDR or repo tier) serves only a request of its own
+  declared kind, none of the compatibility cells a curated plan has and never the `unknown` request (reason
+  `unknown_request_untrusted_plan`, a mismatched kind `kind_mismatch`); the request's project is the session's
+  directory name (the name a grown plan is filed under) or the name of the primary checkout of its git repository, so
+  a session in a linked worktree matches a plan saved under the repository's name; both sides are compared stripped.
   The filter judges after every other drop (unmet binding, scope conflict,
   always-failing, FTS literal drop), so a count is "would have been returned, but for
   eligibility". The gate is on by default (nexus-jypmj.2.8; `NX_ANSWER_KIND_ELIGIBILITY=0`,
@@ -6380,7 +6426,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   tumbler, t2_record_id}` and carries identity only, never evidence text;
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and
-  closed names only. `repair` also says why it ran (nexus-z6yvk): `reason` is `unsupported`
+  closed names only; the one exception is the exact-key branch's key lists below, which may carry entity keys
+  (identifiers the operator configured in `entity.collections`), never evidence text. `repair` also says why it ran (nexus-z6yvk): `reason` is `unsupported`
   (a facet no held evidence bears on), `unread_tail` (a covered or contradicted facet with more than half of
   the ledger's anchors left unread by the assessment's per-call size cap, which the repair then
   reads) or `unsupported_and_unread_tail`, empty when no repair ran, and `unread_facet_ids` names the
@@ -6388,7 +6435,24 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   facet stays covered whatever the unread anchors say: a supporting one adds to its evidence, a
   contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) is recorded as covered
   with the reason `conflicted_from_contradicted` when an unread anchor supports it, and the run stays `partial` with its notice;
-  it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). `assessment` also reports what each call came back as
+  it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). With
+  `NX_ANSWER_RESOLUTION_REPAIR=1` (off by default; RDR-147 Step 4, nexus-qpimy) the repair may instead take an
+  exact-key branch, and `repair` then adds keys, only once the branch was considered (with the switch off the
+  wire is unchanged): `resolution_entered` (the branch resolved keys in place of the semantic queries) and
+  `resolution_reason` (why a considered branch did not enter: `confined_run`, `entity_config_error`,
+  `no_pattern_for_anchor_collections` when no anchor's collection has a key pattern, or `no_key_tokens` when the
+  anchors of the collections that do name none), `anchors_scanned` and `anchors_without_pattern` (how many anchors the
+  scan read, and how many of them lie in a collection with no pattern: the keys scanned for are those of the
+  configured collections only), `resolution_tokens` (distinct keys sent to `resolve`, at most 12), `resolved`,
+  `missing` and `ambiguous` (the keys by outcome), `joined_added` (the joined items merged into the reduction's
+  input, which is `items_merged`; `items_found` is how many were built), `joined_dropped` (each
+  `<key>@<anchor item_id>:<reason>` pair that made no item: `cap`, `no_text` (the record has no readable text),
+  `out_of_scope` (the record lies outside the caller's scope), `held` (the input already holds that joined text, or an earlier anchor with the same text made that join in this run) or
+  `self` (the anchor is the resolved record itself, which joins nothing)), `tokens_dropped` (the keys the item cap
+  kept from being resolved) and `anchor_key_ids` (every distinct key the anchors named, less a key only its own record
+  names). Each of these six lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at
+  its first 3 chunks, and the cut is named in `detail`. The outcome stays one of the existing ones: `completed`,
+  `no_new_evidence` when no key yielded a joined item, `retrieval_failed` when the resolve or the record fetch failed. `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,

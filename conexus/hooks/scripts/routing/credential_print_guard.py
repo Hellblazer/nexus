@@ -180,9 +180,12 @@ _FAILSAFE_MARKERS: tuple[str, ...] = (
 _REDIRECT = (
     "This command would print a Claude Code credential. Harnesses never read "
     "the keychain or a credential file directly, and never print the "
-    "automation token -- use `claude_credentials.py status` to check it, or "
-    "`claude_credentials.py run -- <command>` to run a child process with it "
-    "set in the environment (RDR-219)."
+    "automation token. The nexus repo's wrapper "
+    "(https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py) "
+    "does both safely: `claude_credentials.py status` checks the token, and "
+    "`claude_credentials.py run -- <command>` runs a child process with it "
+    "set in the environment. A project without that wrapper asks its operator "
+    "for an equivalent (RDR-219)."
 )
 
 # ---------------------------------------------------------------------------

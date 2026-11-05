@@ -202,7 +202,7 @@ _NX_T1 = (
 )
 
 _NX_TIERS = (
-    "\n## nx storage (call as mcp__plugin_conexus_nexus__<tool>; paged: footer shows "
+    "\n## Nexus storage (call as mcp__plugin_conexus_nexus__<tool>; paged: footer shows "
     "offset=N)\n\n"
     "Read widest -> narrowest BEFORE any work; check before duplicating effort:\n"
     "  T3 search            all sessions/projects   <- check before researching\n"

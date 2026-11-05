@@ -57,7 +57,7 @@ _MANAGED_NOT_PROBEABLE_DETAIL = (
     "managed deployment — not probeable from this client, so this check was not run: it reads the database "
     "with local admin credentials, which a managed deployment keeps with the store operator, and the "
     "client-side diagnostic path is local-only by design (nexus-y3wuu); skipping. For the RDR-225 "
-    "partition rows the operator's read-only query is in docs/runbooks/rdr-225-cloud-deploy.md"
+    "partition rows the operator's read-only query is in https://github.com/Hellblazer/nexus/blob/main/docs/runbooks/rdr-225-cloud-deploy.md"
 )
 _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials absent); skipping"
 
@@ -336,7 +336,7 @@ def _check_generation_layout() -> list[HealthResult]:
                     f"{len(generations)} generation(s) exist but current does "
                     "not — nothing resolves, so nothing will start"
                 ),
-                fix_suggestions=["scripts/reinstall-tool.sh"],
+                fix_suggestions=[_install_advice().GENERATION_INSTALLER],
             )]
 
         current = install_layout.current_generation()
@@ -356,7 +356,7 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"current points at {current}, which does not exist — every "
                 "shim resolves current at spawn, so nothing will start"
             ),
-            fix_suggestions=["scripts/reinstall-tool.sh"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
 
     if not install_layout.receipt_path(current).is_file():
@@ -366,7 +366,7 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"current points at {current.name}, which has no receipt — that "
                 "is an unfinished build, not a generation"
             ),
-            fix_suggestions=["scripts/reinstall-tool.sh"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
 
     # THE OWNED SET IS WHAT THE DISTRIBUTION DECLARES, not a listing of
@@ -626,7 +626,7 @@ def _check_base_interpreters(current, generations) -> list[HealthResult]:
                 f"{missing_current}, which no longer exists — uv prunes managed "
                 "interpreters, and this generation cannot run without it"
             ),
-            fix_suggestions=["scripts/reinstall-tool.sh"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
     if missing_old:
         return [HealthResult(
@@ -694,7 +694,7 @@ def _check_orphan_uv_install() -> list[HealthResult]:
         ),
         fix_suggestions=[
             "nx self install    # registers it for reap, then reaps once its holders are gone",
-            "scripts/reinstall-tool.sh    # same, from a checkout",
+            "the reinstall-tool.sh script in a nexus checkout's scripts directory    # same, from a checkout",
         ],
     )]
 
@@ -3240,7 +3240,7 @@ def _check_mineru_server() -> list[HealthResult]:
             return [HealthResult(
                 label="MinerU server", ok=False,
                 detail=f"{url} returned HTTP {resp.status_code}",
-                fix_suggestions=["Restart the server: nx mineru stop && nx mineru start"],
+                fix_suggestions=["Restart the server: nx mineru stop, then nx mineru start"],
             )]
 
     # Nothing is up. The question is no longer "is it reachable" but "can
@@ -4543,7 +4543,7 @@ def _check_storage_service_health(
             ok=False,
             detail=f"Storage service at {url} unreachable: {exc}",
             fix_suggestions=[
-                "Start the service: nx service start",
+                "Start the service: nx daemon service start",
                 f"Check that the service is listening on {host}:{port}",
             ],
             fatal=True,
@@ -4584,7 +4584,7 @@ def _check_storage_service_health(
         ok=False,
         detail=detail,
         fix_suggestions=[
-            "Start the service: nx service start",
+            "Start the service: nx daemon service start",
             f"Check service logs; the DB probe at {host}:{port} is failing",
         ],
         fatal=True,
@@ -4799,7 +4799,7 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
             "missing version is a client older than the cut OR a caller that never sends it "
             "(curl, a script), which an upgrade cannot fix",
             "Flip NX_OWNERLESS_WRITE_MODE from log-only to enforce only after this count "
-            "stops moving with every client restarted (docs/operations/ownerless-write-cutover.md)",
+            "stops moving with every client restarted (https://github.com/Hellblazer/nexus/blob/main/docs/operations/ownerless-write-cutover.md)",
         ],
     )]
 
@@ -5003,9 +5003,9 @@ def _check_engine_reaper(
         "event=reaper_run, one line per completed pass; a failed pass logs reaper_pass_failed instead): a thrown "
         "Error is caught and logged, and the schedule stays alive",
         "A reaper that stopped making passes is restarted by restarting the engine "
-        "(`nx daemon service stop && nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
+        "(`nx daemon service stop`, then `nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
         "switches it off on purpose, and then this row reads not applicable",
-        "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+        "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md (the refusal table, the settings and what a pass does)",
     ]
 
     if last_raw is None:
@@ -5049,7 +5049,7 @@ def _check_engine_reaper(
                     *(["An errored tenant: read the engine log for event=reaper_tenant_failed and "
                        "event=reaper_collection_failed (a permission or grants regression errors every "
                        "collection and the pass still completes)"] if errored else []),
-                    "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+                    "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md (the refusal table, the settings and what a pass does)",
                 ],
             )]
         return [HealthResult(
@@ -5154,7 +5154,7 @@ def _check_per_collection_indexes(
             fix_suggestions=[
                 "The engine reports a per_collection_indexes object this client does not understand: check that "
                 "the client and engine versions match (`nx doctor` reports both)",
-                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
 
@@ -5195,12 +5195,12 @@ def _check_per_collection_indexes(
             detail=f"builder_state {state}: {why}, so no per-collection index is being built ({counts})",
             fix_suggestions=[
                 *(["After a nexus_admin credential rotation, restart the engine so it reads the new credential "
-                   "(`nx daemon service stop && nx daemon service start` for a local engine); the engine logs "
+                   "(`nx daemon service stop`, then `nx daemon service start` for a local engine); the engine logs "
                    "event=pci_builder_auth_failed"] if state == "auth_failed" else
                   ["The engine's admin role cannot create indexes on the leaves of nexus.chunks: grant it the "
                    "privilege (it must own or be able to CREATE INDEX on the partitions), then restart the engine"]),
                 "NX_SEARCH_PCI=0 switches the builder off on purpose, and then this row passes with a note",
-                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
     off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
@@ -5253,7 +5253,7 @@ def _check_per_collection_indexes(
                 *(["A reindex leftover is dropped by the builder on its next pass: set NX_SEARCH_PCI=1, or "
                    "DROP INDEX CONCURRENTLY it by hand (it is the invalid pci_<hash>_ccnew/_ccold index)"]
                   if warn_leftover else []),
-                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
     if state == "standby":
@@ -5446,7 +5446,7 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
             detail=(f"profile voyage but the engine serves {served}: it booted degraded, and every Voyage "
                     "collection answers 422 (the engine has no Voyage key)"),
             fix_suggestions=["Persist the key with `nx config set voyage_api_key --stdin` (or export VOYAGE_API_KEY), "
-                             f"then restart the service: `{_SERVICE_RESTART_COMMAND}`",
+                             f"then restart the service: {_SERVICE_RESTART_COMMAND}",
                              "Or choose the local embedder (`nx init`) if Voyage was not intended"],
         )]
     return [HealthResult(
@@ -5454,7 +5454,7 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
         detail=(f"profile bge but the engine serves {served}: it booted degraded, and every bge collection "
                 "answers 422 (the engine found no bge model files)"),
         fix_suggestions=["Run `nx init` to provision the bge model files, then restart the service: "
-                         f"`{_SERVICE_RESTART_COMMAND}`"],
+                         f"{_SERVICE_RESTART_COMMAND}"],
     )]
 
 
@@ -5703,7 +5703,7 @@ def _check_chunks_leaf_bloat(
                    "event=chunks_leaf_autovacuum_checked naming any it could not"] if n_unset else []),
                 *(["autovacuum_enabled=false is kept on purpose by the self-heal; as the owner of each leaf named in "
                    "the log, reset that storage parameter on it: RESET (autovacuum_enabled)"] if n_disabled else []),
-                "docs/architecture.md: the nexus.chunks leaf autovacuum policy",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md (the nexus.chunks leaf autovacuum policy)",
             ],
         )]
     note = ""
@@ -6355,6 +6355,72 @@ def _check_local_pg_auth(config_dir: Path | None = None) -> list[HealthResult]:
     )]
 
 
+#: The lowest PostgreSQL major the engine boots on: service PgVersionFloor.MIN_SERVER_VERSION_NUM is this
+#: times 10000 (pinned equal by tests/test_doctor_local_pg_version.py).
+PG_VERSION_FLOOR: int = 17
+
+
+def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult]:
+    """nexus-90flw: was the nx-managed local cluster created by a PostgreSQL the engine boots on?
+
+    The engine refuses PostgreSQL below 17 (``event=pg_version_below_floor`` when an older server is already
+    running), and an established cluster keeps whatever PostgreSQL created it; started cold from the bundle,
+    such a data directory fails earlier, in ``pg_ctl start`` ("database files are incompatible with server").
+    This row reads the data directory's ``PG_VERSION`` marker (no connection), names the version and the
+    floor, and points at the upgrade.
+
+    Not applicable (no row) where there is no bundled cluster: a virgin box, a managed Postgres (no
+    ``PG_DATA``), or a data directory initdb has not filled. A marker that cannot be read gets a failing row,
+    since "could not look" must not read as "fine".
+    """
+    try:
+        if config_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+            config_dir = _config.nexus_config_dir()
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials  # noqa: PLC0415 — deferred, heavy module
+
+        creds_path = config_dir / CREDENTIALS_FILENAME
+        if not creds_path.is_file():
+            return []
+        pg_data = _read_credentials(creds_path).get("PG_DATA", "").strip()
+        if not pg_data:
+            return []
+        marker = Path(pg_data) / "PG_VERSION"
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_local_pg_version_check_failed", error=str(exc))
+        return []
+    label = "Local PostgreSQL version"
+    try:
+        # exists() too: a data directory that cannot be searched raises here, and that is "could not look".
+        if not marker.exists():
+            return []
+        text = marker.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        return [HealthResult(label=label, ok=False, detail=f"the cluster's PG_VERSION marker could not be read ({exc})")]
+    head = text.split(".", 1)[0]
+    if not head.isdigit():
+        return [HealthResult(
+            label=label, ok=False,
+            detail=f"the cluster's PG_VERSION marker could not be read ({text[:40]!r}) at {marker}",
+        )]
+    if int(head) >= PG_VERSION_FLOOR:
+        return [HealthResult(label=label, ok=True, detail=f"PostgreSQL {text} (the engine needs {PG_VERSION_FLOOR} or newer)")]
+    return [HealthResult(
+        label=label, ok=False,
+        detail=(
+            f"the bundled cluster at {pg_data} was created by PostgreSQL {text}, and a cluster keeps the version "
+            f"that created it; the engine refuses below PostgreSQL {PG_VERSION_FLOOR} "
+            "(event=pg_version_below_floor in the service log, or, started cold from the bundle, pg_ctl's "
+            "'database files are incompatible with server')"
+        ),
+        fix_suggestions=[
+            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "
+            "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md (section 'A local cluster older than PostgreSQL 17')",
+        ],
+    )]
+
+
 #: Microsoft's VC++ redistributable, the manual remedy (nexus-lqjll).
 VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
@@ -6499,8 +6565,8 @@ def _check_service_autostart_drift() -> list[HealthResult]:
                         "start at login here until one exists"
                     ),
                     fix_suggestions=[
-                        "nx daemon service uninstall --autostart && nx daemon "
-                        "service install --autostart  # once a service manager is available",
+                        "`nx daemon service uninstall --autostart`, then `nx daemon "
+                        "service install --autostart`  # once a service manager is available",
                     ],
                 )]
             case ActivationState.UNREACHABLE | _:
@@ -6643,7 +6709,7 @@ def _check_migration_state(
             ),
             fix_suggestions=[
                 "Run `nx init` to apply migrations",
-                "Check that the Postgres cluster is running: nx service status",
+                "Start the storage service (it brings up the Postgres cluster): nx daemon service start",
             ],
             fatal=True,
         )]
@@ -7505,7 +7571,7 @@ ORDER BY tbl.schema_name, tbl.table_name;
             fix_suggestions=[
                 "Re-run migrations: nx init",
                 "Verify the Liquibase changeset applied RLS: "
-                "check service/src/main/resources/db/changelog/",
+                "check https://github.com/Hellblazer/nexus/tree/main/service/src/main/resources/db/changelog",
                 *(_PARTITION_TREE_FIXES if tree_text else ()),
             ],
             fatal=True,
@@ -9315,7 +9381,7 @@ def _channel_waiter_engine_fix_suggestions() -> list[str]:
     if is_dev_checkout_process():
         fixes.append(
             "this process is a dev checkout — rebuild the local engine's cached build "
-            "(see docs/agents/engine-service-release.md for the exact script) if "
+            "(see https://github.com/Hellblazer/nexus/blob/main/docs/agents/engine-service-release.md for the exact script) if "
             "you are iterating on service/ code locally",
         )
     return fixes
@@ -9429,6 +9495,29 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     if pending and isinstance(oldest_pending_age_s, (int, float)):
         pending_desc += f" (oldest {oldest_pending_age_s:.0f}s)"
 
+    if alive and not stale and status.get("gate_stalled"):
+        # A waiter whose last wake is stale reads as stale below, whatever else
+        # its record says (a hard-killed process leaves alive=True and
+        # gate_stalled=True on disk, and its age is the truer signal).
+        # nexus-w4l00 follow-on: the waiter runs and ticks, but every send timed
+        # out on the initialized gate, so no push is delivered. The client
+        # connected in an era that sends no `notifications/initialized` (or has
+        # not finished its handshake). A hard failure, not a warning: the row
+        # would otherwise read as a healthy waiter.
+        since = status.get("gate_stalled_since")
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                "the waiter is running but the client never sent notifications/initialized, so channel "
+                f"pushes are not delivered (stalled since {since or 'unknown'}); announced={announced}. "
+                "Mail still arrives via the drain hook at the next prompt."
+            ),
+            fix_suggestions=[
+                "Restart the MCP server: /mcp (if it recurs, upgrade conexus; the client connected in a "
+                "protocol era that sends no notifications/initialized, nexus-w4l00)",
+            ],
+        )]
+
     if not alive or stale:
         # bead nexus-vsipz review round: a dead waiter names WHY it stopped
         # when it knows -- `stopped_reason` is set only by the two loud stops
@@ -9490,6 +9579,208 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
             f"waiter alive; last wake {wake_desc}; announced={announced}, {pending_desc}"
         ),
     )]
+
+
+_CLAUDE_CODE_MCP_CONNECTION_LABEL = "mcp.claude_code_connection"
+
+#: Claude Code writes one log file per connection under
+#: ``<cache>/<mangled cwd>/<mcp-logs-...>/``; these two directories hold the
+#: nexus server (the plugin install, and the ``server:nexus`` dev channel).
+_CLAUDE_CODE_NEXUS_LOG_DIRS = ("mcp-logs-plugin-conexus-nexus", "mcp-logs-nexus")
+
+#: A Claude Code MCP log is read from its head (the session id and the first
+#: connect) and its tail (the latest connect and channel verdict, which a long
+#: session's reconnects append to the SAME file); a file no larger than the two
+#: together is read whole. Real logs run to ~1.7 MB at most.
+_CLAUDE_CODE_LOG_HEAD_BYTES = 256 * 1024
+_CLAUDE_CODE_LOG_TAIL_BYTES = 2 * 1024 * 1024
+
+#: How many of the newest log files are opened looking for one that carries a
+#: verdict (a ``claude -p`` worker or subagent in the same directory writes
+#: verdict-less siblings).
+_CLAUDE_CODE_LOG_FILES_EXAMINED = 40
+
+#: Claude Code truncates a project directory name at this many characters and
+#: appends ``-<hash>``.
+_CLAUDE_CODE_PROJECT_NAME_MAX = 200
+
+
+def _claude_code_cache_root(platform: str, home: Path, env: "dict[str, str] | os._Environ[str]") -> Path | None:
+    """Where Claude Code keeps its MCP logs (the ``env-paths`` cache directory
+    for the app name ``claude-cli``). Confirmed on macOS; the Linux and Windows
+    paths follow the same library's convention and are not verified here.
+    ``None`` where the location cannot be derived."""
+    if platform == "darwin":
+        return home / "Library" / "Caches" / "claude-cli-nodejs"
+    if platform == "win32":
+        local = env.get("LOCALAPPDATA")
+        return Path(local) / "claude-cli-nodejs" / "Cache" if local else None
+    xdg = env.get("XDG_CACHE_HOME")
+    return (Path(xdg) if xdg else home / ".cache") / "claude-cli-nodejs"
+
+
+def _claude_code_project_dir_name(cwd: Path) -> str:
+    """Claude Code names a project's log directory after the cwd with every
+    non-alphanumeric character replaced by ``-``; a name past
+    :data:`_CLAUDE_CODE_PROJECT_NAME_MAX` characters is cut there and gets
+    ``-<hash>`` appended (see :func:`_claude_code_project_dirs`)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def _claude_code_project_dirs(cache_root: Path, cwd: Path) -> list[Path]:
+    """The log directories that can belong to *cwd* or to a directory above it
+    (Claude Code may have been started in a parent of the directory the doctor
+    runs from). A long name is matched by its 200-character prefix, since the
+    hash suffix cannot be derived."""
+    dirs: list[Path] = []
+    for directory in (cwd, *cwd.parents):
+        name = _claude_code_project_dir_name(directory)
+        if len(name) > _CLAUDE_CODE_PROJECT_NAME_MAX:
+            prefix = name[:_CLAUDE_CODE_PROJECT_NAME_MAX]
+            try:
+                dirs.extend(sorted(d for d in cache_root.iterdir() if d.name.startswith(prefix + "-")))
+            except OSError:
+                continue
+        else:
+            dirs.append(cache_root / name)
+    return dirs
+
+
+def _read_claude_code_log(path: Path) -> list[str]:
+    """The lines of *path*: all of it, or its head and its tail when it is
+    larger than both bounds (the tail's first line is usually cut and fails to
+    parse, which the reader skips)."""
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        if size <= _CLAUDE_CODE_LOG_HEAD_BYTES + _CLAUDE_CODE_LOG_TAIL_BYTES:
+            return fh.read().decode("utf-8", errors="replace").splitlines()
+        head = fh.read(_CLAUDE_CODE_LOG_HEAD_BYTES)
+        fh.seek(size - _CLAUDE_CODE_LOG_TAIL_BYTES)
+        tail = fh.read()
+    return (
+        head.decode("utf-8", errors="replace").splitlines()
+        + tail.decode("utf-8", errors="replace").splitlines()
+    )
+
+
+def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, str | None]:
+    """``(verdict, failure_text, session_id)`` for one log. The LAST verdict
+    wins, because Claude Code appends every reconnect to the same file: a
+    ``Successfully connected`` line starts a new connection and clears what the
+    previous one left, so the user's own remedy (``/mcp``) turns a
+    ``did not declare`` file into a healthy one. *verdict* is ``"failed"``,
+    ``"missing"``, ``"registered"`` or ``None`` (no verdict for the latest
+    connection: still starting, ``not in --channels list``, or an older Claude
+    Code that logs none)."""
+    verdict: str | None = None
+    failure: str | None = None
+    session_id: str | None = None
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue  # a bound can cut the first line of the tail
+        if not isinstance(entry, dict):
+            continue
+        if session_id is None and isinstance(entry.get("sessionId"), str):
+            session_id = entry["sessionId"]
+        message = entry.get("debug") or entry.get("error")
+        if not isinstance(message, str):
+            continue
+        if message.startswith("Connection failed"):
+            verdict, failure = "failed", message[:160]
+        elif message.startswith("Successfully connected"):
+            verdict, failure = None, None
+        elif message.startswith("Channel notifications skipped: server did not declare claude/channel capability"):
+            verdict, failure = "missing", None
+        elif message.startswith("Channel notifications registered"):
+            verdict, failure = "registered", None
+    return verdict, failure, session_id
+
+
+def _check_claude_code_mcp_connection(
+    *, cache_root: Path | None = None, cwd: Path | None = None,
+) -> list[HealthResult]:
+    """Claude Code's own record of its latest connection to the nexus MCP
+    server (nexus-w4l00 follow-on).
+
+    ``nx-mcp`` serves the handshake era only: Claude Code probes the modern
+    era first, is refused, and falls back to ``initialize``, which is the only
+    path that carries the ``claude/channel`` capability. If Claude Code ever
+    stops falling back, the server loses its channel (or every tool), and
+    nothing on the server side can see it. This row reads the client's side:
+    a FAILURE when the latest connection in the log logged "did not declare
+    claude/channel capability" or "Connection failed" and no later line
+    cleared it. "not in --channels list" is a launch choice, not a fault, and a
+    connection with no verdict (still starting, or an older Claude Code that
+    logs nothing) is informational.
+
+    The file is the newest one that carries a verdict (a ``claude -p`` worker
+    or subagent writes verdict-less siblings), or, when
+    ``CLAUDE_CODE_SESSION_ID`` names this session, the newest of this
+    session's own files. Not applicable where no Claude Code log directory
+    exists for the current directory or one above it. *cache_root* and *cwd*
+    are test seams.
+    """
+    label = _CLAUDE_CODE_MCP_CONNECTION_LABEL
+    na = lambda why: [HealthResult(label=label, ok=True, detail=f"informational — {why}")]  # noqa: E731
+    try:
+        if cache_root is None:
+            cache_root = _claude_code_cache_root(sys.platform, Path.home(), os.environ)
+        if cache_root is None:
+            return na("no Claude Code log location is known on this platform")
+        directories = _claude_code_project_dirs(cache_root, cwd if cwd is not None else Path.cwd())
+    except (OSError, RuntimeError) as exc:  # a deleted cwd, or no resolvable home
+        return na(f"could not derive the Claude Code log location ({exc})")
+    files = sorted(
+        {f for p in directories for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (p / d).glob("*.jsonl")},
+        key=lambda f: f.name, reverse=True,
+    )[:_CLAUDE_CODE_LOG_FILES_EXAMINED]
+    if not files:
+        return na("no Claude Code MCP log for the nexus server under this directory")
+
+    scanned: list[tuple[Path, str | None, str | None, str | None]] = []
+    unreadable: str | None = None
+    for f in files:
+        try:
+            lines = _read_claude_code_log(f)
+        except OSError as exc:
+            unreadable = unreadable or f"could not read {f.name}: {exc.strerror or exc}"
+            continue
+        scanned.append((f, *_claude_code_log_verdict(lines)))
+    if not scanned:
+        return na(unreadable or "no readable Claude Code MCP log for the nexus server")
+
+    mine = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    candidates = [row for row in scanned if mine and row[3] == mine] or scanned
+    chosen = next((row for row in candidates if row[1] is not None), candidates[0])
+    newest, verdict, failure, _session = chosen
+
+    if verdict == "failed":
+        return [HealthResult(
+            label=label, ok=False,
+            detail=f"Claude Code's latest connection to the nexus MCP server failed: {failure} (log {newest.name})",
+            fix_suggestions=["Run nx-mcp by hand to see why it exits, then restart the MCP server: /mcp"],
+        )]
+    if verdict == "missing":
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                "Claude Code's latest connection to the nexus MCP server skipped the channel: the server did not "
+                f"declare claude/channel capability (log {newest.name}). Push delivery is off; mail still arrives "
+                "at the next prompt."
+            ),
+            fix_suggestions=[
+                "Restart Claude Code on the current conexus (nx-mcp serves the handshake era so Claude Code falls "
+                "back to initialize, nexus-w4l00); if it still skips, Claude Code may have dropped that fallback: report it",
+            ],
+        )]
+    if verdict == "registered":
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"Claude Code's latest connection to the nexus MCP server registered the channel (log {newest.name})",
+        )]
+    return na(f"Claude Code's latest nexus connection ({newest.name}) logged no channel verdict")
 
 
 _BEADS_PRIME_LABEL = "Beads PRIME.md (user-level)"
@@ -9826,7 +10117,7 @@ def _check_embedding_profile() -> list[HealthResult]:
             detail=f"engine does not serve GET /v1/catalog/embedding_profile ({exc})",
             fix_suggestions=[
                 "The engine predates the RDR-204 Phase 2 route; upgrade it "
-                "(nx upgrade, then nx daemon service stop && nx daemon service start). "
+                "(nx upgrade, then nx daemon service stop, then nx daemon service start). "
                 "No write model is assumed in the meantime.",
             ],
         )]
@@ -12817,6 +13108,7 @@ def run_health_checks(
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
     results.extend(_check_setup_status())  # nexus-sv2wx.19; not applicable where no setup has run
     results.extend(_check_local_pg_auth())  # nexus-ja4pq
+    results.extend(_check_local_pg_version())  # nexus-90flw
     results.extend(_check_vc_runtime())  # nexus-lqjll; [] off Windows
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
@@ -12844,6 +13136,7 @@ def run_health_checks(
     # publishes (no engine call). Degrades internally to informational
     # whenever no session, or no record, is resolvable.
     results.extend(_check_tuple_channel_delivery())
+    results.extend(_check_claude_code_mcp_connection())  # nexus-w4l00: the client side of the handshake fallback
     # nexus-cnzei.8: read-only informational row; [] when beads is not
     # detected on this machine at all.
     results.extend(_check_beads_prime())

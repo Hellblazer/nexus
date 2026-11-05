@@ -5824,7 +5824,8 @@ def store_put(
             "\"distributed-systems\"), never a four-segment name or model "
             "token. Reuse an existing subject before minting one (see "
             "`nx collection list`); placeholders default/knowledge/notes/"
-            "tmp/test are refused. Rules: docs/collections.md."
+            "tmp/test are refused. Rules: "
+            "(https://github.com/Hellblazer/nexus/blob/main/docs/collections.md)."
         ),
     )],
     title: Annotated[str, Field(
@@ -7951,7 +7952,21 @@ def plan_save(
             "debug, document). A verb-less save is refused."
         ),
     )] = "",
-    project: Annotated[str, Field(description="Project namespace for scoping (e.g. \"nexus\").")] = "",
+    answer_kind: Annotated[str, Field(
+        description=(
+            "REQUIRED kind of answer the plan serves: lookup, synthesis, discovery/listing, comparison, "
+            "audit, debug, or unknown. A save with none is refused. nx_answer serves a saved plan only "
+            "for a request of this same kind and only from the project that saved it; unknown serves "
+            "nothing. A plan whose last step is not an operator (it ends in search, query, memory_get "
+            "and the like) cannot claim lookup, synthesis, comparison, audit or debug. That check reads "
+            "the last step only, so the kind is still your claim."
+        ),
+    )] = "",
+    project: Annotated[str, Field(description=(
+        "The repository's name (e.g. \"nexus\"), not a worktree's. A saved plan serves only sessions of "
+        "this project, in its repository's directory or a linked worktree of it; a save with none serves no "
+        "request, and one that is not this session's project says so."
+    ))] = "",
     outcome: Annotated[str, Field(description="Plan outcome: \"success\" or \"partial\".")] = "success",
     tags: Annotated[str, Field(description=(
         "Comma-separated tags (e.g. operation types used). The provenance tags `grown` and "
@@ -7971,28 +7986,31 @@ def plan_save(
     phased-execution plans — this library is for retrieval plans only,
     matched to a verb-shaped intent by `nx_answer`'s plan-match gate.
 
-    Returns "Saved plan: [<id>] <query>", or a refusal naming why (missing
-    verb, invalid JSON, a plan with no executable steps, a plan that
-    declares a reserved binding name, or a `$stepN.<field>` reference
-    inside other text or an object).
+    Returns "Saved plan: [<id>] <query>" (with a note when the plan will
+    serve nothing), or a refusal naming why.
 
     Constraints:
-    - `verb` is required; a verb-less plan is refused outright.
-    - `plan_json` must be valid JSON with a non-empty `steps` list, each
-      step naming a tool.
+    - `verb` and `answer_kind` are required (lookup, synthesis,
+      discovery/listing, comparison, audit, debug, unknown). The kind is
+      stored as a `saved` declaration, your own unreviewed claim; an
+      `answer_kind` key inside `plan_json` is replaced by it.
+    - `nx_answer` serves the plan only for a request of that kind, from
+      `project` (the repository's name; a linked worktree of it counts),
+      never for an unknown-kind request. Unknown kind, or no `project`,
+      serves nothing; the reply warns when `project` is not this session's.
+    - A plan whose last step is retrieval-only (search, query, memory_get,
+      not an operator such as summarize) is refused when it claims lookup,
+      synthesis, comparison, audit or debug. Only the last step is read:
+      search then rank passes, and the kind remains your claim.
+    - `plan_json` needs a non-empty `steps` list, each step naming a tool.
     - `source`, `owner` and `project` are reserved for `nx_answer`'s
-      evidence request: a plan that lists one in `required_bindings`,
-      `optional_bindings` or `default_bindings`, or references it as
+      evidence request: listing one in a binding, or referencing it as
       `$name` in a step's args, is refused.
-    - An `answer_kind` key in `plan_json` is removed before the save, and
-      the reply says so: only seeded templates declare an answer kind.
-    - The provenance tags `grown` and `builtin-template` are removed from
-      `tags` before the save (they are logged and the reply names them):
-      only the plan-grow site and the seed loader earn them. A plan saved
-      here declares nothing and reads as unattested, so `nx_answer` does
-      not serve it for a lookup or a listing when the eligibility gate
-      enforces (it runs in shadow on a failed or skipped extraction, an
-      unreseeded library, or the kill switch).
+    - The tags `grown` and `builtin-template` are removed from `tags`
+      (the reply names them): only the grow site and seed loader earn them.
+    - These rules bind when the eligibility gate enforces; it runs in
+      shadow on a failed or skipped extraction, an unreseeded library, or
+      the kill switch.
     """
     try:
         if not query or not plan_json:
@@ -8015,6 +8033,12 @@ def plan_save(
         # then crashed the runner (unknown tool '') — save-time validation
         # kills the class before it can pollute the match library.
         from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_steps  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.plans.answer_kind import (  # noqa: PLC0415 — deferred import; rare/branch-local path
+            SHAPE_VETOED_KINDS,
+            PlanAnswerKind,
+            saved_plan_json,
+            terminal_is_retrieval_only,
+        )
 
         try:
             parsed_plan = json.loads(plan_json)
@@ -8052,18 +8076,38 @@ def plan_save(
         # nexus-z1d0l.1.11: a verify step with no claim is refused when the runner reaches it.
         if (claimless := claimless_verify_reason(parsed_plan)) is not None:
             return _fail(f"Plan not saved: {claimless}.")
-        # RDR-232 Phase 2 (nexus-jypmj.2.1): plan_save never writes an answer-kind declaration.
-        # Only the seed loader declares curated and only the nx_answer grow site declares grown,
-        # so an embedded key (valid, malformed or an unrelated one of the same name) is removed
-        # rather than stored or refused. A row saved here declares nothing and decodes unknown.
-        from nexus.plans.answer_kind import strip_declaration  # noqa: PLC0415 — deferred import; rare/branch-local path
+        # nexus-0vh80 (Sam, 2026-11-03): a saved plan declares the kind of answer it serves, so it is never
+        # unattested. Required like the verb; "unknown" is a legal answer and serves nothing. Checked after the
+        # plan itself, so a plan that is refused for its own fault is refused for that, not for a missing kind.
+        _kinds = ", ".join(k.value for k in PlanAnswerKind)
+        if not answer_kind:
+            return _fail(
+                f"Plan not saved: an 'answer_kind' is required, one of {_kinds}. It says what kind of answer "
+                "the plan serves; nx_answer serves a saved plan only for a request of that kind and only from "
+                "the project that saved it. Pass unknown if no kind fits (it then serves nothing)."
+            )
+        try:
+            _declared_kind = PlanAnswerKind(answer_kind)
+        except ValueError:
+            return _fail(f"Plan not saved: answer_kind {answer_kind!r} is not one of {_kinds}.")
+        # nexus-0vh80: the shape veto. A plan whose last step hands back what it retrieved is a listing at best;
+        # claiming lookup, synthesis, comparison, audit or debug with it is how plans 598 and 599 won lookups
+        # and answered with raw ids (nexus-rflvp). Reads the declared steps only; it guesses no kind from them.
+        if _declared_kind in SHAPE_VETOED_KINDS and terminal_is_retrieval_only(parsed_plan):
+            _last = parsed_plan["steps"][-1].get("tool")
+            return _fail(
+                f"Plan not saved: answer_kind {_declared_kind.value!r} needs a plan that ends in an operator "
+                f"(summarize, generate, extract and the like); this one ends in {_last!r}, which hands back what "
+                "it retrieved. Declare discovery/listing or unknown, or add the step that puts the answer together."
+            )
+        # RDR-232 Phase 2 (nexus-jypmj.2.1, nexus-0vh80): plan_save writes the declaration, and only from the
+        # caller's argument: provenance `saved`, the saver's own unreviewed claim. Only the seed loader declares
+        # curated and only the nx_answer grow site declares grown, so an embedded key (valid, malformed or an
+        # unrelated one of the same name) is replaced, never stored or trusted.
+        from nexus.plans.answer_kind import ANSWER_KIND_KEY  # noqa: PLC0415 — deferred import; rare/branch-local path
 
-        plan_json_to_store = plan_json
-        _declaration_removed = False
-        if isinstance(parsed_plan, dict):
-            stripped_plan, _declaration_removed = strip_declaration(parsed_plan)
-            if _declaration_removed:
-                plan_json_to_store = json.dumps(stripped_plan)
+        _declaration_replaced = isinstance(parsed_plan, dict) and ANSWER_KIND_KEY in parsed_plan
+        plan_json_to_store = saved_plan_json(plan_json, _declared_kind)
         # nexus-3ihve: the provenance tags are claims only the grow site and the seed loader may make
         # (both call the plan library directly, never this tool). A caller's `grown` would read as
         # grown provenance to anything keyed on the tag, so it is removed, logged and named in the reply.
@@ -8096,10 +8140,28 @@ def plan_save(
             project=project, target_title=query[:80],
         )
         saved = f"Saved plan: [{row_id}] {query[:80]}"
-        if _declaration_removed:
-            saved += " (answer_kind field removed: only seeded templates declare an answer kind)"
+        if _declaration_replaced:
+            saved += f" (embedded answer_kind field replaced by the declared kind, {_declared_kind.value}, saved)"
+        if _declared_kind is PlanAnswerKind.UNKNOWN:
+            saved += " (answer_kind unknown: this plan serves no request; save it again with a kind to have it served)"
+        else:
+            from nexus.plans.eligibility import project_names  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+            _session_names = project_names((_nx_answer_session_project(), *_nx_answer_session_project_aliases()))
+            _saving = project_names(project)
+            if not _saving:
+                saved += (
+                    f" (no project given: a saved {_declared_kind.value} plan serves only a request from the project "
+                    "that saved it, so this one serves no request until it is saved again with a project)"
+                )
+            elif not _saving & _session_names:
+                saved += (
+                    f" (project {project.strip()!r} is not this session's project, "
+                    f"{', '.join(sorted(_session_names)) or 'unknown'}: the plan serves only sessions of "
+                    f"{project.strip()!r}, the repository's name, and none here)"
+                )
         if _tags_removed:
-            saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them; the plan reads as unattested and serves no lookup or listing)"
+            saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them)"
         return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_save", e)
@@ -11298,6 +11360,39 @@ def _nx_answer_question_sources(request: EvidenceRequest, coverage: "RequestCove
     )
 
 
+def _nx_answer_session_project() -> str:
+    """The project this ``nx_answer`` call runs in: the session's directory name, ``""`` if there is none.
+
+    The one reading both sides of the saved-plan rule use (nexus-0vh80): the grow site files a grown plan under it,
+    and the eligibility filter compares a saved plan's project with it. ``nx-mcp`` is started in the session's
+    project directory (``nexus.plans.active_project``), so under Claude Code this is the project's name; a host that
+    starts it elsewhere gets that directory's name, and a saved plan then serves nothing there (it fails closed).
+    """
+    from pathlib import Path as _Path  # noqa: PLC0415 — stdlib, branch-local
+
+    try:
+        return _Path.cwd().name
+    except OSError:
+        return ""
+
+
+def _nx_answer_session_project_aliases() -> tuple[str, ...]:
+    """The other name a saved plan may be filed under for this session: the primary checkout's.
+
+    A session in a linked worktree (``nexus-wt/<session>``) has its own directory name, while a plan is saved under
+    the repository's (``nexus``), so a saved plan serves the session when its project equals either (nexus-0vh80).
+    ``()`` when the session is not in a git checkout or git cannot say. Grown plans are still filed under
+    :func:`_nx_answer_session_project` alone.
+    """
+    from nexus.plans.active_project import primary_checkout_name  # noqa: PLC0415 — deferred; matches this module's convention
+
+    try:
+        name = primary_checkout_name(_os.getcwd())
+    except OSError:
+        return ()
+    return (name,) if name else ()
+
+
 async def _nx_answer_active_project(
     request: EvidenceRequest,
     project_names: list[str] | tuple[str, ...],
@@ -12254,6 +12349,7 @@ async def _nx_answer_plan_miss(
         few_shot_matches = _eligibility.eligible_matches(
             _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
             1 if coverage.names_one_source else 0,
+            (_nx_answer_session_project(), *_nx_answer_session_project_aliases()),
         )
     few_shot_block = _format_plan_few_shot(few_shot_matches)
     if few_shot_block:
@@ -13062,6 +13158,10 @@ async def nx_answer(
         # nexus-4xmpv: a synthesis or unknown request that names exactly one source does not admit citation-traversal;
         # the count is RequestCoverage.names_one_source, the one place that decides it.
         named_source_count=1 if _request_coverage.names_one_source else 0,
+        # nexus-0vh80: a saved plan serves only the project that saved it. The request's project is the session's,
+        # the name a grown plan is filed under below (the server runs in the session's project directory).
+        project=_nx_answer_session_project(),
+        project_aliases=_nx_answer_session_project_aliases(),
     )
     # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind and runs its gate in shadow
     # (nexus-x3eoc); a run of failures in one process is that regime every time, so it warns once per process,
@@ -14614,7 +14714,10 @@ async def nx_answer(
     # fallback re-run below gets the same one. With NX_ANSWER_COVERAGE off (on by default since nexus-jypmj.17) none
     # is passed: every run is then unassessed and this call is what it was before Phase 3. The single_query fast path
     # never gets here (no reduction).
-    from nexus.plans.switches import coverage_enabled as _coverage_enabled  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.switches import (  # noqa: PLC0415 — deferred; matches this module's convention
+        coverage_enabled as _coverage_enabled,
+        resolution_repair_enabled as _resolution_repair_enabled,
+    )
 
     if _coverage_enabled(_os.environ):
         from nexus.plans.coverage_ledger import CoverageBoundary as _CoverageBoundary  # noqa: PLC0415 — deferred; matches this module's convention
@@ -14625,6 +14728,8 @@ async def nx_answer(
             primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
             dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
             confinement=_document_confinement,
+            # RDR-147 Step 4 (nexus-qpimy): the exact-key resolution branch of the one repair; off unless set to an on value.
+            resolution_repair=_resolution_repair_enabled(_os.environ),
         )
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
@@ -15291,7 +15396,7 @@ async def nx_answer(
             try:
                 from pathlib import Path as _Path  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
-                project_name = _Path.cwd().name
+                project_name = _nx_answer_session_project()
                 # RDR-091 critic follow-up (nexus-dfok): anchor the grown
                 # plan to the caller's scope. _infer_scope_tags cannot see
                 # the runtime corpus injection from ``_nx_scope`` because
@@ -15516,7 +15621,7 @@ async def nx_answer_report(
     structured_output=False,
 )
 async def nx_tidy(
-    topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"chromadb quotas\").")],
+    topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"embedding quotas\").")],
     collection: Annotated[str, Field(
         description=(
             "T3 collection to search. \"knowledge\" (default) means every live "
@@ -16188,10 +16293,12 @@ def main():
         # "stdio") -- anyio.run(mcp.run_stdio_async) -- declares no
         # experimental capabilities (MCPServer calls
         # create_initialization_options() bare). channel.
-        # run_stdio_with_channel drives the exact same low-level
-        # Server.run() call MCPServer would have, plus the
-        # "claude/channel" capability that makes Claude Code register a
-        # channel listener (Phase 1 Step 0 spike). Every other transport
+        # run_stdio_with_channel runs the same lifespan, then serve_loop
+        # (the handshake era only, nexus-w4l00; Server.run would also serve
+        # the 2026-07-28 era, whose discover result has no channel
+        # capability), declaring the "claude/channel" capability that makes
+        # Claude Code register a channel listener (Phase 1 Step 0 spike).
+        # Every other transport
         # (SSE, streamable-http) is untouched -- this substitution is
         # stdio-only, matching where nx-mcp actually runs.
         import anyio  # noqa: PLC0415 — rare/branch-local path; stdlib-adjacent import deferred to call site

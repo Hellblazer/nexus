@@ -22,6 +22,13 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+#: The fake uv below is a shebang script, which Windows cannot exec (OSError), so the tests that run the gate through
+#: it skip there. The gate itself runs only on Linux (ci.yml's mcpb-resolve-gate job and release.yml's publish job are
+#: ubuntu-latest), and Windows users never run it; the bundle's launcher is what runs there, tested in the Windows set
+#: by test_mcpb_bootstrap and test_mcpb_launcher_venv. The workflow-text pins and the tests that never reach uv still
+#: run on Windows (nexus-01tnm). If a gate job moves to Windows, give the fake a Windows form and drop this.
+_FAKE_UV_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="the fake uv is a shebang script; the mcpb resolve gate runs only on ubuntu-latest")
 GATE = REPO_ROOT / "scripts" / "check_mcpb_resolve.py"
 
 _FAKE_UV = '''#!{python}
@@ -77,6 +84,7 @@ def _gate(tmp: Path, *extra: str, **cfg):
     return proc, record
 
 
+@_FAKE_UV_POSIX_ONLY
 def test_a_lock_that_resolves_passes_and_the_verdict_names_what_it_examined(tmp_path: Path) -> None:
     proc, record = _gate(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -100,6 +108,7 @@ def _conexus_reqs(pyproject: str) -> list[str]:
     return [d for d in tomllib.loads(pyproject)["project"]["dependencies"] if d.startswith("conexus")]
 
 
+@_FAKE_UV_POSIX_ONLY
 def test_both_variants_are_locked_bare_then_with_the_pdf_setting_and_both_are_named(tmp_path: Path) -> None:
     # nexus-dzc61: the extension starts bare or, with include_pdf on, as conexus[pdf]; the gate resolves both
     proc, record = _gate(tmp_path)
@@ -117,17 +126,20 @@ def test_both_variants_are_locked_bare_then_with_the_pdf_setting_and_both_are_na
     assert "bare: " in verdict and "pdf: " in verdict and verdict.count("pins held") == 2
 
 
+@_FAKE_UV_POSIX_ONLY
 @pytest.mark.parametrize("missing", ["torch", "mineru"])
 def test_a_pdf_lock_without_the_pdf_stack_fails(tmp_path: Path, missing: str) -> None:
     proc, _ = _gate(tmp_path, drop_in_pdf=[missing])
     assert proc.returncode == 1 and "pdf: the PDF stack is not in the lock" in proc.stdout and missing in proc.stdout
 
 
+@_FAKE_UV_POSIX_ONLY
 def test_a_bare_lock_that_carries_the_pdf_stack_fails(tmp_path: Path) -> None:
     proc, _ = _gate(tmp_path, stack_in_bare=True)
     assert proc.returncode == 1 and "bare: the bare bundle locks the PDF stack" in proc.stdout
 
 
+@_FAKE_UV_POSIX_ONLY
 def test_a_wheel_is_resolved_instead_of_the_checkout(tmp_path: Path) -> None:
     wheel = tmp_path / "conexus-9.9.9-py3-none-any.whl"
     wheel.write_bytes(b"")
@@ -146,6 +158,7 @@ def test_the_checkout_itself_is_not_edited(tmp_path: Path) -> None:
     assert staged.exists() == existed, "the gate stages into a scratch copy, never into mcpb/"
 
 
+@_FAKE_UV_POSIX_ONLY
 def test_a_resolve_failure_fails_the_gate_and_shows_uvs_output(tmp_path: Path) -> None:
     proc, _ = _gate(tmp_path, exit=2)
     assert proc.returncode == 1
@@ -153,6 +166,7 @@ def test_a_resolve_failure_fails_the_gate_and_shows_uvs_output(tmp_path: Path) -
     assert "No solution found" in proc.stdout + proc.stderr
 
 
+@_FAKE_UV_POSIX_ONLY
 def test_a_pin_that_moved_in_the_lock_fails(tmp_path: Path) -> None:
     pins = (REPO_ROOT / "src" / "nexus" / "_install" / "constraints.txt").read_text(encoding="utf-8")
     victim = next(ln.split("==")[0] for ln in pins.splitlines() if "==" in ln and ";" not in ln and not ln.startswith("#"))
@@ -160,6 +174,7 @@ def test_a_pin_that_moved_in_the_lock_fails(tmp_path: Path) -> None:
     assert proc.returncode == 1 and "not honoured" in proc.stdout
 
 
+@_FAKE_UV_POSIX_ONLY
 def test_a_lock_without_conexus_at_the_release_fails(tmp_path: Path) -> None:
     proc, _ = _gate(tmp_path, drop_conexus=True)
     assert proc.returncode == 1 and "conexus is not locked" in proc.stdout

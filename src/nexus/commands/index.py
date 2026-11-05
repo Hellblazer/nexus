@@ -13,6 +13,7 @@ import click
 import structlog
 from tqdm import tqdm
 
+from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import EXTRACTOR_CHOICES
 
@@ -261,7 +262,7 @@ def index(ctx: click.Context) -> None:
     _banner = migration_banner()
     if _banner:
         raise click.ClickException(
-            f"{_banner} — nx index is suspended until the upgrade "
+            f"{_banner} — `nx index` is suspended until the upgrade "
             "completes (or fails and is cleared)."
         )
 
@@ -3745,7 +3746,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         raise_identity_drop_exception_for_file(path, chunks=n)
 
 
-@index.command("md")
+@index.command("md", epilog=COLLECTIONS_RULES_EPILOG)
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
 @click.option(
@@ -3755,7 +3756,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         "T3 collection: a bare SUBJECT (e.g. 'vector-search') becomes "
         "knowledge__<subject>; never type a model token or version. A subject "
         "is a durable topic area, not a document or a session; reuse an "
-        "existing one before creating (docs/collections.md). "
+        "existing one before creating (the rules are linked at the end of this help). "
         "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
         "collection so 'nx enrich aspects' can process it (GH #981). "
         "Aspect extraction routes each knowledge__ document by shape (a "

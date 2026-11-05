@@ -1351,7 +1351,7 @@ class ReembedRoutesTest {
 
     private static final String NO_VOYAGE_KEY = "the engine does not serve voyage-context-3 (it serves "
         + "minilm-l6-v2-384): it has no Voyage key. Persist one with `nx config set voyage_api_key --stdin` (or "
-        + "export VOYAGE_API_KEY), then restart the service: `nx daemon service stop && nx daemon service start`";
+        + "export VOYAGE_API_KEY), then restart the service: nx daemon service stop, then nx daemon service start";
 
     /** Run {@code body} with the routes' served models set to {@code served}, then restore the default. */
     private void serving(java.util.function.Supplier<List<String>> served, ThrowingRunnable body) throws Exception {
@@ -1414,8 +1414,8 @@ class ReembedRoutesTest {
             assertThat(start.body()).isEqualTo(plan.body());
             assertThat(json(start).get("error")).isEqualTo("the engine does not serve " + BGE
                 + " (it serves voyage-code-3, voyage-context-3): it found no bge model files. Run `nx init "
-                + "--service` to provision them, then restart the service: `nx daemon service stop && nx daemon "
-                + "service start`");
+                + "--service` to provision them, then restart the service: nx daemon service stop, then nx daemon "
+                + "service start");
             assertThat(jobs.listAll(bge.tenant())).isEmpty();
         });
     }

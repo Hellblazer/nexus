@@ -972,7 +972,9 @@ def body_lines(log: str) -> list[str]:
 def roll_command(sb: Sandbox, *, rc_file: Path | None = None, extra: str = "") -> str:
     spec = sb.spec
     assert sb.engine is not None
-    cmd = (f"TMUX_PANE={shlex.quote(sb.pane_id(spec.caller))} "
+    # The roll's write-time handoff prune must not reach the operator's real /tmp (nexus-2v7da).
+    prune_dir = shlex.quote(str(sb.home / "handoff-prune"))
+    cmd = (f"TMUX_PANE={shlex.quote(sb.pane_id(spec.caller))} NX_RESTART_PRUNE_DIR={prune_dir} "
            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --nx {sb.to_version} --fresh "
            f"--repo {shlex.quote(str(sb.relrepo))} --endpoint {sb.engine.url} --engine-wait {spec.engine_wait} "
            + ("--fallback-resume " if spec.fallback else "")

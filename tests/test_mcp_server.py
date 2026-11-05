@@ -2475,7 +2475,7 @@ def test_plan_search_caps_oversized_result(t2_path, monkeypatch):
         plan_save(
             query=f"capping plan query {i}",
             plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
-            verb="analyze", project="capplanproj", tags="cap",
+            verb="analyze", answer_kind="unknown", project="capplanproj", tags="cap",
         )
     out = plan_search(query="capping plan", project="capplanproj", limit=10)
     assert "[plan_search: result capped at 100 chars" in out
@@ -2486,7 +2486,7 @@ def test_plan_search_caps_oversized_result(t2_path, monkeypatch):
 def test_plan_search_under_cap_is_unaffected(t2_path):
     plan_save(
         query="a small plan", plan_json='{"steps": []}',
-        verb="analyze", project="nocapplanproj",
+        verb="analyze", answer_kind="unknown", project="nocapplanproj",
     )
     out = plan_search(query="small plan", project="nocapplanproj")
     assert "result capped" not in out
@@ -2537,7 +2537,7 @@ def test_plan_save_and_search(t2_path):
     result = plan_save(
         query="compare error handling",
         plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
-        verb="analyze",
+        verb="analyze", answer_kind="unknown",
         project="testproj", tags="search,compare",
     )
     assert "Saved plan:" in result
@@ -2572,7 +2572,7 @@ def test_plan_delete_round_trip(t2_path):
     plan_save(
         query="throwaway shakeout probe entry",
         plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
-        verb="query",
+        verb="query", answer_kind="unknown",
         project="testproj", tags="shakeout-probe",
     )
     out = plan_search(query="shakeout probe", project="testproj")

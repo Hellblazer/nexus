@@ -333,7 +333,7 @@ class EmbeddingProfileMismatchError(RuntimeError):
             "The engine reads local.embed_model and voyage_api_key only "
             "at spawn, so a config change after the service started "
             "leaves the two disagreeing until it restarts. A restart is "
-            f"required for the engine to adopt this: `{_SERVICE_RESTART_COMMAND}`."
+            f"required for the engine to adopt this: {_SERVICE_RESTART_COMMAND}."
         )
 
 
@@ -368,7 +368,7 @@ class CatalogReaderUnavailableError(RuntimeError):
 #: CLI layer built ON TOP of it, and importing downward would invert
 #: that dependency. ``tests/test_config_cmd.py`` pins the command text
 #: in commands/config_cmd.py; keep this string byte-identical to it.
-_SERVICE_RESTART_COMMAND = "nx daemon service stop && nx daemon service start"
+_SERVICE_RESTART_COMMAND = "nx daemon service stop, then nx daemon service start"
 
 #: nexus-l52ms ship-blocker fixup (2026-09-23): the durable, recorded signal
 #: that a ``knowledge__*`` collection is a repo's DELIBERATE ``--corpus
@@ -426,7 +426,7 @@ def _write_intent_embedding_model(content_type: str) -> str:
                     "Voyage API key, but none is configured. Set one with "
                     "`nx config set voyage_api_key <key>` (or export "
                     "VOYAGE_API_KEY), then restart the local service so the "
-                    f"engine re-reads it: `{_SERVICE_RESTART_COMMAND}`."
+                    f"engine re-reads it: {_SERVICE_RESTART_COMMAND}."
                 )
             return canonical_embedding_model(content_type)
         # nexus-xq8f9: in service-vector mode (the 6.0 default) the nexus-service
@@ -1311,7 +1311,7 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
             "collection is a subject area a reader would browse (distributed-systems, "
             "vector-search), never default/knowledge/notes/tmp/test. Name the subject, "
             "reusing an existing one from `nx collection list` where it fits; see "
-            "docs/collections.md Rule 1."
+            "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md Rule 1."
         )
 
 

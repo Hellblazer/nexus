@@ -95,7 +95,7 @@ mcp__plugin_conexus_nexus__memory_put(
 )
 ```
 
-The audit entries are the measurement surface for CA-4: if `nexus_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, Phase 2 dispatch degrades to advisory mode (see RDR-069 Day 2 Operations).
+The audit entries are the measurement surface for CA-4: if `{repo}_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, Phase 2 dispatch degrades to advisory mode (see RDR-069 Day 2 Operations).
 
 **Scenario 4 — timeout or transport failure**: if the Agent tool dispatch fails, times out (>5 minutes without response), or returns an unparseable response (not just a missing Verdict block, but genuinely malformed output), surface the failure to the user explicitly and ask: "Critic dispatch failed. Proceed without critique? (y/N)". Do not silently block and do not silently proceed — the user must choose.
 

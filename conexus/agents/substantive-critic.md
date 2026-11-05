@@ -172,7 +172,7 @@ Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` BEFORE every v
 ```
 Thought 1: State what artifact is being critiqued and its stated purpose
 Thought 2: Identify the criteria/specification it should conform to
-Thought 3: Gather evidence - cross-reference with nx store via search tool (corpus="knowledge"), related artifacts
+Thought 3: Gather evidence - cross-reference with the T3 store via the search tool (corpus="knowledge"), related artifacts
 Thought 4: Analyze first dimension (e.g., structural integrity)
 Thought 5: Analyze second dimension (e.g., logical consistency)
 Thought 6: Analyze third dimension (e.g., completeness)
@@ -202,7 +202,7 @@ When your critique reveals Critical issues requiring remediation, your final out
 ```
 ## Next Step: [appropriate agent, developer, architect-planner, or strategic-planner]
 **Task**: Address critical issues: [list]
-**Input Artifacts**: [critique output, beads created, nx memory path]
+**Input Artifacts**: [critique output, beads created, T2 memory path]
 **Deliverable**: Remediated artifact addressing critical findings
 ```
 
@@ -222,7 +222,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
   mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", project="{project}", title="critique-notes.md"
 
 Store using these naming conventions:
-- **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **T3 store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
 - **T2 (memory_put)**: mcp__plugin_conexus_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
@@ -239,7 +239,7 @@ Store using these naming conventions:
 
 **Verification Checklist**:
 - [ ] T2 gate record written (verify with: memory_get tool: project="...")
-- [ ] nx store documents created (verify with: search tool: query="topic", corpus="knowledge")
+- [ ] T3 store documents created (verify with: search tool: query="topic", corpus="knowledge")
 - [ ] Beads created for critical issues (use bd list when flagging must-fix items)
 - [ ] All data persisted before composing final response
 
@@ -249,7 +249,7 @@ Store using these naming conventions:
 3. **Persist recovery notes**: Write failure details: mcp__plugin_conexus_nexus__memory_put(content="details", project="{project}", title="persistence-failure-{date}.md"
 4. **Continue with response**: Partial data is better than no data - include what succeeded
 
-Example: If nx store write fails but nx memory succeeds, note in response: "Critique persisted to nx memory. nx store write failed - retry with store_put tool manually."
+Example: If T3 store write fails but T2 memory succeeds, note in response: "Critique persisted to T2 memory. T3 store write failed - retry with store_put tool manually."
 
 **Rationale**: Persisting data before generating the response ensures no work is lost if the agent is interrupted or context is compacted.
 
@@ -320,7 +320,7 @@ The canonical structure (in emission order):
 
 **You MUST emit this block literally, at the end of your critique, outside any code fence, using bullet-dash markdown.** The RDR-069 close-flow parser greps for the exact line `- **outcome**:`, alternative phrasings (`outcome: FAILED`, plain-text key-value pairs, code-block emission) force the parser onto the fallback path and degrade CA-2.
 
-**This directive applies in all invocation contexts**, including headless (`claude -p '/conexus:substantive-critique <id>'`), scheduled remote sessions (CCR via the `schedule` skill), GitHub Actions via `anthropics/claude-code-action@v1`, and interactive sessions. The headless context is not exempt from the canonical format. In a documented 2026-04-11 incident (see T2 `nexus_rdr/067-research-2-ca3-phase1b-spike-result` id 743), a headless invocation of this skill produced section headings `## Significant Findings` / `## Minor Findings` / `## Summary` with no `## Critical Issues`, no `## Verification Performed`, and no `## Verdict` block, improvising an entirely different output structure. This directive exists to prevent that class of drift.
+**This directive applies in all invocation contexts**, including headless (`claude -p '/conexus:substantive-critique <id>'`), scheduled remote sessions (CCR via the `schedule` skill), GitHub Actions via `anthropics/claude-code-action@v1`, and interactive sessions. The headless context is not exempt from the canonical format. In a documented 2026-04-11 incident, a headless invocation of this skill produced section headings `## Significant Findings` / `## Minor Findings` / `## Summary` with no `## Critical Issues`, no `## Verification Performed`, and no `## Verdict` block, improvising an entirely different output structure. This directive exists to prevent that class of drift.
 
 The outcome field MUST be one of exactly three literal strings, `justified`, `partial`, or `not-justified`. Do not substitute `PASS`, `FAIL`, `FAILED`, `BLOCKED`, `APPROVED`, or any other alternative vocabulary. The parser maps only the three canonical values.
 

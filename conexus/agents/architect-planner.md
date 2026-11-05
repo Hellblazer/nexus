@@ -243,7 +243,7 @@ Your final output MUST include a clearly labeled next-step recommendation for th
 ```
 ## Next Step: developer
 **Task**: Implement architecture design for [topic]
-**Input Artifacts**: [design doc path, nx knowledge IDs, nx memory keys]
+**Input Artifacts**: [design doc path, T3 knowledge IDs, T2 memory keys]
 **Deliverable**: Working implementation matching architecture spec
 ```
 

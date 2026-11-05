@@ -11,18 +11,18 @@ This directory contains shared resources used across multiple agents.
 
 ## Usage Pattern
 
-All 10 agents reference this shared Context Protocol using:
+All 10 agents reference this shared Context Protocol using the form below. `<plugin-root>` in the block stands for the plugin-root variable, spelled exactly as [agents/developer.md](../../agents/developer.md) spells it on its "This agent follows the Shared Context Protocol" line (copy that line's link target). This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
 
 ```markdown
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](<plugin-root>/resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - [Agent-specific artifacts this agent produces]
 ```
 
-This directory moved out of `agents/` to `conexus/resources/agent-shared/` at
+This directory moved out of `agents/` to [`conexus/resources/agent-shared/`](https://github.com/Hellblazer/nexus/tree/main/conexus/resources/agent-shared) at
 nexus-cnzei.4 — as a subdirectory of `agents/`, it and its five reference
 documents were listed as dispatchable `conexus:_shared:*` entries alongside
 the real agents, with no way to invoke them meaningfully.
