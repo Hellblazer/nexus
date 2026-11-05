@@ -1413,6 +1413,15 @@ def test_a_reply_from_the_future_or_from_before_the_round_is_unreadable(crs, rd)
     assert _read(crs, _fresh_file(rd, age=-2))[0] == "ok"  # a little clock skew is allowed
 
 
+def test_a_reply_stamped_just_before_the_round_by_the_coarse_file_clock_reads(crs, rd) -> None:
+    """Linux stamps mtimes from the coarse clock (a few ms behind time.time()), so a reply written
+    right after the round's `at` can carry an mtime just before it. PR #1641 CI shard 5 red on
+    test_a_reply_written_while_later_sessions_are_still_being_asked_reads_ready this way."""
+    since = NOW - 60
+    assert _read(crs, _fresh_file(rd, age=60.004), since=since)[0] == "ok"  # 4 ms before the round
+    assert _read(crs, _fresh_file(rd, age=62), since=since)[0] == "invalid"  # a real earlier write
+
+
 @pytest.mark.parametrize("ready", ['"true"', "1", "null", '"yes"'])
 def test_ready_must_be_a_real_boolean(crs, rd, ready) -> None:
     assert _read(crs, _fresh_file(rd, f'{{"ready": {ready}}}'))[0] == "invalid"

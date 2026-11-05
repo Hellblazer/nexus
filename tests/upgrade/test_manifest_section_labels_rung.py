@@ -76,6 +76,9 @@ class World:
         self.restamp_on_append: str | None = None  # the engine stamps the document's indexed_at on every manifest write
         self.fail_update_ids: set[str] = set()
         self.updates: list[tuple[str, dict]] = []
+        self.single_updates = 0  # round trips through update(), one per document
+        self.update_many_sizes: list[int] = []  # round trips through update_many(), with their entry counts
+        self.fail_update_many = False
         self.probe_positions = False
         self.listings = 0
         self.fillable_reads = 0  # reads of the engine's one-query count (nexus-l4hds)
@@ -183,11 +186,29 @@ class World:
         return {"ok": True, "docs": len(docs), "failed_doc_ids": failed}
 
     def update(self, tumbler: str, **fields) -> None:
+        self.single_updates += 1
         self.updates.append((tumbler, dict(fields)))
         if tumbler in self.fail_update_ids:
             raise RuntimeError("engine refused the update")
         assert set(fields) == {"indexed_at"}, fields
         self.docs[tumbler].indexed_at = fields["indexed_at"]
+
+    def update_many(self, updates: list[dict]) -> list[int]:
+        """The engine's batch route: one round trip, a count per entry (0: nothing updated)."""
+        self.update_many_sizes.append(len(updates))
+        if self.fail_update_many:
+            raise RuntimeError("engine refused the batch")
+        counts = []
+        for u in updates:
+            fields = {k: v for k, v in u.items() if k != "tumbler"}
+            assert set(fields) == {"indexed_at"}, fields
+            if u["tumbler"] in self.fail_update_ids:
+                counts.append(0)
+                continue
+            self.updates.append((u["tumbler"], fields))
+            self.docs[u["tumbler"]].indexed_at = fields["indexed_at"]
+            counts.append(1)
+        return counts
 
     # t3 -------------------------------------------------------------------
     def get_collection(self, name: str):
@@ -470,6 +491,64 @@ def test_a_failed_restore_defers_and_names_the_document(world: World) -> None:
 
     assert result.outcome is ConvergeOutcome.DEFERRED
     assert "1.1.1" in result.detail and "indexed_at" in result.detail
+
+
+def _many_written_documents(world: World, n: int) -> list[str]:
+    docs = [f"1.1.{i}" for i in range(1, n + 1)]
+    for i, d in enumerate(docs):
+        world.doc(d, indexed_at=DOC_STAMP)
+        world.row(d, 0, h(100 + i))
+        _labelled(world, h(100 + i))
+    world.restamp_on_append = RUN_TIME
+    return docs
+
+
+def test_a_batch_restores_every_written_documents_stamp_in_one_round_trip(world: World) -> None:
+    """nexus-mr443.1: one update() per written document cost one WAN round trip each (~200 documents a
+    minute against the cloud, about 3.5 hours for its catalog). The batch's restores go in one update_many."""
+    docs = _many_written_documents(world, 7)
+
+    assert world.rung().converge(Report()).outcome is ConvergeOutcome.COMPLETED
+
+    assert world.single_updates == 0, "no per-document round trip"
+    assert world.update_many_sizes == [7], "one call carries the batch"
+    assert sorted(world.updates) == [(d, {"indexed_at": DOC_STAMP}) for d in docs]
+    assert all(world.docs[d].indexed_at == DOC_STAMP for d in docs)
+
+
+def test_a_failed_batch_restore_falls_back_to_one_update_per_document(world: World) -> None:
+    docs = _many_written_documents(world, 3)
+    world.fail_update_many = True
+
+    assert world.rung().converge(Report()).outcome is ConvergeOutcome.COMPLETED
+
+    assert world.update_many_sizes == [3]
+    assert world.single_updates == 3
+    assert all(world.docs[d].indexed_at == DOC_STAMP for d in docs)
+
+
+def test_an_entry_the_batch_did_not_update_is_retried_alone_and_named_if_it_still_fails(world: World) -> None:
+    docs = _many_written_documents(world, 3)
+    world.fail_update_ids = {docs[1]}
+
+    result = world.rung().converge(Report())
+
+    assert world.update_many_sizes == [3]
+    assert [u for u in world.updates if u[0] == docs[1]] == [(docs[1], {"indexed_at": DOC_STAMP})] * 2, \
+        "the zero-count entry gets the per-document restore and its one retry"
+    assert world.docs[docs[0]].indexed_at == DOC_STAMP and world.docs[docs[2]].indexed_at == DOC_STAMP
+    assert result.outcome is ConvergeOutcome.DEFERRED
+    assert docs[1] in result.detail and docs[0] not in result.detail
+
+
+def test_a_writer_without_update_many_keeps_the_per_document_restore(world: World) -> None:
+    docs = _many_written_documents(world, 2)
+    world.update_many = None  # an older writer: the attribute is absent or not callable
+
+    assert world.rung().converge(Report()).outcome is ConvergeOutcome.COMPLETED
+
+    assert world.single_updates == 2
+    assert all(world.docs[d].indexed_at == DOC_STAMP for d in docs)
 
 
 # ── documents the orphan backfill minted ─────────────────────────────────────

@@ -1735,6 +1735,12 @@ def _number(v: object) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+#: Linux stamps a file's mtime from the coarse clock, a few ms behind time.time(), so a reply written
+#: right after the round's `at` can read as written before it. One second of slack covers that and
+#: still refuses a reply from any earlier round.
+REPLY_SINCE_SLACK_S = 1.0
+
+
 def read_reply(path: str, since: float, now: float) -> tuple[str, dict]:
     """The one place a reply file is read. ("none", {}) when absent, ("invalid", {}) when it is anything
     but a regular file of ours, under REPLY_MAX bytes, written between ``since`` and ``now`` (+5 s
@@ -1753,7 +1759,7 @@ def read_reply(path: str, since: float, now: float) -> tuple[str, dict]:
     try:
         st = os.fstat(fd)
         if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > REPLY_MAX
-                or st.st_mtime < since or st.st_mtime > now + 5):
+                or st.st_mtime < since - REPLY_SINCE_SLACK_S or st.st_mtime > now + 5):
             return "invalid", {}
         raw = os.read(fd, REPLY_MAX + 1)
     except OSError:

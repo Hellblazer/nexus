@@ -43,65 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.95.0)
+## Awaiting the next release (pinned: v7.95.2)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-- `conexus/hooks/scripts/mailbox_drain.py` (nexus-1d6pz.1): every block the drain delivers, fresh or recovered from the pending record, is bracketed by a line saying it is peer data from another session, not the user's words or approval, and by an end marker after the body.
-- `conexus/skills/peer-messaging/SKILL.md` (nexus-1d6pz.3): a status question reads the threads board, where the sessions keep one, before mailing the peer.
-- `conexus/resources/tier-discipline.md` (nexus-0vh80): only the builtin tier may claim curated; project-tier declared plans read as saved.
-- `conexus/skills/nexus/SKILL.md` (nexus-0vh80): `plan_save` takes a required `answer_kind`, and a saved plan serves only that kind, in its own project.
-- `conexus/skills/nexus/reference.md` (nexus-0vh80): the saved provenance, its narrow eligibility and the retrieval-only shape veto.
-- `conexus/skills/orchestration/SKILL.md` (nexus-z7ddd): the review-round counter-metric no longer cites a T2 record in the maintainer's store.
-- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-z7ddd): the remote test hosts a subagent's ssh git write may name come from `NX_REMOTE_TEST_HOSTS` (comma-separated ssh host aliases; unset or empty exempts none, where the hook used to exempt `chas` and `chas-test`). A maintainer who relied on that sets the variable in the session's settings `env`.
-- `conexus/README.md` (nexus-z7ddd): the hooks table names `NX_REMOTE_TEST_HOSTS` as the setting behind the ssh test-host exemption.
-- `conexus/skills/orchestration/reference.md` (nexus-z7ddd): the nx_answer timing figures no longer cite a T2 record in the maintainer's store.
-- `conexus/skills/composition-probe/SKILL.md` (nexus-z7ddd): drops a pointer to a T2 record in the maintainer's store.
-- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-z7ddd): states the Phase 1b facts inline instead of citing T2 records in the maintainer's store; the canonical prompt load stays (a lint allowlist entry names it).
-- `conexus/agents/substantive-critic.md` (nexus-z7ddd): drops a pointer to a T2 record in the maintainer's store.
-- `conexus/skills/rdr-close/SKILL.md` (nexus-z7ddd): the close-override measurement pattern names the repo's own `{repo}_rdr` project, not `nexus_rdr`.
-
-- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-2v7da): on a compact start with nothing to restore (no checkpoint file, the stub post writes when pre did not run, a checkpoint already used by an earlier compaction, or one past the prune window), inject now emits a short notice saying no restore is available and pointing at the threads board entry and the working tree. It said nothing before, so a resumed session could not tell "nothing was lost" from "nothing was saved". The same notice covers a stamp past the prune window and a checkpoint an earlier compaction already injected (the commonest case: inject runs before post). A foreign session, a non-compact start, an unreadable checkpoint and a second fire for the same compaction (a sidecar under 30 seconds old) stay silent.
-
-- `conexus/agents/developer.md` (nexus-pplwc): names T3 store titles and T2 memory paths, not nonexistent `nx store` / `nx memory` subcommands.
-- `conexus/agents/strategic-planner.md` (nexus-pplwc): the same T3 store / T2 memory wording.
-- `conexus/agents/test-validator.md` (nexus-pplwc): the same T3 store / T2 memory wording.
-- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-pplwc): the naming conventions say T3 store title, not `nx store title`.
-- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-pplwc): the Input Artifacts row says T3 store docs and T2 memory.
-- `conexus/skills/architecture/SKILL.md` (nexus-pplwc): names `jet_brains_type_hierarchy` (JetBrains only), not a bare `type_hierarchy` no backend has.
-- `sn/hooks/scripts/session-start-section.md` (nexus-pplwc): the injected Serena section names the type hierarchy tool as `jet_brains_type_hierarchy`, JetBrains only.
-- `conexus/agents/architect-planner.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/code-review-expert.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/codebase-deep-analyzer.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/debugger.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/deep-analyst.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/deep-research-synthesizer.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/substantive-critic.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/resources/agent-shared/ERROR_HANDLING.md` (nexus-pplwc): the store-failure row is an engine connectivity failure with `nx doctor` as the check, not ChromaDB; the naming row cites the RDR-103 grammar.
-- `conexus/skills/nexus/SKILL.md` (nexus-pplwc): the collection-name separator cites the RDR-103 grammar, not ChromaDB.
-- `conexus/skills/nexus/reference.md` (nexus-pplwc): memory_search is PostgreSQL full-text search with no query grammar, not FTS5; the separator cites RDR-103, not ChromaDB.
-- `conexus/skills/serena-code-nav/SKILL.md` (nexus-pplwc): names only the Serena tools sn exposes under the claude-code context.
-- `conexus/skills/upgrade/SKILL.md` (nexus-pplwc): no longer calls the removed guided-upgrade, migrate-to-service and migration-audit primitives callable, nor cites a rollback verb that no code prints.
-- `conexus/commands/continuation.md` (nexus-z7ddd): the commit-scope audit script is named with its GitHub link, as 'when the project has a `commit_scope_audit.sh`', so no agent reads it as a file it must open.
-- `conexus/commands/rdr-audit.md` (nexus-z7ddd): step 3 loads the canonical prompt from the shipped `AUDIT-PROMPT.md` resource, with the T2 entry as an override.
-- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-z7ddd): the canonical audit prompt is read from the shipped `resources/rdr_process/AUDIT-PROMPT.md`; T2 `nexus_rdr/067-canonical-prompt-v1`, which a user's install lacks, only overrides it.
-- `conexus/resources/rdr_process/AUDIT-PROMPT.md` (nexus-z7ddd): new: the RDR-067 canonical audit prompt (v1.2) as a plugin resource, with the stale `nx` tool names corrected to `conexus`.
-- `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md` (nexus-z7ddd): names the rdr-audit-checklist skill instead of a `${CLAUDE_PLUGIN_ROOT}` path that does not resolve in a file read with Read.
-- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-z7ddd): the orchestration skill is a link relative to the file, since `${CLAUDE_PLUGIN_ROOT}` is not substituted in a file an agent reads with Read. Round 2: the Context Protocol template block writes `<plugin-root>` where agent files carry the plugin-root variable and says so, because this file is opened with Read, which substitutes nothing.
-- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-z7ddd): the orchestration skill is a link relative to the file, since `${CLAUDE_PLUGIN_ROOT}` is not substituted in a file an agent reads with Read. Round 2: the Context Protocol template block writes `<plugin-root>` where agent files carry the plugin-root variable and says so, because this file is opened with Read, which substitutes nothing. The example's memory line reads `project Delos, title phase2-auth.md`.
-- `conexus/resources/agent-shared/MAINTENANCE.md` (nexus-z7ddd): sibling files are named relative to the file, not as repo paths. Round 2: the Context Protocol template block writes `<plugin-root>` where agent files carry the plugin-root variable and says so, because this file is opened with Read, which substitutes nothing.
-- `conexus/skills/writing-nx-skills/SKILL.md` (nexus-z7ddd): repo paths (the registry, the structure test, the SessionStart guidance and its budget tests) are GitHub links.
-- `conexus/skills/composition-probe/SKILL.md` (nexus-z7ddd): the worked example links the search engine and the leased Maven wrapper on GitHub instead of naming repo paths. Round 2: the guarded conditional names `scripts/mvnw-leased.sh` again as the detection key, link beside it, `./mvnw` fallback unchanged.
-- `conexus/skills/cli-controller/SKILL.md` (nexus-z7ddd): an HTML comment no longer names a nexus build directory.
-- `conexus/skills/catalog/SKILL.md` (nexus-z7ddd): the example file path is a neutral `src/app/scoring.py`.
-- `conexus/resources/agent-shared/README.md` (nexus-z7ddd): the note on where this directory moved from links the directory on GitHub instead of naming a repo path. Round 2: the Context Protocol template block writes `<plugin-root>` where agent files carry the plugin-root variable and says so, because this file is opened with Read, which substitutes nothing.
-- `conexus/hooks/scripts/routing/credential_print_guard.py` (nexus-z7ddd): the deny message links the nexus repo's `claude_credentials.py` wrapper on GitHub and says a project without it asks its operator for an equivalent, instead of telling every user to run a script only the nexus repo has.
-- `conexus/hooks/scripts/routing/README.md` (nexus-z7ddd): maintainer notes link the nexus tests on GitHub.
-- `conexus/hooks/scripts/routing/registry.yaml` (nexus-z7ddd): a rule's rationale and the schema note name the credentials wrapper and the routing directory by description, not by a repo path or a bare script name.
-- `conexus/skills/orchestration/reference.md` (nexus-z7ddd): the collection-rules line is a link, not a URL with the sentence's period glued on.
-- `sn/hooks/scripts/serena-tools.txt` (nexus-z7ddd): the generated header names the sync script instead of a repo path; the tool list is unchanged.
-- `conexus/README.md` (nexus-z7ddd): the docs, tests and top-level README it names are GitHub links, and the commands and skills directories are named relative to the plugin.
-- `conexus/skills/orchestration/reference.md` (nexus-z7ddd): the nx_answer timing line no longer cites an operator-only T2 record.
-- `sn/README.md` (nexus-z7ddd): the developer agent is named relative to the conexus plugin, not as a repo path.
-- `conexus/plans/target_families/README.md` (nexus-z7ddd): the tables directory is a GitHub link, not a glob over a repo path.
 
 ## Deferred to the next client release
