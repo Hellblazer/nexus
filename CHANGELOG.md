@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The section-label fill in `nx upgrade` is several times faster against a remote engine** (nexus-mr443.1; client-only). After each batch of manifest writes it put every written document's `indexed_at` back with one catalog update per document, a full round trip each: about 200 documents a minute against the managed service, roughly 3.5 hours for its catalog. The batch's stamps now go back in one `update_many`; a failed batch, or an entry it did not update, falls back to the per-document restore and its retry, so a stamp that cannot be written back is still named and the run still ends DEFERRED. Local installs did not notice the old cost.
+
 ## [7.95.1] - 2026-11-04
 
 Pairs with engine-service-v0.1.179 (REQUIRED_ENGINE_VERSION 0.1.178 -> 0.1.179). The engine changes since v0.1.178 are text only (the re-embed refusal's restart remedy, the boot-refusal and grants-004 messages, the tuple templates' doc links), so the one wire-ledger entry is additive and the engine is deployed to the managed service before this client tag.
