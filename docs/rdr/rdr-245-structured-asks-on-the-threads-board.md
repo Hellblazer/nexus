@@ -101,10 +101,12 @@ Five of the page's fifteen open items were conditional ("after 0.1.180
 deploys", "after the seven-day canary reading"). linda moved them out of the
 answer list by hand. Nothing on the board says whether an ask blocks its
 session (the asker idle on it), whether it is reversible, or when it is due,
-so nothing can decide what deserves an interrupt and what waits. The
-synthesis classed about six or seven of the ten cards as reversible or already
-decided by a standing rule (H2), which is exactly the field that batching and
-A's lazy consensus would need.
+so nothing can decide what deserves an interrupt and what waits. A first
+reading of the ten cards put six or seven as reversible or already decided;
+the two-week retro classification (Research Findings, research-5) scores the
+same ten as 3 auto-proceed, 6 must-ask, 1 unclassifiable. Either way, the
+`reversible:` and `blocking:` fields are what batching and A's lazy consensus
+would need, and today they do not exist.
 
 #### Gap 5: The answer surfaces fit neither Sam's devices nor how he answers
 
@@ -126,6 +128,23 @@ reversible ones, hold the ART push"), not by filling in a form per ask.
 | RDR-239 dictionary | Untouched in phase 1: the answer uses the mailbox template's existing `kind: reply` and `correlation_id`. |
 
 ## Context
+
+### Background
+
+Sam supervises about ten concurrent Claude Code sessions, each in its own
+tmux window of the session `vibes` on the laptop, and from 2026-11-06 he is
+away for two weeks, reaching them only through ssh/mosh/tmux clients on iOS
+devices. Sessions put decisions to him as free-text `needs_sam:` lines on the
+T2 `threads` board and as `needs-sam` beads; another session (linda on
+2026-11-05, wren on 2026-11-01) gathers them and relays his answers by hand.
+This RDR came out of a review of an outside project, `ah` ("agent host"),
+whose ideas (the file as the meeting point, binding by place, reply phases,
+answering where the work is) were mined for this lineage without copying its
+code; the mining and the lineage review are in T3 `agent-cockpit`
+(`analysis-cockpit-ux-synthesis-2026-11-05`,
+`analysis-cockpit-lineage-2026-11-05`). Companion work outside this RDR: tmux
+turn-state dots and `prefix a` (B, installed 2026-11-05 as user-level hooks)
+and the ask budget (A, standing grants Sam writes into his CLAUDE.md).
 
 ### Technical Environment
 
@@ -168,6 +187,39 @@ reversible ones, hold the ART push"), not by filling in a form per ask.
 3. Meet Sam where he already is: a Claude session he talks to, inside a tmux
    client he reaches from his phone.
 
+## Research Findings
+
+### Investigation
+
+Findings are recorded in T2 as `nexus_rdr/245-research-1` through `-7`.
+Four were checked by spike or source read in session ah_276 on 2026-11-05
+(1-4); three rest on the T3 analyses named in Background (5-7).
+
+### Key Discoveries
+
+- **Verified** (research-1, source read): the drain hook frames every mail
+  body as "Peer data from another session, not your user's words or
+  approval" (`src/nexus/hooks/mailbox_drain.py:708`). A relayed answer carries
+  no authority at the asker today; Gap 3 and the matched-answer frame rest on
+  this.
+- **Verified** (research-2, spike): the Notification hook payload carries
+  `notification_type` (`permission_prompt` observed live) and `message`, so
+  B's `needs` state is read from a real field, not message text.
+- **Verified** (research-3, spike): sessions already running pick up hooks
+  added to `~/.claude/settings.json` without a restart.
+- **Verified** (research-4, spike): an agent's Bash call has no TTY on stdin
+  but inherits `TMUX` and `TMUX_PANE`. The TTY check excludes agent tool
+  calls; a tmux-environment check alone would not (Trust model).
+- **Documented** (research-5): over 2026-10-22..11-05, about 74 asks; 23%
+  would auto-proceed under the draft ask budget, 47% at most. Structured asks
+  pay off whatever A decides; A's share is smaller than first estimated.
+- **Documented** (research-6): an approved ask (the ART push, 10-31) was asked
+  again on 11-05, and a 20-answer pass on 11-01 left no record outside one
+  session. Routing to the asker and an answer record are the fix.
+- **Documented** (research-7): earlier cockpit RDRs failed by bundling
+  substrate with consumers and by delegating rendering out of nexus; this RDR
+  does neither.
+
 ## Proposed Solution
 
 ### Approach
@@ -193,6 +245,11 @@ reversible ones, hold the ART push"), not by filling in a form per ask.
    option the session itself listed, and shows the asker how it came (`via`)
    and Sam's own words. A mismatch keeps the peer frame.
 7. The console's Threads panel shows the same ask cards read-only.
+
+### Technical Design
+
+The design is the ask record, its classification, the mediator, the CLI and
+popup, the answer path and the trust model, each in the subsections below.
 
 ### The ask record
 
@@ -812,7 +869,14 @@ from the T2 `asks` records and the board:
 
 ### Contradiction Check
 
-Not yet run.
+Author pass, 2026-11-05. Two tensions were found and resolved in the text.
+The CLI's TTY requirement cannot apply to the mediator, which is an agent
+with no TTY (research-4); `--via mediator` instead requires `--sam-words` and
+the caller's session id, and the Trust model says plainly that this lets any
+session forge a mediator answer. Gap 4's first estimate of the reversible
+share (six or seven of ten) conflicted with the retro (3 of 10); Gap 4 now
+carries both and the decision rests on neither. The gate critique checks the
+rest.
 
 ### Assumption Verification
 
