@@ -366,3 +366,94 @@ def test_mcp_store_put_in_local_mode_stores_into_the_bge_sibling(t2_service_env)
     assert out.startswith("Stored:") and sibling in out and "embeds with Voyage AI" in out, out
     (entry,) = _reader().find_by_title_exact("rfvyy-mcp-routed")
     assert entry.sensitive is True and entry.physical_collection == sibling
+
+
+# --------------------------------------------------------------------------- #
+# Residual S-B: a document already registered in a Voyage collection.
+# --------------------------------------------------------------------------- #
+
+def _register_in(path: Path, collection: str, *, source_uri: str = "") -> str:
+    """A live document in *collection*, as an earlier non-sensitive index left it (no chunks: the catalog row
+    is what a re-index resolves)."""
+    from nexus.catalog.factory import make_catalog_writer
+
+    reader, writer = _reader(), make_catalog_writer()
+    owner = reader.curator_owner_tumbler_by_name("rfvyy-ext") or writer.register_owner("rfvyy-ext", "curator")
+    tumbler = writer.register(
+        owner=owner, title=path.stem, content_type="prose", file_path=str(path.resolve()),
+        physical_collection=collection, source_uri=source_uri or f"file://{path.resolve()}")
+    return str(tumbler)
+
+
+def _entry(tumbler: str):
+    entry = _reader().by_doc_id(tumbler)
+    assert entry is not None
+    return entry
+
+
+def _bge_sibling_has_no_chunks(collection: str) -> bool:
+    from nexus.db import make_t3
+
+    t3 = make_t3()
+    return (not t3.collection_exists(collection)) or t3.get_or_create_collection(collection).count() == 0
+
+
+def test_a_sensitive_index_of_a_voyage_registered_document_refuses_and_does_not_reroute(
+    t2_service_env, tmp_path: Path,
+) -> None:
+    md = _md(tmp_path, "registered.md")
+    tumbler = _register_in(md, _VOYAGE["docs"])
+    out = CliRunner().invoke(main, ["index", "md", str(md), "--corpus", "rfvyy-ext", "--sensitive"])
+    assert out.exit_code != 0, out.output
+    assert tumbler in out.output and _VOYAGE["docs"] in out.output, out.output
+    assert "--ack-external-embedder" in out.output and f"nx catalog delete {tumbler}" in out.output
+    entry = _entry(tumbler)
+    assert entry.sensitive is False and entry.physical_collection == _VOYAGE["docs"]
+    assert len(_reader().find_all_by_file_path(str(md.resolve()))) == 1
+    assert _bge_sibling_has_no_chunks(f"docs__rfvyy-ext__{BGE}__v1")
+
+
+def test_the_same_refusal_when_the_document_matches_by_source_uri(t2_service_env, tmp_path: Path) -> None:
+    md = _md(tmp_path, "by-uri.md")
+    tumbler = _register_in(md, _VOYAGE["docs"], source_uri="x-devonthink-item://RFVYY-S-B")
+    out = CliRunner().invoke(
+        main, ["index", "md", str(md), "--corpus", "rfvyy-ext", "--sensitive", "--source-uri", "x-devonthink-item://RFVYY-S-B"])
+    assert out.exit_code != 0, out.output
+    assert tumbler in out.output and _VOYAGE["docs"] in out.output
+    assert "differs" not in out.output and "move" not in out.output.lower().split("does not move")[0]
+    entry = _entry(tumbler)
+    assert entry.sensitive is False and entry.physical_collection == _VOYAGE["docs"]
+
+
+def test_the_ack_indexes_the_registered_document_in_place(t2_service_env, tmp_path: Path) -> None:
+    from nexus.doc_indexer import _register_or_lookup_doc_id
+
+    md = _md(tmp_path, "in-place.md")
+    tumbler = _register_in(md, _VOYAGE["docs"])
+    got = _register_or_lookup_doc_id(
+        md, "rfvyy-ext", content_type="prose", physical_collection=_VOYAGE["docs"],
+        sensitive=True, ack_external_embedder=True)
+    assert got == tumbler
+    entry = _entry(tumbler)
+    assert entry.sensitive is True and entry.physical_collection == _VOYAGE["docs"]
+
+
+def test_a_registered_document_already_in_bge_proceeds_without_the_ack(t2_service_env, tmp_path: Path) -> None:
+    """Negative control: only a Voyage-embedded home refuses."""
+    from nexus.doc_indexer import _register_or_lookup_doc_id
+
+    md = _md(tmp_path, "already-bge.md")
+    bge_home = f"docs__rfvyy-ext__{BGE}__v1"
+    tumbler = _register_in(md, bge_home)
+    got = _register_or_lookup_doc_id(
+        md, "rfvyy-ext", content_type="prose", physical_collection=bge_home, sensitive=True)
+    assert got == tumbler and _entry(tumbler).sensitive is True
+
+
+def test_a_pdf_registered_in_voyage_refuses_the_same_way(t2_service_env, tmp_path: Path) -> None:
+    pdf = _pdf(tmp_path, "registered.pdf")
+    tumbler = _register_in(pdf, _VOYAGE["docs"])
+    out = CliRunner().invoke(
+        main, ["index", "pdf", str(pdf), "--corpus", "rfvyy-ext", "--extractor", "pymupdf", "--sensitive"])
+    assert out.exit_code != 0 and tumbler in out.output, out.output
+    assert _entry(tumbler).sensitive is False

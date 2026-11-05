@@ -993,8 +993,10 @@ def _register_or_lookup_doc_id(
 ) -> str | tuple[str, bool]:
     """RDR-102 D1 pre-flight catalog registration for the doc_indexer family.
 
-    *ack_external_embedder* (RDR-243 Q3) is the acknowledgement a sensitive run carries; the refusal that
-    reads it for a document already registered in a Voyage collection is nexus-rfvyy.2's.
+    *ack_external_embedder* (RDR-243 Q3, nexus-rfvyy.2): a ``sensitive`` run that resolves a document
+    already registered in a Voyage collection refuses before any write unless this is set, because the
+    register call writes none of its fields on a match and a re-route to the bge sibling would split
+    the document. The refusal is :class:`~nexus.sensitive_write.ExternalEmbedderRefusedError`.
 
     *sensitive* (RDR-243, nexus-rfvyy.6.9) puts the flag on the document this call resolves, before
     the caller writes any chunk and before the post-store chains fire: a fresh registration carries
@@ -1077,7 +1079,12 @@ def _register_or_lookup_doc_id(
         SourceUriNotFoundError,
     )
 
-    from nexus.sensitive_write import SensitiveFlagNotSetError, raise_flag  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+    from nexus.sensitive_write import (  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        ExternalEmbedderRefusedError,
+        SensitiveFlagNotSetError,
+        raise_flag,
+        refuse_external_existing,
+    )
 
     reader = None
     writer = None
@@ -1086,6 +1093,9 @@ def _register_or_lookup_doc_id(
         if sensitive:
             raise_flag(writer, str(tumbler), what="a --sensitive index")
 
+    def _refuse_voyage_existing(entry: object) -> None:
+        if sensitive:
+            refuse_external_existing(entry, ack=ack_external_embedder, what="a --sensitive index")
 
     try:
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
@@ -1170,6 +1180,8 @@ def _register_or_lookup_doc_id(
         # through to registration on a miss.
         if source_uri:
             existing_by_uri = reader.by_source_uri(source_uri)
+            if existing_by_uri is not None:
+                _refuse_voyage_existing(existing_by_uri)
             if existing_by_uri is None:
                 raise SourceUriNotFoundError(
                     f"--source-uri {source_uri!r} resolves to no live "
@@ -1207,6 +1219,7 @@ def _register_or_lookup_doc_id(
             existing = _repo_owner_document_for(reader, file_path)
             from_repo_owner = existing is not None
         if existing is not None:
+            _refuse_voyage_existing(existing)
             if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
                 # nexus-njn1a: a document an earlier release registered without its source_uri
                 # (the same curator-owner case) gets it on the next run. Advisory, like the
@@ -1430,7 +1443,7 @@ def _register_or_lookup_doc_id(
         if with_created:
             return str(tumbler), created
         return str(tumbler)
-    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError, SensitiveFlagNotSetError):
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError, SensitiveFlagNotSetError, ExternalEmbedderRefusedError):
         # nexus-y8qtj / nexus-3o4lt: fail-loud rules propagate — never
         # swallowed by the best-effort catch-all below.
         raise

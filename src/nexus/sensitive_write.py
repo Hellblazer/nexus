@@ -26,7 +26,7 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "BGE_TOKEN", "ExternalEmbedderRefusedError", "SENSITIVE_REASON", "SensitiveFlagNotSetError", "ack_help",
     "bge_sibling", "cloud_disclosure", "cloud_refusal_text", "is_external_embedder", "raise_flag",
-    "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help",
+    "refuse_external_existing", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help",
     "route_for_index", "sensitive_write_kwargs",
 ]
 
@@ -181,6 +181,28 @@ def resolve_sensitive_collection(name: str, *, ack: bool, what: str) -> str:
     click.echo(f"sensitive: {name} embeds with Voyage AI; this document goes to {sibling}, which embeds on "
                f"this machine.", err=True)
     return sibling
+
+
+def refuse_external_existing(existing: object, *, ack: bool, what: str) -> None:
+    """Refuse a ``--sensitive`` index of a document already registered in a Voyage collection (residual S-B).
+
+    The register call matches a live document on its source URI or file path and writes none of its
+    request fields, so routing the new chunks to the bge sibling would split the document: the catalog
+    row would still name the Voyage collection and the Voyage embedding would stay. This refuses
+    instead of re-routing, before any chunk or catalog write. With *ack* the run indexes in place.
+    """
+    if ack:
+        return
+    collection = getattr(existing, "physical_collection", "") or ""
+    if not collection or not is_external_embedder(collection):
+        return
+    tumbler = getattr(existing, "tumbler", "<tumbler>")
+    raise ExternalEmbedderRefusedError(
+        f"{what} refused: document {tumbler} is already registered in the Voyage collection {collection}, "
+        f"and a --sensitive index does not move it. Nothing was written. Either pass "
+        f"--ack-external-embedder to index it in place on Voyage, or delete the document "
+        f"(nx catalog delete {tumbler}) and index it again."
+    )
 
 
 def require_catalog_sensitivity(cat: Any, *, what: str = "a sensitive write") -> None:
