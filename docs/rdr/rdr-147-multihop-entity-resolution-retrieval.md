@@ -451,6 +451,10 @@ the script, so recall alone does not make the answer better than the script's.
   question shape (the 5 issue questions, twice each); the verdict is a model
   call; the re-check cited 35 of the 45 joined items as supporting; the 2 q2
   runs ran on grown plan 14 and covered `f1` on their single joined item.
+  Weakened 2026-11-05 (147-research-12, 147-research-13): in four MVV runs the
+  re-check accepted 11 of 15 entered joins, and the same item flipped between
+  runs. The design no longer rests on it: option 1 (Approach item 2) generates
+  from an entered join whatever the re-check says.
 
 ## Proposed Solution
 
@@ -471,8 +475,14 @@ Three changes. Only the first two are on the path to the MVV.
    The re-check judges only new items (RDR-232's rule, `coverage_ledger.py`
    `evaluate(..., prior=...)`), so a record alone, which names a company but not
    the issue, is never judged supporting (0 of 8, 147-research-8), while the
-   joined item is (10 of 10, 147-research-9). Then the answer is generated from
-   evidence that holds the names. The gate is the signal
+   joined item usually is (10 of 10, 147-research-9; 11 of 15 in the 2026-11-05
+   MVV runs, 147-research-13). Then the answer is generated from evidence that
+   holds the names. When the branch entered and merged at least one joined item,
+   the re-check's verdict is not required to generate (Sam, 2026-11-05, option 1;
+   T2 `nexus/rdr147-option1-decision-2026-11-05`): a final ledger that leaves the
+   facets uncovered does not stop generation, and the answer's notice says it
+   rests on an exact-key join the coverage check did not confirm. The facet
+   states stay as the re-check judged them. The gate is the signal
    itself: an unsupported facet AND entity-key tokens in the evidence. A question
    with no such tokens never reaches it, so simple questions are untouched
    (Beyond-Static guidance), and no second planning round, new plan dimension or
@@ -523,6 +533,11 @@ if first ledger has an unsupported facet (entry rule: see Step 4 sub-step 1)
      report r.missing and r.ambiguous in the RepairReport
      re-evaluate once (the existing single re-check, unchanged:
        it judges the new joined items only)
+     if at least one joined item merged and the final ledger is uncovered:
+       generate anyway (option 1); facet states unchanged
+     the notice of any answer from an entered join says it rests on an
+       exact-key join, names the resolved keys, and, when the re-check did
+       not cover the facets, says the coverage check did not confirm it
 ```
 
 When the branch enters, it runs in place of the semantic facet queries, the
@@ -535,6 +550,22 @@ did on q2, q3, q4 and q7 (147-research-7). The repair's existing
 deadline and USD rules apply unchanged; `resolve` is a zero-cost step. The
 `missing` and `ambiguous` lists are disclosed, so a partial resolution is
 visible in the run summary rather than silent.
+
+**Generation after an entered join (option 1, Sam 2026-11-05).** This is the one
+exception to RDR-232's rule that a ledger covering no facet stops generation
+(`skip_generation`, and `decide_outcome` in `coverage_outcome.py` reading an
+`unavailable` / `uncovered` ledger as a non-answer). It applies only when the
+resolution branch entered and merged at least one joined item, under the same
+switch (`NX_ANSWER_RESOLUTION_REPAIR`), so a confined run, a run whose keys all
+failed to resolve, and every run with the switch off keep RDR-232's rule. The
+ledger and the RepairReport are not rewritten: the facets keep the re-check's
+states, and the run reports that generation went ahead on the join. The
+disclosure is a notice line on the answer, in the place the existing
+`[insufficient-evidence: ...]` notice uses. The risk is an answer the coverage
+check did not confirm. It is bounded by the join itself: the key appears
+verbatim in the anchor and the record is found by exact title. In the
+2026-11-05 MVV runs no answer named a wrong company (pooled precision 1.00 in
+every run, 147-research-12, 147-research-13).
 
 **Entity-key classification (Step 1).** A per-collection pattern in config, for
 example `entity.collections: {"knowledge__herb-*": "CUST-\\d{4}|eid_[0-9a-f]{8}"}`,
@@ -747,7 +778,8 @@ controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 - **Precision:** the companies the answer names have precision ≥ 0.95 against
   HERB ground truth, as the per-run mean over those of the 5 issue questions whose
   answer names at least one company; a question whose answer names none is left out
-  (Sam, 2026-11-05, 147-research-12) (measured 0.9667).
+  (Sam, 2026-11-05, 147-research-12; measured 0.9667 on 2026-11-03,
+  147-research-9).
 
 Reported, not gated: issue5 company recall and F1 beside the script's
 0.7642857142857142 (asserted exactly, as the diagnostic baseline). Hop-1
@@ -760,7 +792,9 @@ rung stays as a diagnostic and cannot satisfy the MVV. The 2 aggregation
 questions are reported (recall, precision, F1) and not gated. A run that clears
 the bar only through the semantic repair, with the resolution branch not
 entering, does not satisfy the MVV: the run summary must show the resolution
-branch entered on the questions that pass.
+branch entered on the questions that pass. The bar as revised on 2026-11-05
+applies to a fresh run on code that carries option 1, not to the 2026-11-05
+rows, which were measured before either change.
 
 ### Benchmark Ladder — per-phase observable metrics
 
@@ -777,7 +811,7 @@ gate thresholds, not exactly (plan T2 `nexus/plan-rdr147-2026-11-03`).
 | P2 (Step 3) | resolution accuracy | the 29 SearchFlow member customers (`p2_member_customers.json`) | 1.0 (by the harness's own exact-title lookup) | 1.0 through the `resolve` step, with `missing` and `ambiguous` empty |
 | P3 (diagnostic) | hop-1 precision | question → affected customers | all7 0.6904761904761905; issue5 0.9666666666666666 | reported, not gated |
 | E2E script (diagnostic) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.7642857142857142 | pinned exactly; reported beside `nx_answer` |
-| E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | every resolved company named, at most one miss per run; precision ≥ 0.95 over the answers that name a company |
+| E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | ≥ 4 of 5 issue questions in the domain, every resolved company named, at most one miss per run; per-run mean precision ≥ 0.95 over the questions whose answer names a company |
 | Aggregation (reported) | company recall / precision / F1 on agg2 | HERB ground truth | script 0.0, `nx_answer` 0.0 | reported, not gated |
 
 **Jointness, as measured.** On HERB the MVV needs: the resolution repair enters
@@ -916,7 +950,8 @@ listed under it.
 The Minimum Viable Validation is in scope and is the Step 4 exit test: on the
 Step 0 sandbox and conditions, with grown plans disabled and two runs per
 question, the answer names every company its retrieved customer ids resolve to,
-with at most one miss per run, at precision ≥ 0.95 over those of the 5 issue
+with at least 4 of the 5 issue questions in the domain and at most one miss per
+run, at precision ≥ 0.95 over those of the 5 issue
 questions whose answer names a company (Sam, 2026-11-05); recall and F1 are reported beside
 the script's 0.7642857142857142. The 2 aggregation questions are reported, not gated (Sam,
 2026-11-03).
@@ -953,3 +988,4 @@ linker conditional.
 - 2026-11-03: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `7e79312f0`; critique `nexus_rdr/147-gate-critique-2026-11-03-r4`.
 - 2026-11-03: Accepted. Round 3 residual dispositions: S1 nexus-wunaf; S2 nexus-v3g1n; S3 nexus-nx6eq (Phase 1 Step 4).
 - 2026-11-05: MVV bar revised after the 2026-11-05 run (nexus-irndi, Sam, T2 `nexus/rdr147-mvv-bar-revision-2026-11-05`, 147-research-12): one in-domain miss allowed per run; precision taken over the answers that name a company.
+- 2026-11-05: option 1 taken after the MVV rerun (Sam, T2 `nexus/rdr147-option1-decision-2026-11-05`, 147-research-13): an entered exact-key join generates whatever the re-check says, with a notice; Assumption #6 weakened to 11 of 15; Step 4 sub-step 4 added. Fix-check observations of f2f669cba applied (floor in the table and Scope Verification, the 0.9667 citation, the fresh-run clause).
