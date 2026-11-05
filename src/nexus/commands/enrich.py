@@ -27,6 +27,7 @@ import click
 import structlog
 
 from nexus.catalog.membership import unknown_collection_message
+from nexus.sensitivity import bound_to
 
 _log = structlog.get_logger(__name__)
 
@@ -1667,6 +1668,7 @@ def _scaled_verify_timeout(evidence_chars: int) -> float:
     default="",
     help="Threshold for --re-extract (lexicographic STRICT-less-than).",
 )
+@bound_to("enrich_aspects")
 def enrich_aspects(
     collection: str,
     dry_run: bool,
@@ -2424,6 +2426,7 @@ def _run_extraction(
     return extracted
 
 
+@bound_to("validate_sample")
 def _run_validation_sample(
     extracted: list[tuple[str, object, str]],
     *,

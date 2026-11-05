@@ -90,6 +90,7 @@ from nexus.aspect_extractor import (
 from nexus.aspect_readers import READ_FAIL_TRANSPORT, TransportReadFailure
 from nexus import config as _config
 from nexus.collection_errors import SupersededCollectionWriteError
+from nexus.sensitivity import bound_to
 
 _log = structlog.get_logger(__name__)
 
@@ -769,6 +770,7 @@ class AspectExtractionWorker:
             return True
         return False
 
+    @bound_to("aspect_worker_drain")
     def _extract_tuple_rows(self, claims: list) -> list:
         """Extract the rows of a tuple batch: one result per claim, in order.
 
@@ -829,6 +831,7 @@ class AspectExtractionWorker:
             _log.warning("aspect_worker_batch_extract_raised", row_count=len(rows), exc_info=True)
             return [ExtractRaised(exc) for _ in rows]
 
+    @bound_to("aspect_worker_drain")
     def _process_batch(self, rows: list) -> None:
         """Run batch extraction on multiple queue rows in one
         Claude call. RDR-089 Phase D — cost-amortised drain.
@@ -1155,6 +1158,7 @@ class AspectExtractionWorker:
         except Exception:  # noqa: BLE001 — the host hook must not mask the fault it reports
             _log.warning("aspect_worker_self_fault_handler_failed", exc_info=True)
 
+    @bound_to("aspect_worker_drain")
     def _process_row(self, row) -> None:
         """Run extraction on one queue row and dispatch on the result.
 

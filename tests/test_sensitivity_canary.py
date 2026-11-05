@@ -10,13 +10,10 @@ captured LLM payload and no captured outbound request. The test is
 parametrized over the table, so a new row brings its own case; it reads the
 row's enforcing phase, never a row name.
 
-RED TODAY, ON PURPOSE. ``llm-surfaces.toml`` does not exist yet (it lands with
-nexus-rfvyy.6.16), so the one parametrized case this file collects fails with
-an assertion that names the missing registry. Not a collection error and not
-an import crash elsewhere: ``_registry_cases`` never raises, and the absent
-file becomes a single ``registry-missing`` case whose body fails. Per-row reds
-(a driver that does not exist yet, then a gate that does not exist yet) start
-once the table lands, at nexus-rfvyy.6.21.
+The registry landed at nexus-rfvyy.6.16. Each ``refuse`` or ``skip`` row at or below
+``PHASE_UNDER_TEST`` is a case, and a case with no driver in ``SURFACE_DRIVERS`` FAILS naming the
+row: that red is expected until the driver and the gate land (nexus-rfvyy.6.21). An absent
+table still becomes one ``registry-missing`` case whose body fails, never a collection error.
 
 How a row is judged, and why it cannot pass vacuously:
 

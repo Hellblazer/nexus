@@ -5408,3 +5408,17 @@ def no_mineru_child_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     from nexus.commands import doctor
 
     monkeypatch.setattr(doctor, "_probe_mineru_child_import", lambda timeout_s=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _suite_runs_inside_the_sensitivity_scope(monkeypatch):
+    """RDR-243 Phase 1 Step 4a (nexus-rfvyy.6.13): ``claude_dispatch``, ``run_text_sync`` and
+    ``_run_claude_isolated`` raise ``DispatchOutsideSensitivityScope`` unless the caller entered
+    ``nexus.sensitivity.llm_bound``. Many tests call a root directly with a fake backend, so the suite
+    runs inside the scope the way a child of a scoped parent does: through ``NX_SENSITIVITY_POSTURE``,
+    which every thread and subprocess sees. tests/test_sensitivity_scope.py deletes it to test the roots
+    as production sees them, and pins that every surface enters the scope itself.
+
+    When a later phase makes the posture change read behaviour (Phase 2 reads exclude under
+    ``llm_bound``), a test that reads documents must not inherit this blanket; narrow it then."""
+    monkeypatch.setenv("NX_SENSITIVITY_POSTURE", "llm_bound")

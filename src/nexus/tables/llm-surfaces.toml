@@ -1,0 +1,532 @@
+# RDR-243 Phase 1 Step 5a (nexus-rfvyy.6.16): the LLM-surface registry, the checked
+# form of RDR-243 Technical Design item 7 and its Key Discoveries census. Ships
+# inside the package (src/nexus/tables/) like chunk-metadata-keys.toml; load it
+# through nexus.tables.llm_surfaces (which wraps load_packaged_table).
+#
+# One row per census row, 25 rows, in census order. `match.surface` names the
+# surface; `emit` carries what the census says about it. Later work reads this
+# table as its source of truth: the privacy-policy section 2 table and each
+# `--sensitive` help text list the rows enforced in the release being built
+# (nexus-rfvyy.6.18), the canary (tests/test_sensitivity_canary.py) judges the
+# `refuse` and `skip` rows of the phase under test, and the registry lint
+# (tests/test_llm_surface_registry_lint.py) requires every LLM or outbound
+# site in src/nexus to sit in a function some row names.
+#
+# emit fields
+#   census_row  the RDR's Key Discoveries row number, 1..25, unique.
+#   label       the surface as a reader of the privacy policy knows it: a verb or a feature, unique,
+#               no `|` or newline. The generated table and `--sensitive` help print it.
+#   sends       what the surface sends, in the census's words: no `|` or newline. The generated
+#               table prints it as is.
+#   targets     the `module:function` entries that carry the surface, a
+#               non-empty list. The FIRST is the primary entry point: the
+#               canary keys its driver by it, so primaries are distinct. A
+#               `module:Class.method` entry also covers the helpers nested in
+#               it, and a `module:Class` entry the whole class (the lint reads
+#               it that way). Several functions share a row when the census
+#               row is one surface with several call sites (row 12 is ten
+#               operators, row 23 four MCP read tools). A target in the
+#               engine (Java) is named by the Python caller that drives it.
+#               A target may also be a source-read or probe that feeds the
+#               surface: the census has no row of its own for it.
+#   endpoints   the endpoint classes the text can reach, a non-empty list; the
+#               first is the primary class. Closed vocabulary:
+#                 anthropic        claude -p, or the Anthropic API
+#                 openai-compat    an openai_compat endpoint (aspect API leg)
+#                 voyage           api.voyageai.com (embed, rerank)
+#                 s2               Semantic Scholar
+#                 openalex         OpenAlex
+#                 crossref-via-dt  CrossRef through DEVONthink
+#                 mineru-url       pdf.mineru_server_url
+#                 cloud-tenant     the managed tenant's storage
+#                 session-model    the Claude Code session's own model
+#                 none             nothing leaves the machine, or no content
+#   behaviour   what the RDR proposes for a sensitive document. Closed:
+#                 refuse   the surface refuses the document (extract_aspects)
+#                 skip     the surface drops the document, loudly
+#                 exclude  the read excludes it, at the engine or the selection
+#                 withhold the output side withholds it from the session model
+#                 disclose the surface prints a disclosure and needs an ack
+#                 n/a-not-a-document  not a document (T2 notes); an unprotected gap
+#                 n/a-no-content      sends no document content
+#   phase       the phase that enforces the row: 1, 2 or 3. Generated text
+#               lists only rows enforced in the release being built, and the
+#               canary runs the rows at or below the phase under test, so the
+#               value is exact: a row never moves to an earlier phase to look
+#               done.
+#
+# The checker kind is "state-machine": the table is a total lookup, surface ->
+# row, with no guard dimension. What the checker proves is totality (every
+# surface in the domain is named by a row) and no overlap.
+#
+# DECISIONS the RDR left open, made here (each is reviewable):
+# - A row that covers several call sites lists them in `targets`; the table
+#   keeps 25 rows because the census has 25.
+# - Call sites the census does not name are attached to the row they feed:
+#   the aspect_readers https reads and the https source-URI HEAD stats
+#   (backfill-etags, doctor --check-references) to row 3, which refuses a
+#   document before any read; MinerU health probes to row 21; the minilm and
+#   bge model downloads to row 25 (no content); the shared claude -p argv
+#   (CliBackend.run) to row 12.
+# - Row 6 (--validate-sample) is `skip`: the document leaves the sample frame
+#   before anything is sent, which is a selection drop like row 5.
+# - Row 21 is `skip`: --sensitive skips the remote leg for the local ladder
+#   and refuses only when the ladder has none.
+# - Rows 19 and 22 are `disclose`: Q3 makes an acknowledgement flag the gate,
+#   so the surface is judged by the disclosure, not by the canary.
+# - Rows 15-17 are `exclude`: the prefetch and the child's reads exclude.
+# - Row 18 and 25 carry phase 1 ("listed since phase 1").
+
+[table]
+id = "llm-surfaces"
+kind = "state-machine"
+version = 1
+
+[dimensions.surface]
+domain = [
+  "aspect_enqueue_hook",
+  "aspect_worker_drain",
+  "aspect_extraction_cli",
+  "aspect_extraction_api",
+  "enrich_aspects",
+  "validate_sample",
+  "enrich_bib",
+  "dt_crossref_gapfill",
+  "taxonomy_label",
+  "taxonomy_review_auto",
+  "knowledge_map",
+  "nx_answer_operators",
+  "nx_answer_bundle",
+  "nx_answer_plan_helpers",
+  "nx_tidy",
+  "nx_enrich_beads",
+  "nx_plan_audit",
+  "memory_rollup",
+  "voyage_embedding",
+  "voyage_rerank",
+  "mineru_remote",
+  "cloud_tenant_storage",
+  "mcp_read_tools",
+  "cli_search",
+  "install_ping",
+]
+
+[[row]]
+id = "aspect-enqueue-hook"
+match = { surface = "aspect_enqueue_hook" }
+
+[row.emit]
+census_row = 1
+label = "Aspect extraction: enqueue hook"
+sends = "full document content, queued for later extraction"
+targets = [
+    "nexus.aspect_worker:aspect_extraction_enqueue_hook",
+  ]
+endpoints = ["anthropic"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "aspect-worker-drain"
+match = { surface = "aspect_worker_drain" }
+
+[row.emit]
+census_row = 2
+label = "Aspect extraction: worker drain"
+sends = "queued or on-disk document content, passed to the LLM"
+targets = [
+    "nexus.aspect_worker:AspectExtractionWorker._process_row",
+    "nexus.aspect_worker:AspectExtractionWorker._process_batch",
+  ]
+endpoints = ["anthropic"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "aspect-extraction-cli"
+match = { surface = "aspect_extraction_cli" }
+
+[row.emit]
+census_row = 3
+label = "Aspect extraction: `claude -p`"
+sends = "document text, passed to `claude -p`"
+targets = [
+    "nexus.aspect_extractor:_run_claude_isolated",
+    "nexus.aspect_extractor:extract_aspects",
+    "nexus.aspect_readers:_read_https_uri",
+    "nexus.aspect_readers:_stat_https_uri",
+    "nexus.aspect_readers:_confirm_head",
+    "nexus.aspect_readers:capture_https_etag",
+    "nexus.commands.catalog_cmds.backfill:backfill_etags_cmd",
+    "nexus.doctor_references:run_check_references",
+  ]
+endpoints = ["anthropic"]
+behaviour = "refuse"
+phase = 1
+
+[[row]]
+id = "aspect-extraction-api"
+match = { surface = "aspect_extraction_api" }
+
+[row.emit]
+census_row = 4
+label = "Aspect extraction: API"
+sends = "document text, sent to the Anthropic API or an `openai_compat` endpoint"
+targets = [
+    "nexus.aspect_extractor:_api_inner_text",
+    "nexus.operators.llm_backend:run_text_sync",
+    "nexus.operators.llm_api:ApiBackend._one_attempt",
+  ]
+endpoints = ["anthropic", "openai-compat"]
+behaviour = "refuse"
+phase = 1
+
+[[row]]
+id = "enrich-aspects"
+match = { surface = "enrich_aspects" }
+
+[row.emit]
+census_row = 5
+label = "`nx enrich aspects`"
+sends = "document text, through the aspect extraction above"
+targets = [
+    "nexus.commands.enrich:enrich_aspects",
+    "nexus.commands.enrich:_select_entries",
+  ]
+endpoints = ["anthropic"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "validate-sample"
+match = { surface = "validate_sample" }
+
+[row.emit]
+census_row = 6
+label = "`nx enrich aspects --validate-sample`"
+sends = "an extracted aspect plus its source evidence"
+targets = [
+    "nexus.commands.enrich:_run_validation_sample",
+    "nexus.commands.enrich:_verify",
+  ]
+endpoints = ["anthropic"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "enrich-bib"
+match = { surface = "enrich_bib" }
+
+[row.emit]
+census_row = 7
+label = "`nx enrich bib`"
+sends = "the title, plus arXiv ids and DOIs scanned from chunks"
+targets = [
+    "nexus.commands.enrich:run_bib_enrichment",
+    "nexus.commands.enrich:_extract_identifiers_for_title",
+    "nexus.bib_enricher:enrich",
+    "nexus.bib_enricher_openalex:_direct_lookup",
+    "nexus.bib_enricher_openalex:enrich",
+  ]
+endpoints = ["s2", "openalex"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "dt-crossref-gapfill"
+match = { surface = "dt_crossref_gapfill" }
+
+[row.emit]
+census_row = 8
+label = "`nx dt index --enrich`, `nx dt capture --enrich`"
+sends = "a DOI"
+targets = [
+    "nexus.commands.enrich:_dt_crossref_bib",
+    "nexus.commands.dt:index_cmd",
+    "nexus.commands.dt:capture_cmd",
+    "nexus.mcp_client.devonthink:dt_resolve_doi",
+  ]
+endpoints = ["crossref-via-dt"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "taxonomy-label"
+match = { surface = "taxonomy_label" }
+
+[row.emit]
+census_row = 9
+label = "Taxonomy labels"
+sends = "topic terms plus sample document names"
+targets = [
+    "nexus.commands.taxonomy_cmd:_generate_labels_batch",
+  ]
+endpoints = ["anthropic"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "taxonomy-review-auto"
+match = { surface = "taxonomy_review_auto" }
+
+[row.emit]
+census_row = 10
+label = "`nx taxonomy review --auto`"
+sends = "topic label, terms and document names"
+targets = [
+    "nexus.commands.taxonomy_cmd:_generate_review_verdicts_batch",
+  ]
+endpoints = ["anthropic"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "knowledge-map"
+match = { surface = "knowledge_map" }
+
+[row.emit]
+census_row = 11
+label = "Knowledge Map in SubagentStart"
+sends = "topic labels, into every agent's context"
+targets = [
+    "nexus.hooks.subagent_start:_knowledge_map_section",
+  ]
+endpoints = ["session-model"]
+behaviour = "exclude"
+phase = 3
+
+[[row]]
+id = "nx-answer-operators"
+match = { surface = "nx_answer_operators" }
+
+[row.emit]
+census_row = 12
+label = "`nx_answer` operators"
+sends = "hydrated chunk text"
+targets = [
+    "nexus.mcp.core:operator_extract",
+    "nexus.mcp.core:operator_rank",
+    "nexus.mcp.core:operator_compare",
+    "nexus.mcp.core:operator_summarize",
+    "nexus.mcp.core:operator_generate",
+    "nexus.mcp.core:operator_filter",
+    "nexus.mcp.core:operator_check",
+    "nexus.mcp.core:operator_verify",
+    "nexus.mcp.core:operator_groupby",
+    "nexus.mcp.core:operator_aggregate",
+    "nexus.operators.dispatch:claude_dispatch",
+    "nexus.operators.dispatch:CliBackend.run",
+  ]
+endpoints = ["anthropic"]
+behaviour = "exclude"
+phase = 2
+
+[[row]]
+id = "nx-answer-bundle"
+match = { surface = "nx_answer_bundle" }
+
+[row.emit]
+census_row = 13
+label = "`nx_answer` bundle"
+sends = "bundled step inputs"
+targets = [
+    "nexus.plans.bundle:dispatch_bundle",
+  ]
+endpoints = ["anthropic"]
+behaviour = "exclude"
+phase = 2
+
+[[row]]
+id = "nx-answer-plan-helpers"
+match = { surface = "nx_answer_plan_helpers" }
+
+[row.emit]
+census_row = 14
+label = "`nx_answer` plan miss and request coverage"
+sends = "the question and plan text; coverage may carry search hits"
+targets = [
+    "nexus.mcp.core:_nx_answer_plan_miss",
+    "nexus.mcp.core:_nx_answer_request_coverage",
+    "nexus.mcp.core:_generalize_grown_match_description",
+  ]
+endpoints = ["anthropic"]
+behaviour = "exclude"
+phase = 2
+
+[[row]]
+id = "nx-tidy"
+match = { surface = "nx_tidy" }
+
+[row.emit]
+census_row = 15
+label = "`nx_tidy`"
+sends = "prefetched T3 entries, inlined"
+targets = [
+    "nexus.mcp.core:nx_tidy",
+  ]
+endpoints = ["anthropic"]
+behaviour = "exclude"
+phase = 2
+
+[[row]]
+id = "nx-enrich-beads"
+match = { surface = "nx_enrich_beads" }
+
+[row.emit]
+census_row = 16
+label = "`nx_enrich_beads`"
+sends = "bead text, plus the nx MCP tools in the child process"
+targets = [
+    "nexus.mcp.core:nx_enrich_beads",
+  ]
+endpoints = ["anthropic"]
+behaviour = "exclude"
+phase = 2
+
+[[row]]
+id = "nx-plan-audit"
+match = { surface = "nx_plan_audit" }
+
+[row.emit]
+census_row = 17
+label = "`nx_plan_audit`"
+sends = "plan text, plus the nx MCP tools in the child process"
+targets = [
+    "nexus.mcp.core:nx_plan_audit",
+  ]
+endpoints = ["anthropic"]
+behaviour = "exclude"
+phase = 2
+
+[[row]]
+id = "memory-rollup"
+match = { surface = "memory_rollup" }
+
+[row.emit]
+census_row = 18
+label = "Memory rollup (`memory_consolidate`)"
+sends = "T2 notes"
+targets = [
+    "nexus.memory_rollup:dispatch_summarizer",
+  ]
+endpoints = ["anthropic"]
+behaviour = "n/a-not-a-document"
+phase = 1
+
+[[row]]
+id = "voyage-embedding"
+match = { surface = "voyage_embedding" }
+
+[row.emit]
+census_row = 19
+label = "Voyage embedding"
+sends = "chunk text, at index time"
+targets = [
+    "nexus.db.http_vector_client:HttpVectorClient.upsert_chunks",
+  ]
+endpoints = ["voyage"]
+behaviour = "disclose"
+phase = 1
+
+[[row]]
+id = "voyage-rerank"
+match = { surface = "voyage_rerank" }
+
+[row.emit]
+census_row = 20
+label = "Voyage rerank"
+sends = "the query plus candidate chunk text"
+targets = [
+    "nexus.search_engine:search_cross_corpus",
+  ]
+endpoints = ["voyage"]
+behaviour = "exclude"
+phase = 3
+
+[[row]]
+id = "mineru-remote"
+match = { surface = "mineru_remote" }
+
+[row.emit]
+census_row = 21
+label = "MinerU remote extraction"
+sends = "PDF bytes"
+targets = [
+    "nexus.pdf_extractor:PDFExtractor._mineru_run_via_server",
+    "nexus.pdf_extractor:PDFExtractor._probe_mineru_health",
+    "nexus.pdf_extractor:PDFExtractor._restart_mineru_server",
+    "nexus.pdf_extractor:_live_server_slots",
+    "nexus.health:_check_mineru_server",
+    "nexus.commands.doctor:_run_check_mineru",
+    "nexus.commands.mineru:start",
+    "nexus.commands.mineru:status",
+    "nexus.daemon.mineru_lifecycle:_healthy",
+  ]
+endpoints = ["mineru-url"]
+behaviour = "skip"
+phase = 1
+
+[[row]]
+id = "cloud-tenant-storage"
+match = { surface = "cloud_tenant_storage" }
+
+[row.emit]
+census_row = 22
+label = "Cloud tenant storage"
+sends = "chunk text and embeddings"
+targets = [
+    "nexus.db.http_vector_client:HttpVectorClient.upsert_chunks_with_embeddings",
+  ]
+endpoints = ["cloud-tenant"]
+behaviour = "disclose"
+phase = 1
+
+[[row]]
+id = "mcp-read-tools"
+match = { surface = "mcp_read_tools" }
+
+[row.emit]
+census_row = 23
+label = "MCP read tools"
+sends = "content and titles of search hits and fetched documents"
+targets = [
+    "nexus.mcp.core:search",
+    "nexus.mcp.core:query",
+    "nexus.mcp.core:store_get",
+    "nexus.mcp.core:store_get_many",
+  ]
+endpoints = ["session-model"]
+behaviour = "withhold"
+phase = 3
+
+[[row]]
+id = "cli-search"
+match = { surface = "cli_search" }
+
+[row.emit]
+census_row = 24
+label = "`nx search` and `nx query` output"
+sends = "result text on stdout, often read by the Bash tool of Claude Code"
+targets = [
+    "nexus.commands.search_cmd:search_cmd",
+  ]
+endpoints = ["session-model"]
+behaviour = "withhold"
+phase = 3
+
+[[row]]
+id = "install-ping"
+match = { surface = "install_ping" }
+
+[row.emit]
+census_row = 25
+label = "Install ping"
+sends = "install id, version and mode; no content"
+targets = [
+    "nexus.install_ping:send_ping",
+    "nexus.db.minilm_direct:_stream_archive",
+    "nexus.db.service_bge_model:_stream_once",
+  ]
+endpoints = ["none"]
+behaviour = "n/a-no-content"
+phase = 1

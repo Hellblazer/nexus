@@ -45,6 +45,7 @@ from nexus.corpus import (
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
+from nexus.sensitivity import bound_to
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistry as _LockedHookRegistry, install_default_hooks as _install_default_hooks
@@ -9260,6 +9261,7 @@ _OPERATOR_MODEL_DESC = (
 )
 
 
+@bound_to("nx_answer_operators")
 async def operator_extract(
     inputs: Annotated[str, Field(description="Items to extract from (plain text or a JSON array string).")],
     fields: Annotated[str, Field(description="Comma-separated field names to extract.")],
@@ -9281,6 +9283,7 @@ async def operator_extract(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_rank(
     items: Annotated[str, Field(description="Items to rank (plain text or a JSON array string).")],
     criterion: Annotated[str, Field(description="Natural-language ranking criterion.")],
@@ -9305,6 +9308,7 @@ async def operator_rank(
 # HISTORY (nexus-km5i): two-sided mode. List/dict values in items/items_a/
 # items_b are JSON-serialized before prompt interpolation so the LLM sees
 # clean JSON instead of Python repr output.
+@bound_to("nx_answer_operators")
 async def operator_compare(
     items: Annotated[str, Field(
         description="Items to compare, one-sided mode (plain text or a JSON array string); ignored if items_a/items_b are set.",
@@ -9337,6 +9341,7 @@ async def operator_compare(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_summarize(
     content: Annotated[str, Field(description="Text to summarize.")],
     cited: Annotated[bool, Field(description="Include a citations list in the output.")] = False,
@@ -9358,6 +9363,7 @@ async def operator_summarize(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_generate(
     template: Annotated[str, Field(description="Named template or description of the desired output form.")],
     context: Annotated[str, Field(description="Source material or context to generate from.")],
@@ -9383,6 +9389,7 @@ async def operator_generate(
 # HISTORY (RDR-088 Phase 1, Paper §D.4 Filter operator; RDR-089 follow-up
 # added the SQL fast path). Composable with `operator_extract`,
 # `operator_rank`, and retrieval tools via `plan_run`.
+@bound_to("nx_answer_operators")
 async def operator_filter(
     items: Annotated[str, Field(
         description=(
@@ -9457,6 +9464,7 @@ async def operator_filter(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_check(
     items: Annotated[str, Field(
         description=(
@@ -9507,6 +9515,7 @@ async def operator_check(
     return bind(raw, records_from_check_items(items), "check")
 
 
+@bound_to("nx_answer_operators")
 async def operator_verify(
     claim: Annotated[str, Field(
         description="A single assertion to verify (e.g. \"the paper reports 2048 GPU-hours for training\").",
@@ -9559,6 +9568,7 @@ async def operator_verify(
 # would break it. Cardinality cap `_OPERATOR_MAX_INPUTS=100` (RDR-093 S-1,
 # generalised nexus-3j6b) is enforced by the plan runner's auto-hydration;
 # a fired cap attaches a `{truncated, original_count, kept_count}` block.
+@bound_to("nx_answer_operators")
 async def operator_groupby(
     items: Annotated[str, Field(
         description=(
@@ -9634,6 +9644,7 @@ async def operator_groupby(
 # isolation (the prompt instructs the model to summarise USING ONLY the
 # items in each group) was verified 0% cross-group leakage on adversarial
 # fixtures with overlapping vocabulary (Spike B, bead nexus-rojs).
+@bound_to("nx_answer_operators")
 async def operator_aggregate(
     groups: Annotated[str, Field(
         description=(
@@ -10598,6 +10609,7 @@ _GROWN_MATCH_DESCRIPTION_SCHEMA: dict[str, Any] = {
 }
 
 
+@bound_to("nx_answer_plan_helpers")
 async def _generalize_grown_match_description(
     *, question: str, plan_json: str,
 ) -> "str | None":
@@ -11105,6 +11117,7 @@ def _nx_answer_split_kind_hint(
     return (rest or None), hint
 
 
+@bound_to("nx_answer_plan_helpers")
 async def _nx_answer_request_coverage(
     *,
     question: str,
@@ -12298,6 +12311,7 @@ async def _claimed_verify_plan(
     raise ValueError(f"planner plan cannot run: {reason}; no step was run")
 
 
+@bound_to("nx_answer_plan_helpers")
 async def _nx_answer_plan_miss(
     question: str,
     *,
@@ -12730,6 +12744,7 @@ NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX: str = "[continuation completed"
     structured_output=False,
 )
 @degrade_loud_when_migrating
+@bound_to("nx_answer_operators")
 async def nx_answer(
     question: Annotated[str, Field(description="Natural-language question to answer.")],
     scope: Annotated[str, Field(
@@ -15620,6 +15635,7 @@ async def nx_answer_report(
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+@bound_to("nx_tidy")
 async def nx_tidy(
     topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"embedding quotas\").")],
     collection: Annotated[str, Field(
@@ -15739,6 +15755,7 @@ async def nx_tidy(
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
+@bound_to("nx_enrich_beads")
 async def nx_enrich_beads(
     bead_description: Annotated[str, Field(description="The bead's title and description to enrich.")],
     context: Annotated[str, Field(description="Optional additional context (e.g. audit findings).")] = "",
@@ -15806,6 +15823,7 @@ async def nx_enrich_beads(
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+@bound_to("nx_plan_audit")
 async def nx_plan_audit(
     plan_json: Annotated[str, Field(description="The plan to audit (JSON string or free-text description).")],
     context: Annotated[str, Field(description="Optional additional context (e.g. an RDR reference).")] = "",

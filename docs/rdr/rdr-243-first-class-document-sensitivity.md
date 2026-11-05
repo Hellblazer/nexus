@@ -766,7 +766,10 @@ taxonomy sample names.
 `llm-surfaces.toml` and loader with every census row and the phase that
 enforces it; the doctor rows `sensitive_in_aspect_eligible` and
 `sensitive_with_aspects`; the privacy-policy §2 table, generated from the
-rows enforced in the release.
+rows enforced in the release, and the `--sensitive` help from the same rows,
+each with one generated line saying that search results are still shown to
+the session model until the output posture ships (accept residual S-E); a
+`docs/sensitivity.md` stub.
 
 Exit: the canary is green for every `refuse` or `skip` row, and each pin
 has been seen to fail with its gate removed.
@@ -792,7 +795,7 @@ posture (Q2); the reader instruction line; rerank exclusion (Q4);
 DEVONthink exclusion
 import (Q7, A6; this RDR adds no write to DEVONthink, Sam 2026-11-04); taxonomy discover
 without sensitive members; the `sensitive_in_external_embedder` doctor row;
-`docs/sensitivity.md`.
+complete `docs/sensitivity.md` (the Phase 1 stub grows).
 
 ### Day 2 Operations
 
