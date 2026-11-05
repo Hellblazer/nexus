@@ -2,12 +2,12 @@
 title: "First-Class Document Sensitivity: Route, Stamp and Exempt Sensitive Documents from Every LLM and External Surface"
 id: RDR-243
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-11-03
-accepted_date:
+accepted_date: 2026-11-05
 related_issues: ["nexus-rfvyy"]
 related_rdrs: [RDR-089, RDR-108, RDR-236, RDR-180, RDR-201, RDR-080, RDR-210]
 ---
@@ -1007,3 +1007,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-04: Sam's rulings: remedy (a) for the round-1 Critical; Gap 5 narrowed to the sensitive case; no DEVONthink writeback tag. After the round-2 PASSED gate, Sam asked for all ten Significants: phases 1 and 2 ship together; MCP `store_put(sensitive=True)` refuses in cloud mode and routes to bge locally; withheld MCP hits are a stub with no title and a withheld count; a sensitive PDF never goes to a MinerU URL, loopback or not. Revision: these designs, the write-path capability check, the dispatch-side thread hops, the client read-method list, the canary's embedding-model condition, engine egress as a hand-kept list, and wording fixes.
 - 2026-11-04: fix round on the revision's fix check (`nexus_rdr/243-fix-check-bb08311f3`): two `GET /version` capability keys (catalog in phase 1, vectors in phase 2) with the conexus edge allowlist; the input-side external rules move into phase 1 and registry rows carry their enforcing phase; the stub `get` read path; engine egress under `EgressGuardCensus`; the stub's per-row field.
 - 2026-11-04: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `8b9d0bc23`; critique `nexus_rdr/243-gate-critique-2026-11-04-r3`.
+- 2026-11-04: Accepted. Round-3 residual dispositions: S-A `nexus-rfvyy.1` (Phase 3); S-B `nexus-rfvyy.2` (Phase 1 Step 3); S-C `nexus-rfvyy.3` (Phase 2, needs Sam); S-D `nexus-rfvyy.4` (Phase 1 Step 3); S-E `nexus-rfvyy.5` (Phase 1 Step 5).
