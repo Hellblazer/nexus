@@ -211,6 +211,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // "source_uri_moved"}) -- no JSON array (not collectionReturning) and the
         // request body carries two tumbler scalars, no id list (not idListAccepting).
         neither("/merge", "handleMerge"),
+        // nexus-rfvyy.6.5 (RDR-243): the audited sensitivity route. Request carries a tumbler list, capped at
+        // MAX_BATCH_DOC_IDS; the response is the update_many shape ({"updated":[1,0,...]}), a POSITIONAL list.
+        both("/sensitivity", "handleSensitivity", POSITIONAL),
         neither("/delete", "handleDelete"),
         both("/delete_many", "handleDeleteMany", REPORT_ONLY),
         // nexus-dkymw: response is a flat scalar map ({"restored": 0|1}) --

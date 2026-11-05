@@ -38,6 +38,7 @@ import java.util.*;
  *   POST  /v1/catalog/update             update document fields
  *   POST  /v1/catalog/update_many        batch-update fields for N documents (nexus-xedhp)
  *   POST  /v1/catalog/merge              collapse a duplicate document into its canonical one, one transaction (nexus-z4rpi)
+ *   POST  /v1/catalog/sensitivity        set or clear the one-way sensitive flag on N documents, audited (nexus-rfvyy.6.5, RDR-243)
  *   POST  /v1/catalog/delete_many        batch-tombstone N documents (nexus-xedhp)
  *   DELETE /v1/catalog/delete            delete document by tumbler
  *   POST  /v1/catalog/link               upsert link
@@ -158,6 +159,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/update"                -> handleUpdate(exchange, tenant, method);
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
                 case "/merge"                 -> handleMerge(exchange, tenant, method);
+                case "/sensitivity"           -> handleSensitivity(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
                 case "/delete_many"           -> handleDeleteMany(exchange, tenant, method);
                 case "/restore"               -> handleRestore(exchange, tenant, method);
@@ -685,6 +687,56 @@ public final class CatalogHandler implements HttpHandler {
         }
         var result = repo.mergeDocuments(tenant, duplicate, canonical);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
+    }
+
+    /**
+     * POST /v1/catalog/sensitivity — set or clear the document sensitivity flag (nexus-rfvyy.6.5, RDR-243).
+     *
+     * <p>Body: {@code {"tumblers": ["1.1.3", ...], "sensitive": true|false, "reason": "..."}}.
+     * Response: {@code {"updated": [1, 0, ...]}}, positionally aligned with the input like {@code update_many}:
+     * {@code 1} the flag changed, {@code 0} it did not (already in that state, unknown or tombstoned tumbler, or
+     * a repeat of an earlier entry in the call). A document already in the requested state writes no audit row.
+     *
+     * <p>This is the ONLY route that lowers the flag. Setting needs no reason; clearing without a non-blank
+     * {@code reason} is a 400 before any write. Every change writes an audit row
+     * ({@code catalog_sensitivity_changes}) in the same transaction as the flag. {@code sensitive} must be a JSON
+     * boolean; {@code tumblers} a non-empty list of strings, at most {@value #MAX_BATCH_DOC_IDS}.
+     *
+     * <p><b>Actor.</b> Derived server-side from the request's principal: its session id when it has one, else its
+     * scope ({@code root|tenant|mint|data}), never the credential hash. Only when there is no principal at all
+     * (a direct handler call outside {@code AuthFilter}) does a body {@code actor} apply, falling back to
+     * {@code "operator"} (the {@code VectorHandler} precedent), so an authenticated caller cannot name someone else.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleSensitivity(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("tumblers");
+        if (!(raw instanceof List<?> l) || l.isEmpty()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumblers' must be a non-empty list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof String s) || s.isBlank())) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"every 'tumblers' element must be a non-blank string\"}"); return;
+        }
+        if (l.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many tumblers (max " + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        if (!(body.get("sensitive") instanceof Boolean sensitive)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'sensitive' must be a boolean\"}"); return;
+        }
+        Object rawReason = body.get("reason");
+        if (rawReason != null && !(rawReason instanceof String)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'reason' must be a string\"}"); return;
+        }
+        String actor;
+        var principal = RequestContext.current();
+        if (principal != null) {
+            actor = principal.session() != null && !principal.session().isBlank() ? principal.session() : principal.scope();
+        } else {
+            actor = body.get("actor") instanceof String a && !a.isBlank() ? a : "operator";
+        }
+        var updated = repo.setSensitivity(tenant, (List<String>) l, sensitive, (String) rawReason, actor);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", updated)));
     }
 
     /**

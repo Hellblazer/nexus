@@ -8462,11 +8462,20 @@ public final class CatalogRepository {
             Field<Integer> chunkCount = DSL.field(
                 ctx.selectCount().from(all)
                    .where(all.DOC_ID.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID).and(liveParentDoc(ctx, tenant))));
+            // nexus-rfvyy.6.5 (RDR-243): the owning document's sensitivity flag, per (chash, doc_id) row. A
+            // correlated scalar read of the row's own parent (unique on (tenant, tumbler)), live-guarded like
+            // the count above; the outer WHERE already requires that parent live.
+            Field<Boolean> docSensitive = DSL.field(
+                ctx.select(CATALOG_DOCUMENTS.SENSITIVE).from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
             var rows = ctx.select(CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                                   CATALOG_DOCUMENT_CHUNKS.POSITION, chunkCount,
                                   CATALOG_DOCUMENT_CHUNKS.COLLECTION,
                                   CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
-                                  CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
+                                  CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
+                                  docSensitive)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .where(CHK_CHASH_HEX.in(chashes).and(liveParentDoc(ctx, tenant)))
                           .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -8485,6 +8494,9 @@ public final class CatalogRepository {
                 m.put("section_type",  r.value7());
                 m.put("page_number",   r.value8());
                 m.put("labels_written", Boolean.TRUE.equals(r.value9()));
+                // nexus-rfvyy.6.5 (RDR-243, additive): the owning document's flag. A client that predates the
+                // key ignores it; an engine that predates it sends none, which a client reads as "cannot say".
+                m.put("sensitive", Boolean.TRUE.equals(r.value10()));
                 out.add(m);
             }
             return out;
@@ -12944,6 +12956,47 @@ public final class CatalogRepository {
         recordSensitivityChanges(ctx, tenant, raised.getValues(CATALOG_DOCUMENTS.TUMBLER), false, true, reason, SENS_ACTOR_ENGINE);
     }
 
+    /**
+     * The audited route (nexus-rfvyy.6.5, RDR-243): set or clear {@code sensitive} on the LIVE documents named in
+     * {@code tumblers}, in ONE transaction with one audit row per document whose flag actually changed.
+     *
+     * <p>Setting needs no reason (a blank one is stored as {@code "set"}); clearing refuses, with an
+     * {@link IllegalArgumentException} (the handler's 400), unless {@code reason} is non-blank, and that check
+     * runs before any write. A document already in the requested state is a no-op and writes no audit row. The
+     * tumblers are addressed exactly as given (an alias row is not followed): an unknown, foreign-tenant or
+     * tombstoned tumbler changes nothing and reports {@code 0}, the same answer {@code update_many} gives.
+     *
+     * @return per-index counts aligned 1:1 with {@code tumblers}: {@code 1} the flag changed, {@code 0} it did not
+     *         (already in that state, unknown, tombstoned, or a repeat of an earlier entry in the same call)
+     */
+    public List<Integer> setSensitivity(String tenant, List<String> tumblers, boolean sensitive,
+                                        String reason, String actor) {
+        if (tumblers == null || tumblers.isEmpty()) {
+            throw new IllegalArgumentException("'tumblers' must be a non-empty list");
+        }
+        if (!sensitive && (reason == null || reason.isBlank())) {
+            throw new IllegalArgumentException("clearing sensitivity requires a non-blank 'reason'");
+        }
+        final String why = (reason == null || reason.isBlank()) ? "set" : reason;
+        final String who = (actor == null || actor.isBlank()) ? "operator" : actor;
+        return tenantScope.withTenant(tenant, ctx -> {
+            var changed = ctx.update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.SENSITIVE, sensitive)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENTS.TUMBLER.in(tumblers))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                       .and(CATALOG_DOCUMENTS.SENSITIVE.isDistinctFrom(sensitive)))
+                .returning(CATALOG_DOCUMENTS.TUMBLER)
+                .fetch()
+                .getValues(CATALOG_DOCUMENTS.TUMBLER);
+            recordSensitivityChanges(ctx, tenant, changed, !sensitive, sensitive, why, who);
+            var remaining = new java.util.HashSet<>(changed);
+            var out = new ArrayList<Integer>(tumblers.size());
+            for (String t : tumblers) out.add(remaining.remove(t) ? 1 : 0);
+            return out;
+        });
+    }
+
     private static void recordSensitivityChange(DSLContext ctx, String tenant, String tumbler,
                                                 boolean oldValue, boolean newValue, String reason) {
         recordSensitivityChanges(ctx, tenant, List.of(tumbler), oldValue, newValue, reason, SENS_ACTOR_ENGINE);
@@ -12987,7 +13040,9 @@ public final class CatalogRepository {
             // the wire contract the client half (nexus-5xn3k.3) reads its 4 new
             // CatalogEntry fields from. No separate "get fence state" route needed.
             CATALOG_DOCUMENTS.INDEX_STATE, CATALOG_DOCUMENTS.INDEX_CONTENT_HASH,
-            CATALOG_DOCUMENTS.INDEX_RUN_ID, CATALOG_DOCUMENTS.INDEX_STARTED_AT
+            CATALOG_DOCUMENTS.INDEX_RUN_ID, CATALOG_DOCUMENTS.INDEX_STARTED_AT,
+            // nexus-rfvyy.6.5 (RDR-243): the one-way sensitivity flag, on every documentFields() reader.
+            CATALOG_DOCUMENTS.SENSITIVE
         };
     }
 
@@ -13048,6 +13103,8 @@ public final class CatalogRepository {
         // nexus-cefa1.2: index_started_at is timestamptz now — same NOT-NULL-DEFAULT-''
         // wire-contract preservation as bib_enriched_at above.
         m.put("index_started_at",   nne(utcIso((java.time.OffsetDateTime) raw.get("index_started_at"))));
+        // nexus-rfvyy.6.5 (RDR-243): always a JSON boolean, never null (the column is NOT NULL DEFAULT false).
+        m.put("sensitive",          Boolean.TRUE.equals(raw.get("sensitive")));
         return m;
     }
 
