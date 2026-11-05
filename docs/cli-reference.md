@@ -585,6 +585,8 @@ nx dt capture --file ~/Downloads/notes.pdf
 | `--contact-email <addr>` | Caller email for Unpaywall PDF discovery on `--doi` (else `$OPENALEX_MAILTO`) |
 | `--collection` / `--corpus` | Index-step collection / corpus (as `nx dt index`) |
 | `--link-semantic` / `--writeback` / `--highlights` / `--enrich` / `--extractor` | Forwarded to the index step |
+| `--sensitive` | Mark the captured document sensitive (RDR-243); see `nx index md`. Refused before DEVONthink is touched when the engine cannot hold the flag; cannot be combined with `--enrich` |
+| `--ack-external-embedder` | With `--sensitive`: accept Voyage. In cloud mode this is required and a one-line disclosure of the managed tenant and Voyage is printed before the capture; in local mode a Voyage target takes the bge sibling without it |
 
 Exit codes:
 

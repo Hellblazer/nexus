@@ -142,7 +142,7 @@ def put_cmd(
 
     # RDR-243: the usage, cloud and engine refusals, before the T3 handle, the register call and any
     # embedding. An engine that cannot hold the flag would otherwise drop it without an error.
-    sensitive_write_kwargs(sensitive, "nx store put --sensitive", ack=ack_external_embedder)
+    sensitive_write_kwargs(sensitive, "store put --sensitive", ack=ack_external_embedder)
 
     db = _t3()
     # nexus-hmxi: pass t3 so the resolver grandfathers an existing
@@ -158,7 +158,7 @@ def put_cmd(
     if sensitive:
         # RDR-243 Q3: a Voyage collection needs the acknowledgement; without it the note goes to the
         # bge collection of the same subject (local mode).
-        col_name = resolve_sensitive_collection(col_name, ack=ack_external_embedder, what="nx store put --sensitive")
+        col_name = resolve_sensitive_collection(col_name, ack=ack_external_embedder, what="store put --sensitive")
 
     # RDR-223 P2.6 (nexus-z0o2p.16): the note is written by the note writer, the
     # same sequence MCP store_put runs (nexus-z0o2p.12). put_note owns the whole

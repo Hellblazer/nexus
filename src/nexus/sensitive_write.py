@@ -77,6 +77,18 @@ class ExternalEmbedderRefusedError(click.ClickException, RuntimeError):
     that survives a per-record ``RuntimeError`` survives this one, and MCP words it with ``_fail``)."""
 
 
+def _parse_collection(collection_name: str) -> Any:
+    """The :class:`~nexus.catalog.collection_name.CollectionName` of a name, or ``None`` when it has none
+    (a legacy two-segment name, or an embedder outside the canonical sets). The value object is the one
+    sanctioned parse of a candidate name; a row lookup would need the collection to be registered."""
+    from nexus.catalog.collection_name import CollectionName  # noqa: PLC0415 — deferred: leaf value object
+
+    try:
+        return CollectionName.parse(collection_name)
+    except ValueError:
+        return None
+
+
 def is_external_embedder(collection_name: str) -> bool:
     """True when *collection_name* is embedded off this machine, or when that cannot be told.
 
@@ -84,10 +96,10 @@ def is_external_embedder(collection_name: str) -> bool:
     else (Voyage) does not. A name without a token (a legacy two-segment name) is unknown, and an
     unknown embedder reads as external, never as safe.
     """
-    from nexus.corpus import LOCAL_EMBEDDING_MODELS, embedding_model_for_collection_name  # noqa: PLC0415 — deferred: corpus is heavy
+    from nexus.corpus import LOCAL_EMBEDDING_MODELS  # noqa: PLC0415 — deferred: corpus is heavy
 
-    token = embedding_model_for_collection_name(collection_name)
-    return token is None or token not in LOCAL_EMBEDDING_MODELS
+    parsed = _parse_collection(collection_name)
+    return parsed is None or parsed.embedding_model not in LOCAL_EMBEDDING_MODELS
 
 
 def bge_sibling(collection_name: str) -> str | None:
@@ -96,12 +108,12 @@ def bge_sibling(collection_name: str) -> str | None:
     Works for every prefix (``knowledge__``, ``docs__``, ``rdr__``, ``code__``). The version segment is
     ``v1``: the sibling is a different collection, not a newer version of the Voyage one.
     """
-    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred: corpus is heavy
+    from nexus.catalog.collection_name import CollectionName  # noqa: PLC0415 — deferred: leaf value object
 
-    if not is_conformant_collection_name(collection_name):
+    parsed = _parse_collection(collection_name)
+    if parsed is None:
         return None
-    parts = parse_conformant_collection_name(collection_name)
-    return f"{parts['content_type']}__{parts['owner_id']}__{BGE_TOKEN}__v1"
+    return CollectionName(parsed.content_type, parsed.owner_id, BGE_TOKEN, 1).render()
 
 
 def _cloud_endpoint() -> str:
