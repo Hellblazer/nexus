@@ -5864,6 +5864,13 @@ def store_put(
             "it removes the stored key."
         ),
     )] = "",
+    sensitive: Annotated[bool, Field(
+        description=(
+            "Mark the document sensitive (RDR-243): it is kept from every model-bound surface. "
+            "One-way: no parameter clears it. Refused in cloud mode, where every collection embeds "
+            "through Voyage and this tool cannot acknowledge that."
+        ),
+    )] = False,
 ) -> str:
     """Store content as a permanent T3 knowledge document.
 
@@ -5916,6 +5923,17 @@ def store_put(
         # below, where it is too late to be the first thing a caller sees).
         if not is_conformant_collection_name(collection):
             _refuse_placeholder_subject(collection)
+        if sensitive:
+            # RDR-243 item 8: this tool has no way to acknowledge an external embedder, and every cloud
+            # collection embeds through Voyage, so cloud mode refuses before any engine contact. Then item 3:
+            # an engine that cannot hold the flag stops the write here, before the T3 handle, the register
+            # call and any embedding (it would drop the flag without an error).
+            from nexus.sensitive_write import require_sensitive_engine  # noqa: PLC0415 — deferred: only a flagged put needs it
+
+            try:
+                require_sensitive_engine("store_put(sensitive=True)")
+            except RuntimeError as exc:
+                return _fail(f"Error: store_put: {exc}")
         t3 = _get_t3()
         # nexus-hmxi: pass t3 so the resolver grandfathers an existing
         # legacy 2-segment collection ahead of the auto-promoted
@@ -5958,13 +5976,17 @@ def store_put(
         # and the recovery import run the same sequence. This tool only words
         # the result.
         from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
+        from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
 
         try:
             outcome = put_note(
                 content=content, collection=col_name, title=title, tags=tags,
                 category=category, source_agent=agent_arg,
-                ttl_days=ttl_days, entity_key=entity_key,
+                ttl_days=ttl_days, entity_key=entity_key, sensitive=sensitive,
             )
+        except SensitiveFlagNotSetError as exc:
+            # RDR-243: the existing document could not be marked, so nothing was written to it.
+            return _fail(f"Error: store_put: {exc}")
         except NoteUriEngineTooOldError as exc:
             # RDR-231 (nexus-bivz3.13): the serving engine cannot hold a note's nx-note:// URI. Raised
             # before the register and the write, so nothing changed; the message carries the remedy.

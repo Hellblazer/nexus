@@ -988,8 +988,17 @@ def _register_or_lookup_doc_id(
     base_path: Path | None = None,
     source_uri: str = "",
     with_created: bool = False,
+    sensitive: bool = False,
 ) -> str | tuple[str, bool]:
     """RDR-102 D1 pre-flight catalog registration for the doc_indexer family.
+
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9) puts the flag on the document this call resolves, before
+    the caller writes any chunk and before the post-store chains fire: a fresh registration carries
+    it in its request; a document found by source URI, by file path or by the register's own
+    idempotency has it raised through the audited route. A failure raises
+    :class:`~nexus.sensitive_write.SensitiveFlagNotSetError` (never swallowed by the best-effort
+    catch below), and so does a registration that yields no document (the caller checks for ``""``).
 
     Pass *with_created=True* (nexus-uxg4u task 2) to additionally receive
     whether THIS call minted a brand-new Document — returns ``(doc_id,
@@ -1065,8 +1074,16 @@ def _register_or_lookup_doc_id(
         SourceUriNotFoundError,
     )
 
+    from nexus.sensitive_write import SensitiveFlagNotSetError, raise_flag  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+
     reader = None
     writer = None
+
+    def _flag(tumbler: object) -> None:
+        if sensitive:
+            raise_flag(writer, str(tumbler), what="a --sensitive index")
+
+
     try:
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
@@ -1174,6 +1191,7 @@ def _register_or_lookup_doc_id(
                     f"re-run this index; or drop --collection to target "
                     f"its current home."
                 )
+            _flag(existing_by_uri.tumbler)
             return (str(existing_by_uri.tumbler), False) if with_created else str(existing_by_uri.tumbler)
 
         existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri, writer)
@@ -1278,6 +1296,7 @@ def _register_or_lookup_doc_id(
                     from nexus.mcp_infra import _record_physical_collection_reconciled  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
                     _record_physical_collection_reconciled()
             _restamp_rdr_frontmatter(writer, existing, file_path, content_type)
+            _flag(existing.tumbler)
             return (str(existing.tumbler), False) if with_created else str(existing.tumbler)
 
         # nexus-u8n4r: refuse registration when the identity about to be
@@ -1357,6 +1376,8 @@ def _register_or_lookup_doc_id(
         _stamp = {**_rdr_frontmatter_stamp(file_path, content_type), **source_format_meta(content_type, fp)}
         if _stamp:
             _register_extra["meta"] = _stamp
+        if sensitive:
+            _register_extra["sensitive"] = True
         _write_result = writer.register(
             owner=owner,
             title=title or file_path.stem,
@@ -1401,10 +1422,12 @@ def _register_or_lookup_doc_id(
                 target_collection=physical_collection, file_path=fp,
                 owner=owner,
             )
+            # The engine raises the flag on a match by source URI only; this one may be a file-path match.
+            _flag(tumbler)
         if with_created:
             return str(tumbler), created
         return str(tumbler)
-    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError):
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError, SensitiveFlagNotSetError):
         # nexus-y8qtj / nexus-3o4lt: fail-loud rules propagate — never
         # swallowed by the best-effort catch-all below.
         raise
@@ -1754,6 +1777,19 @@ def _write_chunks_with_owner_rows(
         return _DeferredOwnerWrite(w, raw_cat, result, doc_id)
     _release()
     return result
+
+
+def _raise_sensitive_unregistered(path: Path) -> None:
+    """A ``--sensitive`` run whose pre-flight registration yielded no document: refuse, write nothing.
+
+    The non-sensitive path goes on and lets a later fallback mint the document; those mints do not
+    carry the flag, so a document that could not be marked is not written at all."""
+    from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+
+    raise SensitiveFlagNotSetError(
+        f"a --sensitive index of {path} refused: the catalog gave the document no identity to mark "
+        f"(registration failed or the path is an ephemeral worktree or temp path). Nothing was written."
+    )
 
 
 def _raise_identity_missing(
@@ -2738,8 +2774,14 @@ def index_pdf(
     dry_run: bool = False,
     title_override: str = "",
     on_extraction: Callable[[dict], None] | None = None,
+    sensitive: bool = False,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9) marks the document sensitive in the pre-flight
+    registration below, before extraction, embedding or any chunk write. A registration that yields
+    no document refuses the run (:class:`~nexus.sensitive_write.SensitiveFlagNotSetError`) instead of
+    falling back to the later mints, which would not carry the flag.
 
     *on_extraction* (RDR-237) is called once, after a run that extracted and indexed this PDF,
     with ``{"extraction_method": str, "extraction_pages": {rung: [1-based pages]}}``: the pages
@@ -3014,11 +3056,14 @@ def index_pdf(
             physical_collection=col_name,
             source_uri=source_uri,
             with_created=True,
+            **({"sensitive": True} if sensitive else {}),
         )
         if isinstance(_reg_result, tuple):
             doc_id, _doc_id_freshly_minted = _reg_result
         else:
             doc_id, _doc_id_freshly_minted = _reg_result, False
+        if sensitive and not doc_id:
+            _raise_sensitive_unregistered(pdf_path)
 
     # nexus-uxg4u round 2 (code-review-expert Finding B / substantive-critic
     # SIGNIFICANT): the pre-flight call above is not the ONLY place THIS
@@ -4008,8 +4053,11 @@ def index_markdown(
     extraction_source: str = "file",
     source_uri: str = "",
     on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
+    sensitive: bool = False,
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9): see :func:`index_pdf`.
 
     By default the collection is ``docs__{corpus}``.  Pass *collection_name*
     to override (e.g. ``rdr__<repo>-<hash8>`` for RDR documents).
@@ -4140,11 +4188,14 @@ def index_markdown(
         base_path=base_path,
         source_uri=source_uri,
         with_created=True,
+        **({"sensitive": True} if sensitive else {}),
     )
     if isinstance(_reg_result, tuple):
         doc_id, _doc_just_created = _reg_result
     else:
         doc_id, _doc_just_created = _reg_result, False
+    if sensitive and not doc_id:
+        _raise_sensitive_unregistered(md_path)
     chunk_fn = partial(
         _markdown_chunks,
         base_path=base_path,

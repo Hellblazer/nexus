@@ -24,6 +24,7 @@ from nexus.db.t3 import T3Database
 from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
+from nexus.sensitive_write import SensitiveFlagNotSetError, sensitive_help
 from nexus.ttl import parse_ttl
 
 # C0 (NUL, tab, CR, LF, ESC ...), DEL and C1 controls: stored chunk text printed to an operator's terminal must
@@ -70,6 +71,7 @@ def store() -> None:
                    "control characters, refused on a code__ collection. Unset: a collection "
                    "configured with an entity-key pattern stamps the title when the whole title "
                    "matches it. A re-put without it removes the stored key.")
+@click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--session-id", default="", hidden=True)
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
@@ -80,6 +82,7 @@ def put_cmd(
     category: str,
     ttl: str,
     entity_key: str,
+    sensitive: bool,
     session_id: str,
     agent: str,
 ) -> None:
@@ -129,6 +132,16 @@ def put_cmd(
     # itself as defense-in-depth, but this CLI path can never reach it.
     ttl_days = days
 
+    if sensitive:
+        # RDR-243 item 3: an engine that cannot hold the flag stops the write before the T3 handle,
+        # the register call and any embedding; it would otherwise drop the flag without an error.
+        from nexus.sensitive_write import require_sensitive_engine  # noqa: PLC0415 — deferred: only a flagged put needs it
+
+        try:
+            require_sensitive_engine("nx store put --sensitive")
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+
     db = _t3()
     # nexus-hmxi: pass t3 so the resolver grandfathers an existing
     # legacy 2-segment collection ahead of the auto-promoted
@@ -174,9 +187,9 @@ def put_cmd(
         outcome = put_note(
             content=content, collection=col_name, title=title, tags=tags,
             category=category, source_agent=agent,
-            ttl_days=ttl_days, entity_key=entity_key,
+            ttl_days=ttl_days, entity_key=entity_key, sensitive=sensitive,
         )
-    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError) as exc:
+    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError, SensitiveFlagNotSetError) as exc:
         # EntityKeyError: an --entity-key the put refuses (a code collection, a control character,
         # over 256 characters; nexus-fai28), raised before any register or write. EntityConfigError
         # names its config file and key. Any other ValueError keeps its traceback.

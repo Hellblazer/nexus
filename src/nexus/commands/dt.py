@@ -30,6 +30,7 @@ import structlog
 import nexus.devonthink as dt_mod
 from nexus.config import DEFAULT_EXTRACTOR, EXTRACTOR_CHOICES, get_pdf_extractor, resolve_extractor
 from nexus.devonthink import DTNotAvailableError, _is_darwin
+from nexus.sensitive_write import sensitive_help, sensitive_write_kwargs
 
 _log = structlog.get_logger(__name__)
 
@@ -249,6 +250,7 @@ def _index_record(
     extractor: str = DEFAULT_EXTRACTOR,
     force: bool = False,
     force_re_embed: bool = False,
+    sensitive: bool = False,
 ) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]], str]:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
@@ -310,6 +312,9 @@ def _index_record(
 
     from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415 — command-local import (doc_indexer)
 
+    # RDR-243: the keyword rides only when set, so an indexer double without it is untouched.
+    sens_kw = {"sensitive": True} if sensitive else {}
+
     # NAME THE DEVONthink IDENTITY when the document is already catalogued
     # (nexus-z0lu4). index_pdf/index_markdown already take source_uri and
     # resolve through by_source_uri FIRST — owner-agnostic and path-independent
@@ -358,7 +363,7 @@ def _index_record(
             file_path, corpus=corpus, collection_name=collection, extractor=extractor,
             force=force, force_re_embed=force_re_embed, return_metadata=True,
             source_uri=dt_source_uri, title_override=dt_title,
-            on_extraction=extraction_reports.append,
+            on_extraction=extraction_reports.append, **sens_kw,
         )
         if extraction_reports:
             degraded = dict(extraction_reports[-1].get("extraction_pages") or {})
@@ -375,7 +380,7 @@ def _index_record(
     else:  # .md — extension filtering happens in index_cmd
         raw = index_markdown(
             file_path, corpus=corpus, collection_name=collection, force=force,
-            force_re_embed=force_re_embed, source_uri=dt_source_uri,
+            force_re_embed=force_re_embed, source_uri=dt_source_uri, **sens_kw,
         )
         chunks = raw if isinstance(raw, int) else 0
         pages = None
@@ -713,6 +718,7 @@ def _index_dt_content_record(
     extraction_source: str = "dt_content",
     force: bool = False,
     force_re_embed: bool = False,
+    sensitive: bool = False,
 ) -> bool:
     """RDR-139 Layer D: index a non-file-backed DT record from DT-extracted
     text (rather than an on-disk file).
@@ -841,6 +847,7 @@ def _index_dt_content_record(
             extraction_source=extraction_source,
             force=force,
             force_re_embed=force_re_embed,
+            **({"sensitive": True} if sensitive else {}),
         )
         if not count:
             # We had non-empty text above, so a 0-chunk return is the
@@ -1062,6 +1069,7 @@ def dt() -> None:
         "reclassification-only pass does not need it."
     ),
 )
+@click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -1081,6 +1089,7 @@ def index_cmd(
     force: bool,
     re_embed: bool,
     allow_page_gap: bool = False,
+    sensitive: bool = False,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -1095,6 +1104,8 @@ def index_cmd(
             "skips never reaches the server, so there is nothing to "
             "re-embed."
         )
+    # RDR-243: the engine refusal and the --enrich refusal, before DEVONthink is read or any record touched.
+    sens_kw = sensitive_write_kwargs(sensitive, "nx dt index --sensitive", dry_run=dry_run, enrich=enrich)
 
     selectors_used = sum([
         use_selection,
@@ -1249,7 +1260,7 @@ def index_cmd(
                 try:
                     content_indexed = _index_dt_content_record(
                         uuid, collection=dt_collection, corpus=corpus, force=force,
-                        force_re_embed=re_embed,
+                        force_re_embed=re_embed, **sens_kw,
                     )
                 except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
                     # nexus-hb10j (substantive-critic, 2xu6t adjudication,
@@ -1363,6 +1374,7 @@ def index_cmd(
                 extractor=extractor,
                 force=force,
                 force_re_embed=re_embed,
+                **sens_kw,
             )
             degraded_pages: dict[str, list[int]] = {}
             extraction_method = ""
@@ -2054,6 +2066,7 @@ def _capture_is_pdf(url: str | None, doi: str | None, file_path: str | None, cap
                    "config, or mineru; mineru = layout, tables and "
                    "math; pymupdf = text layer only, needs no PDF support; auto and docling "
                    "are older names that run as mineru).")
+@click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.pass_context
 def capture_cmd(
     ctx: click.Context,
@@ -2069,6 +2082,7 @@ def capture_cmd(
     highlights: bool,
     enrich: bool,
     extractor: str | None,
+    sensitive: bool = False,
 ) -> None:
     """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
 
@@ -2092,6 +2106,10 @@ def capture_cmd(
         raise click.UsageError(
             "Provide exactly one capture source: a URL argument, --doi, or --file.",
         )
+
+    # RDR-243: refuse before DEVONthink is touched. A capture that created the record and then
+    # failed to flag the index would leave an unprotected record behind.
+    sensitive_write_kwargs(sensitive, "nx dt capture --sensitive", enrich=enrich)
 
     from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
@@ -2160,6 +2178,7 @@ def capture_cmd(
             highlights=highlights,
             enrich=enrich,
             extractor=extractor,
+            sensitive=sensitive,
         )
     except click.ClickException:
         # Capture succeeded but indexing failed: the DT record exists but is
