@@ -879,6 +879,14 @@ a `$ref` step") is dropped: it already works.
 3. **Gate condition (Gap 4).** The resolution branch fires on the HERB issue
    questions and does not fire on a held-out set of single-hop questions; count
    both and record the counts.
+4. **Generation after an entered join (option 1, Sam 2026-11-05;
+   147-research-13).** Added after the 2026-11-05 MVV, where the re-check
+   rejected 4 of 15 entered joins: when the branch entered and merged at least
+   one joined item, an uncovered final ledger does not stop generation, and the
+   answer carries the exact-key-join notice (§Technical Design, Generation after
+   an entered join). Tests pin both sides: an entered join with an uncovered
+   ledger generates and carries the notice; a run where the branch did not
+   enter, or merged nothing, is still a non-answer. Then a fresh MVV run.
 
 #### Step 5: Pin link deletion behavior
 
