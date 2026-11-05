@@ -10,6 +10,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_CONFORMANCE_REPORT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -231,6 +232,11 @@ public final class CatalogRepository {
     // EX_OWN_SEQ_GREATEST above.
     private static final Field<Double>  EX_DOC_SMTIME_GREATEST =
         DSL.greatest(CATALOG_DOCUMENTS.SOURCE_MTIME, DSL.excluded(CATALOG_DOCUMENTS.SOURCE_MTIME));
+    // nexus-rfvyy.6.4 (RDR-243): the document sensitivity flag is one-way on every ON CONFLICT DO UPDATE arm:
+    // the stored value OR the incoming one, so a write that omits the flag (or sends false) never lowers it.
+    // Only the audited route (POST /v1/catalog/sensitivity, nexus-rfvyy.6.5) clears it.
+    private static final Field<Boolean> EX_DOC_SENSITIVE_OR =
+        DSL.field(DSL.condition(CATALOG_DOCUMENTS.SENSITIVE).or(DSL.condition(DSL.excluded(CATALOG_DOCUMENTS.SENSITIVE))));
 
     private static final Field<String>  EX_LNK_FSPAN  = DSL.field("EXCLUDED.from_span",   String.class);
     private static final Field<String>  EX_LNK_TSPAN  = DSL.field("EXCLUDED.to_span",     String.class);
@@ -817,7 +823,7 @@ public final class CatalogRepository {
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
                     CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
                     CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
-                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT)
+                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT, CATALOG_DOCUMENTS.SENSITIVE)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
@@ -827,7 +833,8 @@ public final class CatalogRepository {
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
-                       nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")))
+                       nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")),
+                       bool(d, "sensitive", false))
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doUpdate()
                .set(CATALOG_DOCUMENTS.TITLE,  EX_DOC_TITLE)
@@ -852,6 +859,8 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
                .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT))
+               // nexus-rfvyy.6.4 (RDR-243): one-way; the un-tombstone arm below keeps the old row's flag too.
+               .set(CATALOG_DOCUMENTS.SENSITIVE, EX_DOC_SENSITIVE_OR)
                // nexus-mqd6t: explicit un-tombstone (see the javadoc above).
                // TOMBSTONE-EXEMPT (nexus-mqd6t): the ONE sanctioned resurrection --
                // deliberately unconditional, no WHERE guard applies to an ON
@@ -1123,13 +1132,20 @@ public final class CatalogRepository {
                 s(fields, "source_uri", ""),
                 s(fields, "file_path", ""),
                 repoRoot, ownerType, bool(fields, "allow_cross_project", false));
+            // nexus-rfvyy.6.4 (RDR-243): the request's own sensitivity flag. A re-registration of a LIVE row writes
+            // none of the request's other fields, so the flag is raised on the matched row explicitly
+            // (raiseSensitivity), and a request that carries no flag, or false, never lowers it.
+            final boolean requestedSensitive = bool(fields, "sensitive", false);
             if (!srcUri.isEmpty()) {
                 var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
                                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                                          .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(srcUri))
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
-                if (existing != null) return new RegisterOutcome(existing.value1(), false);
+                if (existing != null) {
+                    if (requestedSensitive) raiseSensitivity(ctx, tenant, List.of(existing.value1()), SENS_REASON_REGISTER_RAISE);
+                    return new RegisterOutcome(existing.value1(), false);
+                }
             }
             String filePath = s(fields, "file_path", "");
             if (!filePath.isEmpty()) {
@@ -1139,8 +1155,19 @@ public final class CatalogRepository {
                                          .and(CATALOG_DOCUMENTS.TUMBLER.startsWith(ownerPrefix + "."))
                                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                                   .fetchOne();
-                if (existing != null) return new RegisterOutcome(existing.value1(), false);
+                if (existing != null) {
+                    if (requestedSensitive) raiseSensitivity(ctx, tenant, List.of(existing.value1()), SENS_REASON_REGISTER_RAISE);
+                    return new RegisterOutcome(existing.value1(), false);
+                }
             }
+
+            // nexus-rfvyy.6.4 (RDR-243): delete-then-re-index keeps the protection. The new tumbler takes the flag
+            // from the most recent TOMBSTONED row of the same source_uri while that tombstone exists (purge-trash
+            // removes it; the audited route can still clear the new row). A file_path-only registration has no
+            // source_uri and no predecessor identity, so it inherits nothing.
+            final Predecessor predecessor = srcUri.isEmpty() ? null : mostRecentTombstoned(ctx, tenant, srcUri);
+            final boolean inherited = predecessor != null && predecessor.sensitive();
+            final boolean newRowSensitive = requestedSensitive || inherited;
 
             // No existing document — atomically claim the next sequence number
             long seq = ctx.select(CATALOG_OWNERS.NEXT_SEQ).from(CATALOG_OWNERS)
@@ -1160,7 +1187,8 @@ public final class CatalogRepository {
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
                     CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
                     CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
-                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT)
+                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT,
+                    CATALOG_DOCUMENTS.SENSITIVE)
                .values(tenant, tumbler,
                        s(fields, "title", ""),
                        nne(s(fields, "author", null)),
@@ -1183,7 +1211,8 @@ public final class CatalogRepository {
                        nne(s(fields,"bib_semantic_scholar_id", "")),
                        nne(s(fields,"bib_openalex_id", "")),
                        nne(s(fields,"bib_doi", "")),
-                       tsOrNull(s(fields,"bib_enriched_at", "")))
+                       tsOrNull(s(fields,"bib_enriched_at", "")),
+                       newRowSensitive)
                // nexus-78n33: TOCTOU backstop. Two concurrent registrations of
                // the same NEW source_uri can both pass the idempotency SELECT
                // above (READ COMMITTED); the partial unique index
@@ -1221,7 +1250,13 @@ public final class CatalogRepository {
                 }
                 log.info("event=register_document_race_lost tenant={} source_uri={} winner={}",
                     tenant, srcUri, winner.value1());
+                // The winner is a live row we did not write: a flagged request still raises it.
+                if (requestedSensitive) raiseSensitivity(ctx, tenant, List.of(winner.value1()), SENS_REASON_REGISTER_RAISE);
                 return new RegisterOutcome(winner.value1(), false);
+            }
+            if (inherited && !requestedSensitive) {
+                recordSensitivityChange(ctx, tenant, tumbler, false, true,
+                    SENS_REASON_REGISTER_INHERIT + " predecessor=" + predecessor.tumbler());
             }
             return new RegisterOutcome(tumbler, true);
         }));
@@ -1361,6 +1396,12 @@ public final class CatalogRepository {
             // occurrence wins; later duplicates alias to its tumbler.
             java.util.Map<String, Integer> firstNewBySrcUri = new java.util.HashMap<>();
             java.util.Map<Integer, Integer> aliasOfIdx = new java.util.HashMap<>();
+            // nexus-rfvyy.6.4 (RDR-243): the sensitivity flag each entry asks for. An intra-batch alias folds its
+            // request into the entry that actually inserts the row (the flag is an OR over everything that names
+            // the document); an entry that resolves to a LIVE row raises that row instead (raiseTargets, below).
+            final boolean[] wantsSensitive = new boolean[docs.size()];
+            for (int i = 0; i < docs.size(); i++) wantsSensitive[i] = bool(docs.get(i), "sensitive", false);
+            java.util.Set<String> raiseTargets = new java.util.LinkedHashSet<>();
             for (int i = 0; i < docs.size(); i++) {
                 var d = docs.get(i);
                 String su = uriOf[i];
@@ -1370,8 +1411,11 @@ public final class CatalogRepository {
                 if (existing == null && !fp.isEmpty()) existing = tumblerByFilePath.get(fp);
                 if (existing != null) {
                     out[i] = existing;
+                    if (wantsSensitive[i]) raiseTargets.add(existing);
                 } else if (!su.isEmpty() && firstNewBySrcUri.containsKey(su)) {
-                    aliasOfIdx.put(i, firstNewBySrcUri.get(su));
+                    int first = firstNewBySrcUri.get(su);
+                    aliasOfIdx.put(i, first);
+                    if (wantsSensitive[i]) wantsSensitive[first] = true;
                 } else {
                     if (!su.isEmpty()) firstNewBySrcUri.put(su, i);
                     newIdx.add(i);
@@ -1398,17 +1442,29 @@ public final class CatalogRepository {
                         tenant, ownerPrefix, seq, cursor);
                 }
 
+                // nexus-rfvyy.6.4 (RDR-243): delete-then-re-index keeps the protection. ONE query over the new
+                // entries' source URIs finds each URI's most recent TOMBSTONED row; a sensitive one makes the
+                // new row sensitive (and is audited below, naming the predecessor, once the row is known to
+                // be ours).
+                java.util.Map<String, Predecessor> predecessorOf = mostRecentTombstonedMany(
+                    ctx, tenant, newIdx.stream().map(ix -> uriOf[ix]).filter(u -> !u.isEmpty()).distinct().toList());
+                java.util.Map<Integer, Predecessor> inheritedBy = new java.util.HashMap<>();
+
                 var insert = ctx.insertInto(CATALOG_DOCUMENTS,
                         CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                         CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
                         CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
                         CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
-                        CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT);
+                        CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT,
+                        CATALOG_DOCUMENTS.SENSITIVE);
                 for (int idx : newIdx) {
                     var fields = docs.get(idx);
                     cursor += 1;
                     String tumbler = ownerPrefix + "." + cursor;
                     out[idx] = tumbler;
+                    Predecessor pred = uriOf[idx].isEmpty() ? null : predecessorOf.get(uriOf[idx]);
+                    boolean rowSensitive = wantsSensitive[idx] || (pred != null && pred.sensitive());
+                    if (pred != null && pred.sensitive() && !wantsSensitive[idx]) inheritedBy.put(idx, pred);
                     // Tentative: this row's own INSERT is about to run. Only
                     // non-empty source_uri rows can lose the cross-transaction
                     // race below (see the TOCTOU backstop comment ahead), so
@@ -1438,7 +1494,8 @@ public final class CatalogRepository {
                             nne(s(fields, "bib_semantic_scholar_id", "")),
                             nne(s(fields, "bib_openalex_id", "")),
                             nne(s(fields, "bib_doi", "")),
-                            tsOrNull(s(fields, "bib_enriched_at", "")));
+                            tsOrNull(s(fields, "bib_enriched_at", "")),
+                            rowSensitive);
                 }
                 // nexus-78n33: same TOCTOU backstop as the single-doc path —
                 // a row whose source_uri was registered by a CONCURRENT
@@ -1502,11 +1559,24 @@ public final class CatalogRepository {
                         // concurrent caller, not us.
                         if (!winner.equals(out[idx])) {
                             created[idx] = false;
+                            // The winner is a live row we did not write: a flagged request still raises it.
+                            if (wantsSensitive[idx]) raiseTargets.add(winner);
                         }
                         out[idx] = winner;
                     }
                 }
+                // nexus-rfvyy.6.4: a row that inherited the flag from its tombstoned predecessor is audited,
+                // naming the predecessor, once the row is known to be OURS (a race loser inserted nothing).
+                for (var e : inheritedBy.entrySet()) {
+                    if (created[e.getKey()]) {
+                        recordSensitivityChange(ctx, tenant, out[e.getKey()], false, true,
+                            SENS_REASON_REGISTER_INHERIT + " predecessor=" + e.getValue().tumbler());
+                    }
+                }
             }
+            // nexus-rfvyy.6.4: raise every live row a flagged request named (UPDATE ... WHERE NOT sensitive, one
+            // statement, one audit row per row actually raised).
+            raiseSensitivity(ctx, tenant, raiseTargets, SENS_REASON_REGISTER_RAISE);
             // Fill intra-batch aliases from their winning row's final tumbler
             // and created flag (nexus-vfef0): an alias never ran its own
             // INSERT, so its created status mirrors whichever outcome the
@@ -3866,7 +3936,7 @@ public final class CatalogRepository {
             // serializes against it too — see that method's own comment.
             lockDocumentRowsSorted(ctx, tenant, true, duplicateTumbler, canonicalTumbler);
 
-            var dup = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.ALIAS_OF)
+            var dup = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SENSITIVE)
                          .from(CATALOG_DOCUMENTS)
                          .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                                 .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
@@ -3877,11 +3947,14 @@ public final class CatalogRepository {
                     "duplicate not found (absent, tombstoned, or not visible to this "
                     + "tenant): " + duplicateTumbler);
             }
-            boolean canonicalExists = ctx.fetchExists(
-                ctx.selectOne().from(CATALOG_DOCUMENTS)
-                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
-                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())));
+            // nexus-rfvyy.6.4 (RDR-243): read the canonical's flag here, after the row locks, with the
+            // existence check (null = no live canonical row).
+            Boolean canonicalSensitive = ctx.select(CATALOG_DOCUMENTS.SENSITIVE).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(canonicalTumbler))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetchOne(CATALOG_DOCUMENTS.SENSITIVE);
+            boolean canonicalExists = canonicalSensitive != null;
             if (!canonicalExists) {
                 throw new MergeRefused(
                     "canonical not found (absent, tombstoned, or not visible to this "
@@ -3962,6 +4035,12 @@ public final class CatalogRepository {
                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(duplicateTumbler))
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .execute();
+
+            // nexus-rfvyy.6.4 (RDR-243): the canonical is sensitive when either side was. The duplicate keeps its
+            // own flag (it stays a live alias row, and its chunks stay covered by it).
+            if (Boolean.TRUE.equals(dup.value3()) && !canonicalSensitive) {
+                raiseSensitivity(ctx, tenant, List.of(canonicalTumbler), SENS_REASON_MERGE + " duplicate=" + duplicateTumbler);
+            }
 
             LinkRemapCounts linkCounts = remapLinksForMerge(ctx, tenant, duplicateTumbler, canonicalTumbler);
 
@@ -12244,7 +12323,7 @@ public final class CatalogRepository {
             for (var d : rows) unique.put(s(d, "tumbler"), d);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int cols = 24;
+            final int cols = 25;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -12253,7 +12332,7 @@ public final class CatalogRepository {
                         CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
                         CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
                         CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
-                        CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT);
+                        CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT, CATALOG_DOCUMENTS.SENSITIVE);
                 for (var d : batch) {
                     String metaJson = jsonOrNull(d.get("metadata"));
                     // Same identity guard as doImportDocument (nexus-0ehwe arbiter class).
@@ -12267,7 +12346,8 @@ public final class CatalogRepository {
                             ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                             nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                             nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
-                            nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")));
+                            nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")),
+                            bool(d, "sensitive", false));
                 }
                 insert.onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                       .doUpdate()
@@ -12294,6 +12374,8 @@ public final class CatalogRepository {
                       .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                       .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
                       .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT))
+                      // nexus-rfvyy.6.4 (RDR-243): one-way, a re-import never lowers the flag.
+                      .set(CATALOG_DOCUMENTS.SENSITIVE, EX_DOC_SENSITIVE_OR)
                       .execute();
             }
             return rows.size();
@@ -12311,7 +12393,7 @@ public final class CatalogRepository {
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
                     CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
                     CATALOG_DOCUMENTS.BIB_YEAR, CATALOG_DOCUMENTS.BIB_AUTHORS, CATALOG_DOCUMENTS.BIB_VENUE, CATALOG_DOCUMENTS.BIB_CITATION_COUNT,
-                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT)
+                    CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT, CATALOG_DOCUMENTS.SENSITIVE)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
@@ -12321,7 +12403,8 @@ public final class CatalogRepository {
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
-                       nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")))
+                       nne(s(d,"bib_doi")), tsOrNull(s(d,"bib_enriched_at")),
+                       bool(d, "sensitive", false))
                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                .doUpdate()
                .set(CATALOG_DOCUMENTS.TITLE,  EX_DOC_TITLE)
@@ -12347,6 +12430,8 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.BIB_OPENALEX_ID,   EX_DOC_BIOA)
                .set(CATALOG_DOCUMENTS.BIB_DOI,  EX_DOC_BIDOI)
                .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT,   DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT))
+               // nexus-rfvyy.6.4 (RDR-243): one-way, a re-import never lowers the flag.
+               .set(CATALOG_DOCUMENTS.SENSITIVE, EX_DOC_SENSITIVE_OR)
                .execute();
         }
     }
@@ -12786,6 +12871,102 @@ public final class CatalogRepository {
         insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
               .doNothing()
               .execute();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // DOCUMENT SENSITIVITY (nexus-rfvyy.6.4, RDR-243): the flag is one-way
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** Audit reasons of the engine's own write rules (the audited route carries the caller's reason). */
+    static final String SENS_REASON_REGISTER_RAISE = "register_raise";
+    static final String SENS_REASON_REGISTER_INHERIT = "register_inherit";
+    static final String SENS_REASON_MERGE = "merge";
+
+    /**
+     * The audit actor of a change the engine makes by its own rule (register raise or inherit, merge). Those
+     * paths run inside a repository call with no caller identity in scope (the db package does not see the
+     * HTTP principal), and the rule, not a person, made the change; the reason names the rule and the row it
+     * followed. The audited route records the real actor.
+     */
+    static final String SENS_ACTOR_ENGINE = "engine";
+
+    /** The most recent TOMBSTONED row of a source URI: its tumbler and whether it was sensitive. */
+    private record Predecessor(String tumbler, boolean sensitive) {}
+
+    // TOMBSTONE-EXEMPT (nexus-rfvyy.6.4): the predecessor lookup reads ONLY tombstoned rows
+    // (deleted_at IS NOT NULL) on purpose: a delete-then-re-index must see what the deleted row carried.
+    private static Predecessor mostRecentTombstoned(DSLContext ctx, String tenant, String sourceUri) {
+        var r = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SENSITIVE).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(sourceUri))
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+            .orderBy(CATALOG_DOCUMENTS.DELETED_AT.desc(), CATALOG_DOCUMENTS.TUMBLER.desc())
+            .limit(1)
+            .fetchOne();
+        return r == null ? null : new Predecessor(r.value1(), Boolean.TRUE.equals(r.value2()));
+    }
+
+    /** {@link #mostRecentTombstoned} for many source URIs in ONE query (the batch register). */
+    private static java.util.Map<String, Predecessor> mostRecentTombstonedMany(
+            DSLContext ctx, String tenant, List<String> sourceUris) {
+        java.util.Map<String, Predecessor> out = new java.util.HashMap<>();
+        if (sourceUris.isEmpty()) return out;
+        // TOMBSTONE-EXEMPT (nexus-rfvyy.6.4): tombstoned rows only, see mostRecentTombstoned.
+        var rows = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SENSITIVE)
+            .from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.SOURCE_URI.in(sourceUris))
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
+            .orderBy(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.DELETED_AT.desc(), CATALOG_DOCUMENTS.TUMBLER.desc())
+            .fetch();
+        for (var r : rows) {
+            out.putIfAbsent(r.value1(), new Predecessor(r.value2(), Boolean.TRUE.equals(r.value3())));
+        }
+        return out;
+    }
+
+    /**
+     * Raise {@code sensitive} on the LIVE rows among {@code tumblers} that do not carry it yet, in the caller's
+     * transaction, and write one audit row per row actually raised (an already-sensitive row is a no-op and
+     * writes nothing). Never lowers a flag.
+     */
+    private static void raiseSensitivity(DSLContext ctx, String tenant,
+                                         java.util.Collection<String> tumblers, String reason) {
+        if (tumblers.isEmpty()) return;
+        var raised = ctx.update(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.SENSITIVE, true)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENTS.TUMBLER.in(tumblers))
+                   .and(CATALOG_DOCUMENTS.SENSITIVE.isFalse())
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .returning(CATALOG_DOCUMENTS.TUMBLER)
+            .fetch();
+        recordSensitivityChanges(ctx, tenant, raised.getValues(CATALOG_DOCUMENTS.TUMBLER), false, true, reason, SENS_ACTOR_ENGINE);
+    }
+
+    private static void recordSensitivityChange(DSLContext ctx, String tenant, String tumbler,
+                                                boolean oldValue, boolean newValue, String reason) {
+        recordSensitivityChanges(ctx, tenant, List.of(tumbler), oldValue, newValue, reason, SENS_ACTOR_ENGINE);
+    }
+
+    /**
+     * Append audit rows to {@code catalog_sensitivity_changes}, one multi-row INSERT per chunk. The ONLY writer
+     * of that table, so every change of the flag (engine rules here, the audited route) lands in one place.
+     */
+    static void recordSensitivityChanges(DSLContext ctx, String tenant, List<String> tumblers,
+                                         boolean oldValue, boolean newValue, String reason, String actor) {
+        if (tumblers.isEmpty()) return;
+        final int chunk = 1000;
+        for (int start = 0; start < tumblers.size(); start += chunk) {
+            var insert = ctx.insertInto(CATALOG_SENSITIVITY_CHANGES,
+                CATALOG_SENSITIVITY_CHANGES.TENANT_ID, CATALOG_SENSITIVITY_CHANGES.TUMBLER,
+                CATALOG_SENSITIVITY_CHANGES.OLD, CATALOG_SENSITIVITY_CHANGES.NEW,
+                CATALOG_SENSITIVITY_CHANGES.REASON, CATALOG_SENSITIVITY_CHANGES.ACTOR);
+            for (String t : tumblers.subList(start, Math.min(start + chunk, tumblers.size()))) {
+                insert = insert.values(tenant, t, oldValue, newValue, reason, actor);
+            }
+            insert.execute();
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
