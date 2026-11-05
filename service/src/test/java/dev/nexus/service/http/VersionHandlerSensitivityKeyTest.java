@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import dev.nexus.service.TestHttp;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -14,9 +16,6 @@ import org.junit.jupiter.api.Test;
 import javax.sql.DataSource;
 import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.SQLException;
 import java.util.List;
@@ -68,8 +67,8 @@ class VersionHandlerSensitivityKeyTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/version", new VersionHandler(refusingPool, router));
         server.start();
-        HttpResponse<String> resp = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
-            URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/version")).GET().build(),
+        HttpResponse<String> resp = TestHttp.client().send(TestHttp.request(
+            "http://127.0.0.1:" + server.getAddress().getPort() + "/version").GET().build(),
             HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).isEqualTo(200);
         JsonNode body = MAPPER.readTree(resp.body());
