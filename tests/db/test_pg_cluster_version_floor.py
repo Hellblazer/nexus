@@ -51,9 +51,11 @@ def test_a_stopped_cluster_below_the_floor_is_refused_before_pg_ctl_start(tmp_pa
     assert [c[-1] for c in calls] == ["status"]  # pg_ctl start never ran
     text = str(err.value)
     assert "PostgreSQL 16" in text
-    assert f"PostgreSQL {PG_VERSION_FLOOR} or newer" in text
+    assert f"needs {PG_VERSION_FLOOR} or newer" in text
     assert "pg_upgrade" in text
     assert "A local cluster older than PostgreSQL 17" in text
+    assert str(pgdata) in text
+    assert text.index("A local cluster older than PostgreSQL 17") < text.index(str(pgdata))  # survives a 600-char cut
 
 
 def test_a_cluster_at_the_floor_starts(tmp_path: Path, ran) -> None:
@@ -70,7 +72,7 @@ def test_a_running_cluster_is_left_alone_whatever_its_version(tmp_path: Path, ra
     assert [c[-1] for c in calls] == ["status"]
 
 
-@pytest.mark.parametrize("marker", [None, "", "garbage", "9.6"])
+@pytest.mark.parametrize("marker", [None, "", "garbage", "\u00b2", "9.6"])
 def test_an_absent_or_unreadable_marker_is_not_refused_but_an_old_dotted_one_is(tmp_path: Path, marker) -> None:
     pgdata = _pgdata(tmp_path, marker)
     if marker == "9.6":
@@ -78,3 +80,48 @@ def test_an_absent_or_unreadable_marker_is_not_refused_but_an_old_dotted_one_is(
             refuse_cluster_below_floor(pgdata)
     else:
         refuse_cluster_below_floor(pgdata)
+
+
+def test_provision_refuses_before_binary_discovery_and_leaves_the_old_conf_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The code review's case: no extracted bundle, so discovery would fail first; and the conf rewrite
+    # would change an old cluster the runbook then has the user start with its own PostgreSQL.
+    config_dir = tmp_path / "cfg"
+    pgdata = config_dir / "postgres"
+    pgdata.mkdir(parents=True)
+    (pgdata / "PG_VERSION").write_text("16\n")
+    conf = pgdata / "postgresql.conf"
+    conf.write_text("port = 5432\n")
+
+    def no_discovery():
+        raise AssertionError("binary discovery ran before the refusal")
+
+    monkeypatch.setattr(pp, "refuse_root", lambda: None)
+    monkeypatch.setattr(pp, "refuse_smart_app_control", lambda: None)
+    monkeypatch.setattr(pp, "discover_pg_binaries", no_discovery)
+    with pytest.raises(PgClusterBelowFloorError, match="PostgreSQL 16"):
+        pp.provision(config_dir)
+    assert conf.read_text() == "port = 5432\n"
+
+
+
+def test_the_supervisor_refuses_before_discovery_with_the_message_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nexus.daemon.storage_service_daemon as ssd
+    from nexus.daemon.storage_service_daemon import StorageServiceStartError, StorageServiceSupervisor
+
+    pgdata = _pgdata(tmp_path, "16")
+    monkeypatch.setattr(ssd, "_port_accepting", lambda host, port: False)
+    monkeypatch.setattr(pp, "discover_pg_binaries", lambda: (_ for _ in ()).throw(AssertionError("discovery ran first")))
+    sup = StorageServiceSupervisor(
+        config_dir=tmp_path, pg_port=1, service_port=0,
+        creds={"PG_DATA": str(pgdata), "PG_PORT": "1", "NX_SERVICE_TOKEN": "t" * 64},
+        binary_path=Path("/nonexistent/fake-nexus-service-binary"), launch_kind="native",
+    )
+    with pytest.raises(StorageServiceStartError) as err:
+        sup._ensure_pg_running()
+    assert isinstance(err.value.__cause__, PgClusterBelowFloorError)
+    assert "A local cluster older than PostgreSQL 17" in str(err.value)
+    assert "Check the Postgres data directory" not in str(err.value)

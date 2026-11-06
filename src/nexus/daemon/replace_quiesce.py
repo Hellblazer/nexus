@@ -150,10 +150,11 @@ def default_ops(config_dir: Path) -> QuiesceOps:
         )
 
     def start_pg() -> None:
-        from nexus.db.pg_provision import _start_cluster, apply_managed_conf_before_start, discover_pg_binaries  # noqa: PLC0415 - deferred, heavy import
+        from nexus.db.pg_provision import _start_cluster, apply_managed_conf_before_start, discover_pg_binaries, refuse_cluster_below_floor  # noqa: PLC0415 - deferred, heavy import
 
         creds = _creds() or {}
         pgdata, port = Path(creds["PG_DATA"]), int(creds["PG_PORT"])
+        refuse_cluster_below_floor(pgdata)  # before the conf rewrite (nexus-hck2c)
         apply_managed_conf_before_start(pgdata, port)  # the managed block first, best effort (nexus-o26hs)
         _start_cluster(discover_pg_binaries(), pgdata, port)
 
