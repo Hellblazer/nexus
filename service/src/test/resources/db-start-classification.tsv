@@ -52,6 +52,7 @@ TenantPartitionCreationTs1MeasurementIntegrationTest	startDedicated	CLUSTER_STAT
 ChashProbePlanShapeTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
 ChashVectorConcurrencyTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
 ChunkLiveOwnersRecallExtendedIntegrationTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 4g tmpfs and 6g container
+PciIndexBytesPerRowChurnMeasurementTest	startDedicated	SIZED	outgrows the default tmpfs; needs an 8g tmpfs and 12g container (70k rows of 1024 dimensions under two HNSW indexes)
 PgBouncerTenantIsolationTest	newContainer	NETWORK	attaches the Postgres container to a Docker network shared with a PgBouncer container
 PlpgsqlCheckGateTest	newContainer	IMAGE	builds its own container from a different image (plpgsql_check)
 DdlCountSwitchTest	newContainer	INFRA	tests the DDL counter's switch on the container factory's own output (tmpfs, server log, probe)

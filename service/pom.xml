@@ -70,9 +70,15 @@
         <onnx.native.dir>linux-x64</onnx.native.dir>
         <djl.native.dir>linux-x86_64</djl.native.dir>
 
-        <!-- Surefire tag exclusion: skip @Tag("integration") by default -->
+        <!-- Surefire tag exclusion: skip @Tag("integration") and @Tag("measurement") by default -->
         <!-- Override with: mvn test -Dtest.excluded.groups="" -Dgroups=integration -->
-        <test.excluded.groups>integration</test.excluded.groups>
+        <!-- nexus-4lnn1.1.6: "measurement" is a slow, hand-run substrate measurement (PciIndexBytesPerRowChurnMeasurementTest).
+             The integration group's -Dgroups=integration selects by tag, so it never picks a measurement class up;
+             run one with -Dtest.excluded.groups= -Dgroups=measurement -Dtest=<Class>. -->
+        <test.excluded.groups>integration,measurement</test.excluded.groups>
+        <!-- The fork bound in seconds (see forkedProcessTimeoutInSeconds below); a measurement run lifts it with
+             -Dnexus.test.fork.timeout=0 (0 = never). -->
+        <nexus.test.fork.timeout>2700</nexus.test.fork.timeout>
 
         <!-- nexus-13eb0: surefire fork-level parallelism. Each fork is a
              separate JVM, so per-class Testcontainers PG containers
@@ -414,7 +420,7 @@
                          and that basis is history. Re-derive by the same rule (about
                          2x the measured main-step maximum) when the maximum moves;
                          do not remove the bound. -->
-                    <forkedProcessTimeoutInSeconds>2700</forkedProcessTimeoutInSeconds>
+                    <forkedProcessTimeoutInSeconds>${nexus.test.fork.timeout}</forkedProcessTimeoutInSeconds>
                     <!-- nexus-1hj1d: deliberately NO rerunFailingTestsCount.
                          A blanket rerun retries EVERY failing test, so a racy
                          PRODUCT bug would be retried into a green run — the
