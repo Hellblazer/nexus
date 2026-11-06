@@ -95,6 +95,9 @@ class PciIndexBytesPerRowChurnMeasurementTest {
     static final double P_CONTROL_25 = 1.250;
     static final double P_CONTROL_50 = 1.750;
     static final double TOLERANCE = 0.01;
+    /** The readings a complete run takes: scenario A ten, scenario B four; the two bases carry no prediction. */
+    static final int EXPECTED_READINGS = 14;
+    static final long EXPECTED_COMPARED = 12;
 
     PostgreSQLContainer<?> pg;
     HikariDataSource adminDs;
@@ -184,6 +187,12 @@ class PciIndexBytesPerRowChurnMeasurementTest {
         }
 
         SoftAssertions soft = new SoftAssertions();
+        // The loop below passes over an empty list, so it proves nothing until the count does: scenario A takes ten
+        // readings (base, ingest, the fresh comparison build, their ratio, then three for each of 25% and 50%) and
+        // scenario B four; all but the two bases are compared with a prediction.
+        soft.assertThat(readings).as("every stage of both scenarios took its reading").hasSize(EXPECTED_READINGS);
+        soft.assertThat(readings.stream().filter(r -> !Double.isNaN(r.predicted())).count())
+            .as("readings compared with a prediction").isEqualTo(EXPECTED_COMPARED);
         for (Reading r : readings) {
             if (Double.isNaN(r.predicted())) {
                 continue;
