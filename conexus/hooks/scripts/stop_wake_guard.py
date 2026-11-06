@@ -25,8 +25,10 @@ Sam (it addresses "you", asks a question, says "say go and I'll", is a ``!`` com
 names a peer, mailbox, notification or restart as the wake, or when it is a past-tense report.
 A block follows when any surviving clause is (a) a CI or run wait, (b) a promise to check or do
 something later, or (c) a timed step (clock time, date, "in N minutes"). The block is
-``{"decision": "block", "reason": ...}``; the reason quotes the clause and tells the model to arm
-a wake now or state plainly who the wake is, then end the turn.
+``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": ...}}``, which continues the
+turn like ``decision: block`` does but without the "Stop hook error occurred" notice Claude Code
+shows for a block (measured live, 2026-11-06); the text quotes the clause and tells the model to
+arm a wake now or state plainly who the wake is, then end the turn.
 
 A sentence that gates on Sam ("once you give it, I'll push the tag") also drops the "After X,
 ..." / "Then ..." sentences that chain from it.
@@ -334,7 +336,7 @@ def main() -> int:
         if decision.block:
             clause = " ".join(decision.clause.split())[:_LOG_CLAUSE_CAP]
             _log("INFO", f'block class={decision.reason} {fields} clause="{clause}"')
-            sys.stdout.write(json.dumps({"decision": "block", "reason": block_reason(decision.reason, decision.clause)}))
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": block_reason(decision.reason, decision.clause)}}))
             sys.stdout.flush()
         else:
             _log("INFO", f"allow reason={decision.reason} {fields}")

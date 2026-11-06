@@ -4,7 +4,7 @@
 The contract these tests pin:
 
 - every allow branch (kill switch, ``stop_hook_active``, a running task, a cron, no text, malformed
-  input) exits 0 with nothing on stdout; the block is ``{"decision": "block", "reason": ...}``;
+  input) exits 0 with nothing on stdout; the block is ``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": ...}}`` (no "Stop hook error" notice, unlike ``decision: block``);
 - a Sam-actor clause, a peer or restart as the wake, and a past-tense report are dropped; a CI or run
   wait, a promise to do something later and a timed step are the three classes that block;
 - a hand-labelled sample of real turn ends (``tests/fixtures/stop_wake_guard_sample.json``, 168 rows
@@ -260,9 +260,9 @@ def test_block_end_to_end(tmp_path: Path) -> None:
     proc = _run(_payload(), tmp_path)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
-    assert out["decision"] == "block"
-    assert "The suite is still running." in out["reason"]
-    assert set(out) == {"decision", "reason"}
+    assert set(out) == {"hookSpecificOutput"}
+    assert out["hookSpecificOutput"]["hookEventName"] == "Stop"
+    assert "The suite is still running." in out["hookSpecificOutput"]["additionalContext"]
     assert proc.stderr == ""
     line = _log(tmp_path).strip().splitlines()[-1]
     assert " INFO stop-wake-guard: block class=ci-wait session=11111111 " in line
@@ -294,7 +294,7 @@ def test_unwritable_log_directory_fails_open(tmp_path: Path) -> None:
     blocker.write_text("x", encoding="utf-8")
     proc = _run(_payload(), blocker)  # NEXUS_CONFIG_DIR is a file: the log cannot be made
     assert proc.returncode == 0
-    assert json.loads(proc.stdout)["decision"] == "block"  # the verdict still stands; only the log is lost
+    assert "additionalContext" in json.loads(proc.stdout)["hookSpecificOutput"]  # the verdict still stands; only the log is lost
 
 
 def test_internal_error_fails_open(tmp_path: Path) -> None:
