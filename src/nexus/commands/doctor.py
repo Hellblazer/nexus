@@ -1083,7 +1083,12 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
 
 
-def _report_aspect_queue_service() -> None:
+#: "Not handed a status": the default sweep fetches ``GET /v1/status`` once and passes it to every
+#: row that reads it; a row run alone fetches its own.
+_ENGINE_STATUS_UNSET: object = object()
+
+
+def _report_aspect_queue_service(engine_status: object = _ENGINE_STATUS_UNSET) -> None:
     """Aspect-queue depth from the LIVE ``aspects`` tuple queue over HTTP (nexus-k0luu).
 
     Fails LOUD on a transport error rather than degrading: silently falling
@@ -1135,7 +1140,7 @@ def _report_aspect_queue_service() -> None:
         )
     if tuple_counts.dead:
         click.echo("  dead tuple tasks: nx tuple stats aspects")
-    retired_failed = _report_retired_queue_table()
+    retired_failed = _report_retired_queue_table(engine_status)
     # The spawner declines to start the aspect worker when `claude` is not on
     # PATH and notes it once per process at debug level; this is the durable
     # signal. A WARNING, not a failure: rows wait in the queue until a worker
@@ -1190,7 +1195,7 @@ def _report_aspect_queue_service() -> None:
         raise click.exceptions.Exit(1)
 
 
-def _report_retired_queue_table() -> bool:
+def _report_retired_queue_table(engine_status: object = _ENGINE_STATUS_UNSET) -> bool:
     """Say what the engine reports about the retired ``aspect_extraction_queue`` table, never
     a clean zero while rows remain in it (nexus-hbnml). Returns True when stranded rows
     are a failure.
@@ -1204,7 +1209,8 @@ def _report_retired_queue_table() -> bool:
     from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
     from nexus.db.t2.http_aspect_queue import RETIRED_TABLE_REMEDY, retired_queue_table  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    table = retired_queue_table(fetch_engine_status())
+    status = fetch_engine_status() if engine_status is _ENGINE_STATUS_UNSET else engine_status
+    table = retired_queue_table(status if isinstance(status, dict) else None)
     if table.state == "gone":
         return False
     if table.state == "empty":
@@ -1234,7 +1240,7 @@ def _report_retired_queue_table() -> bool:
     return True
 
 
-def _run_check_aspect_queue() -> None:
+def _run_check_aspect_queue(engine_status: object = _ENGINE_STATUS_UNSET) -> None:
     """Report the aspect queue's depth: pending, claimed and dead tasks.
 
     RDR-089 follow-up nexus-qeo8 introduced an async worker
@@ -1245,7 +1251,7 @@ def _run_check_aspect_queue() -> None:
     `nx aspects requeue-failed` directs operators to this very check for
     backlog visibility.
     """
-    _report_aspect_queue_service()
+    _report_aspect_queue_service(engine_status)
 
 
 # ── --check-index-failures (nexus-nukn3) ─────────────────────────────────────
@@ -1517,7 +1523,6 @@ def _run_check_index_failures() -> None:
 
 
 #: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
-_ENGINE_STATUS_UNSET: object = object()
 
 
 def _report_engine_activity(status: object = _ENGINE_STATUS_UNSET) -> None:
@@ -2894,7 +2899,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
         "resources": _run_check_resources,
         "plan-library": _run_check_plan_library,
         "taxonomy": _run_check_taxonomy,
-        "aspect-queue": _run_check_aspect_queue,
+        "aspect-queue": lambda: _run_check_aspect_queue(engine_status),
         "t1": _run_check_t1,
         "engine-activity": lambda: _run_check_engine_activity(engine_status),
         "index-failures": _run_check_index_failures,
