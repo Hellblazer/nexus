@@ -2741,7 +2741,15 @@ class TestAskAnswerPeerFallback:
         _wired(tmp_path, eng)
         res = _run(tmp_path=tmp_path, argv=_PLUGIN_ARGV)
         _assert_peer(res.stdout, _R_UNCHECKED)
-        assert res.returncode == 0 and "exceeded" in res.stderr, res.stderr
+        # The same two-clock race as the /v1/tuples/rd timeout test above (nexus-scc9t):
+        # _get's thread.join and urlopen's socket timeout share call_timeout, so under load
+        # the socket can fire first and the skip says "transport failure ... timed out".
+        # Both are the cap tripping; accept either, but only a timeout.
+        assert res.returncode == 0, res.stderr
+        assert (
+            "/v1/memory/get exceeded its" in res.stderr
+            or ("transport failure on /v1/memory/get" in res.stderr and "timed out" in res.stderr)
+        ), res.stderr
 
     def test_a_record_that_is_not_json_is_no_matching_record(self, tmp_path, engine) -> None:
         eng = engine()
