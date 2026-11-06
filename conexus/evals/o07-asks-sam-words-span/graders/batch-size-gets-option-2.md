@@ -1,7 +1,7 @@
 ---
 type: regex
 target: { source: file, path: nx-calls.log }
-pattern: 'CALL \[ask\]\[answer\]\[(?:aurora/)?aur-batch-size\]\[2\]\['
+pattern: 'CHECK ref=(?:aurora/)?aur-batch-size choice=\[2\] '
 match: contains
 ---
 

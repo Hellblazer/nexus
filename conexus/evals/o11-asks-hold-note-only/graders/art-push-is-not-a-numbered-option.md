@@ -1,7 +1,7 @@
 ---
 type: regex
 target: { source: file, path: nx-calls.log }
-pattern: 'CALL \[ask\]\[answer\]\[(?:art-release/)?art-push-main\]\[[0-9]+\]'
+pattern: 'CHECK ref=(?:art-release/)?art-push-main choice=\[[0-9]+\]'
 match: not_contains
 ---
 

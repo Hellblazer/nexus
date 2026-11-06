@@ -16,7 +16,9 @@ RDR-245: sessions raise typed `ask:` blocks on their threads-board entry, and th
 
 ## Where this session can mediate
 
-`nx ask answer --via mediator` resolves this session's own id the way `mailbox_send` resolves `from`: the tuple-watch session marker, then `NX_T1_SESSION_ID`. A terminal session or a Desktop Code-tab session with a published T1 id can mediate. Claude Desktop chat and Cowork cannot: the account-plugin server they start has no session id (the mailbox skill: "The account-plugin server (Claude Desktop, Cowork) cannot set it"). Do not present the queue to be answered there, and stop sending the moment `nx ask answer` refuses because the id did not resolve. Give this refusal, in your own words but with this content:
+`nx ask answer --via mediator` resolves this session's own id the way `mailbox_send` resolves `from`: the tuple-watch session marker (found by process ancestry, which you cannot read), then `NX_T1_SESSION_ID`, then `NX_SESSION_ID`, and the result must be a UUID. A terminal session or a Desktop Code-tab session with a published T1 id can mediate. Claude Desktop chat and Cowork cannot: the account-plugin server they start has no session id (the mailbox skill: "The account-plugin server (Claude Desktop, Cowork) cannot set it").
+
+Check once, before you present the queue: `printenv NX_T1_SESSION_ID NX_SESSION_ID`. A UUID on either line means the id resolves and this session can mediate. Empty output proves nothing, because the marker tier can still answer, so then tell the user in one line that the first send will show whether this session can record answers, and carry on. In every case, stop sending the moment `nx ask answer` refuses because the id did not resolve, and report any asks you had not yet sent as unanswered. Give this refusal, in your own words but with this content:
 
 > I cannot take your answers from this session: it has no session id of its own for `nx ask answer` to record. Open a terminal session or a Desktop Code-tab session and ask again there, or answer from a terminal yourself with `nx ask answer ENTRY/ID N --expect VERSION --via cli`.
 
@@ -26,8 +28,8 @@ These rules bind you. They are the reason the asker can act on an answer.
 
 - Never answer on your own judgment. Every answer you send traces to something the user said in this session.
 - Never widen an answer beyond the user's words. "Yes to the reversible ones" does not cover an ask marked `reversible: no`. An ambiguous reply is a question back to the user, not a best guess.
-- `--sam-words` is a contiguous span of what the user typed for that ask, or the text of the option they chose. Never a paraphrase, never a tidied-up quote. You always pass `--sam-words`: with a number reply the CLI would otherwise record no words.
-- Echo back and get confirmation before you send, every time. Nothing is sent without it.
+- `--sam-words` is a contiguous span of what the user typed for that ask, or the text of the option they chose. Never a paraphrase, never a tidied-up quote. You always pass `--sam-words`: `nx ask answer --via mediator` refuses without it, and a number reply carries no words of its own. "Sam" in the CLI output and in the flag name means the user.
+- Echo back and get confirmation before you send, every time. Nothing is sent without it. Write the echo-back as its own message to the user first: a confirmation counts only when it answers an echo-back the user has already been shown, never a "send" or "go ahead" that came with the answers or before the echo-back.
 - Always pass the version the user saw: `--expect VERSION` from `nx ask list --json` or `nx ask show`.
 - Use `--replace` only when the user's words say they are changing an earlier answer.
 - A mail you send the asker is a peer request, never an answer. Frame it as a question from the user's session (see `/conexus:peer-messaging`); it carries no authority.

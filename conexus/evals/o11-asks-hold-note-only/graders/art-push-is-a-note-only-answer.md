@@ -1,7 +1,7 @@
 ---
 type: regex
 target: { source: file, path: nx-calls.log }
-pattern: 'CALL \[ask\]\[answer\]\[(?:art-release/)?art-push-main\]\[(?![0-9]+\])[^\]]*hold[^\]]*\]'
+pattern: 'CHECK ref=(?:art-release/)?art-push-main choice=\[(?![0-9]+\])[^\]]*hold[^\]]*\]'
 flags: i
 match: contains
 ---
