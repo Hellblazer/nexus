@@ -24,7 +24,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,7 +31,7 @@ import pytest
 import yaml
 
 # O(corpus) meta-test like test_eval_corpus_lint.py: it changes with conexus/evals, so it runs in the lint bucket.
-pytestmark = [pytest.mark.lint, pytest.mark.skipif(sys.platform == "win32", reason="the scaffolds are bash scripts")]
+pytestmark = pytest.mark.lint
 
 REPO = Path(__file__).resolve().parents[1]
 EVALS = REPO / "conexus" / "evals"

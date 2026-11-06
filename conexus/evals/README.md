@@ -158,7 +158,7 @@ characters). It accepts `--opt value` and `--opt=value`, and answers `--help` or
 a usage text logged as `HELP`, never as a `CALL`. One stub serves all eight cases; its `MEDIATE` line
 sets whether a `--via mediator` send is accepted (`ok`) or refused with the real command's
 id-did-not-resolve text and a `REFUSED` log line (`no-session-id`, o14 only).
-`tests/test_asks_eval_stubs.py` drives the stub and pins every `CHECK` verdict and the log-target
+A repository test drives the stub and pins every `CHECK` verdict and the log-target
 graders. The graders read that file with `target: { source: file, path: nx-calls.log }`,
 which the runner supports (first used here). The stub's source is readable in
 the workspace, and the models do read it: a no-skill control therefore passes
