@@ -14,7 +14,8 @@ and on threads that were handed a copy of its context (``asyncio`` tasks and
 ``asyncio.to_thread`` copy it; ``loop.run_in_executor`` and ``threading.Thread`` do
 not). When the variable is unset the process environment decides: a child process
 started by a scoped parent carries ``NX_SENSITIVITY_POSTURE=llm_bound`` (exported
-by a later phase) and is in the scope from its first line.
+by ``_build_dispatch_env``; the nested ``nx-mcp`` also enters the scope per tool call,
+``nexus.mcp._sensitivity_posture``) and is in the scope from its first line.
 
 Imports nothing beyond the standard library: this module sits on the dispatch hot
 path and on CLI startup.

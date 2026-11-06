@@ -16390,6 +16390,11 @@ def main():
     from nexus.mcp._stale_host import install_stale_host_hook  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
 
     install_stale_host_hook(mcp)
+    # RDR-243 Phase 2 Step 2.5 (nexus-rfvyy.7.10): a server a dispatched `claude -p` child launched carries
+    # NX_SENSITIVITY_POSTURE=llm_bound; every tools/call then runs inside the sensitivity scope. A no-op otherwise.
+    from nexus.mcp._sensitivity_posture import install_sensitivity_posture_hook  # noqa: PLC0415 — entry-point only
+
+    install_sensitivity_posture_hook(mcp)
     # RDR-144 P5b: surface the embedder advisory to plugin/Desktop/Cowork-first
     # users who never run the Claude Code SessionStart hook. The MCP server
     # cannot print (stdout is JSON-RPC), so the notice rides the server

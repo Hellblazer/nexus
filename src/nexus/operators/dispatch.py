@@ -56,7 +56,7 @@ from nexus.operators.llm_types import (  # noqa: F401 - re-exports
     record_usage,
     warn_on_family_drift,
 )
-from nexus.sensitivity import assert_llm_bound
+from nexus.sensitivity import POSTURE_ENV, assert_llm_bound
 from nexus.util.nx_argv import argv_off_cwd
 
 if TYPE_CHECKING:
@@ -312,6 +312,11 @@ def _build_dispatch_env(
 
     if parent_session_id:
         base["NX_SESSION_ID"] = parent_session_id
+
+    # RDR-243 Phase 2 Step 2.5 (nexus-rfvyy.7.10): every dispatched child is LLM-bound, in every mode and whatever
+    # the parent held. Its nested nx-mcp reads this at startup (nexus.mcp._sensitivity_posture), and
+    # nexus.sensitivity.current_posture falls back to it, so the child's reads exclude sensitive chunks.
+    base[POSTURE_ENV] = "llm_bound"
 
     # RDR-219 amendment (nexus-wauo1.35 / .38): map a harness's dispatch
     # grant into this child's own CLAUDE_CODE_OAUTH_TOKEN, never into
