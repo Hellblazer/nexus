@@ -544,14 +544,14 @@ class RouteBManifestPreFilterTest {
                 var colls = new String[] {collection};
                 var seeds = new String[] {DOC_A, DOC_B};
                 org.jooq.Table<?> meta = dim == 768
-                    ? SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, body, null, 10, model, tenant)
-                    : SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, body, null, 10, model, tenant);
+                    ? SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, body, null, 10, model, tenant, false)
+                    : SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, body, null, 10, model, tenant, false);
                 org.jooq.Table<?> aspect = dim == 768
-                    ? SEARCH_ASPECT_SCOPED_768.call(q, colls, null, null, null, null, body, null, 10, model, tenant)
-                    : SEARCH_ASPECT_SCOPED_1024.call(q, colls, null, null, null, null, body, null, 10, model, tenant);
+                    ? SEARCH_ASPECT_SCOPED_768.call(q, colls, null, null, null, null, body, null, 10, model, tenant, false)
+                    : SEARCH_ASPECT_SCOPED_1024.call(q, colls, null, null, null, null, body, null, 10, model, tenant, false);
                 org.jooq.Table<?> graph = dim == 768
-                    ? SEARCH_GRAPH_HOP_768.call(q, seeds, colls, null, 1, "both", null, body, null, 10, model, tenant)
-                    : SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, null, 1, "both", null, body, null, 10, model, tenant);
+                    ? SEARCH_GRAPH_HOP_768.call(q, seeds, colls, null, 1, "both", null, body, null, 10, model, tenant, false)
+                    : SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, null, 1, "both", null, body, null, 10, model, tenant, false);
                 for (var fn : List.of(meta, aspect, graph)) {
                     var ids = seed.select(fn.field("id", String.class)).from(fn).fetch(fn.field("id", String.class));
                     assertThat(ids).as("dim %d %s", dim, fn.getName()).containsExactly(DOC_A);
@@ -559,8 +559,8 @@ class RouteBManifestPreFilterTest {
                 // the same call with the predicate's jsonpath form, on the label the other owner holds
                 var path = "exists($.\"section_type\" ? (@ == \"appendix\"))";
                 var metaPath = dim == 768
-                    ? SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, null, path, 10, model, tenant)
-                    : SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, null, path, 10, model, tenant);
+                    ? SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, null, path, 10, model, tenant, false)
+                    : SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, null, path, 10, model, tenant, false);
                 assertThat(seed.select(metaPath.field("id", String.class)).from(metaPath).fetch(metaPath.field("id", String.class)))
                     .as("dim %d jsonpath form", dim).containsExactly(DOC_B);
             }

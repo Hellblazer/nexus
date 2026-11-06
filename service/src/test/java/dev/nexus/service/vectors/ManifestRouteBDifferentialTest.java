@@ -448,7 +448,7 @@ class ManifestRouteBDifferentialTest {
             PgSession.disableIndexScanForExactFallback(ctx);
             Set<String> out = new TreeSet<>();
             for (var r : ctx.selectFrom(MANIFEST_SEARCH_384.call(q, null, null, new String[] {COLL}, null, null,
-                    plan.containment(), plan.jsonPath(), 1000, MODEL, TENANT)).fetch()) {
+                    plan.containment(), plan.jsonPath(), 1000, MODEL, TENANT, false)).fetch()) {
                 out.add(r.get("id", String.class));
             }
             return out;

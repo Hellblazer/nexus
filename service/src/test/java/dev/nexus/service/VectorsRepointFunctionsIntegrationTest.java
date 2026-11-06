@@ -392,7 +392,7 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // search_metadata_scoped_384: must find the seeded chunk.
                 var meta384 = SEARCH_METADATA_SCOPED_384.call(
-                    vec(384, 0.01), colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT);
+                    vec(384, 0.01), colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT, false);
                 var metaIds = ctx.select(meta384.ID).from(meta384).fetch(meta384.ID);
                 assertThat(metaIds).as("search_metadata_scoped_384 must find the seeded chunk").isNotEmpty();
                 assertThat(metaIds.get(0)).isEqualTo(fx.docTumbler());
@@ -408,7 +408,7 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // search_topic_scoped_384: must find the seeded chunk via topic_assignments.
                 var topic384 = SEARCH_TOPIC_SCOPED_384.call(
-                    vec(384, 0.01), "alpha", fx.collection(), 10, MODEL_384, TENANT);
+                    vec(384, 0.01), "alpha", fx.collection(), 10, MODEL_384, TENANT, false);
                 assertThat(ctx.select(topic384.ID).from(topic384).fetch(topic384.ID))
                     .as("search_topic_scoped_384 must find the seeded chunk").isNotEmpty();
                 for (int dim : new int[] {768, 1024}) {
@@ -421,7 +421,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // search_graph_hop_384: seed is its own link target (self-loop
                 // 'cites'), depth 1, direction both, from itself as the seed.
                 var hop384 = SEARCH_GRAPH_HOP_384.call(
-                    vec(384, 0.01), seeds, colls, null, 1, "both", null, null, null, 10, MODEL_384, TENANT);
+                    vec(384, 0.01), seeds, colls, null, 1, "both", null, null, null, 10, MODEL_384, TENANT, false);
                 assertThat(ctx.select(hop384.ID).from(hop384).fetch(hop384.ID))
                     .as("search_graph_hop_384 must find the seeded chunk via the self-loop link").isNotEmpty();
                 for (int dim : new int[] {768, 1024}) {
@@ -439,18 +439,18 @@ class VectorsRepointFunctionsIntegrationTest {
     private static Table<?> metadataFn(int dim, String[] colls) {
         Vector q = vec(dim, 0.01);
         return switch (dim) {
-            case 384 -> SEARCH_METADATA_SCOPED_384.call(q, colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT);
-            case 768 -> SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT);
-            default -> SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT);
+            case 384 -> SEARCH_METADATA_SCOPED_384.call(q, colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT, false);
+            case 768 -> SEARCH_METADATA_SCOPED_768.call(q, colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT, false);
+            default -> SEARCH_METADATA_SCOPED_1024.call(q, colls, null, null, null, null, null, null, null, null, 10, MODEL_384, TENANT, false);
         };
     }
 
     private static Table<?> topicFn(int dim, String collection) {
         Vector q = vec(dim, 0.01);
         return switch (dim) {
-            case 384 -> SEARCH_TOPIC_SCOPED_384.call(q, "alpha", collection, 10, MODEL_384, TENANT);
-            case 768 -> SEARCH_TOPIC_SCOPED_768.call(q, "alpha", collection, 10, MODEL_384, TENANT);
-            default -> SEARCH_TOPIC_SCOPED_1024.call(q, "alpha", collection, 10, MODEL_384, TENANT);
+            case 384 -> SEARCH_TOPIC_SCOPED_384.call(q, "alpha", collection, 10, MODEL_384, TENANT, false);
+            case 768 -> SEARCH_TOPIC_SCOPED_768.call(q, "alpha", collection, 10, MODEL_384, TENANT, false);
+            default -> SEARCH_TOPIC_SCOPED_1024.call(q, "alpha", collection, 10, MODEL_384, TENANT, false);
         };
     }
 
@@ -458,9 +458,9 @@ class VectorsRepointFunctionsIntegrationTest {
                                        String direction) {
         Vector q = vec(dim, 0.01);
         return switch (dim) {
-            case 384 -> SEARCH_GRAPH_HOP_384.call(q, seeds, colls, linkType, depth, direction, null, null, null, 10, MODEL_384, TENANT);
-            case 768 -> SEARCH_GRAPH_HOP_768.call(q, seeds, colls, linkType, depth, direction, null, null, null, 10, MODEL_384, TENANT);
-            default -> SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, linkType, depth, direction, null, null, null, 10, MODEL_384, TENANT);
+            case 384 -> SEARCH_GRAPH_HOP_384.call(q, seeds, colls, linkType, depth, direction, null, null, null, 10, MODEL_384, TENANT, false);
+            case 768 -> SEARCH_GRAPH_HOP_768.call(q, seeds, colls, linkType, depth, direction, null, null, null, 10, MODEL_384, TENANT, false);
+            default -> SEARCH_GRAPH_HOP_1024.call(q, seeds, colls, linkType, depth, direction, null, null, null, 10, MODEL_384, TENANT, false);
         };
     }
 
@@ -986,7 +986,7 @@ class VectorsRepointFunctionsIntegrationTest {
 
     private static java.util.List<String> callGraphHop384(Connection conn, String collection, String seed, int depth) {
         var hop = SEARCH_GRAPH_HOP_384.call(vec(384, 0.09), new String[] {seed}, new String[] {collection},
-            "cites", depth, "out", null, null, null, 10, MODEL_384, TENANT);
+            "cites", depth, "out", null, null, null, 10, MODEL_384, TENANT, false);
         return DSL.using(conn, SQLDialect.POSTGRES).select(hop.ID).from(hop).fetch(hop.ID);
     }
 

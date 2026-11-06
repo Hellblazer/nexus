@@ -180,7 +180,11 @@ migration_wal_bytes_per_worker = 11038000
 # 1 CREATE TABLE (canary_query_ring), ENABLE and FORCE ROW LEVEL SECURITY and 1 CREATE POLICY; 1 CREATE FUNCTION (canary_query_ring_upsert) and its GRANT EXECUTE to nexus_svc. That is 6 statements in the
 # changeset; the measured 7 is those 6 plus 1 from the runAlways grants loop for the new table (the table grant; no sequence, so one and not catalog-047's two).
 # Measured: chas (lab-m via lab-remote), 2026-11-06, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2278.
-migration_ddl_per_worker = 2278
+# 2278 -> 2368 (2026-11-06, after vectors-054 above): vectors-055-1 (nexus-rfvyy.7.3, RDR-243 Phase 2 Step 2.1a, sensitivity=exclude in every vector search function) adds 90 DDL statements to a
+# fresh migration: 31 DROP FUNCTION (the old signature of each of the 30 dimensioned search functions, 10 families x 384, 768 and 1024, and of manifest_qualifying_hits), 31 CREATE FUNCTION (the same
+# functions with a trailing p_exclude_sensitive argument) and 28 GRANT EXECUTE to nexus_svc (every one of them but hybrid_search_<dim>, which never had an explicit grant); the post-condition DO block is not DDL.
+# Counted from the changeset's statements (90) and measured: macOS laptop, 2026-11-06, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2352 on a tree without aspects-005; 2361 with it; 2368 with vectors-054 as well (re-measured after the rebase onto nexus-4lnn1.1.2).
+migration_ddl_per_worker = 2368
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

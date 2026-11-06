@@ -381,7 +381,7 @@ class GraphHopParityTest {
     void chashColumn_matchesSeededChunkChash() throws Exception {
         try (Connection su = pg.createConnection("")) {
             var fn = SEARCH_GRAPH_HOP_1024.call(VectorSeeds.vecXY(1024, 1f, 0f), new String[] {"g0"},
-                new String[] {COLL_G}, "cites", 1, "out", null, null, null, 10, "voyage-context-3", TENANT_A);
+                new String[] {COLL_G}, "cites", 1, "out", null, null, null, 10, "voyage-context-3", TENANT_A, false);
             var rows = DSL.using(su, SQLDialect.POSTGRES).select(fn.ID, fn.CHASH).from(fn).orderBy(fn.DISTANCE).fetch();
             int seen = 0;
             for (var rec : rows) {
@@ -647,11 +647,11 @@ class GraphHopParityTest {
         JSONB where = whereJson == null ? null : JSONB.valueOf(whereJson);
         Table<?> fn = switch (dim) {
             case 384  -> SEARCH_GRAPH_HOP_384.call(vec, seeds, colls, linkType, depth, direction, where, null, null, n,
-                model, tenantFor(collection));
+                model, tenantFor(collection), false);
             case 768  -> SEARCH_GRAPH_HOP_768.call(vec, seeds, colls, linkType, depth, direction, where, null, null, n,
-                model, tenantFor(collection));
+                model, tenantFor(collection), false);
             case 1024 -> SEARCH_GRAPH_HOP_1024.call(vec, seeds, colls, linkType, depth, direction, where, null, null, n,
-                model, tenantFor(collection));
+                model, tenantFor(collection), false);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return DSL.using(conn, SQLDialect.POSTGRES)

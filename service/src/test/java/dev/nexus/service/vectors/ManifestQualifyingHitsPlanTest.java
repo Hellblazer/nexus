@@ -157,7 +157,7 @@ class ManifestQualifyingHitsPlanTest {
             }
             return PgContainerHelper.explainPlanInlined(ctx,
                 ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(new String[] {COLLECTION}, null, null, plan.containment(),
-                    plan.jsonPath(), cap, MODEL, TENANT, queryText)));
+                    plan.jsonPath(), cap, MODEL, TENANT, queryText, false)));
         });
     }
 

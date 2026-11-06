@@ -909,7 +909,7 @@ class CombinedQueryParityTest {
     void chashColumn_isMatchedChunkChash() throws Exception {
         try (Connection su = pg.createConnection("")) {
             var fn = SEARCH_METADATA_SCOPED_1024.call(queryVec(1024), new String[] {COLL_M},
-                "paper", null, null, null, null, null, null, null, 10, "voyage-context-3", TENANT_A);
+                "paper", null, null, null, null, null, null, null, 10, "voyage-context-3", TENANT_A, false);
             var rows = DSL.using(su, SQLDialect.POSTGRES).select(fn.ID, fn.CHASH).from(fn).orderBy(fn.DISTANCE).fetch();
             int seen = 0;
             for (var rec : rows) {
@@ -1143,11 +1143,11 @@ class CombinedQueryParityTest {
         JSONB where = whereJson == null ? null : JSONB.valueOf(whereJson);
         return switch (dim) {
             case 384  -> SEARCH_METADATA_SCOPED_384.call(vec, colls, contentType, author, year, corpus,
-                subtree, where, null, null, n, modelFor(collection), tenantFor(collection));
+                subtree, where, null, null, n, modelFor(collection), tenantFor(collection), false);
             case 768  -> SEARCH_METADATA_SCOPED_768.call(vec, colls, contentType, author, year, corpus,
-                subtree, where, null, null, n, modelFor(collection), tenantFor(collection));
+                subtree, where, null, null, n, modelFor(collection), tenantFor(collection), false);
             case 1024 -> SEARCH_METADATA_SCOPED_1024.call(vec, colls, contentType, author, year, corpus,
-                subtree, where, null, null, n, modelFor(collection), tenantFor(collection));
+                subtree, where, null, null, n, modelFor(collection), tenantFor(collection), false);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -1163,11 +1163,11 @@ class CombinedQueryParityTest {
         Vector vec = queryVec(dim);
         return switch (dim) {
             case 384  -> SEARCH_TOPIC_SCOPED_384.call(vec, topicLabel, collection, n,
-                modelFor(collection), tenantFor(collection));
+                modelFor(collection), tenantFor(collection), false);
             case 768  -> SEARCH_TOPIC_SCOPED_768.call(vec, topicLabel, collection, n,
-                modelFor(collection), tenantFor(collection));
+                modelFor(collection), tenantFor(collection), false);
             case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(vec, topicLabel, collection, n,
-                modelFor(collection), tenantFor(collection));
+                modelFor(collection), tenantFor(collection), false);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -1192,11 +1192,11 @@ class CombinedQueryParityTest {
         String[] colls = {collection};
         return switch (dim) {
             case 384  -> SEARCH_ASPECT_SCOPED_384.call(
-                vec, colls, field, pattern, minConfidence, null, null, null, n, modelFor(collection), tenantFor(collection));
+                vec, colls, field, pattern, minConfidence, null, null, null, n, modelFor(collection), tenantFor(collection), false);
             case 768  -> SEARCH_ASPECT_SCOPED_768.call(
-                vec, colls, field, pattern, minConfidence, null, null, null, n, modelFor(collection), tenantFor(collection));
+                vec, colls, field, pattern, minConfidence, null, null, null, n, modelFor(collection), tenantFor(collection), false);
             case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
-                vec, colls, field, pattern, minConfidence, null, null, null, n, modelFor(collection), tenantFor(collection));
+                vec, colls, field, pattern, minConfidence, null, null, null, n, modelFor(collection), tenantFor(collection), false);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }

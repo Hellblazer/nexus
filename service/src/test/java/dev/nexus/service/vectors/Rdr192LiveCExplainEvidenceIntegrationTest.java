@@ -507,7 +507,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     @Test
     void topicScopedSearch_inlinesLiveC() {
-        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(), TOPIC_LABEL, COLL, 10, MODEL, TENANT);
+        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(), TOPIC_LABEL, COLL, 10, MODEL, TENANT, false);
         String plan = explain("search_topic_scoped_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "search_topic_scoped_384");
     }
@@ -516,7 +516,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     @Test
     void hybridSearchFunction_inlinesLiveC() {
-        Table<?> fn = HYBRID_SEARCH_384.call(queryVec(), COMMON_TOKEN, new String[] {COLL}, null, 10);
+        Table<?> fn = HYBRID_SEARCH_384.call(queryVec(), COMMON_TOKEN, new String[] {COLL}, null, 10, false);
         String plan = explain("hybrid_search_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "hybrid_search_384");
     }
@@ -884,7 +884,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         for (int i = 0; i < NUM_CHUNKS; i += 100) some.add(chashHex.get(i));
         byte[][] chashes = some.stream().map(h -> HexFormat.of().parseHex(h)).toArray(byte[][]::new);
         Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_384.call(
-            queryVec(), chashes, new String[] {COLL}, null, null, 10, MODEL, TENANT);
+            queryVec(), chashes, new String[] {COLL}, null, null, 10, MODEL, TENANT, false);
         String plan = explain("text_gated_search_by_chash_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "text_gated_search_by_chash_384");
     }
@@ -892,14 +892,14 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     @Test
     void hnswFirstRank_inlinesLiveC() {
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_384.call(queryVec(), COMMON_TOKEN, new String[] {COLL},
-            null, null, 10, MODEL, TENANT);
+            null, null, 10, MODEL, TENANT, false);
         String plan = explain("text_gated_search_hnsw_first_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "text_gated_search_hnsw_first_384");
     }
 
     @Test
     void plainSearch_inlinesLiveC_reference() {
-        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(), new String[] {COLL}, null, null, 10, MODEL, TENANT);
+        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(), new String[] {COLL}, null, null, 10, MODEL, TENANT, false);
         String plan = explain("plain_search_384 (reference)", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "plain_search_384");
     }

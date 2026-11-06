@@ -160,11 +160,11 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // (catalog_links, topics, topic_assignments) already have SELECT via the
             // helper's ALL TABLES IN SCHEMA nexus grant.
             PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_metadata_scoped_1024"
-                + "(nexus.vector, text[], text, text, int, text, text, jsonb, jsonb, text, int, text, text)", SVC_ROLE);
+                + "(nexus.vector, text[], text, text, int, text, text, jsonb, jsonb, text, int, text, text, boolean)", SVC_ROLE);
             PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_graph_hop_768"
-                + "(nexus.vector, text[], text[], text, int, text, jsonb, jsonb, text, int, text, text)", SVC_ROLE);
+                + "(nexus.vector, text[], text[], text, int, text, jsonb, jsonb, text, int, text, text, boolean)", SVC_ROLE);
             PgContainerHelper.grantExecuteOnFunction(su, "nexus.search_topic_scoped_384"
-                + "(nexus.vector, text, text, int, text, text)", SVC_ROLE);
+                + "(nexus.vector, text, text, int, text, text, boolean)", SVC_ROLE);
         }
 
         // Second role + pool, DEDICATED to the real-call companion test (found during
@@ -479,7 +479,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_1024() throws Exception {
         Table<?> fn = PLAIN_SEARCH_1024.call(
-            queryVec(1024), new String[] {COL_1024}, null, null, 10, MODEL_1024, TENANT);
+            queryVec(1024), new String[] {COL_1024}, null, null, 10, MODEL_1024, TENANT, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (1024-dim) must bind to the FULL"
@@ -500,7 +500,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_768() throws Exception {
         Table<?> fn = PLAIN_SEARCH_768.call(
-            queryVec(768), new String[] {COL_768}, null, null, 10, MODEL_768, TENANT);
+            queryVec(768), new String[] {COL_768}, null, null, 10, MODEL_768, TENANT, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (768-dim) must bind to the FULL"
@@ -517,7 +517,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_384() throws Exception {
         Table<?> fn = PLAIN_SEARCH_384.call(
-            queryVec(384), new String[] {COL_384}, null, null, 10, MODEL_384, TENANT);
+            queryVec(384), new String[] {COL_384}, null, null, 10, MODEL_384, TENANT, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (384-dim) must bind to the FULL"
@@ -578,7 +578,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         // under test does not depend on which chashes are named.
         byte[] chash = Chash.fromHex(md5x2("planshape-near-768", "target-768")).toBytes();
         Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_768.call(
-            queryVec(768), new byte[][] {chash}, new String[] {COL_768}, null, null, 10, MODEL_768, TENANT);
+            queryVec(768), new byte[][] {chash}, new String[] {COL_768}, null, null, 10, MODEL_768, TENANT, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("hybridSearch's selective-gate rank (768-dim) must project distance off the"
@@ -609,7 +609,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void hybridSearch_denseGateRank_shape_usesFullHnswIndex_384() throws Exception {
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
-            queryVec(384), "planshape", new String[] {COL_384}, null, null, 10, MODEL_384, TENANT);
+            queryVec(384), "planshape", new String[] {COL_384}, null, null, 10, MODEL_384, TENANT, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("hybridSearch's dense-gate HNSW-first rank (384-dim) must bind to the FULL"
@@ -636,7 +636,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void searchMetadataScoped_shape_usesFullHnswIndex_1024() throws Exception {
         Table<?> fn = SEARCH_METADATA_SCOPED_1024.call(
-            queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, null, null, 10, MODEL_1024, TENANT);
+            queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, null, null, 10, MODEL_1024, TENANT, false);
         // Reachability, not the cost choice (explainIndexReachable's javadoc): what this pins is that the
         // guard does not defeat the bind. With the natural planner develop's CI runner picked a Seq Scan on
         // the leaf under load (b3a85d90b, nexus-h9zkm; an earlier red rerun green on f391a1a6c) while the
@@ -657,7 +657,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     void searchGraphHop_shape_usesFullHnswIndex_768() throws Exception {
         Table<?> fn = SEARCH_GRAPH_HOP_768.call(
             queryVec(768), new String[] {"planshape-graphhop-doc"}, new String[] {COL_768},
-            null, 1, "both", null, null, null, 10, MODEL_768, TENANT);
+            null, 1, "both", null, null, null, 10, MODEL_768, TENANT, false);
         // The qualifying set here is the whole leaf, so the planner may legitimately choose a sequential scan,
         // a hash join and a sort (it did on develop's CI runner): the pin is that the HNSW scan is reachable.
         String plan = explainIndexReachable(fn);
@@ -694,7 +694,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void searchTopicScoped_shape_projectsCorrectDimColumn_andStaysCollectionScoped_384() throws Exception {
         Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(
-            queryVec(384), "planshape-topic", COL_384, 10, MODEL_384, TENANT);
+            queryVec(384), "planshape-topic", COL_384, 10, MODEL_384, TENANT, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("search_topic_scoped_384's distance projection must still read the CORRECT "

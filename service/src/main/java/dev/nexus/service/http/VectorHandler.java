@@ -699,9 +699,10 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> where     = optMap(body, "where");
         boolean includeSourceUri      = optBool(body, "include_source_uri", false);
         byte[][] chashAllow           = optChashAllow(body);
+        boolean excludeSensitive      = optExcludeSensitive(body);
 
         var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where,
-                                                 includeSourceUri, chashAllow);
+                                                 includeSourceUri, chashAllow, excludeSensitive);
         sendSearchResult(ex, body, queryText, searchResult);
         admitToQueryRing(tenant, searchResult.queryVector());
     }
@@ -815,6 +816,7 @@ public final class VectorHandler implements HttpHandler {
         Integer rerankMaxCandidates = optRerankMaxCandidates(body, rerank);
         boolean lexical             = optBool(body, "lexical", false);
         byte[][] chashAllow         = optChashAllow(body);
+        boolean excludeSensitive    = optExcludeSensitive(body);
         Integer contentChars        = optInteger(body, "content_chars");
         if (contentChars != null && contentChars < 1) {
             throw new IllegalArgumentException("field 'content_chars' must be at least 1, got " + contentChars);
@@ -828,7 +830,7 @@ public final class VectorHandler implements HttpHandler {
         long handlerStartNanos = System.nanoTime();
         var result = repo.searchPerCollection(tenant, queryText, collections, perK, limit,
                                               thresholds, where, includeSourceUri, includeEmbeddings, lexical,
-                                              chashAllow);
+                                              chashAllow, excludeSensitive);
         long repoMs = (System.nanoTime() - handlerStartNanos) / 1_000_000L;
         emitTokenUsage(ex, result.tokens());
         emitSkippedCollections(ex, result.skippedCollections());
@@ -968,9 +970,10 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> where = optMap(body, "where");
         boolean includeSourceUri  = optBool(body, "include_source_uri", false);
         byte[][] chashAllow       = optChashAllow(body);
+        boolean excludeSensitive  = optExcludeSensitive(body);
 
         var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where,
-                                                       includeSourceUri, chashAllow);
+                                                       includeSourceUri, chashAllow, excludeSensitive);
         sendSearchResult(ex, body, queryText, hybridResult);
         admitToQueryRing(tenant, hybridResult.queryVector());
     }
@@ -997,6 +1000,7 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         rejectChashAllow(body, "/search-metadata-scoped");
+        boolean excludeSensitive = optExcludeSensitive(body);
         String queryText         = requireString(body, "query");
         List<String> collections = requireStringList(body, "collections");
         String contentType       = optString(body, "content_type");
@@ -1009,7 +1013,7 @@ public final class VectorHandler implements HttpHandler {
 
         var metaResult = repo.searchMetadataScopedWithTokens(
             tenant, queryText, collections, contentType, author, year, corpus,
-            subtree, where, nResults);
+            subtree, where, nResults, excludeSensitive);
         sendSearchResult(ex, body, queryText, metaResult);
         admitToQueryRing(tenant, metaResult.queryVector());
     }
@@ -1027,12 +1031,14 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         rejectChashAllow(body, "/search-topic-scoped");
+        boolean excludeSensitive = optExcludeSensitive(body);
         String queryText  = requireString(body, "query");
         String topicLabel = requireString(body, "topic");
         String collection = requireString(body, "collection");
         int nResults      = optInt(body, "n_results", 10);
 
-        var topicResult = repo.searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults);
+        var topicResult = repo.searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults,
+                                                      excludeSensitive);
         sendSearchResult(ex, body, queryText, topicResult);
         admitToQueryRing(tenant, topicResult.queryVector());
     }
@@ -1056,6 +1062,7 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         rejectChashAllow(body, "/search-graph-hop");
+        boolean excludeSensitive = optExcludeSensitive(body);
         String queryText         = requireString(body, "query");
         List<String> seeds       = requireStringList(body, "seeds");
         List<String> collections = requireStringList(body, "collections");
@@ -1067,7 +1074,7 @@ public final class VectorHandler implements HttpHandler {
         int nResults             = optInt(body, "n_results", 10);
 
         var graphResult = repo.searchGraphHopWithTokens(
-            tenant, queryText, seeds, collections, linkType, depth, direction, where, nResults);
+            tenant, queryText, seeds, collections, linkType, depth, direction, where, nResults, excludeSensitive);
         sendSearchResult(ex, body, queryText, graphResult);
         admitToQueryRing(tenant, graphResult.queryVector());
     }
@@ -1095,6 +1102,7 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         rejectChashAllow(body, "/search-aspect-scoped");
+        boolean excludeSensitive = optExcludeSensitive(body);
         String queryText         = requireString(body, "query");
         List<String> collections = requireStringList(body, "collections");
         String field             = optString(body, "field");
@@ -1109,7 +1117,7 @@ public final class VectorHandler implements HttpHandler {
         }
 
         var aspectResult = repo.searchAspectScopedWithTokens(
-            tenant, queryText, collections, field, pattern, minConfidence, where, nResults);
+            tenant, queryText, collections, field, pattern, minConfidence, where, nResults, excludeSensitive);
         sendSearchResult(ex, body, queryText, aspectResult);
         admitToQueryRing(tenant, aspectResult.queryVector());
     }
@@ -2862,6 +2870,20 @@ public final class VectorHandler implements HttpHandler {
             throw new IllegalArgumentException("field 'chash_allow' is not supported on " + route
                 + "; it applies to /search, /query, /hybrid-search and /search-per-collection");
         }
+    }
+
+    /**
+     * Optional {@code sensitivity} (nexus-rfvyy.7.3, RDR-243): {@code "exclude"} drops every chunk with a live
+     * sensitive owner inside the search statement. Absent or JSON null is the search as it always was. Any other
+     * value, a different string, a number, a boolean or an array, is a 400 that names the field: a typo must never
+     * silently include the rows the caller meant to keep out. Served by every vector search route.
+     */
+    static boolean optExcludeSensitive(Map<String, Object> body) {
+        Object val = body.get("sensitivity");
+        if (val == null) return false;
+        if (val instanceof String s && s.equals("exclude")) return true;
+        throw new IllegalArgumentException(
+            "field 'sensitivity' must be \"exclude\" or absent, got " + (val instanceof String ? "\"" + val + "\"" : val));
     }
 
     private List<String> optStringList(Map<String, Object> body, String key) {

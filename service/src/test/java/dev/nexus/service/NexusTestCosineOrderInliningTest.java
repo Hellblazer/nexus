@@ -240,7 +240,7 @@ class NexusTestCosineOrderInliningTest {
      */
     @Test
     void fixtureIndexServesThePlainOperator() {
-        Table<?> fn = PLAIN_SEARCH_384.call(queryVector, new String[] {COLLECTION}, null, null, K_PLAN, MODEL, TENANT);
+        Table<?> fn = PLAIN_SEARCH_384.call(queryVector, new String[] {COLLECTION}, null, null, K_PLAN, MODEL, TENANT, false);
         String plan = tenantScope.withTenant(TENANT,
             ctx -> PgContainerHelper.explainPlan(ctx, ctx.select(fn.field("id")).from(fn)));
         assertThat(plan)

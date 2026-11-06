@@ -238,7 +238,7 @@ class ManifestQualifyingHitsTest {
     private int hits(String tenant, String[] collections, ManifestPushdown.Plan plan, JSONB chunkWhere, int cap,
                      String model, String queryText) {
         return tenantScope.withTenant(tenant, ctx -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
-            collections, chunkWhere, null, plan.containment(), plan.jsonPath(), cap, model, tenant, queryText))
+            collections, chunkWhere, null, plan.containment(), plan.jsonPath(), cap, model, tenant, queryText, false))
             .fetch().size());
     }
 
@@ -255,7 +255,7 @@ class ManifestQualifyingHitsTest {
             // The table is small and the statement is exact: nothing here depends on the HNSW walk.
             PgSession.disableIndexScanForExactFallback(ctx);
             return ctx.selectFrom(MANIFEST_SEARCH_384.call(q, queryText, null, collections, chunkWhere, null,
-                plan.containment(), plan.jsonPath(), 1000, MODEL, tenant)).fetch().size();
+                plan.containment(), plan.jsonPath(), 1000, MODEL, tenant, false)).fetch().size();
         });
     }
 
@@ -314,7 +314,7 @@ class ManifestQualifyingHitsTest {
         // are what a route (a) page is compared with.
         ManifestPushdown.Plan intro = plan(where("section_type", "intro"));
         var rows = tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
-            colls(C1), null, null, intro.containment(), intro.jsonPath(), 1000, MODEL, TENANT, null)).fetch());
+            colls(C1), null, null, intro.containment(), intro.jsonPath(), 1000, MODEL, TENANT, null, false)).fetch());
 
         var pairs = new java.util.HashSet<String>();
         for (var r : rows) {
@@ -334,7 +334,7 @@ class ManifestQualifyingHitsTest {
         // answer with the cap; its test is ManifestSearchShortPageIntegrationTest#aPageWhoseDistinctReadFills...
         ManifestPushdown.Plan quad = plan(where("section_type", "quad-x"));
         var rows = tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
-            colls(C1), null, null, quad.containment(), quad.jsonPath(), 4, MODEL, TENANT, null)).fetch());
+            colls(C1), null, null, quad.containment(), quad.jsonPath(), 4, MODEL, TENANT, null, false)).fetch());
 
         assertThat(rows).as("hits at a bound of 4").hasSize(4);
         assertThat(rows.stream().map(r -> HexFormat.of().formatHex(r.getChunkChash())).distinct().toList())
