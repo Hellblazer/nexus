@@ -65,8 +65,8 @@ Each row is a feature that sends document-derived text off the machine or to a m
 
 | Surface | What it sends | Where | With `--sensitive` |
 | --- | --- | --- | --- |
-| Aspect extraction: enqueue hook | full document content, queued for later extraction | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
-| Aspect extraction: worker drain | queued or on-disk document content, passed to the LLM | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| Aspect extraction: enqueue hook | the document's identity, queued for later extraction (the worker reads the content at drain) | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
+| Aspect extraction: worker drain | document content read at drain from its chunks or its file, passed to the LLM | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |
 | Aspect extraction: `claude -p` | document text, passed to `claude -p` | Anthropic (`claude -p` or `api.anthropic.com`) | refused |
 | Aspect extraction: API | document text, sent to the Anthropic API or an `openai_compat` endpoint | Anthropic (`claude -p` or `api.anthropic.com`); the endpoint in `llm.openai_compat.base_url` | refused |
 | `nx enrich aspects` | document text, through the aspect extraction above | Anthropic (`claude -p` or `api.anthropic.com`) | skipped, loudly |

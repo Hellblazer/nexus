@@ -336,6 +336,11 @@ def aspects_requeue_failed(
     terminal; this clears the ones that still do. Dead-backlog visibility is
     ``nx doctor --check-aspect-queue``.
 
+    A revive is an enqueue, so the dead tasks pass the sensitivity gate
+    first (RDR-243): the task of a document flagged sensitive stays dead and
+    is named on stderr, and when the catalog cannot say, nothing is revived
+    and the command exits 1. ``--limit`` counts the tasks revived.
+
     The retired table's failed rows are not read: the table is gone
     (nexus-hbnml).
     """
@@ -380,9 +385,6 @@ def aspects_requeue_failed(
             )
             raise SystemExit(1) from exc
 
-    if limit is not None:
-        dead = dead[:limit]
-
     scope = f" in {collection}" if collection else ""
     if not dead:
         click.echo(f"aspects queue: no dead tasks{scope}.")
@@ -408,6 +410,10 @@ def aspects_requeue_failed(
     flagged = [t for t in dead if (i := _task_identity(t)) is not None and i["doc_id"] not in clear]
     flagged_ids = {t.id for t in flagged}
     dead = [t for t in dead if t.id not in flagged_ids]
+    # --limit counts revivals, so it slices after the gate: flagged tasks stay dead and sort
+    # oldest first, and slicing before would let them fill every limited run.
+    if limit is not None:
+        dead = dead[:limit]
 
     if dry_run:
         click.echo(f"Would revive {len(dead)} dead task(s){scope}:")

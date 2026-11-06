@@ -48,8 +48,9 @@
 # test_import_catalog_flag_gate 8, test_sensitivity_unreadable_catalog 8, test_enrich_delete_tumbler 7, test_doctor_sensitivity_rows 5, test_reindex_sensitive_gate 5,
 # test_sensitive_store_put_existing_voyage 5, test_doc_sensitivity_flagged 2, test_catalog_sensitivity_client 1 (219 in all), and the 4 dry-run tests above.
 # None of the new files can run over a stub catalog: a stub would carry the flag by construction and prove nothing about the row the engine keeps one-way.
-provisioned_tests = 5333
+provisioned_tests = 5334
 tolerance_tests = 0
+# 5333 -> 5334 (nexus-hbnml review r3, 2026-11-06): +1, the requeue-failed --limit pin in tests/test_aspect_sensitivity_gates.py. scripts/tenant_delta.py --base origin/develop (2410760b9): -18.
 # 5352 -> 5333 (nexus-hbnml, merged onto develop after RDR-243): -19, the -14 below plus -5 for the table-path tests of tests/test_aspect_sensitivity_gates.py the retirement removes (four tests and the table case of the enqueue test). First counted 2026-11-04 on develop 7dc537fe0 as 5129 -> 5115: -14. scripts/tenant_delta.py --base f8d3e1be3 (the fork point) counts -14 for the change
 # that retires the aspect queue table and answers its review (tests/daemon/test_aspect_worker_reclaim.py 1 -> 0,
 # tests/db/test_http_aspects_stores.py 9 -> 5, tests/test_aspect_worker.py 29 -> 25, tests/test_rename_lock_t1_1.py 10 -> 9,

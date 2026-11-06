@@ -107,9 +107,11 @@ def check_sensitive_in_aspect_eligible(
 
 
 def _queued_doc_ids(queue: Any) -> set[str]:
-    """Every doc id with a task in the ``aspects`` tuple subspace (every claim state, a dead task
-    included). The old queue table and its read routes are retired (nexus-hbnml); rows an engine still
-    holds in a kept table are drained into the subspace at engine start, so they show here after that."""
+    """Every doc id with a live task (available or claimed) in the ``aspects`` tuple subspace. A dead
+    task is left out: ``nx aspects requeue-failed`` never revives the task of a flagged document, it
+    carries identity and no text, and retention clears it, so counting it would hold the row at FAIL
+    with no remedy. The old queue table and its read routes are retired (nexus-hbnml); rows an engine
+    still holds in a kept table are drained into the subspace at engine start, so they show here after."""
     from nexus.commands.aspects import _task_identity  # noqa: PLC0415 — deferred, the verb module has a heavy import graph
     from nexus.db.t2.http_aspect_queue import (  # noqa: PLC0415 — deferred, CLI startup cost
         ASPECTS_KEYS,
@@ -120,13 +122,15 @@ def _queued_doc_ids(queue: Any) -> set[str]:
     ids: set[str] = set()
     tuples = queue._tuples()
     census = aspects_census(tuples)
-    if census is not None and (census.available + census.claimed + census.dead) > 0:
+    if census is not None and (census.available + census.claimed) > 0:
         since = None
         while True:
             page = tuples.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=300, since=since)
             if not page:
                 break
             for row in page:
+                if row.claim_state == "dead":
+                    continue
                 ident = _task_identity(row)
                 if ident is not None:
                     ids.add(str(ident["doc_id"]))

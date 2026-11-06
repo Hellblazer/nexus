@@ -269,6 +269,24 @@ def test_requeue_failed_leaves_a_dead_task_of_a_document_flagged_after_it_died_d
     assert [e["tumbler"] for e in logs.named("aspect_enqueue_skipped_sensitive")] == [flagged, flagged]
 
 
+def test_requeue_failed_limit_counts_revivals_not_the_flagged_tasks_ahead_of_them(db: Any, logs: _Log) -> None:
+    """``--limit`` slices after the gate: a flagged task that stays dead and sorts oldest must not fill
+    every limited run, or ``--limit 1`` would revive nothing for ever."""
+    from click.testing import CliRunner
+
+    from nexus.commands.aspects import aspects_group
+
+    flagged, clear = _doc("limit-flagged"), _doc("limit-clear")
+    _dead(db, flagged, "/lf.md")
+    _dead(db, clear, "/lc.md")
+    _flag(flagged)
+
+    result = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    assert "Revived 1 dead task(s) to available; left 1 dead (sensitive document)." in result.output, result.output
+    assert _states(db) == {flagged: "dead", clear: None}
+
+
 # ── Row 2: the worker drain after a late flag ───────────────────────────────────────────────────
 
 
