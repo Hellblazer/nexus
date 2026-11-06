@@ -443,6 +443,7 @@ async def test_with_no_entity_config_at_all_the_switch_on_repair_is_the_switch_o
     d_on, d_off = _simple(2), _simple(2)
     cov_on = _cov(await _run(d_on, on(**kw)))
     cov_off = _cov(await _run(d_off, CoverageBoundary(request=_request(3), resolution_repair=False, **kw)))
+    assert len(cov_on.ledger.anchors) >= 2, "the ledger has anchors to scan, so a scan would have reported them"
     assert (cov_on.repair.resolution_entered, cov_on.repair.resolution_reason) == (False, "")
     assert _wire(cov_on.repair) == _wire(cov_off.repair)
     assert not any(k.startswith("resolution_") or k.startswith("anchors_") for k in cov_on.repair.to_wire())
