@@ -762,8 +762,9 @@ where evidence is seen.
   `document-discovery` answered with no coverage boundary and the MVV run lost a
   question. **Mitigation**: Step 4 branch (c), a curated `discovery/listing`
   template with the coverage-bearing body, so either reading reaches a coverage
-  boundary. Tagged `cosine-only`, it wins only on cosine at or above the 0.40
-  floor. Accepted residual (Sam, 2026-11-06, 147-research-16): "Which documents
+  boundary. Tagged `cosine-only`, it is never offered by the below-floor
+  category route; on the cosine path it wins only at or above the 0.40 floor,
+  and the FTS5 fallback, which ignores the tag, can still admit it. Accepted residual (Sam, 2026-11-06, 147-research-16): "Which documents
   mention the customers affected?" and two borderline wordings, read as
   `discovery/listing` or in the shadow regime, now get this template, a
   synthesized answer instead of a document list.
@@ -815,7 +816,7 @@ where evidence is seen.
   implementation bead starts before that.
 - [x] Critical Assumption #5 measured (Step 4 sub-step 1, 2026-11-03,
   147-research-7): the repair enters; Step 4 takes branch (a). Branch (c) was
-  added after the 2026-11-06 MVV (147-research-15).
+  rewritten as the routing fix after the 2026-11-06 MVV (147-research-15).
 
 ### Minimum Viable Validation
 
@@ -943,7 +944,7 @@ a `$ref` step") is dropped: it already works.
      single-query templates, which never reach the coverage boundary. Ship one
      curated builtin, `conexus/plans/builtin/entity-resolution.yml`
      (`strategy: entity-resolution`, `verb: research`, `scope: global`, tags
-     `builtin-template` and `cosine-only`), declaring `answer_kind: discovery/listing`, with the
+     including `builtin-template` and `cosine-only`), declaring `answer_kind: discovery/listing`, with the
      step body of `hybrid-factual-lookup.yml` (search, traverse, fetch, rank,
      generate), so a `discovery/listing` reading of these questions gets a plan
      with a coverage boundary and a `lookup` reading still gets
@@ -951,8 +952,9 @@ a `$ref` step") is dropped: it already works.
      of companies that were affected by issues in the product, and the clients
      hit by the outage. Name of the company with the most resolved bugs."); with
      the bundled MiniLM it scores 0.474 to 0.542 on the 7 questions, above the
-     0.40 floor (147-research-16; the first draft's wording scored 0.535 to
-     0.643, 147-research-15). The
+     0.40 floor (147-research-16; the offline estimate before the YAML existed was 0.535
+     to 0.643, 147-research-15, and the first committed wording scored 0.414 to
+     0.545, review r1 of d55364dc4). The
      `cosine-only` tag keeps it out of the below-floor category route
      (`matcher.py` `_is_cosine_only_plan`), where it stole requests that are not
      entity listings. No golden discovery request changes plan; the accepted
@@ -1075,8 +1077,8 @@ the script's 0.7642857142857142. The 2 aggregation questions are reported, not g
 - **Incremental adoption**: the resolution repair is gated on an unsupported
   facet plus recognised key tokens, so other questions take today's path; the
   linker is off by default. The branch (c) template is not behind a switch:
-  entity-listing questions that clear its cosine floor take the multi-step
-  plan on every install after upgrade.
+  entity-listing questions it wins take the multi-step plan on every install
+  that has not run `nx plan disable` on it.
 - **Memory management**: `resolve` holds one call's tokens and their manifests;
   bounded by the plan step's input.
 - Build tool compatibility, Licensing, IDE compatibility, Secret/credential
@@ -1105,4 +1107,4 @@ plus tests on the MVV path (resolve, the repair branch, entity keys), and about
 - 2026-11-05: text brought into line with the option 1 code (69cc82790) and fix check b60dab40e: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
 - 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
 - 2026-11-06: the join-completeness domain is the questions whose anchors hold a key (Sam, T2 `nexus/rdr147-domain-decision-2026-11-06`); branch (c) rewritten as the routing fix the 2026-11-06 MVV needs (Sam "proceed.", 147-research-15); R4 updated with the measured request kinds.
-- 2026-11-06: wording follows the reviewed branch (c) code (22f3285f7, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted, the anchor domain in Scope Verification.
+- 2026-11-06: wording follows the reviewed branch (c) code (22f3285f7, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted; and the anchor domain (Sam's 2026-11-06 decision) in Scope Verification.

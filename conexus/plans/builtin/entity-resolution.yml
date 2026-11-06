@@ -33,7 +33,8 @@
 # cosine, where any request scores something; this template's text is a
 # narrow bag, so below the floor it stole requests that are not entity
 # listings ("Find the retry helper in the code files", golden G08 and H30
-# in the shadow regime). It wins only on cosine at or above min_confidence.
+# in the shadow regime). On the cosine path it wins only at or above
+# min_confidence; the FTS5 fallback ignores the tag.
 
 name: entity-resolution
 description: >-
