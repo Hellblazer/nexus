@@ -21,6 +21,7 @@ from nexus.formatters import (
 from nexus.scoring import round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.errors import SearchEmbeddingProfileMismatchError
+from nexus import sensitivity as _sens
 from nexus.search_engine import (
     LexicalLegUnavailableError,
     SearchDiagnostics,
@@ -488,6 +489,10 @@ def search_cmd(
     #: to the boosts so the calibration reads the same rows (no second read).
     model_of_out: list = []
 
+    #: RDR-243 Phase 2 (nexus-rfvyy.7.8): read once, on the command's own thread. A `nx search` a model runs
+    #: through Bash inherits NX_SENSITIVITY_POSTURE=llm_bound from its parent and excludes; a person's does not.
+    _sensitivity = _sens.read_sensitivity()
+
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
         from nexus.commands._helpers import default_db_path as _db_path  # noqa: PLC0415 — deferred import; only needed in this branch
@@ -508,6 +513,7 @@ def search_cmd(
                 # after retrieval, so they need the deep per-collection floor.
                 deep_candidates=resolved is not None or max_file_chunks is not None,
                 model_of_out=model_of_out,
+                sensitivity=_sensitivity,
             )
         return raw
 

@@ -38,6 +38,7 @@ from nexus.corpus import (
     index_model_for_collection,
 )
 from nexus.db.limits import QUOTAS
+from nexus.sensitivity import ReadSensitivity, check_read_sensitivity
 from nexus.ttl import refuse_ttl_over_cap
 from nexus.metadata_schema import (
     ALLOWED_TOP_LEVEL,
@@ -194,11 +195,11 @@ def _rewrite_collection_metadata(
         if where_clause is not None:
             batch = _vector_with_retry(
                 col.get, where=where_clause, include=["metadatas"],
-                limit=page, offset=offset,
+                limit=page, offset=offset, sensitivity="include",
             )
         else:
             batch = _vector_with_retry(
-                col.get, include=["metadatas"], limit=page, offset=offset,
+                col.get, include=["metadatas"], limit=page, offset=offset, sensitivity="include",
             )
         ids = batch.get("ids") or []
         metas = batch.get("metadatas") or []
@@ -800,7 +801,7 @@ class T3Database:
         col = _vector_with_retry(
             self._client_for(collection_name).get_collection, collection_name,
         )
-        result = _vector_with_retry(col.get, ids=ids, include=["embeddings"])
+        result = _vector_with_retry(col.get, ids=ids, include=["embeddings"], sensitivity="include")
         by_id = dict(zip(result["ids"], result["embeddings"]))
         return np.array(
             [by_id[i] for i in ids if i in by_id], dtype=np.float32,
@@ -1075,8 +1076,14 @@ class T3Database:
         collection_names: list[str],
         n_results: int = 10,
         where: dict | None = None,
+        *,
+        sensitivity: ReadSensitivity,
     ) -> list[dict]:
         """Semantic search over the given collections.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8) is required, as on ``HttpVectorClient.search``. This
+        facade serves injected clients (tests, ``--dry-run``) that carry no catalog flags, so ``exclude`` and
+        ``include`` read alike here.
 
         Each collection is queried with its appropriate embedding model.
         Results are returned sorted by distance (closest first).
@@ -1084,6 +1091,7 @@ class T3Database:
 
         *where* is an optional ChromaDB metadata filter applied to every collection.
         """
+        check_read_sensitivity(sensitivity)
         results: list[dict] = []
         # Fix 3: track queried vs dimension-skipped counts for all-skipped ERROR.
         queried_count = 0
@@ -1301,7 +1309,7 @@ class T3Database:
                     where=ttl_where,
                     include=["metadatas"],
                     limit=page_limit,
-                    offset=offset,
+                    offset=offset, sensitivity="include",
                 )
                 page_ids = result["ids"]
                 for doc_id, meta in zip(page_ids, result["metadatas"]):
@@ -1335,7 +1343,7 @@ class T3Database:
         clamped = limit if self._local_mode else min(limit, QUOTAS.MAX_QUERY_RESULTS)
         with self._read_sem(collection):
             result = _vector_with_retry(
-                col.get, include=["metadatas"], limit=clamped, offset=offset,
+                col.get, include=["metadatas"], limit=clamped, offset=offset, sensitivity="include",
             )
         # GH #373 mirror: same None-meta defence as the query path; a
         # single corrupted row should not blank the whole listing.
@@ -1505,7 +1513,7 @@ class T3Database:
                 col.get,
                 include=["metadatas"],
                 limit=page_limit,
-                offset=offset,
+                offset=offset, sensitivity="include",
             )
             page_metas = result.get("metadatas") or []
             page_ids = result.get("ids") or []
@@ -1541,7 +1549,7 @@ class T3Database:
                 where={"source_path": source_path},
                 include=[],
                 limit=page_limit,
-                offset=offset,
+                offset=offset, sensitivity="include",
             )
             page_ids = result["ids"]
             ids.extend(page_ids)
@@ -1602,7 +1610,7 @@ class T3Database:
         present: list[str] = []
         for i in range(0, len(candidate_ids), page_limit):
             batch = candidate_ids[i : i + page_limit]
-            result = _vector_with_retry(col.get, ids=batch, include=[])
+            result = _vector_with_retry(col.get, ids=batch, include=[], sensitivity="include")
             present.extend(result["ids"])
         return present
 
@@ -1658,7 +1666,7 @@ class T3Database:
                 col.get,
                 include=["metadatas"],
                 limit=page_limit,
-                offset=offset,
+                offset=offset, sensitivity="include",
             )
             page_ids = result.get("ids") or []
             page_metas = result.get("metadatas") or []
@@ -1694,7 +1702,7 @@ class T3Database:
                 where={"source_path": old_path},
                 include=["metadatas"],
                 limit=page_limit,
-                offset=offset,
+                offset=offset, sensitivity="include",
             )
             page_ids = result["ids"]
             page_metas = result["metadatas"]
@@ -1718,19 +1726,21 @@ class T3Database:
                 )
         return len(ids)
 
-    def get_by_id(self, collection: str, doc_id: str) -> dict | None:
+    def get_by_id(self, collection: str, doc_id: str, *, sensitivity: ReadSensitivity) -> dict | None:
         """Retrieve a single entry by its exact document ID.
 
         Returns a dict with ``id``, ``content``, and all metadata fields,
-        or ``None`` if the entry does not exist.
+        or ``None`` if the entry does not exist. ``sensitivity`` is required (RDR-243 Phase 2, nexus-rfvyy.7.8);
+        see :meth:`search`.
         """
+        check_read_sensitivity(sensitivity)
         try:
             col = self._client_for(collection).get_collection(collection)
         except _NotFoundErrors:
             return None
         with self._read_sem(collection):
             result = _vector_with_retry(
-                col.get, ids=[doc_id], include=["documents", "metadatas"]
+                col.get, ids=[doc_id], include=["documents", "metadatas"], sensitivity=sensitivity,
             )
         if not result["ids"]:
             return None
@@ -1746,7 +1756,7 @@ class T3Database:
             col = self._client_for(collection).get_collection(collection)
         except _NotFoundErrors:
             return False
-        result = _vector_with_retry(col.get, ids=[doc_id], include=[])
+        result = _vector_with_retry(col.get, ids=[doc_id], include=[], sensitivity="include")
         if not result["ids"]:
             return False
         _vector_with_retry(col.delete, ids=[doc_id])
@@ -1771,7 +1781,7 @@ class T3Database:
                 where={"title": title},
                 include=[],
                 limit=page_limit,
-                offset=offset,
+                offset=offset, sensitivity="include",
             )
             page_ids = result["ids"]
             ids.extend(page_ids)
@@ -1803,7 +1813,7 @@ class T3Database:
         with self._read_sem(collection):
             for i in range(0, len(ids), page):
                 batch = ids[i : i + page]
-                result = _vector_with_retry(col.get, ids=batch, include=[])
+                result = _vector_with_retry(col.get, ids=batch, include=[], sensitivity="include")
                 found.update(result["ids"])
         return found
 
@@ -1902,7 +1912,7 @@ def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResu
         if not query:
             continue
         probed_count += 1
-        results = db.search(query=query, collection_names=[collection_name], n_results=10)
+        results = db.search(query=query, collection_names=[collection_name], n_results=10, sensitivity="include")
         found = [r for r in results if r["id"] == pid]
         if found:
             found_count += 1

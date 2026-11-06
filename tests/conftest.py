@@ -5411,7 +5411,7 @@ def no_mineru_child_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _suite_runs_inside_the_sensitivity_scope(monkeypatch):
+def _suite_runs_inside_the_sensitivity_scope(monkeypatch, request):
     """RDR-243 Phase 1 Step 4a (nexus-rfvyy.6.13): ``claude_dispatch``, ``run_text_sync`` and
     ``_run_claude_isolated`` raise ``DispatchOutsideSensitivityScope`` unless the caller entered
     ``nexus.sensitivity.llm_bound``. Many tests call a root directly with a fake backend, so the suite
@@ -5419,9 +5419,15 @@ def _suite_runs_inside_the_sensitivity_scope(monkeypatch):
     which every thread and subprocess sees. tests/test_sensitivity_scope.py deletes it to test the roots
     as production sees them, and pins that every surface enters the scope itself.
 
-    When a later phase makes the posture change read behaviour (Phase 2 reads exclude under
-    ``llm_bound``), a test that reads documents must not inherit this blanket; narrow it then."""
+    Phase 2 (nexus-rfvyy.7.8) made the posture read behaviour: an entry point's reads are ``exclude`` under
+    ``llm_bound``, and an ``exclude`` read needs an engine that reports ``vector_sensitivity_exclude_supported``.
+    This blanket therefore covers the dispatch asserts and the gates only. ``nexus.sensitivity.read_sensitivity``
+    is pinned to ``include`` for every test, and every entry point calls it through the module, so one patch
+    reaches them all. A test of the read behaviour carries ``@pytest.mark.sensitivity_reads`` and gets the real
+    function (and the env, which a child of a scoped parent sees)."""
     monkeypatch.setenv("NX_SENSITIVITY_POSTURE", "llm_bound")
+    if request.node.get_closest_marker("sensitivity_reads") is None:
+        monkeypatch.setattr("nexus.sensitivity.read_sensitivity", lambda posture=None: "include")
 
 
 @pytest.fixture(autouse=True)

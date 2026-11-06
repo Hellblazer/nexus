@@ -127,7 +127,7 @@ def _fetch_service_vectors(
         if offset >= _next and _next < n:
             _progress(f"    fetching {offset:,}/{n:,} chunks ({100 * offset // n}%)")
             _next += _milestone
-        page = stub.get(include=["documents"], limit=page_size, offset=offset)
+        page = stub.get(include=["documents"], limit=page_size, offset=offset, sensitivity="include")
         page_ids = page.get("ids") or []
         page_docs = page.get("documents") or []
         if not page_ids:

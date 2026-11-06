@@ -335,7 +335,7 @@ def _chunk_metadatas(t3: Any, collection: str, chashes: list[str]) -> dict[str, 
         if getattr(exc, "__cause__", None) is not None:
             raise  # a service that could not be asked is not "the collection is absent"
         return {}
-    result = col.get(ids=list(chashes), include=["metadatas"])
+    result = col.get(ids=list(chashes), include=["metadatas"], sensitivity="include")
     ids: list[str] = result.get("ids") or []
     metas: list[Any] = result.get("metadatas") or []
     if len(metas) != len(ids):

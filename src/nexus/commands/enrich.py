@@ -584,7 +584,7 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
     offset = 0
     while True:
         batch = _vector_with_retry(
-            col.get, include=["metadatas"], limit=300, offset=offset,
+            col.get, include=["metadatas"], limit=300, offset=offset, sensitivity="include",
         )
         batch_ids = batch.get("ids", [])
         batch_meta = batch.get("metadatas", [])
@@ -749,7 +749,7 @@ def run_bib_enrichment(
             col.get,
             include=["metadatas"],
             limit=300,
-            offset=offset,
+            offset=offset, sensitivity="include",
         )
         batch_ids = batch.get("ids", [])
         total_chunks += len(batch_ids)
@@ -940,7 +940,7 @@ def run_bib_enrichment(
         updated_meta: list[dict] = []
         for batch_start in range(0, len(own_ids), _BATCH):
             batch_ids = own_ids[batch_start:batch_start + _BATCH]
-            fetch = _vector_with_retry(col.get, ids=batch_ids, include=["metadatas"])
+            fetch = _vector_with_retry(col.get, ids=batch_ids, include=["metadatas"], sensitivity="include")
             for cid, meta in zip(fetch.get("ids", []), fetch.get("metadatas", [])):
                 merged = dict(meta)
                 merged["bib_year"] = bib.get("year", 0)
@@ -1051,7 +1051,7 @@ def _extract_identifiers_for_title(
                 batch = _vector_with_retry(
                     col.get,
                     ids=chunk_ids[batch_start:batch_start + 300],
-                    include=["documents"],
+                    include=["documents"], sensitivity="include",
                 )
                 docs = batch.get("documents") or []
                 for d in docs:

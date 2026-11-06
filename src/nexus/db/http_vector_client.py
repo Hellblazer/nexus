@@ -62,6 +62,7 @@ from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON, UNREGISTERED
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, is_deadline_abort, parse_retry_after
 from nexus.redact import redact_credentials
+from nexus.sensitivity import ReadSensitivity, check_read_sensitivity
 
 _log = structlog.get_logger(__name__)
 
@@ -2762,6 +2763,23 @@ class VectorServiceError(RuntimeError):
         self.edge_refusal = edge_refusal
 
 
+class SensitivityExcludeUnavailable(VectorServiceError):
+    """A ``sensitivity="exclude"`` read was refused before any request was sent (RDR-243 Phase 2, nexus-rfvyy.7.8).
+
+    The engine filters sensitive chunks out of a read only when it carries ``vector_sensitivity_exclude_supported``;
+    an engine without it answers HTTP 200 to the key and returns the sensitive rows (a flag it does not list reads the
+    same on the public edge). So the client reads the flag first and refuses unless it is JSON ``true``: when the
+    engine reports it absent or false, and when the question could not be asked (the probe failed or timed out). It
+    never falls back to an unfiltered read. The first two are real answers and are cached; the third is not, so the
+    next read asks again (Sam's ruling on nexus-rfvyy.3)."""
+
+
+#: The value of every read's ``sensitivity`` argument. ``exclude`` asks the engine to drop chunks with a live
+#: sensitive owner; ``include`` sends nothing, the request the client made before the argument existed.
+Sensitivity = ReadSensitivity
+_check_sensitivity = check_read_sensitivity
+
+
 class IdempotencyKeyRefusedError(VectorServiceError):
     """The engine refused a keyed request's ``Idempotency-Key`` (RDR-222): 422
     ``idempotency_key_reused`` (the key was first used with another body), or 400
@@ -2818,9 +2836,30 @@ class _ServiceCollectionStub:
     adding a full Chroma collection client to the service mode.
     """
 
-    def __init__(self, name: str, tenant: str = "default") -> None:
+    def __init__(
+        self,
+        name: str,
+        tenant: str = "default",
+        *,
+        sensitivity_gate: Callable[[], None] | None = None,
+    ) -> None:
         self._name = name
         self._tenant = tenant
+        #: RDR-243 Phase 2 (nexus-rfvyy.7.8): the owning client's ``_require_sensitivity_exclude``. A stub built
+        #: without one cannot show the engine filters, so it refuses an ``exclude`` read (fails closed).
+        self._sensitivity_gate = sensitivity_gate
+
+    def _stamp_sensitivity(self, body: dict[str, Any], sensitivity: Sensitivity) -> None:
+        _check_sensitivity(sensitivity)
+        if sensitivity != "exclude":
+            return
+        if self._sensitivity_gate is None:
+            raise SensitivityExcludeUnavailable(
+                f"sensitivity='exclude' read of {self._name!r} refused: this collection handle has no client to "
+                "read the engine's capability from, so it cannot be shown to filter sensitive chunks."
+            )
+        self._sensitivity_gate()
+        body["sensitivity"] = "exclude"
 
     def get(
         self,
@@ -2832,6 +2871,7 @@ class _ServiceCollectionStub:
         *,
         include_source_uri: bool = False,
         include_non_live: bool = False,
+        sensitivity: Sensitivity,
     ) -> dict:
         """Query chunks from the service. Returns Chroma-style result dict.
 
@@ -2931,7 +2971,14 @@ class _ServiceCollectionStub:
         this stub does not fabricate them. An engine older than the amendment
         ignores the field and answers from its own read filter, which already
         returned unowned chunks.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8; see :meth:`HttpVectorClient.search`) is required, on
+        both branches and every page: ``exclude`` sends ``"sensitivity": "exclude"`` and the engine drops chunks
+        with a live sensitive owner from the rows and from the ``count`` it reports; ``include`` sends nothing.
+        A metadata-only read (``include=["metadatas"]``) takes it too: the rule is one rule, and ``include`` is
+        what maintenance code passes.
         """
+        _check_sensitivity(sensitivity)
         if ids is not None:
             from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
             page_size = QUOTAS.MAX_RECORDS_PER_WRITE
@@ -2972,6 +3019,7 @@ class _ServiceCollectionStub:
                     body["include_source_uri"] = True
                 if include_non_live:
                     body["include_non_live"] = True
+                self._stamp_sensitivity(body, sensitivity)
                 page = _post("/v1/vectors/store-get", body, tenant=self._tenant)
                 page_ids = page.get("ids", []) or []
                 # nexus-hdx2u E4 (fix-round): engine-side count (E3, now a
@@ -3037,6 +3085,7 @@ class _ServiceCollectionStub:
                 body["include_source_uri"] = True
             if include_non_live:
                 body["include_non_live"] = True
+            self._stamp_sensitivity(body, sensitivity)
             result = _post("/v1/vectors/get", body, tenant=self._tenant)
             # Normalise to Chroma shape: {ids, documents, metadatas}.
             # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
@@ -4021,6 +4070,64 @@ class HttpVectorClient:
         self._chash_allow_fetched_at = _monotonic()
         return flag
 
+    #: RDR-243 Phase 2 (nexus-rfvyy.7.8): the longest a real ``GET /version`` answer is trusted for the
+    #: ``sensitivity=exclude`` capability. Only a real answer (true or false) is held; see
+    #: :meth:`supports_sensitivity_exclude`.
+    _SENSITIVITY_EXCLUDE_TTL_S: float = 300.0
+    _sensitivity_exclude_flag: bool | None = None
+    _sensitivity_exclude_fetched_at: float | None = None
+
+    def supports_sensitivity_exclude(self) -> bool:
+        """Does the engine drop chunks with a live sensitive owner from a read that sends ``"sensitivity":
+        "exclude"`` (``GET /version``'s ``vector_sensitivity_exclude_supported``, nexus-rfvyy.7.4)? Only a JSON
+        ``true`` counts; an absent key, ``false`` and any other value are ``False``.
+
+        Unlike :meth:`supports_chash_allow` this RAISES when the question cannot be asked
+        (:class:`SensitivityExcludeUnavailable`: the request failed or timed out, or the answer was not an
+        object), because the safe direction here is a refused read, and a ``False`` returned for an outage would
+        be cached as if the engine had said it. Only a real answer, true or false, is cached for
+        :attr:`_SENSITIVITY_EXCLUDE_TTL_S`. A failed probe is not: it is retried on the next read, so an outage
+        costs exactly the reads made during it (Sam's ruling on nexus-rfvyy.3)."""
+        fetched = self._sensitivity_exclude_fetched_at
+        if (
+            self._sensitivity_exclude_flag is not None and fetched is not None
+            and _monotonic() - fetched < self._SENSITIVITY_EXCLUDE_TTL_S
+        ):
+            return self._sensitivity_exclude_flag
+        try:
+            info = _get("/version", tenant=self._tenant, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — any failure to ask is "could not show the engine filters"
+            raise SensitivityExcludeUnavailable(
+                f"sensitivity='exclude' read refused: could not read the engine's /version to learn whether it "
+                f"filters sensitive chunks ({type(exc).__name__}: {exc}). Nothing was cached; the next read asks again."
+            ) from exc
+        if not isinstance(info, dict):
+            raise SensitivityExcludeUnavailable(
+                "sensitivity='exclude' read refused: the engine's /version answer was not an object, so it cannot "
+                "be shown to filter sensitive chunks. Nothing was cached; the next read asks again."
+            )
+        flag = info.get("vector_sensitivity_exclude_supported") is True
+        self._sensitivity_exclude_flag = flag
+        self._sensitivity_exclude_fetched_at = _monotonic()
+        return flag
+
+    def _require_sensitivity_exclude(self) -> None:
+        """Raise :class:`SensitivityExcludeUnavailable` unless the engine is shown to filter. Never falls back."""
+        if not self.supports_sensitivity_exclude():
+            raise SensitivityExcludeUnavailable(
+                "sensitivity='exclude' read refused: the engine does not report "
+                "vector_sensitivity_exclude_supported, so it would return sensitive chunks in full (it answers "
+                "HTTP 200 to a key it does not know). Upgrade the engine; nothing was read."
+            )
+
+    def _stamp_sensitivity(self, body: dict[str, Any], sensitivity: Sensitivity) -> None:
+        """Validate *sensitivity*, and for ``exclude`` check the engine can honour it (raising before any request)
+        and put the key in *body*. ``include`` adds nothing. Call BEFORE building anything else a request needs."""
+        _check_sensitivity(sensitivity)
+        if sensitivity == "exclude":
+            self._require_sensitivity_exclude()
+            body["sensitivity"] = "exclude"
+
     def search(
         self,
         query: str,
@@ -4037,8 +4144,16 @@ class HttpVectorClient:
         rerank_max_candidates: int | None = None,
         rerank_meta_out: dict | None = None,
         chash_allow: Sequence[str] | None = None,
+        sensitivity: Sensitivity,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and has no default: ``"exclude"`` sends
+        ``"sensitivity": "exclude"`` and the engine drops every chunk with a live sensitive owner (refused first,
+        with :class:`SensitivityExcludeUnavailable`, unless :meth:`supports_sensitivity_exclude`); ``"include"``
+        sends nothing, the request this method made before the argument. Every hit carries ``sensitive``; the
+        client passes it through and never reads ``False`` as clean, because the engine does the excluding. The
+        same holds for every read below.
 
         ``chash_allow`` (nexus-jypmj, the document confinement; ``vector_search_chash_allow_supported``): at most
         3000 distinct 64-hex chunk hashes. The engine restricts its candidates to those chunks and ranks them
@@ -4104,6 +4219,7 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)
         if where:
             body["where"] = where
         if include_source_uri:
@@ -4169,6 +4285,7 @@ class HttpVectorClient:
         rerank_top_k: int | None = None,
         rerank_meta_out: dict | None = None,
         chash_allow: Sequence[str] | None = None,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Hybrid lexical+vector search via ``POST /v1/vectors/hybrid-search``
         (RDR-217 P2.1, bead nexus-lqo4p.6).
@@ -4230,6 +4347,7 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         if where:
             body["where"] = where
         if include_source_uri:
@@ -4306,6 +4424,7 @@ class HttpVectorClient:
         content_chars: int | None = None,
         lexical: bool = False,
         chash_allow: Sequence[str] | None = None,
+        sensitivity: Sensitivity,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
         ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
@@ -4386,6 +4505,7 @@ class HttpVectorClient:
         not echo the field (it predates it and ignored it): the caller then
         runs the lexical leg on ``/hybrid-search`` itself.
         """
+        _check_sensitivity(sensitivity)  # before the write-off return: a bad value is never read as include
         if self._per_collection_written_off():
             return None
 
@@ -4395,6 +4515,7 @@ class HttpVectorClient:
             "per_collection_k": per_collection_k,
             "limit": limit,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         finite: dict[str, float] = {}
         for name, value in (thresholds or {}).items():
             if name in collection_names and value is not None and math.isfinite(value):
@@ -4640,6 +4761,7 @@ class HttpVectorClient:
         subtree: str | None = None,
         where: dict | None = None,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Metadata-scoped combined search (RDR-156 P4, Decision 5; catalog-008).
 
@@ -4660,6 +4782,7 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         if content_type is not None:
             body["content_type"] = content_type
         if author is not None:
@@ -4683,6 +4806,7 @@ class HttpVectorClient:
         collection: str,
         *,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Topic-scoped combined search (RDR-156 P4, Decision 5).
 
@@ -4698,6 +4822,7 @@ class HttpVectorClient:
             "collection": collection,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         return _post("/v1/vectors/search-topic-scoped", body, tenant=self._tenant)
 
     def search_graph_hop(
@@ -4711,6 +4836,7 @@ class HttpVectorClient:
         direction: str = "both",
         where: dict | None = None,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
 
@@ -4736,6 +4862,7 @@ class HttpVectorClient:
             "direction": direction,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         if link_type is not None:
             body["link_type"] = link_type
         if where:
@@ -4770,6 +4897,7 @@ class HttpVectorClient:
         min_confidence: float | None = None,
         where: dict | None = None,
         n_results: int = 10,
+        sensitivity: Sensitivity,
     ) -> list[dict]:
         """Aspect-scoped combined search (RDR-156 Decision 5, bead nexus-ubnwk).
 
@@ -4832,6 +4960,7 @@ class HttpVectorClient:
             "collections": collection_names,
             "n_results": n_results,
         }
+        self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
         if field is not None:
             body["field"] = field
         if pattern is not None:
@@ -4844,8 +4973,13 @@ class HttpVectorClient:
         _warn_skipped_collections("search_aspect_scoped", collection_names)
         return result
 
-    def get_by_id(self, collection: str, doc_id: str) -> dict | None:
+    def get_by_id(self, collection: str, doc_id: str, *, sensitivity: Sensitivity) -> dict | None:
         """Fetch a single chunk by ID.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8; see :meth:`search`): under ``exclude`` a chunk with a
+        live sensitive owner is absent from the engine's answer and this returns ``None``. A refusal
+        (:class:`SensitivityExcludeUnavailable`) is raised BEFORE the request, outside the ``try`` below that reads
+        a service error as "no such chunk", so a refused read is never mistaken for a miss.
 
         Returns a FLAT dict of ``id`` + ``content`` + all metadata fields, to
         match ``T3Database.get_by_id`` (the drop-in oracle). nexus-ij9hg: the
@@ -4856,12 +4990,10 @@ class HttpVectorClient:
         post-P4a default). That is the nexus-7zuzz behavioural-divergence class
         signature parity cannot catch.
         """
+        request: dict[str, Any] = {"collection": collection, "ids": [doc_id]}
+        self._stamp_sensitivity(request, sensitivity)
         try:
-            result = _post(
-                "/v1/vectors/store-get",
-                {"collection": collection, "ids": [doc_id]},
-                tenant=self._tenant,
-            )
+            result = _post("/v1/vectors/store-get", request, tenant=self._tenant)
         except VectorServiceError:
             return None
 
@@ -6155,7 +6287,9 @@ class HttpVectorClient:
             raise CollectionNotFoundError(
                 f"service unavailable checking collection {name!r}"
             ) from exc
-        return _ServiceCollectionStub(name=name, tenant=self._tenant)
+        return _ServiceCollectionStub(
+            name=name, tenant=self._tenant, sensitivity_gate=self._require_sensitivity_exclude,
+        )
 
     def get_or_create_collection(self, name: str) -> "_ServiceCollectionStub":
         """Return a stub collection handle for staleness checks.
@@ -6170,7 +6304,9 @@ class HttpVectorClient:
         ``/v1/vectors/store-delete``, making both paths work end-to-end
         against the Java service.
         """
-        return _ServiceCollectionStub(name=name, tenant=self._tenant)
+        return _ServiceCollectionStub(
+            name=name, tenant=self._tenant, sensitivity_gate=self._require_sensitivity_exclude,
+        )
 
     def get_embeddings(
         self,
@@ -6839,22 +6975,31 @@ class HttpVectorClient:
         (a chash with no live row is absent; the note being judged is live, so its chunks are). Pages at 300 ids per request. Raises on any
         service failure: the caller (the TTL sweep's guard, nexus-6pfgb.30) treats "could not read" as
         "do not retire", never as "no row"."""
-        return {doc_id: meta for doc_id, _doc, meta in self._store_get_pages(collection, chashes)}
+        # The text of each row is dropped here: this reads the note's TTL keys, and the sweep has to see every row.
+        return {
+            doc_id: meta
+            for doc_id, _doc, meta in self._store_get_pages(collection, chashes, sensitivity="include")
+        }
 
-    def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+    def chunk_rows(self, collection: str, chashes: list[str], *, sensitivity: Sensitivity) -> dict[str, dict]:
         """``chash -> row`` for the live chunks of *collection* named by *chashes*, each row the flat
         shape :meth:`get_by_id` returns (``id``, ``content`` and the metadata fields). A chash with no
         live row is absent. Pages at 300 ids per request.
 
         Unlike :meth:`get_by_id`, which reads any service failure as "no such chunk", this raises
         :class:`VectorServiceError`: the recovery-bundle export (nexus-6pfgb.36) must not report a
-        piece it could not read as a piece that is gone."""
+        piece it could not read as a piece that is gone.
+
+        ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8; see :meth:`search`): under ``exclude`` a chash whose
+        chunk has a live sensitive owner is absent, like a chash with no live row."""
         return {
             doc_id: {"id": doc_id, "content": doc, **meta}
-            for doc_id, doc, meta in self._store_get_pages(collection, chashes)
+            for doc_id, doc, meta in self._store_get_pages(collection, chashes, sensitivity=sensitivity)
         }
 
-    def _store_get_pages(self, collection: str, chashes: list[str]) -> Iterator[tuple[str, str, dict]]:
+    def _store_get_pages(
+        self, collection: str, chashes: list[str], *, sensitivity: Sensitivity,
+    ) -> Iterator[tuple[str, str, dict]]:
         """``(id, document, metadata)`` for each live row of *collection* named by *chashes*, 300 ids
         per ``/v1/vectors/store-get`` request. Raises :class:`VectorServiceError` on any service
         failure and when the engine reports more matched rows than it returned; an engine that sends no
@@ -6862,11 +7007,9 @@ class HttpVectorClient:
         page = 300
         for start in range(0, len(chashes), page):
             batch = chashes[start:start + page]
-            result = _post(
-                "/v1/vectors/store-get",
-                {"collection": collection, "ids": batch, "limit": len(batch)},
-                tenant=self._tenant,
-            )
+            request: dict[str, Any] = {"collection": collection, "ids": batch, "limit": len(batch)}
+            self._stamp_sensitivity(request, sensitivity)
+            result = _post("/v1/vectors/store-get", request, tenant=self._tenant)
             ids = result.get("ids") or []
             docs = result.get("documents") or []
             metas = result.get("metadatas") or []

@@ -210,7 +210,7 @@ def resolve_span_in_t3(
     col = t3.get_collection(physical_collection)
     result = col.get(
         where={"chunk_text_hash": hex_chash},
-        include=["documents", "metadatas"],
+        include=["documents", "metadatas"], sensitivity="include",
     )
     if not result["ids"]:
         return None
@@ -394,7 +394,7 @@ def fallback_chash_scan(
                     col = t3.get_collection(coll)
                     hit = col.get(
                         where={"chunk_text_hash": hex_chash},
-                        include=[],
+                        include=[], sensitivity="include",
                     )
                     doc_id = hit["ids"][0] if hit["ids"] else ""
                 except Exception as exc:  # noqa: BLE001 — best-effort doc_id recovery on a confirmed hit; failure degrades to empty doc_id, the span text is still returned
@@ -648,7 +648,7 @@ def resolve_span_text_for_entry(
                     natural_id = row.chash  # RDR-180: full digest
                     fetched = col.get(
                         ids=[natural_id],
-                        include=["documents"],
+                        include=["documents"], sensitivity="include",
                     )
                     docs = fetched.get("documents", [])
                     if docs:
@@ -666,7 +666,7 @@ def resolve_span_text_for_entry(
             result = col.get(
                 where={"$and": [{k: v} for k, v in where_filter.items()]},
                 include=["documents"],
-                limit=1,
+                limit=1, sensitivity="include",
             )
             docs = result.get("documents", [])
             if docs:

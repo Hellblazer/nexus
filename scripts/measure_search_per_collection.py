@@ -215,7 +215,7 @@ def run_one(
         t0 = time.perf_counter()
         results = search(
             query, cols, n_results=n, t3=client, cluster_by=None, rerank=rerank,
-            diagnostics_out=diag,
+            diagnostics_out=diag, sensitivity="include",
         )
         wall = time.perf_counter() - t0
     failed: dict[str, str] = {}
@@ -385,7 +385,7 @@ def measure_concurrency(
                 try:
                     res = search(
                         query, cols, n_results=n, t3=client, cluster_by=None, rerank=rerank,
-                        diagnostics_out=diag,
+                        diagnostics_out=diag, sensitivity="include",
                     )
                     rows = len(res)
                 except Exception as exc:  # noqa: BLE001 — the search's own failure is a measurement
@@ -473,7 +473,7 @@ def _lexical_search_once(
     rows = 0
     try:
         rows = len(search(query, cols, n_results=n, t3=client, cluster_by=None, rerank=rerank,
-                          lexical=True, diagnostics_out=diag))
+                          lexical=True, diagnostics_out=diag, sensitivity="include"))
     except Exception as exc:  # noqa: BLE001 — the search's own failure is a measurement
         err = f"{type(exc).__name__}: {str(exc)[:200]}"
     wall = time.perf_counter() - t0

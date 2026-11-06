@@ -1443,7 +1443,7 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # with no live owner is exactly what a backfill exists to register.
                 result = col.get(
                     include=["metadatas"], limit=200, offset=offset,
-                    include_non_live=True,
+                    include_non_live=True, sensitivity="include",
                 )
                 metas = result.get("metadatas", [])
                 if metas and use_doc_id is None:
@@ -1640,7 +1640,7 @@ def _backfill_papers(
         meta: dict | None = None
         try:
             col = t3.get_or_create_collection(col_name)
-            result = col.get(limit=1, include=["metadatas"], include_non_live=True)
+            result = col.get(limit=1, include=["metadatas"], include_non_live=True, sensitivity="include")
             if result.get("ids") and result.get("metadatas"):
                 first_id, meta = result["ids"][0], result["metadatas"][0]
         except VectorServiceError as exc:
@@ -1877,7 +1877,7 @@ def _backfill_per_file_from_t3(
     while True:
         page = col.get(
             include=["metadatas"], limit=page_size, offset=offset,
-            include_non_live=True,
+            include_non_live=True, sensitivity="include",
         )
         ids = page.get("ids") or []
         if not ids:

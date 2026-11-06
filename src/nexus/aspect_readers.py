@@ -548,7 +548,7 @@ def _gather_chroma_chunks_by_field(
                 requested_batch = ids[batch_start : batch_start + page_limit]
                 page = coll.get(
                     ids=requested_batch,
-                    include=["documents", "metadatas"],
+                    include=["documents", "metadatas"], sensitivity="include",
                 )
                 page_ids = page.get("ids") or []
                 docs = page.get("documents") or []
@@ -599,7 +599,7 @@ def _gather_chroma_chunks_by_field(
                     where={identity_field: match_value},
                     limit=page_limit,
                     offset=offset,
-                    include=["documents", "metadatas"],
+                    include=["documents", "metadatas"], sensitivity="include",
                 )
                 docs = page.get("documents") or []
                 mds = page.get("metadatas") or []

@@ -12040,7 +12040,7 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
     def _read(chashes: list[str]) -> None:
         for start in range(0, len(chashes), page_size):
             batch = chashes[start:start + page_size]
-            page = col.get(ids=batch, include=["metadatas"], limit=len(batch))
+            page = col.get(ids=batch, include=["metadatas"], limit=len(batch), sensitivity="include")
             for chash, meta in zip(page.get("ids") or [], page.get("metadatas") or []):
                 rows[chash] = meta or {}
 

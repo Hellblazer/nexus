@@ -2978,7 +2978,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 natural_ids = [r.chash for r in manifest if r.chash]  # RDR-180: full digest
                 if natural_ids:
                     try:
-                        present = col.get(ids=natural_ids, include=[])
+                        present = col.get(ids=natural_ids, include=[], sensitivity="include")
                     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         present = None
                     if present and present.get("ids"):
@@ -3942,7 +3942,7 @@ def _paginated_get(
             kwargs["where"] = where
         if include_non_live:
             kwargs["include_non_live"] = True
-        batch = _vector_with_retry(col.get, **kwargs)
+        batch = _vector_with_retry(col.get, sensitivity="include", **kwargs)
         batch_ids: list[str] = batch["ids"] or []
         all_ids.extend(batch_ids)
         if has_metas:
@@ -3989,7 +3989,7 @@ def _present_ids(col: object, ids: list[str]) -> set[str]:
 
     if isinstance(col, _ServiceCollectionStub):
         return set(col.existing_ids(ids))
-    return set(col.get(ids=ids, include=[]).get("ids") or [])
+    return set(col.get(ids=ids, include=[], sensitivity="include").get("ids") or [])
 
 
 def _batched_delete(col: object, ids: list[str]) -> int:

@@ -1110,7 +1110,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
         # live-only read made a collection of unowned chunks look empty here,
         # which skipped the "would destroy every chunk" refusal below.
         batch = col.get(
-            limit=300, offset=offset, include=["metadatas"], include_non_live=True,
+            limit=300, offset=offset, include=["metadatas"], include_non_live=True, sensitivity="include",
         )
         # nexus-vn48: page-batch chash -> doc_id resolution to amortise
         # SQLite calls across the page rather than per-chunk.
@@ -1669,7 +1669,7 @@ def _upsert_reembed_batch(
         except VectorServiceError as exc:
             if exc.reason != OWNERLESS_CHUNK_WRITE_REASON or attempt == _REEMBED_OWNER_RETRIES:
                 raise
-            live = set((col.get(ids=ids, include=[]).get("ids")) or [])
+            live = set((col.get(ids=ids, include=[], sensitivity="include").get("ids")) or [])
             keep = [i for i, cid in enumerate(ids) if cid in live]
             lost = len(ids) - len(keep)
             _log.warning(
@@ -1776,7 +1776,7 @@ def _reembed_collection(
     while offset < total:
         page_rows = col.get(
             limit=page, offset=offset,
-            include=["documents", "metadatas"],
+            include=["documents", "metadatas"], sensitivity="include",
         )
         ids = page_rows.get("ids") or []
         documents = page_rows.get("documents") or []

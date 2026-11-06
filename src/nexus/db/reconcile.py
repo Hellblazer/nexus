@@ -66,7 +66,7 @@ def iter_collection_chunks(
     col = client.get_collection(collection_name)
     offset = start_offset
     while True:
-        batch = col.get(include=include, limit=page, offset=offset)
+        batch = col.get(include=include, limit=page, offset=offset, sensitivity="include")
         ids = batch.get("ids") or []
         if not ids:
             return

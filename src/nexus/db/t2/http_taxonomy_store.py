@@ -1811,7 +1811,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             # The service store-get path ignores `include` and always returns
             # the full {ids, documents, metadatas} envelope (VectorHandler P4a.2,
             # nexus-1k8s1); we pass include for intent only.
-            res = stub.get(ids=batch, include=["documents"])
+            res = stub.get(ids=batch, include=["documents"], sensitivity="include")
             res_ids = res.get("ids") or []
             # nexus-hdx2u: a store-get can legitimately return FEWER rows
             # than requested (absent/deleted ids), never more.
@@ -1854,7 +1854,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         offset = 0
         _PAGE = 300
         while offset < n:
-            page = stub.get(include=[], limit=_PAGE, offset=offset)
+            page = stub.get(include=[], limit=_PAGE, offset=offset, sensitivity="include")
             pids = page.get("ids") or []
             if not pids:
                 break
@@ -1941,7 +1941,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             vectors_unavailable = False
             for i in range(0, len(doc_ids), _PAGE):
                 batch = doc_ids[i:i + _PAGE]
-                result = coll.get(ids=batch, include=["documents", "embeddings"])
+                result = coll.get(ids=batch, include=["documents", "embeddings"], sensitivity="include")
                 got_ids = result.get("ids") or []
                 got_docs = result.get("documents") or []
                 got_embs = result.get("embeddings")
@@ -2140,7 +2140,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             src_emb_rows: list[Any] = []
             offset = 0
             while True:
-                page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
+                page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset, sensitivity="include")
                 page_ids = page.get("ids", [])
                 page_embs = page.get("embeddings")
                 if not page_ids or page_embs is None:

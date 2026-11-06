@@ -30,11 +30,16 @@ from contextvars import ContextVar
 from typing import Any, Final, Literal, TypeVar
 
 __all__ = [
-    "DispatchOutsideSensitivityScope", "POSTURE_ENV", "Posture", "SensitiveDocumentRefused", "assert_llm_bound",
-    "bound_to", "current_posture", "current_surface", "llm_bound",
+    "DispatchOutsideSensitivityScope", "POSTURE_ENV", "Posture", "ReadSensitivity", "SensitiveDocumentRefused",
+    "assert_llm_bound", "bound_to", "check_read_sensitivity", "current_posture", "current_surface", "llm_bound",
+    "read_sensitivity",
 ]
 
 Posture = Literal["default", "llm_bound"]
+
+#: The ``sensitivity`` argument every vector read that returns chunk text takes (RDR-243 Phase 2, nexus-rfvyy.7.8):
+#: ``exclude`` asks the engine to drop chunks with a live sensitive owner, ``include`` reads as before.
+ReadSensitivity = Literal["exclude", "include"]
 
 #: The environment variable a child process reads its posture from. It is for nexus parents only: a scoped
 #: nexus process exports it to the children it starts. Setting it by hand (a shell, a hook) puts the process
@@ -79,6 +84,21 @@ def current_posture() -> Posture:
     if value is not None:
         return value
     return "llm_bound" if os.environ.get(POSTURE_ENV) == "llm_bound" else "default"
+
+
+def read_sensitivity(posture: Posture | None = None) -> ReadSensitivity:
+    """The ``sensitivity`` value a read takes for *posture*: ``llm_bound`` excludes, ``default`` includes.
+
+    An entry point calls this ONCE, on its own thread, and hands the value down as an argument. Reads never look at
+    the ContextVar themselves: a worker thread started with ``threading.Thread`` or ``run_in_executor`` does not
+    inherit it (RDR-243 A7). With no *posture* it reads :func:`current_posture` now."""
+    return "exclude" if (current_posture() if posture is None else posture) == "llm_bound" else "include"
+
+
+def check_read_sensitivity(value: object) -> None:
+    """Raise ``ValueError`` for anything but ``"exclude"`` or ``"include"``: ``None`` or a typo must not read as include."""
+    if not isinstance(value, str) or value not in ("exclude", "include"):
+        raise ValueError(f"sensitivity must be 'exclude' or 'include', got {value!r}")
 
 
 def current_surface() -> str | None:

@@ -28,6 +28,7 @@ import structlog
 
 from nexus.aspect_readers import uri_for
 from nexus.catalog.meta_filter import ABSENT_MEANS
+from nexus.sensitivity import ReadSensitivity
 from nexus.catalog.types import manifest_row_wire
 from nexus.embed_window import window_for_model
 
@@ -388,7 +389,9 @@ def group_documents(
     return rows, degraded
 
 
-def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str, str, int] | None:
+def split_note_text(
+    t3: Any, collection: str, chunk_ids: list[str], *, sensitivity: ReadSensitivity,
+) -> tuple[str, str, int] | None:
     """``(first chunk id, full text, chunk count)`` when *chunk_ids* are
     chunks of ONE split note, else ``None`` (nexus-spujb, nexus-b2tld).
 
@@ -409,6 +412,9 @@ def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str
     The manifest is now the only authority: ``len(chashes) < 2`` below is
     the honest test of whether a document is split, and it costs one catalog
     round trip per read that the short-circuit used to save.
+
+    *sensitivity* (RDR-243 Phase 2, nexus-rfvyy.7.8) is required: it is the read's, passed to every piece. Under
+    ``exclude`` a piece the engine withholds makes the note unreadable (``None``), never a text with a hole.
     """
     if not chunk_ids:
         return None
@@ -425,7 +431,7 @@ def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str
             continue
         parts: list[tuple[str, int | None, int | None]] = []
         for chash in chashes:
-            entry = t3.get_by_id(collection, chash)
+            entry = t3.get_by_id(collection, chash, sensitivity=sensitivity)
             if entry is None:
                 return None
             parts.append((

@@ -295,7 +295,7 @@ def _metadata_for_doc_id(col: Any, doc_id: str) -> list[dict]:
         reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
     if not chashes:
         return []
-    batch = _vector_with_retry(col.get, ids=chashes, include=["metadatas"])
+    batch = _vector_with_retry(col.get, ids=chashes, include=["metadatas"], sensitivity="include")
     return batch.get("metadatas", [])
 
 
@@ -509,7 +509,7 @@ def _own_chunk_metadata(col: Any, doc_id: str) -> dict | None:
         return None
     if not rows:
         return None
-    batch = _vector_with_retry(col.get, ids=[rows[0].chash], include=["metadatas"])
+    batch = _vector_with_retry(col.get, ids=[rows[0].chash], include=["metadatas"], sensitivity="include")
     metas = (batch or {}).get("metadatas") or []
     return metas[0] if metas and metas[0] is not None else None
 
@@ -3425,7 +3425,7 @@ def index_pdf(
                             where=meta_where,
                             include=["metadatas"],
                             limit=300,
-                            offset=offset,
+                            offset=offset, sensitivity="include",
                         )
                         all_meta.extend(batch.get("metadatas", []))
                         if len(batch.get("ids", [])) < 300:

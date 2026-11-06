@@ -539,7 +539,7 @@ def export_collection(
                     col.get,
                     include=["documents", "metadatas"],
                     limit=page_size,
-                    offset=offset,
+                    offset=offset, sensitivity="include",
                 )
                 page_ids = result["ids"]
                 if not page_ids:

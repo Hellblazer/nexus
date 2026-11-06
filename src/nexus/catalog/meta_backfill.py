@@ -478,7 +478,7 @@ def _chunk_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]
     from nexus.db.http_vector_client import VectorServiceError, is_unregistered_collection_error  # noqa: PLC0415 — deferred, heavy import graph
 
     try:
-        return t3.chunk_rows(collection, chashes)
+        return t3.chunk_rows(collection, chashes, sensitivity="include")
     except VectorServiceError as exc:
         if not is_unregistered_collection_error(exc):
             raise

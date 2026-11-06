@@ -429,7 +429,7 @@ def _fetch_chunks_by_key(
             limit=_PAGE_SIZE,
             offset=offset,
             include=["metadatas"],
-            include_non_live=True,
+            include_non_live=True, sensitivity="include",
         )
         page_ids: list[str] = result.get("ids") or []
         page_metas: list[dict] = result.get("metadatas") or []
@@ -522,7 +522,7 @@ def _fetch_chunk_by_id(
         cid = chash
         meta = cached_meta
     else:
-        result = col.get(ids=[chash], include=["metadatas"], include_non_live=True)
+        result = col.get(ids=[chash], include=["metadatas"], include_non_live=True, sensitivity="include")
         ids: list[str] = result.get("ids") or []
         if not ids:
             return None
@@ -584,7 +584,7 @@ def _forward_hints_for_chashes(
     """
     if not chashes:
         return {}, {}
-    result = col.get(ids=list(chashes), include=["metadatas"], include_non_live=True)
+    result = col.get(ids=list(chashes), include=["metadatas"], include_non_live=True, sensitivity="include")
     ids: list[str] = result.get("ids") or []
     metas: list[dict] = result.get("metadatas") or []
     if len(metas) != len(ids):

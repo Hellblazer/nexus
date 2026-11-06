@@ -629,7 +629,7 @@ def _run_chunk_size_distribution() -> dict:
         while True:
             try:
                 got = col.get(
-                    limit=page, offset=offset, include=["documents"],
+                    limit=page, offset=offset, include=["documents"], sensitivity="include",
                 )
             except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 tables[name] = {"error": f"get: {exc}"}
@@ -747,7 +747,7 @@ def _run_chunk_text_dedup() -> dict:
         while True:
             try:
                 got = col.get(
-                    limit=page, offset=offset, include=["metadatas"],
+                    limit=page, offset=offset, include=["metadatas"], sensitivity="include",
                 )
             except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 within_summary[name] = {"error": f"get: {exc}"}
@@ -1080,7 +1080,7 @@ def _run_name_vs_embed_dim() -> dict:
                 # nexus-pyv0e: sample via the dual-mode-safe public surface
                 # (collection handle + get_embeddings), not client._client.
                 coll = t3_db.get_or_create_collection(name)
-                sample = coll.get(limit=1)
+                sample = coll.get(limit=1, sensitivity="include")
                 ids = sample.get("ids") or []
                 embs = t3_db.get_embeddings(name, ids[:1]) if ids else None
                 probe_err = None
@@ -1603,7 +1603,7 @@ def _run_visible_outside_manifest(
                         break
                     batch = page_chashes[start: start + page_limit][:remaining]
                     try:
-                        got = col.get(ids=batch, include=["metadatas"])
+                        got = col.get(ids=batch, include=["metadatas"], sensitivity="include")
                     except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
                         report["check_errors"].append({"collection": name, "error": f"get: {exc}"})
                         report["pass"] = False

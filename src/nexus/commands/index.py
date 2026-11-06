@@ -3626,7 +3626,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 corpus, collection_exists=lambda name: local_t3.collection_exists(name),
             )
         col = local_t3.get_or_create_collection(col_name)
-        result = col.get(include=["documents", "metadatas"])
+        result = col.get(include=["documents", "metadatas"], sensitivity="include")
         docs: list[str] = result.get("documents") or []
         metas: list[dict] = result.get("metadatas") or []
 

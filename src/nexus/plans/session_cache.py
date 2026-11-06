@@ -177,7 +177,7 @@ class PlanSessionCache:
         # Full rebuild: drop anything we've seen before. ``include``
         # omitted so we get just the ids (ids come back unconditionally).
         try:
-            existing = self._col.get(where={"session_id": self._session_id})
+            existing = self._col.get(where={"session_id": self._session_id}, sensitivity="include")
             ids = existing.get("ids") or []
             if ids:
                 self._col.delete(ids=ids)

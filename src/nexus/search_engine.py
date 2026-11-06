@@ -16,6 +16,7 @@ import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
+from nexus.sensitivity import ReadSensitivity
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
     DISPLAY_SOURCE_PATH_KEY,
     OWNER_AGENTS_KEY,
@@ -1392,8 +1393,15 @@ def search_cross_corpus(
     content_chars: int | None = None,
     per_collection_k_cap: int | None = None,
     model_of_out: "list[Callable[[str], str | None]] | None" = None,
+    *,
+    sensitivity: ReadSensitivity,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
+
+    *sensitivity* (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and has no default. It is handed to every read
+    this call makes, in every pool task, as an ARGUMENT: a worker thread started without a context copy does not
+    see the posture ContextVar (RDR-243 A7), so no task consults it. The caller reads
+    :func:`nexus.sensitivity.read_sensitivity` once, on its own thread (``exclude`` under ``llm_bound``).
 
     Over-fetch: a batch is sized at ``max(n_results * mult, len(group) *
     floor)`` candidates (:func:`_desired_candidate_count`), where *mult* is
@@ -1725,7 +1733,7 @@ def search_cross_corpus(
                 lex_meta: dict = {}
                 lex_raw = t3.hybrid_search(
                     query, cols, n_results=per_k, where=effective_where,
-                    rerank=True, rerank_meta_out=lex_meta, **chash_kw,
+                    rerank=True, rerank_meta_out=lex_meta, sensitivity=sensitivity, **chash_kw,
                 )
                 # A degrade on EITHER leg is a degrade for this batch;
                 # merged rather than overwritten so the vector leg's
@@ -1734,7 +1742,7 @@ def search_cross_corpus(
                     rerank_meta.update(lex_meta)
             else:
                 lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
-                                           where=effective_where, **chash_kw)
+                                           where=effective_where, sensitivity=sensitivity, **chash_kw)
         except VectorServiceError as lex_exc:
             raise LexicalLegUnavailableError(
                 f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
@@ -1785,9 +1793,11 @@ def search_cross_corpus(
         try:
             if server_rerank:
                 raw = t3.search(query, cols, n_results=per_k, where=effective_where,
-                                rerank=True, rerank_meta_out=rerank_meta, **rerank_cap_kw, **chash_kw)
+                                rerank=True, rerank_meta_out=rerank_meta, sensitivity=sensitivity,
+                                **rerank_cap_kw, **chash_kw)
             else:
-                raw = t3.search(query, cols, n_results=per_k, where=effective_where, **chash_kw)
+                raw = t3.search(query, cols, n_results=per_k, where=effective_where,
+                                sensitivity=sensitivity, **chash_kw)
             if lexical:
                 # ADDITIVE: the lexical rows join the vector rows rather than
                 # replacing them, deduplicated by chunk id with the vector row
@@ -2045,6 +2055,7 @@ def search_cross_corpus(
                 query, group, per_collection_k=per_collection_k, limit=limit,
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
+                sensitivity=sensitivity,
                 **rerank_cap_kw, **chash_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),

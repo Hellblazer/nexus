@@ -774,7 +774,7 @@ def note_chunks_present(t3, collection: str, chash: str, title: str) -> tuple[bo
     as UNVERIFIABLE at the caller, never as a ghost.
     """
     if chash:
-        if t3.get_by_id(collection, chash) is not None:
+        if t3.get_by_id(collection, chash, sensitivity="include") is not None:
             return True, "chash"
         if not title:
             return False, "chash"

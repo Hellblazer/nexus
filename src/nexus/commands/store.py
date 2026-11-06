@@ -24,6 +24,7 @@ from nexus.db.t3 import T3Database
 from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
+from nexus import sensitivity as _sens
 from nexus.sensitive_write import (
     ExternalEmbedderRefusedError,
     SensitiveFlagNotSetError,
@@ -557,15 +558,17 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     # reads (nexus-50uw6); a fully-qualified name is that one collection.
     scope, _rows = _store_scope(collection, db)
     col_name, entry = scope[0], None
+    # RDR-243 Phase 2 (nexus-rfvyy.7.8): read once; a `nx store get` a model runs under NX_SENSITIVITY_POSTURE excludes.
+    sensitivity = _sens.read_sensitivity()
     for candidate in scope:
-        entry = db.get_by_id(candidate, doc_id)
+        entry = db.get_by_id(candidate, doc_id, sensitivity=sensitivity)
         if entry is not None:
             col_name = candidate
             break
     if entry is None:
         raise click.ClickException(f"Entry {doc_id!r} not found in {', '.join(scope)}")
     # nexus-spujb: a note split to its model's token window reads back whole.
-    split = _split_note_text(db, col_name, [entry["id"]])
+    split = _split_note_text(db, col_name, [entry["id"]], sensitivity=sensitivity)
     if split is not None:
         entry = {**entry, "content": split[1], "chunk_count": split[2]}
 
@@ -707,10 +710,10 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         # F10c bug class this whole area exists to fix. The reap is now
         # collection-scoped itself (nexus-r3cdg); this check stays as the
         # primary layer.
-        if db.get_by_id(col_name, doc_id) is None:
+        if db.get_by_id(col_name, doc_id, sensitivity="include") is None:
             # nexus-9ts7n: a delete stays in the one collection it names (reads span
             # the corpus's siblings, a delete does not), so say which sibling has it.
-            hint = _holder_hint(db, collection, col_name, lambda s: db.get_by_id(s, doc_id) is not None)
+            hint = _holder_hint(db, collection, col_name, lambda s: db.get_by_id(s, doc_id, sensitivity="include") is not None)
             raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}{hint}")
 
         # nexus-o8dil.5 (RDR-191 F10c follow-up): reap BEFORE delete, not
@@ -785,7 +788,7 @@ def _delete_by_title(
     row_ids = db.find_ids_by_title(col_name, title)
 
     def present(chash: str) -> bool:
-        return db.get_by_id(col_name, chash) is not None
+        return db.get_by_id(col_name, chash, sensitivity="include") is not None
 
     docs = reap_catalog_documents_by_title(col_name, title, row_ids, present) if yes else None
     if not yes:

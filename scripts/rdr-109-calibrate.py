@@ -109,6 +109,7 @@ def _baseline_rank(
         n_results=top_k * 3,  # over-fetch so the boost can re-rank within window
         t3=t3,
         cluster_by=None,
+        sensitivity="include",
     )
     ranked: list[RankedHit] = []
     for r in results:
@@ -182,7 +183,7 @@ def main() -> int:
     from nexus.db import make_t3  # noqa: PLC0415
     t3 = make_t3()
     coll = t3.get_or_create_collection(args.collection)
-    raw = coll.get(include=["documents", "metadatas"])
+    raw = coll.get(include=["documents", "metadatas"], sensitivity="include")
     chunks = []
     for cid, doc, meta in zip(raw["ids"], raw["documents"], raw["metadatas"]):
         chash = (meta or {}).get("chunk_text_hash") or cid

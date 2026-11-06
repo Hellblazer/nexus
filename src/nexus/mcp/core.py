@@ -45,7 +45,8 @@ from nexus.corpus import (
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
-from nexus.sensitivity import bound_to
+from nexus import sensitivity as _sensitivity  # reads go through the module so one test patch reaches every entry point
+from nexus.sensitivity import ReadSensitivity, bound_to
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistry as _LockedHookRegistry, install_default_hooks as _install_default_hooks
@@ -3300,8 +3301,14 @@ def _search_render(
     structured: bool = False,
     threshold: float | None = None,
     lexical: bool = False,
+    *,
+    sensitivity: ReadSensitivity,
 ) -> "str | dict":
     """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
+
+    ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and has no default: the ``search`` tool
+    reads :func:`nexus.sensitivity.read_sensitivity` once on its own thread and hands the value down, so the
+    retrieval's worker threads never consult the ContextVar. It is part of the page-cache key.
 
     Private render function — NOT ``@mcp.tool()``-decorated. This is what
     plan-runner, ``nx doc cite`` (``_phase5_search``), and every direct
@@ -3420,7 +3427,7 @@ def _search_render(
         allow_key = None if _allow is None else hashlib.sha256("\n".join(sorted(_allow)).encode()).hexdigest()
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical, boost_window, allow_key,
+            topic or "", threshold, lexical, boost_window, allow_key, sensitivity,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3473,6 +3480,7 @@ def _search_render(
                 # page is pool-sensitive (nexus-abdp2), so it keeps the full k.
                 per_collection_k_cap=None if lexical_rerank else _MCP_PER_COLLECTION_K,
                 model_of_out=model_of_out,
+                sensitivity=sensitivity,
             )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -3842,6 +3850,7 @@ def search(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
         threshold=threshold, lexical=lexical,
+        sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2: read once, here, on the tool's own thread
     )
 
 
@@ -4511,6 +4520,7 @@ def search_metadata_scoped(
         # limit/n_groups) so a group's true top-N isn't truncated away
         # before the merge decides the global top-N. See
         # _grouped_combined_query for the full contract.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread; the lambda below only closes over it
         rows = _grouped_combined_query(target, lambda group: t3.search_metadata_scoped(
             query, group,
             content_type=content_type or None,
@@ -4519,6 +4529,7 @@ def search_metadata_scoped(
             subtree=(subtree or None),
             where=(where_map or None),
             n_results=limit,
+            sensitivity=sensitivity,
         ), t3=t3)
         # Metadata-scoped is document-level: the function returns one row per
         # matching CHUNK, so a multi-chunk document repeats its tumbler. Collapse
@@ -4619,9 +4630,10 @@ def search_topic_scoped(
         # against) — classify a collection's VectorServiceError into the
         # SAME named error every other combined-query tool now raises for
         # this engine 422, rather than letting it propagate raw.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
         for col in target:
             try:
-                merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit))
+                merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit, sensitivity=sensitivity))
             except VectorServiceError as exc:
                 raise classify_vector_service_error(
                     exc, collections=[col], t3=t3,
@@ -4746,6 +4758,7 @@ def search_graph_hop(
         # limit/n_groups) so a group's true top-N isn't truncated away
         # before the merge decides the global top-N. See
         # _grouped_combined_query for the full contract.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
         rows = _grouped_combined_query(target, lambda group: t3.search_graph_hop(
             query, seed_list, group,
             link_type=(link_type or None),
@@ -4753,6 +4766,7 @@ def search_graph_hop(
             direction=direction,
             where=(where_dict or None),
             n_results=limit,
+            sensitivity=sensitivity,
         ), t3=t3)
         # Document-level: collapse to one row per tumbler, keeping the best
         # (nearest) distance, and truncate to `limit` AFTER the merge (see
@@ -4905,6 +4919,7 @@ def search_aspect_scoped(
             where_map = parsed or None
         # nexus-3l6gz / nexus-hg745: one combined-query call per embedding-model
         # group, ALL-OR-NOTHING. See _grouped_combined_query for the full contract.
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
         rows = _grouped_combined_query(target, lambda group: t3.search_aspect_scoped(
             query, group,
             field=(field or None),
@@ -4912,6 +4927,7 @@ def search_aspect_scoped(
             min_confidence=(min_confidence or None),
             where=(where_map or None),
             n_results=limit,
+            sensitivity=sensitivity,
         ), t3=t3)
         # Document-level: the function returns one row per matching CHUNK, so a
         # multi-chunk document repeats its tumbler. Collapse to one row per id,
@@ -5064,6 +5080,9 @@ def query(
       bibliographic quality; the catalog-param path ranks by raw vector
       distance only.
     """
+    # RDR-243 Phase 2 (nexus-rfvyy.7.8): the posture is read once, here, on the tool's own thread, and every read
+    # below (the combined queries, the lambdas their fan-out runs, search_cross_corpus) is handed the value.
+    sensitivity = _sensitivity.read_sensitivity()
     try:
         from nexus.config import get_tuning_config, load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -5256,6 +5275,7 @@ def query(
                             subtree=(subtree or None),
                             where=(where_dict or None),
                             n_results=fetch_n,
+                            sensitivity=sensitivity,
                         ), t3=t3)
                 else:
                     rows = _grouped_combined_query(
@@ -5265,6 +5285,7 @@ def query(
                             depth=depth,
                             where=(where_dict or None),
                             n_results=fetch_n,
+                            sensitivity=sensitivity,
                         ), t3=t3)
             else:
                 # Metadata-scoped path: catalog filters pushed into SQL.
@@ -5276,6 +5297,7 @@ def query(
                         subtree=(subtree or None),
                         where=(where_dict or None),
                         n_results=fetch_n,
+                        sensitivity=sensitivity,
                     ), t3=t3)
 
             # Dedup: one row per tumbler, keeping best (lowest) distance.
@@ -5473,6 +5495,7 @@ def query(
             # on the managed cloud. The topic BOOST does not depend on
             # cluster_by and still runs.
             cluster_by=None,
+            sensitivity=sensitivity,
         )
         # hybrid scoring + RDR-055 E2 quality boost — parity
         # with the CLI (search_cmd.py). Chunk-level ranking (and, below,
@@ -6176,6 +6199,7 @@ def store_get(
         if not doc_id:
             return _fail("Error: doc_id is required")
         t3 = _get_t3()
+        sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's thread
         # nexus-mgqs8: the bare name spans every knowledge collection; any
         # other name is one collection and behaves exactly as before.
         scope = _read_scope(t3, collection)
@@ -6189,7 +6213,7 @@ def store_get(
         also_titled: list[str] = []  # nexus-xkc4n: the other collections holding a title an exact name narrowed
         if looks_like_hash or len(scope) == 1:
             for candidate in scope:
-                entry = t3.get_by_id(candidate, doc_id)
+                entry = t3.get_by_id(candidate, doc_id, sensitivity=sensitivity)
                 if entry is not None:
                     col_name = candidate
                     break
@@ -6214,11 +6238,11 @@ def store_get(
                 col_name, ids = matches[0]
                 # nexus-spujb: every chunk of a split note carries its title,
                 # so several ids can be ONE note rather than an ambiguity.
-                split = split_note_text(t3, col_name, ids) if len(ids) > 1 else None
+                split = split_note_text(t3, col_name, ids, sensitivity=sensitivity) if len(ids) > 1 else None
                 if split is not None:
-                    entry = t3.get_by_id(col_name, split[0])
+                    entry = t3.get_by_id(col_name, split[0], sensitivity=sensitivity)
                 elif len(ids) == 1:
-                    entry = t3.get_by_id(col_name, ids[0])
+                    entry = t3.get_by_id(col_name, ids[0], sensitivity=sensitivity)
                 else:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
@@ -6237,11 +6261,11 @@ def store_get(
                 found = named  # nexus-xkc4n, as for the chunk-title matches above
             if len(found) == 1 and len(found[0][1]) == 1:
                 col_name, (chashes,) = found[0]
-                entry = t3.get_by_id(col_name, chashes[0])
+                entry = t3.get_by_id(col_name, chashes[0], sensitivity=sensitivity)
                 if entry is not None and len(chashes) > 1:
-                    split = split_note_text(t3, col_name, chashes)
+                    split = split_note_text(t3, col_name, chashes, sensitivity=sensitivity)
                     if split is not None:
-                        entry = t3.get_by_id(col_name, split[0]) or entry
+                        entry = t3.get_by_id(col_name, split[0], sensitivity=sensitivity) or entry
             elif found:
                 return (
                     f"Title {doc_id!r} names {sum(len(d) for _c, d in found)} documents"
@@ -6276,7 +6300,7 @@ def store_get(
         # nexus-spujb: a note split to its model's token window reads back whole.
         from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
 
-        split = split_note_text(t3, col_name, [entry["id"]])
+        split = split_note_text(t3, col_name, [entry["id"]], sensitivity=sensitivity)
         # nexus-zdzm5: the ID line names the NOTE (its first chunk, the id
         # store_put reported), not whichever of its chunks the caller passed.
         note_id = split[0] if split is not None else entry["id"]
@@ -6635,8 +6659,15 @@ def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
     return out
 
 
-def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dict]:
+def _batched_get_by_ids(
+    t3: Any, col_name: str, ids: list[str], *, sensitivity: ReadSensitivity,
+) -> dict[str, dict]:
     """Batch-fetch ``ids`` from ``col_name`` in one (paged) round trip.
+
+    ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8) is required and goes to the batch and to the per-id
+    fallback alike. A refused ``exclude`` read (:class:`~nexus.db.http_vector_client.SensitivityExcludeUnavailable`)
+    propagates: it is not a "batch failed, try each id" case, and reading it as one would turn a refusal into a
+    list of missing documents.
 
     Delegates to ``_ServiceCollectionStub.get(ids=...)``, which already
     pages internally at ``QUOTAS.MAX_RECORDS_PER_WRITE`` (300 — smaller
@@ -6683,8 +6714,12 @@ def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dic
     """
     if not ids:
         return {}
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
     try:
-        result = t3.get_or_create_collection(col_name).get(ids=ids)
+        result = t3.get_or_create_collection(col_name).get(ids=ids, sensitivity=sensitivity)
+    except SensitivityExcludeUnavailable:
+        raise
     except Exception as exc:  # noqa: BLE001 — batch-level failure; falls back to per-id retry below, never raises to the caller
         _log.error(
             "store_get_many_batch_fetch_failed",
@@ -6692,7 +6727,7 @@ def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dic
             id_count=len(ids),
             error=str(exc),
         )
-        return _fallback_get_by_ids_individually(t3, col_name, ids)
+        return _fallback_get_by_ids_individually(t3, col_name, ids, sensitivity=sensitivity)
 
     out_ids = result.get("ids") or []
     docs = result.get("documents") or []
@@ -6711,7 +6746,7 @@ def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dic
 
 
 def _fallback_get_by_ids_individually(
-    t3: Any, col_name: str, ids: list[str],
+    t3: Any, col_name: str, ids: list[str], *, sensitivity: ReadSensitivity,
 ) -> dict[str, dict]:
     """Per-id retry after a whole-batch fetch failure.
 
@@ -6725,10 +6760,14 @@ def _fallback_get_by_ids_individually(
     the ids end up missing anyway — no worse than the batch path, and the
     per-id calls fail fast (connection-level errors, not slow timeouts).
     """
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
     id_to_entry: dict[str, dict] = {}
     for doc_id in ids:
         try:
-            entry = t3.get_by_id(col_name, doc_id)
+            entry = t3.get_by_id(col_name, doc_id, sensitivity=sensitivity)
+        except SensitivityExcludeUnavailable:
+            raise
         except Exception:  # noqa: BLE001 — per-id graceful degradation, mirrors the pre-fix loop exactly
             entry = None
         if entry is not None:
@@ -6827,6 +6866,7 @@ def store_get_many(
     - Ids are chunk ids, so a note that `store_put` split comes back as its
       separate pieces; use `store_get` for the whole note.
     """
+    sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
     try:
         # Detect parallel-stream form: ids is a non-empty list of lists.
         parallel_form = (
@@ -7002,7 +7042,7 @@ def store_get_many(
                 break
             for col_name, idxs in idxs_by_collection.items():
                 batch_ids = _unique_preserve_order(id_list[idx] for idx in idxs)
-                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
+                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids, sensitivity=sensitivity)
                 for idx in idxs:
                     found = id_to_entry.get(id_list[idx])
                     if found is not None:
@@ -9137,13 +9177,14 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         # live, unrelated document that owns this exact chash under a
         # DIFFERENT collection. A collection-scoped existence check first
         # closes that off before any catalog mutation happens.
-        if t3.get_by_id(col_name, doc_id) is None:
+        # RDR-243 Phase 2: existence only, nothing is returned to the model, and a delete must find a sensitive chunk
+        if t3.get_by_id(col_name, doc_id, sensitivity="include") is None:
             # nexus-jald5: the read tools look further than a delete does; say which
             # collection of the read scope holds the id, as nx store delete does.
             # Best effort: a failing probe leaves the plain answer.
             try:
                 holder = next(
-                    (s for s in _read_scope(t3, collection) if s != col_name and t3.get_by_id(s, doc_id) is not None),
+                    (s for s in _read_scope(t3, collection) if s != col_name and t3.get_by_id(s, doc_id, sensitivity="include") is not None),
                     None,
                 )
             except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
@@ -11749,7 +11790,7 @@ async def _nx_answer_primary_stream(
     records = lifecycle.reserved_items() if lifecycle is not None else ()
     try:
         cat = _get_catalog()
-        fetch = t3_chunk_fetcher(_get_t3())
+        fetch = t3_chunk_fetcher(_get_t3(), sensitivity=_sensitivity.read_sensitivity())
 
         def _read() -> "PrimaryEvidence":
             # The capability probe is a (cached) HTTP read, so it runs here with the rest of the blocking I/O.
