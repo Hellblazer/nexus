@@ -28,9 +28,9 @@ answers) and prints the flags for `apply`: {accept, reject, hold, apply_args, ap
 warnings}. None of the three writes the document or T2. Every file named is a file directly inside WORK
 (the BLOCKS=, PROPOSED= and STATUSES= header paths).
 
-A cut-only session (RDR-221 Step 3.1, nexus-ger02.10; the prose-cut skill) is a model's run, with no author to read
-the copy: its filtered.json carries "mode": "cut-only" or its work directory holds a cut-only run's brief or card
-(brief.py cut_only_work), `render` opens no viewer and records `cut_only` in session.json, and from then on an html page also protects its nav, heading, button and samp
+A cut-only session (RDR-221 Step 3.1, nexus-ger02.10; the prose-cut skill) has no app: its filtered.json carries
+"mode": "cut-only" or its work directory holds a cut-only run's brief or card (brief.py cut_only_work), `render`
+records `cut_only` in session.json, and from then on an html page also protects its nav, heading, button and samp
 elements (a normal html run does not) and `apply` refuses (exit 1, nothing written) an accepted edit that is not a cut
 (it adds, replaces or reorders a word, or adds markup), which a hand-edited filtered.json could hold. The session log
 then carries `cut_only`, `word_budget` and `words` {document, budget, removed (the applied cuts' words), after,

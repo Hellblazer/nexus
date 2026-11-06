@@ -22,7 +22,9 @@
 #   RUNNER_NO_APP_REASON  why a path-run review scenario cannot run headless
 #   runner_prompt_is_path_run PROMPT
 #                         exit 0 when PROMPT starts a prose-edit run on a file (it reviews in the MarkupEditor app);
-#                         1 for a stdin run (`-`), a subcommand (setup, rejections, exemplar) or any other prompt
+#                         1 for a stdin run (`-`), a subcommand (setup, rejections, exemplar) or any other prompt.
+#                         A prose-cut prompt (conexus-prose-edit:prose-cut, a cut-only run or its decide turn) is
+#                         another prompt: it has no app to drive, so it is never held back as a path run
 #   runner_stops_before_the_app NAME
 #                         exit 0 for the scenarios that are path runs but stop before step 6b by design (canary-fail:
 #                         T2 is down at the build; unmapped: the skill asks for a genre first), so they stay valid

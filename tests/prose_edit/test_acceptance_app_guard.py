@@ -43,12 +43,16 @@ def test_a_path_run_prompt_is_a_path_run(prompt: str) -> None:
     "/prose-edit - --genre commit-message\n\nfix: make the queue drain in order basically",
     "/prose-edit -\n\nfix: make the queue drain",
     "/prose-edit setup",
+    # prose-cut has no app: a cut-only run and its decide turn are not path runs (nexus-ger02.10)
+    f"/conexus-prose-edit:prose-cut {F}/review-scenario.md --mode cut-only --voice-card c.txt --word-budget 40 --genre how-to",
+    "/prose-cut docs/x.md --mode cut-only --voice-card c.txt --word-budget 40 --genre how-to --budget 20",
+    "/conexus-prose-edit:prose-cut decide /tmp/prose-edit-ab12cd34 --accept 2-4 --reject 1",
     "/prose-edit rejections docs/x.md",
     "/prose-edit exemplar rdr docs/x.md:1-3",
     "Run the shell command `nx --version` with the Bash tool and print its exact output. Do nothing else.",
     "Yes, apply.",
 ])
-def test_a_stdin_run_a_subcommand_and_an_answer_turn_are_not_path_runs(prompt: str) -> None:
+def test_a_stdin_run_a_subcommand_a_prose_cut_run_and_an_answer_turn_are_not_path_runs(prompt: str) -> None:
     assert not classify(prompt)
 
 
@@ -74,6 +78,12 @@ def test_a_per_kind_scenario_is_not_run_without_a_harness_and_says_why(tmp_path:
     assert recorded.startswith(f"{name}: ") and "MarkupEditor" in recorded
     assert "NOT-RUN" in proc.stderr
     assert not (tmp_path / "out" / f"{name}.jsonl").exists() and not (tmp_path / "out" / f"{name}.rc").exists()
+
+
+def test_a_prose_cut_scenario_runs_without_a_harness(tmp_path: Path) -> None:
+    run_scenario(tmp_path, "cutonly-1", f"/conexus-prose-edit:prose-cut {F}/review-scenario.md --mode cut-only "
+                 "--voice-card c.txt --word-budget 40 --genre how-to")
+    assert not (tmp_path / "out" / "not-run.txt").exists()  # no MarkupEditor is needed, so the guard lets it start
 
 
 def test_the_harness_switch_lets_a_path_run_through(tmp_path: Path) -> None:
