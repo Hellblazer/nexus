@@ -6414,7 +6414,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
         detail=(
             f"the bundled cluster at {pg_data} was created by PostgreSQL {text}, and a cluster keeps the version "
             f"that created it; the engine refuses below PostgreSQL {PG_VERSION_FLOOR} "
-            "(event=pg_version_below_floor in the service log, or, started cold, nx refuses before pg_ctl runs)"
+            "(event=pg_version_below_floor in the service log, or, started cold, a refusal before pg_ctl runs)"
         ),
         fix_suggestions=[
             f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "

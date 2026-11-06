@@ -1563,8 +1563,8 @@ def refuse_cluster_below_floor(pgdata: Path) -> None:
     raise PgClusterBelowFloorError(
         f"the local PostgreSQL cluster was created by PostgreSQL {text} and nexus needs {PG_VERSION_FLOOR} or "
         f"newer, so it was not started. Upgrade it with pg_upgrade, or move it aside and re-run nx init if you "
-        "do not need its data: docs/migration-runbook.md, section 'A local cluster older than PostgreSQL 17' "
-        "(https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md). "
+        "do not need its data: see 'A local cluster older than PostgreSQL 17' in "
+        "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md . "
         f"Data directory: {pgdata}"
     )
 

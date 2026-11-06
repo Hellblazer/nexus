@@ -16,6 +16,7 @@ from nexus.db.pg_provision import (
     refuse_cluster_below_floor,
 )
 from nexus.health import PG_VERSION_FLOOR
+from tests._child_process import pg_data_tempdir
 
 
 def _pgdata(tmp_path: Path, marker: str | None) -> Path:
@@ -87,7 +88,7 @@ def test_provision_refuses_before_binary_discovery_and_leaves_the_old_conf_alone
 ) -> None:
     # The code review's case: no extracted bundle, so discovery would fail first; and the conf rewrite
     # would change an old cluster the runbook then has the user start with its own PostgreSQL.
-    config_dir = tmp_path / "cfg"
+    config_dir = Path(pg_data_tempdir("nexus_hck2c_cfg_"))  # the substrate helper; no postmaster runs here
     pgdata = config_dir / "postgres"
     pgdata.mkdir(parents=True)
     (pgdata / "PG_VERSION").write_text("16\n")
@@ -131,7 +132,7 @@ def test_a_running_old_cluster_takes_the_provision_fast_path_unrefused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The hoisted refusal sits after the fast path: a serving cluster is the engine's to refuse.
-    config_dir = tmp_path / "cfg"
+    config_dir = Path(pg_data_tempdir("nexus_hck2c_cfg_"))  # the substrate helper; no postmaster runs here
     (config_dir / "postgres").mkdir(parents=True)
     (config_dir / "postgres" / "PG_VERSION").write_text("16\n")
     (config_dir / pp.CREDENTIALS_FILENAME).write_text(f"PG_PORT=5433\nNX_SERVICE_TOKEN={'t' * 64}\n")
