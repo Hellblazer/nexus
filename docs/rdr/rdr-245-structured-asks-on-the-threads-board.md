@@ -683,7 +683,8 @@ cannot write. Either way the frame could then drop "unverified".
 Batch is the default and is pull: no windows, no schedule, no defaults.
 Nothing proceeds without an answer (Decision 4). Interrupt-class is
 `blocking: yes` on an open ask; it leads `nx ask list` and every mediator
-pass, and B's red dot and `prefix a` stay the glanceable signal. Phone push
+pass, and B's red dot (set by `claude-tmux-state need`) and `prefix a` stay
+the glanceable signal. Phone push
 is named for phase 2 (Claude Code's `inputNeededNotifEnabled` setting, or an
 ntfy-style webhook); the Augur analysis argues it be reserved for
 interrupt-class asks.
@@ -741,7 +742,7 @@ upgrades, and Sam would have to find it from his phone.
 
 A popup picker, a status-bar ask count, console cards, a `pane:` field and a
 "waiting over ten minutes" interrupt clause. **Rejected** (Decision 11): new
-surfaces, duplicates of B's red dot, and a clause that "imports amber's false
+surfaces, duplicates of B's red dot (set by `claude-tmux-state need`), and a clause that "imports amber's false
 alarms into the interrupt class" (Augur analysis, section 2).
 
 ### Alternative 7: The hook checks the asker's board entry
@@ -861,7 +862,8 @@ A decision only Sam can make goes in an `ask:` block in its thread: ask (id, [a-
 
 Sam's `~/.claude/CLAUDE.md` gets the same text plus one line, which stays out
 of AGENTS.md because the script is his dotfile: "When you write a
-`blocking: yes` ask, run `claude-tmux-state need` if it exists." The
+`blocking: yes` ask with no `after:` line, run `claude-tmux-state need` if it
+exists." The
 Decision 1 line (the CLAUDE.md authority line quoted under Decisions) goes to
 Sam to paste only after phase 1 ships.
 
@@ -967,9 +969,11 @@ longer reads the board entry, so "open at this version" is the asker's check,
 and the frame, the convention text, the Trust model and the risks all say so.
 Classification checks `after:` first and keeps quiet blocking asks
 interrupt-class, matching `answer`'s `after:` refusal. B is described as the
-script behaves, with `need` named wherever the red dot is. The worked example
-is an ask no standing rule decides. Gap 4's two reversible-share estimates
-remain, and nothing rests on them.
+script behaves, with `need` named where the red dot is introduced or relied on
+(Context, Classification, Interrupt vs batch policy, Composition with A and B,
+the Existing Infrastructure Audit, Step 5, Alternative 6 and Decision 5). The
+worked example is an ask no standing rule decides. Gap 4's two reversible-share
+estimates remain, and nothing rests on them.
 
 ### Assumption Verification
 
@@ -1047,7 +1051,8 @@ dependency, no new surface, no second parser.
 4. **No defaults: nothing proceeds without an answer.** First "probably
    inert"; then `default:` removed with lazy consensus (research-11).
 5. **Interrupt threshold.** "likely yes, also b": `blocking: yes` interrupts;
-   B's red dot is the existing glanceable signal (research-11).
+   B's red dot (set by `claude-tmux-state need`) is the existing glanceable
+   signal (research-11).
 6. **Mediator-first.** Any session running the conexus `asks` skill; the CLI
    is its tool and Sam's fallback.
 7. **Windows and Desktop** (research-8): the hook change must work on both.
