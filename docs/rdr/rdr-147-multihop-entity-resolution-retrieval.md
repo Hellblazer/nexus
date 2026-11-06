@@ -752,11 +752,14 @@ where evidence is seen.
 - **R3, the repair may not enter (Assumption #5).** Retired by measurement: the
   repair enters on q2 to q7 (147-research-7).
 - **R4, request kind.** "Find the names of companies …" is likely read as
-  `unknown` by the fixed rules and decided by the model call, likely as
-  discovery/listing. A curated lookup plan would then be ineligible
-  (`eligibility.py`). The repair does not depend on the request kind.
-  **Mitigation**: any curated template (Step 4, branch c) declares a kind
-  measured on the 7 questions.
+  `unknown` by the fixed rules and decided by the model call. Measured on
+  2026-11-06 (147-research-15): the call read `lookup` 13 times in 14, which
+  leaves only `hybrid-factual-lookup` (a coverage boundary), and once
+  `discovery/listing`, which leaves only the single-query listing templates, so
+  `document-discovery` answered with no coverage boundary and the MVV run lost a
+  question. **Mitigation**: Step 4 branch (c), a curated `discovery/listing`
+  template with the coverage-bearing body, so either reading reaches a coverage
+  boundary.
 - **R5, answering from every held id may cost precision.** The evidence holds
   more customer ids than the script reads (on the issue questions, 4 to 10
   against 4 to 6). Measured with the joined items, precision was 0.9667 on the
@@ -812,9 +815,13 @@ run (a plan grown from one question otherwise captures later ones,
 147-research-9), and two runs per question, the MVV gates what the exact-key join
 controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 
-- **Join completeness:** on every issue question whose evidence holds at least
-  one customer id, the answer names every company those ids resolve to (measured
-  10 of 10, 147-research-9). At most one such question may miss per run, with at
+- **Join completeness:** on every issue question whose coverage anchors hold at
+  least one entity key (the run's `anchor_key_ids` is non-empty: the domain, as
+  the harness counts it; Sam, 2026-11-06, T2
+  `nexus/rdr147-domain-decision-2026-11-06`), the answer names every company
+  those keys resolve to (measured 10 of 10, 147-research-9). A question whose
+  evidence holds ids but whose anchors hold none is outside the domain, and the
+  run reports it. At most one in-domain question may miss per run, with at
   least 4 of the 5 issue questions in the domain (Sam, 2026-11-05,
   147-research-12: the 2026-11-05 miss was the re-check's variance on the same
   joined item).
@@ -917,11 +924,29 @@ a `$ref` step") is dropped: it already works.
      a named-source detection defect, fixed under RDR-232's rules as its own bead,
      before the resolution branch can be measured. This RDR does not change
      RDR-232's rule that a missing named source decides its facets.
-   - (c) Contingency, only if (a) or (b) lands and the MVV still fails because
-     hop-1 precision matters on some corpus: add `filter` to `_ALLOWED_TOOLS` and
-     its aliases, carry ids and tumblers through `filter`, and ship a curated YAML
-     plan (`strategy: entity-resolution`) whose declared answer kind is one the
-     HERB request kind can reach.
+   - (c) Routing (built after the 2026-11-06 MVV, Sam "proceed.", T2
+     `nexus/rdr147-branch-c-decision-2026-11-06`; 147-research-15). The MVV lost
+     run a because the request-kind model call read one question as
+     `discovery/listing`, and the only eligible plans for that kind were the
+     single-query templates, which never reach the coverage boundary. Ship one
+     curated builtin, `conexus/plans/builtin/entity-resolution.yml`
+     (`strategy: entity-resolution`, `verb: research`, `scope: global`, tag
+     `builtin-template`), declaring `answer_kind: discovery/listing`, with the
+     step body of `hybrid-factual-lookup.yml` (search, traverse, fetch, rank,
+     generate), so a `discovery/listing` reading of these questions gets a plan
+     with a coverage boundary and a `lookup` reading still gets
+     `hybrid-factual-lookup`. Its match text names entity-listing requests ("which
+     customers were affected", "name the companies"); measured offline it scores
+     0.535 to 0.643 on the 7 questions against at most 0.303 for
+     `document-discovery`, and no golden discovery request changes plan.
+     Deterministic tests over the real matcher and the YAML on disk pin: for each
+     request kind (`lookup`, `discovery/listing`, `unknown`, `synthesis`, and the
+     shadow regime) the HERB questions and paraphrases reach a plan that is not a
+     single query; the golden discovery requests keep their plans; deleting the
+     YAML brings plan 7 back. The builtin count pins move from 12 to 13. The
+     earlier contingency text (`filter` in `_ALLOWED_TOOLS`, ids through
+     `filter`) is not built: its trigger, hop-1 precision, did not fire (MVV
+     precision 1.00). Then a fresh MVV run on a reseeded sandbox.
 3. **Gate condition (Gap 4).** The resolution branch fires on the HERB issue
    questions and does not fire on a held-out set of single-hop questions; count
    both and record the counts.
@@ -1057,3 +1082,4 @@ linker conditional.
 - 2026-11-05: fix-check 3e08dbecd findings applied: the option 1 outcome mapping (answered shape, `no_grow`, `generated_on_join`, its own notice), the notice scoped to uncovered answers, "merged at least one" marked as this RDR's reading, stale Assumption #6 and Jointness sites, R9, the precision-evidence caveat, the fresh-run clause, sizes.
 - 2026-11-05: text brought into line with the option 1 code (69cc82790) and fix check b60dab40e: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
 - 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
+- 2026-11-06: the join-completeness domain is the questions whose anchors hold a key (Sam, T2 `nexus/rdr147-domain-decision-2026-11-06`); branch (c) rewritten as the routing fix the 2026-11-06 MVV needs (Sam "proceed.", 147-research-15); R4 updated with the measured request kinds.
