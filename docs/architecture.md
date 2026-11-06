@@ -1343,6 +1343,7 @@ Grouped by verb:
   - `type-scoped-search`: Single-content-type semantic search. Resolves the content-type bucket and runs the query against only those collections.
   - `document-discovery`: "Which documents/papers/RDRs exist on X" — a single-step `query()` fast path (nexus-h33x8.6) that returns the matching documents themselves, not a synthesized answer.
   - `corpus-coverage-check`: "Does the corpus have anything on X" — the sibling yes-or-no fast path to `document-discovery`, kept as a separate template so the matcher has two distinct description vectors to rank against.
+  - `entity-resolution`: "Which companies were affected by issues in X" — a `discovery/listing` template with `hybrid-factual-lookup`'s steps (search, graph traversal, rank, generate), so an entity-listing request reaches a plan with a coverage boundary instead of the single-query `document-discovery`. Tagged `cosine-only`: matched on similarity at or above the floor, never by the below-floor category route (RDR-147 branch (c)).
 - **verb=lookup**
   - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval.
 - **verb=document**

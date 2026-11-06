@@ -18,24 +18,27 @@
 # rationale. tests/test_plan_match_entity_resolution_route.py pins the
 # match text, the request kinds and the golden discovery requests.
 #
-# Match text follows the abstract-themes.yml precedent (RDR-098): a dense
-# bag of short question-form phrasings, because the RDR-079 cache embeds
-# it with the bundled MiniLM and the cosine tracks phrasal overlap. The
-# phrasings are entity-listing requests (the names of the companies or
-# customers tied to an issue), which document-discovery's phrasings
-# ("which documents discuss", "list the papers") do not cover. The text
-# deliberately avoids a leading "Find ..." phrasing: an earlier draft that
-# opened with "Find the names of companies" pulled "Find the retry helper in
-# just the code files" away from type-scoped-search in the category route
-# (tests/test_plan_match_category_route_probes.py, the mmfag guard).
-# Document-level guidance (use document-discovery to list documents
-# instead) belongs here, not in the embedded description.
+# Match text: the RDR-079 cache embeds it with the bundled MiniLM and the
+# cosine tracks phrasal overlap. The phrasings are entity-listing requests
+# (the names of the companies tied to an issue, the company with the most
+# resolved bugs), which document-discovery's phrasings ("which documents
+# discuss", "list the papers") do not cover. Wording is narrow on purpose:
+# an earlier draft with "Which customers ... ?" sentences pulled document
+# listings such as "Which customers are mentioned in the RDRs?" above the
+# floor. Measured with the bundled MiniLM (tests pin the questions, not the
+# numbers): the 7 HERB questions score 0.47 to 0.54, the paraphrases 0.45 to 0.53.
+#
+# The tag `cosine-only` keeps this template out of the below-floor category
+# route (matcher._is_cosine_only_plan). That route orders a verb pool by raw
+# cosine, where any request scores something; this template's text is a
+# narrow bag, so below the floor it stole requests that are not entity
+# listings ("Find the retry helper in the code files", golden G08 and H30
+# in the shadow regime). It wins only on cosine at or above min_confidence.
 
 name: entity-resolution
 description: >-
-  Which customers were affected by these bugs? Which companies were impacted by this
-  defect? Names of the companies affected by the issues. The customers and organizations
-  affected.
+  Names of companies that were affected by issues in the product, and the clients hit by
+  the outage. Name of the company with the most resolved bugs.
 dimensions:
   verb: research
   scope: global
@@ -56,7 +59,7 @@ default_bindings:
   graph_budget_chunks: 4
 # RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
 answer_kind: discovery/listing
-tags: builtin-template,rdr-147,nexus-irndi,entity-resolution,discovery-listing
+tags: builtin-template,cosine-only,rdr-147,nexus-irndi,entity-resolution,discovery-listing
 plan_json:
   steps:
     - tool: search

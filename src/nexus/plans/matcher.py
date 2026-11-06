@@ -242,6 +242,24 @@ def _is_category_plan(tags: str | None) -> bool:
     return _CATEGORY_PLAN_TAG in [t.strip() for t in tags.split(",")]
 
 
+#: Comma-token on a builtin template that keeps it OUT of the below-floor category route: the template
+#: can win only on its own cosine at or above ``min_confidence``. For a template whose match text is
+#: narrow (entity-resolution: a customer or company listing tied to an issue). Below the floor the route
+#: orders its pool by raw cosine, where any template scores something, so a narrow template with a high
+#: raw score steals requests that are not its own (RDR-147 branch (c), nexus-irndi: "Find the retry helper
+#: in the code files", and golden G08 and H30 in the shadow regime). Applies to the category route only:
+#: the FTS5 fallback below never reads ``builtin-template`` and admits a row on text overlap, so the tag
+#: has no effect there.
+_COSINE_ONLY_TAG = "cosine-only"
+
+
+def _is_cosine_only_plan(tags: str | None) -> bool:
+    """True when *tags* carries the ``cosine-only`` comma token."""
+    if not tags:
+        return False
+    return _COSINE_ONLY_TAG in [t.strip() for t in tags.split(",")]
+
+
 def _plan_verb(row: dict) -> Any:
     """The plan's verb, preferring the canonical ``dimensions`` map.
 
@@ -859,6 +877,7 @@ def plan_match(
                 below_floor
                 and category_verb is not None
                 and _is_category_plan(row.get("tags"))
+                and not _is_cosine_only_plan(row.get("tags"))
                 and _verbs_compatible(_plan_verb(row), category_verb)
             )
             if below_floor and not routable:

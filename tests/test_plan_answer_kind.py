@@ -70,7 +70,8 @@ _TABLE: dict[str, PlanAnswerKind] = {
 #: row: a library seeded by the previous release holds the other twelve, and a reseed inserts these.
 _ADDED_AFTER_DECLARATION: frozenset[str] = frozenset({"entity-resolution.yml"})
 
-#: What the 12 builtins were BEFORE this bead, captured from the tree at origin/develop 4898d437d:
+#: What the 12 pre-existing builtins were BEFORE this bead, captured from the tree at origin/develop 4898d437d (the
+#: entity-resolution row is a freeze pin of its own YAML, see its comment):
 #: (canonical dimensions, sha256[:12] of the description, name, verb, scope, sha256[:12] of the
 #: canonical JSON of the YAML plan_json body). The declaration may add a key beside ``steps``; it must
 #: move none of these.
@@ -87,12 +88,15 @@ _BEFORE: dict[str, tuple[str, str, str, str, str, str]] = {
     "research-default.yml": ('{"scope":"global","strategy":"default","verb":"research"}', "8d17c00f852f", "default", "research", "global", "d7bff227acdd"),
     "review-default.yml": ('{"scope":"global","strategy":"default","verb":"review"}', "62f68754c0cd", "default", "review", "global", "21c8428f4736"),
     "type-scoped-search.yml": ('{"scope":"global","strategy":"type-scoped","verb":"research"}', "7754909a23d4", "type-scoped-search", "research", "global", "77a84d788747"),
-    # Added after the declaration (nexus-irndi): captured from the new YAML, whose steps are hybrid-factual-lookup's.
-    "entity-resolution.yml": ('{"scope":"global","strategy":"entity-resolution","verb":"research"}', "3d9f5a07a077", "entity-resolution", "research", "global", "57af6c5e0bd4"),
+    # FREEZE PIN, not a develop capture (the file has no row on develop 4898d437d): the entity-resolution YAML
+    # as of fix round 1 of the nexus-irndi review, whose steps are hybrid-factual-lookup's. A change to its
+    # description, dimensions, tags or steps moves these hashes on purpose and the diff shows the edit.
+    "entity-resolution.yml": ('{"scope":"global","strategy":"entity-resolution","verb":"research"}', "ca44c80f5808", "entity-resolution", "research", "global", "57af6c5e0bd4"),
 }
 
 
-#: Per builtin, captured from the tree at origin/develop 4898d437d (the YAML blobs there run through the
+#: Per pre-existing builtin, captured from the tree at origin/develop 4898d437d (the entity-resolution row is a
+#: freeze pin of its own YAML; the YAML blobs there run through the
 #: row builder): (sha256[:12] of the tags string, sha256[:12] of the default_bindings JSON or None when the
 #: template has none, parent_dims). Literals, so a change to the YAML tags or bindings cannot hide behind a
 #: comparison of the template with itself.
@@ -109,7 +113,8 @@ _BEFORE_ROW: dict[str, tuple[str, str | None, str | None]] = {
     "research-default.yml": ('7a87d6cc0664', '7d0587b5acc4', None),
     "review-default.yml": ('2534dd636291', 'a4f389eb2c29', None),
     "type-scoped-search.yml": ('f20f6848e2a3', '7d0587b5acc4', None),
-    "entity-resolution.yml": ('b6d69d316fa6', 'f71db903c830', None),
+    # FREEZE PIN, as in _BEFORE: tags now carry `cosine-only`; the bindings are hybrid-factual-lookup's.
+    "entity-resolution.yml": ('dcbdb52917d7', 'f71db903c830', None),
 }
 
 
@@ -172,7 +177,7 @@ class TestBuiltinDeclarations:
         assert canonical_dimensions_json(template["dimensions"]) == dims
         assert (_h(row.query), row.name, row.verb, row.scope) == (desc_h, plan_name, verb, scope)
         tags_h, bindings_h, parent_dims = _BEFORE_ROW[name]
-        assert _h(row.tags) == tags_h, "tags are byte-identical to develop 4898d437d"
+        assert _h(row.tags) == tags_h, "tags are byte-identical to the captured literal (develop 4898d437d; entity-resolution: its freeze pin)"
         assert (_h(row.default_bindings) if row.default_bindings is not None else None) == bindings_h
         assert row.parent_dims == parent_dims
         stored = json.loads(row.plan_json)
