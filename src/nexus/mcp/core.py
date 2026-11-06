@@ -3476,7 +3476,11 @@ def _search_render(
         #: its lexical rows went back to vector-distance order (RDR-188 Gap 2:
         #: a degrade is surfaced, never only logged).
         rerank_note: str | None = None
-        cached = _page_cache_get(cache_key, need)
+        # RDR-243 review r1 F8: an ``exclude`` read bypasses the page-turn cache, both ways. A page cached before a
+        # document was flagged (the flag can be set from another process) would otherwise be served under
+        # ``exclude`` for up to the TTL. Page turns under ``exclude`` re-run the retrieval.
+        use_page_cache = sensitivity != "exclude"
+        cached = _page_cache_get(cache_key, need) if use_page_cache else None
         #: nexus-ml9vu: the row-preferred model resolver the retrieval builds,
         #: handed to the boosts so the calibration reads the same rows.
         model_of_out: list = []
@@ -3601,7 +3605,8 @@ def _search_render(
                     results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
             # Non-clustered results are now ranked by hybrid_score
             # (apply_ranking_boosts' own sort) rather than raw distance.
-            _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
+            if use_page_cache:
+                _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
         if not results:
             if structured:
                 return _structured_no_results(diag)
