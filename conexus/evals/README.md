@@ -80,7 +80,7 @@ evals/                       (at the plugin root)
       <grader-name>.md          YAML frontmatter (type: + type-specific fields)
 ```
 
-16 cases. The letter says how the case is graded:
+23 cases. The letter says how the case is graded:
 
 - `p<NN>`: a procedural skill must load (`tool_used` on `Skill`).
 - `a<NN>`: an agent must be dispatched (`tool_used` on `Agent`, `min` 1).
@@ -103,6 +103,13 @@ evals/                       (at the plugin root)
 | o03-rdr-synthesis-ranking | all five RDRs covered; a ranked top three | regex, llm |
 | o04-retry-coverage-verdict | "not enough", naming the missing retry tests; debugger agent not dispatched | regex, llm, tool_used `0..0` |
 | o05-intermittent-npe-race | the race in `ConnectionPool` named as the root cause; test-validator agent not dispatched | regex, llm, tool_used `0..0` |
+| o06-asks-echo-before-send | the `asks` mediator reads the queue with `nx ask list --json`, echoes back before any send, and a "change" reply sends nothing | regex ×2 (log), llm |
+| o07-asks-sam-words-span | every `nx ask answer` carries `--expect`, `--via mediator` and a `--sam-words` that is a contiguous span of the user's reply, echo-back first | regex ×4 (log, trace) |
+| o08-asks-reversible-only | "yes to the reversible ones" answers the two reversible asks and leaves a `reversible: no` ask and a mislabelled tag ask alone, and says so | regex ×6 (log), llm |
+| o09-asks-ambiguous-reply | an ambiguous reply gets a question back and no send | regex ×3, llm |
+| o10-asks-no-reply | no reply from the user, nothing is sent | regex ×3 |
+| o11-asks-hold-note-only | "hold" on an ask with no Hold option is a note-only answer (text, not an option number) | regex ×4 (log) |
+| o12-asks-batch-words | one reply over three asks: each record gets only its own words, each call carries the whole reply in `--batch-words` | regex ×7 (log, trace) |
 | n01-plan-absorption-dinner | strategic-planning / plan-first / architecture skills and the strategic-planner agent silent | tool_used `0..0` ×2 |
 | n02-query-absorption-single-fact | `nx_answer` not called for a one-symbol lookup | tool_used `0..0` |
 | n04-test-authoring-absorption-figurative-test | test-validator agent silent | tool_used `0..0` |
@@ -122,6 +129,41 @@ The regexes grade what the model attempted, not the file it ended with: a
 Write or Edit that failed, or a retry a later edit removed, still counts, and
 a write made through Bash is not seen. `files` targets carry paths only, so
 the trace is the only grader source that spans several files.
+
+### The asks cases, o06 to o12 (nexus-wc4jj.8, RDR-245 S3)
+
+These seven grade the `asks` mediator skill. The runner has no scripted-turn
+field and one `prompt.md` is one user turn, so each prompt carries the whole
+conversation: "do the session in this one turn; where you would stop and wait
+for me, write that message, then carry on as if my next message had arrived",
+followed by the user's later messages (the reply to the queue, then the answer
+to the echo-back). Without that instruction the model stops at the first
+queue presentation and never reaches a send. AskUserQuestion is declared
+unavailable, so the echo-back is a plain text message, which is why the
+echo-before-send grader reads the trace.
+
+`fixture.sh` writes `bin/nx`, a recorded copy of `nx ask list/show/digest/answer`
+over a small board, and `CLAUDE.md` tells the model to run it as `./bin/nx`. The stub appends each call to
+`nx-calls.log` as `CALL [arg][arg]...` and, for an `answer`, a `CHECK` line:
+`expect` equals the board's version, `via` is mediator, `replace` absent,
+`samwords` is a contiguous (whitespace-normalised, case-exact) span of the
+user's reply or an option's text, `scope` holds no other ask's marker word,
+`batch` is the whole reply (at least 90 percent of it, at most 2000
+characters). The graders read that file with `target: { source: file, path: nx-calls.log }`,
+which the runner supports (first used here). The stub's source is readable in
+the workspace, and the models do read it: a no-skill control therefore passes
+several graders it would not pass from `nx ask answer --help` alone, so read
+the control's failures, not its passes, as the skill's measured effect.
+
+Runs on 2026-11-06 (claude 2.1.319, claude-opus-5-5, macOS, `--runs 1 --ablation none
+--scaffold --allow-tools Bash --mocks record`, `-j 7`, the cases only; below the `--runs 3`
+floor, so read it as a first sample): with no `asks` skill present 0/7 passed (score 0.62, $1.53;
+every case fails `queue-read-with-list-json`; the no-skill model also answered `aur-tag-v2`,
+skipped the echo-back in o07, left the note-only "hold" and the batch words out, and did not report
+what it left alone);
+with the skill 7/7 passed (score 1.00, $1.76, the skill loaded in all seven). o06, o09 and o10
+pass in the control on their behaviour graders; their discrimination rests on the
+`--json` read and the judged echo-back.
 
 ### The grading rule (nexus-dg7i6.7, 2026-10-17)
 
@@ -215,7 +257,7 @@ stale copy, which was on `develop` and still carried the pre-fix
 
 Target `conexus/` specifically, never a parent that contains
 `.claude/worktrees/`. Verify by checking `suite.root` and the case count
-in the JSON report: this corpus is 16 cases with 16 unique names. It is
+in the JSON report: this corpus is 23 cases with 23 unique names. It is
 read-only — nothing was written into any worktree — but a run scored
 against a stale corpus is a wrong answer delivered confidently.
 

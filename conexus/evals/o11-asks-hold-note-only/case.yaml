@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: asks-hold-note-only
+context:
+  scaffold_script: fixture.sh

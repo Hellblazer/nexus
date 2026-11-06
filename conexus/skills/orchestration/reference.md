@@ -194,7 +194,7 @@ Retrieval and knowledge:
 
 RDR lifecycle: `/conexus:rdr-create` -> `/conexus:rdr-research` -> `/conexus:rdr-gate` -> (`/conexus:rdr-fix` for a BLOCKED gate's findings, one fix check per fix round, then re-gate) -> `/conexus:rdr-accept` -> implementation phases -> `/conexus:rdr-close`. List: run `nx rdr preamble rdr-list`. Show: `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`. Every phase-review bead runs `/conexus:phase-review-gate` before close: each numbered phase item in the RDR has a closing-bead pointer or an explicit `none` deferral. Nothing enforces it; it prevents silent scope reduction (RDR-112 Phase 1 dropped the T3 daemon from a 6-bead close, found three phases later, 2 to 3 days of replanning).
 
-Git: isolation `/conexus:git-worktrees`; done `/conexus:finishing-branch`. Another session or agent: `/conexus:peer-messaging`, protocol `/conexus:mailbox`. Reference: `/conexus:nexus`, `/conexus:cli-controller`, `/conexus:writing-nx-skills`.
+Git: isolation `/conexus:git-worktrees`; done `/conexus:finishing-branch`. Another session or agent: `/conexus:peer-messaging`, protocol `/conexus:mailbox`. The user's asks waiting on the threads board: `/conexus:asks`. Reference: `/conexus:nexus`, `/conexus:cli-controller`, `/conexus:writing-nx-skills`.
 
 ## nx_answer
 

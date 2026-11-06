@@ -321,6 +321,13 @@ def _text(text: str) -> str:
     return _trace_line([{"type": "text", "text": text}])
 
 
+def _bash(command: str) -> str:
+    return _trace_line([{"type": "tool_use", "id": "toolu_b", "name": "Bash", "input": {"command": command}}])
+
+
+_ASK_ANSWER = "./bin/nx ask answer aurora/aur-batch-size 2 --expect 0b94d7e1f3a85c26 --via mediator --sam-words \"go with the bigger batch\""
+
+
 def _hook(output: str) -> str:
     """A hook's output line: its text is a JSON string, so any quotes in it arrive escaped."""
     return json.dumps({"type": "system", "subtype": "hook_response", "output": output},
@@ -362,6 +369,19 @@ _REGEX_CONTROLS: dict[str, tuple[list[str], list[str]]] = {
         ["The pool has no locking, so two threads take the same slot.",
          "It is a race between the check and the read in borrow()."],
         ["Here is the stack trace of the NPE.", "Embrace a bigger pool size."],
+    ),
+    # RDR-245 S3 (nexus-wc4jj.8): the echo-back is a text message, so its order against the first send is a
+    # trace property. A confirming question ahead of an `ask answer` passes; a send with no such question
+    # ahead of it, a report written after the send, or a question with no send does not. Each string is a
+    # whole trace, one message per line.
+    "o07-asks-sam-words-span/graders/echo-back-precedes-the-first-send.md": (
+        [_text("I will record: aur-batch-size 2 'go with the bigger batch'. Shall I send these?") + "\n" + _bash(_ASK_ANSWER),
+         _text("Echo-back below. Confirm, or tell me what to change?") + "\n" + _bash("./bin/nx ask list --json") + "\n" + _bash(_ASK_ANSWER)],
+        [_bash(_ASK_ANSWER) + "\n" + _text("Sent. Should I send the other one too?"),
+         _text("Two asks are waiting. What is your call?") + "\n" + _bash(_ASK_ANSWER),
+         _text("Shall I send these?") + "\n" + _bash("./bin/nx ask list --json"),
+         _text("I will send them now.") + "\n" + _bash(_ASK_ANSWER),
+         _hook('{"type":"text","text":"Shall I send these?"}{"name":"Bash","input":{"command":"nx ask answer x"}}')],
     ),
     # o01 grades trace lines (nexus-pztjj), so its controls are trace lines: a write to any source
     # file passes; the same code in prose, an Edit that adds none of it, a test file (every live run

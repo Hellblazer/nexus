@@ -423,6 +423,13 @@ standalone_skills:
       - "two sessions need the same checkout, build, or test capacity"
     tools: []
 
+  asks:
+    description: "RDR-245 mediator: work the user's structured asks through nx ask (list, show, answer, digest) — queue, echo-back, send with the user's own words, report"
+    triggers:
+      - "going through or answering the asks waiting on the user"
+      - "relaying the user's answers to the sessions that raised them"
+    tools: [Bash]
+
   catalog:
     description: "Catalog manipulation — resolve tumblers, create links, seed auto-linker context, file link context"
     triggers:
