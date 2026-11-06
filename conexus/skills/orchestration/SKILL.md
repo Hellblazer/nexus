@@ -181,8 +181,8 @@ extension pass verifying that defect's fix, recorded in the marker as
 `ext=fix-introduced`. The extension does not renumber the episode; anything
 beyond it is round 3 and needs the human.
 
-Counter-metric that travels with this bound (from the ratchet's history test,
-T2 nexus/prompt-ratchet-history-test-2026-08-17): findings per round must
+Counter-metric that travels with this bound (measured on the review
+ratchet's history test, 2026-08-17): findings per round must
 RISE while rounds per bead FALL. If both fall, the bound is suppressing
 recall; about 20% of historical later-round Criticals were pre-existing
 defects a confirmation-scoped pass would not have found. Revert to

@@ -509,7 +509,7 @@ def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
     if exc.code == 404:
         return ("This engine does not carry the quarantine-restore route (RDR-192 Step 9, bead "
                 "nexus-2x9xa): the connected engine predates it. Upgrade the engine (compare its "
-                "version against REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py)."), EXIT_NO_ROUTE
+                "version against nexus.engine_version.REQUIRED_ENGINE_VERSION)."), EXIT_NO_ROUTE
     if exc.code == 503 and exc.reason == QUARANTINE_RESTORE_BUSY_REASON:
         engine = exc.engine_body if isinstance(exc.engine_body, dict) else {}
         committed = engine.get("nothing_moved") is False

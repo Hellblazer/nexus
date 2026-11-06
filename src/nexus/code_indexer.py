@@ -520,6 +520,13 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     ):
         return 0
 
+    # RDR-243 (fix round 2): a code file flagged sensitive in the catalog is not embedded by a Voyage
+    # collection (voyage-code-3) from a repo run, which has no --ack-external-embedder. See
+    # prose_indexer.index_prose_file for the placement.
+    from nexus.sensitive_write import skip_sensitive_for_external  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+    if skip_sensitive_for_external(catalog_doc_id, ctx.corpus, file_path, "code", ctx.sensitive_docs):
+        return 0
+
     # nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
     # [24598] finding 1 CRITICAL; code-review-nexus-hg2dw-36602c67f
     # [24601] finding 1): fence-begin THIS FILE right here, immediately

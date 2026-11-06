@@ -41,7 +41,7 @@ def test_empty_threads_project_says_so() -> None:
 # ── seams ────────────────────────────────────────────────────────────────────
 
 
-def test_bd_absent_renders_one_line_notice_not_a_traceback() -> None:
+def test_a_bead_source_error_renders_one_line_notice_not_a_traceback() -> None:
     def runner() -> BeadsResult:
         return BeadsResult((), "bd is not on PATH")
 
@@ -50,6 +50,17 @@ def test_bd_absent_renders_one_line_notice_not_a_traceback() -> None:
     assert "Could not read the list of beads waiting on you: bd is not on PATH." in resp.text
     assert "Can't tell what needs you right now." in resp.text
     assert "Traceback" not in resp.text
+
+
+def test_a_user_without_bd_sees_no_error_and_the_board_still_answers() -> None:
+    now = datetime.now(timezone.utc)
+    rows = [{"title": "s", "timestamp": _iso(now), "content": "## A\nstate: live\n"}]
+    skipped = lambda: BeadsResult((), skipped="bd is not installed")  # noqa: E731 -- a seam stand-in
+    html = _client(bd_runner=skipped, threads_reader=lambda: rows).get("/threads").text
+    assert "Could not read the list of beads" not in html
+    assert "Can't tell what needs you right now." not in html
+    assert "Nothing needs you. 1 session reported, newest just now." in html
+    assert "Beads are not shown: bd is not installed." in html
 
 
 def test_beads_listed_with_id_title_priority_assignee() -> None:
@@ -179,10 +190,55 @@ def _fake_bd(tmp_path, monkeypatch, script: str) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))
 
 
-def test_run_bd_reports_missing_binary(tmp_path, monkeypatch) -> None:
+def test_run_bd_skips_when_bd_is_missing_and_there_is_no_beads_database(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))  # empty dir: no bd
+    monkeypatch.delenv("BEADS_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # no .beads at or above (tmp_path is outside the repo)
     result = threads_route.run_bd_needs_sam()
-    assert not result.ok and "not on PATH" in result.error
+    # No bd and no beads database: a user without beads has no bead list to read
+    # (user-surface inventory 2026-11-04, new row 9). Skipped, said once.
+    assert result.ok and result.beads == () and "bd is not installed" in result.skipped
+
+
+def test_run_bd_missing_with_a_beads_dir_above_cwd_is_an_error(tmp_path, monkeypatch) -> None:
+    (tmp_path / ".beads").mkdir()
+    deep = tmp_path / "a" / "b"
+    deep.mkdir(parents=True)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.delenv("BEADS_DIR", raising=False)
+    monkeypatch.chdir(deep)
+    result = threads_route.run_bd_needs_sam()
+    assert not result.ok and result.error == "bd is not on PATH" and result.skipped == ""
+
+
+def test_run_bd_missing_with_beads_dir_env_set_is_an_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("BEADS_DIR", str(tmp_path / "elsewhere"))
+    monkeypatch.chdir(tmp_path)
+    assert threads_route.run_bd_needs_sam().error == "bd is not on PATH"
+
+
+def test_run_bd_skips_on_its_no_beads_database_error(tmp_path, monkeypatch) -> None:
+    _fake_bd(tmp_path, monkeypatch, 'echo "Error: no beads database found" >&2\nexit 1\n')
+    result = threads_route.run_bd_needs_sam()
+    assert result.ok and result.beads == () and "no beads database" in result.skipped
+
+
+def test_run_bd_broken_bd_is_an_error_not_a_skip(tmp_path, monkeypatch) -> None:
+    """A bd whose interpreter is gone raises FileNotFoundError at exec, like a missing bd, and must read as an error
+    when the repo has a beads database."""
+    (tmp_path / ".beads").mkdir()
+    bd = tmp_path / "bin" / "bd"
+    bd.parent.mkdir()
+    bd.write_text("#!/nonexistent/interpreter\n")
+    bd.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bd.parent))
+    monkeypatch.delenv("BEADS_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    result = threads_route.run_bd_needs_sam()
+    assert not result.ok and result.skipped == ""
 
 
 def test_run_bd_parses_output_and_passes_the_label_filter(tmp_path, monkeypatch) -> None:
@@ -200,9 +256,9 @@ def test_run_bd_parses_output_and_passes_the_label_filter(tmp_path, monkeypatch)
 
 
 def test_run_bd_nonzero_exit_is_one_line(tmp_path, monkeypatch) -> None:
-    _fake_bd(tmp_path, monkeypatch, 'echo "no beads database found" >&2\nexit 3\n')
+    _fake_bd(tmp_path, monkeypatch, 'echo "database is locked" >&2\nexit 3\n')
     result = threads_route.run_bd_needs_sam()
-    assert result.error == "bd list failed (exit 3): no beads database found"
+    assert result.error == "bd list failed (exit 3): database is locked"
 
 
 def test_run_bd_garbage_output_is_one_line(tmp_path, monkeypatch) -> None:

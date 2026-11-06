@@ -1,11 +1,11 @@
 # RDR-080 P2a — Canonical registry of retrieval-shaped agents.
 #
 # NOTHING READS THIS FILE. It was written as the single source of truth for
-# `conexus/hooks/scripts/subagent-start.sh` and `tests/test_plan_first_skills.py`;
+# the subagent-start hook script and a plan-first skills test;
 # the test is gone, and RDR-215 bead nexus-q02nx.21 deleted the script. Its
 # port, `nexus.hooks.subagent_start`, classifies an agent from the dispatch's
 # own `agent_type` and task text (`_classify`), never from a registry file.
-# `tests/test_plugin_release_drift_ledger.py` records the same finding
+# The nexus repo's plugin release drift ledger test records the same finding
 # independently ("retrieval-agents.txt — no live reference in the tree").
 #
 # Left in place rather than deleted because that is a disposition for

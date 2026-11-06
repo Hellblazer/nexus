@@ -227,7 +227,7 @@ class CatalogWriter(Protocol):
     def ensure_owner_for_repo(self, repo, *, repo_name=..., description=...) -> object:  # canonical DIVERGENT
         ...
 
-    def register(self, owner, title, *, content_type=..., file_path=..., corpus=..., physical_collection=..., chunk_count=..., head_hash=..., author=..., year=..., meta=..., source_mtime=..., source_uri=..., with_created=...) -> object:  # canonical -- with_created (nexus-vfef0): True returns (tumbler, created) instead of a bare tumbler
+    def register(self, owner, title, *, content_type=..., file_path=..., corpus=..., physical_collection=..., chunk_count=..., head_hash=..., author=..., year=..., meta=..., source_mtime=..., source_uri=..., with_created=..., sensitive=...) -> object:  # canonical -- sensitive (RDR-243): rides the request only when true; with_created (nexus-vfef0): True returns (tumbler, created) instead of a bare tumbler
         ...
 
     def register_many(self, owner, docs, *, with_created=...) -> object:  # canonical — returns list[Tumbler] aligned 1:1 with docs (nexus-9dvqy); with_created=True returns (tumbler, created) pairs (nexus-53cae)
@@ -237,6 +237,9 @@ class CatalogWriter(Protocol):
         ...
 
     def merge_documents(self, duplicate, canonical) -> object:  # canonical (nexus-z4rpi)
+        ...
+
+    def set_sensitivity(self, tumblers, sensitive, *, reason=...) -> object:  # canonical (RDR-243, nexus-rfvyy.6.8)
         ...
 
     def link(self, from_t, to_t, link_type, created_by, *, from_span=..., to_span=..., allow_dangling=..., **meta) -> object:  # canonical DIVERGENT
@@ -338,6 +341,10 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "register_many",
     "update",
     "merge_documents",
+    # RDR-243 (nexus-rfvyy.6.8): the audited sensitivity route. Whitelisted in the same change that adds the
+    # client method, in the shared set and not _SERVICE_ONLY_WRITE_OPS: missing here it raises AttributeError
+    # through the closed _ServiceCatalogWriter and every getattr capability check reads False (nexus-kgos1).
+    "set_sensitivity",
     "link",
     "link_if_absent",
     "unlink",

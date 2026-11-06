@@ -24,7 +24,10 @@ class ServiceRoleBypassRlsCheckTest {
         String msg = ServiceRoleBypassRlsCheck.refusal(facts("svc_x", false, true)).orElseThrow();
         assertThat(msg).contains("svc_x").contains("BYPASSRLS")
             .contains("NOBYPASSRLS").contains("restart")
-            .contains("vectors-039-1").contains("permission denied");
+            .contains("vectors-039-1").contains("permission denied")
+            // The message ships to operators who have no nexus checkout: a link, not a repo path (nexus-z7ddd).
+            .contains("https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#storage-service-postgres-prerequisites")
+            .doesNotContain("See docs/");
     }
 
     @Test

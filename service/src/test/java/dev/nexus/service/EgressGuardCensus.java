@@ -169,6 +169,10 @@ final class EgressGuardCensus {
             + "The literal is the scheme prefixed to a bare proxy host, not a destination."));
         m.put("dev/nexus/service/db/SchemaMigrator.java", Allow.pinned(Map.of("http(s) URL literal", 1),
             "A documentation link inside an error message (the migration runbook); nothing connects to it."));
+        m.put("dev/nexus/service/db/PgVersionFloor.java", Allow.pinned(Map.of("http(s) URL literal", 1),
+            "A documentation link inside the boot refusal (docs/configuration.md on GitHub); nothing connects to it."));
+        m.put("dev/nexus/service/db/ServiceRoleBypassRlsCheck.java", Allow.pinned(Map.of("http(s) URL literal", 1),
+            "A documentation link inside the boot refusal (docs/configuration.md on GitHub); nothing connects to it."));
         return java.util.Collections.unmodifiableMap(m);
     }
 

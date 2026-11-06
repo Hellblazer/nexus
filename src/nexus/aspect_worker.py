@@ -72,6 +72,7 @@ import structlog
 # ``nexus.aspect_worker._extract_aspects`` swap the worker's
 # extraction call cleanly without touching the public entrypoint.
 from nexus.aspect_extractor import (
+    SENSITIVE_DOCUMENT,
     ExtractFail,
     extract_aspects as _extract_aspects,
     extract_aspects_batch as _extract_aspects_batch,
@@ -79,6 +80,9 @@ from nexus.aspect_extractor import (
 from nexus.aspect_readers import READ_FAIL_TRANSPORT, TransportReadFailure
 from nexus import config as _config
 from nexus.collection_errors import SupersededCollectionWriteError
+from nexus import doc_sensitivity
+from nexus.doc_sensitivity import SensitivityUnknown
+from nexus.sensitivity import SensitiveDocumentRefused, bound_to
 
 _log = structlog.get_logger(__name__)
 
@@ -164,7 +168,9 @@ def _is_retryable(exc: BaseException) -> bool:
         _is_retryable_vector_error,
         _is_retryable_voyage_error,
     )
-    if isinstance(exc, TransportReadFailure):
+    if isinstance(exc, TransportReadFailure | SensitivityUnknown):
+        # SensitivityUnknown: the catalog could not say whether the document is sensitive
+        # (RDR-243). A fact about the moment, so retry; a clear answer is never assumed.
         return True
     for predicate in (_is_retryable_vector_error, _is_retryable_voyage_error):
         try:
@@ -387,6 +393,7 @@ class AspectExtractionWorker:
                 reason, row=claim.row, exc=exc,
             ),
             document_gone=self._document_gone,
+            document_sensitive=self._document_sensitive,
             **(tuple_options or {}),
         )
 
@@ -406,6 +413,13 @@ class AspectExtractionWorker:
         return t2_index_write(
             lambda db: db.complete_aspect(fields, claim_id=claim_id, claimant=claimant)
         )
+
+    @staticmethod
+    def _document_sensitive(doc_id: str) -> bool:
+        """True when the catalog row of *doc_id* is sensitive (RDR-243). Raises
+        :class:`~nexus.doc_sensitivity.SensitivityUnknown` when the catalog cannot say: the
+        tuple side retries such a claim and never extracts it."""
+        return doc_sensitivity.is_sensitive(doc_id)
 
     @staticmethod
     def _document_gone(doc_id: str) -> bool:
@@ -687,6 +701,7 @@ class AspectExtractionWorker:
             retry_s = min(self._poll_interval, _TUPLE_CLAIM_RETRY_S) if failed else self._poll_interval
             self._wait_for_wake_or_timeout(retry_s)
 
+    @bound_to("aspect_worker_drain")
     def _extract_tuple_rows(self, claims: list) -> list:
         """Extract the rows of a tuple batch: one result per claim, in order.
 
@@ -723,6 +738,15 @@ class AspectExtractionWorker:
                     doc_id_lookup=doc_id_lookup,
                     manifest_lookup=manifest_lookup,
                 )
+            except SensitiveDocumentRefused as exc:
+                # The extractor's own gate (the flag landed after the claim's check): a verdict on
+                # the document, so the task is acked as dropped, never retried.
+                _log.info(
+                    "aspect_worker_skipped_sensitive",
+                    tumbler=exc.tumbler, surface=_SURFACE_DRAIN, collection=row.collection,
+                    source_path=row.source_path,
+                )
+                return ExtractFail(uri="", reason=SENSITIVE_DOCUMENT, detail="document is sensitive")
             except Exception as exc:  # noqa: BLE001 — extract is best-effort; the verdict map routes the failure
                 _log.warning(
                     "aspect_worker_extract_raised",
@@ -1206,6 +1230,39 @@ def _resolve_catalog_reader():
     return make_catalog_reader()
 
 
+#: The registry names (``src/nexus/tables/llm-surfaces.toml``) the document gates of this module log under.
+_SURFACE_ENQUEUE = "aspect_enqueue_hook"
+_SURFACE_DRAIN = "aspect_worker_drain"
+
+
+def sensitive_enqueue_filter(rows: list[dict]) -> list[dict]:
+    """RDR-243 census row 1: drop the rows of sensitive documents before anything is queued.
+
+    The ONE enqueue gate: the hook, the indexer's batch (``enqueue_many``) and
+    ``nx aspects requeue-failed`` all pass their rows through it, so no enqueue path reaches the
+    queue (and persists a document's text in a row or a task) without it. The flag is read from the
+    CATALOG row of each ``doc_id``, one batched read. It must run before the enqueue, which on the
+    table form upserts a status back to ``pending``. Each dropped row logs
+    ``aspect_enqueue_skipped_sensitive`` with the tumbler and the surface.
+
+    Raises :class:`~nexus.doc_sensitivity.SensitivityUnknown` when the catalog cannot be read: a
+    row whose flag is unknown is not queued, and the caller's failure handler reports it."""
+    flagged = doc_sensitivity.flagged(r.get("doc_id", "") for r in rows)
+    if not flagged:
+        return list(rows)
+    kept: list[dict] = []
+    for row in rows:
+        if row.get("doc_id", "") in flagged:
+            _log.info(
+                "aspect_enqueue_skipped_sensitive",
+                tumbler=row.get("doc_id", ""), surface=_SURFACE_ENQUEUE,
+                collection=row.get("collection", ""),
+            )
+        else:
+            kept.append(row)
+    return kept
+
+
 def _resolve_doc_id_for_enqueue(collection: str, source_path: str) -> str:
     """Best-effort catalog lookup for a doc_id, keyed on (collection,
     source_path) — hygiene-001 (nexus-tk070.p6a follow-on), review round
@@ -1424,6 +1481,19 @@ def aspect_extraction_enqueue_hook(
             collection=collection,
             source_path=source_path,
         )
+        return
+
+    # RDR-243 census row 1: a sensitive document is never queued, and its text is never persisted
+    # in a row. The catalog row is read before the enqueue; a read that fails refuses (loudly).
+    try:
+        kept = sensitive_enqueue_filter([{"collection": collection, "source_path": source_path, "doc_id": doc_id}])
+    except SensitivityUnknown as exc:
+        _log.warning(
+            "aspect_enqueue_skipped_sensitivity_unknown",
+            tumbler=doc_id, surface=_SURFACE_ENQUEUE, collection=collection, error=exc.detail,
+        )
+        return
+    if not kept:
         return
 
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)

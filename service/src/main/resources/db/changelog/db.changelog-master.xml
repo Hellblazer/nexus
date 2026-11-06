@@ -2049,13 +2049,23 @@
     <include file="db/changelog/vectors-053-quarantine-restore-chunk-keys-only.xml"/>
 
     <!--
+        Bead nexus-rfvyy.6.3 (RDR-243 Phase 1 Step 2a): the one-way document sensitivity flag, schema half.
+        catalog-047-1 adds catalog_documents.sensitive BOOLEAN NOT NULL DEFAULT false and a partial index on live
+        sensitive documents; catalog-047-2 creates the audit table nexus.catalog_sensitivity_changes (tenant RLS);
+        catalog-047-3 creates nexus.chunk_sensitive and nexus.chunk_sensitive_many and their GRANT EXECUTE; see the
+        included file's own header. ADD COLUMN / CREATE TABLE / CREATE FUNCTION, no DATA EFFECT. After vectors-053
+        (current tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/catalog-047-document-sensitivity.xml"/>
+
+    <!--
         Bead nexus-hbnml (RDR-235 step B of nexus-bpikw): retire nexus.aspect_extraction_queue. aspects-005-1 creates a
         counting helper that sees every tenant's rows (the table is FORCE RLS and the migration role has no BYPASSRLS);
         aspects-005-2 drops the table and the helper only when the table holds no row (a preCondition onFail="CONTINUE"
         onError="CONTINUE", then a second count inside the dropping transaction, failOnError="false"; never HALT,
         never MARK_RAN), so a table that still holds rows is kept and the changeset is retried at the next boot.
         aspects-005-1 also swaps the kept table's collection foreign key to ON DELETE/UPDATE CASCADE. The engine
-        drains a kept table once at start (AspectQueueDrain), so the next boot finds it empty. DATA EFFECT line in the changeset. After vectors-053 (current tail), before the
+        drains a kept table once at start (AspectQueueDrain), so the next boot finds it empty. DATA EFFECT line in the changeset. After catalog-047 (RDR-243), before the
         grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/aspects-005-retire-aspect-queue-table.xml"/>

@@ -15,6 +15,7 @@ behaviour is asserted ABSENT rather than left as a hole.
 """
 from __future__ import annotations
 
+import re
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -169,7 +170,10 @@ class TestPromotionVerbRetired:
         assert "Liquibase" in msg
         assert "ADD COLUMN" in msg
         assert "aspect_promotion_log" in msg
-        assert "aspect_promotion.py" in msg
+        # `aspect_promotion_log` is also spelled `nexus.aspect_promotion_log`, so a bare substring of the module
+        # name proves nothing: assert the sentence that sends the reader to the module's docstring.
+        assert "See the docstring of nexus.aspect_promotion for the full changeset template." in msg
+        assert re.search(r"nexus\.aspect_promotion(?!_)", msg)
 
 
 # ── Audit-log read path (SQLite substrate) ──────────────────────────────────

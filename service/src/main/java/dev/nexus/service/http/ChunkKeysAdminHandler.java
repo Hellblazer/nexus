@@ -34,7 +34,8 @@ import java.util.function.Supplier;
  * later bead that ships only after a cloud dry run has been read.
  *
  * <pre>
- *   POST /v1/admin/chunk-keys/sweep               the CALLER's tenant; dry run by default
+ *   POST /v1/admin/chunk-keys/sweep               the CALLER's tenant, or the tenant a root credential names;
+ *                                                 dry run by default
  *   POST /v1/admin/chunk-keys/add-constraints     table-wide, operator (root token) only
  *   POST /v1/admin/chunk-keys/validate-constraints table-wide, operator only
  * </pre>
@@ -80,6 +81,32 @@ import java.util.function.Supplier;
  * rows the sweep leaves behind (a blocked collection) are frozen until fixed. The response lists them per tenant under
  * {@code left_behind}. Validate changes no data.
  *
+ * <p><b>Naming a target tenant, and the audit.</b> A request may carry {@code "tenant": "<id>"}. A tenant credential
+ * sweeps its own tenant (naming it is the same as naming none); naming ANOTHER tenant is 403 {@code tenant_mismatch}.
+ * A data or mint credential is refused by the scope guard (403, an error text, no reason code) whatever it names. The
+ * root credential ({@link RequestContext#isOperator()}, the check the table-wide routes use) may name another tenant:
+ * the engine then requires it to be registered (the default tenant; a tenant that holds a {@code service_tokens} row,
+ * revoked or expired rows included; or a tenant that holds chunk rows even with no token row; else 422
+ * {@code unknown_tenant}, and the wildcard, a name with a control character, and a case or whitespace variant of a real
+ * tenant never match), and runs the dry run or the apply in that tenant's scope exactly as a tenant credential would
+ * (the tenant GUC is set per batch, so RLS applies the same way).
+ *
+ * <p><b>Every sweep a root credential makes is audited, whether or not it names a tenant, and naming its own tenant
+ * included.</b> Two {@code gc_audit} rows (operation {@code retire_keys_sweep}), both in the TARGET tenant: an
+ * <i>intent</i> row ({@code phase: started}: mode, target and caller tenant, the actor, the accept map, batch size,
+ * whether the call resumed, and the optional {@code "operator"} label) written before the sweep reads or changes any
+ * chunk row (the tenant-registry existence probe of a named tenant is the only statement that runs before it), and an
+ * <i>outcome</i> row ({@code finished}, {@code refused} for a 409 preconditions refusal, or {@code failed}) with the
+ * counts, in a finally path, so a call that throws in batch N records the rows batches 1..N-1 committed. The actor is a
+ * prefix of the credential's hash, never the secret and never the whole hash. Dry run and apply both fail closed: no
+ * audit sink is 503 {@code audit_unavailable}; an intent row that cannot be written is 500
+ * {@code audit_intent_failed}, in both cases before any read or change; an outcome row that cannot be written after the
+ * work is 500 {@code audit_write_failed} with this call's counts, {@code rows_changed} and the continuation; a failure
+ * inside the work is 500 {@code sweep_failed} with the partial counts. The answer carries {@code audit}
+ * ({@code actor}, {@code intent_id}, {@code outcome_id}). A tenant credential's sweep is not audited. The resume token
+ * is signed over the target tenant. The answer's {@code tenant} is the target; a client that asked for a tenant and reads
+ * another in the answer is talking to an engine that predates this field.
+ *
  * <p><b>Authorization.</b> {@link AuthFilter} has resolved the bearer; the sweep needs a root or tenant credential (a
  * data or mint credential is 403), the table-wide routes need {@link RequestContext#isOperator()}.
  */
@@ -95,23 +122,48 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
     static final int MAX_MAX_BATCHES = 200;
     static final int DEFAULT_BUDGET_SECONDS = 30;
     static final int MAX_BUDGET_SECONDS = 120;
+    static final int MAX_OPERATOR_LABEL = 80;
 
     private final ChunkKeySweep sweep;
     private final Supplier<ChunkConstraintAdmin> constraints;
     private final Supplier<List<String>> tenants;
+    private final Supplier<Audit> auditSink;
+
+    /** Where a root-targeted sweep call is recorded: {@code CatalogRepository#recordGcAudit} in the engine. */
+    @FunctionalInterface
+    public interface Audit {
+        long record(String tenant, Map<String, Object> row);
+    }
+
+    /** The gc_audit operation of a root-targeted sweep call. */
+    public static final String AUDIT_OPERATION = "retire_keys_sweep";
 
     /**
      * @param sweep       the sweep and its counts
      * @param constraints the admin-connection DDL, bound late; null (or a supplier answering null) is 503 on the
      *                    table-wide routes
-     * @param tenants     every tenant that holds a {@code service_tokens} row ({@code TokenStore#listKnownTenants});
-     *                    the table-wide routes add the tenants the probe finds
+     * @param tenants     every tenant that holds a {@code service_tokens} row, revoked or expired ones included
+     *                    ({@code TokenStore#listKnownTenants}); the sweep route also accepts a tenant that holds chunk
+     *                    rows with no token row, and the table-wide routes add the tenants the probe finds
      */
     public ChunkKeysAdminHandler(ChunkKeySweep sweep, Supplier<ChunkConstraintAdmin> constraints,
                                  Supplier<List<String>> tenants) {
+        this(sweep, constraints, tenants, (Supplier<Audit>) () -> null);
+    }
+
+    /** As above, with the audit sink a root credential's sweep is recorded through (null: refused, 503). */
+    public ChunkKeysAdminHandler(ChunkKeySweep sweep, Supplier<ChunkConstraintAdmin> constraints,
+                                 Supplier<List<String>> tenants, Audit audit) {
+        this(sweep, constraints, tenants, (Supplier<Audit>) () -> audit);
+    }
+
+    /** As above, the sink read per request (it may be bound late or replaced; a supplier answering null: 503). */
+    public ChunkKeysAdminHandler(ChunkKeySweep sweep, Supplier<ChunkConstraintAdmin> constraints,
+                                 Supplier<List<String>> tenants, Supplier<Audit> auditSink) {
         this.sweep = sweep;
         this.constraints = constraints;
         this.tenants = tenants;
+        this.auditSink = auditSink;
     }
 
     @Override
@@ -145,12 +197,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             body.put("reason", e.reason());
             HttpUtil.send(ex, e.status(), json(body));
         } catch (ChunkKeySweep.PreconditionRefused e) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("error", e.getMessage());
-            body.put("reason", "sweep_preconditions_not_met");
-            body.put("blocking", e.report().blocking());
-            body.put("report", dryRunBody(e.report()));
-            HttpUtil.send(ex, 409, json(body));
+            HttpUtil.send(ex, 409, json(preconditionBody(e)));
         } catch (Exception e) {
             if (!HttpUtil.sendTypedDbError(ex, e, log, "chunk_keys_admin", "op=" + op + " tenant=" + tenant)) {
                 log.error("event=chunk_keys_admin_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
@@ -161,48 +208,339 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
 
     // ---- sweep --------------------------------------------------------------------------------------------------
 
-    private void handleSweep(HttpExchange ex, String tenant) throws IOException {
+    private void handleSweep(HttpExchange ex, String callerTenant) throws IOException {
         String scopeName = RequestContext.scope();
         if (!TokenStore.SCOPE_ROOT.equals(scopeName) && !TokenStore.SCOPE_TENANT.equals(scopeName)) {
+            // A data or mint credential: the scope guard, whatever tenant the body names (no reason code).
             HttpUtil.send(ex, 403, json(Map.of("error",
                 "the sweep needs a tenant or root credential, not scope " + scopeName)));
             return;
         }
         Map<String, Object> body = readBody(ex);
+        String named = namedTenant(body);
+        boolean root = RequestContext.isOperator();
+        if (named != null && !named.equals(callerTenant) && !root) {
+            // Only a tenant-scope credential reaches here. Not a hint about whether the tenant exists: it learns
+            // nothing about the others.
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("error", "this credential is bound to tenant " + callerTenant + " and may not sweep another "
+                + "tenant: only the root credential names a target tenant");
+            out.put("reason", "tenant_mismatch");
+            log.warn("event=retire_keys_target_refused caller_tenant={} scope={} reason=tenant_mismatch",
+                callerTenant, scopeName);
+            HttpUtil.send(ex, 403, json(out));
+            return;
+        }
+        String tenant = named == null ? callerTenant : named;
+        if (root && !tenant.equals(callerTenant) && !registered(tenant)) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("error", "tenant " + tenant + " is not registered on this engine (it holds no credential and "
+                + "no chunk row, and is not the default tenant): nothing was swept");
+            out.put("reason", "unknown_tenant");
+            HttpUtil.send(ex, 422, json(out));
+            return;
+        }
+        // Every sweep a root credential makes is recorded, whether or not the request names a tenant.
+        Audit audit = auditSink.get();
+        if (root && audit == null) {
+            HttpUtil.send(ex, 503, json(Map.of("error",
+                "this engine has no audit sink for a root-credential sweep; no chunk row was read or changed",
+                "reason", "audit_unavailable")));
+            return;
+        }
         ChunkKeyPlan plan = plan(body);
         boolean dryRun = !Boolean.FALSE.equals(body.get("dry_run"));
         Map<String, Long> accepted = accepted(body);
         int batchSize = intField(body, "batch_size", ChunkKeySweep.DEFAULT_BATCH, 1, ChunkKeySweep.MAX_BATCH);
         String only = body.get("collection") instanceof String s && !s.isBlank() ? s : null;
+        String operatorLabel = operatorLabel(body);
+        int maxBatches = dryRun ? 0 : intField(body, "max_batches", DEFAULT_MAX_BATCHES, 1, MAX_MAX_BATCHES);
+        int budget = dryRun ? 0 : intField(body, "budget_seconds", DEFAULT_BUDGET_SECONDS, 1, MAX_BUDGET_SECONDS);
+        ChunkKeySweep.Resume resume = dryRun ? null : resume(body);
 
-        if (dryRun) {
-            boolean measure = !Boolean.FALSE.equals(body.get("measure_batch"));
-            var report = sweep.dryRun(tenant, plan, accepted, batchSize, measure);
-            log.info("event=retire_keys_dry_run tenant={} sweepable={} blocked={} blocking={}", tenant,
-                report.sweepableRows(), report.blockedRows(), report.blocking());
-            Map<String, Object> out = dryRunBody(report);
-            out.put("dry_run", true);
-            HttpUtil.send(ex, 200, json(out));
+        // The intent row goes in before the sweep reads or changes any chunk row (only the tenant-registry existence
+        // probe above ran before it): a sink that cannot be written refuses the call with no chunk read or changed,
+        // instead of being found out after the rows are swept.
+        Trail trail = null;
+        if (root) {
+            trail = new Trail(audit, tenant, callerTenant, only, dryRun, accepted, batchSize, resume != null, operatorLabel);
+            try {
+                trail.intent();
+            } catch (RuntimeException e) {
+                log.error("event=retire_keys_audit_intent_failed tenant={} caller_tenant={} error={}", tenant,
+                    callerTenant, e.getMessage(), e);
+                HttpUtil.send(ex, 500, json(Map.of("error",
+                    "the audit row for this sweep could not be written; no chunk row was read or changed",
+                    "reason", "audit_intent_failed")));
+                return;
+            }
+        }
+
+        Map<String, Object> counts = new LinkedHashMap<>();
+        Map<String, Object> out = null;
+        ChunkKeySweep.Progress progress = new ChunkKeySweep.Progress();
+        RuntimeException failure = null;
+        boolean completed = false;
+        try {
+            if (dryRun) {
+                boolean measure = !Boolean.FALSE.equals(body.get("measure_batch"));
+                var report = sweep.dryRun(tenant, plan, accepted, batchSize, measure);
+                log.info("event=retire_keys_dry_run tenant={} caller_tenant={} sweepable={} blocked={} blocking={}",
+                    tenant, callerTenant, report.sweepableRows(), report.blockedRows(), report.blocking());
+                counts.put("retired_key_rows", report.retiredRows());
+                counts.put("sweepable_rows", report.sweepableRows());
+                counts.put("blocked_rows", report.blockedRows());
+                counts.put("wrong_width_rows", report.wrongWidthRows());
+                counts.put("blocking", report.blocking());
+                out = dryRunBody(report);
+                out.put("dry_run", true);
+            } else {
+                var applied = sweep.apply(tenant, plan, accepted, only, batchSize, maxBatches,
+                    Duration.ofSeconds(budget), resume, progress);
+                counts.put("rows_swept", applied.rowsSwept());
+                counts.put("batches", applied.batches());
+                counts.put("done", applied.done());
+                counts.put("remaining_rows", applied.remainingRows());
+                counts.put("locked_skipped_rows", applied.lockedSkippedRows());
+                counts.put("blocked_collections", applied.blocked().size());
+                counts.put("resumed", resume != null && !applied.resumeIgnored());
+                counts.put("resume_ignored", applied.resumeIgnored());
+                out = new LinkedHashMap<>();
+                out.put("tenant", applied.tenant());
+                out.put("dry_run", false);
+                out.put("rows_swept", applied.rowsSwept());
+                out.put("batches", applied.batches());
+                out.put("done", applied.done());
+                out.put("remaining_rows", applied.remainingRows());
+                out.put("locked_skipped_rows", applied.lockedSkippedRows());
+                out.put("first_batch_ms", applied.firstBatchMs());
+                out.put("elapsed_ms", applied.totalMs());
+                out.put("blocked_collections", blockedList(applied.blocked()));
+                out.put("resume", applied.resume() == null ? null : resumeBody(applied.resume()));
+                out.put("resume_ignored", applied.resumeIgnored());
+            }
+            completed = true;
+        } catch (RuntimeException e) {
+            failure = e;
+        } finally {
+            if (trail != null) {
+                if (failure instanceof ChunkKeySweep.PreconditionRefused refused) {
+                    counts.put("blocking", refused.report().blocking());
+                }
+                if ((failure != null || !completed) && !dryRun) {
+                    counts.put("rows_swept", progress.rowsSwept());
+                    counts.put("batches", progress.batches());
+                }
+                // Never throws: a failure to write the outcome is reported to the caller, it does not hide the work.
+                // An Error that skips the catch leaves failure null and completed false: still a failed call.
+                trail.outcome(counts, failure != null || completed ? failure
+                    : new IllegalStateException("the sweep did not complete"));
+            }
+        }
+
+        if (failure != null) {
+            if (failure instanceof ChunkKeySweep.PreconditionRefused refused) {
+                Map<String, Object> refusal = preconditionBody(refused);
+                if (trail != null) {
+                    refusal.put("audit", trail.body());
+                }
+                HttpUtil.send(ex, 409, json(refusal));
+                return;
+            }
+            if (trail == null || failure instanceof IllegalArgumentException) {
+                throw failure;   // unchanged mapping for the credentials that are not audited
+            }
+            // The outcome row is already written. Pool exhaustion (or the admission queue full) keeps the shared
+            // mapper's retryable 503, as it does for every other route. Every other error stays sweep_failed: a
+            // constraint violation or a lock timeout inside the work must answer with the partial counts, which the
+            // shared mapper's generic 409 / opaque 500 would drop.
+            if (HttpUtil.isPoolExhausted(failure) && HttpUtil.sendTypedDbError(ex, failure, log, "chunk_keys_admin",
+                    "op=/sweep tenant=" + tenant + " rows_swept=" + progress.rowsSwept())) {
+                return;
+            }
+            log.error("event=retire_keys_sweep_failed tenant={} caller_tenant={} rows_swept={} batches={} error={}",
+                tenant, callerTenant, progress.rowsSwept(), progress.batches(), failure.getMessage(), failure);
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("tenant", tenant);
+            err.put("error", "the sweep failed after " + progress.rowsSwept() + " rows in " + progress.batches()
+                + " batches: " + failure.getClass().getSimpleName() + "; the rows counted were committed and are "
+                + "not undone; re-run the same command, the sweep takes up where the rows left are");
+            err.put("reason", "sweep_failed");
+            err.put("dry_run", dryRun);
+            err.put("rows_swept", progress.rowsSwept());
+            err.put("batches", progress.batches());
+            err.put("rows_changed", progress.rowsSwept() > 0);
+            err.put("audit", trail.body());
+            HttpUtil.send(ex, 500, json(err));
             return;
         }
-        int maxBatches = intField(body, "max_batches", DEFAULT_MAX_BATCHES, 1, MAX_MAX_BATCHES);
-        int budget = intField(body, "budget_seconds", DEFAULT_BUDGET_SECONDS, 1, MAX_BUDGET_SECONDS);
-        ChunkKeySweep.Resume resume = resume(body);
-        var applied = sweep.apply(tenant, plan, accepted, only, batchSize, maxBatches, Duration.ofSeconds(budget), resume);
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("tenant", applied.tenant());
-        out.put("dry_run", false);
-        out.put("rows_swept", applied.rowsSwept());
-        out.put("batches", applied.batches());
-        out.put("done", applied.done());
-        out.put("remaining_rows", applied.remainingRows());
-        out.put("locked_skipped_rows", applied.lockedSkippedRows());
-        out.put("first_batch_ms", applied.firstBatchMs());
-        out.put("elapsed_ms", applied.totalMs());
-        out.put("blocked_collections", blockedList(applied.blocked()));
-        out.put("resume", applied.resume() == null ? null : resumeBody(applied.resume()));
-        out.put("resume_ignored", applied.resumeIgnored());
+        if (trail != null) {
+            out.put("audit", trail.body());
+            if (trail.outcomeFailed) {
+                // The work is done and cannot be taken back: say so, with this call's counts and the continuation.
+                out.put("error", "the sweep ran but its outcome audit row could not be written; this call's counts "
+                    + "are in this answer");
+                out.put("reason", "audit_write_failed");
+                out.put("rows_changed", !dryRun && ((Number) counts.getOrDefault("rows_swept", 0L)).longValue() > 0);
+                HttpUtil.send(ex, 500, json(out));
+                return;
+            }
+        }
         HttpUtil.send(ex, 200, json(out));
+    }
+
+    private static Map<String, Object> preconditionBody(ChunkKeySweep.PreconditionRefused e) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", e.getMessage());
+        body.put("reason", "sweep_preconditions_not_met");
+        body.put("blocking", e.report().blocking());
+        body.put("report", dryRunBody(e.report()));
+        return body;
+    }
+
+    /** The {@code tenant} field of the request: absent is null; present it must be a non-blank string. */
+    private static String namedTenant(Map<String, Object> body) {
+        Object v = body.get("tenant");
+        if (v == null) {
+            return null;
+        }
+        if (!(v instanceof String s) || s.isBlank()) {
+            throw new IllegalArgumentException("'tenant' must be a non-blank string naming the tenant to sweep");
+        }
+        return s;
+    }
+
+    /** The optional {@code operator} label: who the person behind the shared root credential is. */
+    private static String operatorLabel(Map<String, Object> body) {
+        Object v = body.get("operator");
+        if (v == null) {
+            return null;
+        }
+        if (!(v instanceof String s) || s.isBlank() || s.length() > MAX_OPERATOR_LABEL
+                || s.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("'operator' must be a printable string of at most "
+                + MAX_OPERATOR_LABEL + " characters naming who runs the sweep");
+        }
+        return s.strip();
+    }
+
+    /**
+     * The tenants a root credential may target: the default tenant, a tenant that holds a {@code service_tokens} row
+     * (a revoked or expired row still counts), or a tenant that holds chunk rows without one (a data-only tenant
+     * whose tokens aged out, e.g.). A name with a control character is never registered; the wildcard is refused.
+     * The chunk-row test is a tenant-scoped existence probe ({@link ChunkKeySweep#hasChunkRows}: stops at the first
+     * row, under a short statement bound, reads no content), exact on the tenant string, so a case or whitespace
+     * variant of a real tenant holds none. It is the ONE statement of a root sweep that runs before the intent row:
+     * the registry check comes first so that audit rows are only ever written inside a registered tenant.
+     */
+    private boolean registered(String tenant) {
+        if (TenantConstants.BOOTSTRAP_ANY_TENANT.equals(tenant) || tenant.chars().anyMatch(Character::isISOControl)) {
+            return false;
+        }
+        return TenantConstants.DEFAULT_TENANT.equals(tenant) || tenants.get().contains(tenant)
+            || sweep.hasChunkRows(tenant);
+    }
+
+    /**
+     * The gc_audit rows of one root sweep call, both in the TARGET tenant: an intent row before the first read
+     * ({@code phase: started}, the request: mode, accept map, batch size, resumed, operator label) and an outcome row
+     * after the work ({@code finished}, {@code refused} or {@code failed}, with the counts; a failed call carries the
+     * partial counts of the batches that did commit). The actor is a prefix of the credential's hash, never the secret
+     * and never the whole hash; one shared root token names no person, hence the optional {@code operator} label.
+     */
+    private final class Trail {
+        private final Audit audit;
+        private final String target;
+        private final String callerTenant;
+        private final String collection;
+        private final boolean dryRun;
+        private final Map<String, Long> accepted;
+        private final int batchSize;
+        private final boolean resumed;
+        private final String operatorLabel;
+        private final String actor;
+        private long intentId = -1;
+        private long outcomeId = -1;
+        boolean outcomeFailed;
+
+        Trail(Audit audit, String target, String callerTenant, String collection, boolean dryRun, Map<String, Long> accepted,
+              int batchSize, boolean resumed, String operatorLabel) {
+            this.audit = audit;
+            this.target = target;
+            this.callerTenant = callerTenant;
+            this.collection = collection;
+            this.dryRun = dryRun;
+            this.accepted = accepted;
+            this.batchSize = batchSize;
+            this.resumed = resumed;
+            this.operatorLabel = operatorLabel;
+            String hash = RequestContext.credentialHash();
+            this.actor = "root:" + (hash == null ? "unknown" : hash.substring(0, Math.min(16, hash.length())));
+        }
+
+        void intent() {
+            Map<String, Object> details = details("started");
+            details.put("accept", new LinkedHashMap<>(accepted));
+            details.put("batch_size", batchSize);
+            details.put("resumed", resumed);
+            if (operatorLabel != null) {
+                details.put("operator", operatorLabel);
+            }
+            intentId = write(details);
+        }
+
+        /** Never throws; {@link #outcomeFailed} says whether the row went in. */
+        void outcome(Map<String, Object> counts, RuntimeException failure) {
+            String phase = failure == null ? "finished"
+                : failure instanceof ChunkKeySweep.PreconditionRefused ? "refused" : "failed";
+            Map<String, Object> details = details(phase);
+            details.put("intent_audit_id", intentId);
+            details.put("counts", counts);
+            if (failure != null) {
+                // The class and a code, never the message: it can carry SQL or row detail a tenant credential can read
+                // back through gc_audit/list; the full text is in the engine log.
+                details.put("failure", failure.getClass().getSimpleName());
+            }
+            if (operatorLabel != null) {
+                details.put("operator", operatorLabel);
+            }
+            try {
+                outcomeId = write(details);
+            } catch (RuntimeException e) {
+                outcomeFailed = true;
+                log.error("event=retire_keys_audit_failed tenant={} caller_tenant={} phase={} intent_id={} counts={} "
+                        + "error={}", target, callerTenant, phase, intentId, counts, e.getMessage(), e);
+            }
+        }
+
+        Map<String, Object> body() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("actor", actor);
+            m.put("tenant", target);
+            m.put("intent_id", intentId);
+            m.put("outcome_id", outcomeFailed ? null : outcomeId);
+            return m;
+        }
+
+        private Map<String, Object> details(String phase) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("phase", phase);
+            details.put("mode", dryRun ? "dry-run" : "apply");
+            details.put("target_tenant", target);
+            details.put("caller_tenant", callerTenant);
+            details.put("scope", RequestContext.scope());
+            return details;
+        }
+
+        private long write(Map<String, Object> details) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("operation", AUDIT_OPERATION);
+            row.put("collection", collection == null ? "" : collection);
+            row.put("actor", actor);
+            row.put("dry_run", dryRun);
+            row.put("details", details);
+            return audit.record(target, row);
+        }
     }
 
     static Map<String, Object> dryRunBody(ChunkKeySweep.DryRun r) {

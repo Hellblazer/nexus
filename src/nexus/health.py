@@ -57,7 +57,7 @@ _MANAGED_NOT_PROBEABLE_DETAIL = (
     "managed deployment — not probeable from this client, so this check was not run: it reads the database "
     "with local admin credentials, which a managed deployment keeps with the store operator, and the "
     "client-side diagnostic path is local-only by design (nexus-y3wuu); skipping. For the RDR-225 "
-    "partition rows the operator's read-only query is in docs/runbooks/rdr-225-cloud-deploy.md"
+    "partition rows the operator's read-only query is in https://github.com/Hellblazer/nexus/blob/main/docs/runbooks/rdr-225-cloud-deploy.md"
 )
 _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials absent); skipping"
 
@@ -336,7 +336,7 @@ def _check_generation_layout() -> list[HealthResult]:
                     f"{len(generations)} generation(s) exist but current does "
                     "not — nothing resolves, so nothing will start"
                 ),
-                fix_suggestions=["scripts/reinstall-tool.sh"],
+                fix_suggestions=[_install_advice().GENERATION_INSTALLER],
             )]
 
         current = install_layout.current_generation()
@@ -356,7 +356,7 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"current points at {current}, which does not exist — every "
                 "shim resolves current at spawn, so nothing will start"
             ),
-            fix_suggestions=["scripts/reinstall-tool.sh"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
 
     if not install_layout.receipt_path(current).is_file():
@@ -366,7 +366,7 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"current points at {current.name}, which has no receipt — that "
                 "is an unfinished build, not a generation"
             ),
-            fix_suggestions=["scripts/reinstall-tool.sh"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
 
     # THE OWNED SET IS WHAT THE DISTRIBUTION DECLARES, not a listing of
@@ -626,7 +626,7 @@ def _check_base_interpreters(current, generations) -> list[HealthResult]:
                 f"{missing_current}, which no longer exists — uv prunes managed "
                 "interpreters, and this generation cannot run without it"
             ),
-            fix_suggestions=["scripts/reinstall-tool.sh"],
+            fix_suggestions=[_install_advice().GENERATION_INSTALLER],
         )]
     if missing_old:
         return [HealthResult(
@@ -694,7 +694,7 @@ def _check_orphan_uv_install() -> list[HealthResult]:
         ),
         fix_suggestions=[
             "nx self install    # registers it for reap, then reaps once its holders are gone",
-            "scripts/reinstall-tool.sh    # same, from a checkout",
+            "the reinstall-tool.sh script in a nexus checkout's scripts directory    # same, from a checkout",
         ],
     )]
 
@@ -4293,6 +4293,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
+    # nexus.catalog_sensitivity_changes: RDR-243 (nexus-rfvyy.6.3,
+    # catalog-047-document-sensitivity.xml), the audit record of every change
+    # of catalog_documents.sensitive; ENABLE + FORCE + tenant_isolation.
+    "nexus.catalog_sensitivity_changes",
     # "nexus.chash_index" REMOVED (RDR-187/nexus-piwya.9, .9 review High):
     # the table is dropped, and _check_rls_present LEFT-JOINs this list
     # against live pg_class — a listed-but-dropped table is a PERMANENT
@@ -4798,7 +4802,7 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
             "missing version is a client older than the cut OR a caller that never sends it "
             "(curl, a script), which an upgrade cannot fix",
             "Flip NX_OWNERLESS_WRITE_MODE from log-only to enforce only after this count "
-            "stops moving with every client restarted (docs/operations/ownerless-write-cutover.md)",
+            "stops moving with every client restarted (https://github.com/Hellblazer/nexus/blob/main/docs/operations/ownerless-write-cutover.md)",
         ],
     )]
 
@@ -5004,7 +5008,7 @@ def _check_engine_reaper(
         "A reaper that stopped making passes is restarted by restarting the engine "
         "(`nx daemon service stop`, then `nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
         "switches it off on purpose, and then this row reads not applicable",
-        "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+        "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md (the refusal table, the settings and what a pass does)",
     ]
 
     if last_raw is None:
@@ -5048,7 +5052,7 @@ def _check_engine_reaper(
                     *(["An errored tenant: read the engine log for event=reaper_tenant_failed and "
                        "event=reaper_collection_failed (a permission or grants regression errors every "
                        "collection and the pass still completes)"] if errored else []),
-                    "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+                    "https://github.com/Hellblazer/nexus/blob/main/docs/operations/engine-reaper.md (the refusal table, the settings and what a pass does)",
                 ],
             )]
         return [HealthResult(
@@ -5153,7 +5157,7 @@ def _check_per_collection_indexes(
             fix_suggestions=[
                 "The engine reports a per_collection_indexes object this client does not understand: check that "
                 "the client and engine versions match (`nx doctor` reports both)",
-                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
 
@@ -5199,7 +5203,7 @@ def _check_per_collection_indexes(
                   ["The engine's admin role cannot create indexes on the leaves of nexus.chunks: grant it the "
                    "privilege (it must own or be able to CREATE INDEX on the partitions), then restart the engine"]),
                 "NX_SEARCH_PCI=0 switches the builder off on purpose, and then this row passes with a note",
-                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
     off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
@@ -5252,7 +5256,7 @@ def _check_per_collection_indexes(
                 *(["A reindex leftover is dropped by the builder on its next pass: set NX_SEARCH_PCI=1, or "
                    "DROP INDEX CONCURRENTLY it by hand (it is the invalid pci_<hash>_ccnew/_ccold index)"]
                   if warn_leftover else []),
-                "docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md: Day 2 Operations",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
             ],
         )]
     if state == "standby":
@@ -5702,7 +5706,7 @@ def _check_chunks_leaf_bloat(
                    "event=chunks_leaf_autovacuum_checked naming any it could not"] if n_unset else []),
                 *(["autovacuum_enabled=false is kept on purpose by the self-heal; as the owner of each leaf named in "
                    "the log, reset that storage parameter on it: RESET (autovacuum_enabled)"] if n_disabled else []),
-                "docs/architecture.md: the nexus.chunks leaf autovacuum policy",
+                "https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md (the nexus.chunks leaf autovacuum policy)",
             ],
         )]
     note = ""
@@ -6415,7 +6419,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
         ),
         fix_suggestions=[
             f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "
-            "docs/migration-runbook.md, 'A local cluster older than PostgreSQL 17'",
+            "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md (section 'A local cluster older than PostgreSQL 17')",
         ],
     )]
 
@@ -7570,7 +7574,7 @@ ORDER BY tbl.schema_name, tbl.table_name;
             fix_suggestions=[
                 "Re-run migrations: nx init",
                 "Verify the Liquibase changeset applied RLS: "
-                "check service/src/main/resources/db/changelog/",
+                "check https://github.com/Hellblazer/nexus/tree/main/service/src/main/resources/db/changelog",
                 *(_PARTITION_TREE_FIXES if tree_text else ()),
             ],
             fatal=True,
@@ -9380,7 +9384,7 @@ def _channel_waiter_engine_fix_suggestions() -> list[str]:
     if is_dev_checkout_process():
         fixes.append(
             "this process is a dev checkout — rebuild the local engine's cached build "
-            "(see docs/agents/engine-service-release.md for the exact script) if "
+            "(see https://github.com/Hellblazer/nexus/blob/main/docs/agents/engine-service-release.md for the exact script) if "
             "you are iterating on service/ code locally",
         )
     return fixes

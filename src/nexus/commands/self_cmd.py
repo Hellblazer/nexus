@@ -263,7 +263,7 @@ def perform_self_install(
             "running from one. Get onto the generation layout first — "
             "`nx self install` with no --extras converges a legacy uv tree "
             "or repairs a uv takeover; a dev checkout uses "
-            "scripts/reinstall-tool.sh — then re-run "
+            "the reinstall-tool.sh script in its checkout's scripts directory — then re-run "
             "`nx self install --extras ...` from the generation."
         )
     elif _running_from_legacy_tool_install():
@@ -295,7 +295,7 @@ def perform_self_install(
             f"this nx is running from {host}, which is not a generation under "
             f"{tools} — `nx self install` upgrades a generation install in "
             "place-safe fashion and has nothing to do from a dev checkout.\n"
-            "For a checkout, use: scripts/reinstall-tool.sh"
+            "For a checkout, run the reinstall-tool.sh script from the checkout's scripts directory."
         )
 
     # WHAT TO INSTALL comes from the receipt of the generation we are running

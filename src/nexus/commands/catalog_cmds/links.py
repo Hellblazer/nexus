@@ -338,7 +338,7 @@ def links_for_file_cmd(file_path: str) -> None:
 
     \b
     Examples:
-      nx catalog links-for-file src/nexus/catalog/catalog.py
+      nx catalog links-for-file src/app/main.py
       nx catalog links-for-file docs/rdr/rdr-060.md
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible

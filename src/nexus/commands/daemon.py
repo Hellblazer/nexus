@@ -34,6 +34,7 @@ from xml.sax.saxutils import escape as _xml_escape
 import click
 import structlog
 
+from nexus.commands._help_links import MIGRATION_RUNBOOK_EPILOG
 from nexus import config as _config
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.nx_argv import nx_argv
@@ -1144,7 +1145,7 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     sys.exit(3)
 
 
-@service_group.command("install-binary")
+@service_group.command("install-binary", epilog=MIGRATION_RUNBOOK_EPILOG)
 @click.argument("tag", required=True)
 @click.option(
     "--config-dir",
@@ -1165,7 +1166,7 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     is_flag=True,
     default=False,
     help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
-    "ONLY after healing per docs/migration-runbook.md (re-index the "
+    "ONLY after healing per the runbook linked at the end of this help (re-index the "
     "affected collections, then re-run doctor and confirm the warning "
     "clears). The rows stay unhealed debt if you force past them; a "
     "pre-v0.1.48 char-era engine can still crash-loop on boot.",

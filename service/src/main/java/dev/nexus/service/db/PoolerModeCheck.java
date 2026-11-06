@@ -71,7 +71,7 @@ public final class PoolerModeCheck {
                     "pgbouncer pool_mode=" + poolMode + " but '" + REQUIRED_POOL_MODE
                     + "' is required: SET LOCAL tenant GUC leaks across borrows under "
                     + poolMode + "-mode pooling → cross-tenant read (nexus-bhzuv). Fix the "
-                    + "deployed pooler (see service/deploy/pgbouncer.ini)");
+                    + "deployed pooler (see https://github.com/Hellblazer/nexus/blob/main/service/deploy/pgbouncer.ini)");
         }
     }
 

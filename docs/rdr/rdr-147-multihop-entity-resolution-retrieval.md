@@ -445,12 +445,18 @@ the script, so recall alone does not make the answer better than the script's.
   source. q1 does not reach the boundary (plan 7). Step 0's
   `repair_entered=False` came from its probe on a different question.
 - [x] **#6 RDR-232's single re-check judges a joined item supporting** —
-  **Status**: Verified (HERB, 10 of 10) — **Method**: Spike, 2026-11-03
+  **Status**: Verified on the 2026-11-03 spike (HERB, 10 of 10); weakened on
+  2026-11-05 to 11 of 15 (below) — **Method**: Spike, 2026-11-03
   (147-research-8, 147-research-9, 147-research-10). A record alone: 0 of 8. A
   joined item: `f1` covered in 10 of 10 valid runs. Caveats: one corpus and one
   question shape (the 5 issue questions, twice each); the verdict is a model
   call; the re-check cited 35 of the 45 joined items as supporting; the 2 q2
   runs ran on grown plan 14 and covered `f1` on their single joined item.
+  Weakened 2026-11-05 (147-research-12, 147-research-13): in four MVV runs the
+  re-check accepted 11 of 15 entered joins, and the same item flipped between
+  runs. Since option 1 (Approach item 2) the MVV no longer needs it: with the
+  switch on, an entered join that merged at least one item generates whatever
+  the re-check says.
 
 ## Proposed Solution
 
@@ -471,8 +477,19 @@ Three changes. Only the first two are on the path to the MVV.
    The re-check judges only new items (RDR-232's rule, `coverage_ledger.py`
    `evaluate(..., prior=...)`), so a record alone, which names a company but not
    the issue, is never judged supporting (0 of 8, 147-research-8), while the
-   joined item is (10 of 10, 147-research-9). Then the answer is generated from
-   evidence that holds the names. The gate is the signal
+   joined item usually is (10 of 10, 147-research-9; 11 of 15 in the 2026-11-05
+   MVV runs, 147-research-13). Then the answer is generated from evidence that
+   holds the names. **Option 1** (Sam, 2026-11-05, T2
+   `nexus/rdr147-option1-decision-2026-11-05`, taking the fallback of T2
+   `nexus/rdr147-c1-decision-2026-11-03`: "when the exact-key branch entered, the
+   re-check's verdict is not required to generate; the answer notice discloses
+   that the answer rests on an exact-key join"). This RDR reads "entered" as
+   entered AND merged at least one joined item, since an entered branch whose
+   pairs all dropped joined nothing. Then a final ledger that leaves the facets
+   uncovered does not stop generation. Every answer generated with a merged join
+   leads with a notice that it rests on an exact-key join, as the chosen option's text asks;
+   when the final ledger was uncovered, the notice adds that the coverage check
+   did not confirm it. The facet states stay as the re-check judged them. The gate is the signal
    itself: an unsupported facet AND entity-key tokens in the evidence. A question
    with no such tokens never reaches it, so simple questions are untouched
    (Beyond-Static guidance), and no second planning round, new plan dimension or
@@ -523,6 +540,13 @@ if first ledger has an unsupported facet (entry rule: see Step 4 sub-step 1)
      report r.missing and r.ambiguous in the RepairReport
      re-evaluate once (the existing single re-check, unchanged:
        it judges the new joined items only)
+     if at least one joined item merged and the final ledger is uncovered:
+       generate anyway (option 1); facet states unchanged;
+       RepairReport.generated_on_join = true
+     every answer generated with a merged join leads with the exact-key-join
+       notice naming the distinct keys of the merged items
+       (RepairReport.joined_keys); generated_on_join adds "the coverage check
+       did not confirm this answer"
 ```
 
 When the branch enters, it runs in place of the semantic facet queries, the
@@ -535,6 +559,48 @@ did on q2, q3, q4 and q7 (147-research-7). The repair's existing
 deadline and USD rules apply unchanged; `resolve` is a zero-cost step. The
 `missing` and `ambiguous` lists are disclosed, so a partial resolution is
 visible in the run summary rather than silent.
+
+**Generation after an entered join (option 1, Sam 2026-11-05).** This is the one
+exception this RDR adds to RDR-232's rule that a ledger covering no facet stops generation
+(`skip_generation`, and `decide_outcome` in `coverage_outcome.py` reading an
+`unavailable` / `uncovered` ledger as a non-answer). It applies only when the
+resolution branch entered and merged at least one joined item, under the same
+switch (`NX_ANSWER_RESOLUTION_REPAIR`), so a confined run, a run whose keys all
+failed to resolve, and every run with the switch off keep RDR-232's rule. The
+ledger is not rewritten: the facets keep the re-check's states and the final
+coverage state stays `unavailable` / `uncovered`. What changes, in this order:
+the boundary's result has `skip_generation` false; the RepairReport gains
+`generated_on_join: true` (on the wire and in the run summary's `resolution_*`
+counts as `resolution_generated_on_join`); `decide_outcome` gives such a run
+the answered shape, counts it as an answer, and sets `no_grow`, so an answer the
+coverage check did not confirm never grows a plan, but only when the generated
+text classifies as an answer: other text keeps today's `no_usable_answer`
+downgrade. The notice line is `[exact-key join: <n> record(s) joined by exact
+key (<keys>)]`, where `<keys>` are the distinct keys of the merged items
+(`RepairReport.joined_keys`) and `<n>` their count, with `; the coverage check
+did not confirm this answer` added when `generated_on_join` is true. It leads
+the prose of every answer generated with a merged join, ahead of the existing
+`[insufficient-evidence: ...]` notice on a partial answer (that notice's own
+wording would contradict an uncovered answer, so it is not reused for it).
+The generator gets no unresolved-facets note on these runs: `_note_unresolved`
+serves only `partial` and `complete` ledgers and skips an `unavailable` one, and
+this ledger stays `unavailable`; whether such a note would help is unmeasured and
+not built. Readers that took an uncovered final state to mean a withheld answer
+are handled in two ways. `answer_text_class` consults `generated_on_join` (a
+redacted row of such an answer stays `redacted` rather than
+`non_answer/uncovered`); `nx answer-runs` does not read the flag, it skips a
+leading join line so that the line does not hide a partial answer. The risk is an answer the coverage check did
+not confirm. The join fixes which record a key names, not whether the anchor
+message answers the question; that relevance is what the re-check judged, and
+nothing else on the coverage path checks it (R9). The 2026-11-05 precision (pooled 1.00 in every
+run, 147-research-12, 147-research-13) covers only answers the re-check
+accepted: 11 company-naming runs, 4 in `mvv-2026-11-05.jsonl` and 7 in
+`mvv-2026-11-05.run1.jsonl`, each of precision 1.00. The one template-7 row (a listing that named no
+company, which never reached the coverage boundary) is outside the precision
+mean, as is any run that names no company, and the 4 backend-question runs (2 in
+each file, the branch not entered) named none. The rejected joins produced
+non-answers, so the answers that only option 1 admits are unmeasured until the
+fresh MVV, which reports precision split by `generated_on_join`.
 
 **Entity-key classification (Step 1).** A per-collection pattern in config, for
 example `entity.collections: {"knowledge__herb-*": "CUST-\\d{4}|eid_[0-9a-f]{8}"}`,
@@ -577,7 +643,7 @@ lookups (hop-1 precision 0.967). A curated template is a contingency only
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | `resolve` step | `HttpCatalogClient.find_by_title_exact`, `resolve_many`; runner `_NON_EMBEDDING_TOOLS` | Add: a thin runner-native step over the existing exact lookup. New code (about 120 lines plus tests). |
-| Resolution repair | `CoverageBoundary.run`, `coverage_repair`, `repair_stream` | Extend: an exact-key branch inside the existing one repair. New code (about 250 lines plus tests). |
+| Resolution repair | `CoverageBoundary.run`, `coverage_repair`, `repair_stream` | Extend: an exact-key branch inside the existing one repair, and option 1's generation rule (`coverage_outcome.decide_outcome`, the notice in `mcp/core.py`). New code (about 300 lines plus tests). |
 | Entity-key patterns and `entity_key` | `config.py` `_DEFAULTS`, `.nexus.yml`; catalog document meta | Add: config key, stamp on store_put, `classify_entity` helper (about 150 lines). |
 | Graph expansion over `mentions` | `traverse` step | Reuse unchanged; it already runs as a `$ref`-seeded step. June's "extend the runner" was wrong. |
 | `mentions` links | `link_if_absent`, `upsertLink` | Reuse, conditional on Step 2. |
@@ -707,12 +773,20 @@ where evidence is seen.
   ladder, not fixed.
 - **R8, `links_from` shows tombstoned endpoints.** Matters only if the linker
   ships and a consumer other than `traverse` reads mentions links.
+- **R9, option 1 answers what the coverage check did not confirm.** An anchor
+  that holds a key but does not concern the question now yields an answer
+  instead of a decline. **Mitigation**: only with the switch on and at least one
+  merged join; the notice says so; `no_grow` keeps such answers from growing a
+  plan (a library plan that answered still has its success counted, as for a
+  partial answer today); the MVV reports precision split by `generated_on_join`, and the held-out
+  set counts answered outcomes as well as firings.
 
 ### Failure Modes
 
 - **Visible**: `resolve` returns keys in `missing` or `ambiguous`; the repair
   report and run summary carry them, and the answer is generated from whatever
-  did resolve, or declined as today.
+  did resolve, or, when nothing merged and the ledger is uncovered, declined as
+  today.
 - **Silent (if the linker ships)**: a stale `mentions` link after an entity
   record is trashed. `traverse` already skips tombstoned endpoints and `resolve`
   sees only live documents, so stale links cannot reach either; `links_from` and
@@ -740,12 +814,19 @@ controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 
 - **Join completeness:** on every issue question whose evidence holds at least
   one customer id, the answer names every company those ids resolve to (measured
-  10 of 10, 147-research-9).
+  10 of 10, 147-research-9). At most one such question may miss per run, with at
+  least 4 of the 5 issue questions in the domain (Sam, 2026-11-05,
+  147-research-12: the 2026-11-05 miss was the re-check's variance on the same
+  joined item).
 - **Precision:** the companies the answer names have precision ≥ 0.95 against
-  HERB ground truth on the 5 issue questions (measured 0.9667).
+  HERB ground truth, as the per-run mean over those of the 5 issue questions whose
+  answer names at least one company; a question whose answer names none is left out
+  (Sam, 2026-11-05, 147-research-12; measured 0.9667 on 2026-11-03,
+  147-research-9).
 
 Reported, not gated: issue5 company recall and F1 beside the script's
-0.7642857142857142 (asserted exactly, as the diagnostic baseline). Hop-1
+0.7642857142857142 (asserted exactly, as the diagnostic baseline), and precision
+split by `generated_on_join`. Hop-1
 retrieval recall, which sets the remaining gap (measured issue5 F1 0.7167), is
 separate later work.
 
@@ -755,7 +836,10 @@ rung stays as a diagnostic and cannot satisfy the MVV. The 2 aggregation
 questions are reported (recall, precision, F1) and not gated. A run that clears
 the bar only through the semantic repair, with the resolution branch not
 entering, does not satisfy the MVV: the run summary must show the resolution
-branch entered on the questions that pass.
+branch entered on the questions that pass. The bar as revised on 2026-11-05
+applies to a fresh run on code that carries option 1, not to the 2026-11-05
+rows: the first two runs predate the bar revision, and all four predate option
+1's code.
 
 ### Benchmark Ladder — per-phase observable metrics
 
@@ -772,13 +856,14 @@ gate thresholds, not exactly (plan T2 `nexus/plan-rdr147-2026-11-03`).
 | P2 (Step 3) | resolution accuracy | the 29 SearchFlow member customers (`p2_member_customers.json`) | 1.0 (by the harness's own exact-title lookup) | 1.0 through the `resolve` step, with `missing` and `ambiguous` empty |
 | P3 (diagnostic) | hop-1 precision | question → affected customers | all7 0.6904761904761905; issue5 0.9666666666666666 | reported, not gated |
 | E2E script (diagnostic) | company recall / precision / F1 | HERB ground truth | issue5 F1 0.7642857142857142 | pinned exactly; reported beside `nx_answer` |
-| E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | every resolved company named; precision ≥ 0.95 |
+| E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | ≥ 4 of 5 issue questions in the domain, every resolved company named, at most one miss per run; per-run mean precision ≥ 0.95 over the questions whose answer names a company |
 | Aggregation (reported) | company recall / precision / F1 on agg2 | HERB ground truth | script 0.0, `nx_answer` 0.0 | reported, not gated |
 
 **Jointness, as measured.** On HERB the MVV needs: the resolution repair enters
-(Assumption #5) AND `resolve` returns the right records (P2) AND the re-check
-judges the joined items supporting (147-research-9) AND the generated answer
-names the resolved companies. Hop-1 precision (P3) is not a factor on the
+(Assumption #5) AND `resolve` returns the right records (P2) AND the joined
+items reach generation (since option 1 whether or not the re-check covers them;
+it covered 11 of 15, 147-research-13) AND the generated answer names the
+resolved companies. Hop-1 precision (P3) is not a factor on the
 issue lookups at k=20. The linker (P1) is not on the path. Each phase review
 asserts its own rung and reports the `nx_answer` rung honestly.
 
@@ -840,6 +925,21 @@ a `$ref` step") is dropped: it already works.
 3. **Gate condition (Gap 4).** The resolution branch fires on the HERB issue
    questions and does not fire on a held-out set of single-hop questions; count
    both and record the counts.
+4. **Generation after an entered join (option 1, Sam 2026-11-05;
+   147-research-13).** Added after the 2026-11-05 MVV, where the re-check
+   rejected 4 of 15 entered joins: when the branch entered and merged at least
+   one joined item, an uncovered final ledger does not stop generation, and the
+   answer carries the exact-key-join notice (§Technical Design, Generation after
+   an entered join). Tests pin both sides: an entered join with an uncovered
+   ledger generates, carries the notice with its not-confirmed clause, reports
+   `generated_on_join`, and sets `no_grow`; a covered or partial answer from a
+   merged join carries the notice without the clause; generated text that is
+   not an answer keeps the `no_usable_answer` downgrade; with an uncovered
+   ledger, a run where the branch did not enter, merged nothing, ran confined,
+   or ran with the switch off is still a non-answer with no notice; a redacted
+   row of a `generated_on_join` answer is not classed as a non-answer. The harness splits precision
+   by `generated_on_join` and counts answered held-out outcomes. Then a fresh
+   MVV run.
 
 #### Step 5: Pin link deletion behavior
 
@@ -851,7 +951,9 @@ endpoints as `traverse` does; this matters only if Step 2 ships.
 
 The resolution repair and the linker default off; enable on the HERB sandbox
 first. Default-on for the resolution repair requires: the MVV green, P2 = 1.0
-through `resolve`, and Step 4's single-hop non-firing count recorded. The linker
+through `resolve`, Step 4's single-hop non-firing and answered counts recorded,
+and the MVV's precision on `generated_on_join` answers reported (the switch now
+also carries option 1's generation rule). The linker
 has its own gate if built: P1 at its targets.
 
 ### Day 2 Operations
@@ -866,13 +968,14 @@ has its own gate if built: P1 at its targets.
 No new external packages. New components:
 
 - `resolve` step: about 120 lines plus tests.
-- Resolution repair branch in the coverage boundary: about 250 lines plus tests.
+- Resolution repair branch in the coverage boundary, with option 1's generation
+  rule and notice: about 300 lines plus tests.
 - Entity-key config, `entity_key` stamp and `classify_entity`: about 150 lines.
 - Entity linker, conditional: about 300 lines (forward hook, reverse generator,
   dry run).
 
 Reused unchanged: `find_by_title_exact` and the by-title route, the coverage
-boundary's budgets and disclosure, `traverse`, the hook registry, catalog typed
+boundary's budgets, `traverse`, the hook registry, catalog typed
 links and the FK cascade.
 
 ## Finalization Gate
@@ -895,7 +998,8 @@ is built (Step 2). #5 was acknowledged unverified at gate round 2 (Sam,
 2026-11-03; 147-research-6) and is now verified by spike (147-research-7). #6
 (the re-check judges a joined item supporting) is verified by spike on HERB only
 (147-research-8 and 147-research-9; counts in 147-research-10), with the caveats
-listed under it.
+listed under it; weakened on 2026-11-05 to 11 of 15 (147-research-12, -13), and
+since option 1 the MVV no longer needs it.
 
 #### API Verification
 
@@ -911,7 +1015,9 @@ listed under it.
 The Minimum Viable Validation is in scope and is the Step 4 exit test: on the
 Step 0 sandbox and conditions, with grown plans disabled and two runs per
 question, the answer names every company its retrieved customer ids resolve to,
-at precision ≥ 0.95 on the 5 issue questions; recall and F1 are reported beside
+with at least 4 of the 5 issue questions in the domain and at most one miss per
+run, at precision ≥ 0.95 over those of the 5 issue
+questions whose answer names a company (Sam, 2026-11-05); recall and F1 are reported beside
 the script's 0.7642857142857142. The 2 aggregation questions are reported, not gated (Sam,
 2026-11-03).
 
@@ -933,7 +1039,7 @@ the script's 0.7642857142857142. The 2 aggregation questions are reported, not g
 
 Right-sized for a redesign of three mechanisms and the validation bar. The
 document is long because it carries measured numbers with their conditions and
-the anchors an implementer needs; the implementation itself is about 520 lines
+the anchors an implementer needs; the implementation itself is about 570 lines
 plus tests on the MVV path (resolve, the repair branch, entity keys), with the
 linker conditional.
 
@@ -946,3 +1052,8 @@ linker conditional.
 - 2026-11-03: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0de44d26a`; critique `nexus_rdr/147-gate-critique-2026-11-03-r3`.
 - 2026-11-03: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `7e79312f0`; critique `nexus_rdr/147-gate-critique-2026-11-03-r4`.
 - 2026-11-03: Accepted. Round 3 residual dispositions: S1 nexus-wunaf; S2 nexus-v3g1n; S3 nexus-nx6eq (Phase 1 Step 4).
+- 2026-11-05: MVV bar revised after the 2026-11-05 run (nexus-irndi, Sam, T2 `nexus/rdr147-mvv-bar-revision-2026-11-05`, 147-research-12): one in-domain miss allowed per run; precision taken over the answers that name a company.
+- 2026-11-05: option 1 taken after the MVV rerun (Sam, T2 `nexus/rdr147-option1-decision-2026-11-05`, 147-research-13): an entered exact-key join generates whatever the re-check says, with a notice; Assumption #6 weakened to 11 of 15; Step 4 sub-step 4 added. Fix-check observations of 80e18913a applied (floor in the table and Scope Verification, the 0.9667 citation, the fresh-run clause).
+- 2026-11-05: fix-check 3e08dbecd findings applied: the option 1 outcome mapping (answered shape, `no_grow`, `generated_on_join`, its own notice), the notice scoped to uncovered answers, "merged at least one" marked as this RDR's reading, stale Assumption #6 and Jointness sites, R9, the precision-evidence caveat, the fresh-run clause, sizes.
+- 2026-11-05: text brought into line with the option 1 code (69cc82790) and fix check b60dab40e: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
+- 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.

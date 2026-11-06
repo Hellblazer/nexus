@@ -116,7 +116,12 @@ def export_cmd(output: Path) -> None:
 
 @click.command("import")
 @click.argument("bundle", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-def import_cmd(bundle: Path) -> None:
+@click.option(
+    "--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False,
+    help="Accept that a note flagged sensitive (in the bundle, or already in the catalog) is restored into a "
+         "Voyage collection, which sends its text to Voyage AI. Without it, that note is refused and counted "
+         "as a failure; the rest of the bundle restores.")
+def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
     """Import a recovery bundle written by 'nx catalog export'.
 
     Knowledge docs are written through the note writer MCP store_put uses
@@ -138,7 +143,9 @@ def import_cmd(bundle: Path) -> None:
     from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — command-local import
 
     try:
-        summary = import_bundle(reader, writer, make_t3(), bundle)
+        summary = import_bundle(
+            reader, writer, make_t3(), bundle,
+            **({"ack_external_embedder": True} if ack_external_embedder else {}))
     except NoteUriEngineTooOldError as exc:
         # The first note hit it and so would every other: one clear error, not N per-note failures.
         raise click.ClickException(f"recovery import aborted at the first note: {exc}") from exc

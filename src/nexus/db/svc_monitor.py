@@ -80,10 +80,10 @@ PsqlRunner = Callable[..., "subprocess.CompletedProcess[str]"]
 _GRANTS_004_REMEDY = (
     "nexus_svc must hold pg_monitor MEMBERSHIP before this call can "
     "succeed (grants-004-monitor-wal-visibility, "
-    "service/src/main/resources/db/changelog/grants-nexus-svc.xml). "
+    "https://github.com/Hellblazer/nexus/blob/main/service/src/main/resources/db/changelog/grants-nexus-svc.xml). "
     "REMEDY: confirm nexus_admin holds `pg_monitor WITH ADMIN OPTION` "
-    "(docs/configuration.md prerequisite 2 -- the local bundle installer "
-    "runs this automatically via src/nexus/db/pg_provision.py; bring-"
+    "(prerequisite 2 of https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md -- the local bundle installer "
+    "runs this automatically via nexus.db.pg_provision; bring-"
     "your-own/managed Postgres deployments must run it manually) and "
     "that the engine has applied its Liquibase migration at least once "
     "since."

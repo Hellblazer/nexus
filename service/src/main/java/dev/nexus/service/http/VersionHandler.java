@@ -41,6 +41,7 @@ import java.util.function.Supplier;
  *  "nx_answer_out_of_step_cost_supported":true,
  *  "search_row_owner_span_supported":true,
  *  "vector_search_chash_allow_supported":true,
+ *  "catalog_sensitivity_supported":true,
  *  "route_b_manifest_keys_supported":true,
  *  "route_c_manifest_keys_supported":true,
  *  "schema_latest_id":"vectors-002",
@@ -455,6 +456,23 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-rfvyy.6.5 capability advertisement (RDR-243): does this engine carry the document sensitivity flag,
+     * that is {@code catalog_documents.sensitive}, the audited {@code POST /v1/catalog/sensitivity} route, the
+     * {@code sensitive} key on every document JSON and on each {@code /manifest/chash_positions} row, and the
+     * register-time key {@code sensitive}?
+     *
+     * <p>An independent flag, and the only evidence: an engine without the column reads a register body by key,
+     * ignores {@code "sensitive": true} and answers 200, so a client that marks a document sensitive must read
+     * this flag first or the mark is dropped without an error. Always present, always {@code true} on an engine
+     * carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code vector_search_chash_allow_supported} precedent): that allowlist entry is paired conexus work that
+     * lands before the client release, and without it a cloud client refuses {@code --sensitive} writes.
+     */
+    static void appendCatalogSensitivityCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_sensitivity_supported\":true");
+    }
+
+    /**
      * nexus-qpt52 capability advertisement (RDR-236 Phase 3, the route (b) dispatch the Phase 4 sweep precondition
      * reads, RDR-236 line 1760): does every route (b) search ({@code POST /v1/vectors/search-metadata-scoped},
      * {@code /search-aspect-scoped}, {@code /search-graph-hop}) answer a {@code where} on EVERY key {@code
@@ -687,6 +705,8 @@ public final class VersionHandler implements HttpHandler {
         appendSearchRowOwnerSpanCapabilityField(body);
         // nexus-jypmj (RDR-232): the chash_allow restriction on the four vector search routes.
         appendVectorSearchChashAllowCapabilityField(body);
+        // nexus-rfvyy.6.5 (RDR-243): the document sensitivity flag, the audited route and the key on the wire.
+        appendCatalogSensitivityCapabilityField(body);
         // nexus-qpt52: route (b) answers every stage-answered key and operator per owning document.
         appendRouteBManifestKeysCapabilityField(body);
         // nexus-u9dc5: route (c), the get routes, answers the same keys per owning document.

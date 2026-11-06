@@ -46,6 +46,7 @@ import enum
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -374,6 +375,11 @@ class InstallPlan:
     why: str = ""
 
 
+def _checkout_script(source: object) -> str:
+    """The checkout's rebuild script as one shell word: a checkout path with a space still pastes."""
+    return shlex.quote(f"{source}/scripts/reinstall-tool.sh")
+
+
 def install_plan() -> InstallPlan:
     """What kind of install this process runs from, and so whether the auto
     path may touch it. The auto path builds a generation; it never rebuilds a
@@ -393,7 +399,7 @@ def install_plan() -> InstallPlan:
             )
         if receipt.source_kind == "directory":
             return InstallPlan(
-                "directory", False, "NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh",
+                "directory", False, f"NX_REINSTALL_EXTRAS=pdf {_checkout_script(receipt.source)}",
                 f"this install was built from the checkout {receipt.source}",
             )
         return InstallPlan("generation", True, INSTALL_COMMAND)
@@ -828,7 +834,7 @@ def _install_generation(*, carrying: bool = False, notes: list[str] | None = Non
                 raise PdfStackMissingError(
                     f"PDF support is not installed in the current generation ({receipt.version}, built from "
                     f"{receipt.source}), which is newer than this process ({version}); nothing was written. "
-                    "Run: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh"
+                    f"Run: NX_REINSTALL_EXTRAS=pdf {_checkout_script(receipt.source)}"
                 )
             version = receipt.version
             extras = tuple(sorted({"pdf", *receipt.extras}))

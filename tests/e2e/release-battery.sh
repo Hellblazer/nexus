@@ -4,17 +4,38 @@
 #   tests/e2e/release-battery.sh [--max-parallel N] [--only a,b,c] [--skip-preflight] [--plan]
 #                                [--plugin-only vX.Y.Z]
 #
-# Five legs and a preflight (cleanup step 11, nexus-0r1uz; dual nexus-oc2bk; resolve nexus-2k66t.4.4):
+# Six legs and a preflight (cleanup step 11, nexus-0r1uz; dual nexus-oc2bk; resolve nexus-2k66t.4.4;
+# plugins nexus-z7ddd):
 #   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
 #   pkgup  tests/e2e/migration-rehearsal/run.sh --package-upgrade    package-upgrade convergence
 #   lsg    tests/e2e/local-service-gate.sh                            the local-service gate
 #   dual   tests/e2e/dual-embedder-gate.sh                            the keyed bge + Voyage engine (needs a key)
 #   resolve tests/e2e/constraints-resolve-gate.sh                     the shipped lock resolves on every supported
 #                                                                     target (uv pip compile, off-host; network)
+#   plugins tests/e2e/plugin-out-of-repo-gate.sh --all                the four plugins (conexus, sn, tool-spill,
+#                                                                     prose-edit) run from a project outside any
+#                                                                     nexus checkout: the static pass over each plus
+#                                                                     the CANARY (a fixture plugin with random nonces
+#                                                                     that measures what Claude Code substitutes).
+#                                                                     The static pass is deterministic; the canary
+#                                                                     is five live model runs judged on events,
+#                                                                     delivered text and the init event (it needs the
+#                                                                     model to print a nonce; UNVERIFIED is red: rerun,
+#                                                                     never waive). The model-driven per-target sweep
+#                                                                     is NOT in the battery (release skill Step 11c,
+#                                                                     advisory, after publish). The
+#                                                                     canary needs the claude CLI (the laptop): where
+#                                                                     $NX_GATE_CLAUDE (default claude) is not on PATH
+#                                                                     the leg runs --static-only, its row reads
+#                                                                     "(static pass only)" and so does the CLOSING
+#                                                                     LINE. NX_BATTERY_PLUGIN_GATE_LIVE=0 asks for that
+#                                                                     on purpose. Unlike the five above it also runs in
+#                                                                     --plugin-only mode: the plugin trees are what
+#                                                                     that mode changes.
 #
 # Serial first: tests/e2e/release-preflight.sh (the ci-evidence required-context
 # drift tests, the wire-contract ledger, the mandatory pins and the pin sweep).
-# Then the five legs in ONE parallel group, MAX_PARALLEL wide (default 4), each
+# Then the six legs in ONE parallel group, MAX_PARALLEL wide (default 4), each
 # leg in its own log, each verdict line captured verbatim with wall-clock
 # seconds. Reds never stop the battery; one table at the end; exit 1 on any
 # red. A leg that exits 0 without its verdict line is MISSING, never passed
@@ -183,6 +204,7 @@ BATTERY_T0=$(date +%s)
 # Matches on the postmaster's -D data directory being under OUR $WORK, so it
 # can never touch a peer's cluster, a gate this battery did not start, or the
 # operator's real service. SIGINT is Postgres's fast-shutdown signal.
+# shellcheck disable=SC2329  # invoked by the EXIT/INT/TERM trap below
 _reap_our_clusters() {
   local rc=$?
   local pids
@@ -196,20 +218,20 @@ _reap_our_clusters() {
     # shellcheck disable=SC2086
     [ -n "$pids" ] && kill -KILL $pids 2>/dev/null || true
   fi
-  return $rc
+  return "$rc"
 }
 trap _reap_our_clusters EXIT INT TERM
 
 echo "RELEASE BATTERY: work=$WORK max-parallel=$MAX_PARALLEL tree=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || printf ' (dirty)')${PLUGIN_ONLY_BASE:+ mode=plugin-only base=$PLUGIN_ONLY_BASE}"
 
 # ── leg table ────────────────────────────────────────────────────────────────
-declare -A LEG_CMD LEG_VERDICT LEG_STATUS LEG_START LEG_END LEG_RC LEG_LINE LEG_PHASE
+declare -A LEG_CMD LEG_VERDICT LEG_STATUS LEG_START LEG_END LEG_LINE LEG_PHASE
 ORDER=()
 define_leg() {  # define_leg <name> <phase> <verdict-regex> <command...>
   local name="$1" phase="$2" verdict="$3"; shift 3
   ORDER+=("$name"); LEG_PHASE[$name]="$phase"; LEG_VERDICT[$name]="$verdict"
   # %q-quoted so a path with a space survives the bash -c replay
-  LEG_CMD[$name]="$(printf '%q ' "$@")"; LEG_STATUS[$name]="PENDING"; LEG_START[$name]=""; LEG_END[$name]=""; LEG_RC[$name]=""; LEG_LINE[$name]=""
+  LEG_CMD[$name]="$(printf '%q ' "$@")"; LEG_STATUS[$name]="PENDING"; LEG_START[$name]=""; LEG_END[$name]=""; LEG_LINE[$name]=""
 }
 
 [ "$SKIP_PREFLIGHT" = 1 ] || \
@@ -227,8 +249,19 @@ define_leg dual       group  "DUAL-EMBEDDER GATE (PASSED|FAILED)"       tests/e2
 # macOS 13 negative control. Network, no install; release battery and by hand only,
 # never the default suite. Offline self-test: tests/e2e/constraints_resolve_gate_test.sh.
 define_leg resolve    group  "CONSTRAINTS RESOLVE GATE (PASSED|FAILED)" tests/e2e/constraints-resolve-gate.sh
+# nexus-z7ddd: the plugins as a user runs them, from a project that is not a nexus checkout. Static pass
+# plus the canary (5 short claude runs against a fixture plugin); where claude is absent (chas, CI pool)
+# the static pass runs alone and says so in the row AND in the closing line rather than skipping. The same
+# NX_GATE_CLAUDE knob the gate reads decides it, so the probe and the run cannot disagree.
+PLUGINS_GATE_ARGS=(--all)
+PLUGINS_STATIC_ONLY=0
+if [ "${NX_BATTERY_PLUGIN_GATE_LIVE:-1}" = 0 ] || ! command -v "${NX_GATE_CLAUDE:-claude}" >/dev/null 2>&1; then
+  PLUGINS_GATE_ARGS+=(--static-only)
+  PLUGINS_STATIC_ONLY=1
+fi
+define_leg plugins    group  "PLUGIN OUT-OF-REPO GATE (PASSED|FAILED|UNVERIFIED|NOT-APPLICABLE)"  tests/e2e/plugin-out-of-repo-gate.sh "${PLUGINS_GATE_ARGS[@]}"
 
-# nexus-rbmja.3: the plugin-only fast lane. The five legs above stay in the table and are marked
+# nexus-rbmja.3: the plugin-only fast lane. The five legs above (all but plugins) stay in the table and are marked
 # SKIPPED, never omitted. What the eligibility gate above proved is that the diff from the last client
 # tag touches nothing the wheel or the engine are built from but the version strings, so the wheel and
 # engine are those of the tag; tests/ and the plugin trees DO differ, and the skipped legs are not pure
@@ -280,6 +313,11 @@ battery_verdict() {  # battery_verdict <red-count>
   local red="$1" why=() joined mode=""
   [ "${ONLY_SKIPPED:-0}" -eq 0 ] || why+=("${ONLY_SKIPPED} leg(s) skipped by --only")
   [ "$PLUGIN_ONLY" != 1 ] || mode="PLUGIN-ONLY vs ${PLUGIN_ONLY_BASE}: ${PLUGIN_SKIPPED} leg(s) skipped by design"
+  # The plugins leg ran without the canary (no claude, or asked for): the closing line says so, so a
+  # reader of the last line alone does not take a static-only plugin check for the measured one.
+  if [ "${PLUGINS_STATIC_ONLY:-0}" = 1 ] && [ "${LEG_STATUS[plugins]:-}" = PASSED ]; then
+    mode="${mode:+$mode; }plugins leg static pass only: the canary did not run, run it where claude is"
+  fi
   if [ "$red" -eq 0 ]; then
     if [ "${#why[@]}" -gt 0 ]; then
       joined="$(printf '%s; ' "${why[@]}")"
@@ -295,7 +333,7 @@ battery_verdict() {  # battery_verdict <red-count>
 }
 finish_leg() {  # finish_leg <leg> <rc>
   local leg="$1" rc="$2" line clean prop
-  LEG_END[$leg]=$(date +%s); LEG_RC[$leg]="$rc"
+  LEG_END[$leg]=$(date +%s)
   clean="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOGS/$leg.log")"
   # verbatim verdict line: last match after stripping ANSI colour
   line="$(printf '%s\n' "$clean" | grep -E "${LEG_VERDICT[$leg]}" | tail -1 || true)"
@@ -328,7 +366,7 @@ run_serial() {
   start_leg "$leg"; wait "${LEG_PID[$leg]}"; finish_leg "$leg" $?
 }
 run_group() {  # run_group <leg...>: MAX_PARALLEL wide, reds do not stop the rest
-  local queue=("$@") running=() leg pid rc i
+  local queue=("$@") running=() leg pid rc
   while [ ${#queue[@]} -gt 0 ] || [ ${#running[@]} -gt 0 ]; do
     while [ ${#queue[@]} -gt 0 ] && [ ${#running[@]} -lt "$MAX_PARALLEL" ]; do
       leg="${queue[0]}"; queue=("${queue[@]:1}")

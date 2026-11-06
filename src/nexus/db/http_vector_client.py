@@ -5285,9 +5285,28 @@ class HttpVectorClient:
     def chunk_keys_sweep(
         self, *, dry_run: bool = True, accept: Mapping[str, int] | None = None, collection: str | None = None,
         batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
-        measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None,
+        measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None, tenant: str | None = None,
+        operator: str | None = None,
     ) -> dict:
-        """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant (nexus-6pfgb.43).
+        """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant, or of ``tenant`` when the
+        credential is the root one (nexus-6pfgb.43).
+
+        ``tenant`` names the target. A credential bound to that tenant sweeps it as before; the root credential may name
+        another registered tenant (the engine runs the call in that tenant's scope); a tenant credential naming another
+        tenant is 403 ``tenant_mismatch`` (a data or mint credential gets the scope 403, with no reason), an
+        unregistered name is 422 ``unknown_tenant``. The answer's ``tenant`` is the tenant that was swept: an engine that
+        predates the field ignores ``tenant`` and answers for the credential's own tenant, so a caller that asked for
+        one tenant must compare the answer's ``tenant`` with it before it goes on (``nx t3 retire-keys`` does, before
+        any apply).
+
+        EVERY sweep the root credential makes is audited by the engine, named tenant or not: an intent row before the
+        first read and an outcome row after the work, both in the target tenant's ``gc_audit`` (operation
+        ``retire_keys_sweep``). The answer carries ``audit`` = ``{"actor", "tenant", "intent_id", "outcome_id"}``.
+        ``operator`` is an optional free-text label (at most 80 printable characters) recorded in both rows, so one
+        shared root token still says which person ran the sweep. A sink that cannot be written refuses the call before
+        any read or change: 503 ``audit_unavailable`` (no sink), 500 ``audit_intent_failed``; after the work, 500
+        ``audit_write_failed`` (the outcome row; the answer's counts and ``resume`` ride in ``engine_body``) or 500
+        ``sweep_failed`` (an error inside the work; ``rows_swept`` and ``rows_changed`` ride in ``engine_body``).
 
         The allow-list, the bypass prefixes and the quarantine implication ride in the body, rendered from the key
         table (:func:`nexus.tables.chunk_metadata_keys.engine_plan`): the engine cannot name the ROW keys, so it pins
@@ -5318,6 +5337,10 @@ class HttpVectorClient:
         from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
 
         body: dict[str, Any] = {**engine_plan(), "dry_run": dry_run}
+        if tenant is not None:
+            body["tenant"] = tenant
+        if operator is not None:
+            body["operator"] = operator
         if accept:
             body["accept"] = {str(name): int(rows) for name, rows in accept.items()}
         if resume:

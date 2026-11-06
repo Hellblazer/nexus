@@ -563,6 +563,13 @@ public class TenantKeyedStateGateTest {
                 + "listKnownTenants), read on each table-wide request; it caches nothing");
             notKeyed.put("NexusService.chunkConstraintAdmin", "the admin-connection DDL object bound once at boot; "
                 + "table-wide, it opens a connection per call and holds no per-tenant state");
+            notKeyed.put("NexusService.chunkKeysAudit", "the sink behind a root credential's retire-keys sweep audit "
+                + "(CatalogRepository#recordGcAudit), bound once at boot, replaced only by a test; it is a function "
+                + "that writes a row in the tenant it is given and holds no per-tenant state");
+            for (String f : List.of("ChunkKeysAdminHandler.Trail.callerTenant", "ChunkKeysAdminHandler.Trail.accepted")) {
+                notKeyed.put(f, "a field of the audit trail of ONE sweep request (built per request, dropped with "
+                    + "its response); the handler holds no reference to it afterwards");
+            }
             notKeyed.put("NexusService.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("AuthFilter.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("TokenAdminHandler.cache", TOKEN_CACHE_REF);

@@ -714,7 +714,13 @@ from __future__ import annotations
 #: PG17 / BYPASSRLS boot refusals (0.1.177), and the section-label fillable count
 #: (nexus-l4hds), the chunk-keys admin routes (nexus-6pfgb.43) and the
 #: quarantine-restore chunk-key filter (nexus-l003p).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 178)
+#: 0.1.179 (conexus 7.95.1): pairs with engine-service-v0.1.179 (tagged
+#: 2026-11-05 on 1986726b9). Text-only engine changes since v0.1.178: the
+#: re-embed refusal's restart remedy (nexus-pplwc), the PG17 / BYPASSRLS / pooler
+#: boot-refusal messages, the grants-004 RAISE text and the tuple templates' doc
+#: links (nexus-z7ddd). No wire change; the pin rises so the release's source
+#: tree and its pinned engine tag agree.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 179)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

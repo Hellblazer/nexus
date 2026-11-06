@@ -320,6 +320,7 @@ from nexus.commands.catalog_cmds import recovery as _recovery_cmds  # noqa: E402
 from nexus.commands.catalog_cmds import trash as _trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import ghost_sweep as _ghost_sweep_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import footnotes as _footnotes_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import sensitivity as _sensitivity_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -340,6 +341,7 @@ _recovery_cmds.register(catalog)
 _trash_cmds.register(catalog)
 _ghost_sweep_cmds.register(catalog)
 _footnotes_cmds.register(catalog)
+_sensitivity_cmds.register(catalog)
 
 
 @catalog.command("init", hidden=True)
@@ -370,6 +372,33 @@ def setup_cmd(remote: str) -> None:
     )
 
 
+def _resolve_owner_option(cat: "CatalogReader", owner: str) -> Tumbler:
+    """Resolve an ``--owner`` value: a dotted tumbler, else an owner name (#537 / nexus-1lx7).
+
+    Shared by ``nx catalog list --owner`` and ``nx catalog sensitive --path ... --owner``. Raises
+    ``ClickException`` for an unknown or ambiguous name.
+    """
+    try:
+        return Tumbler.parse(owner)
+    except (ValueError, TypeError):
+        matches = cat.owner_tumblers_by_name(owner)
+        if not matches:
+            raise click.ClickException(
+                f"--owner {owner!r}: not a dotted tumbler "
+                f"(e.g. '1.2') and no owner has this name. "
+                f"Use `nx catalog stats` to list known owners."
+            )
+        if len(matches) > 1:
+            candidates = ", ".join(str(t) for t in matches)
+            raise click.ClickException(
+                f"--owner {owner!r}: ambiguous; "
+                f"{len(matches)} owners share this name across "
+                f"types ({candidates}). Pass the dotted tumbler "
+                f"directly to disambiguate."
+            )
+        return matches[0]
+
+
 @catalog.command("list")
 @click.option("--owner", default="")
 @click.option("--type", "content_type", default="")
@@ -380,8 +409,11 @@ def setup_cmd(remote: str) -> None:
                    "`--meta quality_gate_overridden=true`, `--meta extraction_method=mineru`. "
                    "An absent key matches nothing, except extraction_source, which is `file` when absent. "
                    "Scans the catalog's documents (nexus-6pfgb.16).")
+@click.option("--sensitive", "only_sensitive", is_flag=True,
+              help="Keep only documents flagged sensitive (RDR-243): the list to review before a clear. "
+                   "Scans the catalog's documents, like --meta; paging applies to the matches.")
 @click.option("--json", "as_json", is_flag=True)
-def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filters: tuple[str, ...], as_json: bool) -> None:
+def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filters: tuple[str, ...], only_sensitive: bool, as_json: bool) -> None:
     """List catalog entries."""
     from nexus.catalog.meta_filter import documents_with_meta, parse_meta_filters  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
@@ -397,26 +429,7 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
         # human-readable name they see in catalog output. Without this
         # fallback, non-dotted strings leaked the raw int() ValueError
         # from Tumbler.parse as a stack trace.
-        owner_tumbler: Tumbler | None
-        try:
-            owner_tumbler = Tumbler.parse(owner)
-        except (ValueError, TypeError):
-            matches = cat.owner_tumblers_by_name(owner)
-            if not matches:
-                raise click.ClickException(
-                    f"--owner {owner!r}: not a dotted tumbler "
-                    f"(e.g. '1.2') and no owner has this name. "
-                    f"Use `nx catalog stats` to list known owners."
-                )
-            if len(matches) > 1:
-                candidates = ", ".join(str(t) for t in matches)
-                raise click.ClickException(
-                    f"--owner {owner!r}: ambiguous; "
-                    f"{len(matches)} owners share this name across "
-                    f"types ({candidates}). Pass the dotted tumbler "
-                    f"directly to disambiguate."
-                )
-            owner_tumbler = matches[0]
+        owner_tumbler = _resolve_owner_option(cat, owner)
         entries = cat.by_owner(owner_tumbler)
         # GH #568: --owner path is by-owner-then-Python-filter (the
         # owner cardinality is naturally small so the post-filter is
@@ -431,9 +444,12 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
         # 0. Mirrors PR #533's fix for the MCP catalog_list surface.
         # nexus-6pfgb.16: a meta filter cannot be pushed into SQL, so it scans every document of the type
         # (0 is the unbounded read) and pages the matches.
+        # RDR-243: the sensitive flag is not pushed into SQL either, so it scans like a meta filter.
         entries = cat.all_documents(
-            limit=0 if meta_wanted else limit + offset + 1, content_type=content_type,
+            limit=0 if (meta_wanted or only_sensitive) else limit + offset + 1, content_type=content_type,
         )
+    if only_sensitive:
+        entries = [e for e in entries if e.sensitive]
     if meta_wanted:
         entries = documents_with_meta(entries, meta_wanted)
     total = len(entries)

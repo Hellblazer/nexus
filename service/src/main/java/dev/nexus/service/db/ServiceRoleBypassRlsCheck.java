@@ -65,8 +65,8 @@ public final class ServiceRoleBypassRlsCheck {
             + " on would carry no DML grant for " + r + " and the first write to one would fail with permission"
             + " denied; row-level security, which isolates tenants, would not bind " + r + " either (nexus-b1adx)."
             + " Fix: as a superuser run ALTER ROLE " + r + " NOBYPASSRLS, then restart the engine. A role that"
-            + " needs BYPASSRLS for diagnostics is nexus_diag, not the service role. See docs/configuration.md,"
-            + " \"Storage Service (Postgres) Prerequisites\".");
+            + " needs BYPASSRLS for diagnostics is nexus_diag, not the service role. See "
+            + "https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#storage-service-postgres-prerequisites");
     }
 
     /**

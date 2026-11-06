@@ -36,6 +36,7 @@ __all__ = [
     "AnswerShape",
     "NON_ANSWER_SHAPES",
     "INSUFFICIENT_EVIDENCE_NOTICE_PREFIX",
+    "EXACT_KEY_JOIN_NOTICE_PREFIX",
     "ANSWERING_OPERATORS",
     "is_answering_operator",
     "classify_answer_shape",
@@ -98,7 +99,9 @@ class AnswerShape(str, Enum):
     NO_EVIDENCE = "no_evidence"
     #: RDR-232 section 4 (nexus-jypmj.3.3): the coverage state was ``partial`` and a usable answer exists, so
     #: ``final_text`` is the marker notice (``[insufficient-evidence: <n> unresolved]``, then the unresolved
-    #: facets) followed by the prose. NOT in :data:`NON_ANSWER_SHAPES`: that set couples ``success=False``, no
+    #: facets) followed by the prose; when the run merged an exact-key join (RDR-147) the text opens with
+    #: ``[exact-key join: ...]`` ahead of that marker, and an uncovered ledger that generated on a join is ANSWERED when its text is an answer
+    #: behind the same line (``coverage_outcome.render_exact_key_join_notice``). NOT in :data:`NON_ANSWER_SHAPES`: that set couples ``success=False``, no
     #: plan growth and a notice in place of the prose, and a partial answer needs only the no-grow effect,
     #: which ``nx_answer`` applies through an explicit flag. Set by ``nx_answer`` from the coverage state,
     #: never by :func:`classify_answer_shape`.
@@ -248,6 +251,10 @@ def classify_answer_shape(final_text: str | None) -> AnswerShape:
 #: (a ``trace=True`` row without a run summary), so keep it stable. The marker line carries a count and no
 #: question text, so it survives ``trace=False`` redaction wherever the text itself is kept.
 INSUFFICIENT_EVIDENCE_NOTICE_PREFIX: str = "[insufficient-evidence:"
+
+#: Opening of the one notice line an answer carries when its run merged an exact-key join (RDR-147, nexus-irndi). On a
+#: partial answer it opens the text, ahead of the insufficient-evidence notice, so a reader that keys on that prefix skips it.
+EXACT_KEY_JOIN_NOTICE_PREFIX: str = "[exact-key join:"
 
 
 #: Text-mode notice prefix for a non-answer. ``nx answer-runs`` keys on

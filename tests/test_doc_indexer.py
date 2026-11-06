@@ -523,6 +523,9 @@ class TestIndexPdfUnchunkableGuard:
 # ── nexus-uxg4u: --dry-run must never touch the catalog ─────────────────────
 
 
+# RDR-243 (nexus-rfvyy.6.20): a dry run reads the catalog's sensitivity flag, read-only, so it needs a tenant
+# to read from; it still registers and writes nothing, which is what these pin.
+@pytest.mark.t2_tenant
 class TestIndexPdfDryRunNeverTouchesCatalog:
     def test_dry_run_never_calls_register_or_lookup_doc_id(
         self, sample_pdf, throwaway_t3,
@@ -2963,6 +2966,7 @@ def test_index_pdf_incremental_progress_fires(incr_setup):
     assert [d for d, _ in progress] == sorted(d for d, _ in progress), "progress never goes back"
 
 
+@pytest.mark.t2_tenant  # RDR-243: the dry run reads the catalog's sensitivity flag (read-only)
 def test_index_pdf_incremental_dry_run_puts_the_chunks_in_the_throwaway_store(incr_setup):
     """A dry run writes no catalog row, so there is no owner row to write; the chunks go straight
     into the caller's throwaway store, batch by batch, and the writer is never used."""

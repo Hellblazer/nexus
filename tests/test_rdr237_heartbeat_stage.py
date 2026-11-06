@@ -125,10 +125,18 @@ def test_the_batch_path_passes_no_heartbeat() -> None:
     """``index_pdf``'s all-in-memory path has no pipeline row to stamp (the RDR's Progress and
     Step 2 text say so since the 2026-10-27 amendment)."""
     tree = ast.parse(inspect.getsource(doc_indexer))
+
+    def builds_pdf_extractor(node: ast.AST) -> bool:
+        """``PDFExtractor(...)``, or the sensitive-or-plain choice of one (RDR-243 row 21:
+        ``PDFExtractor(sensitive=True) if sensitive else PDFExtractor()``)."""
+        if isinstance(node, ast.IfExp):
+            return builds_pdf_extractor(node.body) and builds_pdf_extractor(node.orelse)
+        return isinstance(node, ast.Call) and getattr(node.func, "id", "") == "PDFExtractor"
+
     calls = [
         n for n in ast.walk(tree)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "extract"
-        and isinstance(n.func.value, ast.Call) and getattr(n.func.value.func, "id", "") == "PDFExtractor"
+        and builds_pdf_extractor(n.func.value)
     ]
     assert calls, "non-vacuity: the batch path's PDFExtractor().extract call was found"
     for call in calls:

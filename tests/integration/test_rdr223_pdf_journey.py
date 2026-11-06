@@ -32,7 +32,8 @@ The journeys (RDR-223 Test Plan 8 for each path, and the bead tests):
   only the stamp (no data request, no fence begin, no second extraction), after which the buffer goes;
 * every non-streaming path stamps complete LAST: a kill in a post-store hook leaves the document
   ``indexing`` and the rerun fires the hooks again (RDR-223 D2);
-* a dry run is confined to its throwaway store and sends the engine nothing, pipeline buffer included.
+* a dry run is confined to its throwaway store and sends the engine no write and no pipeline-buffer request;
+  its only engine traffic is the read-only catalog lookup of the document's sensitivity flag (RDR-243).
 
 "Owner" means a ``catalog_document_chunks`` row of the document; "written by the run" means a chash
 of the run's own chunks that the vector store holds.
@@ -926,7 +927,13 @@ def test_a_dry_run_never_touches_the_row_of_a_real_run_of_the_same_bytes(tmp_pat
             embed_fn=lambda texts, model: ([[] for _ in texts], model), hooks=HookRegistry(),
             dry_run=True)
     assert n == len(lines)
-    assert t.events == [], "the dry run sent the engine nothing at all"
+    # RDR-243 (nexus-rfvyy.6.21): a dry run reads the document's sensitivity flag from the catalog, read-only
+    # (doc_indexer._flagged_for_dry_run), before it decides whether an external leg may run. The row exists
+    # here (the killed real run registered it), so the lookup resolves it: that one read is the only engine
+    # traffic allowed. Anything else, a write or a pipeline route above all, would reach the real run's row.
+    assert set(t.events) <= {"/resolve_many"}, f"the dry run sent the engine more than a catalog read: {t.events}"
+    assert t.writes == 0 and t.upserts == [], "the dry run wrote nothing to the engine"
+    assert not any(e.startswith("pipeline:") for e in t.events), "the dry run used no pipeline-buffer route"
     assert _buffer_evidence(path) == (flagged_before, counter_before), "the real run's row is untouched"
 
 

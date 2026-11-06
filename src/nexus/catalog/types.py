@@ -222,6 +222,12 @@ class CatalogEntry:
     # reporting a real value unless the wire-parsing path
     # (``_to_entry``) explicitly says otherwise.
     index_state_reported: bool = True
+    # RDR-243 (nexus-rfvyy.6.8): the one-way sensitivity flag. Only a JSON
+    # ``true`` on the wire counts (``_to_entry``); an engine without the
+    # column omits the key and reads False. Moved only by
+    # ``HttpCatalogClient.set_sensitivity``: the general update route
+    # refuses it.
+    sensitive: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -253,6 +259,7 @@ class CatalogEntry:
             "index_run_id": self.index_run_id,
             "index_started_at": self.index_started_at,
             "index_state_reported": self.index_state_reported,
+            "sensitive": self.sensitive,
         }
 
 

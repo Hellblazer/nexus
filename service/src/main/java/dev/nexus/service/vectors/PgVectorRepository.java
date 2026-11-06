@@ -5275,7 +5275,7 @@ public final class PgVectorRepository {
 -- collection carries this chunk's own chash under ITS OWN metadata.doc_id.
 -- That is the identical predicate nexus.catalog_document_chunks's sweep
 -- ("nl3fn NOTES GUARD", CatalogRepository.java sweepChunksQuery) and the
--- client's live_note_chashes (src/nexus/indexer_utils.py) already use to
+-- client's live_note_chashes (in nexus.indexer_utils) already use to
 -- recognize a live manifest-less note; this census must agree with them.
 -- REVERSE TIE-BREAK (round 3 fix, both reviews Significant): more than one
 -- live note-shaped document CAN reverse-match the same chash -- identical

@@ -9,7 +9,7 @@
 # Schema (per rule):
 #   rule_name:        unique snake_case identifier; matches the hook
 #                     script basename minus the .py extension
-#   hook_script:      path under conexus/hooks/scripts/routing/ to the .py
+#   hook_script:      path under hooks/scripts/routing/ in this plugin to the .py
 #                     entry point
 #   matcher:          Claude Code hook matcher pattern (Bash, Edit, etc.)
 #   mode:             redirect | block | warn  — semantic only; the hook
@@ -62,10 +62,10 @@ rules:
     rationale: >-
       never read a Claude Code credential straight from the keychain, a
       .credentials.json file, or a shell expansion of
-      CLAUDE_CODE_OAUTH_TOKEN — use claude_credentials.py status/run --
-      instead (RDR-219 Gap 2, nexus-wauo1.22). NO ESCAPE TOKEN: this rule
+      CLAUDE_CODE_OAUTH_TOKEN — use the nexus repo's credentials wrapper (its
+      status and run verbs) instead (RDR-219 Gap 2, nexus-wauo1.22). NO ESCAPE TOKEN: this rule
       never honours # routing-allow:, unlike every other rule in this
-      registry — the message naming claude_credentials.py is RDR-219's
+      registry — the message naming that wrapper is RDR-219's
       only answer to a false positive.
     escape_token: "none (RDR-219: this guard is deliberately un-escapable)"
     # Hook-level: a crash in the guard must not brick every agent's Bash.

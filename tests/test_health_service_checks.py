@@ -1074,6 +1074,7 @@ _ALL_TENANT_TABLES = [
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
+    "nexus.catalog_sensitivity_changes",  # RDR-243 (nexus-rfvyy.6.3, catalog-047; mirrors health._RLS_TENANT_TABLES)
     # ("nexus.chash_index" removed — RDR-187/nexus-piwya.9: dropped table,
     # mirrors health._RLS_TENANT_TABLES)
     # ("nexus.chash_alias" removed — nexus-lgdel.l1: dropped table

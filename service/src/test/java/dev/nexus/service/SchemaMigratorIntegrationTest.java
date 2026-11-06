@@ -2462,6 +2462,70 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── grants-004's RAISE text changed; databases migrated before it keep booting ──
+
+    /**
+     * {@code grants-004-monitor-wal-visibility} is {@code runAlways} and its RAISE message is part of
+     * its checksum, so the edit that replaced the repo-only file names with a link changed it, and
+     * every database migrated by engine-service-v0.1.75 through v0.1.178 holds the old one. The
+     * changeset carries a {@code <validCheckSum>} for the old text. This runs the production entry
+     * point ({@link SchemaMigrator#migrate}, what the engine calls at boot) against a real
+     * {@code databasechangelog} stamped with the old checksum, and it must complete.
+     *
+     * <p>MEASURED on Liquibase 4.29.0, and the reason the test carries two controls: Liquibase's
+     * documentation says editing a {@code runAlways} changeset is a checksum error, but the boot
+     * does not check a {@code runAlways} row's stored checksum at all. A value nobody ever shipped
+     * boots too (control 2), while the same bogus value on an ordinary changeset refuses the boot
+     * (control 1, which proves the migrator does validate stored checksums). So the boot would
+     * survive the edit even without the {@code validCheckSum}; the entry is insurance against a
+     * Liquibase that starts checking these rows, and the old-checksum leg is the pin that the
+     * shipped state boots.
+     */
+    @Test
+    @Order(18)
+    void grants004_migratedWithTheOldChecksum_stillBoots() throws Exception {
+        final String id = "grants-004-monitor-wal-visibility";
+        final String bogus = "9:00000000000000000000000000000000";
+        SchemaMigrator.migrate(adminDs); // defensive: the shared fixture is at HEAD
+
+        try (Connection conn = adminDs.getConnection()) {
+            assertThat(md5sumsFor(conn, id))
+                .as("a walk at HEAD records the new text's checksum, one row per identity")
+                .containsOnly(GrantsMonitorChecksumTest.NEW_CHECKSUM);
+
+            // CONTROL 1: the migrator validates stored checksums of an ordinary (run-once) changeset.
+            // catalog-002-2-chash-checks: run-once, not runAlways, executed on every walk.
+            String ordinaryId = "catalog-002-2-chash-checks";
+            assertThat(md5sumsFor(conn, ordinaryId)).as("control row exists").isNotEmpty();
+            String ordinaryMd5 = md5sumsFor(conn, ordinaryId).get(0);
+            setMd5sum(conn, ordinaryId, bogus);
+            try {
+                assertThatThrownBy(() -> SchemaMigrator.migrate(adminDs))
+                    .as("control 1: a bogus stored checksum on %s must refuse the boot", ordinaryId)
+                    .isInstanceOf(SchemaMigrator.MigrationException.class)
+                    .hasStackTraceContaining("Validation Failed");
+            } finally {
+                setMd5sum(conn, ordinaryId, ordinaryMd5);
+            }
+
+            // THE CASE THAT MATTERS: the row an engine through v0.1.178 left behind.
+            setMd5sum(conn, id, GrantsMonitorChecksumTest.OLD_CHECKSUM);
+            assertThatCode(() -> SchemaMigrator.migrate(adminDs))
+                .as("a database migrated with the old checksum must boot on the new text")
+                .doesNotThrowAnyException();
+            assertThat(md5sumsFor(conn, id))
+                .as("the boot re-stamps the row with the new text's checksum")
+                .containsOnly(GrantsMonitorChecksumTest.NEW_CHECKSUM);
+
+            // CONTROL 2: a checksum nobody shipped boots as well, so a runAlways row is not
+            // checksum-checked at all (the validCheckSum is not what carries the boot above).
+            setMd5sum(conn, id, bogus);
+            assertThatCode(() -> SchemaMigrator.migrate(adminDs))
+                .as("control 2: Liquibase 4.29.0 does not check a runAlways row's stored checksum")
+                .doesNotThrowAnyException();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static DSLContext dsl(Connection c) {
@@ -2473,6 +2537,21 @@ class SchemaMigratorIntegrationTest {
      * typed form: {@code DSL.table(DSL.name(...))} / {@code DSL.field(DSL.name(...), Class)}. */
     private static Table<?> databaseChangeLog() {
         return DSL.table(DSL.name("databasechangelog"));
+    }
+
+    private static java.util.List<String> md5sumsFor(Connection conn, String id) {
+        return dsl(conn).select(DSL.field(DSL.name("md5sum"), String.class))
+            .from(databaseChangeLog())
+            .where(DSL.field(DSL.name("id"), String.class).eq(id))
+            .fetch(0, String.class);
+    }
+
+    private static void setMd5sum(Connection conn, String id, String md5sum) {
+        int rows = dsl(conn).update(databaseChangeLog())
+            .set(DSL.field(DSL.name("md5sum"), String.class), md5sum)
+            .where(DSL.field(DSL.name("id"), String.class).eq(id))
+            .execute();
+        assertThat(rows).as("databasechangelog rows stamped for " + id).isGreaterThanOrEqualTo(1);
     }
 
     private static long changelogRowCount(Connection c) throws Exception {

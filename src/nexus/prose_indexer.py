@@ -112,6 +112,16 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     ):
         return 0
 
+    # RDR-243 (fix round 2): a document flagged sensitive in the catalog is not embedded by a Voyage
+    # collection from a repo run (there is no --ack-external-embedder here). After the staleness skip, so
+    # an unchanged file costs nothing; before the fence, so the skip leaves no half-open index run.
+    from nexus.sensitive_write import skip_sensitive_for_external  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+    if skip_sensitive_for_external(
+        catalog_doc_id, ctx.corpus, file_path,
+        "md" if file_path.suffix.lower() in (".md", ".markdown") else "prose", ctx.sensitive_docs,
+    ):
+        return 0
+
     # nexus-hg2dw critique round 2 (T2 critique-nexus-hg2dw-36602c67f
     # [24598] finding 1 CRITICAL; code-review-nexus-hg2dw-36602c67f
     # [24601] finding 1): fence-begin THIS FILE right here, immediately

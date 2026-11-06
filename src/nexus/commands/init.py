@@ -31,6 +31,7 @@ import click
 import structlog
 
 import nexus.config as _config
+from nexus.commands._help_links import VOYAGE_LOCAL_MODE_EPILOG
 from nexus.config import set_config_value
 from nexus.db.local_ef import _TIER1_MODEL
 
@@ -1007,15 +1008,14 @@ def _converge_ladder_best_effort() -> None:
         )
 
 
-@click.command("init")
+@click.command("init", epilog=VOYAGE_LOCAL_MODE_EPILOG)
 @click.option(
     "--embedder",
     type=click.Choice(["bge-768", "minilm-384"]),
     default=None,
     help=(
         "Local service embedder selector (minilm-384 gets an advisory — this "
-        "init run provisions bge-768; Voyage is a separate opt-in, see "
-        "docs/cli-reference.md 'Local mode with Voyage' for the steps)."
+        "init run provisions bge-768; Voyage is a separate opt-in; the steps are linked at the end of this help)."
     ),
 )
 @click.option(
@@ -1077,7 +1077,7 @@ def init_cmd(
     ``--embedder`` selects bge-768 vs minilm-384 for the local service-embedder
     step (minilm-384 gets an advisory — this step always fetches the bge-768 ONNX).
     A separate opt-in (nexus-umm29) switches the running service to Voyage
-    instead — see docs/cli-reference.md "Local mode with Voyage" for the
+    instead — the page linked at the end of this help ("Local mode with Voyage") has the
     ``local.embed_model`` + ``voyage_api_key`` + restart steps; a later
     ``nx init`` keeps a voyage-* ``local.embed_model`` and says so
     (nexus-ddmfg). ``--service`` is still accepted (it

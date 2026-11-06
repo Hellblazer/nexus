@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-10 agents, 39 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+10 agents, 39 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](https://github.com/Hellblazer/nexus/blob/main/README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
 
@@ -38,11 +38,11 @@ T2 — the T2 daemon was retired in favour of that service. For a storage
 service that survives reboots independent of Claude Code (recommended for
 any host with regular `nx` CLI use), run `nx daemon service install
 --autostart` once after install. See
-[Container Integration](../docs/container-integration.md) for the full
+[Container Integration](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for the full
 story.
 
 **Companion plugin:**
-- **[sn](../sn/README.md)** — Serena (LSP code intelligence) + Context7 (library docs) with SubagentStart guidance injection. Install separately: `/plugin install sn@nexus-plugins`.
+- **[sn](https://github.com/Hellblazer/nexus/blob/main/sn/README.md)** — Serena (LSP code intelligence) + Context7 (library docs) with SubagentStart guidance injection. Install separately: `/plugin install sn@nexus-plugins`.
 
 **Also required:**
 - Python 3.12–3.13 (for hook scripts)
@@ -296,7 +296,7 @@ empty directories: 0.1 to 0.2 s with a Python already there, 2.3 s each when uv 
 the Windows gate hosts were slower (nexus-3ya9d). Each `SessionStart` entry's timeout is therefore its own
 work budget plus a 30 s cold-start allowance, so Claude Code does not cancel the first session's hooks while
 uv starts; a warm hook returns when it is done and pays nothing for the larger limit.
-[`tests/test_session_start_cold_start_allowance.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_cold_start_allowance.py) pins the rule.
+[`test_session_start_cold_start_allowance.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_cold_start_allowance.py) pins the rule.
 
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
@@ -334,7 +334,7 @@ names each handler by its program and verb.
 | `PreCompact` (`manual\|auto`) | `hooks/scripts/compact_checkpoint.py pre` | Write the session's `threads` board entry first (the entry whose body has a `session: <session id>` line, found by one full-text search of `threads` (capped at 2 s), then fetching up to 4 hits, newest first by the listing's timestamp, and taking the first whose body really has the line, so the newest wins when two entries carry it; the whole lookup, the title fallback included, stays inside 6 s; failing that, the entry titled exactly the session's name, found through the name in Claude Code's `sessions/*.json`; a prefix match is not used), then the working state from `nx command-context continuation`, run in the session's worktree when the launch directory's repository has one: a worktree named `<session>` or `<session>-<topic>`, ranked when several match by: the launch directory is inside it, the board entry names its path, its branch carries a board `ref:` bead or a child of one, its name is exactly `<session>`, then the most recent git activity (the header says `- worktree: <path>` with up to five `- other worktree: <path> [<branch>], last active <time>` lines, or `none named <session> or <session>-*` when it keeps the launch directory): branch, HEAD, in-progress beads (those the board entry's `ref:` lines name, and their children; the whole list when the board has no `ref:` line, names none of the listed beads, or `bd` is unavailable), uncommitted files, open PRs, recent commits (ready beads and memory titles are left out: the SessionStart group that runs on the same event injects them). Written to `<nexus config dir>/compact-checkpoints/<session_id>.md`, mode 0600 (the temp file `mkstemp` creates), written atomically. A hook input carrying `agent_id` (fired inside a subagent or teammate) is ignored by pre, post and inject, so the parent's checkpoint and restore are never touched. Keeps the last three superseded checkpoints per session and removes files older than two days, the `<session>.injected` sidecars included. Never vetoes: it exits 0 on every path, because a veto on the context-limit recovery path fails the request and only defers the compaction. A missing `nx` or a timeout (25 s) leaves a checkpoint with the error line; errors go to `<config>/logs/hook.log` |
 | `PostCompact` (`manual\|auto`) | `hooks/scripts/compact_checkpoint.py post` | Append the compact summary to the same file and log one INFO line to `hook.log` when the summary names none of the session's board title, the checkpoint path or a bead id from the checkpoint. A checkpoint that already carries a summary, or whose own `written:` stamp is missing or older than the two-day prune window (pre did not run for this compaction), is archived and replaced by a stub, never appended to or refreshed. Pairing is by use, not age, so a summary used later than it was made (the changelog's deferred idle case; in one measured CLI run, an idle compaction ran pre, inject and post inside 20 s) still finds its checkpoint (nexus-702gy). No decision output |
 | `SessionStart` (matcher `compact`) | `hooks/scripts/compact_checkpoint.py inject` | A separate group from the seven-verb one above. Emits this session's checkpoint as `additionalContext` (capped near 8 KB, recent commits cut first, the board entry last), an intro that states the checkpoint's age and trigger, and a line naming the full file; past ten minutes the intro adds that the checkpoint may predate this compaction and the state may have changed, or, when the payload carries `precomputed: true`, that the payload marked the summary precomputed (prepared while the session was idle, after the checkpoint was taken). Each verb logs one INFO `probe` line to `hook.log` (verb, payload keys by name, outcome, and the values of `hook_event_name`, `source`, `trigger` and `precomputed` when they are a string or a bool; no other value) so what a client's payload carries is visible. Nothing when none exists for this session id, its own `written:` stamp (not the file's mtime) is missing or older than the two-day prune window, the file is a stub, or `<session>.injected` holds that stamp (it was already injected; inject records the stamp there and never rewrites the checkpoint, since inject may run before post (it did in the live runs measured)). Reads one file and writes the sidecar: no network, no `nx` call. Its 35 s timeout is the cold-start allowance every SessionStart entry carries plus its own work |
-| `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4); a single ssh command to the chas test host is exempt, since its git runs there (nexus-yc7fs) |
+| `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4); a single ssh command to a host named in `NX_REMOTE_TEST_HOSTS` (comma-separated ssh host aliases; unset or empty exempts none) is exempt, since its git runs there (nexus-yc7fs) |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/credential_print_guard.py` | Deny commands that would reveal a Claude credential: a keychain read, a `.credentials.json` read, naming a protected token variable, or reading another process's environment (RDR-219 Gap 2, no escape) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `SubagentStop` (matcher `.+`) | `hooks/scripts/nx_hook_shim.py subagent-stop-t1-nudge` | When a named agent stops and its own transcript shows no successful T1 put (an MCP `scratch` call with `action=put`, or a Bash `nx scratch put`), return `additionalContext` that gives the agent one more turn with a one-sentence request to write its findings to T1. A warning, not a veto: no `decision` key. Silent on the stop that follows its own nudge (`stop_hook_active`), when the transcript is missing or unparseable, and for harness-internal stops with no `agent_type`, which the `.+` matcher never spawns it for (nexus-mtheb.3) |
@@ -352,7 +352,7 @@ for that release (so was the bd-close gate, since deleted, which let an
 unreviewed `bd close` through while returning a correct deny to anything
 that called it directly). It is still registered on both tiers, because
 the verdict is useful as data; only the command tier is wired. `nexus.mcp.hooks.DECIDING_HOOKS` is the list, and
-[`tests/test_deciding_hooks_are_command_tier.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_deciding_hooks_are_command_tier.py) refuses a `hooks.json`
+[`test_deciding_hooks_are_command_tier.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_deciding_hooks_are_command_tier.py) refuses a `hooks.json`
 that moves any of them back.
 
 ## Slash Commands
@@ -378,8 +378,8 @@ commands used to inject is not replaced; the skill's own MCP-tool
 project-context calls cover the same ground.
 
 **MCP-tool pointers** (RDR-080 — dispatch the named MCP tool directly). Some
-are commands ([`conexus/commands/*.md`](https://github.com/Hellblazer/nexus/tree/main/conexus/commands)) and some are skills
-([`conexus/skills/*/SKILL.md`](https://github.com/Hellblazer/nexus/tree/main/conexus/skills)); Claude Code spells both `/conexus:<name>`, so
+are commands (`commands/*.md`) and some are skills
+(`skills/*/SKILL.md`); Claude Code spells both `/conexus:<name>`, so
 the invocation reads the same and the surface is marked per line below:
 - `nx_answer` (MCP tool, no skill or command since nexus-dg7i6.6) — multi-step retrieval
 - `/conexus:knowledge-tidying` (skill) → `nx_tidy` *(was → knowledge-tidier agent; command `/conexus:knowledge-tidy` merged into this skill at nexus-cnzei.4)*
@@ -395,7 +395,7 @@ the invocation reads the same and the surface is marked per line below:
 **RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`, `/conexus:rdr-fix`. Four of these
 (`rdr-gate`, `rdr-accept`, `rdr-audit`, `rdr-fix`) pair a `commands/*.md` file with a distinctly-named
 `*-checklist` skill (`rdr-gate-checklist`, `rdr-accept-checklist`, `rdr-audit-checklist`, `rdr-fix-checklist`).
-The names don't collide, so `_KNOWN_COMMAND_SKILL_COLLISIONS` in [`tests/test_plugin_structure.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py) stays
+The names don't collide, so `_KNOWN_COMMAND_SKILL_COLLISIONS` in [`test_plugin_structure.py`](https://github.com/Hellblazer/nexus/blob/main/tests/test_plugin_structure.py) stays
 empty. `rdr-list` is command-only (its skill depended on the command's own bash-injected data and was
 deleted at nexus-cnzei.4); `rdr-create`/`rdr-close`/`rdr-research`/`rdr-show` are skill-only (the redundant
 command was deleted at nexus-cnzei.4).

@@ -223,7 +223,7 @@ _GC_NO_ROUTE_MESSAGE = (
     "reapable-aware gc_quarantine_orphans; RDR-192 Step 8, beads nexus-wbfpw.16 and "
     "nexus-wbfpw.17), so nx t3 gc cannot run. Upgrade to an engine tag that carries them "
     "(compare the deployed engine's own version against REQUIRED_ENGINE_VERSION in "
-    "src/nexus/engine_version.py)."
+    "nexus.engine_version)."
 )
 
 
@@ -1493,7 +1493,7 @@ _NO_ROUTE_MESSAGE = (
     "(RDR-192 S2, bead nexus-wbfpw.4) -- the connected engine predates "
     "that route. Upgrade to an engine tag that carries it (compare the "
     "deployed engine's own version against REQUIRED_ENGINE_VERSION in "
-    "src/nexus/engine_version.py)."
+    "nexus.engine_version)."
 )
 
 
@@ -1705,7 +1705,7 @@ def census_manifest_less_cmd(
     no-owner, unclassified -- and prints, per collection, the count in
     each bucket, the owning document (tumbler + how it was found: forward,
     reverse, or none) for each item, and a total. See
-    ``scripts/sql/manifest_less_census.sql``'s header (the SAME text the
+    the header of https://github.com/Hellblazer/nexus/blob/main/scripts/sql/manifest_less_census.sql (the SAME text the
     engine route runs) for the full bucket definitions and the
     forward/reverse precedence rule.
 
@@ -1718,7 +1718,7 @@ def census_manifest_less_cmd(
          itself SUCCEEDED and is genuinely empty; a failed listing is exit 5.
       4  the connected engine predates the manifest-less-census route --
          upgrade the engine (compare its version against
-         REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py).
+         nexus.engine_version.REQUIRED_ENGINE_VERSION).
       5  a real engine error other than "predates the route": a
          quarantine-* --collection's 400, a transient 5xx, or a failed
          --all collection listing. In --all, collections already censused
@@ -1754,7 +1754,7 @@ def census_manifest_less_cmd(
     \b
     Needs engine-service-v0.1.133 or later; against an older engine it
     exits 4, and the same census runs as direct SQL
-    (``scripts/sql/manifest_less_census.sql``).
+    (https://github.com/Hellblazer/nexus/blob/main/scripts/sql/manifest_less_census.sql).
     """
     if bool(collection) == bool(all_collections):
         raise click.UsageError(

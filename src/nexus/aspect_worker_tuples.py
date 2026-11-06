@@ -232,6 +232,7 @@ class TupleQueueSide:
         renew_every_s: float = RENEW_INTERVAL_S,
         deadline_s: Callable[[int], float] | None = None,
         document_gone: Callable[[str], bool] | None = None,
+        document_sensitive: Callable[[str], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         from nexus.aspect_extractor import worst_case_extract_seconds  # noqa: PLC0415 — deferred: heavy module
@@ -249,6 +250,7 @@ class TupleQueueSide:
             lambda n: worst_case_extract_seconds(n) + RENEW_DEADLINE_MARGIN_S
         )
         self._document_gone = document_gone or (lambda _doc_id: False)
+        self._document_sensitive = document_sensitive or (lambda _doc_id: False)
         self._clock = clock
         self._held: dict[str, HeldClaim] = {}
         self._held_lock = threading.Lock()
@@ -366,6 +368,12 @@ class TupleQueueSide:
                 gone = False
             if gone:
                 self._gone_verdict(claim)
+                continue
+            # RDR-243 census row 2: the flag is one-way and can land after the task was queued, so
+            # the claim asks the catalog again. A sensitive document's task is acked as dropped
+            # before anything is read or sent; a catalog that cannot answer is NOT a clear
+            # answer, so the claim goes back on the retry ladder.
+            if self._sensitive_verdict(claim):
                 continue
             ready.append(claim)
         if not ready:
@@ -598,6 +606,33 @@ class TupleQueueSide:
             source_path=row.source_path, task_id=claim.task_id,
         )
         self._ack(claim)
+
+    def _sensitive_verdict(self, claim: HeldClaim) -> bool:
+        """True when the claim was given its verdict here: acked (the document is sensitive) or
+        retried (the catalog could not say). False when the document is clear to extract."""
+        from nexus.doc_sensitivity import SensitivityUnknown  # noqa: PLC0415 — deferred: keeps this module's import light
+
+        row = claim.row
+        assert row is not None
+        try:
+            sensitive = bool(self._document_sensitive(row.doc_id))
+        except SensitivityUnknown as exc:
+            _log.warning(
+                "aspect_task_sensitivity_unknown",
+                tumbler=row.doc_id, surface="aspect_worker_drain", collection=row.collection,
+                task_id=claim.task_id, error=exc.detail,
+            )
+            self._retry_or_dead(claim)
+            return True
+        if not sensitive:
+            return False
+        _log.info(
+            "aspect_worker_skipped_sensitive",
+            tumbler=row.doc_id, surface="aspect_worker_drain", collection=row.collection,
+            source_path=row.source_path, task_id=claim.task_id,
+        )
+        self._ack(claim)
+        return True
 
     def _gone_now(self, doc_id: str) -> bool:
         try:

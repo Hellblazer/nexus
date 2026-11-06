@@ -40,9 +40,17 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5115
+# 5129 -> 5352 (nexus-rfvyy.6.21, 2026-11-05): +223. RDR-243 Phase 1 adds 223 tenant-minting tests (the new gate, write-verb, import and engine-flag test files), each needing a real catalog,
+# because the subject is the sensitivity flag on a catalog row and every gate reads it from that row. Measured on chas (lab-l, `uv run pytest -n auto`, sweep on, report mode) at 2d9e932a1: 5348 of 43627,
+# plus the 4 tests of tests/test_doc_indexer.py (TestIndexPdfDryRunNeverTouchesCatalog and the incremental dry run) that the same run showed touching the catalog without a tenant (a dry run now reads the flag,
+# read-only) and that now carry the mark. Per module: test_sensitive_catalog_flag_gates 34, test_sensitive_write_verbs 30, test_sensitive_external_rules 29, test_catalog_sensitive_cmd 23,
+# test_aspect_sensitivity_gates 16, test_sensitivity_canary 14 (11 drivers and 3 harness cases), test_export_sensitivity_roundtrip 13, test_import_sensitive_external_embedder 11, test_bib_taxonomy_sensitivity_gates 8,
+# test_import_catalog_flag_gate 8, test_sensitivity_unreadable_catalog 8, test_enrich_delete_tumbler 7, test_doctor_sensitivity_rows 5, test_reindex_sensitive_gate 5,
+# test_sensitive_store_put_existing_voyage 5, test_doc_sensitivity_flagged 2, test_catalog_sensitivity_client 1 (219 in all), and the 4 dry-run tests above.
+# None of the new files can run over a stub catalog: a stub would carry the flag by construction and prove nothing about the row the engine keeps one-way.
+provisioned_tests = 5333
 tolerance_tests = 0
-# 5129 -> 5115 (nexus-hbnml, 2026-11-04, on develop 7dc537fe0): -14. scripts/tenant_delta.py --base f8d3e1be3 (the fork point) counts -14 for the change
+# 5352 -> 5333 (nexus-hbnml, merged onto develop after RDR-243): -19, the -14 below plus -5 for the table-path tests of tests/test_aspect_sensitivity_gates.py the retirement removes (four tests and the table case of the enqueue test). First counted 2026-11-04 on develop 7dc537fe0 as 5129 -> 5115: -14. scripts/tenant_delta.py --base f8d3e1be3 (the fork point) counts -14 for the change
 # that retires the aspect queue table and answers its review (tests/daemon/test_aspect_worker_reclaim.py 1 -> 0,
 # tests/db/test_http_aspects_stores.py 9 -> 5, tests/test_aspect_worker.py 29 -> 25, tests/test_rename_lock_t1_1.py 10 -> 9,
 # t1_2.py 8 -> 5, t2_race.py 6 -> 5, tests/upgrade/test_aspect_queue_migration_rung.py 1 -> 0, and +1 for the console

@@ -56,7 +56,7 @@ The resolved absolute path is what gets substituted into `{project_path}` in the
 
 **Transcript mining is NOT delegatable to subagents.** The `~/.claude/projects/*.jsonl` tree is not efficiently scannable from a subagent context — subagents do not have the main session's working directory, cannot traverse the directory efficiently with their tool budget, and the JSONL line lengths cause truncation in Grep tool output. The main session must gather transcript excerpts BEFORE dispatching the deep-research-synthesizer agent.
 
-This invariant was verified in RDR-067 Phase 1b (T2 `nexus_rdr/067-spike-disposition` id 754). Violating it means the subagent receives an empty evidence layer and degrades silently.
+This invariant was verified in RDR-067 Phase 1b. Violating it means the subagent receives an empty evidence layer and degrades silently.
 
 **Pre-step flow**:
 
@@ -79,15 +79,15 @@ This invariant was verified in RDR-067 Phase 1b (T2 `nexus_rdr/067-spike-disposi
 
 ## Canonical Prompt
 
-The skill embeds the pinned canonical prompt from T2 at dispatch time:
+The skill embeds the pinned canonical prompt at dispatch time. The prompt ships with the plugin at `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/AUDIT-PROMPT.md`, so it is there on an install whose T2 holds no `nexus_rdr` entries. A T2 entry of the same name overrides the shipped text:
 
-1. `mcp__plugin_conexus_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` — loads the v1 prompt (stored with no `ttl`, i.e. permanent; reference by stable title only — do not pass any runtime numeric id as a parameter)
+1. `Read` `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/AUDIT-PROMPT.md`. Then try `mcp__plugin_conexus_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` (stored with no `ttl`, i.e. permanent; reference by stable title only — do not pass any runtime numeric id as a parameter). If it returns an entry, that entry replaces the shipped text; if it reports no such entry, use the shipped text. Either way the prompt is everything below the marker heading in the file (the one that says the text below it is what the skill embeds).
 2. Substitute `{project}` with the derived project name (bare name, for display)
 3. Substitute `{project_path}` with the resolved absolute worktree path (see §Project Worktree Path Resolution) — this MUST be an absolute path with no tilde, no `$HOME`, no relative components. The canonical prompt uses `{project_path}` wherever it Globs evidence files.
 4. Substitute `{transcript_excerpts}` with the pre-step block (empty if fast path)
 5. Pass the substituted text as the subagent's task body
 
-Do NOT inline the canonical prompt text into this skill file — the prompt is the single source of truth in T2 and the skill references it by stable title. Updating the prompt is a T2 `memory_put` upsert, not a skill edit.
+Do NOT inline the canonical prompt text into this skill file — the shipped resource is the single source of truth, and a T2 entry under the stable title is the override. Changing the default prompt for everyone is an edit to the resource file. The T2 entry exists for trying a variant on one machine before that edit: it wins over the shipped file for as long as it exists, so a stored copy goes stale when the shipped text changes. When the resource file changes, re-`memory_put` the new body over the entry (or delete the entry), and when you notice an entry that differs from the shipped file only by older text, do the same.
 
 ## Behavior — Audit Dispatch (default mode)
 
@@ -200,7 +200,8 @@ See [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md) for requ
 
 ### Input Artifacts
 - nx store: none
-- nx memory: rdr_process/* (prior audits for this project), nexus_rdr/067-canonical-prompt-v1 (the canonical prompt)
+- nx memory: rdr_process/* (prior audits for this project)
+- Files: `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/AUDIT-PROMPT.md` (the canonical prompt; T2 `nexus_rdr/067-canonical-prompt-v1` overrides it when present)
 - Files: `<project-worktree>/docs/rdr/post-mortem/*.md` (primary evidence; the skill body substitutes the absolute worktree path into the prompt via the `{project_path}` parameter before dispatch)
 
 ### Deliverable
@@ -220,14 +221,14 @@ Full audit output conforming to the canonical prompt's output-format contract:
 - [ ] Respects the non-delegatable invariant — do NOT attempt to glob `~/.claude/projects/*` from within the subagent context
 ```
 
-**Task body**: embed the full substituted canonical prompt (loaded via `memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")`, with `{project}` and `{transcript_excerpts}` filled in) as the task content. The relay envelope above wraps the prompt — the prompt itself is the dispatch payload.
+**Task body**: embed the full substituted canonical prompt (the shipped `AUDIT-PROMPT.md`, or the T2 override `memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` when it exists, with `{project}` and `{transcript_excerpts}` filled in) as the task content. The relay envelope above wraps the prompt — the prompt itself is the dispatch payload.
 
 ## Success Criteria
 
 - [ ] Target project name derived (git remote → pwd basename → user prompt)
 - [ ] T1 link context seeded pointing to RDR-067 tumbler 1.1.771
 - [ ] Main-session transcript pre-step completed (or explicitly skipped via `--no-transcripts` / no transcript directory)
-- [ ] Canonical prompt loaded from T2 `nexus_rdr/067-canonical-prompt-v1` and substituted
+- [ ] Canonical prompt loaded (shipped `AUDIT-PROMPT.md`, or the T2 `nexus_rdr/067-canonical-prompt-v1` override when present) and substituted
 - [ ] deep-research-synthesizer dispatched with the substituted prompt
 - [ ] Subagent output parsed for verdict category, incident count, confidence, drift distribution
 - [ ] Full output persisted by the skill body to T2 `rdr_process/audit-<project>-<YYYY-MM-DD>` permanently (no `ttl`)
@@ -252,7 +253,7 @@ Outputs generated across the audit flow:
 
 ## Phase 1b Signals Folded In
 
-This skill incorporates six signals surfaced by the Phase 1b spike (T2 `nexus_rdr/067-spike-disposition`):
+This skill incorporates six signals surfaced by the RDR-067 Phase 1b spike:
 
 1. **Skill body owns `memory_put`** — subagents do not reliably self-persist (0/3 Phase 1b runs called memory_put despite explicit instruction). Resolved by moving persistence to the skill body.
 2. **Transcript-mining fast path** — `--no-transcripts` flag + automatic fast path when no transcript directory exists. Resolves the meta-session noise trap identified in Phase 1b.
@@ -271,4 +272,3 @@ Two independent CA-1/CA-2 audit runs against nexus produced a false-positive SCO
 - The incident block in the output format now requires a `Code-verification result` field for non-CLEAN verdicts
 - Method notes updated: "Unchecked success criteria are NOT evidence of non-implementation"
 
-See T2 `nexus_rdr/067-research-2-audit-methodology-false-positive` (id 771) for the evidence.

@@ -34,6 +34,23 @@ class PoolerModeCheckTest {
         assertTrue(ex.getMessage().contains("session"));
     }
 
+    /**
+     * The refusal reaches an operator who may have installed from PyPI and has no checkout (nexus-z7ddd), so it
+     * links the shipped pooler config on GitHub, not a path. The link has to name the file the next test pins.
+     */
+    @Test
+    void theRefusalLinksTheShippedPoolerConfigOnGitHub() {
+        String link = "https://github.com/Hellblazer/nexus/blob/main/service/deploy/pgbouncer.ini";
+        var wrongMode = assertThrows(PoolerModeCheck.PoolerModeException.class,
+                () -> PoolerModeCheck.assertTransactionMode("session"));
+        assertTrue(wrongMode.getMessage().contains(link), wrongMode.getMessage());
+        // the missing-mode refusal names no file: it is not a configuration the operator can compare
+        var missing = assertThrows(PoolerModeCheck.PoolerModeException.class,
+                () -> PoolerModeCheck.assertTransactionMode(null));
+        assertTrue(!missing.getMessage().contains("service/deploy"), missing.getMessage());
+        assertTrue(Files.isRegularFile(Path.of("deploy", "pgbouncer.ini")), "the linked file exists in the tree");
+    }
+
     @Test
     void statementAndUnknownModesFailClosed() {
         assertThrows(PoolerModeCheck.PoolerModeException.class,

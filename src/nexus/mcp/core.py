@@ -45,6 +45,7 @@ from nexus.corpus import (
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
+from nexus.sensitivity import bound_to
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistry as _LockedHookRegistry, install_default_hooks as _install_default_hooks
@@ -5824,7 +5825,8 @@ def store_put(
             "\"distributed-systems\"), never a four-segment name or model "
             "token. Reuse an existing subject before minting one (see "
             "`nx collection list`); placeholders default/knowledge/notes/"
-            "tmp/test are refused. Rules: docs/collections.md."
+            "tmp/test are refused. Rules: "
+            "(https://github.com/Hellblazer/nexus/blob/main/docs/collections.md)."
         ),
     )],
     title: Annotated[str, Field(
@@ -5862,6 +5864,13 @@ def store_put(
             "it removes the stored key."
         ),
     )] = "",
+    sensitive: Annotated[bool, Field(
+        description=(
+            "Mark the document sensitive (RDR-243): it is kept from every model-bound surface. "
+            "One-way: no parameter clears it. Refused in cloud mode, where every collection embeds "
+            "through Voyage and this tool cannot acknowledge that."
+        ),
+    )] = False,
 ) -> str:
     """Store content as a permanent T3 knowledge document.
 
@@ -5914,6 +5923,24 @@ def store_put(
         # below, where it is too late to be the first thing a caller sees).
         if not is_conformant_collection_name(collection):
             _refuse_placeholder_subject(collection)
+        if sensitive:
+            # RDR-243 item 8: this tool has no way to acknowledge an external embedder, and every cloud
+            # collection embeds through Voyage, so cloud mode refuses before any engine contact. Then item 3:
+            # an engine that cannot hold the flag stops the write here, before the T3 handle, the register
+            # call and any embedding (it would drop the flag without an error).
+            from nexus.sensitive_write import (  # noqa: PLC0415 — deferred: only a flagged put needs it
+                cloud_refusal_text,
+                require_sensitive_engine,
+            )
+
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: config is heavy
+
+            if not is_local_mode():
+                return _fail(f"Error: store_put: {cloud_refusal_text('store_put(sensitive=True)')}")
+            try:
+                require_sensitive_engine("store_put(sensitive=True)")
+            except RuntimeError as exc:
+                return _fail(f"Error: store_put: {exc}")
         t3 = _get_t3()
         # nexus-hmxi: pass t3 so the resolver grandfathers an existing
         # legacy 2-segment collection ahead of the auto-promoted
@@ -5923,6 +5950,26 @@ def store_put(
         # a genuinely new corpus mints strictly (raises loud if
         # local.embed_model is voyage-shaped with no key configured).
         col_name = t3_collection_name(collection, t3=t3, for_write=True)
+        routed_note = ""
+        if sensitive:
+            # RDR-243 Q3 (local mode): a Voyage collection is not written to; the bge collection of the
+            # same subject is. No acknowledgement exists on this tool.
+            from nexus.sensitive_write import (  # noqa: PLC0415 — deferred: only a flagged put needs it
+                ExternalEmbedderRefusedError,
+                refuse_external_existing_note,
+                resolve_sensitive_collection,
+            )
+
+            try:
+                # A live note of this title in the Voyage collection would be left unflagged beside a new
+                # note in the sibling; this tool has no acknowledgement, so it refuses.
+                refuse_external_existing_note(col_name, title, ack=False, what="store_put(sensitive=True)")
+                routed = resolve_sensitive_collection(col_name, ack=False, what="store_put(sensitive=True)")
+            except ExternalEmbedderRefusedError as exc:
+                return _fail(f"Error: store_put: {exc.message}")
+            if routed != col_name:
+                routed_note = f"\nsensitive: {col_name} embeds with Voyage AI; stored in {routed}, which embeds on this machine."
+                col_name = routed
 
         # RDR-101 Phase 3 PR δ Stage B.5: pre-register the catalog entry
         # so the T3 chunk can carry the resulting tumbler as ``doc_id``
@@ -5956,13 +6003,20 @@ def store_put(
         # and the recovery import run the same sequence. This tool only words
         # the result.
         from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
+        from nexus.sensitive_write import ExternalEmbedderRefusedError, SensitiveFlagNotSetError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
 
         try:
             outcome = put_note(
                 content=content, collection=col_name, title=title, tags=tags,
                 category=category, source_agent=agent_arg,
-                ttl_days=ttl_days, entity_key=entity_key,
+                ttl_days=ttl_days, entity_key=entity_key, sensitive=sensitive,
             )
+        except SensitiveFlagNotSetError as exc:
+            # RDR-243: the existing document could not be marked, so nothing was written to it.
+            return _fail(f"Error: store_put: {exc}")
+        except ExternalEmbedderRefusedError as exc:
+            # RDR-243: the note is flagged sensitive in the catalog and this collection embeds with Voyage.
+            return _fail(f"Error: store_put: {exc.message}")
         except NoteUriEngineTooOldError as exc:
             # RDR-231 (nexus-bivz3.13): the serving engine cannot hold a note's nx-note:// URI. Raised
             # before the register and the write, so nothing changed; the message carries the remedy.
@@ -6067,7 +6121,7 @@ def store_put(
             f" ({len(pieces)} chunks, split to the embedding model's token window)"
             if len(pieces) > 1 else ""
         )
-        stored = f"Stored: {doc_id} -> {col_name}{split_note}"
+        stored = f"Stored: {doc_id} -> {col_name}{split_note}{routed_note}"
         # RDR-192 Step 13: a second line, only when the re-put's sweep removed chunks or did not finish.
         superseded = superseded_line(outcome)
         return f"{stored}\n{superseded}" if superseded else stored
@@ -9259,6 +9313,7 @@ _OPERATOR_MODEL_DESC = (
 )
 
 
+@bound_to("nx_answer_operators")
 async def operator_extract(
     inputs: Annotated[str, Field(description="Items to extract from (plain text or a JSON array string).")],
     fields: Annotated[str, Field(description="Comma-separated field names to extract.")],
@@ -9280,6 +9335,7 @@ async def operator_extract(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_rank(
     items: Annotated[str, Field(description="Items to rank (plain text or a JSON array string).")],
     criterion: Annotated[str, Field(description="Natural-language ranking criterion.")],
@@ -9304,6 +9360,7 @@ async def operator_rank(
 # HISTORY (nexus-km5i): two-sided mode. List/dict values in items/items_a/
 # items_b are JSON-serialized before prompt interpolation so the LLM sees
 # clean JSON instead of Python repr output.
+@bound_to("nx_answer_operators")
 async def operator_compare(
     items: Annotated[str, Field(
         description="Items to compare, one-sided mode (plain text or a JSON array string); ignored if items_a/items_b are set.",
@@ -9336,6 +9393,7 @@ async def operator_compare(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_summarize(
     content: Annotated[str, Field(description="Text to summarize.")],
     cited: Annotated[bool, Field(description="Include a citations list in the output.")] = False,
@@ -9357,6 +9415,7 @@ async def operator_summarize(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_generate(
     template: Annotated[str, Field(description="Named template or description of the desired output form.")],
     context: Annotated[str, Field(description="Source material or context to generate from.")],
@@ -9382,6 +9441,7 @@ async def operator_generate(
 # HISTORY (RDR-088 Phase 1, Paper §D.4 Filter operator; RDR-089 follow-up
 # added the SQL fast path). Composable with `operator_extract`,
 # `operator_rank`, and retrieval tools via `plan_run`.
+@bound_to("nx_answer_operators")
 async def operator_filter(
     items: Annotated[str, Field(
         description=(
@@ -9456,6 +9516,7 @@ async def operator_filter(
     )
 
 
+@bound_to("nx_answer_operators")
 async def operator_check(
     items: Annotated[str, Field(
         description=(
@@ -9506,6 +9567,7 @@ async def operator_check(
     return bind(raw, records_from_check_items(items), "check")
 
 
+@bound_to("nx_answer_operators")
 async def operator_verify(
     claim: Annotated[str, Field(
         description="A single assertion to verify (e.g. \"the paper reports 2048 GPU-hours for training\").",
@@ -9558,6 +9620,7 @@ async def operator_verify(
 # would break it. Cardinality cap `_OPERATOR_MAX_INPUTS=100` (RDR-093 S-1,
 # generalised nexus-3j6b) is enforced by the plan runner's auto-hydration;
 # a fired cap attaches a `{truncated, original_count, kept_count}` block.
+@bound_to("nx_answer_operators")
 async def operator_groupby(
     items: Annotated[str, Field(
         description=(
@@ -9633,6 +9696,7 @@ async def operator_groupby(
 # isolation (the prompt instructs the model to summarise USING ONLY the
 # items in each group) was verified 0% cross-group leakage on adversarial
 # fixtures with overlapping vocabulary (Spike B, bead nexus-rojs).
+@bound_to("nx_answer_operators")
 async def operator_aggregate(
     groups: Annotated[str, Field(
         description=(
@@ -10597,6 +10661,7 @@ _GROWN_MATCH_DESCRIPTION_SCHEMA: dict[str, Any] = {
 }
 
 
+@bound_to("nx_answer_plan_helpers")
 async def _generalize_grown_match_description(
     *, question: str, plan_json: str,
 ) -> "str | None":
@@ -11104,6 +11169,7 @@ def _nx_answer_split_kind_hint(
     return (rest or None), hint
 
 
+@bound_to("nx_answer_plan_helpers")
 async def _nx_answer_request_coverage(
     *,
     question: str,
@@ -12297,6 +12363,7 @@ async def _claimed_verify_plan(
     raise ValueError(f"planner plan cannot run: {reason}; no step was run")
 
 
+@bound_to("nx_answer_plan_helpers")
 async def _nx_answer_plan_miss(
     question: str,
     *,
@@ -12648,6 +12715,13 @@ def _insufficient_evidence_prefix() -> str:
     return INSUFFICIENT_EVIDENCE_NOTICE_PREFIX
 
 
+def _exact_key_join_prefix() -> str:
+    """``EXACT_KEY_JOIN_NOTICE_PREFIX``, imported on first use (RDR-147, nexus-irndi)."""
+    from nexus.plans.answer_shape import EXACT_KEY_JOIN_NOTICE_PREFIX  # noqa: PLC0415 — deferred: only reached when a notice is composed
+
+    return EXACT_KEY_JOIN_NOTICE_PREFIX
+
+
 #: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
 #: "a stable prefix, followed by call-specific detail" convention as
 #: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX`` above. Written by
@@ -12729,6 +12803,7 @@ NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX: str = "[continuation completed"
     structured_output=False,
 )
 @degrade_loud_when_migrating
+@bound_to("nx_answer_operators")
 async def nx_answer(
     question: Annotated[str, Field(description="Natural-language question to answer.")],
     scope: Annotated[str, Field(
@@ -12826,7 +12901,7 @@ async def nx_answer(
     Use `search`/`query` directly for a single-step, known-shape lookup:
     this tool reduces from many documents and is NOT sub-second
     (p50 ~80s, p95 ~217s). Matches a saved plan (an inline planner grows
-    one on a miss), runs it, and returns the synthesized answer.
+    one on a miss), runs it, and returns the answer.
 
     Returns the final step's output as a string, or with `structured=True`
     an envelope (`{final_text, chunks, plan_id, step_count, answer_shape,
@@ -12841,19 +12916,19 @@ async def nx_answer(
       in `scope_diagnostics` (text mode: a `[scope conflict: ...]` line).
     - `continuation=True` needs a matching `nx_answer_report` call.
     - The coverage check is on by default: it adds model calls (latency,
-      about 0.02 USD a run; the times above predate it) and can withhold
+      about 0.02 USD a run) and can withhold
       an answer as "uncovered". `NX_ANSWER_COVERAGE=0` turns it off.
     - `answer_shape` says what `final_text` is. Prose follows for
       "answered" and "insufficient_evidence" (opens with
       `[insufficient-evidence: <n> unresolved]`, names each unsettled
-      part, then answers). Any other value, "uncovered" (no
-      part is covered) included, is a one-line notice, never the
-      raw payload.
+      part, then answers). Any other value ("uncovered" included) is
+      a one-line notice, never the raw payload.
     - `run_summary.persistence` (persisted, dropped, unsupported,
       unverified, not_recorded): only "persisted" means the engine kept
       the run's coverage summary.
     - Text mode opens a degraded answer with `[budget exhausted ...]`,
-      `[non-answer: <shape>]` or `[insufficient-evidence: ...]`.
+      `[non-answer: <shape>]` or `[insufficient-evidence: ...]`. A
+      merged exact-key join puts `[exact-key join: ...]` first.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -13375,12 +13450,13 @@ async def nx_answer(
         if not _extra_text:
             _text = text
         elif text.startswith(
-            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix(), _insufficient_evidence_prefix())
+            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix(), _insufficient_evidence_prefix(), _exact_key_join_prefix())
         ):
             # The tool contract: a degraded text answer STARTS with its
             # marker. The markers (budget exhausted, non-answer, and the
             # partial answer's insufficient-evidence notice, RDR-232
-            # nexus-jypmj.3.3) keep the leading position and the extra
+            # nexus-jypmj.3.3, and the exact-key-join notice, RDR-147,
+            # which opens a partial answer ahead of that one) keep the leading position and the extra
             # notices (budget warnings, dropped reduce steps, evidence-
             # request disclosures) follow.
             _text = f"{text}\n{_extra_text}"
@@ -15279,7 +15355,12 @@ async def nx_answer(
         render_non_answer_notice as _render_non_answer_notice,
         AnswerShape as _AnswerShape,
     )
-    from nexus.plans.coverage_outcome import decide_outcome as _decide_outcome, render_insufficient_evidence as _render_insufficient_evidence  # noqa: PLC0415 — deferred: plan path only
+    from nexus.plans.coverage_outcome import (  # noqa: PLC0415 — deferred: plan path only
+        decide_outcome as _decide_outcome,
+        has_merged_join as _has_merged_join,
+        render_exact_key_join_notice as _render_exact_key_join_notice,
+        render_insufficient_evidence as _render_insufficient_evidence,
+    )
 
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the post-generation half of the coverage-state table. The boundary
     # decided the state before generation; what generation returned decides whether a usable answer exists, and
@@ -15365,6 +15446,12 @@ async def nx_answer(
         final_text = _render_insufficient_evidence(
             _verdict.coverage, {f.id: f.text for f in _request_coverage.facets}, final_text,
         )
+    # RDR-147 (nexus-irndi): every answer from a run whose resolution branch merged a joined item says so, whatever the
+    # final ledger (covered, partial, or uncovered with generation allowed by option 1); the line adds that the coverage
+    # check did not confirm the answer only in the last case. It opens the text, ahead of the insufficient-evidence
+    # notice on a partial answer. Counter outcome and no-grow flag are the verdict's.
+    if _shape in (_AnswerShape.ANSWERED, _AnswerShape.INSUFFICIENT_EVIDENCE) and _verdict.coverage is not None and _has_merged_join(_verdict.coverage):
+        final_text = _render_exact_key_join_notice(_verdict.coverage, final_text)
 
     _log.info(
         "nx_answer_complete",
@@ -15619,6 +15706,7 @@ async def nx_answer_report(
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+@bound_to("nx_tidy")
 async def nx_tidy(
     topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"embedding quotas\").")],
     collection: Annotated[str, Field(
@@ -15738,6 +15826,7 @@ async def nx_tidy(
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
+@bound_to("nx_enrich_beads")
 async def nx_enrich_beads(
     bead_description: Annotated[str, Field(description="The bead's title and description to enrich.")],
     context: Annotated[str, Field(description="Optional additional context (e.g. audit findings).")] = "",
@@ -15805,6 +15894,7 @@ async def nx_enrich_beads(
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+@bound_to("nx_plan_audit")
 async def nx_plan_audit(
     plan_json: Annotated[str, Field(description="The plan to audit (JSON string or free-text description).")],
     context: Annotated[str, Field(description="Optional additional context (e.g. an RDR reference).")] = "",
