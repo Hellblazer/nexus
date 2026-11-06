@@ -1,0 +1,20 @@
+{
+  "answer_id": "0f1e2d3c4b5a6978",
+  "question": "Retry-safe keying for quarantine restore: accept the gap, or build option B?",
+  "options": [
+    "Accept the gap and close the bead",
+    "Build option B at P3 (one transaction per keyed call, engine change plus one client line) [irreversible]"
+  ],
+  "choice": 2,
+  "note": "only if the tests are green",
+  "sam_words": "only if the tests are green",
+  "batch_title": null,
+  "via": "cli",
+  "asked": "2026-11-05T10:15Z",
+  "blocking": false,
+  "tty": "/dev/ttys004",
+  "time": "2026-11-05T20:15:03Z",
+  "status": "sent",
+  "tuple_id": "7d3f0a52-91c4-4e6b-8a1f-2c5b9e0d4f68",
+  "error": null
+}

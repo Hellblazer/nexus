@@ -1,5 +1,9 @@
 # Changelog
 
+## [7.96.0] - 2026-11-05
+
+Plugin version aligned with conexus 7.96.0. No plugin-side changes: the `PENDING_RELEASE.md` ledger was empty at this pin, so nothing becomes active here.
+
 ## [7.95.2] - 2026-11-05
 
 Plugin version aligned with conexus 7.95.2. No plugin-side changes.

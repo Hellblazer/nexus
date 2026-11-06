@@ -851,9 +851,12 @@ Day 2 Ops: show the full aspect record for a single document. Takes no options �
 ```
 nx enrich delete COLLECTION SOURCE_PATH [--yes]
 nx enrich delete COLLECTION --all [--no-dry-run] [--yes]
+nx enrich delete --tumbler T [--yes]
 ```
 
 Day 2 Ops: remove aspect rows. Pass SOURCE_PATH to remove a single row — use when re-indexing a document with a content change that should drop the prior aspects rather than overwrite. `--yes` skips the confirmation prompt. Safe: the underlying chunks in T3 are untouched.
+
+`--tumbler T` (RDR-243, nexus-rfvyy.6.17) removes the aspect row of the document with catalog tumbler `T`, whatever its collection. It is the remedy `nx catalog doctor --sensitive-with-aspects` prints for each flagged document that already has an aspect row. It takes no COLLECTION, SOURCE_PATH or `--all`, and it does not remove a task still queued for the document.
 
 `--all` (nexus-3foc9) removes every aspect row in COLLECTION instead — the cleanup step after opting a collection out of `aspects.docs_collections` (opting out stops new extraction but leaves rows already written fully visible to aspect-scoped search and groupby). Exactly one of SOURCE_PATH or `--all` is required. `--all` is **dry-run by default**: it reports the row count and collection and writes nothing; pass `--no-dry-run --yes` (or answer the confirmation prompt) to actually delete. Refuses on a collection name the catalog does not know at all; a known collection with zero aspect rows is reported as a no-op.
 
@@ -2206,9 +2209,9 @@ Exit codes:
 | 5 | The apply stalled: three calls in a row swept nothing while rows remain. |
 | 6 | The engine ran the sweep but could not write its audit row (`audit_write_failed`: the rows were changed, the verb prints how many), or the sweep failed part-way (`sweep_failed`, partial counts printed). |
 
-Needs the engine release that carries nexus-6pfgb.43; naming a tenant other than the credential's own, and the audit of every root sweep, need the engine release that carries the root-names-the-target change, which is newer than `engine-service-v0.1.178` (an older engine gives exit 4, as above). Both halves are required: the engine, and a client that carries `--tenant` and `--operator` (until the client release that ships them, a `develop` checkout).
+Needs the engine release that carries nexus-6pfgb.43; naming a tenant other than the credential's own, and the audit of every root sweep, need the engine release that carries the root-names-the-target change, which is carried first by `engine-service-v0.1.180` (an older engine gives exit 4, as above). Both halves are required: the engine, and a client that carries `--tenant` and `--operator` (conexus 7.96.0 and later).
 
-**Managed service (Phase E), the operator procedure.** On a managed cloud client credentials are mint-locked, so a per-tenant token cannot be made: the root service token is the credential. Set it as `NX_SERVICE_TOKEN` (and the managed endpoint as `NX_SERVICE_URL`) for the command; never paste its value into a shell history, a ticket or a log. Requirements: an engine at or past the tag that carries the root-names-the-target change (before the first dry run, `nx t3 retire-keys --tenant ID` against an older engine prints the one-line exit-4 message and writes nothing) and a client that carries `--tenant`, which until a release is a `develop` checkout. In order:
+**Managed service (Phase E), the operator procedure.** On a managed cloud client credentials are mint-locked, so a per-tenant token cannot be made: the root service token is the credential. Set it as `NX_SERVICE_TOKEN` (and the managed endpoint as `NX_SERVICE_URL`) for the command; never paste its value into a shell history, a ticket or a log. Requirements: an engine at or past the tag that carries the root-names-the-target change (before the first dry run, `nx t3 retire-keys --tenant ID` against an older engine prints the one-line exit-4 message and writes nothing) and a client that carries `--tenant` (conexus 7.96.0 and later). In order:
 
 1. A dry run for every tenant, one at a time, each with your name: `nx t3 retire-keys --tenant nexus --operator <you> --max-rps 2`, then the same for each other tenant (for example `gate-xr789`). Read the counts and the preconditions; the dry run writes no chunk row, but it is audited, so it leaves two rows.
 2. Accept only the residues you have judged (`--accept NAME=N`, N at least the live count).
@@ -2257,9 +2260,10 @@ Exit codes:
 | 3 | Every requested chunk is back, but at least one stays hidden from search and get: no live owner names it, reattach refused it (`superseded`), or `--no-reattach` left it. A dry run exits 3 when a real run would leave it hidden. `--json` carries the count as `hidden`. |
 | 4 | The connected engine predates the route. Upgrade it (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`). |
 | 5 | The engine refused the request or failed: a sample-only audit row, an audit row for another collection or quarantine collection, a collection that is not registered or not live, a transient 5xx; or the client hit an unexpected error. One line on stderr says which. |
-| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held a lock for more than 2 seconds, or the call lost a deadlock with another writer. The busy statement rolled back. Each quarantine collection is restored in its own transaction, so the message says whether an earlier one had already committed (`nothing_moved: false` on the wire) and names its `gc_audit` ids, which `--json` also puts in `audit_ids`; a chunk it restored reads `present` on the rerun, and a chunk kept in quarantine (a `rival`, an `indexing` or a `failed` owner) is kept again. Run the same command again. |
+| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held a lock for more than 2 seconds, or the call lost a deadlock with another writer. A real run goes in pages of at most 74 chashes (the engine's keyed ceiling) and a page is one transaction across every quarantine collection it touches, so the busy page rolled back whole: nothing of it moved, and only earlier pages are committed (their `gc_audit` ids are in the report). Against an engine that predates keyed restore, and for a dry run, each quarantine collection is restored in its own transaction, so the message says whether an earlier one had already committed (`nothing_moved: false` on the wire) and names its `gc_audit` ids, which `--json` also puts in `audit_ids`. A chunk it restored reads `present` on the rerun, and a chunk kept in quarantine (a `rival`, an `indexing` or a `failed` owner) is kept again. Run the same command again. |
+| 7 | The engine committed a page but its answer was lost and could not be read back (the request ledger holds no stored answer), so that page's counts are UNKNOWN, not zero, and later pages were not sent. `--json` carries `error.counts_unknown`. Read `nx catalog gc-audit list --operation quarantine_restore`, then run the same command again: what was restored reads `present`. |
 
-A failure on a later page (exit 4, 5 or 6) still prints the report, the totals and the `gc_audit` ids of the pages already committed, then the error; `--json` keeps its one document and adds an `error` key. The verb pages itself: chashes go in batches of 1000, an audit row by offset, a window by chash cursor. Needs the engine and the client from the same release (the route first ships in the engine that carries changeset `vectors-025`); against an older engine it exits 4.
+A failure on a later page (exit 4, 5, 6 or 7) still prints the report, the totals and the `gc_audit` ids of the pages already committed, then the error; `--json` keeps its one document and adds an `error` key. The verb pages itself: a real run takes at most 74 chashes a page (a dry run, 1000), whether the chashes are named, listed by an audit row (by offset) or found in a window (by chash cursor). If the engine refuses a page keyed because its answer would not fit the request ledger's 64 KB stored-response cap (422 `keyed_restore_body_over_cap`; nothing ran), the client sends that same page once more without the key, and a line on stderr names the page that ran that way. An unkeyed page has no replay protection. Needs the engine and the client from the same release (the route first ships in the engine that carries changeset `vectors-025`); against an older engine it exits 4.
 
 ---
 
@@ -6738,3 +6742,64 @@ RDR (Research-Design-Review) authoring helpers.
 | `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-gate`, `rdr-fix`, `rdr-accept`, `rdr-research`, `rdr-audit`). `rdr-fix <id>` prints the latest gate's findings with their `Sites:` lists, the diff range and fix commits since the gated commit, whether a fix-check record exists for the file's tip, the pre-edit research title, and the fix rules (nexus-zbdm0). `rdr-verdict <id> <critique-title>` computes a gate's outcome from the stored critique and the derived round (issue blocks and `Ship-blocker: yes` marks counted, the larger of each self-reported and counted number used, a missing `ship_blockers` line read as `critical_count`) under `review-rounds.toml`'s rdr-gate rows, and prints the gate record to write with the `prior:` chain pre-filled (nexus-yxo2l). `rdr-audit` in default mode leads with a Gate loop health block: per gated RDR, rounds, Criticals per round from the `prior:` chain, residual count, and a flag when the loop ran past the round cap |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.
+
+---
+
+## nx ask
+
+Structured asks on the threads board (RDR-245, nexus-wc4jj.7): the mediator's tool and Sam's fallback. An ask is an `ask:` block in a session's T2 `threads` entry. It is named `<entry>/<id>`; a bare `<id>` is accepted only when exactly one entry holds it. Answers are recorded in T2 project `asks` (title `<asker session id>/<ask id>/<version>`) and mailed to `mailbox/<asker session id>` as a raw `tuple_out`. The record, batch record and mail body shapes are pinned by `tests/fixtures/asks/`.
+
+| Subcommand | Description |
+|------------|-------------|
+| `list [--json] [--all]` | Interrupt asks, then the batch, then one-line counts of quiet, conditional and answered asks (`--all` lists them), then legacy asks and needs-sam beads (a bead that a structured ask folds into carries `-> <entry>/<ask id>`; the ask stays in its own group), then lint findings, then the last 48 hours of answers. `--json` carries every parsed field of every ask with its version, the bead objects with `ask_pointers`, the lint findings and the digest |
+| `show <ref> [--json]` | Every field of one ask: numbered options with the recommendation marked, the version, the asker session, the entry age and the answer record for this version, if any |
+| `answer <ref> <n\|text> --expect VERSION [--note TEXT] [--via cli\|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]` | Answer one ask. A number picks that option; any other text is a note-only answer that authorizes no option |
+| `digest` | Every answer of the last seven days, newest first: time, `via`, Sam's words, the batch reply they came from, and the tuple id (or the `sending` / `failed` status) |
+
+### nx ask answer
+
+```
+nx ask answer ENTRY/ID N|TEXT --expect VERSION [--note TEXT] [--via cli|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]
+```
+
+Refused, with nothing recorded or sent: `--expect` differs from the ask's current version (the current text is printed); the ask has an `after:` value; the entry has no `session:` line, or one that is not a lower-case canonical UUID, or two or more entries carry the same `session:` id; a number outside `1..` the option count; a `sent` record for the same version without `--replace`; a `sending` record under 10 minutes old (even with `--replace`). A `sending` record over 10 minutes old, or a `failed` one, is retried without `--replace`. The record is written `sending` with a fresh `answer_id`, read back, and the command stops without sending if the `answer_id` read back is not its own (first record wins). It then posts the tuple and updates the record to `sent` with the tuple id, or `failed` with the error, and prints which.
+
+| Flag | Description |
+|------|-------------|
+| `--expect VERSION` | Required. The 16-hex version of the ask Sam saw |
+| `--note TEXT` | A note on a chosen option. Not allowed with a free-text reply (the reply is the note) |
+| `--via cli\|mediator` | `cli` (default): stdin must be a TTY; the note, or the text of a note-only answer, is recorded as Sam's words. `mediator`: a session relaying Sam's words; needs `--sam-words` and this session's own id (tuple-watch marker, then `NX_T1_SESSION_ID`) |
+| `--sam-words TEXT` | `--via mediator` only. The contiguous span Sam typed for this ask, 1 to 500 characters |
+| `--batch-words TEXT` | `--via mediator` only. Sam's whole reply when it covered several asks, at most 2000 characters; shown only by `digest`. Answers sent with the same words by the same mediator within 10 minutes share one `batch/<mediator session>/<YYYYMMDDTHHMMSSZ>` record |
+| `--replace` | Supersede a `sent` answer to the same version |
+
+`--via cli` mails with a sender id minted once and kept in the nexus config dir (`ask-cli-sender`); `--via mediator` mails with the mediator's own session id.
+
+### nx ask list
+
+```
+nx ask list [--json] [--all]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | One JSON object with the groups `interrupt`, `batch`, `quiet`, `conditional`, `answered`, plus `legacy`, `beads`, `beads_error`, `lint`, `unreadable` and `digest` |
+| `--all` | List the quiet, conditional and answered asks instead of only counting them |
+
+### nx ask show
+
+```
+nx ask show ENTRY/ID [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | The ask as one JSON object (every parsed field, `entry_age`, and `answer`: null when there is no record for this version, else only the closed-pattern fields `answer_id`, `choice`, `via`, `time`, `status` and `tuple_id`, or `{"unreadable": true}` when any of them does not match; Sam's words, notes and errors are never shown here) |
+
+### nx ask digest
+
+```
+nx ask digest
+```
+
+Lists every answer record of the last seven days, newest first. Takes no flags.

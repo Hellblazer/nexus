@@ -43,10 +43,12 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.95.2)
+## Awaiting the next release (pinned: v7.96.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/skills/upgrade/SKILL.md` (nexus-hbnml): the rung list no longer names `aspect_queue_tuples`, which is retired with the aspect queue table.
+- `conexus/hooks/scripts/mailbox_drain.py` (nexus-wc4jj.9): an `ask:` mail whose body matches an answer record in T2 project `asks` (one GET, capped at 2.0 s) prints as a matched frame: an unverified claim with Sam's words in a nonce fence and no row header; anything else stays peer-framed with a fixed reason line.
+- `conexus/skills/mailbox/SKILL.md` (nexus-wc4jj.9): the trust paragraph names the matched ask answer as its one exception, acted on alone only for `reversible: yes` with words that clearly choose the option.
 
 ## Deferred to the next client release

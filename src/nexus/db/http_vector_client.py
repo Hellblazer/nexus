@@ -58,7 +58,7 @@ from nexus.db.gateway_backoff import (
 )
 from nexus.db.client_identity import client_identity_headers
 from nexus.collection_errors import superseded_write_error_from_body
-from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
+from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON, UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, is_deadline_abort, parse_retry_after
 from nexus.redact import redact_credentials
@@ -2220,6 +2220,13 @@ _GATE_BUSY_503_DEFAULT_WAIT_S: dict[str, float] = {
     "sweep_gate_busy": _SWEEP_GATE_BUSY_DEFAULT_WAIT_S,
 }
 
+#: Most chashes one KEYED ``POST /v1/vectors/gc/quarantine-restore`` takes (nexus-k9kr9): the engine refuses a keyed
+#: call over it with 400 ``too_many_chashes_for_keyed_restore`` and clamps a keyed ``limit`` to it, so that the call's
+#: whole 200 body fits the request ledger's 64 KB stored-response cap and a replay equals the first response field for
+#: field (the engine also refuses, with 422 ``keyed_restore_body_over_cap``, a body that would still be over it). The engine's
+#: ``VectorHandler.MAX_KEYED_QUARANTINE_RESTORE_CHASHES``, pinned to it by ``tests/test_t3_quarantine_restore.py``.
+QUARANTINE_RESTORE_KEYED_MAX_CHASHES: int = 74
+
 #: Longest a 503's ``Retry-After`` is slept before the first status poll. The poll answers the 503
 #: either way (a request that never reached the engine reads ``unknown``), and an engine without a
 #: ledger answers it 404 and surfaces the 503, so a long ``Retry-After`` must not delay that.
@@ -2244,6 +2251,10 @@ _KEY_REFUSALS: frozenset[tuple[int, str]] = frozenset({
     (400, "idempotency_key_malformed"),
     (400, "idempotency_key_unsupported"),
 })
+
+#: The ``error`` of the engine's 422 for a keyed restore whose 200 body would be over the ledger's stored-response cap
+#: (nexus-k9kr9). The keyed transaction rolled back and nothing ran, so the same page may be sent again unkeyed.
+_KEYED_RESTORE_BODY_OVER_CAP = (422, "keyed_restore_body_over_cap")
 
 
 def _engine_error(exc: VectorServiceError) -> str:
@@ -2354,7 +2365,7 @@ def _note_unresolved(exc: BaseException, key: str, why: str) -> None:
     )
 
 
-def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) -> Any:
+def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool, busy_reason: str | None = None) -> Any:
     """POST *body* to a bounded sweep route under one fresh request key, and resolve an ambiguous
     outcome through the ledger (RDR-222 Phase 1).
 
@@ -2382,6 +2393,10 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) ->
       lapses, so a resend before then is answered ``request_in_flight`` and the right response is to
       poll. ``rolled_back`` means that attempt can no longer commit, not that the key is finished: the
       same-key resend that follows may take the key over and commit.
+    * *busy_reason* names a typed 503 whose ``reason`` field (not ``error``) says the call did not run and rolled
+      back (``quarantine_restore_busy``, nexus-k9kr9): handled as ``sweep_gate_busy`` is, waiting ``Retry-After``
+      (5 s when absent) and resending under the same key, but only when the body says ``nothing_moved`` is true;
+      one that says anything else is raised at once with the engine's body (it names what committed).
     * Every other error is raised exactly as before.
 
     At most :data:`_KEYED_MAX_RESENDS` resends; past it the last outcome surfaces. An outcome the ledger
@@ -2421,11 +2436,28 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) ->
             if isinstance(exc, VectorServiceError) and exc.code is not None:
                 error = _engine_error(exc)
                 if (exc.code, error) in _KEY_REFUSALS:
-                    raise IdempotencyKeyRefusedError(
+                    refused = IdempotencyKeyRefusedError(
                         str(exc), code=exc.code, edge_refusal=exc.edge_refusal,
                         reason=exc.reason, engine_body=exc.engine_body,
-                    ) from exc
-                busy = exc.code == 503 and error in not_run
+                    )
+                    # No resend has happened yet exactly when this is the first POST: a poll is only ever followed
+                    # by a resend (or by a return/raise), and every resend counts.
+                    refused.on_first_attempt = resends == 0
+                    raise refused from exc
+                if (exc.code, error) == _KEYED_RESTORE_BODY_OVER_CAP:
+                    over_cap = KeyedRestoreBodyOverCapError(
+                        str(exc), code=exc.code, edge_refusal=exc.edge_refusal,
+                        reason=exc.reason, engine_body=exc.engine_body,
+                    )
+                    over_cap.on_first_attempt = resends == 0
+                    raise over_cap from exc
+                # The typed restore-busy 503 is "did not run" only when the engine says nothing moved. One that
+                # says something did (``nothing_moved`` false or absent) is not resent and not polled: it is raised
+                # with the engine's body, audit ids included, for the caller to report.
+                typed_busy = busy_reason is not None and exc.reason == busy_reason
+                if typed_busy and not (isinstance(exc.engine_body, dict) and exc.engine_body.get("nothing_moved") is True):
+                    raise
+                busy = exc.code == 503 and (error in not_run or typed_busy)
                 ambiguous = (
                     (exc.code == 409 and error == "request_in_flight")
                     or exc.code in (502, 504)
@@ -2436,7 +2468,7 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool) ->
                 if exc.code == 503:
                     wait_first = _retry_after_seconds(identity)
                     if busy and wait_first is None:
-                        wait_first = not_run[error]
+                        wait_first = not_run.get(error, _SWEEP_GATE_BUSY_DEFAULT_WAIT_S)
                     elif not busy and wait_first is not None:
                         wait_first = min(wait_first, _RETRY_AFTER_BEFORE_POLL_MAX_S)
             else:
@@ -2737,7 +2769,24 @@ class IdempotencyKeyRefusedError(VectorServiceError):
     resend can only repeat it, so the keyed methods raise this and never resend. ``code`` and
     ``engine_body["error"]`` say which. A :class:`VectorServiceError`, so a caller that catches that
     still catches this.
+
+    ``on_first_attempt`` is true only when the refusal answered the FIRST POST of a keyed call, before any status
+    poll or resend; a caller that falls back to an unkeyed resend on ``idempotency_key_unsupported`` must check it,
+    because a refusal that answers a later attempt means an earlier attempt of the same call may have run.
     """
+
+    on_first_attempt: bool = False
+
+
+class KeyedRestoreBodyOverCapError(VectorServiceError):
+    """422 ``keyed_restore_body_over_cap`` (nexus-k9kr9): the keyed restore's 200 body would be over the request
+    ledger's stored-response cap. The engine builds the body inside the keyed transaction, so the transaction rolled
+    back and nothing ran; the same page sent unkeyed stores no body and has no cap. ``on_first_attempt`` is true only
+    when the refusal answered the FIRST POST of the call, as on :class:`IdempotencyKeyRefusedError`. A
+    :class:`VectorServiceError` with ``code`` 422, so a caller that catches that still catches this.
+    """
+
+    on_first_attempt: bool = False
 
 
 class PerCollectionEnvelopeError(VectorServiceError):
@@ -5179,6 +5228,31 @@ class HttpVectorClient:
 
         A write that is never auto-retried on a gateway-transient code
         (:data:`nexus.db.gateway_backoff._NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES`).
+
+        RDR-222 (nexus-k9kr9): a real run (not a ``dry_run``) of at most
+        :data:`QUARANTINE_RESTORE_KEYED_MAX_CHASHES` chashes is one keyed request (``Idempotency-Key``, a fresh uuid4
+        minted here), resolved through the ledger on an ambiguous outcome exactly as
+        :meth:`gc_quarantine_orphans_bounded` is. The engine then runs every quarantine sibling in ONE transaction
+        with the ledger marker, so a lost response is answered by the stored first response, and a
+        ``quarantine_restore_busy`` 503 on any sibling rolls the whole call back (``nothing_moved`` true,
+        ``audit_ids`` empty): that busy answer is waited out (``Retry-After``) and resent under the same key, at most
+        3 times, before it is raised; a busy answer whose body does not say ``nothing_moved`` is true is raised at
+        once. ``limit`` on the ``audit_id`` and window sources is clamped by the engine to
+        the same ceiling (page by ``source.next_offset`` / ``next_after``), and a keyed row's two titles are cut to
+        160 JSON bytes. A dry run, or a ``chashes`` list over the ceiling, is sent unkeyed as before; so is the call
+        again against an engine that keeps a ledger but not keyed restore (400 ``idempotency_key_unsupported``), when
+        that refusal answers the first attempt; a later one is raised, because an earlier attempt may have run.
+        Raises :class:`IdempotencyKeyRefusedError` for any other refused key.
+        A 422 ``keyed_restore_body_over_cap`` answering the first attempt (the page's 200 body would be over the
+        ledger's stored-response cap; the keyed transaction rolled back, nothing ran) sends the same page once more
+        unkeyed, which stores no body and has no cap; the returned dict then carries ``"ran_unkeyed":
+        "keyed_restore_body_over_cap"`` and the page has no replay protection. A later-attempt 422 is raised.
+
+        A keyed call the ledger settles as committed but whose stored answer is unavailable returns
+        :class:`CommittedWithUnknownCounts` (``{"committed_unknown_counts": True}``, no ``rows``, no counts): the
+        restore ran and its counts are unknown, which a caller must never read as zero restored. ``nx t3 quarantine
+        restore`` stops on it with exit 7.
+
         Raises :class:`VectorServiceError` (``code=404`` on an engine that
         predates the route, ``400`` for a refused request such as a sample-only
         audit row, ``422`` for an unregistered collection, ``503`` with
@@ -5200,7 +5274,45 @@ class HttpVectorClient:
             body["dry_run"] = True
         if reattach is not None:
             body["reattach"] = reattach
-        return _post("/v1/vectors/gc/quarantine-restore", body, tenant=self._tenant)
+        path = "/v1/vectors/gc/quarantine-restore"
+        # A dry run writes nothing, so there is nothing for a key to protect (the engine refuses one), and a list
+        # over the keyed ceiling is a call the engine would refuse keyed: both go as before, unkeyed.
+        if dry_run or (chashes is not None and len(chashes) > QUARANTINE_RESTORE_KEYED_MAX_CHASHES):
+            return _post(path, body, tenant=self._tenant)
+        try:
+            return _keyed_sweep_post(
+                path, body, tenant=self._tenant, gate_busy=False, busy_reason=QUARANTINE_RESTORE_BUSY_REASON,
+            )
+        except IdempotencyKeyRefusedError as exc:
+            # An engine that keeps a ledger but predates keyed restore answers 400 ``idempotency_key_unsupported``
+            # before it does anything (a refused key ran nothing), so the call goes again without the key. That holds
+            # only when the refusal answers the FIRST attempt: after a poll or a resend, an earlier attempt of this
+            # call may have run, and an unkeyed resend would run it twice, so the refusal is raised with a note. An
+            # engine that keeps no ledger at all ignores the key and never reaches here. Any other refusal is a client bug.
+            if exc.code == 400 and _engine_error(exc) == "idempotency_key_unsupported":
+                if exc.on_first_attempt:
+                    _log.info("quarantine_restore_unkeyed_fallback", path=path)
+                    return _post(path, body, tenant=self._tenant)
+                exc.add_note(
+                    "this refusal answered a later attempt of the call, so an earlier attempt may have run; the call "
+                    "was not sent again unkeyed. Check the gc_audit quarantine_restore rows, then run the command again."
+                )
+            raise
+        except KeyedRestoreBodyOverCapError as exc:
+            # The engine rolled the keyed transaction back, so nothing ran. The unkeyed path stores no body and has no
+            # cap, so the same page goes again without the key, once. Only when this answers the FIRST attempt: after a
+            # poll or a resend an earlier attempt may have committed, and an unkeyed resend would run it twice.
+            if not exc.on_first_attempt:
+                exc.add_note(
+                    "this refusal answered a later attempt of the call, so an earlier attempt may have run; the call "
+                    "was not sent again unkeyed. Check the gc_audit quarantine_restore rows, then run the command again."
+                )
+                raise
+            _log.warning("quarantine_restore_unkeyed_over_cap", path=path, engine_body=exc.engine_body)
+            page = _post(path, body, tenant=self._tenant)
+            if isinstance(page, dict):
+                page["ran_unkeyed"] = _KEYED_RESTORE_BODY_OVER_CAP[1]
+            return page
 
     def manifest_less_census(
         self, collection: str, limit: int = 100, offset: int = 0,

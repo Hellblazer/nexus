@@ -107,7 +107,7 @@ def _collect(request: Request) -> dict[str, Any]:
     now = clock()
     board = build_board(entries, now)
     beads = bd_runner()
-    asks = merge_asks(board.needs_you, beads.beads)
+    asks = merge_asks(board.needs_you, beads.beads, board.structured)
     # False when a source failed or an entry could not be read: "nothing needs you" would then be a guess.
     checked_everything = beads.ok and not t2_error and not board.unreadable
     return {
