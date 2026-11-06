@@ -57,7 +57,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-055-1" author="nexus-rfvyy.7.3">
-        <comment>RDR-243 Phase 2 Step 2.1a: sensitivity=exclude in the 31 vector search functions (10 families x 3 dimensions plus manifest_qualifying_hits). Each takes a trailing p_exclude_sensitive boolean DEFAULT false; when true the statement carries NOT chunk_sensitive(...) inside the search predicate. Old signatures dropped in the same changeset (one function per name), nexus_svc grants re-issued, RETURNS TABLE shapes unchanged. No data effect: function definitions and grants only.</comment>
+        <comment>RDR-243 Phase 2 Step 2.1a: sensitivity=exclude in the 31 vector search functions (10 families x 3 dimensions plus manifest_qualifying_hits). Each takes a trailing p_exclude_sensitive boolean DEFAULT false; when true the statement carries an inline NOT EXISTS over the chunk's live sensitive owners (the rule nexus.chunk_sensitive applies, written out because the planner cannot inline a scalar function whose body holds a subquery) inside the search predicate. Old signatures dropped in the same changeset (one function per name), nexus_svc grants re-issued, RETURNS TABLE shapes unchanged. No data effect: function definitions and grants only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 DROP FUNCTION IF EXISTS nexus.plain_search_384(nexus.vector,text[],jsonb,text,integer,text,text);
 
