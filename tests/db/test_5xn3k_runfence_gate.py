@@ -437,7 +437,7 @@ def _count_chunks(col, content_hash: str) -> int:
     total = 0
     offset = 0
     while True:
-        batch = col.get(where={"content_hash": content_hash}, include=[], limit=300, offset=offset)
+        batch = col.get(where={"content_hash": content_hash}, include=[], limit=300, offset=offset, sensitivity="include")
         ids = batch.get("ids", [])
         total += len(ids)
         if len(ids) < 300:

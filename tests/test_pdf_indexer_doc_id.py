@@ -174,7 +174,7 @@ def test_pdf_indexer_registers_catalog_and_writes_manifest(
     assert docs_collection, "registry should record docs_collection after indexing"
 
     docs_col = local_t3.get_collection(docs_collection)
-    result = docs_col.get(include=["metadatas"])
+    result = docs_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "expected at least one PDF chunk in T3 docs collection"
 
     # Filter to PDF chunks (the docs__ collection holds prose + PDF mixed).
@@ -237,7 +237,7 @@ def test_pdf_indexer_doc_id_absent_when_catalog_uninitialized(
     docs_collection = info.get("docs_collection")
     assert docs_collection
     docs_col = local_t3.get_collection(docs_collection)
-    result = docs_col.get(include=["metadatas"])
+    result = docs_col.get(include=["metadatas"], sensitivity="include")
     assert result["ids"], "indexer should still write chunks when catalog absent"
 
     pdf_metas = [m for m in result["metadatas"] if m.get("content_type") == "pdf"]

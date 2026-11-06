@@ -234,11 +234,11 @@ class _FakeClient:
         self.rows = rows
         self.calls: list[tuple[str, str]] = []
 
-    def search(self, query, collection_names, n_results=10):
+    def search(self, query, collection_names, n_results=10, *, sensitivity="include"):
         self.calls.append(("vector", query))
         return self.rows
 
-    def hybrid_search(self, query, collection_names, n_results=10):
+    def hybrid_search(self, query, collection_names, n_results=10, *, sensitivity="include"):
         self.calls.append(("hybrid", query))
         return self.rows
 

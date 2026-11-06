@@ -109,7 +109,7 @@ def _data(cols: list[str]) -> dict[str, list[tuple[str, float]]]:
 def _search(engine: _EmbeddingEngine, cols: list[str], **kw):
     kw.setdefault("threshold_override", float("inf"))
     kw.setdefault("cluster_by", "semantic")
-    return search_cross_corpus("q", cols, 20, engine.client, **kw)
+    return search_cross_corpus("q", cols, 20, engine.client, **kw, sensitivity="include")
 
 
 def _signature(results) -> list[tuple]:
@@ -163,7 +163,7 @@ class TestTheRowsCarryTheVectors:
         assert all(b.get("embeddings_limit") == 300 for b in engine.route_calls())
 
         big = _EmbeddingEngine(monkeypatch, _data(cols))
-        search_cross_corpus("q", cols, 100, big.client, threshold_override=float("inf"), cluster_by="semantic")
+        search_cross_corpus("q", cols, 100, big.client, threshold_override=float("inf"), cluster_by="semantic", sensitivity="include")
         assert all(b.get("embeddings_limit") == 400 for b in big.route_calls()), "4n once n passes 75"
 
     def test_the_field_is_not_requested_when_nothing_needs_the_vectors(self, monkeypatch):

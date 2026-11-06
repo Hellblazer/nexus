@@ -222,7 +222,7 @@ def test_t3_concurrent_reads():
 
     def _search(query: str) -> list:
         try:
-            return t3.search(query, ["knowledge__conctest"], n_results=5)
+            return t3.search(query, ["knowledge__conctest"], n_results=5, sensitivity="include")
         except Exception as e:
             errors.append(str(e))
             return []

@@ -89,7 +89,7 @@ def test_lexical_refuses_a_backend_without_the_route(monkeypatch):
     """
     with pytest.raises(LexicalLegUnavailableError) as exc:
         search_cross_corpus("q", [_COLL], n_results=5,
-                            t3=_VectorOnlyBackend(), lexical=True)
+                            t3=_VectorOnlyBackend(), lexical=True, sensitivity="include")
     msg = str(exc.value)
     assert "hybrid-search" in msg
     assert "falling back" in msg
@@ -101,7 +101,7 @@ def test_without_lexical_a_routeless_backend_is_never_asked(monkeypatch):
     A backend with no hybrid route is still a perfectly good vector backend.
     """
     rows = search_cross_corpus("q", [_COLL], n_results=5,
-                               t3=_VectorOnlyBackend(), lexical=False)
+                               t3=_VectorOnlyBackend(), lexical=False, sensitivity="include")
     assert [r.id for r in rows] == ["v1"]
 
 
@@ -115,7 +115,7 @@ def test_lexical_is_additive_and_never_replaces_the_vector_rows():
         vector_rows=[{"id": "v1", "content": "a", "distance": 0.2, "collection": _COLL}],
         lexical_rows=[{"id": "L1", "content": "b", "distance": 0.30, "collection": _COLL}],
     )
-    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True, sensitivity="include")
 
     assert backend.hybrid_calls, "the lexical leg was never called"
     assert {r.id for r in rows} == {"v1", "L1"}
@@ -126,7 +126,7 @@ def test_a_row_both_legs_return_is_not_duplicated():
         vector_rows=[{"id": "same", "content": "a", "distance": 0.2, "collection": _COLL}],
         lexical_rows=[{"id": "same", "content": "a", "distance": 0.2, "collection": _COLL}],
     )
-    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True, sensitivity="include")
     assert [r.id for r in rows] == ["same"]
 
 
@@ -143,7 +143,7 @@ def test_a_lexical_row_survives_a_threshold_that_would_drop_it():
         vector_rows=[{"id": "v1", "content": "a", "distance": 0.20, "collection": _COLL}],
         lexical_rows=[{"id": "far", "content": "b", "distance": 0.92, "collection": _COLL}],
     )
-    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True, sensitivity="include")
 
     assert "far" in {r.id for r in rows}, (
         "the lexical hit was dropped by the vector distance threshold — the "
@@ -165,7 +165,7 @@ def test_the_exemption_does_not_leak_to_vector_rows():
         ],
         lexical_rows=[],
     )
-    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True, sensitivity="include")
     ids = {r.id for r in rows}
     assert "near" in ids
     assert "far_vec" not in ids, (
@@ -257,7 +257,7 @@ def test_a_lexical_leg_failure_does_not_discard_the_vector_rows_silently():
         vector_rows=[{"id": "v1", "content": "a", "distance": 0.2, "collection": _COLL}],
     )
     with pytest.raises(LexicalLegUnavailableError) as exc:
-        search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+        search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True, sensitivity="include")
 
     msg = str(exc.value)
     assert "lexical leg failed" in msg, "the failure must name the lexical leg"
@@ -282,7 +282,7 @@ def test_the_exemption_survives_a_row_both_legs_returned():
     row = {"id": "both", "content": "a", "distance": 0.92, "collection": _COLL}
     backend = _LexicalBackend(vector_rows=[dict(row)], lexical_rows=[dict(row)])
 
-    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True, sensitivity="include")
 
     assert "both" in {r.id for r in rows}, (
         "a row returned by BOTH legs was dropped by the vector threshold; the "
@@ -301,7 +301,7 @@ def test_no_internal_provenance_marker_reaches_a_result_row():
         vector_rows=[{"id": "v1", "content": "a", "distance": 0.20, "collection": _COLL}],
         lexical_rows=[{"id": "L1", "content": "b", "distance": 0.30, "collection": _COLL}],
     )
-    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True)
+    rows = search_cross_corpus("q", [_COLL], n_results=5, t3=backend, lexical=True, sensitivity="include")
 
     for r in rows:
         assert "_lexical_only" not in r.metadata, (
@@ -344,7 +344,7 @@ def test_the_lexical_leg_is_reranked_whenever_the_vector_leg_is():
         lexical_rows=[{"id": "L1", "content": "b", "distance": 0.3, "collection": _COLL}],
     )
     search_cross_corpus("q", [_COLL], n_results=5, t3=backend,
-                        lexical=True, rerank=True)
+                        lexical=True, rerank=True, sensitivity="include")
 
     assert backend.hybrid_kwargs, "the lexical leg was never called"
     assert backend.hybrid_kwargs[0].get("rerank") is True, (

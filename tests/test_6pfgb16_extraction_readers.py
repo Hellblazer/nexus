@@ -59,7 +59,7 @@ class _StubT3:
     def collection_info(self, name: str) -> dict:
         return {"count": len(self.docs), "metadata": {}}
 
-    def get_by_id(self, name: str, doc_id: str) -> dict | None:
+    def get_by_id(self, name: str, doc_id: str, *, sensitivity="include") -> dict | None:
         return dict(self.docs[doc_id]) if name == self.name and doc_id in self.docs else None
 
     def find_ids_by_title(self, name: str, title: str) -> list[str]:
@@ -255,7 +255,7 @@ class _Col:
         self.rows = rows
         self.reads: list[list[str]] = []
 
-    def get(self, *, ids=None, where=None, include=None, limit=None):
+    def get(self, *, ids=None, where=None, include=None, limit=None, sensitivity="include"):
         assert where is None, "the scan reads the rows its catalog names, by id"
         self.reads.append(list(ids))
         hit = [c for c in ids if c in self.rows]

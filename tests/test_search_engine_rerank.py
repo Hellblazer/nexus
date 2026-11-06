@@ -46,7 +46,7 @@ def test_rerank_requested_per_collection_and_scores_reach_metadata():
     meta: dict = {}
     out = search_cross_corpus(
         "q", ["knowledge__a", "rdr__b"], n_results=5, t3=t3,
-        cluster_by=None, rerank=True, rerank_meta_out=meta,
+        cluster_by=None, rerank=True, rerank_meta_out=meta, sensitivity="include",
     )
 
     assert all(c["rerank"] is True for c in t3.calls)
@@ -66,7 +66,7 @@ def test_degrade_meta_collected_per_collection():
     meta: dict = {}
     search_cross_corpus(
         "q", ["knowledge__a", "rdr__b"], n_results=5, t3=t3,
-        cluster_by=None, rerank=True, rerank_meta_out=meta,
+        cluster_by=None, rerank=True, rerank_meta_out=meta, sensitivity="include",
     )
 
     assert meta["knowledge__a"]["degraded"] is True
@@ -78,7 +78,7 @@ def test_legacy_backend_never_asked_to_rerank():
     meta: dict = {}
     out = search_cross_corpus(
         "q", ["knowledge__a", "rdr__b"], n_results=5, t3=t3,
-        cluster_by=None, rerank=True, rerank_meta_out=meta,
+        cluster_by=None, rerank=True, rerank_meta_out=meta, sensitivity="include",
     )
 
     assert all("rerank" not in c for c in t3.calls)
@@ -88,6 +88,6 @@ def test_legacy_backend_never_asked_to_rerank():
 
 def test_rerank_off_is_the_default_no_kwargs_leak():
     t3 = _FakeT3({"knowledge__a": [_row("k1", "knowledge__a", 0.1)]})
-    search_cross_corpus("q", ["knowledge__a"], n_results=5, t3=t3, cluster_by=None)
+    search_cross_corpus("q", ["knowledge__a"], n_results=5, t3=t3, cluster_by=None, sensitivity="include")
 
     assert all("rerank" not in c for c in t3.calls)

@@ -27,7 +27,7 @@ _RENDEZVOUS_S = 5.0
 class _FakeT3:
     _voyage_client = None
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         return [
             {"id": f"c{i}", "content": f"text {i}", "distance": 0.1 + 0.01 * i,
              "chunk_text_hash": f"{i:064x}"}
@@ -86,7 +86,7 @@ def test_display_lookup_overlaps_the_topic_labels() -> None:
 
     results = search_cross_corpus(
         "q", [_COL], n_results=4, t3=_FakeT3(), catalog=catalog,
-        taxonomy=taxonomy, cluster_by="semantic", link_boost=False,
+        taxonomy=taxonomy, cluster_by="semantic", link_boost=False, sensitivity="include",
     )
 
     # Serial code would leave one side waiting out the full timeout.
@@ -144,7 +144,7 @@ def test_a_failed_lookup_leaves_results_without_display_paths_as_before() -> Non
 
     results = search_cross_corpus(
         "q", [_COL], n_results=4, t3=_FakeT3(), catalog=catalog,
-        taxonomy=None, cluster_by=None, link_boost=False,
+        taxonomy=None, cluster_by=None, link_boost=False, sensitivity="include",
     )
 
     assert len(results) == 4

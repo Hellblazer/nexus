@@ -393,7 +393,7 @@ def test_t1_pagination(t1: T1Database, method: str, expected: int) -> None:
 
 def test_new_entry_has_access_count_zero(t1: T1Database) -> None:
     doc_id = t1.put(content="fresh entry")
-    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     meta = raw["metadatas"][0]
     assert meta["access_count"] == 0
     assert meta["last_accessed"] == ""
@@ -402,7 +402,7 @@ def test_new_entry_has_access_count_zero(t1: T1Database) -> None:
 def test_get_increments_access_count(t1: T1Database) -> None:
     doc_id = t1.put(content="trackable entry")
     t1.get(doc_id)
-    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     assert raw["metadatas"][0]["access_count"] == 1
 
 
@@ -411,21 +411,21 @@ def test_get_three_times_access_count_three(t1: T1Database) -> None:
     t1.get(doc_id)
     t1.get(doc_id)
     t1.get(doc_id)
-    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     assert raw["metadatas"][0]["access_count"] == 3
 
 
 def test_search_increments_access_count(t1: T1Database) -> None:
     doc_id = t1.put(content="searchable unique content zygomorphic")
     t1.search("zygomorphic")
-    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     assert raw["metadatas"][0]["access_count"] == 1
 
 
 def test_last_accessed_updated_after_get(t1: T1Database) -> None:
     doc_id = t1.put(content="timestamp check")
     t1.get(doc_id)
-    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     ts = raw["metadatas"][0]["last_accessed"]
     assert ts != ""
     # Should be a valid ISO timestamp
@@ -437,7 +437,7 @@ def test_get_preserves_existing_metadata(t1: T1Database) -> None:
     """Access tracking must not wipe session_id, tags, or flagged."""
     doc_id = t1.put(content="preserve me", tags="important")
     t1.get(doc_id)
-    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     meta = raw["metadatas"][0]
     assert meta["session_id"] == _SESSION
     assert meta["tags"] == "important"
@@ -458,7 +458,7 @@ def test_promote_does_not_increment_access_count(t1: T1Database, db: T2Database)
     """I-2 fix: promote() does not inflate access_count."""
     doc_id = t1.put(content="promote without tracking")
     t1.promote(doc_id, project="proj", title="p.md", t2=db)
-    raw = t1._col.get(ids=[doc_id], include=["metadatas"])
+    raw = t1._col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     assert raw["metadatas"][0]["access_count"] == 0
 
 

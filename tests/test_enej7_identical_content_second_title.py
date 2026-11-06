@@ -49,7 +49,7 @@ def _assert_two_documents(client, collection: str, titles: tuple[str, str]) -> N
     manifests = [{r.chash for r in reader.get_manifest(str(d.tumbler))} for d in docs]
     assert manifests[0] and manifests[0] == manifests[1], "both documents own the one shared chunk"
     chash = next(iter(manifests[0]))
-    assert chash in client.get_collection(collection).get(ids=[chash], include=[])["ids"]
+    assert chash in client.get_collection(collection).get(ids=[chash], include=[], sensitivity="include")["ids"]
 
 
 def test_cli_second_title_registers_a_second_document(t2_service_env, tmp_path):

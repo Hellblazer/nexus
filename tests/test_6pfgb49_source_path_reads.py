@@ -67,7 +67,7 @@ def test_search_text_label_never_falls_back_to_a_stale_source_path():
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.mcp.core._get_t1", return_value=(SimpleNamespace(session_id=""), None)), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        out = _search_render(query="stale label probe", corpus="code__test")
+        out = _search_render(query="stale label probe", corpus="code__test", sensitivity="include")
     assert STALE not in out
     assert "chunk-dddd" in out, "an unlabelled hit falls back to its id"
 

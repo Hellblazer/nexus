@@ -36,7 +36,7 @@ class TestRerankEnvelopePositiveAck:
         )
         meta: dict = {}
         _client().search(
-            "q", ["code__x__stub-code-1024__v1"], rerank=True, rerank_meta_out=meta,
+            "q", ["code__x__stub-code-1024__v1"], rerank=True, rerank_meta_out=meta, sensitivity="include",
         )
         return meta
 
@@ -270,7 +270,7 @@ class TestDistanceKeySentinel:
                 {"id": "a", "collection": "c"},
             ],
         )
-        out = _client().search("q", ["c"], structured=True)
+        out = _client().search("q", ["c"], structured=True, sensitivity="include")
         assert out["distances"][0] is None
 
     def test_reported_distances_helper_emits_none_never_zero_or_inf(self) -> None:

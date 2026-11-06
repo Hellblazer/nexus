@@ -557,7 +557,7 @@ class TestStorePutIntegrity:
         def __init__(self, present_ids: set[str] | None = None):
             self._present = present_ids or set()
 
-        def get_by_id(self, collection, doc_id):
+        def get_by_id(self, collection, doc_id, *, sensitivity="include"):
             return {"id": doc_id} if doc_id in self._present else None
 
         def find_ids_by_title(self, collection, title):
@@ -706,7 +706,7 @@ class TestStorePutIntegrity:
         )
 
         class _FlakyT3:
-            def get_by_id(self, collection, doc_id):
+            def get_by_id(self, collection, doc_id, *, sensitivity="include"):
                 raise TimeoutError("engine read timed out")
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FlakyT3())

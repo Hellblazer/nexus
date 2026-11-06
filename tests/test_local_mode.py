@@ -408,7 +408,7 @@ class TestT3DatabaseLocalMode:
             title="python-fact",
         )
         assert doc_id
-        results = local_db.search("programming language", collection_names=["knowledge__test"])
+        results = local_db.search("programming language", collection_names=["knowledge__test"], sensitivity="include")
         assert len(results) == 1
         assert any("Python" in r.get("content", "") for r in results)
 
@@ -430,7 +430,7 @@ class TestT3DatabaseLocalMode:
         col = local_db.get_or_create_collection(
             "knowledge__source_path_check",
         )
-        rows = col.get(include=["metadatas"])
+        rows = col.get(include=["metadatas"], sensitivity="include")
         assert rows["metadatas"], "expected MCP put to land at least one chunk"
         leaked = [m for m in rows["metadatas"] if "source_path" in m]
         assert not leaked, (
@@ -449,13 +449,13 @@ class TestT3DatabaseLocalMode:
         # local-mode search still works (the CCE branch was deleted, not
         # merely bypassed).
         local_db.put(collection="knowledge__test", content="test content", title="t1")
-        results = local_db.search("test", collection_names=["knowledge__test"])
+        results = local_db.search("test", collection_names=["knowledge__test"], sensitivity="include")
         assert isinstance(results, list)
 
     def test_local_mode_skips_max_query_results_clamping(self, local_db: T3Database) -> None:
         for i in range(5):
             local_db.put(collection="knowledge__test", content=f"document {i}", title=f"doc-{i}")
-        results = local_db.search("document", collection_names=["knowledge__test"], n_results=500)
+        results = local_db.search("document", collection_names=["knowledge__test"], n_results=500, sensitivity="include")
         assert isinstance(results, list)
 
     def test_cloud_mode_still_works(self) -> None:
@@ -549,7 +549,7 @@ class TestLocalStaleness:
         )
         monkeypatch.setattr(
             "nexus.doc_indexer._own_chunk_metadata",
-            lambda col, doc_id: col.get(ids=["chunk1"], include=["metadatas"])["metadatas"][0],
+            lambda col, doc_id: col.get(ids=["chunk1"], include=["metadatas"], sensitivity="include")["metadatas"][0],
         )
 
         # RDR-103 Phase 5: pre-create with strict=False so the test
@@ -590,7 +590,7 @@ class TestLocalCollectionLifecycle:
         )
         assert doc_id
 
-        results = local_db.search("systems programming", collection_names=["knowledge__lifecycle"])
+        results = local_db.search("systems programming", collection_names=["knowledge__lifecycle"], sensitivity="include")
         assert len(results) == 1
         assert any("Rust" in r.get("content", "") for r in results)
 
@@ -645,7 +645,7 @@ class TestLocalCollectionLifecycle:
 
         with patched_mcp_infra_t3(local_db):
             assert local_db.expire() == 1
-        assert len(local_db.search("permanent", collection_names=["knowledge__expire_test"])) == 1
+        assert len(local_db.search("permanent", collection_names=["knowledge__expire_test"], sensitivity="include")) == 1
 
 
 # ── Corpus model consistency ──────────────────────────────────────────────────

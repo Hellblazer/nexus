@@ -63,7 +63,7 @@ class _FakeStub:
         self._ids = ids
         self._docs = docs
 
-    def get(self, *, include=None, limit=10, offset=0):  # noqa: ANN001
+    def get(self, *, include=None, limit=10, offset=0, sensitivity="include"):  # noqa: ANN001
         sl = slice(offset, offset + limit)
         return {"ids": self._ids[sl], "documents": self._docs[sl]}
 
@@ -514,7 +514,7 @@ class _StubWithIds:
         self._ids = ids
         self._docs = docs
 
-    def get(self, ids=None, where=None, include=None, limit=None, offset=0):  # noqa: ANN001
+    def get(self, ids=None, where=None, include=None, limit=None, offset=0, *, sensitivity="include"):  # noqa: ANN001
         if ids is not None:
             idx = {i: d for i, d in zip(self._ids, self._docs)}
             rids = [i for i in ids if i in idx]
@@ -593,7 +593,7 @@ def test_svc_fetch_by_ids_raises_when_stub_overreturns():
     ids, _docs, _embs = _corpus(4)
 
     class _OverReturns:
-        def get(self, ids=None, where=None, include=None, limit=None, offset=0):  # noqa: ANN001
+        def get(self, ids=None, where=None, include=None, limit=None, offset=0, *, sensitivity="include"):  # noqa: ANN001
             # Returns one MORE row than was requested — never legitimate.
             return {
                 "ids": [*ids, "phantom"],

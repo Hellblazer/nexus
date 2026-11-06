@@ -357,7 +357,7 @@ def test_search_returns_results(t3):
     result = _search_render(
         query="vector database",
         corpus="knowledge__test__voyage-context-3__v1",
-        limit=5,
+        limit=5, sensitivity="include",
     )
     assert not result.startswith("Error:")
     assert "vector database" in result.lower() or "doc1" in result
@@ -415,7 +415,7 @@ class TestNexusHmxiRoundTripGrandfathering:
         sresult = _search_render(
             query="ART data Phase-5",
             corpus="knowledge__art",
-            limit=5,
+            limit=5, sensitivity="include",
         )
         assert not sresult.startswith("Error:")
         assert "art-overview" in sresult or "art-followup" in sresult
@@ -511,7 +511,7 @@ class TestNexusHmxiRoundTripGrandfathering:
 
 @pytest.mark.t2_tenant
 def test_search_no_results(t3):
-    result = _search_render(query="nonexistent topic", corpus="knowledge__empty")
+    result = _search_render(query="nonexistent topic", corpus="knowledge__empty", sensitivity="include")
     assert not result.startswith("Error:")
     assert "no" in result.lower()
 
@@ -532,7 +532,7 @@ def test_search_threshold_kwarg_routed_to_engine():
     _mock_t3([{"name": "knowledge__test", "count": 5}])
     captured, fake = _capture_search_kwargs()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="vector db", corpus="knowledge__test", threshold=0.7)
+        _search_render(query="vector db", corpus="knowledge__test", threshold=0.7, sensitivity="include")
     assert captured, "engine must be invoked"
     assert captured[0].get("threshold_override") == pytest.approx(0.7)
 
@@ -542,7 +542,7 @@ def test_search_no_threshold_kwarg_passes_none():
     _mock_t3([{"name": "knowledge__test", "count": 5}])
     captured, fake = _capture_search_kwargs()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="vector db", corpus="knowledge__test")
+        _search_render(query="vector db", corpus="knowledge__test", sensitivity="include")
     assert captured[0].get("threshold_override") is None
 
 
@@ -585,7 +585,7 @@ def test_search_ranks_by_hybrid_score_not_raw_distance():
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         out = _search_render(query="hybrid ranking pin", corpus="code__test",
-                      cluster_by="", structured=True)
+                      cluster_by="", structured=True, sensitivity="include")
     assert out["ids"] == [
         "mid_dist_high_frecency", "low_dist_no_boost", "high_dist_no_boost",
     ]
@@ -641,7 +641,7 @@ def test_search_and_cli_helper_rank_identically():
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         mcp_out = _search_render(query="parity pin", corpus="code__test",
-                          cluster_by="", structured=True)
+                          cluster_by="", structured=True, sensitivity="include")
 
     assert mcp_out["ids"] == cli_order
 
@@ -673,11 +673,11 @@ def test_search_page_and_scores_do_not_depend_on_pool_depth(limit):
         with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
              patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
             pages[depth] = _strip_pool_count(_search_render(
-                query="boost window pin", corpus="code__test", cluster_by="", limit=limit))
+                query="boost window pin", corpus="code__test", cluster_by="", limit=limit, sensitivity="include"))
             mcp_core._reset_page_cache_for_tests()
             out = _search_render(
                 query="boost window pin", corpus="code__test", cluster_by="",
-                limit=limit, structured=True)
+                limit=limit, structured=True, sensitivity="include")
         structured[depth] = (out["ids"], out["hybrid_scores"])
     assert len(pages) >= 3
     assert all(" s=" in p for p in pages.values()), "the page must show s= or the pin proves nothing"
@@ -698,7 +698,7 @@ def test_search_pool_count_still_follows_the_fetch_depth():
         mcp_core._reset_page_cache_for_tests()
         with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
              patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-            text = _search_render(query="boost window count", corpus="code__test", cluster_by="")
+            text = _search_render(query="boost window count", corpus="code__test", cluster_by="", sensitivity="include")
         footers.append([ln for ln in text.splitlines() if ln.startswith("--- showing")][0])
     assert footers[0].endswith("of 40. next: offset=10"), footers
     assert footers[1].endswith("of 120. next: offset=10"), footers
@@ -719,7 +719,7 @@ def test_search_page_turns_past_the_window_continue_the_same_ordering():
             with patch("nexus.search_engine.search_cross_corpus", lambda *_a, _d=depth, **_k: pool(_d)), \
                  patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
                 out = _search_render(query="boost window seam", corpus="code__test",
-                                     cluster_by="", limit=10, offset=offset, structured=True)
+                                     cluster_by="", limit=10, offset=offset, structured=True, sensitivity="include")
             seen.extend(out["ids"])
         assert len(seen) == 50 and len(set(seen)) == 50, depth
 
@@ -746,7 +746,7 @@ def test_cluster_by_semantic_discards_the_boosted_order():
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         out = _search_render(query="cluster order pin", corpus="code__test",
-                      cluster_by="semantic", structured=True)
+                      cluster_by="semantic", structured=True, sensitivity="include")
 
     # NOT the hybrid-boosted order (mid/low/high) — the pre-boost order
     # search_cross_corpus produced, which is this fixture's own declaration
@@ -783,7 +783,7 @@ def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG), \
          patch("nexus.mcp.core._get_t1", side_effect=RuntimeError("no T1 in this test")):
         out = _search_render(query="cluster duplicate ids", corpus="code__test",
-                             cluster_by="semantic", structured=True)
+                             cluster_by="semantic", structured=True, sensitivity="include")
 
     assert out["ids"] == [shared, shared, other]
     assert out["tumblers"] == ["1.1.1", "1.1.2", "1.1.2"]
@@ -833,9 +833,9 @@ def test_structured_true_uncapped_structured_false_capped_same_cache_entry():
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value={"search": {"query_sanitizer": False}}):
         structured_out = _search_render(query="diversity cap pin", corpus="code__test",
-                                         cluster_by="", structured=True, limit=10)
+                                         cluster_by="", structured=True, limit=10, sensitivity="include")
         text_out = _search_render(query="diversity cap pin", corpus="code__test",
-                                   cluster_by="", structured=False, limit=10)
+                                   cluster_by="", structured=False, limit=10, sensitivity="include")
 
     dom_ids_structured = [i for i in structured_out["ids"] if i.startswith("dom")]
     assert len(dom_ids_structured) == 8, (
@@ -865,12 +865,12 @@ def test_clustered_mode_skips_the_diversity_cap():
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value={"search": {"query_sanitizer": False}}):
         out = _search_render(query="clustered no cap pin", corpus="code__test",
-                              cluster_by="semantic", structured=True, limit=10)
+                              cluster_by="semantic", structured=True, limit=10, sensitivity="include")
         # The falsifying half (code review [24005], Important): structured=True
         # bypasses the cap on its own, so only a TEXT render proves the
         # `clustered` skip does anything. Same fixture, same cache entry.
         text_out = _search_render(query="clustered no cap pin", corpus="code__test",
-                                   cluster_by="semantic", structured=False, limit=10)
+                                   cluster_by="semantic", structured=False, limit=10, sensitivity="include")
 
     dom_ids = [i for i in out["ids"] if i.startswith("dom")]
     assert len(dom_ids) == 8, (
@@ -1221,7 +1221,7 @@ def test_store_put_category_persisted_in_metadata(t3):
     )
     # Pull the stored chunk back and confirm category is on the metadata.
     col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
-    rows = col.get(where={"category": "rdr_postmortem"}, include=["metadatas"])
+    rows = col.get(where={"category": "rdr_postmortem"}, include=["metadatas"], sensitivity="include")
     assert rows["ids"], (
         "category=rdr_postmortem chunk should be retrievable via where filter"
     )
@@ -1243,7 +1243,7 @@ def test_store_put_category_default_empty(t3):
     )
     col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
     # where filters with non-empty values miss; without filter we see all.
-    rows = col.get(where={"title": "no-category"}, include=["metadatas"])
+    rows = col.get(where={"title": "no-category"}, include=["metadatas"], sensitivity="include")
     assert rows["ids"], "stored chunk must be retrievable"
     assert rows["metadatas"][0].get("category", "") == ""
 
@@ -1258,7 +1258,7 @@ def test_no_ansi_in_output(t1, t3, t2_path):
     results = [
         scratch(action="put", content="ansi test"),
         scratch(action="list"),
-        _search_render(query="test", corpus="knowledge"),
+        _search_render(query="test", corpus="knowledge", sensitivity="include"),
         memory_put(content="ansi check", project="test", title="ansi.md"),
         memory_get(project="test", title="ansi.md"),
         memory_search(query="ansi"),
@@ -1315,7 +1315,7 @@ def test_search_corpus_routing(corpus_arg, available, expected_in, expected_not_
     captured, fake = _capture_search()
     kwargs = {"corpus": corpus_arg} if corpus_arg is not None else {}
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", **kwargs)
+        _search_render("test query", **kwargs, sensitivity="include")
     assert len(captured) == 1
     for name in expected_in:
         assert name in captured[0]
@@ -1350,7 +1350,7 @@ def test_fanout_floor_excludes_thin_collection_beside_healthy_sibling():
     _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="code")
+        _search_render("test query", corpus="code", sensitivity="include")
     assert len(captured) == 1
     assert "code__healthy" in captured[0]
     assert "code__thin" not in captured[0]
@@ -1366,13 +1366,13 @@ def test_reset_singletons_drops_a_cached_search_page():
     _mock_t3([{"name": "knowledge__notes", "count": 1}])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="knowledge")
+        _search_render("test query", corpus="knowledge", sensitivity="include")
         assert len(captured) == 1
-        _search_render("test query", corpus="knowledge")
+        _search_render("test query", corpus="knowledge", sensitivity="include")
         assert len(captured) == 1, "the second identical search is served from the page cache"
         mcp_infra.reset_singletons()
         _mock_t3([{"name": "knowledge__notes", "count": 1}])
-        _search_render("test query", corpus="knowledge")
+        _search_render("test query", corpus="knowledge", sensitivity="include")
     assert len(captured) == 2, "after the reset the search reaches the engine again"
     assert mcp_core._page_cache_get(("absent",), 1) is None
 
@@ -1386,7 +1386,7 @@ def test_fanout_floor_keeps_single_tiny_collection_under_prefix():
     _mock_t3([{"name": "knowledge__notes", "count": 1}])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="knowledge")
+        _search_render("test query", corpus="knowledge", sensitivity="include")
     assert len(captured) == 1
     assert captured[0] == ["knowledge__notes"]
 
@@ -1402,7 +1402,7 @@ def test_fanout_floor_keeps_two_tiny_siblings():
     ])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="code")
+        _search_render("test query", corpus="code", sensitivity="include")
     assert len(captured) == 1
     assert "code__a" in captured[0]
     assert "code__b" in captured[0]
@@ -1415,7 +1415,7 @@ def test_fanout_floor_honours_explicit_collection_name():
     _mock_t3([{"name": "code__thin__voyage-code-3__v1", "count": _FANOUT_MIN_COLLECTION_CHUNK_COUNT - 1}])
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="code__thin__voyage-code-3__v1")
+        _search_render("test query", corpus="code__thin__voyage-code-3__v1", sensitivity="include")
     assert len(captured) == 1
     assert captured[0] == ["code__thin__voyage-code-3__v1"]
 
@@ -1434,7 +1434,7 @@ def test_fanout_floor_applies_under_all_alias():
     _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="all")
+        _search_render("test query", corpus="all", sensitivity="include")
     assert len(captured) == 1
     assert "knowledge__notes" in captured[0]
     assert "code__healthy" in captured[0]
@@ -1453,7 +1453,7 @@ def test_fanout_floor_boundary_exact():
     _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="code")
+        _search_render("test query", corpus="code", sensitivity="include")
     assert len(captured) == 1
     assert "code__at_floor" in captured[0]
     assert "code__below_floor" not in captured[0]
@@ -1493,7 +1493,7 @@ def test_fanout_floor_fails_open_when_count_unknown():
     with patch.object(mcp_core, "_get_collection_counts",
                        return_value={"code__healthy": 20}), \
          patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="code")
+        _search_render("test query", corpus="code", sensitivity="include")
     assert len(captured) == 1
     assert "code__mystery" in captured[0]
     assert "code__healthy" in captured[0]
@@ -1517,7 +1517,7 @@ def test_fanout_floor_negative_count_sentinel_fails_open():
     _warm_fanout_counts()
     captured, fake = _capture_search()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render("test query", corpus="code")
+        _search_render("test query", corpus="code", sensitivity="include")
     assert len(captured) == 1
     assert "code__failed_count" in captured[0], (
         "a -1 (failed-count) collection must fail open, not read as a "
@@ -1550,7 +1550,7 @@ def test_fanout_floor_exclusion_visible_in_search_hit_footer():
                      collection="code__healthy", metadata={})
     ]
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        out = _search_render("test query", corpus="code")
+        out = _search_render("test query", corpus="code", sensitivity="include")
     assert "[excluded below fan-out floor: code__thin]" in out
 
 
@@ -1563,7 +1563,7 @@ def test_fanout_floor_exclusion_visible_on_zero_hit():
     ])
     _warm_fanout_counts()
     with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: []):
-        out = _search_render("test query", corpus="code")
+        out = _search_render("test query", corpus="code", sensitivity="include")
     assert "[excluded below fan-out floor: code__thin]" in out
 
 
@@ -1575,7 +1575,7 @@ def test_fanout_floor_no_footer_when_nothing_excluded():
                      collection="knowledge__notes", metadata={})
     ]
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        out = _search_render("test query", corpus="knowledge")
+        out = _search_render("test query", corpus="knowledge", sensitivity="include")
     assert "excluded below fan-out floor" not in out
 
 
@@ -1871,8 +1871,8 @@ def test_page_turn_serves_from_lookahead_without_reembedding(monkeypatch):
         ]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        page1 = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
-        page2 = _search_render(query="q", corpus="knowledge__test", limit=2, offset=2)
+        page1 = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0, sensitivity="include")
+        page2 = _search_render(query="q", corpus="knowledge__test", limit=2, offset=2, sensitivity="include")
 
     assert len(calls) == 1, f"page-turn must reuse the lookahead fetch, got {calls}"
     assert calls[0] >= 4  # the first fetch covered at least two pages
@@ -1892,8 +1892,8 @@ def test_page_cache_misses_on_different_query(monkeypatch):
                              collection="knowledge__test", metadata={})]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="first", corpus="knowledge__test", limit=2, offset=0)
-        _search_render(query="second", corpus="knowledge__test", limit=2, offset=0)
+        _search_render(query="first", corpus="knowledge__test", limit=2, offset=0, sensitivity="include")
+        _search_render(query="second", corpus="knowledge__test", limit=2, offset=0, sensitivity="include")
 
     assert calls == ["first", "second"]
 
@@ -1914,9 +1914,9 @@ def test_page_cache_expires_on_ttl(monkeypatch):
                 for i in range(6)]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=0, sensitivity="include")
         t["now"] += mcp_core._PAGE_CACHE_TTL_S + 1
-        _search_render(query="q", corpus="knowledge__test", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=2, sensitivity="include")
 
     assert len(calls) == 2, "an expired cache entry must refetch"
 
@@ -1935,8 +1935,8 @@ def test_page_beyond_lookahead_refetches_wider(monkeypatch):
                 for i in range(n_results)]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)   # covers ~3 pages
-        _search_render(query="q", corpus="knowledge__test", limit=2, offset=20)  # beyond lookahead
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=0, sensitivity="include")   # covers ~3 pages
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=20, sensitivity="include")  # beyond lookahead
 
     assert len(calls) == 2
     assert calls[1] >= 22  # refetched wide enough for the requested window
@@ -1972,12 +1972,12 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     # floor would make this assertion fail by returning "No collections
     # match corpus 'knowledge'" instead of searching.
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
-        _search_render(query="q", corpus="knowledge", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=0, sensitivity="include")
+        _search_render(query="q", corpus="knowledge", limit=2, offset=2, sensitivity="include")
         assert len(calls) == 1, "page-turn burst must serve from cache pre-write"
         store_put(content="written mid-burst", collection="fixture-subject",
                   title="cache-inval")
-        _search_render(query="q", corpus="knowledge", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=2, sensitivity="include")
 
     assert len(calls) == 2, (
         "a store_put must invalidate the page cache — a repeat search "
@@ -2005,10 +2005,10 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch, local_mode_write):
     # nexus-rbhci: same lone-collection-under-a-prefix rule as the sibling
     # test above -- the bare "knowledge" prefix must still reach it.
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=0, sensitivity="include")
         assert len(calls) == 1
         store_delete(doc_id=real_doc_id, collection="fixture-subject")
-        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=0, sensitivity="include")
 
     assert len(calls) == 2, "a store_delete must invalidate the page cache"
 
@@ -2075,8 +2075,8 @@ def test_cached_zero_hit_preserves_threshold_diag(monkeypatch):
         return []
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        first = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
-        second = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
+        first = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0, sensitivity="include")
+        second = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0, sensitivity="include")
 
     assert len(calls) == 1, "the repeat zero-hit must serve from cache"
     assert "dropped at distance" in first, "uncached path must carry the hint"
@@ -2090,7 +2090,7 @@ def test_search_pagination_first_page(t3):
     coll = "knowledge__pag__voyage-context-3__v1"
     for i in range(5):
         t3.put(collection=coll, content=f"document about topic {i}", title=f"doc{i}")
-    result = _search_render(query="topic", corpus=coll, limit=2, offset=0)
+    result = _search_render(query="topic", corpus=coll, limit=2, offset=0, sensitivity="include")
     assert "showing 1-2" in result and "offset=2" in result
 
 
@@ -2099,8 +2099,8 @@ def test_search_pagination_pages_differ(t3):
     coll = "knowledge__pag2__voyage-context-3__v1"
     for i in range(6):
         t3.put(collection=coll, content=f"unique searchable content number {i}", title=f"doc{i}")
-    page1 = _search_render(query="searchable content", corpus=coll, limit=2, offset=0)
-    page2 = _search_render(query="searchable content", corpus=coll, limit=2, offset=2)
+    page1 = _search_render(query="searchable content", corpus=coll, limit=2, offset=0, sensitivity="include")
+    page2 = _search_render(query="searchable content", corpus=coll, limit=2, offset=2, sensitivity="include")
     assert not page2.startswith("Error:")
     p1 = {l.split("]")[0] for l in page1.split("\n") if l.startswith("[")}
     p2 = {l.split("]")[0] for l in page2.split("\n") if l.startswith("[")}
@@ -2111,14 +2111,14 @@ def test_search_pagination_pages_differ(t3):
 def test_search_pagination_last_page(t3):
     coll = "knowledge__pag3__voyage-context-3__v1"
     t3.put(collection=coll, content="only document about finality", title="solo")
-    assert "(end)" in _search_render(query="finality", corpus=coll, limit=10, offset=0)
+    assert "(end)" in _search_render(query="finality", corpus=coll, limit=10, offset=0, sensitivity="include")
 
 
 @pytest.mark.t2_tenant
 def test_search_pagination_offset_beyond_end(t3):
     coll = "knowledge__pag4__voyage-context-3__v1"
     t3.put(collection=coll, content="small collection", title="one")
-    assert "No results at offset 100" in _search_render(query="small", corpus=coll, limit=10, offset=100)
+    assert "No results at offset 100" in _search_render(query="small", corpus=coll, limit=10, offset=100, sensitivity="include")
 
 
 @pytest.mark.t2_tenant
@@ -2180,7 +2180,7 @@ def test_search_caps_oversized_result(monkeypatch):
     ]
     with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: results), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        out = _search_render(query="padding", corpus="code__test", limit=20)
+        out = _search_render(query="padding", corpus="code__test", limit=20, sensitivity="include")
     assert "[search: result capped at 100 chars" in out
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
@@ -2192,7 +2192,7 @@ def test_search_under_cap_is_unaffected():
                lambda *a, **kw: [SearchResult(id="r1", content="small", distance=0.1,
                                               collection="code__test", metadata={})]), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        out = _search_render(query="small", corpus="code__test")
+        out = _search_render(query="small", corpus="code__test", sensitivity="include")
     assert "result capped" not in out
 
 
@@ -2698,7 +2698,7 @@ def _search_clustered(results, corpus="knowledge,docs", cluster_by="semantic"):
     _mock_t3(collections)
     with patch("nexus.search_engine.search_cross_corpus",
                lambda q, c, n_results=10, t3=None, where=None, **kw: results):
-        return _search_render("test query", corpus=corpus, cluster_by=cluster_by)
+        return _search_render("test query", corpus=corpus, cluster_by=cluster_by, sensitivity="include")
 
 
 @pytest.mark.t2_tenant
@@ -2996,7 +2996,7 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
 
     coll = "knowledge__ctxblock__voyage-context-3__v1"
     t3.put(collection=coll, content="a note about annotated retrieval context", title="ctxnote")
-    out = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0)
+    out = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, sensitivity="include")
     assert out.startswith(READER_INSTRUCTION), out[:120]
     # nexus-6pfgb.11: the age line is the OWNING document's, read from the catalog; the chunk
     # row's own indexed_at is the last writer's and is not read. This note has no catalog
@@ -3009,7 +3009,7 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
     from nexus.catalog.types import CatalogEntry
 
     chash = _search_render(
-        query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True,
+        query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True, sensitivity="include",
     )["chunk_text_hash"][0]
     owner = CatalogEntry(
         tumbler=Tumbler.parse("1.1.1"), title="ctxnote", author="", year=0, content_type="knowledge",
@@ -3024,10 +3024,10 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
     )
     with patch("nexus.mcp.core._get_catalog", return_value=catalog):
         # A new query string: the first query's result list is cached with its (owner-less) metadata.
-        owned = _search_render(query="a note about annotated retrieval context", corpus=coll, limit=5, offset=0)
+        owned = _search_render(query="a note about annotated retrieval context", corpus=coll, limit=5, offset=0, sensitivity="include")
     assert "indexed 2026-09-01" in owned and "d ago)" in owned, owned
     # structured output is untouched by the annotation
-    structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True)
+    structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True, sensitivity="include")
     assert set(structured) == {
         "ids", "tumblers", "distances", "hybrid_scores", "collections",
         "chunk_collections", "chunk_text_hash",

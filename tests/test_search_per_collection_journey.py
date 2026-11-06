@@ -76,7 +76,7 @@ def seeded(t2_service_env):
 def _run(client, cols, n, **kw):
     kw.setdefault("threshold_override", float("inf"))
     kw.setdefault("cluster_by", None)
-    return search_cross_corpus(_QUERY, cols, n, client, **kw)
+    return search_cross_corpus(_QUERY, cols, n, client, **kw, sensitivity="include")
 
 
 def _signature(results):
@@ -93,7 +93,7 @@ def _old_client(client):
 
 def test_the_real_engine_answers_the_route_with_the_envelope_the_client_validates(seeded):
     env = seeded.search_per_collection(
-        _QUERY, [_BIG, _SMALL, _MID], per_collection_k=6, limit=300,
+        _QUERY, [_BIG, _SMALL, _MID], per_collection_k=6, limit=300, sensitivity="include",
     )
     assert env is not None, "the engine jar in this checkout carries the route (nexus-tu8wp.1)"
     assert env["per_collection_k"] == 6 and env["limit"] == 300
@@ -162,7 +162,7 @@ def test_a_collection_the_engine_skips_is_accounted_for_not_refused(seeded):
     assert diags[0].per_collection[_BIG][0] == 6
 
     env = seeded.search_per_collection(
-        _QUERY, [_BIG, _GHOST], per_collection_k=6, limit=300,
+        _QUERY, [_BIG, _GHOST], per_collection_k=6, limit=300, sensitivity="include",
     )
     assert env["skipped_collections"] == [_GHOST]
     assert [e["collection"] for e in env["per_collection"]] == [_BIG]

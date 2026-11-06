@@ -151,7 +151,7 @@ def cat(service):
 class _NoT3:
     """The link-half round-trip needs no T3 — a fetch would be a test bug."""
 
-    def get_by_id(self, collection: str, doc_id: str):
+    def get_by_id(self, collection: str, doc_id: str, *, sensitivity="include"):
         raise AssertionError("T3 must not be touched by the link round-trip")
 
 
@@ -232,7 +232,7 @@ def test_reimport_is_idempotent_against_the_real_engine(cat, pg_instance, tmp_pa
     cat.atomic_manifest_replace(a_t, [{"chash": chash, "position": 0}], collection=know_col)
 
     class _T3:
-        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        def chunk_rows(self, collection: str, chashes: list[str], *, sensitivity="include") -> dict[str, dict]:
             assert chashes == [chash]
             return {chash: {"id": chash, "content": "note-a body", "tags": "", "category": ""}}
 

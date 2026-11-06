@@ -123,7 +123,7 @@ def test_t3_put_with_ttl_stores_indexed_at_and_ttl_days() -> None:
     )
 
     col = client.get_collection("knowledge__ttltest", embedding_function=ef)
-    result = col.get(ids=[doc_id], include=["metadatas"])
+    result = col.get(ids=[doc_id], include=["metadatas"], sensitivity="include")
     assert result["metadatas"], "Document not found after put()"
     meta = result["metadatas"][0]
 
@@ -223,7 +223,7 @@ def test_index_markdown_atomicity_originals_survive_add_failure(
     stored_docs = list(original_docs)
     stored_metas = list(original_metas)
 
-    def mock_get(where=None, include=None, limit=None):
+    def mock_get(where=None, include=None, limit=None, **_sens_kw):
         """Simulate col.get() — returns entries matching source_path filter."""
         include = include or []
         source = (where or {}).get("source_path")

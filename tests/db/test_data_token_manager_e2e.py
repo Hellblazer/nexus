@@ -127,7 +127,7 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
             # The chunk is owned (seeded above), so a live read sees it, and
             # the rewritten title proves the POST landed rather than the seed
             # merely being read back.
-            present = client.get_collection(collection).get(ids=[chash], include=["metadatas"])
+            present = client.get_collection(collection).get(ids=[chash], include=["metadatas"], sensitivity="include")
 
         assert chash in (present.get("ids") or []), (
             "the engine accepted the write authenticated by the self-minted "
@@ -222,7 +222,7 @@ def test_mint_tenant_tenant_asymmetric_round_trip_succeeds(
                 collection, ids=[chash], documents=[content], embeddings=[embedding],
                 metadatas=[{"title": "ssqk9-asym", "chunk_text_hash": chash}],
             )
-            present = client.get_collection(collection).get(ids=[chash], include=["metadatas"])
+            present = client.get_collection(collection).get(ids=[chash], include=["metadatas"], sensitivity="include")
 
         assert chash in (present.get("ids") or []), (
             "mint_tenant must have overridden the caller's 'default' "

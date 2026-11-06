@@ -234,7 +234,7 @@ class _World:
             raise RuntimeError("owner lookup down")
         return [{"chash": c, "doc_id": d, "position": 0, "chunk_count": 1} for c in chashes for d in self.owners.get(c, [])]
 
-    def chunk_rows(self, collection, chashes):
+    def chunk_rows(self, collection, chashes, *, sensitivity="include"):
         if collection in self.fail_rows_for:
             raise RuntimeError("store-get down")
         return {c: self.rows[(collection, c)] for c in chashes if (collection, c) in self.rows}
@@ -597,7 +597,7 @@ def test_the_derived_keys_read_no_chunk_row_and_no_manifest():
         def chash_positions(self, chashes):
             raise AssertionError("no owner lookup")
 
-        def chunk_rows(self, collection, chashes):
+        def chunk_rows(self, collection, chashes, *, sensitivity="include"):
             raise AssertionError("no chunk row read")
 
     w = _Trip()

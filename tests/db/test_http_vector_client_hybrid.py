@@ -53,7 +53,7 @@ def test_posts_to_the_hybrid_route_and_returns_rows_verbatim(client, monkeypatch
     _patch_post(monkeypatch, ROWS, captured)
 
     rows = client.hybrid_search("resolve_active_session_id",
-                                ["code__nexus-1-1"], n_results=5)
+                                ["code__nexus-1-1"], n_results=5, sensitivity="include")
 
     assert captured[0]["path"] == "/v1/vectors/hybrid-search"
     assert captured[0]["tenant"] == "t"
@@ -72,7 +72,7 @@ def test_optional_fields_are_omitted_when_not_requested(client, monkeypatch):
     captured: list[dict] = []
     _patch_post(monkeypatch, ROWS, captured)
 
-    client.hybrid_search("q", ["code__nexus-1-1"])
+    client.hybrid_search("q", ["code__nexus-1-1"], sensitivity="include")
 
     body = captured[0]["body"]
     for absent in ("where", "include_source_uri", "rerank", "rerank_top_k"):
@@ -84,7 +84,7 @@ def test_where_and_source_uri_reach_the_body(client, monkeypatch):
     _patch_post(monkeypatch, ROWS, captured)
 
     client.hybrid_search("q", ["code__nexus-1-1"],
-                         where={"lang": "python"}, include_source_uri=True)
+                         where={"lang": "python"}, include_source_uri=True, sensitivity="include")
 
     body = captured[0]["body"]
     assert body["where"] == {"lang": "python"}
@@ -124,12 +124,12 @@ def test_rerank_envelope_unpacked_exactly_as_search_unpacks_it(client, monkeypat
     _patch_post(monkeypatch, envelope, [])
     hybrid_meta: dict = {}
     hybrid_rows = client.hybrid_search("q", ["code__nexus-1-1"], rerank=True,
-                                       rerank_top_k=3, rerank_meta_out=hybrid_meta)
+                                       rerank_top_k=3, rerank_meta_out=hybrid_meta, sensitivity="include")
 
     _patch_post(monkeypatch, envelope, [])
     search_meta: dict = {}
     search_rows = client.search("q", ["code__nexus-1-1"], rerank=True,
-                                rerank_top_k=3, rerank_meta_out=search_meta)
+                                rerank_top_k=3, rerank_meta_out=search_meta, sensitivity="include")
 
     assert hybrid_rows == search_rows
     assert hybrid_meta == search_meta
@@ -145,7 +145,7 @@ def test_stale_engine_bare_array_reports_the_same_degrade(client, monkeypatch):
     _patch_post(monkeypatch, ROWS, [])
     meta: dict = {}
     rows = client.hybrid_search("q", ["code__nexus-1-1"], rerank=True,
-                                rerank_meta_out=meta)
+                                rerank_meta_out=meta, sensitivity="include")
 
     assert rows == ROWS
     assert meta["degraded"] is True
@@ -161,7 +161,7 @@ def test_rerank_top_k_is_only_sent_alongside_rerank(client, monkeypatch):
     captured: list[dict] = []
     _patch_post(monkeypatch, ROWS, captured)
 
-    client.hybrid_search("q", ["code__nexus-1-1"], rerank_top_k=3)
+    client.hybrid_search("q", ["code__nexus-1-1"], rerank_top_k=3, sensitivity="include")
 
     assert "rerank_top_k" not in captured[0]["body"]
     assert "rerank" not in captured[0]["body"]
@@ -189,7 +189,7 @@ def test_minimal_call_sends_exactly_three_keys_on_the_hybrid_route(client, monke
     captured: list[dict] = []
     _patch_post(monkeypatch, ROWS, captured)
 
-    client.hybrid_search("q", ["code__nexus-1-1"])
+    client.hybrid_search("q", ["code__nexus-1-1"], sensitivity="include")
 
     assert captured[0]["path"] == "/v1/vectors/hybrid-search"
     assert set(captured[0]["body"]) == {"query", "collections", "n_results"}
@@ -209,7 +209,7 @@ def test_maximal_call_sends_exactly_the_seven_wire_fields(client, monkeypatch):
 
     client.hybrid_search("q", ["code__nexus-1-1"], n_results=5,
                          where={"lang": "python"}, include_source_uri=True,
-                         rerank=True, rerank_top_k=3)
+                         rerank=True, rerank_top_k=3, sensitivity="include")
 
     assert set(captured[0]["body"]) == {
         "query", "collections", "n_results", "where",
@@ -229,7 +229,7 @@ def test_client_local_parameters_are_unreachable_from_this_method(client, monkey
 
     for kwarg in ("cluster_by", "threshold", "structured"):
         with pytest.raises(TypeError):
-            client.hybrid_search("q", ["code__nexus-1-1"], **{kwarg: "x"})
+            client.hybrid_search("q", ["code__nexus-1-1"], **{kwarg: "x"}, sensitivity="include")
 
 
 def test_the_brake_is_consulted_before_the_post_not_after(client, monkeypatch):
@@ -253,7 +253,7 @@ def test_the_brake_is_consulted_before_the_post_not_after(client, monkeypatch):
     monkeypatch.setattr(hvc, "_post", fake_post)
     monkeypatch.setattr(rate_brake, "get_brake", lambda: _RecordingBrake())
 
-    client.hybrid_search("q", ["code__nexus-1-1"], rerank=True)
+    client.hybrid_search("q", ["code__nexus-1-1"], rerank=True, sensitivity="include")
 
     assert order == ["wait", "post"]
     rate_brake.reset_brake()
@@ -279,7 +279,7 @@ def test_a_rate_limited_degrade_trips_the_shared_brake_with_the_reported_value(
 
     meta: dict = {}
     rows = client.hybrid_search("q", ["code__nexus-1-1"], rerank=True,
-                                rerank_meta_out=meta)
+                                rerank_meta_out=meta, sensitivity="include")
 
     assert meta["degraded"] is True
     assert meta["retry_after_seconds"] == 7

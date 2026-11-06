@@ -80,12 +80,12 @@ class TestGetFailsLoud:
     def test_get_by_where_raises_instead_of_looking_empty(self, failing_post):
         stub = _ServiceCollectionStub("code__o__bge-768__v1")
         with pytest.raises(VectorServiceError):
-            stub.get(where={"doc_id": "d1"}, include=["metadatas"])
+            stub.get(where={"doc_id": "d1"}, include=["metadatas"], sensitivity="include")
 
     def test_get_by_ids_raises_instead_of_looking_empty(self, failing_post):
         stub = _ServiceCollectionStub("code__o__bge-768__v1")
         with pytest.raises(VectorServiceError):
-            stub.get(ids=["a" * 64])
+            stub.get(ids=["a" * 64], sensitivity="include")
 
 
 class TestDeleteFailsLoud:

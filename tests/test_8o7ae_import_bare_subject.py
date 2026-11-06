@@ -68,7 +68,7 @@ def test_import_into_bare_subject_lands_where_other_verbs_read(t2_service_env, t
     assert f"into {resolved}" in imported.output, imported.output
     assert listed.exit_code == 0, listed.output
     assert title in listed.output, listed.output
-    assert chash in client.get_collection(resolved).get(ids=[chash], include=[])["ids"]
+    assert chash in client.get_collection(resolved).get(ids=[chash], include=[], sensitivity="include")["ids"]
 
 
 def test_keyless_voyage_install_gets_the_remedy_not_a_traceback(t2_service_env, tmp_path, monkeypatch):

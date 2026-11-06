@@ -42,11 +42,11 @@ from tests._chunk_seed import seed_chunks_direct
 def _search_ids(client, collection: str, text: str) -> list[str]:
     """Raw ``search()`` over the wire. ``n_results`` exceeds every
     collection this file writes, so membership does not depend on rank."""
-    return client.search(text, [collection], n_results=50, structured=True).get("ids") or []
+    return client.search(text, [collection], n_results=50, structured=True, sensitivity="include").get("ids") or []
 
 
 def _get_ids(client, collection: str, chash: str) -> list[str]:
-    return client.get_collection(collection).get(ids=[chash], include=[]).get("ids") or []
+    return client.get_collection(collection).get(ids=[chash], include=[], sensitivity="include").get("ids") or []
 
 
 def _manifest_chashes(collection: str, title: str) -> tuple[str, set[str]]:

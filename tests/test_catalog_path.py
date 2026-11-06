@@ -291,7 +291,7 @@ class TestIndexDocumentSourceKey:
         )
         monkeypatch.setattr(
             "nexus.doc_indexer._own_chunk_metadata",
-            lambda col, doc_id: col.get(ids=["existing"], include=["metadatas"])["metadatas"][0],
+            lambda col, doc_id: col.get(ids=["existing"], include=["metadatas"], sensitivity="include")["metadatas"][0],
         )
 
         def dummy_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):

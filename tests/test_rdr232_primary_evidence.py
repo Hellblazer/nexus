@@ -774,7 +774,7 @@ def test_the_other_documents_title_is_never_used_for_shared_text() -> None:
     shared = "## Proposed Solution\nthe same text in ART RDR-084 and in another RDR"
 
     class Collection:
-        def get(self, ids: list[str]) -> dict[str, list]:
+        def get(self, ids: list[str], *, sensitivity="include") -> dict[str, list]:
             return {
                 "ids": list(ids), "documents": [shared for _ in ids],
                 "metadatas": [{"section_title": "RDR-002 Intro", "section_type": "other", "title": "RDR-002"} for _ in ids],
@@ -784,7 +784,7 @@ def test_the_other_documents_title_is_never_used_for_shared_text() -> None:
         def get_or_create_collection(self, name: str) -> Collection:
             return Collection()
 
-    fetch = t3_chunk_fetcher(T3())
+    fetch = t3_chunk_fetcher(T3(), sensitivity="include")
     chash = _hash(shared)
     assert fetch(ART_COL, [chash]) == {chash: shared}, "text only: no metadata crosses the boundary"
 

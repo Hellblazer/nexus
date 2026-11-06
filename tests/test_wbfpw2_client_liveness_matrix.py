@@ -72,7 +72,7 @@ def _get_visible(client, collection: str, chash: str) -> bool:
     from nexus.errors import CollectionNotFoundError
 
     try:
-        result = client.get_collection(collection).get(ids=[chash], include=[])
+        result = client.get_collection(collection).get(ids=[chash], include=[], sensitivity="include")
     except CollectionNotFoundError:
         return False
     return chash in (result.get("ids") or [])
@@ -83,7 +83,7 @@ def _search_visible(client, collection: str, chash: str, text: str) -> bool:
     it, querying with the chunk's own text (a local bge-768 embed puts
     an exact self-match at or near rank 0, so a generous ``n_results``
     is a reliable visibility probe, not a relevance test)."""
-    result = client.search(text, [collection], n_results=50, structured=True)
+    result = client.search(text, [collection], n_results=50, structured=True, sensitivity="include")
     return chash in (result.get("ids") or [])
 
 

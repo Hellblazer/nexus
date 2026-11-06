@@ -237,9 +237,9 @@ def test_a_failed_sweep_is_reported_not_left_to_the_log(t2_service_env):
     # (code review S-2; it is the state the doctor's --visible-outside-manifest check probes).
     v1_chash = _chash(v1)
     collection = client.get_or_create_collection(col)
-    assert collection.get(ids=[v1_chash], include_non_live=True)["ids"] == [v1_chash], (
+    assert collection.get(ids=[v1_chash], include_non_live=True, sensitivity="include")["ids"] == [v1_chash], (
         "control: the replaced chunk was not removed")
-    assert collection.get(ids=[v1_chash])["ids"] == [], "hidden: the normal reader does not return it"
+    assert collection.get(ids=[v1_chash], sensitivity="include")["ids"] == [], "hidden: the normal reader does not return it"
     assert v1_chash in client.manifest_less_census(col, limit=300)["chashes"]["superseded"], (
         "and the census classes it superseded")
 

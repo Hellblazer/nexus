@@ -74,7 +74,7 @@ class _T3:
     def list_collections(self):
         return [{"name": COL}, {"name": RDR_COL}]
 
-    def get_by_id(self, collection, doc_id):
+    def get_by_id(self, collection, doc_id, *, sensitivity="include"):
         self.probed.append(("chash", doc_id))
         return {"id": doc_id} if doc_id in self._chashes else None
 

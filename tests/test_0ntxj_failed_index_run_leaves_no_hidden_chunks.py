@@ -91,8 +91,8 @@ def _seed_killed_split_run(md) -> None:
 
 def _stored_and_visible(client: HttpVectorClient) -> tuple[set[str], set[str]]:
     col = client.get_collection(_COLLECTION)
-    stored = set(col.get(include=[], include_non_live=True)["ids"])
-    visible = set(col.get(ids=sorted(stored), include=[])["ids"]) if stored else set()
+    stored = set(col.get(include=[], include_non_live=True, sensitivity="include")["ids"])
+    visible = set(col.get(ids=sorted(stored), include=[], sensitivity="include")["ids"]) if stored else set()
     return stored, visible
 
 
@@ -211,6 +211,6 @@ def test_a_failed_reindex_keeps_the_previous_content_readable(t2_service_env, tm
 
     after = [r.chash for r in sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)]
     assert after == before, "the failed re-index must not replace the readable manifest"
-    visible = set(client.get_collection(_COLLECTION).get(ids=before, include=[])["ids"])
+    visible = set(client.get_collection(_COLLECTION).get(ids=before, include=[], sensitivity="include")["ids"])
     assert visible == set(before)
     assert _doc_for(md).index_state == "failed"

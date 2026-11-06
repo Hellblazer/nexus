@@ -215,10 +215,10 @@ class _FakeT3:
         self.puts: list[dict] = []
         self.chunk_rows_requests: list[tuple[str, list[str]]] = []
 
-    def get_by_id(self, collection: str, doc_id: str) -> dict | None:
+    def get_by_id(self, collection: str, doc_id: str, *, sensitivity="include") -> dict | None:
         return self.rows.get(doc_id)
 
-    def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+    def chunk_rows(self, collection: str, chashes: list[str], *, sensitivity="include") -> dict[str, dict]:
         self.chunk_rows_requests.append((collection, list(chashes)))
         return {c: self.rows[c] for c in chashes if c in self.rows}
 
@@ -417,7 +417,7 @@ def test_a_store_read_failure_stops_the_export_and_writes_no_bundle(fake_catalog
     """nexus-6pfgb.36: a piece the store could not return is not a piece that is gone; the error
     propagates and no file is written."""
     class _Failing(_FakeT3):
-        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        def chunk_rows(self, collection: str, chashes: list[str], *, sensitivity="include") -> dict[str, dict]:
             raise VectorServiceError("503 from store-get")
 
     url, _state = fake_catalog
@@ -437,7 +437,7 @@ def test_notes_of_a_collection_the_engine_no_longer_registers_are_ghosts(fake_ca
     collection holds no chunks; its notes count as ghosts and the rest of the export goes on, as it
     did when each piece was read alone."""
     class _Unregistered(_FakeT3):
-        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        def chunk_rows(self, collection: str, chashes: list[str], *, sensitivity="include") -> dict[str, dict]:
             raise _unregistered(collection)
 
     url, _state = fake_catalog
@@ -452,7 +452,7 @@ def test_notes_of_a_collection_the_engine_no_longer_registers_are_ghosts(fake_ca
 def test_any_other_422_from_the_store_still_stops_the_export(fake_catalog, tmp_path):
     """A 422 with another reason is a store that could not answer, not an empty collection."""
     class _Other(_FakeT3):
-        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        def chunk_rows(self, collection: str, chashes: list[str], *, sensitivity="include") -> dict[str, dict]:
             raise VectorServiceError("422", code=422, reason="model_unavailable",
                                      engine_body={"error": "model unavailable", "collection": collection,
                                                   "reason": "model_unavailable"})

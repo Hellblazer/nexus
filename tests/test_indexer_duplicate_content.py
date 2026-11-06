@@ -234,7 +234,7 @@ def test_code_indexer_collapses_duplicate_module_across_files(
     assert code_collection
 
     code_col = local_t3.get_collection(code_collection)
-    result = code_col.get(include=["metadatas", "documents"])
+    result = code_col.get(include=["metadatas", "documents"], sensitivity="include")
     chunk_ids = result["ids"]
     docs = result["documents"]
     assert chunk_ids, "expected the indexer to write at least one chunk"
@@ -347,7 +347,7 @@ def test_prose_indexer_collapses_shared_paragraph_across_files(
     assert docs_collection
 
     docs_col = local_t3.get_collection(docs_collection)
-    result = docs_col.get(include=["metadatas", "documents"])
+    result = docs_col.get(include=["metadatas", "documents"], sensitivity="include")
     chunk_ids = result["ids"]
     docs = result["documents"]
     assert chunk_ids, "expected the indexer to write at least one chunk"
@@ -456,7 +456,7 @@ def test_prose_indexer_handles_within_file_duplicate_paragraph(
     assert docs_collection
 
     docs_col = local_t3.get_collection(docs_collection)
-    result = docs_col.get(include=["documents"])
+    result = docs_col.get(include=["documents"], sensitivity="include")
     chunk_ids = result["ids"]
     docs = result["documents"]
     assert chunk_ids, "expected the indexer to write at least one chunk"

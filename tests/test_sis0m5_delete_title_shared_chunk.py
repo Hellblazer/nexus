@@ -57,7 +57,7 @@ def _note(writer, client, owner, collection: str, title: str, content: str) -> t
 
 
 def _live(client, collection: str, chash: str) -> bool:
-    return chash in client.get_collection(collection).get(ids=[chash], include=[])["ids"]
+    return chash in client.get_collection(collection).get(ids=[chash], include=[], sensitivity="include")["ids"]
 
 
 @pytest.mark.parametrize("delete_first_written", [True, False], ids=["delete-first", "delete-second"])
@@ -246,7 +246,7 @@ def test_a_ghost_is_reaped_when_its_twin_wrote_the_chunk_last(t2_service_env):
     writer.write_manifest(ghost, [{"chash": chash, "position": 0}], collection=col)
     # The twin writes the same chunk last, so its row now carries the twin's title.
     _tb, ub, _c = _note(writer, client, owner, col, "sis0m5 late twin", body)
-    row = client.get_collection(col).get(ids=[chash], include=["metadatas"])
+    row = client.get_collection(col).get(ids=[chash], include=["metadatas"], sensitivity="include")
     assert row["metadatas"][0]["title"] == "sis0m5 late twin"  # the condition the test names
 
     with patch("nexus.commands.store._t3", return_value=client):

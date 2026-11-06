@@ -215,7 +215,7 @@ def _get_sources(t3: T3Database, col_name: str) -> set[str]:
     for the ``any(filename in p for p in sources)`` membership pattern
     these tests use to verify file-to-collection routing."""
     col = t3.get_or_create_collection(col_name)
-    return {m.get("title", "") for m in col.get(include=["metadatas"])["metadatas"]}
+    return {m.get("title", "") for m in col.get(include=["metadatas"], sensitivity="include")["metadatas"]}
 
 
 # ── Basic indexer pipeline ────────────────────────────────────────────────────
@@ -336,7 +336,7 @@ def test_phase_5c_index_drops_corpus_store_type_git_meta(
     dropped_keys = ("corpus", "store_type", "git_meta")
     for col_name in my_cols:
         col = local_t3.get_or_create_collection(col_name)
-        metadatas = col.get(include=["metadatas"])["metadatas"]
+        metadatas = col.get(include=["metadatas"], sensitivity="include")["metadatas"]
         total_chunks += len(metadatas)
         for m in metadatas:
             for k in dropped_keys:
@@ -401,7 +401,7 @@ def test_greenfield_index_writes_no_deprecated_keys(
     total_chunks = 0
     for col_name in my_cols:
         col = local_t3.get_or_create_collection(col_name)
-        metadatas = col.get(include=["metadatas"])["metadatas"]
+        metadatas = col.get(include=["metadatas"], sensitivity="include")["metadatas"]
         total_chunks += len(metadatas)
         for m in metadatas:
             for k in _PRUNE_DEPRECATED_KEYS:
@@ -575,14 +575,14 @@ def test_smart_index_rdr_routing(
     docs_col = local_t3.get_or_create_collection(info["docs_collection"])
     docs_sections = {
         m.get("section_title", "")
-        for m in docs_col.get(include=["metadatas"])["metadatas"]
+        for m in docs_col.get(include=["metadatas"], sensitivity="include")["metadatas"]
     }
     assert not any("ADR-001" in s for s in docs_sections), (
         f"ADR-001 must not appear in docs__ section_titles: {docs_sections}"
     )
 
     rdr_col = local_t3.get_or_create_collection(rdr_col_name)
-    rdr_metas = rdr_col.get(include=["metadatas"])["metadatas"]
+    rdr_metas = rdr_col.get(include=["metadatas"], sensitivity="include")["metadatas"]
     assert rdr_metas, f"expected ADR-001 chunks in {rdr_col_name}; got none"
     rdr_sections = {m.get("section_title", "") for m in rdr_metas}
     assert any("ADR-001" in s for s in rdr_sections), (
@@ -611,7 +611,7 @@ def test_smart_index_search(
 
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    results = local_t3.search(query, [info[corpus_key]], n_results=5)
+    results = local_t3.search(query, [info[corpus_key]], n_results=5, sensitivity="include")
     assert len(results) > 0
     # RDR-102 D2: search results no longer carry source_path (filtered
     # by normalize() at write time). Title carries "{relpath}:chunk-{i}".
@@ -745,7 +745,7 @@ def test_migration_moves_prose_from_code_to_docs(
             "embedding_model": "model-code", "store_type": "code",  # neutral model token on purpose (RDR-109 mode lint) -- fabricated metadata literal, never derived from an actual embedder call
         }],
     )
-    assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 1
+    assert len(code_col.get(ids=["fake-prose-in-code"], sensitivity="include")["ids"]) == 1
 
     # Step 4 — re-index triggers _prune_misclassified, which uses
     # the doc_id-keyed where-filter to find the seed chunk and remove
@@ -753,7 +753,7 @@ def test_migration_moves_prose_from_code_to_docs(
     # in code__ is misclassified).
     _index(rich_repo, reg, local_t3)
 
-    assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 0, (
+    assert len(code_col.get(ids=["fake-prose-in-code"], sensitivity="include")["ids"]) == 0, (
         "migration must prune the seed chunk via the doc_id-keyed "
         "_prune_misclassified path"
     )
@@ -777,7 +777,7 @@ def test_index_then_search(
 ) -> None:
     _index(mini_repo, registry, local_t3)
     col = registry.get(mini_repo)["collection"]
-    results = local_t3.search(query, [col], n_results=5)
+    results = local_t3.search(query, [col], n_results=5, sensitivity="include")
     assert len(results) > 0
     # RDR-102 D2: source_path is gone; title carries the filename via
     # the "{relpath}:chunk-{i}" pattern (code_indexer.py:393).
@@ -877,7 +877,7 @@ def test_index_repository_pdf_routing(
     """
     _index(rich_repo, rich_registry, local_t3)
     docs_col = rich_registry.get(rich_repo)["docs_collection"]
-    results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5)
+    results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5, sensitivity="include")
     pdf_results = [r for r in results if r.get("content_type") == "pdf"]
     assert pdf_results, f"No PDF chunks; content_types: {[r.get('content_type') for r in results]}"
     assert isinstance(pdf_results[0]["title"], str)
@@ -1005,7 +1005,7 @@ def test_reindex_self_heals_missing_manifest(
     # passed vacuously before the stamp).
     info = reg.get(rich_repo)
     docs_col = local_t3.get_or_create_collection(info["docs_collection"])
-    got = docs_col.get(include=["metadatas"])
+    got = docs_col.get(include=["metadatas"], sensitivity="include")
     readme_ids = [
         cid for cid, m in zip(got["ids"], got["metadatas"])
         if "README.md" in (m or {}).get("title", "")
@@ -1017,7 +1017,7 @@ def test_reindex_self_heals_missing_manifest(
     )
 
     # Snapshot T3 so we can prove the heal never re-embedded anything.
-    ids_before = sorted(docs_col.get()["ids"])
+    ids_before = sorted(docs_col.get(sensitivity="include")["ids"])
 
     # README.md is unchanged on disk -> staleness skips it (by_doc_id hit);
     # only the new self-heal pass can repair the manifest.
@@ -1034,7 +1034,7 @@ def test_reindex_self_heals_missing_manifest(
     assert count_after == len(healed) > 0, (
         "chunk_count must resync from the healed manifest"
     )
-    assert sorted(docs_col.get()["ids"]) == ids_before, (
+    assert sorted(docs_col.get(sensitivity="include")["ids"]) == ids_before, (
         "the heal must NOT re-embed (T3 chunk set unchanged)"
     )
 

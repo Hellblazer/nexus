@@ -37,7 +37,7 @@ class _ClusterT3:
             for i in range(6)
         ]
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         return list(self.rows)
 
     def get_embeddings(self, collection_name: str, ids: list[str]) -> np.ndarray:
@@ -70,7 +70,7 @@ class _OwnerCatalog:
 
 def _labels(catalog) -> dict[str, str]:
     results = search_cross_corpus(
-        "q", ["docs__a"], 10, _ClusterT3(), cluster_by="semantic", catalog=catalog,
+        "q", ["docs__a"], 10, _ClusterT3(), cluster_by="semantic", catalog=catalog, sensitivity="include",
     )
     assert len(results) == 6
     assert all("_cluster_index" not in r.metadata for r in results)

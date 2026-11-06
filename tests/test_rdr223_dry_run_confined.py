@@ -36,7 +36,7 @@ def test_preview_upsert_writes_into_an_in_memory_store() -> None:
     _preview_upsert(t3, "docs__dry__minilm-l6-v2-384__v1", ["a" * 64], ["text"], [[0.1] * 4],
                     [{"content_hash": "h"}])
     col = t3.get_or_create_collection("docs__dry__minilm-l6-v2-384__v1")
-    assert col.get(ids=["a" * 64])["ids"] == ["a" * 64]
+    assert col.get(ids=["a" * 64], sensitivity="include")["ids"] == ["a" * 64]
 
 
 @pytest.mark.parametrize("store", ["mock", "engine_client"])

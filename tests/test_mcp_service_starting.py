@@ -150,7 +150,7 @@ def _assert_not_answering_message(text: str) -> None:
 @pytest.mark.parametrize("status", [502, 503, 504])
 def test_search_on_a_service_that_answers_not_ready_says_it_is_not_answering(engine, status):
     engine.stats_status = status
-    _assert_not_answering_message(core._search_render("anything", corpus="knowledge"))
+    _assert_not_answering_message(core._search_render("anything", corpus="knowledge", sensitivity="include"))
     # The retry schedule really ran: the empty answer was reached the long way round.
     assert engine.stats_hits > 1
 
@@ -166,7 +166,7 @@ def test_search_on_a_service_that_is_not_listening_yet_says_it_is_not_answering(
     mcp_infra.reset_singletons()
     mcp_infra.inject_t3(hvc.HttpVectorClient(tenant=hvc._process_default_tenant()))
     try:
-        _assert_not_answering_message(core._search_render("anything", corpus="knowledge"))
+        _assert_not_answering_message(core._search_render("anything", corpus="knowledge", sensitivity="include"))
     finally:
         mcp_infra.reset_singletons()
 
@@ -185,7 +185,7 @@ def test_search_on_a_service_that_resets_the_connection_says_it_is_not_answering
         mcp_infra.reset_singletons()
         mcp_infra.inject_t3(hvc.HttpVectorClient(tenant=hvc._process_default_tenant()))
         try:
-            text = core._search_render("anything", corpus="knowledge")
+            text = core._search_render("anything", corpus="knowledge", sensitivity="include")
             _assert_not_answering_message(text)
             assert "(connection reset)" in text
             # Non-vacuity: the classifier saw the read-side reset this test is about.
@@ -209,7 +209,7 @@ def test_search_on_a_service_that_breaks_the_pipe_says_it_is_not_answering(monke
         mcp_infra.reset_singletons()
         mcp_infra.inject_t3(hvc.HttpVectorClient(tenant=hvc._process_default_tenant()))
         try:
-            text = core._search_render("anything", corpus="knowledge")
+            text = core._search_render("anything", corpus="knowledge", sensitivity="include")
             _assert_not_answering_message(text)
             assert "(connection reset)" in text
             # Non-vacuity: every failure the client classified was a write-side EPIPE.
@@ -221,7 +221,7 @@ def test_search_on_a_service_that_breaks_the_pipe_says_it_is_not_answering(monke
 @pytest.mark.parametrize(
     "call",
     [
-        pytest.param(lambda: core._search_render("anything", corpus="knowledge"), id="search"),
+        pytest.param(lambda: core._search_render("anything", corpus="knowledge", sensitivity="include"), id="search"),
         pytest.param(lambda: core.query("anything", corpus="knowledge"), id="query"),
         pytest.param(lambda: core.store_list(), id="store_list"),
         pytest.param(lambda: core.store_get("0" * 64), id="store_get"),
@@ -258,7 +258,7 @@ def test_the_startup_warmup_failing_does_not_poison_the_names_cache(engine):
 def test_a_genuinely_empty_store_still_says_no_collections_match(engine):
     engine.stats_status = 200
     engine.stats_rows = []
-    text = core._search_render("anything", corpus="knowledge")
+    text = core._search_render("anything", corpus="knowledge", sensitivity="include")
     assert text == "No collections match corpus 'knowledge'"
     assert core.collection_list() == "No collections found."
 
@@ -266,7 +266,7 @@ def test_a_genuinely_empty_store_still_says_no_collections_match(engine):
 def test_a_hard_engine_error_is_not_reported_as_not_answering(engine):
     """A 500 is a fault, not a startup; it keeps its own error text."""
     engine.stats_status = 500
-    text = core._search_render("anything", corpus="knowledge")
+    text = core._search_render("anything", corpus="knowledge", sensitivity="include")
     assert "not answering" not in text
     assert _NO_COLLECTIONS not in text
     assert "500" in text
@@ -274,7 +274,7 @@ def test_a_hard_engine_error_is_not_reported_as_not_answering(engine):
 
 def test_the_local_not_ready_text_names_the_status_and_the_remedies(engine):
     engine.stats_status = 503
-    text = core._search_render("anything", corpus="knowledge")
+    text = core._search_render("anything", corpus="knowledge", sensitivity="include")
     assert text == (
         "Error: The nexus service is not answering (HTTP 503). This is not an empty store. If "
         "this was just after login or a restart, retry in a few seconds; if it persists, run "
@@ -287,7 +287,7 @@ def test_a_managed_endpoint_gets_no_login_or_restart_wording(engine, monkeypatch
 
     monkeypatch.setattr(config, "is_local_mode", lambda: False)
     engine.stats_status = 503
-    text = core._search_render("anything", corpus="knowledge")
+    text = core._search_render("anything", corpus="knowledge", sensitivity="include")
     assert text == (
         "Error: The managed nexus endpoint did not answer (HTTP 503). This is not an empty "
         "store. Retry shortly; if it persists, run `nx doctor`."

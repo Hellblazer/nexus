@@ -69,7 +69,7 @@ class _StubT3:
     def list_store(self, name: str, limit: int = 20, offset: int = 0) -> list[dict]:
         return [dict(d) for d in list(self.docs.values())[offset:offset + limit]]
 
-    def get_by_id(self, name: str, doc_id: str) -> dict | None:
+    def get_by_id(self, name: str, doc_id: str, *, sensitivity="include") -> dict | None:
         return dict(self.docs[doc_id]) if name == self.name and doc_id in self.docs else None
 
     def find_ids_by_title(self, name: str, title: str) -> list[str]:

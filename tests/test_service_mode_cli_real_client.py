@@ -279,7 +279,7 @@ def test_model_drift_probe_service_mode_real_client(real_client, monkeypatch):
 
     monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 7)
 
-    def fake_search(query, cols, n, t3, *, diagnostics_out):
+    def fake_search(query, cols, n, t3, *, diagnostics_out, **_kw):
         diag = SearchDiagnostics()
         diag.per_collection[_CODE] = (3, 0, 0.45, 0.30)  # raw, dropped, thr, top
         diagnostics_out.append(diag)

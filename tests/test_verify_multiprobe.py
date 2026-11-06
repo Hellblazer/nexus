@@ -96,7 +96,7 @@ def test_partial_probes_degraded() -> None:
 
     def fake_search(query, collection_names, n_results=10, **kwargs):
         call_count[0] += 1
-        results = original_search(query=query, collection_names=collection_names, n_results=n_results)
+        results = original_search(query=query, collection_names=collection_names, n_results=n_results, sensitivity="include")
         # On even calls, return empty (simulate miss)
         if call_count[0] % 2 == 0:
             return []

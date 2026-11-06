@@ -797,7 +797,7 @@ class TestServingPathAuditClosure:
 
         _publish_lease(port=stub_server.server_address[1], token="lease-tok")
         t3 = make_t3()
-        t3.search("anything", ["knowledge__x__minilm-l6-v2-384__v1"])
+        t3.search("anything", ["knowledge__x__minilm-l6-v2-384__v1"], sensitivity="include")
         # The proof: the request reached the stub authenticated with the
         # LEASE token, with zero env plumbing.
         assert stub_server.request_auths == ["Bearer lease-tok"]

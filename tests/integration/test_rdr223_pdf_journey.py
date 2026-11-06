@@ -369,7 +369,7 @@ def test_the_streaming_run_stamps_complete_only_after_its_metadata_post_pass(tmp
     assert last_data < min(enrich) < stamp[0]
     doc, _ = _register(path, "stamp-order")
     stored = hvc.HttpVectorClient().get_collection(_COLLECTION).get(
-        ids=[_sha(lines[0])], include=["metadatas"])["metadatas"][0]
+        ids=[_sha(lines[0])], include=["metadatas"], sensitivity="include")["metadatas"][0]
     assert stored["extraction_method"] == "mineru", "the post-pass ran before the document was stamped"
     assert _index_state(doc) == "complete"
 
@@ -504,7 +504,7 @@ def test_a_changed_pdf_drops_what_the_new_version_dropped_after_its_last_request
 
 
 def _stored_metadata(collection: str, chashes: list[str]) -> dict[str, dict]:
-    got = hvc.HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"])
+    got = hvc.HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"], sensitivity="include")
     assert len(got["ids"]) == len(chashes), "every chunk is stored"
     return dict(zip(got["ids"], got["metadatas"]))
 
@@ -886,7 +886,7 @@ def test_a_dry_run_into_a_throwaway_store_previews_and_sends_the_engine_nothing(
             dry_run=True)
     assert n == len(lines)
     assert t.events == [] and t.catalog == [], "the engine saw nothing, pipeline routes included"
-    got = store.get_or_create_collection(_COLLECTION).get(ids=[_sha(lines[0])])
+    got = store.get_or_create_collection(_COLLECTION).get(ids=[_sha(lines[0])], sensitivity="include")
     assert got["ids"] == [_sha(lines[0])], "the preview landed in the throwaway store"
 
 
@@ -1491,7 +1491,7 @@ def _found_by_bib_year(collection: str, year: int) -> set[str]:
     """Chunk ids a ``where bib_year=`` search answers with: the engine's label stage answers it
     from the catalog document's bib columns."""
     rows = hvc.HttpVectorClient().search("journey unique text", [collection], n_results=300,
-                                         where={"bib_year": year})
+                                         where={"bib_year": year}, sensitivity="include")
     return {r["id"] for r in rows}
 
 

@@ -216,7 +216,7 @@ def test_a_reference_that_never_calls_search_is_refused(monkeypatch):
         if client is ref:
             calls["n"] += 1
             return []  # a stand-in that never touches /search
-        return search_cross_corpus(query, columns, n, client, **kw)
+        return search_cross_corpus(query, columns, n, client, **kw, sensitivity="include")
 
     with pytest.raises(rp.RouteNotServedError, match="made no /search call"):
         _measure(engine, cols, route_client=engine.client, ref_client=ref,
@@ -237,7 +237,7 @@ def test_the_call_log_restores_the_client_when_it_exits(monkeypatch):
     client = engine.client
     with rp.CallLog(client) as log:
         search_cross_corpus("q", cols, _N, client, cluster_by=None,
-                            threshold_override=float("inf"))
+                            threshold_override=float("inf"), sensitivity="include")
     assert log.route_served == 2 and log.search_calls == 0
     assert "search" not in vars(client) and "search_per_collection" not in vars(client)
 

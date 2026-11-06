@@ -528,7 +528,7 @@ class _ModeT3:
         client = HttpVectorClient(_row_resolver=row_resolver)
         monkeypatch.setattr(
             client.__class__, "search",
-            lambda self, query, collection_names, n_results=10, where=None:
+            lambda self, query, collection_names, n_results=10, where=None, **_sens_kw:
                 list(cls.ROWS.get(collection_names[0], [])),
         )
         monkeypatch.setattr(client.__class__, "embedding_mode", lambda self: mode)
@@ -557,7 +557,7 @@ def test_threshold_follows_the_collection_model_not_the_engine_mode(
     monkeypatch, mode, voyage_filtered, bge_filtered,
 ):
     t3 = _ModeT3.make(monkeypatch, mode)
-    results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE], 10, t3)
+    results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE], 10, t3, sensitivity="include")
     ids = {r.id for r in results}
     assert ("voy-far" not in ids) is voyage_filtered
     assert ("bge-far" not in ids) is bge_filtered
@@ -567,7 +567,7 @@ def test_threshold_follows_the_collection_model_not_the_engine_mode(
 def test_an_explicit_threshold_override_still_applies_to_every_family(monkeypatch):
     t3 = _ModeT3.make(monkeypatch, "onnx-local")
     results = search_cross_corpus(
-        "q", [_ModeT3.VOY, _ModeT3.BGE], 10, t3, threshold_override=0.5,
+        "q", [_ModeT3.VOY, _ModeT3.BGE], 10, t3, threshold_override=0.5, sensitivity="include",
     )
     assert {r.id for r in results} == {"voy-near", "bge-near"}
 
@@ -584,7 +584,7 @@ def test_a_fake_engine_with_the_attribute_gate_filters_voyage_not_bge():
         def search(self, query, collection_names, n_results=10, where=None, **kw):
             return list(_ModeT3.ROWS.get(collection_names[0], []))
 
-    results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE], 10, _Fake())
+    results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE], 10, _Fake(), sensitivity="include")
     ids = {r.id for r in results}
     assert "voy-far" not in ids and "bge-far" in ids
 
@@ -643,7 +643,7 @@ def test_threshold_for_collection_model_legacy_name_by_engine_kind() -> None:
 )
 def test_legacy_name_threshold_by_engine_mode(monkeypatch, mode, legacy_filtered):
     t3 = _legacy_t3(monkeypatch, mode)
-    results = search_cross_corpus("q", [LEGACY, _ModeT3.VOY, _ModeT3.BGE], 10, t3)
+    results = search_cross_corpus("q", [LEGACY, _ModeT3.VOY, _ModeT3.BGE], 10, t3, sensitivity="include")
     ids = {r.id for r in results}
     assert ("leg-far" not in ids) is legacy_filtered
     assert "leg-near" in ids
@@ -654,7 +654,7 @@ def test_legacy_name_threshold_by_engine_mode(monkeypatch, mode, legacy_filtered
 
 def test_an_explicit_override_still_filters_a_legacy_name_on_a_dual_engine(monkeypatch):
     t3 = _legacy_t3(monkeypatch, "dual")
-    results = search_cross_corpus("q", [LEGACY], 10, t3, threshold_override=0.5)
+    results = search_cross_corpus("q", [LEGACY], 10, t3, threshold_override=0.5, sensitivity="include")
     assert {r.id for r in results} == {"leg-near"}
 
 
@@ -693,7 +693,7 @@ def test_a_fake_engine_reporting_dual_gives_a_legacy_name_no_threshold(monkeypat
         def search(self, query, collection_names, n_results=10, where=None, **kw):
             return list(_LEGACY_ROWS)
 
-    results = search_cross_corpus("q", [LEGACY], 10, _Fake())
+    results = search_cross_corpus("q", [LEGACY], 10, _Fake(), sensitivity="include")
     assert {r.id for r in results} == {"leg-near", "leg-far"}
 
 
@@ -759,7 +759,7 @@ def test_a_legacy_name_whose_row_says_voyage_is_filtered_on_a_dual_engine(monkey
     _seed_rows(monkeypatch, LEGACY_VOY)
     catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, "voyage-model-b")})
     t3 = _recording_t3(monkeypatch, "dual", catalog)
-    results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.BGE], 10, t3)
+    results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.BGE], 10, t3, sensitivity="include")
     ids = {r.id for r in results}
     assert "leg-near" in ids
     assert "leg-far" not in ids          # past the docs threshold (0.65): filtered
@@ -770,7 +770,7 @@ def test_a_legacy_name_whose_row_says_bge_gets_no_threshold(monkeypatch):
     _seed_rows(monkeypatch, LEGACY_BGE)
     catalog = _RowCatalog({LEGACY_BGE: _row(LEGACY_BGE, BGE)})
     t3 = _recording_t3(monkeypatch, "voyage", catalog)
-    results = search_cross_corpus("q", [LEGACY_BGE], 10, t3)
+    results = search_cross_corpus("q", [LEGACY_BGE], 10, t3, sensitivity="include")
     assert {r.id for r in results} == {"leg-near", "leg-far"}
 
 
@@ -781,7 +781,7 @@ def test_a_legacy_voyage_row_groups_with_the_conformant_voyage_family(monkeypatc
     # The row names the conformant sibling's own model, read off its name, so they group.
     catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, _ModeT3.VOY.split("__")[2])})
     t3 = _recording_t3(monkeypatch, "dual", catalog)
-    search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY, _ModeT3.BGE], 10, t3)
+    search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY, _ModeT3.BGE], 10, t3, sensitivity="include")
     assert sorted(map(sorted, t3.batches)) == sorted(
         [sorted([LEGACY_VOY, _ModeT3.VOY]), [_ModeT3.BGE]]
     )
@@ -792,11 +792,11 @@ def test_a_name_with_no_token_and_no_row_still_gets_no_threshold_on_a_dual_engin
     _seed_rows(monkeypatch, LEGACY)
     catalog = _RowCatalog({})            # no row backs the name
     t3 = _recording_t3(monkeypatch, "dual", catalog)
-    results = search_cross_corpus("q", [LEGACY], 10, t3)
+    results = search_cross_corpus("q", [LEGACY], 10, t3, sensitivity="include")
     assert {r.id for r in results} == {"leg-near", "leg-far"}
     # ...and on a non-dual Voyage engine it keeps the prefix threshold.
     t3 = _recording_t3(monkeypatch, "voyage", _RowCatalog({}))
-    assert {r.id for r in search_cross_corpus("q", [LEGACY], 10, t3)} == {"leg-near"}
+    assert {r.id for r in search_cross_corpus("q", [LEGACY], 10, t3, sensitivity="include")} == {"leg-near"}
 
 
 def test_a_row_without_a_model_is_authoritative_and_not_guessed_from_the_name(monkeypatch):
@@ -808,7 +808,7 @@ def test_a_row_without_a_model_is_authoritative_and_not_guessed_from_the_name(mo
     row = _row(_ModeT3.VOY, "voyage-model-b")
     del row["embedding_model"]
     t3 = _recording_t3(monkeypatch, "dual", _RowCatalog({_ModeT3.VOY: row}))
-    assert {r.id for r in search_cross_corpus("q", [_ModeT3.VOY], 10, t3)} == {"leg-near", "leg-far"}
+    assert {r.id for r in search_cross_corpus("q", [_ModeT3.VOY], 10, t3, sensitivity="include")} == {"leg-near", "leg-far"}
 
 
 def test_conformant_names_are_unchanged_and_each_name_is_looked_up_once(monkeypatch):
@@ -819,7 +819,7 @@ def test_conformant_names_are_unchanged_and_each_name_is_looked_up_once(monkeypa
         _ModeT3.BGE: _row(_ModeT3.BGE, BGE),
     })
     t3 = _recording_t3(monkeypatch, "dual", catalog)
-    results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE, _ModeT3.VOY], 10, t3)
+    results = search_cross_corpus("q", [_ModeT3.VOY, _ModeT3.BGE, _ModeT3.VOY], 10, t3, sensitivity="include")
     ids = {r.id for r in results}
     assert "voy-far" not in ids and "bge-far" in ids
     assert sorted(catalog.calls) == sorted([_ModeT3.VOY, _ModeT3.BGE])
@@ -844,7 +844,7 @@ def test_a_fake_handle_without_a_row_resolver_falls_back_to_the_name(monkeypatch
         def search(self, query, collection_names, n_results=10, where=None, **kw):
             return list(_LEGACY_ROWS)
 
-    assert {r.id for r in search_cross_corpus("q", [LEGACY], 10, _Fake())} == {"leg-near", "leg-far"}
+    assert {r.id for r in search_cross_corpus("q", [LEGACY], 10, _Fake(), sensitivity="include")} == {"leg-near", "leg-far"}
     assert _group_collections_by_embedding_model([_ModeT3.VOY, _ModeT3.BGE]) == [
         [_ModeT3.VOY], [_ModeT3.BGE],
     ]
@@ -918,7 +918,7 @@ def test_a_default_tenant_client_filters_a_legacy_voyage_row_from_the_primed_cac
     monkeypatch.setattr(HttpVectorClient, "list_collections", _no_fetch)
     monkeypatch.setattr(mcp_infra, "_refresh_collections_cache_if_stale", _no_fetch)
     t3 = _ModeT3.make(monkeypatch, "dual")
-    ids = {r.id for r in search_cross_corpus("q", [LEGACY_VOY, _ModeT3.BGE], 10, t3)}
+    ids = {r.id for r in search_cross_corpus("q", [LEGACY_VOY, _ModeT3.BGE], 10, t3, sensitivity="include")}
     assert "leg-near" in ids
     assert "leg-far" not in ids
     assert "bge-far" in ids
@@ -1084,7 +1084,7 @@ def test_search_hands_back_the_resolver_it_built_and_it_ranks_the_legacy_row_fir
     catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, voy_model)})
     t3 = _recording_t3(monkeypatch, "dual", catalog)
     out: list = []
-    results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY], 10, t3, model_of_out=out)
+    results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY], 10, t3, model_of_out=out, sensitivity="include")
     assert len(out) == 1 and out[0](LEGACY_VOY) == voy_model
     boosted = apply_ranking_boosts(results, window=1, model_of=out[0])
     assert [r.id for r in boosted] == ["leg", "con"]

@@ -76,7 +76,7 @@ class TestFix1SearchClientSideEmbed:
         spy_col = _spy_collection(count=1)
         db = _local_db_with_spy_col(fake_ef, spy_col)
 
-        db.search("hello world", collection_names=["knowledge__test__minilm-l6-v2-384__v1"])
+        db.search("hello world", collection_names=["knowledge__test__minilm-l6-v2-384__v1"], sensitivity="include")
 
         spy_col.query.assert_called_once()
         kwargs = spy_col.query.call_args.kwargs
@@ -94,7 +94,7 @@ class TestFix1SearchClientSideEmbed:
         spy_col = _spy_collection(count=1)
         db = _local_db_with_spy_col(fake_ef, spy_col)
 
-        db.search("test query", collection_names=["code__owner__bge-base-en-v15-768__v1"])
+        db.search("test query", collection_names=["code__owner__bge-base-en-v15-768__v1"], sensitivity="include")
 
         fake_ef.assert_called()
 
@@ -106,7 +106,7 @@ class TestFix1SearchClientSideEmbed:
         spy_col = _spy_collection(count=1)
         db = _local_db_with_spy_col(fake_ef, spy_col)
 
-        db.search("test", collection_names=["knowledge__owner__minilm-l6-v2-384__v1"])
+        db.search("test", collection_names=["knowledge__owner__minilm-l6-v2-384__v1"], sensitivity="include")
 
         kwargs = spy_col.query.call_args.kwargs
         assert kwargs["query_embeddings"] == [expected_vec]
@@ -122,7 +122,7 @@ class TestFix1SearchClientSideEmbed:
         db = T3Database(_client=mock_client, _ef_override=mock_ef)
         assert db._local_mode is False
 
-        db.search("hello", collection_names=["code__owner__model-code__v1"])
+        db.search("hello", collection_names=["code__owner__model-code__v1"], sensitivity="include")
 
         kwargs = spy_col.query.call_args.kwargs
         assert "query_texts" in kwargs, (
@@ -302,7 +302,7 @@ class TestFix3AllSkippedErrorEvent:
                 results = db.search(
                     "test",
                     collection_names=["knowledge__a__model-ctx__v1",
-                                      "knowledge__b__model-ctx__v1"],
+                                      "knowledge__b__model-ctx__v1"], sensitivity="include",
                 )
 
         assert results == [], "should return empty, not raise"
@@ -326,7 +326,7 @@ class TestFix3AllSkippedErrorEvent:
         db = T3Database(_client=mock_client, _ef_override=MagicMock())
 
         with patch("nexus.db.t3._log") as mock_log:
-            results = db.search("test", collection_names=["code__owner__model-code__v1"])
+            results = db.search("test", collection_names=["code__owner__model-code__v1"], sensitivity="include")
 
         assert results == []
         error_calls = [c for c in mock_log.error.call_args_list
@@ -353,7 +353,7 @@ class TestFix3AllSkippedErrorEvent:
             with patch("nexus.db.t3._log") as mock_log:
                 results = db.search(
                     "test",
-                    collection_names=["knowledge__orphan__minilm-l6-v2-384__v1"],
+                    collection_names=["knowledge__orphan__minilm-l6-v2-384__v1"], sensitivity="include",
                 )
 
         assert results == []
@@ -403,7 +403,7 @@ class TestFix3AllSkippedErrorEvent:
             db.search("test", collection_names=[
                 "code__a__model-code__v1",
                 "code__b__model-code__v1",
-            ])
+            ], sensitivity="include")
 
         error_calls = [c for c in mock_log.error.call_args_list
                        if c.args and "search_all_collections_dimension_skipped" in str(c.args[0])]

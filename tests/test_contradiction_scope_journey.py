@@ -66,7 +66,7 @@ def test_the_rows_carry_source_agent_and_only_the_mixed_collection_is_fetched(se
     monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, route)
 
     results = search_cross_corpus(
-        _QUERY, [_NOTES, _CODE], 6, client, threshold_override=float("inf"), cluster_by=None,
+        _QUERY, [_NOTES, _CODE], 6, client, threshold_override=float("inf"), cluster_by=None, sensitivity="include",
     )
 
     by_col: dict[str, list] = {}

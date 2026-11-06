@@ -161,7 +161,7 @@ def test_clustering_skipped_partial_failure_event(monkeypatch):
     class _PartialT3:
         _voyage_client = "fake"
 
-        def search(self, query, collection_names, n_results=10, where=None):
+        def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
             col = collection_names[0]
             if col == "code__good":
                 return [
@@ -178,7 +178,7 @@ def test_clustering_skipped_partial_failure_event(monkeypatch):
     with capture_logs() as logs:
         results = search_cross_corpus(
             "q", ["code__good", "code__broken"], 10,
-            _PartialT3(), cluster_by="semantic",
+            _PartialT3(), cluster_by="semantic", sensitivity="include",
         )
     events = [e for e in logs if e.get("event") == "clustering_skipped_partial_failure"]
     assert len(events) == 1

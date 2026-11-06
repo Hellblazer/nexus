@@ -93,7 +93,7 @@ def _meta(path, marker) -> dict:
 
 
 def _chunk_method(line: str) -> str:
-    entry = hvc.HttpVectorClient().get_by_id(_COLLECTION, _sha(line))
+    entry = hvc.HttpVectorClient().get_by_id(_COLLECTION, _sha(line), sensitivity="include")
     assert entry is not None
     return entry.get("extraction_method", "")
 

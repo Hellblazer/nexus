@@ -26,7 +26,7 @@ H = "7" * 64
 class _FakeT3:
     _voyage_client = None
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         return [{"id": "hit", "content": "shared text", "distance": 0.2, "chunk_text_hash": H}]
 
 
@@ -57,7 +57,7 @@ class _Catalog:
 
 def _search(catalog: _Catalog) -> SearchResult:
     out = search_cross_corpus(
-        "q", [COL_X], n_results=1, t3=_FakeT3(), catalog=catalog, link_boost=True,
+        "q", [COL_X], n_results=1, t3=_FakeT3(), catalog=catalog, link_boost=True, sensitivity="include",
     )
     assert len(out) == 1
     return out[0]

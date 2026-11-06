@@ -199,7 +199,7 @@ def _assert_named_source_and_primary_evidence(fx, reader):
     assert [s.tumbler for s in art_resolution.sources] == [fx.art_rdr]
     caps = _replace(DEFAULT_CAPS, max_selected_items=6, max_single_source_items=6)
     primary = select_primary_evidence(
-        art_resolution, cat=reader, fetch_chunks=t3_chunk_fetcher(get_t3()), caps=caps)
+        art_resolution, cat=reader, fetch_chunks=t3_chunk_fetcher(get_t3(), sensitivity="include"), caps=caps)
     (cov,) = primary.documents
     assert cov.status == "ok" and cov.manifest_rows == len(g.ART_RDR_PIECES) and cov.partial is True
     assert primary.selected_items == 6 and {i.doc_id for i in primary.items} == {fx.art_rdr}

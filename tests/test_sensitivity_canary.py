@@ -876,7 +876,7 @@ def _run_search_fanout(world: CanaryWorld, tenant: Any) -> list[Any]:
     client = hvc.HttpVectorClient(tenant=tenant)
     return search_cross_corpus(
         "tuple lease renewal does not change attempts", world.collections, 5, client,
-        threshold_override=float("inf"), cluster_by=None,
+        threshold_override=float("inf"), cluster_by=None, sensitivity="include",
     )
 
 

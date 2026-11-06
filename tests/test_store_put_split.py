@@ -177,7 +177,7 @@ def test_store_put_writes_every_piece_and_a_manifest_in_order(
 
     assert result.startswith(f"Stored: {_sha(pieces[0])}"), result
     for piece in pieces:
-        entry = engine_t3.get_by_id(col_name, _sha(piece))
+        entry = engine_t3.get_by_id(col_name, _sha(piece), sensitivity="include")
         assert entry is not None and entry["content"] == piece
     docs = documents_by_title("long-note")
     assert len(docs) == 1

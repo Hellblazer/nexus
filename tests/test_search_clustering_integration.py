@@ -31,7 +31,7 @@ class _FakeT3:
         self._results = results_by_col
         self.get_embeddings_calls: list[tuple[str, list[str]]] = []
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         return self._results.get(collection_names[0], [])
 
     def get_embeddings(self, collection_name: str, ids: list[str]) -> np.ndarray:
@@ -54,20 +54,20 @@ class TestClusterByNone:
 
     def test_explicit_none_returns_flat_list(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
-        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None)
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None, sensitivity="include")
         assert isinstance(results, list)
         assert all(isinstance(r, SearchResult) for r in results)
         assert len(results) == 5
 
     def test_no_cluster_label_on_results(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 3)})
-        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None)
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None, sensitivity="include")
         for r in results:
             assert "_cluster_label" not in r.metadata
 
     def test_get_embeddings_not_called(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
-        search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None)
+        search_cross_corpus("q", ["code__test"], 10, t3, cluster_by=None, sensitivity="include")
         assert t3.get_embeddings_calls == []
 
 
@@ -105,7 +105,7 @@ class TestFullPipeline:
             ["code__a", "docs__b"],
             10,
             t3,
-            cluster_by="semantic",
+            cluster_by="semantic", sensitivity="include",
         )
         # Exactly ONE fetch per collection, not TWO (F1 fix)
         fetched_cols = [c[0] for c in t3.get_embeddings_calls]
@@ -127,7 +127,7 @@ class TestFullPipeline:
         class _ContradictingT3:
             _voyage_client = "fake"
 
-            def search(self, query, collection_names, n_results=10, where=None):
+            def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
                 return [
                     {"id": "chunk-a", "content": "text", "distance": 0.1,
                      "source_agent": "agent-alpha"},
@@ -151,7 +151,7 @@ class TestFullPipeline:
 
         t3 = _ContradictingT3()
         clustered = search_cross_corpus(
-            "q", ["code__test"], 10, t3, cluster_by="semantic",
+            "q", ["code__test"], 10, t3, cluster_by="semantic", sensitivity="include",
         )
         assert not any(r.metadata.get("_contradiction_flag") for r in clustered), (
             "search_cross_corpus no longer flags; the render does, on the displayed page"
@@ -178,7 +178,7 @@ class TestFullPipeline:
             def __init__(self) -> None:
                 self.get_embeddings_calls: list = []
 
-            def search(self, query, collection_names, n_results=10, where=None):
+            def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
                 col = collection_names[0]
                 if col == "code__good":
                     return [
@@ -206,7 +206,7 @@ class TestFullPipeline:
 
         t3 = _PartialT3()
         pooled = search_cross_corpus(
-            "q", ["code__good", "code__broken"], 10, t3, cluster_by=None,
+            "q", ["code__good", "code__broken"], 10, t3, cluster_by=None, sensitivity="include",
         )
         assert t3.get_embeddings_calls == [], "search_cross_corpus makes no vector call for the check"
         results = flag_displayed_contradictions(pooled, t3)
@@ -231,7 +231,7 @@ class TestClusterShapeGuard:
         class _ShortT3:
             _voyage_client = "fake"
 
-            def search(self, query, collection_names, n_results=10, where=None):
+            def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
                 return _low_distance_results(collection_names[0], 5)
 
             def get_embeddings(self, collection_name: str, ids: list[str]) -> np.ndarray:
@@ -240,7 +240,7 @@ class TestClusterShapeGuard:
 
         t3 = _ShortT3()
         # Should NOT raise IndexError — should return unclustered results
-        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic")
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic", sensitivity="include")
         assert len(results) == 5
         # No cluster labels — clustering was skipped
         for r in results:
@@ -250,7 +250,7 @@ class TestClusterShapeGuard:
 class TestClusterBySemantic:
     def test_returns_flat_list_with_cluster_labels(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 6)})
-        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic")
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic", sensitivity="include")
         assert isinstance(results, list)
         assert all(isinstance(r, SearchResult) for r in results)
         for r in results:
@@ -258,7 +258,7 @@ class TestClusterBySemantic:
 
     def test_get_embeddings_called(self) -> None:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
-        search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic")
+        search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic", sensitivity="include")
         assert len(t3.get_embeddings_calls) == 1
         assert t3.get_embeddings_calls[0][0] == "code__test"
 
@@ -268,7 +268,7 @@ class TestClusterBySemantic:
             "code__b": _low_distance_results("code__b", 3),
         })
         search_cross_corpus(
-            "q", ["code__a", "code__b"], 10, t3, cluster_by="semantic",
+            "q", ["code__a", "code__b"], 10, t3, cluster_by="semantic", sensitivity="include",
         )
         cols_fetched = [c[0] for c in t3.get_embeddings_calls]
         assert "code__a" in cols_fetched
@@ -277,7 +277,7 @@ class TestClusterBySemantic:
     def test_fewer_than_three_results_skips_clustering(self) -> None:
         """Clustering needs >=3 results; with fewer, return flat without labels."""
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 2)})
-        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic")
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic", sensitivity="include")
         assert len(results) == 2
         # cluster_results returns singletons for n<=2, which still get labels
         # but get_embeddings should still be called for the attempt
@@ -285,7 +285,7 @@ class TestClusterBySemantic:
 
     def test_empty_results_returns_empty(self) -> None:
         t3 = _FakeT3({"code__test": []})
-        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic")
+        results = search_cross_corpus("q", ["code__test"], 10, t3, cluster_by="semantic", sensitivity="include")
         assert results == []
 
 
@@ -342,7 +342,7 @@ class TestTopicGrouping:
 
         results = search_cross_corpus(
             "q", ["code__test"], 10, t3,
-            cluster_by="semantic", taxonomy=tax,
+            cluster_by="semantic", taxonomy=tax, sensitivity="include",
         )
         assert len(results) == 6
         labeled = [r for r in results if "_topic_label" in r.metadata]
@@ -360,7 +360,7 @@ class TestTopicGrouping:
 
         results = search_cross_corpus(
             "q", ["code__test"], 10, t3,
-            cluster_by="semantic", taxonomy=tax,
+            cluster_by="semantic", taxonomy=tax, sensitivity="include",
         )
         assert len(results) == 6
         # Ward clustering adds _cluster_label to ALL results
@@ -372,7 +372,7 @@ class TestTopicGrouping:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
         results = search_cross_corpus(
             "q", ["code__test"], 10, t3,
-            cluster_by="semantic", taxonomy=None,
+            cluster_by="semantic", taxonomy=None, sensitivity="include",
         )
         assert len(results) == 5
         # Ward clustering should label ALL results
@@ -384,7 +384,7 @@ class TestTopicGrouping:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
         results = search_cross_corpus(
             "q", ["code__test"], 10, t3,
-            cluster_by=None,
+            cluster_by=None, sensitivity="include",
         )
         assert len(results) == 5
         for r in results:
@@ -426,7 +426,7 @@ class TestTopicScopedSearch:
         results = search_cross_corpus(
             "q", ["code__test"], 10, t3,
             cluster_by=None, taxonomy=tax,
-            topic="http handlers",
+            topic="http handlers", sensitivity="include",
         )
         assert len(results) == 3
         assert {r.id for r in results} == {"code__test-0", "code__test-1", "code__test-2"}
@@ -439,7 +439,7 @@ class TestTopicScopedSearch:
         results = search_cross_corpus(
             "q", ["code__test"], 10, t3,
             cluster_by=None, taxonomy=tax,
-            topic="nonexistent",
+            topic="nonexistent", sensitivity="include",
         )
         assert results == []
 
@@ -448,6 +448,6 @@ class TestTopicScopedSearch:
         t3 = _FakeT3({"code__test": _low_distance_results("code__test", 5)})
         results = search_cross_corpus(
             "q", ["code__test"], 10, t3,
-            cluster_by=None, topic=None,
+            cluster_by=None, topic=None, sensitivity="include",
         )
         assert len(results) == 5

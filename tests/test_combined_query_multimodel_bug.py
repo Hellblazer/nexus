@@ -70,13 +70,13 @@ class _ModelAwareServiceT3:
         ]
 
     def search_graph_hop(self, query, seeds, collection_names, *, link_type=None,
-                         depth=1, direction="both", where=None, n_results=10):
+                         depth=1, direction="both", where=None, n_results=10, sensitivity="include"):
         self.graph_calls.append(list(collection_names))
         return self._retrieve(list(collection_names))
 
     def search_metadata_scoped(self, query, collection_names, *, content_type=None,
                                author=None, year=None, corpus=None, subtree=None,
-                               where=None, n_results=10):
+                               where=None, n_results=10, sensitivity="include"):
         self.meta_calls.append(list(collection_names))
         return self._retrieve(list(collection_names))
 

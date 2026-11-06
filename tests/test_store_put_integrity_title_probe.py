@@ -51,7 +51,7 @@ class _T3ByTitle:
         self.title_lookups: list[str] = []
         self.chash_lookups: list[str] = []
 
-    def get_by_id(self, collection, doc_id):
+    def get_by_id(self, collection, doc_id, *, sensitivity="include"):
         self.chash_lookups.append(doc_id)
         return None
 

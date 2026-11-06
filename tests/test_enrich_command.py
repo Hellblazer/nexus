@@ -794,7 +794,7 @@ def test_enrich_writes_chunk_rows_only_where_one_document_holds_them() -> None:
         total=2, enriched=0, untitled=0,
     )
     col = MagicMock()
-    col.get.side_effect = lambda ids=None, include=None, limit=None, offset=0: (
+    col.get.side_effect = lambda ids=None, include=None, limit=None, offset=0, **_sens_kw: (
         {"ids": list(chunk), "metadatas": list(chunk.values())} if ids is None
         else {"ids": list(ids), "metadatas": [dict(chunk[i]) for i in ids]}
     )
@@ -857,7 +857,7 @@ def _backfill(chunks: dict[str, dict], owners: dict[str, list[str]], entries: di
     """Run ``--backfill-catalog`` over T3 rows *chunks* (id -> metadata) whose holders are
     *owners* and whose catalog documents are *entries*; returns ``(result, hook)``."""
     col = MagicMock()
-    col.get.side_effect = lambda ids=None, include=None, limit=None, offset=0: (
+    col.get.side_effect = lambda ids=None, include=None, limit=None, offset=0, **_sens_kw: (
         {"ids": list(chunks), "metadatas": list(chunks.values())} if not offset
         else {"ids": [], "metadatas": []}
     )
@@ -999,7 +999,7 @@ def _enrich_with(chunks: dict[str, dict], found, owners: dict[str, list[str]]):
     """Run ``nx enrich bib`` (s2) with the catalog's answers fixed; returns
     ``(result, backend_mock, owners_lookup_mock)``."""
     col = MagicMock()
-    col.get.side_effect = lambda ids=None, include=None, limit=None, offset=0: (
+    col.get.side_effect = lambda ids=None, include=None, limit=None, offset=0, **_sens_kw: (
         {"ids": list(chunks), "metadatas": list(chunks.values())} if ids is None
         else {"ids": list(ids), "metadatas": [dict(chunks[i]) for i in ids]}
     )

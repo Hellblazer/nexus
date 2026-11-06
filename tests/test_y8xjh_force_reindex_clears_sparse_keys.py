@@ -106,7 +106,7 @@ def _stored(t3) -> dict:
     import hashlib
 
     chash = hashlib.sha256(_TEXT.encode()).hexdigest()
-    got = t3.get_or_create_collection(_COLLECTION).get(ids=[chash], include=["metadatas"])
+    got = t3.get_or_create_collection(_COLLECTION).get(ids=[chash], include=["metadatas"], sensitivity="include")
     assert got["ids"] == [chash], got
     return got["metadatas"][0]
 

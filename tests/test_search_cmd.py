@@ -893,7 +893,7 @@ def _format_results(results: list) -> str:
 @pytest.mark.t2_tenant
 @pytest.mark.parametrize("query", _QUERIES)
 def test_search_ranking_snapshot(query: str, search_corpus: T3Database, snapshot) -> None:
-    raw = search_cross_corpus(query, ["code__snapshot", "knowledge__snapshot"], n_results=5, t3=search_corpus)
+    raw = search_cross_corpus(query, ["code__snapshot", "knowledge__snapshot"], n_results=5, t3=search_corpus, sensitivity="include")
     scored = apply_hybrid_scoring(raw, hybrid=True)
     assert _format_results(scored) == snapshot
 
@@ -901,7 +901,7 @@ def test_search_ranking_snapshot(query: str, search_corpus: T3Database, snapshot
 @pytest.mark.t2_tenant
 @pytest.mark.parametrize("query", _QUERIES[:3])
 def test_search_single_corpus_snapshot(query: str, search_corpus: T3Database, snapshot) -> None:
-    raw = search_cross_corpus(query, ["code__snapshot"], n_results=5, t3=search_corpus)
+    raw = search_cross_corpus(query, ["code__snapshot"], n_results=5, t3=search_corpus, sensitivity="include")
     scored = apply_hybrid_scoring(raw, hybrid=False)
     assert _format_results(scored) == snapshot
 

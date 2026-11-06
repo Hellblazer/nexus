@@ -39,7 +39,7 @@ class _RecordingT3:
         self.calls: dict[str, int] = {}  # collection → n_results used
         self._results = results or []
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         col = collection_names[0]
         self.calls[col] = n_results
         return self._results
@@ -51,28 +51,28 @@ class TestOverfetchInSearchCrossCorpus:
     def test_knowledge_gets_4x_fetch(self) -> None:
         """knowledge__ collection is fetched with n_results * 4."""
         t3 = _RecordingT3()
-        search_cross_corpus("q", ["knowledge__papers"], n_results=10, t3=t3)
+        search_cross_corpus("q", ["knowledge__papers"], n_results=10, t3=t3, sensitivity="include")
         assert t3.calls["knowledge__papers"] == 40
 
     def test_code_gets_2x_fetch(self) -> None:
         """code__ collection is fetched with n_results * 2."""
         t3 = _RecordingT3()
-        search_cross_corpus("q", ["code__nexus"], n_results=10, t3=t3)
+        search_cross_corpus("q", ["code__nexus"], n_results=10, t3=t3, sensitivity="include")
         assert t3.calls["code__nexus"] == 20
 
     def test_docs_gets_4x_fetch(self) -> None:
         t3 = _RecordingT3()
-        search_cross_corpus("q", ["docs__api"], n_results=10, t3=t3)
+        search_cross_corpus("q", ["docs__api"], n_results=10, t3=t3, sensitivity="include")
         assert t3.calls["docs__api"] == 40
 
     def test_rdr_gets_4x_fetch(self) -> None:
         t3 = _RecordingT3()
-        search_cross_corpus("q", ["rdr__reviews"], n_results=10, t3=t3)
+        search_cross_corpus("q", ["rdr__reviews"], n_results=10, t3=t3, sensitivity="include")
         assert t3.calls["rdr__reviews"] == 40
 
     def test_unknown_prefix_gets_2x_fetch(self) -> None:
         t3 = _RecordingT3()
-        search_cross_corpus("q", ["custom__stuff"], n_results=10, t3=t3)
+        search_cross_corpus("q", ["custom__stuff"], n_results=10, t3=t3, sensitivity="include")
         assert t3.calls["custom__stuff"] == 20
 
     def test_per_k_not_divided_by_num_corpora(self) -> None:
@@ -82,7 +82,7 @@ class TestOverfetchInSearchCrossCorpus:
             "q",
             ["knowledge__a", "knowledge__b", "code__c"],
             n_results=10,
-            t3=t3,
+            t3=t3, sensitivity="include",
         )
         # knowledge → 4x; code → 2x; no division by 3
         assert t3.calls["knowledge__a"] == 40
@@ -93,17 +93,17 @@ class TestOverfetchInSearchCrossCorpus:
         """max(5, n_results * mult) floor applies when product is tiny."""
         t3 = _RecordingT3()
         # n_results=1, code 2x → 2, but floor → 5
-        search_cross_corpus("q", ["code__nexus"], n_results=1, t3=t3)
+        search_cross_corpus("q", ["code__nexus"], n_results=1, t3=t3, sensitivity="include")
         assert t3.calls["code__nexus"] == 5
 
     def test_small_n_results_knowledge_floor(self) -> None:
         """knowledge 4x of n_results=1 → 4, floored to 5."""
         t3 = _RecordingT3()
-        search_cross_corpus("q", ["knowledge__x"], n_results=1, t3=t3)
+        search_cross_corpus("q", ["knowledge__x"], n_results=1, t3=t3, sensitivity="include")
         assert t3.calls["knowledge__x"] == 5
 
     def test_normal_n_results_no_floor_needed(self) -> None:
         """n_results=5 with 2x → 10, well above floor."""
         t3 = _RecordingT3()
-        search_cross_corpus("q", ["code__nexus"], n_results=5, t3=t3)
+        search_cross_corpus("q", ["code__nexus"], n_results=5, t3=t3, sensitivity="include")
         assert t3.calls["code__nexus"] == 10

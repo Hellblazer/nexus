@@ -177,7 +177,7 @@ class TestRoundTrip:
         unaffected). The fixture seeds ``title="File N"`` per chunk."""
         _export_import(populated_db, "code__test", tmp_path, target="code__meta_check")
         col = populated_db._client_for("code__meta_check").get_collection("code__meta_check")
-        titles = {m.get("title", "") for m in col.get(include=["metadatas"])["metadatas"]}
+        titles = {m.get("title", "") for m in col.get(include=["metadatas"], sensitivity="include")["metadatas"]}
         assert "File 0" in titles and "File 4" in titles
 
     def test_round_trip_preserves_embeddings(self, populated_db: T3Database, tmp_path: Path):
@@ -186,13 +186,13 @@ class TestRoundTrip:
         # identity is no longer id-based post-fix -- look up by document
         # text instead of assuming the id round-trips verbatim.
         orig_col = populated_db._client_for("code__test").get_collection("code__test")
-        orig_result = orig_col.get(include=["documents", "embeddings"])
+        orig_result = orig_col.get(include=["documents", "embeddings"], sensitivity="include")
         orig_by_doc = dict(zip(orig_result["documents"], orig_result["embeddings"]))
         orig_emb = orig_by_doc["document 0"]
 
         _export_import(populated_db, "code__test", tmp_path, target="code__emb_check")
         restored_col = populated_db._client_for("code__emb_check").get_collection("code__emb_check")
-        restored_result = restored_col.get(include=["documents", "embeddings"])
+        restored_result = restored_col.get(include=["documents", "embeddings"], sensitivity="include")
         restored_by_doc = dict(zip(restored_result["documents"], restored_result["embeddings"]))
         restored_emb = restored_by_doc["document 0"]
         np.testing.assert_allclose(orig_emb, restored_emb, rtol=1e-6)
@@ -258,7 +258,7 @@ class TestRoundTrip:
         restored = ephemeral_db._client_for(
             "taxonomy__restored",
         ).get_collection("taxonomy__restored")
-        result = restored.get(ids=ids, include=["metadatas"])
+        result = restored.get(ids=ids, include=["metadatas"], sensitivity="include")
         meta_by_id = dict(zip(result["ids"], result["metadatas"]))
         # WITH TEETH — every taxonomy key must survive the round trip.
         for original_id, original_meta in zip(ids, metadatas):
@@ -553,7 +553,7 @@ class TestServiceModeExport:
 
         dst = ephemeral_db.get_collection(collection_name)
         assert dst.count() == 2
-        stored = dst.get(ids=ids, include=["documents", "metadatas", "embeddings"])
+        stored = dst.get(ids=ids, include=["documents", "metadatas", "embeddings"], sensitivity="include")
         assert set(stored["ids"]) == set(ids)
         by_id_doc = dict(zip(stored["ids"], stored["documents"]))
         for i, doc_id in enumerate(ids):
@@ -991,7 +991,7 @@ class TestVectorOnlyImport:
         assert col.count() == 3
         # Vector-only entries should have empty (or None) documents and
         # the original embeddings preserved.
-        got = col.get(include=["documents", "embeddings"])
+        got = col.get(include=["documents", "embeddings"], sensitivity="include")
         assert all((d == "" or d is None) for d in got["documents"])
         assert len(got["embeddings"]) == 3
         assert len(got["embeddings"][0]) == 16
@@ -1034,7 +1034,7 @@ class TestVectorOnlyImport:
 
         col = ephemeral_db._client_for(col_name).get_collection(col_name)
         assert col.count() == 4
-        got = col.get(ids=["a", "b"], include=["documents"])
+        got = col.get(ids=["a", "b"], include=["documents"], sensitivity="include")
         # ``a`` was None, normalized to ""; ``b`` keeps its text.
         a_doc = got["documents"][got["ids"].index("a")]
         b_doc = got["documents"][got["ids"].index("b")]
@@ -1076,7 +1076,7 @@ class TestChashRehash:
         assert result["rehashed_count"] == 1
 
         col = ephemeral_db._client_for("code__legacy").get_collection("code__legacy")
-        got = col.get(include=["documents", "metadatas"])
+        got = col.get(include=["documents", "metadatas"], sensitivity="include")
         assert len(got["ids"]) == 1
         new_id = got["ids"][0]
         expected_id = hashlib.sha256(doc_text.encode()).hexdigest()
@@ -1105,7 +1105,7 @@ class TestChashRehash:
         assert result["rehashed_count"] == 1
 
         col = ephemeral_db._client_for("code__vec_legacy").get_collection("code__vec_legacy")
-        got = col.get(include=[])
+        got = col.get(include=[], sensitivity="include")
         expected_id = hashlib.sha256(legacy_id.encode()).hexdigest()
         assert got["ids"] == [expected_id]
 
@@ -1129,7 +1129,7 @@ class TestChashRehash:
         assert result["rehashed_count"] == 0
 
         col = ephemeral_db._client_for("taxonomy__legacy").get_collection("taxonomy__legacy")
-        got = col.get(include=[])
+        got = col.get(include=[], sensitivity="include")
         assert got["ids"] == [legacy_id]
 
     def test_conformant_32char_id_left_unchanged(
@@ -1149,7 +1149,7 @@ class TestChashRehash:
         assert result["rehashed_count"] == 0
 
         col = ephemeral_db._client_for("code__conformant").get_collection("code__conformant")
-        got = col.get(include=[])
+        got = col.get(include=[], sensitivity="include")
         assert got["ids"] == [conformant_id]
 
 

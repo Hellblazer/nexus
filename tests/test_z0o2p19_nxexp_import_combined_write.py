@@ -652,7 +652,7 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
     stored = _stored_vectors(client, tmp_path, dst)
     assert stored == {c: v.tobytes() for c, v in file_vecs.items()}, "every vector is the file's"
     assert [c for _, c in _manifest(reader, doc_x)] == [shared], "document X still owns the shared chunk"
-    kept = client.get_collection(dst).get(ids=[shared], include=["metadatas"])["metadatas"][0]
+    kept = client.get_collection(dst).get(ids=[shared], include=["metadatas"], sensitivity="include")["metadatas"][0]
     assert kept.get("bib_year") == 2020, "metadata is merged: a key the export omits survives on a shared chunk"
     # nexus-6pfgb.18: importing document Y restamps no document or position key on the row document X
     # owns; X keeps its title, tags and line span, and Y's ttl_days never lands.
@@ -660,7 +660,7 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
     assert "ttl_days" not in kept, kept
     # A row nobody else owns gets no document key either (the catalog entry the import registers holds
     # them) but keeps its own position key.
-    rows = client.get_collection(dst).get(ids=[lone, fresh], include=["metadatas"])["metadatas"]
+    rows = client.get_collection(dst).get(ids=[lone, fresh], include=["metadatas"], sensitivity="include")["metadatas"]
     assert len(rows) == 2, "the unshared rows were not examined"
     for m in rows:
         assert not {"title", "tags", "ttl_days"} & set(m), m
@@ -1470,7 +1470,7 @@ def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_tru
         # still gets the unique key (never a wrong one).
         exported = {r["id"]: r["metadata"].get("content_hash") for r in _read_nxexp(f)}
         assert len(exported) >= 4 and all(v in (ka, kb) for v in exported.values()), exported   # non-vacuous
-        stored = client.get_collection(dst).get(ids=list(exported), include=["metadatas"])
+        stored = client.get_collection(dst).get(ids=list(exported), include=["metadatas"], sensitivity="include")
         stored_hash = {i: m.get("content_hash") for i, m in zip(stored["ids"], stored["metadatas"])}
         assert len(stored_hash) == len(exported), "the imported chunks were not examined"
         # a's chunks sit on rows the native copy ("a-native") already wrote with ka; b's key lands nowhere

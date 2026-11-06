@@ -167,7 +167,7 @@ class TestStaleChunkMetadataDoesNotForceReindex:
         # Rewrite the chunk-metadata hash the way the store leaves it
         # after a shared or embed-skipped upsert: not this doc's hash.
         col = local_t3.get_collection(entry.physical_collection)
-        rows = col.get(include=["metadatas"])
+        rows = col.get(include=["metadatas"], sensitivity="include")
         touched = [
             (cid, {**m, "content_hash": "first-writer-of-a-shared-chash"})
             for cid, m in zip(rows["ids"], rows["metadatas"])

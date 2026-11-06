@@ -35,24 +35,24 @@ class _FakeServiceT3:
 
     def search_metadata_scoped(self, query, collection_names, *, content_type=None,
                                author=None, year=None, corpus=None, subtree=None,
-                               where=None, n_results=10):
+                               where=None, n_results=10, sensitivity="include"):
         self.meta_calls.append((query, list(collection_names), content_type, author,
                                 year, corpus, subtree, where, n_results))
         return self.meta_rows
 
-    def search_topic_scoped(self, query, topic, collection, *, n_results=10):
+    def search_topic_scoped(self, query, topic, collection, *, n_results=10, sensitivity="include"):
         self.topic_calls.append((query, topic, collection, n_results))
         return self.topic_rows_by_col.get(collection, [])
 
     def search_graph_hop(self, query, seeds, collection_names, *, link_type=None,
-                         depth=1, direction="both", where=None, n_results=10):
+                         depth=1, direction="both", where=None, n_results=10, sensitivity="include"):
         self.graph_calls.append((query, list(seeds), list(collection_names),
                                  link_type, depth, direction, where, n_results))
         return self.graph_rows
 
     def search_aspect_scoped(self, query, collection_names, *, field=None,
                              pattern=None, min_confidence=None, where=None,
-                             n_results=10):
+                             n_results=10, sensitivity="include"):
         self.aspect_calls.append((query, list(collection_names), field, pattern,
                                   min_confidence, where, n_results))
         return self.aspect_rows

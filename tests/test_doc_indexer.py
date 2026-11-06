@@ -1461,7 +1461,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     )
     monkeypatch.setattr(
         "nexus.doc_indexer._own_chunk_metadata",
-        lambda col, doc_id: next(iter(col.get(limit=1, include=["metadatas"])["metadatas"]), None),
+        lambda col, doc_id: next(iter(col.get(limit=1, include=["metadatas"], sensitivity="include")["metadatas"]), None),
     )
     # nexus-sghyo (2026-08-06): embed_fn dispatch reads ambient
     # is_vector_service_mode() regardless of the injected t3= handle —
@@ -1505,7 +1505,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     col = local_t3.get_or_create_collection(
         f"docs__local-fallback-test__{_local_token()}__v1",
     )
-    rows = col.get(limit=1, include=["metadatas"])
+    rows = col.get(limit=1, include=["metadatas"], sensitivity="include")
     assert rows["metadatas"], "expected at least one chunk in collection"
     embedding_model = rows["metadatas"][0].get("embedding_model", "")
     assert embedding_model and embedding_model != "voyage-context-3", (
@@ -1628,7 +1628,7 @@ def _registered_before(path, corpus: str, content_type: str, monkeypatch) -> Non
     monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", file_hash))
 
     def _first_row(col, doc_id):
-        metas = col.get(limit=1, include=["metadatas"]).get("metadatas") or []
+        metas = col.get(limit=1, include=["metadatas"], sensitivity="include").get("metadatas") or []
         return metas[0] if metas else None
 
     monkeypatch.setattr("nexus.doc_indexer._own_chunk_metadata", _first_row)
@@ -3344,7 +3344,7 @@ class TestStreamingReturnMetadata:
 
         fake_reader.get_manifest.assert_called_once_with("1.1.1")
         fake_reader.close.assert_called_once()
-        fake_col.get.assert_called_once_with(ids=["chash-a", "chash-b"], include=["metadatas"])
+        fake_col.get.assert_called_once_with(ids=["chash-a", "chash-b"], include=["metadatas"], sensitivity="include")
         assert result == [
             {"page_number": 1, "title": "My Paper", "source_author": "A. Thor"},
             {"page_number": 2, "title": "My Paper", "source_author": "A. Thor"},
@@ -3482,7 +3482,7 @@ def test_index_pdf_does_not_emit_source_path(
     col = t3.get_or_create_collection(
         f"docs__rdr102-pdf-b__{_local_token()}__v1",
     )
-    rows = col.get(include=["metadatas"])
+    rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["metadatas"], "expected at least one chunk"
     leaked = [m for m in rows["metadatas"] if "source_path" in m]
     assert not leaked, (
@@ -3510,7 +3510,7 @@ def test_index_markdown_does_not_emit_source_path(
     col = t3.get_or_create_collection(
         f"docs__rdr102-md-b__{_local_token()}__v1",
     )
-    rows = col.get(include=["metadatas"])
+    rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["metadatas"], "expected at least one chunk"
     leaked = [m for m in rows["metadatas"] if "source_path" in m]
     assert not leaked, (
@@ -3535,7 +3535,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
         index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, collection_name=collection, embed_fn=_fake_embed)
 
     col = t3.get_or_create_collection(collection)
-    rows = col.get(include=["metadatas"])
+    rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["metadatas"], (
         "expected at least one chunk in docs__rdr102-pdf; staleness "
         "skip would mask the real bug"
@@ -3566,7 +3566,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     assert n > 0, "expected index_markdown to upsert chunks"
 
     col = t3.get_or_create_collection(collection)
-    rows = col.get(include=["metadatas"])
+    rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["metadatas"], (
         "expected at least one chunk in docs__rdr102-md"
     )
@@ -3607,7 +3607,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     col = t3.get_or_create_collection(
         f"rdr__rdr102-rdrmode__{_registered_token('rdr')}__v1",
     )
-    rows = col.get(include=["metadatas"])
+    rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["metadatas"], (
         "expected at least one chunk in rdr__rdr102-rdrmode"
     )

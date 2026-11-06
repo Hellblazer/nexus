@@ -66,7 +66,7 @@ def _bge_file(tmp_path, *docs):
 
 def _stored(db, collection: str) -> int:
     try:
-        return len(db.get_collection(collection).get(include=[])["ids"])
+        return len(db.get_collection(collection).get(include=[], sensitivity="include")["ids"])
     except Exception:  # noqa: BLE001 — a collection that was never created holds nothing
         return 0
 

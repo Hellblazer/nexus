@@ -120,8 +120,8 @@ def detect_hybrid_gate_regression(
     Raises :class:`HybridGateRegression` on the three-input condition. Raises
     whatever the client raises otherwise, by not catching it.
     """
-    hybrid_rows = client.hybrid_search(query, collections, n_results=n_results)
-    vector_rows = client.search(query, collections, n_results=n_results)
+    hybrid_rows = client.hybrid_search(query, collections, n_results=n_results, sensitivity="include")
+    vector_rows = client.search(query, collections, n_results=n_results, sensitivity="include")
 
     if ground_truth_lexical_match and len(hybrid_rows) == 0 and len(vector_rows) > 0:
         raise HybridGateRegression(
@@ -303,7 +303,7 @@ def test_positive_control_the_route_is_alive_on_this_very_collection(
     _ids, docs, _tumbler = _seed(db)
 
     assert _corpus_carries_literal_tokens(_LEXICAL_QUERY, docs)
-    alive = db.hybrid_search(_LEXICAL_QUERY, [_COLLECTION], n_results=10)
+    alive = db.hybrid_search(_LEXICAL_QUERY, [_COLLECTION], n_results=10, sensitivity="include")
 
     assert alive, (
         "the route returned nothing for a query whose literal tokens the "
@@ -341,8 +341,8 @@ def test_fixture_b_the_planted_bug_0148_condition_makes_the_detector_fire(
 
     # The observables, recorded before the detector is asked to judge them, so
     # the comparison test below has something to compare.
-    assert db.hybrid_search(_LEXICAL_QUERY, [_COLLECTION], n_results=10) == []
-    assert db.search(_LEXICAL_QUERY, [_COLLECTION], n_results=10), (
+    assert db.hybrid_search(_LEXICAL_QUERY, [_COLLECTION], n_results=10, sensitivity="include") == []
+    assert db.search(_LEXICAL_QUERY, [_COLLECTION], n_results=10, sensitivity="include"), (
         "the vector leg must still retrieve, or this is the degenerate case "
         "rather than the planted one"
     )
@@ -382,8 +382,8 @@ def test_the_two_fixtures_are_identical_in_observables_and_differ_in_one_thing(
         return real_post(path, body, tenant=tenant, **kw)
 
     monkeypatch.setattr(hvc, "_post", planted_post)
-    b_hybrid = len(db.hybrid_search(_LEXICAL_QUERY, [_COLLECTION], n_results=10))
-    b_vector = len(db.search(_LEXICAL_QUERY, [_COLLECTION], n_results=10))
+    b_hybrid = len(db.hybrid_search(_LEXICAL_QUERY, [_COLLECTION], n_results=10, sensitivity="include"))
+    b_vector = len(db.search(_LEXICAL_QUERY, [_COLLECTION], n_results=10, sensitivity="include"))
 
     # Identical observable signature.
     assert a_hybrid == b_hybrid == 0

@@ -499,7 +499,7 @@ class TestStoreGetManyCollectionBatchFailureDegradesGracefully:
 
         mock_t3 = MagicMock()
         mock_t3.get_or_create_collection = lambda name: _RaisingCollection()
-        mock_t3.get_by_id = lambda col, doc_id: store.get(doc_id)
+        mock_t3.get_by_id = lambda col, doc_id, **_kw: store.get(doc_id)
 
         with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
             result = store_get_many(

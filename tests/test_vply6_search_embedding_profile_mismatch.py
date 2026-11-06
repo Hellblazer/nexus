@@ -101,7 +101,7 @@ class _MismatchedModeT3:
         self._results = results_by_col
         self._mismatched = set(mismatched)
 
-    def search(self, query, collection_names, n_results=10, where=None):
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         col = collection_names[0]
         if col in self._mismatched:
             raise VectorServiceError(
@@ -123,7 +123,7 @@ def test_single_mismatched_collection_raises_named_error(cloud_mode: None) -> No
     t3 = _MismatchedModeT3({}, mismatched={bad})
 
     with pytest.raises(SearchEmbeddingProfileMismatchError) as excinfo:
-        search_cross_corpus("what does this collection contain", [bad], n_results=5, t3=t3)
+        search_cross_corpus("what does this collection contain", [bad], n_results=5, t3=t3, sensitivity="include")
 
     message = str(excinfo.value)
     # Names the collection's registered model...
@@ -153,7 +153,7 @@ def test_partial_mismatch_across_a_multi_collection_search_still_raises(cloud_mo
     )
 
     with pytest.raises(SearchEmbeddingProfileMismatchError) as excinfo:
-        search_cross_corpus("q", [healthy, bad], n_results=5, t3=t3)
+        search_cross_corpus("q", [healthy, bad], n_results=5, t3=t3, sensitivity="include")
 
     assert bad in excinfo.value.mismatches
     # The healthy collection is NOT part of the failure -- only the
@@ -178,7 +178,7 @@ def test_non_mismatch_failure_keeps_the_existing_graceful_degrade(cloud_mode: No
     # marker this bead's fix targets).
     orig_search = t3.search
 
-    def _search(query, collection_names, n_results=10, where=None):
+    def _search(query, collection_names, n_results=10, where=None, **_sens_kw):
         if collection_names[0] == orphan:
             raise VectorServiceError(
                 "POST /v1/vectors/search → HTTP 400: query embedder produced "
@@ -189,7 +189,7 @@ def test_non_mismatch_failure_keeps_the_existing_graceful_degrade(cloud_mode: No
 
     t3.search = _search  # type: ignore[method-assign]
 
-    results = search_cross_corpus("q", [healthy, orphan], n_results=5, t3=t3)
+    results = search_cross_corpus("q", [healthy, orphan], n_results=5, t3=t3, sensitivity="include")
 
     assert {r.id for r in results} == {"a"}
 
@@ -221,7 +221,7 @@ def test_matched_pair_searches_normally(t3) -> None:
     )
     give_chunks_a_live_owner(name, [chash])
 
-    results = search_cross_corpus("quick brown fox", [name], n_results=5, t3=t3)
+    results = search_cross_corpus("quick brown fox", [name], n_results=5, t3=t3, sensitivity="include")
 
     assert results
     assert any("quick brown fox" in r.content for r in results)

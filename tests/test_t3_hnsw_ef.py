@@ -156,7 +156,7 @@ class TestVerifyCollectionDeepHnswSpace:
 
     def _fake_search(self, probe_id: str):
         """Return a search() replacement that pretends probe_id was found."""
-        def _inner(query, collection_names, n_results=10, where=None):
+        def _inner(query, collection_names, n_results=10, where=None, **_sens_kw):
             return [{"id": probe_id, "content": "alpha beta", "distance": 0.1}]
         return _inner
 

@@ -738,7 +738,7 @@ def test_search_path_filters_results_by_file_path(runner, mock_search, tmp_path)
     other_dir = tmp_path / "other"
     other_dir.mkdir()
 
-    def fake_search(query, collection_names, n_results=10, where=None):
+    def fake_search(query, collection_names, n_results=10, where=None, **_sens_kw):
         return [
             _search_result(content="inside src", id="r1",
                            _display_path=str(src_dir / "file.py")),
@@ -974,7 +974,7 @@ def test_store_get_custom_collection(runner, mock_store):
     runner.invoke(main, ["store", "get", "abc123", "-c", "code__myrepo"])
     # RDR-103 Phase 5: t3_collection_name auto-promotes 2-segment.
     mock_store.get_by_id.assert_called_once_with(
-        "code__myrepo__voyage-code-3__v1", "abc123",
+        "code__myrepo__voyage-code-3__v1", "abc123", sensitivity="include",
     )
 
 
