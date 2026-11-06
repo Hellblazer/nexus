@@ -66,7 +66,9 @@ _ENTRY = re.compile(r"^\s*[-*]\s*\[([^\]]*)\]\(([^)\s]+)\)")
 #   learned in <name>     (optionally "learned in the <name>", with or without a trailing "repo")
 #   <name> repo           (also "<name> repository")
 # "whole repo", "the Java repo", "any git repo", "this repo" and "learned in a session" name no repo.
-# Known limit: a repo whose name is one of those words ("go", "swift", "git", "main") never counts.
+# The generic list is open (a deny-list); no allow-list of known repo names was built, so an unlisted
+# generic word still counts as a name. Known limit the other way: a repo whose name is one of those
+# words ("go", "swift", "git", "main") never counts.
 _REPO_FORMS = (
     re.compile(r"\brepo(?:sitory)?\s*[:=]\s*([\w./-]+)", re.IGNORECASE),
     re.compile(r"\blearned\s+in\s+(?:the\s+)?([\w.-]+)", re.IGNORECASE),
@@ -81,7 +83,7 @@ _GENERIC_REPO_WORDS = frozenset(
     "child target source current given first second last next previous "
     # where heuristics are learned, as opposed to which repo
     "session sessions practice general review reviews production testing ci prior new separate "
-    "different earlier older "
+    "different earlier older recent past several multiple long "
     # languages and stacks ("the Java repo")
     "java python rust go golang kotlin scala typescript javascript node nodejs ruby php swift c cpp "
     "csharp dotnet shell bash sql".split()
