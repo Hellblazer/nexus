@@ -284,7 +284,7 @@ def test_legacy_entry_parses_as_before() -> None:
     assert page.refs == ("https://claude.ai/artifact/T8f4Dxeo9MHNz3b6yQy9Dx (db collection answers)",)
     assert page.needs_sam == "waiting on: Sam; answer the page (one button takes every recommendation)"
     assert wrapper.needs_sam == "" and wrapper.waiting_on == "me"
-    assert sweep.refs == ("nexus-6pfgb.43 (retire-keys fix shipped into 7.96.0 / engine 0.1.180", "tamsin driving)")
+    assert sweep.refs == ("nexus-6pfgb.43 (key-retirement fix shipped into 7.96.0 / engine 0.1.180", "tamsin driving)")
     assert sweep.needs_sam == "after engine 0.1.180 deploys, see cloud dry-run counts and say go"
     board = build_board([row("linda", fixture("linda_legacy.txt"))], NOW)
     assert [i.thread.title for i in board.needs_you] == ["Sam's decision queue page", "RDR-236 sweep slice C"]

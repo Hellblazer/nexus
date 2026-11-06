@@ -18,5 +18,5 @@ state: built; docs, review and push left
 waiting_on: me
 
 ## RDR-236 sweep slice C
-ref: nexus-6pfgb.43 (retire-keys fix shipped into 7.96.0 / engine 0.1.180, tamsin driving)
+ref: nexus-6pfgb.43 (key-retirement fix shipped into 7.96.0 / engine 0.1.180, tamsin driving)
 needs_sam: after engine 0.1.180 deploys, see cloud dry-run counts and say go
