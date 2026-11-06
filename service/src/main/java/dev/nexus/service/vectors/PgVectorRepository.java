@@ -9785,15 +9785,15 @@ FROM scope s
      * Test seam (review fix F2): runs between the search or read and the sensitive-flag lookup, the window in which a
      * document can be flagged. Null in production.
      */
-    private static volatile Runnable beforeSensitiveLookupHook;
+    private static volatile Runnable beforeSensitiveLookupHookForTests;
 
-    /** Install (or, with null, clear) the {@link #beforeSensitiveLookupHook}; for tests only. */
+    /** Install (or, with null, clear) the {@link #beforeSensitiveLookupHookForTests}; for tests only. */
     public static void setBeforeSensitiveLookupHookForTests(Runnable hook) {
-        beforeSensitiveLookupHook = hook;
+        beforeSensitiveLookupHookForTests = hook;
     }
 
     private static void runBeforeSensitiveLookupHook() {
-        Runnable h = beforeSensitiveLookupHook;
+        Runnable h = beforeSensitiveLookupHookForTests;
         if (h != null) h.run();
     }
 

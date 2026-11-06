@@ -725,7 +725,7 @@ public class TenantKeyedStateGateTest {
             )) {
                 notKeyed.put(f, COUNTER);
             }
-            // TEST_HOOK (21)
+            // TEST_HOOK (22)
             for (String f : List.of(
                 "CatalogRepository.afterChunkUpsertHookForTests",
                 "CatalogRepository.afterMoveCompletedHookForTests",
@@ -741,6 +741,7 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.afterExistencePartitionHookForTests",
                 "PgVectorRepository.afterNeedEmbedResolvedHookForTests",
                 "PgVectorRepository.afterSweepSqlHookForTests",
+                "PgVectorRepository.beforeSensitiveLookupHookForTests",
                 "PgVectorRepository.keyedRestoreSiblingHookForTests",
                 "RequestLedger.claimPhaseHookForTests",
                 "TaxonomyRepository.betweenOwnAndCrossPassHookForTests",
