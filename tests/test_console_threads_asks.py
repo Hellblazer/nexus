@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -608,13 +610,17 @@ def test_an_unparseable_by_sorts_last() -> None:
     assert ids(classify([row("e", entry_text(*blocks))], NOW, ()).interrupt) == ["dated", "junk"]
 
 
-class _Unreadable:
+class _UnreadableRow:
     """A row whose content cannot be read; the title is fine."""
 
     def get(self, key: str, default: object = "") -> object:
         if key == "content":
             raise RuntimeError("unreadable")
         return {"title": "bad", "timestamp": FRESH}.get(key, default)
+
+
+def _Unreadable() -> Mapping[str, Any]:  # noqa: N802 -- reads as a constructor at the call sites
+    return cast(Mapping[str, Any], _UnreadableRow())
 
 
 def test_classify_reports_the_entry_it_could_not_read_and_still_classifies_the_rest() -> None:
@@ -733,10 +739,10 @@ def test_needs_sam_with_its_value_on_the_next_line_still_takes_an_ask_colon_line
 
 def test_an_ask_line_that_is_not_an_id_inside_a_block_is_a_note_and_not_part_of_the_version() -> None:
     plain = only_ask(entry_text(ask_text("a1"))).version
-    content = entry_text(ask_text("a1") + "\nask: Sam please pick the port")
+    content = entry_text(ask_text("a1") + "\nask: pick the port")
     (t,) = parse_session("e", content).threads
     assert t.asks[0].version == plain
-    assert t.notes == ("ask: Sam please pick the port",)
+    assert t.notes == ("ask: pick the port",)
 
 
 # --- conditional property -----------------------------------------------------------
@@ -858,3 +864,62 @@ def test_the_vectors_cover_the_normalization_cases() -> None:
     assert by_name["plain"] == by_name["stray_non_ask_line_inside_a_block"] == by_name["updated_line_inside_a_block"]
     assert by_name["plain"] == by_name["indent_and_trailing_space"]
     assert len({by_name[n] for n in ("plain", "upper_case_key_is_hashed_verbatim", "interior_spacing_is_verbatim", "non_ascii_value", "empty_after_is_hashed")}) == 5
+
+
+# --- an ask: line inside an open block always ends it ---------------------------------------
+
+
+def test_a_bad_id_ask_line_closes_the_open_block_and_nothing_merges_into_the_previous_ask() -> None:
+    first = ask_text("a1")
+    alone = only_ask(entry_text(first))
+    second = ask_text("Bad_Id", option=["X", "Y"], question="Other?")
+    (t,) = parse_session("e", entry_text(first, second)).threads
+    (a,) = t.asks
+    assert a.id == "a1"
+    assert [(o.n, o.text) for o in a.options] == [(1, "Ship"), (2, "Wait")]
+    assert a.question == "Ship it?"
+    assert a.version == alone.version  # the second ask changed nothing about the first
+
+
+def test_the_lines_after_a_bad_id_are_notes_not_part_of_any_ask() -> None:
+    content = entry_text(ask_text("a1"), ask_text("Bad_Id", option=["X", "Y"], question="Other?"))
+    (t,) = parse_session("e", content).threads
+    assert "ask: Bad_Id" in t.notes
+    assert "question: Other?" in t.notes
+    assert "option: X" in t.notes and "option: Y" in t.notes
+    assert all("Other?" not in a.question and a.id != "Bad_Id" for a in t.asks)
+
+
+def test_a_bad_id_ask_line_inside_a_block_is_a_bad_id_finding() -> None:
+    content = entry_text(ask_text("a1"), ask_text("Bad_Id"))
+    assert ("bad-id", "Bad_Id") in pairs(findings(row("e", content)))
+
+
+def test_a_valid_id_after_a_bad_id_opens_a_clean_new_block() -> None:
+    content = entry_text(ask_text("a1"), ask_text("Bad_Id", question="Lost?"), ask_text("a2", question="Third?"))
+    (t,) = parse_session("e", content).threads
+    assert [(a.id, a.question, len(a.options)) for a in t.asks] == [("a1", "Ship it?", 2), ("a2", "Third?", 2)]
+
+
+def test_a_bad_id_ask_line_with_prose_naming_sam_inside_a_block_is_a_legacy_ask_outside_it() -> None:
+    content = entry_text(ask_text("a1") + "\nask: Sam please pick the port")
+    (t,) = parse_session("e", content).threads
+    assert t.asks[0].version == only_ask(entry_text(ask_text("a1"))).version
+    assert t.needs_sam == "ask: Sam please pick the port"
+
+
+# --- a repeated after: is conditional when any value is non-empty ---------------------------
+
+
+@pytest.mark.parametrize("first,second", [("", "engine deploys"), ("engine deploys", ""), ("none", "engine deploys")])
+def test_a_repeated_after_with_any_non_empty_value_is_conditional(first: str, second: str) -> None:
+    content = entry_text(ask_text(after=first) + f"\nafter: {second}")
+    a = only_ask(content)
+    assert a.after == "engine deploys" and a.conditional is True
+    assert ("repeated-field", "a1") in pairs(findings(row("e", content)))
+    assert ids(classify([row("e", content)], NOW, ()).conditional) == ["a1"]
+
+
+def test_a_repeated_after_with_only_empty_values_is_not_conditional() -> None:
+    a = only_ask(entry_text(ask_text(after="") + "\nafter:"))
+    assert a.after == "" and a.conditional is False

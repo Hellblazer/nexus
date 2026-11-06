@@ -274,6 +274,7 @@ def _build_ask(
 ) -> Ask:
     """``block`` is ``(normalized key, value, stripped line)`` in file order, the ``ask:`` line first."""
     first: dict[str, str] = {}
+    after_values: list[str] = []
     seen: set[str] = set()
     repeated: list[str] = []
     options: list[Option] = []
@@ -283,12 +284,17 @@ def _build_ask(
             text = value[: marked.start()].strip() if marked else value
             options.append(Option(len(options) + 1, text, marked is not None))
             continue
+        if key == "after":
+            after_values.append(value)
         if key in seen:
             if key not in repeated:
                 repeated.append(key)
             continue
         seen.add(key)
         first[key] = value
+    if "after" in repeated:
+        # a repeated after: fails safe: any value that holds makes the ask conditional
+        first["after"] = next((v for v in after_values if has_value(v)), "")
     rec_raw = first.get("rec", "")
     bad = [k for k in ("reversible", "blocking") if first.get(k) and first[k].strip().lower() not in ("yes", "no")]
     if rec_raw and not _REC.fullmatch(rec_raw):
@@ -392,9 +398,12 @@ def parse_session(name: str, content: str) -> Session:
             cur["ask_next"] = False
             cur["block"] = [("ask", field[1], line)]
             continue
+        if field is not None and field[0] == "ask":
+            # an ask: line whose value is not an id still ends the open block; what follows is outside it
+            close_block()
         if cur is not None and cur["block"] is not None:
             # inside an ask block the Sam-mention backstop is off
-            if field is not None and field[0] in ASK_KEYS and field[0] != "ask":
+            if field is not None and field[0] in ASK_KEYS:
                 cur["block"].append((field[0], field[1], line))
             else:
                 cur["notes"].append(line)
