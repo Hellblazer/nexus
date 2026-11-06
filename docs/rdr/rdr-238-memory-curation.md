@@ -343,12 +343,14 @@ here are the ones each pass found on a named page or table.
 - **2026-11-05, Sam's answer on hub-linked files (nexus-qo7ie.29).** A memory
   file counts as indexed when either index file names it, or when a memory file
   that an index names links it with a markdown link: one hub level, no deeper,
-  and a bare file name in a hub's prose does not count. On Sam's memory directory
-  the 27 files linked from `project_key_technical_facts.md` had read as
-  unindexed; with this rule the count is 0. Technical Design 3's "Indexed"
-  sentence is read with this entry, by `nx memory curate --files` and by the
-  SessionStart check (nexus-qo7ie.16) alike, since both use
-  `nexus._hook_runtime.memory_scan.scan`.
+  and a bare file name in a hub's prose does not count. A hub link counts only
+  when it points into the memory directory (`x.md` or `./x.md`); `archive/x.md`
+  and `../x.md` name other files. On Sam's memory directory the 27 files linked
+  from `project_key_technical_facts.md` had read as unindexed; with this rule
+  the count is 0. `nx memory curate --files` applies it through
+  `nexus._hook_runtime.memory_scan.scan`, and the SessionStart check
+  (nexus-qo7ie.16, not yet built) is to call the same function. Technical
+  Design 3's "Indexed" sentence was amended to match.
 
 ### Critical Assumptions
 
@@ -439,8 +441,11 @@ them.
    the on-demand index file `MEMORY-ondemand.md` exists, so a repo with
    another layout never sees it. It finds the memory directory from the git
    common directory, so a linked worktree checks its primary's directory.
-   "Indexed" means named in `MEMORY.md` or `MEMORY-ondemand.md`; the two
-   index files are not themselves checked. Size is `MEMORY.md`'s bytes
+   "Indexed" means named in `MEMORY.md` or `MEMORY-ondemand.md`, or linked
+   by a markdown link from a memory file one of them names (one hub level;
+   Key Discoveries 2026-11-05); the two index files are not themselves
+   checked. The check calls `nexus._hook_runtime.memory_scan.scan`, the
+   function `nx memory curate --files` uses, so the two cannot disagree. Size is `MEMORY.md`'s bytes
    divided by 4, against `memory.index_budget_tokens` in `.nexus.yml`
    (default 1500), read by a stdlib line scan for that one key under a
    top-level `memory:` block, since the hook cannot import a YAML parser; a

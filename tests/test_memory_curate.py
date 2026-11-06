@@ -423,14 +423,22 @@ def test_a_file_linked_from_an_indexed_hub_is_indexed_one_level_only(tmp_path: P
     # Sam, 2026-11-05 (nexus-qo7ie.29): one hub level counts as indexed.
     d = tmp_path / "mem-hub"
     d.mkdir()
-    _w(d, "MEMORY.md", "- [Facts](hub.md) - index of technical facts\n")
-    _w(d, "hub.md", _fm("Facts", "hub") + "- [Child](child.md)\n- see prose_only.md\n")
+    _w(d, "MEMORY.md", "- [Facts](hub.md) - index of technical facts\n- prose hub: hub2.md\n")
+    _w(d, "hub.md", _fm("Facts", "hub") + "- [Child](child.md)\n- see prose_only.md\n"
+                    "- [Archived](archive/elsewhere.md)\n- [Up](../up.md)\n")
+    _w(d, "hub2.md", _fm("Hub two", "named by an index in prose") + "- [Dot](./dot_child.md)\n")
+    _w(d, "dot_child.md", _fm("Dot child", "linked as ./dot_child.md from a prose-named hub"))
+    # same base names as the hub's subdirectory and parent links, but not their targets
+    _w(d, "elsewhere.md", _fm("Elsewhere", "a top-level file, not archive/elsewhere.md"))
+    _w(d, "up.md", _fm("Up", "a top-level file, not ../up.md"))
     _w(d, "child.md", _fm("Child", "linked from the hub") + "- [Grandchild](grandchild.md)\n")
     _w(d, "grandchild.md", _fm("Grandchild", "two levels down"))
     _w(d, "prose_only.md", _fm("Prose", "named by the hub in prose, not linked"))
     _w(d, "orphan_hub.md", _fm("Orphan hub", "not indexed") + "- [Via orphan](via_orphan.md)\n")
     _w(d, "via_orphan.md", _fm("Via orphan", "linked only from an unindexed file"))
-    assert ms.scan(d).unindexed == ["grandchild.md", "orphan_hub.md", "prose_only.md", "via_orphan.md"]
+    assert ms.scan(d).unindexed == [
+        "elsewhere.md", "grandchild.md", "orphan_hub.md", "prose_only.md", "up.md", "via_orphan.md",
+    ]
 
 
 def test_files_scan_is_silent_on_a_clean_directory(tmp_path: Path) -> None:

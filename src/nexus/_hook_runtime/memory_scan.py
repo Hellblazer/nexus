@@ -134,7 +134,10 @@ def scan(directory: Path) -> MemoryScan:
     hub_linked: set[str] = set()
     for n in files:
         if n in mentioned:
-            hub_linked |= {t.rsplit("/", 1)[-1] for t in index_link_targets(texts[n])}
+            # A hub link names a memory file only when it points into this directory:
+            # "x.md" or "./x.md". "archive/x.md" and "../x.md" are other files.
+            hub_linked |= {t.removeprefix("./") for t in index_link_targets(texts[n])
+                           if "/" not in t.removeprefix("./")}
     unindexed = [n for n in files if n not in mentioned and n not in hub_linked]
     oversized = []
     for n in files:
