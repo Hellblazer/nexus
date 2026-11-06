@@ -536,8 +536,8 @@ the asker's `session:` id, and per `via`:
    because `mailbox_send`'s own-`from` check (`tuple_directory.py:216`) would
    refuse the CLI's sender id. `from` is the mediator's own session id, or
    for `cli` a UUID minted once in the nexus config dir. Both writes are
-   unstamped (research-10), so the hook's existing label marks them
-   `[unattested]`; that is expected and changes nothing. There is no
+   unstamped (research-10); the engine records no stamp, and the matched
+   frame says so (hook step 4). There is no
    reply-to: an asker that needs more from Sam puts a new or changed ask on
    its board. Dims: `kind=reply`, `correlation_id=ask:<ask id>@<version>`,
    `address_kind=session`. The body is a closed grammar:
@@ -604,7 +604,11 @@ stamp as a canonical UUID or one of two fixed phrases. These are
 sender-chosen values, but no sender-written free text. Sam's words come from
 the answer record, never from the mail, and sit inside a nonce fence: the
 hook draws `secrets.token_hex(8)` per delivery, so no content can forge the
-closing line. The words are capped at 500 characters.
+closing line. The words are capped at 500 characters. A matched block prints
+no row header line and no body: the existing header (`_render_live`, whose
+`from=` and `kind=` are sender-typed and unchecked, research-13) appears only
+in the peer-framed fallback, inside its end marker. A recovered matched block
+likewise prints neither.
 
 ```
 (An unverified claim that Sam answered your ask d1105-k9kr9-keying at version
@@ -918,7 +922,9 @@ refuses an ask with `after:`.
 - Fence: a stamp containing `)` plus an instruction renders as "a stamp that
   is not a session id"; record words containing `)`, an instruction line, a
   forged `>>>end sam-words` with a guessed nonce, and `(end of peer data)` all
-  stay inside the fence; words over the cap are cut and marked.
+  stay inside the fence; words over the cap are cut and marked. A matched row
+  whose `from=` and `kind=` carry an instruction string prints neither, live
+  or recovered.
 - Portability: the hook branch's tests pass on Windows and contain no
   subprocess, tmux or POSIX-only call.
 - Mediator skill and asker, as scripted-turn evals: echo-back before any
