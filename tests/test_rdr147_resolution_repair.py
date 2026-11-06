@@ -427,6 +427,28 @@ async def test_a_malformed_entity_config_is_not_entered_and_never_escapes_the_bo
     assert d.resolve_calls() == [] and cov.repair.outcome == "completed" and len(d.repair_searches()) == 1
 
 
+@pytest.mark.parametrize("confined", [False, True])
+@pytest.mark.asyncio
+async def test_with_no_entity_config_at_all_the_switch_on_repair_is_the_switch_off_repair(
+    monkeypatch: pytest.MonkeyPatch, confined: bool,
+) -> None:
+    """RDR-147 Phase 2 turned the switch on by default (nexus-bwct4.2). An install with no ``entity.collections`` must
+    see the repair and its wire exactly as before RDR-147: no resolution keys, no reason (not even ``confined_run``),
+    no catalog call."""
+    real = _config.load_config
+    monkeypatch.setattr(_config, "load_config", lambda *a, **k: {x: v for x, v in real(*a, **k).items() if x != "entity"})
+    kw: dict[str, Any] = {}
+    if confined:
+        kw["confinement"] = SimpleNamespace(contains=lambda key: True, sends_filter=False, allow_list=lambda: [])
+    d_on, d_off = _simple(2), _simple(2)
+    cov_on = _cov(await _run(d_on, on(**kw)))
+    cov_off = _cov(await _run(d_off, CoverageBoundary(request=_request(3), resolution_repair=False, **kw)))
+    assert (cov_on.repair.resolution_entered, cov_on.repair.resolution_reason) == (False, "")
+    assert _wire(cov_on.repair) == _wire(cov_off.repair)
+    assert not any(k.startswith("resolution_") or k.startswith("anchors_") for k in cov_on.repair.to_wire())
+    assert d_on.resolve_calls() == []
+
+
 @pytest.mark.asyncio
 async def test_a_run_confined_to_one_document_does_not_enter_and_says_why() -> None:
     """A joined item carries another document's record text under a new chash, so it fails the confinement's own
