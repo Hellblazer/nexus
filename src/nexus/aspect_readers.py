@@ -548,7 +548,9 @@ def _gather_chroma_chunks_by_field(
                 requested_batch = ids[batch_start : batch_start + page_limit]
                 page = coll.get(
                     ids=requested_batch,
-                    include=["documents", "metadatas"], sensitivity="include",
+                    # RDR-243 review r1 F7: this text goes to an LLM extractor. ``exclude`` applies the shared-chunk
+                    # rule (a chunk with any live sensitive owner is withheld) on top of the per-document gate.
+                    include=["documents", "metadatas"], sensitivity="exclude",
                 )
                 page_ids = page.get("ids") or []
                 docs = page.get("documents") or []
@@ -599,7 +601,7 @@ def _gather_chroma_chunks_by_field(
                     where={identity_field: match_value},
                     limit=page_limit,
                     offset=offset,
-                    include=["documents", "metadatas"], sensitivity="include",
+                    include=["documents", "metadatas"], sensitivity="exclude",  # as above: LLM-bound text (F7)
                 )
                 docs = page.get("documents") or []
                 mds = page.get("metadatas") or []
