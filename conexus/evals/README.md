@@ -80,7 +80,7 @@ evals/                       (at the plugin root)
       <grader-name>.md          YAML frontmatter (type: + type-specific fields)
 ```
 
-23 cases. The letter says how the case is graded:
+24 cases. The letter says how the case is graded:
 
 - `p<NN>`: a procedural skill must load (`tool_used` on `Skill`).
 - `a<NN>`: an agent must be dispatched (`tool_used` on `Agent`, `min` 1).
@@ -110,6 +110,7 @@ evals/                       (at the plugin root)
 | o10-asks-no-reply | no reply from the user, nothing is sent | regex ×3 |
 | o11-asks-hold-note-only | "hold" on an ask with no Hold option is a note-only answer (text, not an option number) | regex ×4 (log) |
 | o12-asks-batch-words | one reply over three asks: each record gets only its own words, each call carries the whole reply in `--batch-words` | regex ×7 (log, trace) |
+| o13-asks-asker-stale | an asker handed a matched ask answer for a version its entry no longer has re-reads the entry with `nx ask show`, calls the answer stale and acts on nothing | tool_used ×5 (re-read `min` 1; Edit, Write, MCP mail and answer/close/send `0..0`), regex ×2, llm (trace) |
 | n01-plan-absorption-dinner | strategic-planning / plan-first / architecture skills and the strategic-planner agent silent | tool_used `0..0` ×2 |
 | n02-query-absorption-single-fact | `nx_answer` not called for a one-symbol lookup | tool_used `0..0` |
 | n04-test-authoring-absorption-figurative-test | test-validator agent silent | tool_used `0..0` |
@@ -257,7 +258,7 @@ stale copy, which was on `develop` and still carried the pre-fix
 
 Target `conexus/` specifically, never a parent that contains
 `.claude/worktrees/`. Verify by checking `suite.root` and the case count
-in the JSON report: this corpus is 23 cases with 23 unique names. It is
+in the JSON report: this corpus is 24 cases with 24 unique names. It is
 read-only — nothing was written into any worktree — but a run scored
 against a stale corpus is a wrong answer delivered confidently.
 
