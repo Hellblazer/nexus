@@ -2465,9 +2465,15 @@ def _run_housekeeping(
                 if not new_meta.get(NON_EVIDENTIARY_META_KEY):
                     new_meta[NON_EVIDENTIARY_META_KEY] = True
                     w.update(new_entry.tumbler, meta=new_meta)
-            # Transfer links from old entry to new entry
+            # Transfer links from old entry to new entry. A link between the
+            # two entries (a symlink ghost citing its own target, or the
+            # target citing the ghost) would land as a self-link on the new
+            # entry, so it is dropped (nexus-x3bxj).
+            new_key = str(new_entry.tumbler)
             old_links = cat.links_from(entry.tumbler)
             for lnk in old_links:
+                if str(lnk.to_tumbler) == new_key:
+                    continue
                 w.link_if_absent(
                     new_entry.tumbler, lnk.to_tumbler, lnk.link_type,
                     created_by=lnk.created_by,
@@ -2475,6 +2481,8 @@ def _run_housekeeping(
             # Also transfer incoming links
             incoming = cat.links_to(entry.tumbler)
             for lnk in incoming:
+                if str(lnk.from_tumbler) == new_key:
+                    continue
                 w.link_if_absent(
                     lnk.from_tumbler, new_entry.tumbler, lnk.link_type,
                     created_by=lnk.created_by,
