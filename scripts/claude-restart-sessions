@@ -45,12 +45,21 @@ given, in which case it is restarted with --resume (2026-10-31, for 7.91.0).
 
 A pane whose process is claude itself (no shell under it, as a `tmux new-window 'claude ...'` leaves it)
 would close with the exit and take the relaunch line with it (nexus-8rh0u: six windows in the 7.96.0
-restart). Before each exit the script sets remain-on-exit on the pane; after it, a dead pane is respawned
-(`respawn-pane -k`, same pane id and window) with the user's login shell in the session's cwd, then the
-option is released and the relaunch is typed as usual. Where tmux will not keep the pane, claude's pane
-is replaced by a new window in the same session (the relaunch follows the new pane id); where neither is
-possible the session is left running. A relaunch that produces no session file stops the whole run: the
-log names the sessions not yet restarted and the exit status is 5, so one broken pane does not become six.
+restart). Before each exit the script sets remain-on-exit on the pane, remembering what that scope held; after
+the exit it waits (up to 10 s) for the pane to be dead or a shell at its prompt (a `sh -c '<claude>; ...'`
+wrapper outlives claude by a moment), respawns a dead one (`respawn-pane -k -c <cwd>`: same pane id and
+window) with the user's login shell, restores the option exactly as it was, and types the relaunch as usual.
+Where tmux will not keep the pane, claude's pane is replaced by a new window in the same session (the relaunch
+follows the new pane id); where neither is possible the session is left running. A relaunch that produces no
+session file stops the whole run: the log names the sessions not yet restarted, the lost session's id and
+resume line, the rerun (--skip for each session already back) and whether the --nx install ran; the caller's
+pane gets a message; the exit status is 5. One broken pane does not become six.
+
+tmux versions this needs (from tmux's CHANGES; only tmux 3.6a has actually run it): `set-option -p` and
+`show-options -p` arrived in tmux 3.0; remain-on-exit is documented as a pane option in 3.3a, and the first
+version that made it one is not known, so below that (and below 3.0 altogether) the window scope (-w) is
+used, which also keeps the other panes of the window until it is released; `respawn-pane -c` arrived in 2.6.
+A tmux that takes neither scope gets the new-window fallback.
 
 A session launched with --dangerously-load-development-channels server:nexus shows a confirmation dialog
 on every launch, which holds a fresh session's first prompt. It is relaunched on --channels
@@ -760,7 +769,12 @@ class RelaunchStalled(Exception):
 
     The 7.96.0 restart WARNed and moved on, exiting six more sessions that could not be brought back
     either; a relaunch that does not come up means whatever is wrong is wrong for the next one too.
+    ``session`` is the session dict (id, name, cwd, argv) and ``pane`` where the relaunch was typed.
     """
+
+    def __init__(self, message: str, session: dict | None = None, pane: str = "") -> None:
+        super().__init__(message)
+        self.session, self.pane = session or {}, pane
 
 
 #: Exit status of a run stopped by a RelaunchStalled (0 all restarted, 1 some left, 2 install aborted,
@@ -777,17 +791,49 @@ def pane_state(pane: str) -> tuple[int, bool, str] | None:
     return int(parts[0]), parts[1] == "1", parts[2]
 
 
-def keep_pane(pane: str) -> str:
-    """Ask tmux to keep *pane* when its process exits (remain-on-exit); returns the scope flag that took
-    ("-p" pane option, "-w" window option on a tmux without pane-scoped ones) or "" when neither did."""
-    for scope in ("-p", "-w"):
+def pane_option(pane: str, scope: str) -> str:
+    """remain-on-exit as set AT *scope* on the pane (``-p``) or its window (``-w``); "" when that scope sets none."""
+    out = tmux_run("show-options", scope, "-t", pane, "remain-on-exit").stdout.split()
+    return out[1] if len(out) >= 2 and out[0] == "remain-on-exit" else ""
+
+
+def keep_pane(pane: str, scopes: tuple[str, ...] = ("-p", "-w")) -> tuple[str, str] | None:
+    """Ask tmux to keep *pane* when its process exits (remain-on-exit on). Returns (scope, the value that
+    scope held before) for release_pane, or None when no scope took. ``-p`` is the pane option; ``-w`` is the
+    fallback for a tmux without a pane-scoped one and applies to every pane of the window until released."""
+    for scope in scopes:
+        prior = pane_option(pane, scope)
         if tmux_run("set-option", scope, "-t", pane, "remain-on-exit", "on").returncode == 0:
-            return scope
-    return ""
+            return scope, prior
+    return None
 
 
-def release_pane(pane: str, scope: str) -> None:
-    tmux_run("set-option", scope, "-u", "-t", pane, "remain-on-exit")
+def release_pane(pane: str, scope: str, prior: str) -> None:
+    """Put remain-on-exit back as keep_pane found it: the user's own value, or unset when it had none."""
+    if prior:
+        tmux_run("set-option", scope, "-t", pane, "remain-on-exit", prior)
+    else:
+        tmux_run("set-option", scope, "-u", "-t", pane, "remain-on-exit")
+
+
+#: A shell's leading option that makes it run a command string (-c, -lc, -ic): a wrapper, not a prompt.
+_COMMAND_MODE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+
+
+def shell_at_prompt(pid: int) -> bool:
+    """True when *pid* is a shell started interactively (it has an argv and no -c): what a pane shows once
+    claude has gone and nothing wraps it. A pid that is gone, or a `sh -c '<claude>; ...'` wrapper, is not."""
+    try:
+        words = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+                               timeout=10).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for w in words[1:]:
+        if not w.startswith("-"):
+            break
+        if _COMMAND_MODE.fullmatch(w):
+            return False
+    return bool(words)
 
 
 def login_shell() -> str:
@@ -804,33 +850,38 @@ def spare_window(name: str, session: str, cwd: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def settle_pane(pane: str, name: str, session: str, cwd: str, direct: bool) -> str:
+def settle_pane(pane: str, name: str, session: str, cwd: str) -> str:
     """After claude exited from a pane kept with remain-on-exit: the pane to type the relaunch into.
 
-    A dead pane is respawned (``respawn-pane -k`` keeps its id and its window) with the user's login
-    shell in *cwd*; a pane tmux closed anyway is replaced by a new window; a pane with a shell still
-    in it is used as it is. "" when no pane can be had. *direct*: claude was the pane's process, so
-    the pane is about to die and tmux gets up to 10 s to say so.
+    Waits up to 10 s for the pane to be either dead or a shell at its prompt: a pane whose process was
+    claude itself dies at once, and one wrapped as ``sh -c '<claude>; ...'`` dies when the wrapper ends,
+    so the line typed at the first look would go to a shell about to exit. A dead pane (or one still
+    wrapped after the wait) is respawned (``respawn-pane -k -c <cwd>``: same pane id, same window) with
+    the user's login shell. A pane tmux closed anyway is replaced by a new window; a pane with a shell
+    at its prompt is used as it is. "" when no pane can be had.
     """
     st = None
-    for i in range(10 if direct else 1):
+    for i in range(10):
         st = pane_state(pane)
-        if st is None or st[1]:
+        if st is None or st[1] or shell_at_prompt(st[0]):
             break
-        if i < 9 and direct:
+        if i < 9:
             time.sleep(1)
     if st is None:
         log(f"{name}: pane {pane} closed with claude although it was kept; opening a new window in {session}")
         return spare_window(name, session, cwd)
-    if not st[1]:
+    if not st[1] and shell_at_prompt(st[0]):
         return pane
     shell = login_shell()
-    r = tmux_run("respawn-pane", "-k", "-t", pane, f"cd {shlex.quote(cwd)} 2>/dev/null; exec {shlex.quote(shell)} -l")
+    r = tmux_run("respawn-pane", "-k", "-c", cwd, "-t", pane, f"exec {shlex.quote(shell)} -l")
     if r.returncode == 0:
         log(f"{name}: pane {pane} respawned with {shell} in {cwd}")
         return pane
     log(f"{name}: respawn-pane of {pane} failed ({r.stderr.strip() or r.returncode}); opening a new window in {session}")
-    return spare_window(name, session, cwd)
+    spare = spare_window(name, session, cwd)
+    if spare:
+        tmux_run("kill-pane", "-t", pane)  # the dead pane has no use now; with a spare, nothing is lost by closing it
+    return spare
 
 
 def label(s: dict) -> str:
@@ -885,7 +936,7 @@ def restart(s: dict, handoff: str = "") -> bool:
     st = pane_state(pane)
     session = st[2] if st else ""
     direct = bool(st) and st[0] == s["pid"]
-    kept = keep_pane(pane) if st else ""
+    kept = keep_pane(pane) if st else None
     if direct:
         log(f"{name}: claude is the process of pane {pane} (no shell under it); "
             + ("keeping the pane across the exit" if kept else f"{tmux_version() or 'this tmux'} cannot keep it"))
@@ -920,13 +971,14 @@ def restart(s: dict, handoff: str = "") -> bool:
             return False
         time.sleep(1)
         if kept:
-            pane = settle_pane(s["pane"], name, session, s["cwd"], direct)
+            pane = settle_pane(s["pane"], name, session, s["cwd"])
             if not pane:
                 log(f"FAIL {name}: claude exited and pane {s['pane']} is gone; no pane or window to relaunch in")
-                raise RelaunchStalled(f"{name}: claude exited and there is no pane to relaunch in (was {s['pane']})")
+                raise RelaunchStalled(f"{name}: claude exited and there is no pane to relaunch in (was {s['pane']})",
+                                      s, s["pane"])
     finally:
         if kept:
-            release_pane(s["pane"], kept)
+            release_pane(s["pane"], *kept)
     tmux("send-keys", "-t", pane, "-l", cmd)
     tmux("send-keys", "-t", pane, "Enter")
     # A fresh start registers slower than a resume (a new transcript, hooks, MCP servers);
@@ -953,9 +1005,9 @@ def restart(s: dict, handoff: str = "") -> bool:
     if handoff:
         log(f"WARN {name}: relaunched fresh in {pane} but no session file appeared within 180s; "
             f"check the pane and give it `cat {handoff}` yourself")
-        raise RelaunchStalled(f"{name}: relaunched fresh in {pane}, no session file within 180s")
+        raise RelaunchStalled(f"{name}: relaunched fresh in {pane}, no session file within 180s", s, pane)
     log(f"WARN {name}: relaunched in {pane} but no session file appeared within 60s; check the pane")
-    raise RelaunchStalled(f"{name}: relaunched in {pane}, no session file within 60s")
+    raise RelaunchStalled(f"{name}: relaunched in {pane}, no session file within 60s", s, pane)
 
 
 _SGR = re.compile(r"\x1b\[([0-9;:]*)m")
@@ -2388,10 +2440,34 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
         left = [label(s) for s in others + callers]
         log(f"=== STOP: {e}; not yet restarted: {', '.join(left) or 'none'}; "
             f"{len(RESULTS)} of {len(found)} restarted before it; nothing further was exited.")
+        stop_report(a, found, e)
         return EXIT_STALLED
     kinds = list(RESULTS.values())
     log(f"=== done: {ok} of {len(found)} restarted ({kinds.count('fresh')} fresh, {kinds.count('resumed')} resumed)")
     return 0 if ok == len(found) else 1
+
+
+def stop_report(a: argparse.Namespace, found: list[dict], e: RelaunchStalled) -> None:
+    """What a stopped run leaves the operator: the lost session's id and the line that brings it back, the
+    rerun for the rest, whether the install already ran, and a message on the caller's pane. The run is
+    detached, its exit status goes nowhere, and the log is all anyone reads."""
+    s = e.session
+    if s:
+        log(f"stalled session: {label(s)}, id {s.get('sessionId')}, pane {e.pane or s.get('pane')}; "
+            f"bring it back by hand with: {relaunch_command(s)}")
+    done = [label(x) for x in found if x["sessionId"] in RESULTS]
+    skips = " ".join(f"--skip {shlex.quote(n)}" for n in [*done, *([label(s)] if s else [])])
+    mode = "--fresh" if a.fresh else "--resume"
+    log(f"rerun the rest after that (a ready round first, or add --force): claude-restart-sessions {mode} --no-update {skips}".rstrip())
+    if a.nx:
+        log(f"the --nx {a.nx} install already ran in this run; the rerun does not repeat it (no --nx)")
+    me = getattr(a, "caller_pane", "")
+    if me:
+        try:
+            tmux_run("display-message", "-d", "20000", "-t", me,
+                     f"claude-restart-sessions STOPPED at {label(s) if s else '?'}: relaunch produced no session; see {LOG}")
+        except Exception:  # noqa: BLE001 -- a notice that cannot be shown must not hide the stop
+            pass
 
 
 #: Where the restart's /tmp files live (the handoffs, drafts, typed asks and ready replies).

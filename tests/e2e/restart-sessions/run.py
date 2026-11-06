@@ -40,7 +40,9 @@ with nothing written to the operator's ~/.claude. Five scenarios, each in its ow
   the 7.96.0 restart), and ``rs_alpha``, the caller, in an ordinary bash pane. Both must resume as the same
   session ids on new processes, rs_direct in the SAME pane id and window (the exit must not close it; a
   login shell is respawned there, remain-on-exit is released), rs_alpha last, no failure word in the log.
-  Checked before the roll: claude really is rs_direct's pane process, and rs_alpha's is a shell.
+  Each is told a code word first (that gives it the transcript ``claude --resume`` needs) and must still
+  answer its own word after the resume. Checked before the roll: claude really is rs_direct's pane process,
+  and rs_alpha's is a shell.
 
 Shared by every scenario:
 
@@ -107,6 +109,16 @@ Not exercised: a real cloud engine (the gate reads the stand-in), a real PyPI in
 operator's own marketplace remote, a ``--resume`` roll that needs the install or a
 handoff (``pane`` resumes two sessions, no other scenario resumes any), the ready-round check (the roll passes ``--no-ready-check``; unit tests cover it), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
 restart()'s fallback for a handoff that went stale.
+
+Red control for ``pane`` (nexus-8rh0u): the script as it was before the fix (2410760b9) must FAIL it.
+From a checkout, in the repo root::
+
+    git show 2410760b9:scripts/claude-restart-sessions > /tmp/crs-before-8rh0u && chmod +x /tmp/crs-before-8rh0u
+    NX_RESTART_SANDBOX_SCRIPT=/tmp/crs-before-8rh0u tests/e2e/restart-sessions/run.sh --scenario pane
+
+Expected: ``RESTART SANDBOX FAILED -- 1 scenario(s) (pane)``, the log lacking ``claude is the process of
+pane`` and ``OK rs_direct``, and rs_direct's window gone. The same command without the variable must PASS.
+(A single scenario never records a pass; only all five do.)
 
 Positive controls: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script; the
 pane checks always use this checkout's reader. Against the rewritten harness (nexus-q4m6u),
@@ -194,7 +206,9 @@ ORACLE = REPO / "scripts" / "claude-restart-sessions"
 @dataclasses.dataclass(frozen=True)
 class Spec:
     name: str
-    #: Sessions that must restart fresh, with the code word each is told ({} = told nothing).
+    #: Sessions told a code word at boot, so each has a transcript (roll, variant: they restart fresh and
+    #: must answer their word from the handoff; pane: they are RESUMED, which needs the transcript, and must
+    #: still know the word afterwards). {} = told nothing.
     words: dict[str, str]
     #: Sessions that must be left running.
     held: tuple[str, ...]
@@ -214,7 +228,7 @@ class Spec:
     #: Sessions told nothing that still restart (abort: they would, were the install good).
     plain: tuple[str, ...] = ()
     #: Sessions launched with claude as the pane's own process (``new-window 'exec claude ...'``): no shell
-    #: under it, as the 7.96.0 panes were (nexus-8rh0u). Must be in ``plain``.
+    #: under it, as the 7.96.0 panes were (nexus-8rh0u). Must be in ``words`` or ``plain``.
     direct: tuple[str, ...] = ()
     #: A ``--resume`` roll (no --nx, no handoffs) instead of the ``--nx --fresh`` one.
     resume: bool = False
@@ -234,8 +248,8 @@ SPECS = {
                     busy=("rs_late",), release_after=("rs_alpha", "rs_image")),
     "abort": Spec("abort", {}, (), frozenset({"rs_alpha"}), plain=("rs_alpha", "rs_nochan"), install_fails=True),
     "gate": Spec("gate", {}, ("rs_alpha",), frozenset({"rs_alpha"}), engine=("502",)),
-    "pane": Spec("pane", {}, (), frozenset({"rs_alpha"}), plain=("rs_alpha", "rs_direct"), direct=("rs_direct",),
-                 resume=True, wait=240),
+    "pane": Spec("pane", {"rs_alpha": "HELIOTROPE", "rs_direct": "MARZIPAN"}, (), frozenset({"rs_alpha"}),
+                 direct=("rs_direct",), resume=True, wait=240),
 }
 
 
@@ -1454,7 +1468,9 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     the exit closed the pane and its window, the relaunch line went to a pane that was gone, and the roll
     went on to the next session. Now the pane (same id, same window) takes a shell, the relaunch lands in
     it, and both sessions resume as the same session ids. rs_alpha, in an ordinary bash pane, is the
-    caller and goes last."""
+    caller and goes last. Each session is told a code word in boot() first: that writes the transcript
+    ``claude --resume`` needs (a session never prompted has none to resume), and afterwards each must still
+    answer its word."""
     spec = sb.spec
     before = boot(sb, failures)
     sb.before = before
@@ -1485,12 +1501,18 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
         failures.append(f"pane: pane {pane} of window rs_direct is gone ({panes})")
     if sb.tmux("show-options", "-p", "-t", pane, "remain-on-exit").stdout.strip():
         failures.append(f"pane: remain-on-exit is still set on {pane}")
-    for name in spec.plain:
+    for name, word in spec.words.items():
         now = sb.wait_status(name, {"idle"}, 120)
         was = before[name]
         if now.get("sessionId") != was.get("sessionId") or now.get("pid") == was.get("pid"):
             failures.append(f"{name}: not resumed as the same session on a new process (was {was.get('pid')}, "
                             f"now {now.get('pid')}, session {was.get('sessionId')} -> {now.get('sessionId')})")
+            continue
+        # A resume brings the transcript back: the session still knows the word it was told before the roll.
+        reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
+        others = [w for n, w in spec.words.items() if n != name]
+        if word not in reply or any(w in reply for w in others):
+            failures.append(f"{name}: after the resume it answered {reply[:80]!r}, not its word {word}")
     if str(sb.session("rs_direct").get("tmux", "")).rsplit(".", 1)[-1] != pane:
         failures.append(f"rs_direct: resumed in {sb.session('rs_direct').get('tmux')}, not in pane {pane}")
     notes.append(f"pane took {time.time() - t0:.0f}s; rs_direct kept {pane}")
