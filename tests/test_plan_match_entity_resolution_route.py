@@ -240,7 +240,7 @@ def test_without_the_template_the_shadow_regime_mostly_lands_on_the_single_query
 #: The seven golden discovery requests (tests/_rdr232_golden.py's golden_v1 and the held-out set, by qid prefix).
 _GOLDEN_DISCOVERY = ("G10", "G11", "G12", "H03", "H11", "H18", "H25")
 
-#: What each request reached BEFORE this template existed, measured on the 12-builtin tree (f8f240d0b):
+#: What each request reached BEFORE this template existed, measured on the 12-builtin tree (d479753d1):
 #: under the discovery/listing reading, and in the shadow regime. (name, verb) or None for no match. H18 infers verb
 #: `document`, so no research-verb plan is in its pool.
 _DDISC = ("document-discovery", "research")
