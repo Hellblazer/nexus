@@ -348,10 +348,18 @@ public final class PgVectorRepository {
      * (VectorHandler, then the HTTP response) can see it too. The 2-arg constructor keeps
      * every existing {@code new Tokened<>(value, tokens)} call site (single-collection
      * routes, writes) compiling unchanged, with an empty list.
+     *
+     * <p>{@code queryVector} (nexus-4lnn1.1.3, RDR-230): the query vector the search computed with the collection it may
+     * enter the recall canary's query ring, set only by {@link #searchWithTokens}; {@code null} everywhere else.
+     * The handler passes it to {@link PciQueryRing#admit} after the response is sent.
      */
-    public record Tokened<T>(T value, long tokens, List<String> skippedCollections) {
+    public record Tokened<T>(T value, long tokens, List<String> skippedCollections, QueryVector queryVector) {
         public Tokened(T value, long tokens) {
-            this(value, tokens, List.of());
+            this(value, tokens, List.of(), null);
+        }
+
+        public Tokened(T value, long tokens, List<String> skippedCollections) {
+            this(value, tokens, skippedCollections, null);
         }
     }
 
@@ -1481,7 +1489,7 @@ public final class PgVectorRepository {
                                               ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri,
                                               true, ManifestPushdown.of(labelSplit.labels()), chashAllow);
         return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
-                             wide.tokens(), wide.skippedCollections());
+                             wide.tokens(), wide.skippedCollections(), wide.queryVector());
     }
 
     /** nexus-tko2w: stateless; answers the section_title / section_type / page_number where-keys from the manifest. */
@@ -1541,9 +1549,14 @@ public final class PgVectorRepository {
             chashAllow != null, chashAllow == null && wherePlan.manifest() != null ? wherePlan : null);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
+        // nexus-4lnn1.1.3: the vector for the recall canary's query ring. One collection: admitted to it. Several (one
+        // model, one statement): to the collection of the nearest row; none when the statement returned no row.
+        QueryVector ringVector = collectionNames.size() == 1
+            ? QueryVector.alone(model, embedResult.embeddings().get(0), collectionNames.get(0))
+            : new QueryVector(model, embedResult.embeddings().get(0), nearestCollection(result));
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
         enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows);
-        return new Tokened<>(rows, embedResult.tokens(), skippedCollections);
+        return new Tokened<>(rows, embedResult.tokens(), skippedCollections, ringVector);
     }
 
     /**
@@ -1963,6 +1976,23 @@ public final class PgVectorRepository {
         return row;
     }
 
+    /**
+     * The collection of the nearest row of a plain search statement, read from the jOOQ record (never from the row
+     * map, whose flattened metadata could shadow {@code distance} or {@code collection}); {@code null} for no rows.
+     */
+    private static String nearestCollection(Result<? extends Record> result) {
+        String nearest = null;
+        Double best = null;
+        for (Record rec : result) {
+            Double d = rec.get("distance", Double.class);
+            if (d != null && (best == null || d < best)) {
+                best = d;
+                nearest = rec.get("collection", String.class);
+            }
+        }
+        return nearest;
+    }
+
     private static List<Map<String, Object>> plainSearchRows(Result<? extends Record> result) {
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -2072,7 +2102,19 @@ public final class PgVectorRepository {
     public record PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
                                       long tokens, List<String> skippedCollections, int peakRetainedRows,
                                       int embeddingDim, List<Map<String, Object>> lexicalRows,
-                                      List<LexicalStat> lexical) {
+                                      List<LexicalStat> lexical, QueryVector queryVector) {
+        /**
+         * A result with no query-ring vector (nexus-4lnn1.1.3 adds {@code queryVector}: the query's vector with the
+         * one arm it may enter the recall canary's ring of, or {@code null}).
+         */
+        public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
+                                   long tokens, List<String> skippedCollections, int peakRetainedRows,
+                                   int embeddingDim, List<Map<String, Object>> lexicalRows,
+                                   List<LexicalStat> lexical) {
+            this(rows, perCollection, tokens, skippedCollections, peakRetainedRows, embeddingDim, lexicalRows,
+                 lexical, null);
+        }
+
         /** A result of a request that did not ask for the lexical leg. */
         public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
                                    long tokens, List<String> skippedCollections, int peakRetainedRows,
@@ -2780,7 +2822,8 @@ public final class PgVectorRepository {
             lexicalStats = kept;
         }
         return new PerCollectionResult(rows, wide.perCollection(), wide.tokens(), wide.skippedCollections(),
-                                       wide.peakRetainedRows(), wide.embeddingDim(), lexicalRows, lexicalStats);
+                                       wide.peakRetainedRows(), wide.embeddingDim(), lexicalRows, lexicalStats,
+                                       wide.queryVector());
     }
 
     /** {@link #searchPerCollection} for a {@code where} that carries none of the manifest-answered label keys. */
@@ -3048,7 +3091,29 @@ public final class PgVectorRepository {
                      lexicalStats.stream().filter(s -> s.error() != null).count(), slowestLexicalMs, sumLexicalMs);
         }
         return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained(),
-                                       includeEmbeddings ? queryDim : 0, lexicalRows, lexicalStats);
+                                       includeEmbeddings ? queryDim : 0, lexicalRows, lexicalStats,
+                                       ringVector(model, qv, stats));
+    }
+
+    /**
+     * nexus-4lnn1.1.3 (RDR-230): the vector and the arm it may enter the recall canary's query ring of. A request
+     * that searched one collection admits to it if its arm answered (an arm that failed may have had a vector of
+     * the wrong width). A fan-out admits to the arm that returned the nearest row, by the arm's smallest RAW distance
+     * (before its threshold), so the choice does not move with a client's cut.
+     */
+    private static QueryVector ringVector(String model, float[] vector, List<PerCollectionStat> stats) {
+        if (stats.size() == 1) {
+            PerCollectionStat only = stats.get(0);
+            return only.errorKind() == null ? QueryVector.alone(model, vector, only.collection())
+                                            : new QueryVector(model, vector, null);
+        }
+        List<String> names = new ArrayList<>(stats.size());
+        List<Double> distances = new ArrayList<>(stats.size());
+        for (PerCollectionStat st : stats) {
+            names.add(st.collection());
+            distances.add(st.errorKind() == null ? st.minRawDistance() : null);
+        }
+        return QueryVector.nearestOf(model, vector, names, distances);
     }
 
     /** Row key of a survivor's stored vector: base64 of its little-endian float32 components. */

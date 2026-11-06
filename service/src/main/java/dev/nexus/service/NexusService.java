@@ -233,6 +233,8 @@ public final class NexusService {
      * off.
      */
     private final ChunkReaper chunkReaper;
+    /** The /v1/vectors handler, held so Main can bind the query ring to it late (nexus-4lnn1.1.3). */
+    private final VectorHandler vectorHandler;
 
     /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
     private final Runnable reaperScheduledTask;
@@ -814,9 +816,9 @@ public final class NexusService {
         // the handler answers an explicit 503 per route when its backend (pgvector
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
-        var vectorCtx = server.createContext("/v1/vectors",
-                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy,
-                        requestLedger));
+        this.vectorHandler = new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker,
+                ownerlessWritePolicy, requestLedger);
+        var vectorCtx = server.createContext("/v1/vectors", this.vectorHandler);
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
@@ -1063,6 +1065,28 @@ public final class NexusService {
         out.add(DEFAULT_TENANT);
         out.addAll(tokenStore.listKnownTenants(SweepBounds.STATEMENT_TIMEOUT));
         return List.copyOf(out);
+    }
+
+    /**
+     * The tenants the query ring's 30-day delete visits (nexus-4lnn1.1.3): {@link #reaperTenants()} together with
+     * every tenant in {@code request_ledger_tenants}, the set ledger retention visits. If reading the registry
+     * throws, the reaper's tenants are still returned. A tenant with ring rows, no {@code service_tokens} row and no
+     * ledger row is not visited (a search writes no ledger row; only the keyed sweep routes do).
+     */
+    List<String> ringTenants() {
+        var tenants = new java.util.LinkedHashSet<String>(reaperTenants());
+        try {
+            tenants.addAll(requestLedger.ledgerTenants(SweepBounds.STATEMENT_TIMEOUT));
+        } catch (RuntimeException e) {
+            log.warn("event=request_ledger_tenants_list_failed; the query ring expires for the reaper tenants only "
+                    + "this pass", e);
+        }
+        return List.copyOf(tenants);
+    }
+
+    /** Bind the recall canary's query ring to the vector routes (Main, once the router's index set exists). */
+    void queryRing(dev.nexus.service.vectors.PciQueryRing ring) {
+        vectorHandler.queryRing(ring);
     }
 
     /** The scheduled reaper, or null when none was wired. Package-private for the wiring test. */

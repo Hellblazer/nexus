@@ -559,8 +559,14 @@ public final class Main {
         // the read half so its first refresh() has a set to replace; stopped in the hook right after the listener and
         // before the builder reaper, so a pass cannot open a new builder connection after the reaper ended the old one.
         String pciBootNonce = dev.nexus.service.db.BackendReaper.bootNonce(applicationName);
+        // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Every engine runs a writer; only the builder-lock
+        // holder's pass runs the 30-day delete (tenants: the reaper's plus request_ledger_tenants).
+        var pciQueryRing = new dev.nexus.service.vectors.PciQueryRing(tenantScope, pciSweep);
+        var pciQueryRingExpiry = new dev.nexus.service.vectors.PciQueryRingExpiry(tenantScope, service::ringTenants);
+        service.queryRing(pciQueryRing);
+        pciQueryRing.start();
         var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
-                dev.nexus.service.db.PgSession.startupPciSettings());
+                dev.nexus.service.db.PgSession.startupPciSettings(), pciQueryRingExpiry::expireAll);
         pciReconciler.start();
         // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
         // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the
@@ -660,6 +666,7 @@ public final class Main {
             // keep; closing the pool below aborts that socket.
             pciSweep.stop();
             leafBloatSweep.stop();
+            pciQueryRing.stop();   // nexus-4lnn1.1.3: no flush; what is still queued is lost, as designed
         };
         OrtInitGate.process().onBoundExpired(stopAllButEmbedders);
 

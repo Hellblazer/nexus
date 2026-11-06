@@ -38,6 +38,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import java.util.random.RandomGenerator;
 
@@ -223,6 +224,8 @@ public final class PciReconciler {
     private final Duration countTimeout;
     private final Duration period;
     private final RandomGenerator random;
+    /** nexus-4lnn1.1.3: deletes the recall canary's query-ring rows older than 30 days; returns the row count. */
+    private final IntSupplier ringExpiry;
 
     private final Map<LeafKey, Failure> failures = new ConcurrentHashMap<>();
     private final AtomicReference<String> building = new AtomicReference<>();
@@ -250,6 +253,17 @@ public final class PciReconciler {
     PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
                   Duration period, RandomGenerator random) {
+        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, () -> 0);
+    }
+
+    /**
+     * As above with the query-ring age bound (nexus-4lnn1.1.3): {@code ringExpiry} runs at the start of every pass
+     * this engine runs as the builder-lock holder, whatever the pass then plans, and returns the rows it deleted.
+     */
+    PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
+                  PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
+                  Duration period, RandomGenerator random, IntSupplier ringExpiry) {
+        this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.builder = Objects.requireNonNull(builder, "builder");
@@ -270,8 +284,17 @@ public final class PciReconciler {
      */
     public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
                                        PciSettings settings) {
-        return new PciReconciler(new PciCatalog(ds),
-            new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings);
+        return create(ds, admin, bootNonce, sweep, settings, () -> 0);
+    }
+
+    /** As above, with the query ring's age bound run at the start of each pass this engine holds the lock for. */
+    public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
+                                       PciSettings settings, IntSupplier ringExpiry) {
+        return new PciReconciler(new PciCatalog(ds)::read,
+            new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
+            Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
+            Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
+            RandomGenerator.getDefault(), ringExpiry);
     }
 
     // -- status ----------------------------------------------------------------------------------------------
@@ -411,6 +434,7 @@ public final class PciReconciler {
                 return PassReport.inactive(state);
             }
             passStartedAt = clock.instant();
+            expireRings();
             PciCatalog.Snapshot snapshot;
             try {
                 snapshot = catalog.get();
@@ -449,6 +473,18 @@ public final class PciReconciler {
         } finally {
             building.set(null);
             passStartedAt = null;
+        }
+    }
+
+    /**
+     * The query ring's 30-day age bound (nexus-4lnn1.1.3). It is not part of the pass's account: a failure here must
+     * not stop the builds, and the expiry logs its own counts.
+     */
+    private void expireRings() {
+        try {
+            ringExpiry.getAsInt();
+        } catch (RuntimeException e) {
+            log.warn("event=pci_ring_expire_failed reason=hook error_class={}", e.getClass().getSimpleName());
         }
     }
 

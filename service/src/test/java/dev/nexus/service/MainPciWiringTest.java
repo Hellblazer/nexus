@@ -175,6 +175,35 @@ class MainPciWiringTest {
     }
 
     /**
+     * nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Every engine builds, binds and starts the writer (not
+     * only the builder-lock holder), over the SAME valid-index set the router uses; the reconciler is handed the age
+     * bound so that the holder's pass runs it; the hook stops the writer without a flush. Without the bind the handler
+     * admits nothing and no test of the ring would notice; without the expiry argument rows on idle rings never age.
+     */
+    @Test
+    void theQueryRingIsBoundAndStartedInEveryEngine_andTheReconcilerGetsItsAgeBound() throws Exception {
+        String src = code(main());
+        int ringNew = src.indexOf("new dev.nexus.service.vectors.PciQueryRing(tenantScope, pciSweep)");
+        int expiryNew = src.indexOf("new dev.nexus.service.vectors.PciQueryRingExpiry(tenantScope, service::ringTenants)");
+        int bind = src.indexOf("service.queryRing(pciQueryRing);");
+        int ringStart = src.indexOf("pciQueryRing.start();");
+        int create = src.indexOf("PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,");
+        int hook = shutdownSteps(src);
+        int ringStop = src.indexOf("pciQueryRing.stop();", hook);
+
+        assertThat(ringNew).as("built over the pool's scope and the router's own index set").isPositive();
+        assertThat(expiryNew).as("the age bound takes the reaper-plus-ledger tenants").isPositive();
+        assertThat(bind).as("bound to the vector routes after the service exists").isGreaterThan(src.indexOf("var service = new NexusService("));
+        assertThat(ringStart).isGreaterThan(bind);
+        assertThat(create).as("the reconciler is built after the ring").isGreaterThan(ringStart);
+        assertThat(src.substring(create, src.indexOf(";", create))).as("and is handed the age bound")
+            .contains("pciQueryRingExpiry::expireAll");
+        assertThat(ringStop).as("stopped in the shutdown hook").isGreaterThan(hook);
+        assertThat(src.indexOf("pciQueryRing.start();", ringStart + 1)).as("started once").isNegative();
+        assertThat(src).as("a stop that flushes would hold the hook on a hung database").doesNotContain("pciQueryRing.flushNow");
+    }
+
+    /**
      * nexus-43ulx.23: {@code per_collection_indexes} on {@code /v1/status} is bound in Main from the SAME sweep and
      * reconciler that run (not a copy, not {@code PciIndexSet.NONE}), after both exist. Without the call the route
      * silently omits the key and every client reads "cannot tell"; no other test would notice.

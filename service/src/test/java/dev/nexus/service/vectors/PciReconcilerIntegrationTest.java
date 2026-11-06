@@ -133,7 +133,7 @@ class PciReconcilerIntegrationTest {
     void captureLogs() {
         appender = new ListAppender<>();
         appender.start();
-        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class)) {
+        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class, PciQueryRingExpiry.class)) {
             var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(c);
             logger.setLevel(Level.DEBUG);
             logger.addAppender(appender);
@@ -142,7 +142,7 @@ class PciReconcilerIntegrationTest {
 
     @AfterEach
     void removeTenants() throws Exception {
-        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class)) {
+        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class, PciQueryRingExpiry.class)) {
             ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger(c)).detachAppender(appender);
         }
         try (Connection owner = adminDs.getConnection()) {
@@ -463,6 +463,77 @@ class PciReconcilerIntegrationTest {
         PassReport second = reconciler(s, sweep).reconcileOnce();
         assertThat(second.builds()).isEqualTo(1);
         assertThat(validIndexed(tenant)).contains(name("b-1")).hasSize(3);
+    }
+
+    // -- nexus-4lnn1.1.3: the query ring's 30-day age bound runs in the lock holder's pass ---------------------------
+
+    PciReconciler reconcilerWithRingExpiry(PciSettings s, PciIndexSweep sweep, java.util.function.IntSupplier expiry) {
+        return new PciReconciler(catalog::read, builderSession(s), sweep, s, Clock.systemUTC(),
+            PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60),
+            java.util.random.RandomGenerator.getDefault(), expiry);
+    }
+
+    @Test
+    void theHoldersPassDeletesAnIdleRingsRowsOlderThan30Days_andKeepsTheYoung() throws Exception {
+        String tenant = newTenant("ringexp");
+        String coll = name("ringexp");
+        collection(tenant, coll, 3);
+        for (int i = 0; i < 2; i++) {
+            final int seed = i;
+            float[] v = new float[384];
+            java.util.Arrays.fill(v, 0.1f * (seed + 1));
+            asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.ADDED_AT,
+                    java.time.OffsetDateTime.now().minusDays(seed == 0 ? 31 : 2))
+                .execute());
+        }
+        PciSettings s = settings(16);
+        var expiry = new PciQueryRingExpiry(new TenantScope(svcDs), () -> List.of(tenant));
+
+        PassReport report = reconcilerWithRingExpiry(s, sweep(s), expiry::expireAll).reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.OK);
+        int left = asSuperuser(su -> su.fetchCount(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING,
+            dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION.eq(coll)));
+        assertThat(left).as("the 31-day row went, the 2-day row stayed").isEqualTo(1);
+        assertThat(logged("event=pci_ring_expire tenants=1 deleted=1 failed=0")).isEqualTo(1);
+    }
+
+    @Test
+    void theAgeBoundRunsOncePerHolderPass_andAFailingBoundDoesNotStopTheBuilds() throws Exception {
+        String tenant = newTenant("ringfail");
+        collection(tenant, name("b"), B);
+        PciSettings s = settings(16);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+
+        PassReport report = reconcilerWithRingExpiry(s, sweep(s), () -> {
+            calls.incrementAndGet();
+            throw new IllegalStateException("boom");
+        }).reconcileOnce();
+
+        assertThat(calls).hasValue(1);
+        assertThat(report.ranToEnd()).isTrue();
+        assertThat(report.builds()).as("the build still ran").isEqualTo(1);
+        assertThat(logged("event=pci_ring_expire_failed reason=hook")).isEqualTo(1);
+    }
+
+    @Test
+    void theAgeBoundDoesNotRunWhenTheReconcilerIsOff() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        PciSettings off = new PciSettings(false, B, 600, 16);
+
+        PassReport report = reconcilerWithRingExpiry(off, sweep(off), () -> {
+            calls.incrementAndGet();
+            return 0;
+        }).reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.OFF);
+        assertThat(calls).hasValue(0);
     }
 
     @Test

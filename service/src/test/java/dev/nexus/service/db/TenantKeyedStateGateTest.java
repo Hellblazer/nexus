@@ -636,6 +636,23 @@ public class TenantKeyedStateGateTest {
                 + "once at construction from stateless lambdas");
             notKeyed.put("NexusService.TENANT_RESET_ROUTE_ENV", CONSTANT);
             notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
+            // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Its rows are in nexus.canary_query_ring (FORCE RLS,
+            // cascading foreign key to the collection registry); what the engine holds in memory is a short queue.
+            notKeyed.put("PciQueryRing.queue", "a bounded in-memory queue (1,024 entries) drained every 30 seconds; an "
+                + "entry for a reset tenant is skipped by the function's foreign key, so nothing outlives the reset");
+            notKeyed.put("PciQueryRing.Entry.tenant", "the tenant of one queued ring entry, immutable; dies when the "
+                + "queue is drained at the next flush");
+            notKeyed.put("PciQueryRing.validIndexes", "the router's valid-index set, shared with the repository; "
+                + "owned and evicted there");
+            notKeyed.put("PciQueryRing.dropped", "a single process-wide count of entries the full queue dropped, "
+                + "reset at each flush; not keyed by tenant");
+            notKeyed.put("PciQueryRing.seen", "a single process-wide count of admit calls, for tests; "
+                + "not keyed by tenant");
+            notKeyed.put("PciQueryRing.writer", "the writer thread handle, set once at start; tenant-independent");
+            notKeyed.put("PciQueryRingExpiry.tenants", "a supplier of the tenant list (the reaper's tenants and "
+                + "request_ledger_tenants), re-read on every pass; the expiry keeps no copy");
+            notKeyed.put("VectorHandler.queryRing", "the handle of the one query ring, bound once at boot; "
+                + "the ring keeps no per-tenant state of its own beyond its short queue");
             // CONFIG (15)
             for (String f : List.of(
                 "Bge768Embedder.admissionGate",

@@ -16,7 +16,9 @@ import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
 import dev.nexus.service.vectors.OwnerlessChunkWriteException;
 import dev.nexus.service.vectors.OwnerlessWritePolicy;
 import dev.nexus.service.vectors.OwnershipGuard;
+import dev.nexus.service.vectors.PciQueryRing;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.QueryVector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -152,6 +154,12 @@ public final class VectorHandler implements HttpHandler {
     private final OwnerlessWritePolicy ownerlessWritePolicy;
     /** RDR-222 Phase 1: null when the handler is built without a ledger; a keyed request is then refused. */
     private final KeyedSweep keyedSweep;
+    /**
+     * nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Bound late by {@link #queryRing}, because the ring
+     * needs the router's valid-index set, which Main builds after the service; {@code null} (a handler built without
+     * one, or before the bind) admits nothing.
+     */
+    private volatile PciQueryRing queryRing;
 
     /**
      * @param embedderRouter collection-aware embedder router for /embed (may be null —
@@ -206,6 +214,22 @@ public final class VectorHandler implements HttpHandler {
         this.rerankStage    = new RerankStage(reranker);
         this.ownerlessWritePolicy = ownerlessWritePolicy;
         this.keyedSweep     = requestLedger == null ? null : new KeyedSweep(requestLedger);
+    }
+
+    /** Bind the query ring that {@code /search} and {@code /search-per-collection} admit to. Idempotent. */
+    public void queryRing(PciQueryRing ring) {
+        this.queryRing = ring;
+    }
+
+    /**
+     * Admit a search's vector to the query ring. Called AFTER the response has been sent, so the ring costs the
+     * search nothing; never throws ({@link PciQueryRing#admit} contains its own failures).
+     */
+    private void admitToQueryRing(String tenant, QueryVector query) {
+        PciQueryRing ring = queryRing;
+        if (ring != null) {
+            ring.admit(tenant, query);
+        }
     }
 
     @Override
@@ -676,6 +700,7 @@ public final class VectorHandler implements HttpHandler {
         var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where,
                                                  includeSourceUri, chashAllow);
         sendSearchResult(ex, body, queryText, searchResult);
+        admitToQueryRing(tenant, searchResult.queryVector());
     }
 
     /**
@@ -874,6 +899,7 @@ public final class VectorHandler implements HttpHandler {
         String envelopeBody = json(envelope);
         long serializeMs = (System.nanoTime() - serializeStartNanos) / 1_000_000L;
         HttpUtil.send(ex, 200, envelopeBody);
+        admitToQueryRing(tenant, result.queryVector());
         // nexus-mz9jv: the request's total beside the search_per_collection line's split (query embed, fan-out,
         // enrich, embedding fill): repo_ms covers those, the rest of handler_ms is rerank, serialisation, the write.
         log.info("event=search_per_collection_request collections={} rows={} bytes={} repo_ms={} serialize_ms={} "
