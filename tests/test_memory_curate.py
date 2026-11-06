@@ -272,7 +272,9 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     # GIT_DIR / GIT_COMMON_DIR redirect git away from the layout on disk: ask git
     assert md.primary_checkout_root(repo, {"GIT_DIR": str(repo / ".git")}) == Path("/via/git")
     assert md.primary_checkout_root(repo, {"GIT_COMMON_DIR": str(repo / ".git")}) == Path("/via/git")
-    assert len(asked) == 2
+    # GIT_CEILING_DIRECTORIES can stop git's search above cwd, which the read does not model: ask git
+    assert md.primary_checkout_root(repo / "sub", {"GIT_CEILING_DIRECTORIES": str(repo)}) == Path("/via/git")
+    assert len(asked) == 3
     # an unrecognised layout: ask git
     broken = tmp_path / "broken"
     broken.mkdir()
@@ -286,9 +288,16 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     badcommon.mkdir()
     gitdir = tmp_path / "badcommon-gitdir"
     gitdir.mkdir()
+    (gitdir / "HEAD").write_text("ref: refs/heads/main\n")  # so it is the commondir that is wrong
     (gitdir / "commondir").write_text("../no-such-common\n")
     (badcommon / ".git").write_text(f"gitdir: {gitdir}\n")
-    for cwd in (broken, dangling, headless, badcommon):
+    headless_target = tmp_path / "headless-target"
+    headless_target.mkdir()
+    (headless_target / "notes").write_text("a directory a gitdir line names, but not a git directory\n")
+    headless_link = tmp_path / "headless-link"
+    headless_link.mkdir()
+    (headless_link / ".git").write_text(f"gitdir: {headless_target}\n")
+    for cwd in (broken, dangling, headless, badcommon, headless_link):
         asked.clear()
         assert md.primary_checkout_root(cwd, {}) == Path("/via/git"), cwd
         assert asked == [cwd], cwd
@@ -655,6 +664,10 @@ def test_agents_names_a_repo_forms(text: str) -> None:
         "learned in the repo",
         "learned in a session",
         "learned in practice",
+        "keep it in a new repo",
+        "a separate repo for the fixtures",
+        "learned in CI",
+        "learned in prior sessions",
         "repo: any",
         "check callers before renaming",
         "",
