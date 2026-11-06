@@ -1766,7 +1766,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
             print(
                 f"> **WARNING** (Layer 1 — plan grammar): RDR-{t2_key}'s Implementation "
                 "Plan does not follow the template's `### Phase N` / `#### Step N` "
-                "heading grammar (`conexus/resources/rdr/TEMPLATE.md`)."
+                "heading grammar (https://github.com/Hellblazer/nexus/blob/main/conexus/resources/rdr/TEMPLATE.md)."
             )
             print(
                 "> This does not block the gate. Prefer conforming the plan to the "
@@ -4099,7 +4099,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
             f"> The critique `{critique_title}` is in neither recognised shape (no `## Critical Issues` / "
             "`## Significant Issues` sections, no `CRITICAL —` paragraphs, no Verdict counts), so its "
             "findings cannot be counted. No outcome is computed. Re-store it in the canonical format "
-            "(conexus/agents/substantive-critic.md § Output Format) and run this again."
+            "(https://github.com/Hellblazer/nexus/blob/main/conexus/agents/substantive-critic.md § Output Format) and run this again."
         )
         return
     # nexus-yjf5l.7 decision 2: a finding cannot carry both an explicit

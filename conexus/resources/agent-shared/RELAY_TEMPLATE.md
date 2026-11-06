@@ -4,7 +4,7 @@ All agent dispatches follow this standardized structure. **Relays are constructe
 
 ## Every Report Ends With a VERIFY Block (MANDATORY)
 
-An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cnzei.6: a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim, in the exact shape and with the exact checked/not-checked scope that `${CLAUDE_PLUGIN_ROOT}/skills/orchestration/SKILL.md`'s "VERIFY Line Convention" section owns — read it there rather than here; this file states only that the requirement applies to every relay, not what it says.
+An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cnzei.6: a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim, in the exact shape and with the exact checked/not-checked scope that [the orchestration skill](../../skills/orchestration/SKILL.md)'s "VERIFY Line Convention" section owns — read it there rather than here; this file states only that the requirement applies to every relay, not what it says.
 
 ## Required Fields
 
@@ -107,7 +107,7 @@ A valid relay MUST have:
 
 ### Input Artifacts
 - nx store: decision-architect-auth-redesign
-- nx memory: Delos/phase2-auth.md
+- nx memory: project Delos, title phase2-auth.md
 - Files: src/main/java/auth/AuthController.java, src/main/java/auth/TokenValidator.java
 
 ### Deliverable
@@ -141,13 +141,13 @@ Coverage report with gap identification
 
 ## Usage in Skills
 
-Skills should reference this template rather than inline it:
+Skills should reference this template rather than inline it. `<plugin-root>` in the block stands for the plugin-root variable, spelled exactly as [agents/developer.md](../../agents/developer.md) spells it on its "This agent follows the Shared Context Protocol" line (copy that line's link target). This file is opened with `Read`, which does not substitute the variable, so it is not written out here.
 
 ```markdown
 ## Agent Invocation
 
 Use the Agent tool with standardized relay format.
-See [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
+See [RELAY_TEMPLATE.md](<plugin-root>/resources/agent-shared/RELAY_TEMPLATE.md) for required fields.
 ```
 
 ## Usage in Agents

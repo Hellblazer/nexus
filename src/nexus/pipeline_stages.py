@@ -243,8 +243,12 @@ def extractor_loop(
     extractor: str = DEFAULT_EXTRACTOR,
     extraction_done: threading.Event | None = None,
     allow_degraded_extraction: bool = False,
+    sensitive: bool = False,
 ) -> ExtractionResult:
     """Extract pages to the pipeline buffer via the on_page streaming callback.
+
+    *sensitive* (RDR-243 row 21, nexus-rfvyy.6.10) builds the extractor so it never resolves or
+    contacts a MinerU server: every MinerU attempt is the local subprocess.
 
     On resume, if all pages are already in the buffer, skips re-extraction
     entirely and returns the stored ExtractionResult metadata.
@@ -373,7 +377,7 @@ def extractor_loop(
             raise PipelineCancelled("pipeline cancelled")
         db.update_progress(content_hash, pages_extracted=max(row_pages_extracted, settled[0]))
 
-    ext = PDFExtractor()
+    ext = PDFExtractor(sensitive=True) if sensitive else PDFExtractor()
     try:
         result = ext.extract(
             pdf_path, extractor=extractor, on_page=on_page,
@@ -2041,8 +2045,12 @@ def pipeline_index_pdf(
     title_override: str = "",
     on_write_started: Callable[[], None] | None = None,
     enrich: bool = False,
+    sensitive: bool = False,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.10): no MinerU server is resolved or contacted
+    (:class:`~nexus.pdf_extractor.PDFExtractor`), and a fallback registration here carries the flag.
 
     *enrich* (nexus-6pfgb.28), when True, looks the resolved title up in Semantic Scholar once,
     after the catalog hook, and writes the result to the catalog document's ``bib_*`` columns
@@ -2194,6 +2202,7 @@ def pipeline_index_pdf(
             content_type="paper",
             physical_collection=collection,
             with_created=True,
+            **({"sensitive": True} if sensitive else {}),
         )
         if isinstance(_reg_result, tuple):
             doc_id, _fallback_created = _reg_result
@@ -2327,6 +2336,7 @@ def pipeline_index_pdf(
                     extractor=extractor,
                     extraction_done=extraction_done,
                     allow_degraded_extraction=allow_degraded_extraction,
+                    **({"sensitive": True} if sensitive else {}),
                 )
                 all_futures.add(extract_future)
                 chunk_future = pool.submit(
@@ -2607,7 +2617,7 @@ def pipeline_index_pdf(
                 source_uri=source_uri,
                 extraction=extraction_record(_meta),
             )
-            if enrich:
+            if enrich and not sensitive:  # RDR-243 rows 7 and 8: a sensitive document's title is never sent
                 # Best effort as a whole, the lookup included: ``enrich`` catches only httpx and
                 # ValueError, and ``_catalog_pdf_bib_hook`` closes its clients in a ``finally``,
                 # so either can raise into the tail that has not yet stamped the document complete.

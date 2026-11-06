@@ -110,6 +110,9 @@ _LINES = {
     ("hook-surface-shakeout/run.sh", '"command": "python3 /home/nexus/turn_end.py"'): (
         "hooks.json text written for the shakeout container image"
     ),
+    ("plugin_out_of_repo_gate_test.sh", "allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}"): (
+        "SKILL.md frontmatter text written into a fixture plugin; the gate reads it, nothing runs it"
+    ),
 }
 
 #: Scripts that use "$E2E_PYTHON" without sourcing python.sh themselves.

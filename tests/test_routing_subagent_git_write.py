@@ -116,6 +116,9 @@ def _isolate_log(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(tmp_path / "log.jsonl"))
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "isolated-nexus-config"))
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    # The exempt-host list is the session's setting; no case may inherit it. The
+    # ssh carve-out tests below set it themselves (``remote_hosts``).
+    monkeypatch.delenv("NX_REMOTE_TEST_HOSTS", raising=False)
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "dropped_writes.jsonl"))
 
 
@@ -4050,15 +4053,22 @@ _CHAS_DENIED = [
 ]
 
 
-def test_a_subagent_ssh_to_chas_is_allowed(shared_repo):
+@pytest.fixture()
+def remote_hosts(monkeypatch):
+    """The carve-out only fires for a host the session names: these cases name
+    the two aliases the _CHAS_* commands use."""
+    monkeypatch.setenv("NX_REMOTE_TEST_HOSTS", "chas,chas-test")
+
+
+def test_a_subagent_ssh_to_chas_is_allowed(shared_repo, remote_hosts):
     assert _denied_among(_CHAS_ALLOWED, shared_repo) == []
 
 
-def test_a_command_that_can_run_git_locally_is_not_carved_out(shared_repo):
+def test_a_command_that_can_run_git_locally_is_not_carved_out(shared_repo, remote_hosts):
     assert _not_denied(_CHAS_DENIED, shared_repo) == []
 
 
-def test_the_chas_carve_out_is_not_vacuous(shared_repo):
+def test_the_chas_carve_out_is_not_vacuous(shared_repo, remote_hosts):
     """Without the carve-out every allowed command above contains git and a
     write verb, so the primary rule would deny it: the allow test proves the
     carve-out fired, not that the scan missed the text."""
@@ -4068,3 +4078,44 @@ def test_the_chas_carve_out_is_not_vacuous(shared_repo):
     spec.loader.exec_module(guard)
     for cmd in _CHAS_ALLOWED:
         assert guard._primary_match(guard._normalize_for_primary_scan(cmd)), cmd
+
+
+# --- The remote test hosts are configuration, not a constant ------------------
+# (user-surface inventory 2026-11-04, A-2377: the hook shipped the maintainers'
+# box as the only exempt host, with no way for a user to name their own.)
+
+_REMOTE_CMD = "ssh {host} 'git -C x add f'"
+
+
+def _remote_verdict(host: str, cwd: pathlib.Path, hosts: str | None) -> dict:
+    """Verdict for one ssh-to-``host`` git write with ``NX_REMOTE_TEST_HOSTS``
+    set to ``hosts`` (``None`` = variable absent)."""
+    env = os.environ.copy()
+    env["NX_HOOK_PYTHON"] = sys.executable
+    env.pop("NX_REMOTE_TEST_HOSTS", None)
+    if hosts is not None:
+        env["NX_REMOTE_TEST_HOSTS"] = hosts
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        input=json.dumps(_payload(_REMOTE_CMD.format(host=host), agent=True, cwd=str(cwd))),
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+    return _hso(proc)
+
+
+def test_remote_test_hosts_unset_exempts_none(shared_repo):
+    """No alias is exempt by default, the maintainers' own included."""
+    for host in ("chas", "chas-test", "devbox"):
+        assert _remote_verdict(host, shared_repo, None).get("permissionDecision") == "deny", host
+
+
+def test_remote_test_hosts_env_names_the_users_own_host(shared_repo):
+    assert _remote_verdict("devbox", shared_repo, "devbox,ci-box").get("permissionDecision") != "deny"
+    assert _remote_verdict("ci-box", shared_repo, "devbox, ci-box").get("permissionDecision") != "deny"
+    # only the named aliases are exempt
+    assert _remote_verdict("chas-test", shared_repo, "devbox").get("permissionDecision") == "deny"
+
+
+def test_remote_test_hosts_env_empty_exempts_none(shared_repo):
+    assert _remote_verdict("chas-test", shared_repo, "").get("permissionDecision") == "deny"
+    assert _remote_verdict("chas", shared_repo, " , ").get("permissionDecision") == "deny"

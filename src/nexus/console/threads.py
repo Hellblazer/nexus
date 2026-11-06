@@ -109,10 +109,15 @@ class Bead:
 
 @dataclass(frozen=True)
 class BeadsResult:
-    """Outcome of the needs-sam bead query: the beads, or one line saying why not."""
+    """Outcome of the needs-sam bead query: the beads, or one line saying why not.
+
+    ``skipped`` is not a failure: the source does not exist on this machine (no
+    ``bd``), so there is nothing to read and nothing the board is missing.
+    """
 
     beads: tuple[Bead, ...]
     error: str = ""
+    skipped: str = ""
 
     @property
     def ok(self) -> bool:

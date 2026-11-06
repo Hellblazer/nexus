@@ -76,7 +76,7 @@ def _get_owner_for(collection: str) -> str:
         raise click.ClickException(
             f"Unknown owner for collection {collection!r}. "
             f"Add it to DEFAULT_COLLECTION_OWNER in "
-            f"src/nexus/catalog/orphan_backfill.py, or pass --owner "
+            f"nexus.catalog.orphan_backfill, or pass --owner "
             f"explicitly."
         )
     return owner_prefix

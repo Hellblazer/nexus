@@ -2,8 +2,10 @@
 title: "Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer"
 id: RDR-189
 type: Architecture
-status: accepted
+status: deferred
 accepted_date: 2026-10-24
+deferred_date: 2026-11-05
+deferred_reason: "Sam, 2026-11-05: deferred after P1. P2 needs a human-authored multi-facet answer family (nexus-z1d0l.2.5) and nobody is authoring one; no movement since 2026-11-01. P1 stays shipped. The open P2-P6 beads under epic nexus-z1d0l are deferred with it; resume by un-deferring them and authoring the first family."
 priority: medium
 author: Hal Hildebrand
 reviewed-by: Sam

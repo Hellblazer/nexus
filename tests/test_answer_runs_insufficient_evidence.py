@@ -118,11 +118,14 @@ class TestCoverageDecidedNonAnswers:
         assert ok == [] and failed == [] and list(degenerate) == [cls]
 
     def test_a_redacted_unavailable_row_whose_coverage_block_was_cut_is_still_degenerate(self) -> None:
-        """fit_summary may cut the ``coverage`` block; the kept ``coverage_state`` still says unavailable."""
+        """fit_summary may cut the ``coverage`` block; the kept ``coverage_state`` still says unavailable. A returned
+        non-answer is recorded ``failure``; a recorded ``success`` is an RDR-147 option 1 answer and stays out."""
         summary = {**_summary(partial=0, trace=False), "coverage_complete": 0, "coverage_unavailable": 1,
-                   "coverage_state": "unavailable"}
+                   "coverage_state": "unavailable", "outcome": "failure"}
         ok, _, _, degenerate, _ = _split_four_way([_row(redacted=True, summary=summary, steps=5)])
         assert ok == [] and list(degenerate) == ["non_answer/no_usable_answer"]
+        answered = {**summary, "outcome": "success"}
+        assert _classify_degenerate_row(_row(redacted=True, summary=answered, steps=5)) == "redacted", "control: a recorded success is no non-answer"
 
     def test_a_redacted_complete_row_stays_redacted_and_executed_ok(self) -> None:
         """Control: only an unavailable summary moves a redacted row."""

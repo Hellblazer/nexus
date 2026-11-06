@@ -1311,7 +1311,7 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
             "collection is a subject area a reader would browse (distributed-systems, "
             "vector-search), never default/knowledge/notes/tmp/test. Name the subject, "
             "reusing an existing one from `nx collection list` where it fits; see "
-            "docs/collections.md Rule 1."
+            "https://github.com/Hellblazer/nexus/blob/main/docs/collections.md Rule 1."
         )
 
 

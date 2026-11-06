@@ -679,10 +679,9 @@ class TestProjectCmdFlag:
         result = runner.invoke(main, ["taxonomy", "project", "--help"])
         assert "code__*" in result.output or "0.70" in result.output
         assert "knowledge__*" in result.output or "0.50" in result.output
-        # Reference to tuning doc for operators. Click wraps at hyphens,
-        # inserting "- " breaks, so normalise before the containment check.
-        collapsed = " ".join(result.output.split()).replace("- ", "-")
-        assert "exploration/taxonomy-projection-tuning.md" in collapsed
+        # Reference to the tuning doc for operators: the link sits in an epilog click prints as written,
+        # so it is whole in the output (tests/test_repo_only_references_lint.py renders every help to check).
+        assert "https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md" in result.output
 
 
 # ── Phase 5 (nexus-84v) — nx taxonomy hubs ──────────────────────────────────
@@ -850,8 +849,7 @@ class TestHubs:
         for flag in ("--min-collections", "--max-icf", "--warn-stale", "--explain"):
             assert flag in result.output
         # Points the operator at the tuning doc.
-        collapsed = " ".join(result.output.split()).replace("- ", "-")
-        assert "exploration/taxonomy-projection-tuning.md" in collapsed
+        assert "https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md" in result.output
 
 
 # ── Phase 6 (nexus-w4k) — nx taxonomy audit ─────────────────────────────────
@@ -990,5 +988,4 @@ class TestAudit:
         assert "--collection" in result.output
         assert "--threshold" in result.output
         assert "--top-n" in result.output
-        collapsed = " ".join(result.output.split()).replace("- ", "-")
-        assert "exploration/taxonomy-projection-tuning.md" in collapsed
+        assert "https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md" in result.output

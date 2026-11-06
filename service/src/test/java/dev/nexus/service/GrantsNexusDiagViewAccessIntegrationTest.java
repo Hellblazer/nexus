@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.TreeSet;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
@@ -294,6 +295,58 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 assertThatThrownBy(() -> countAs(diag, "nexus", "request_ledger_tenants"))
                     .as("nexus_diag must hold no SELECT on nexus.request_ledger_tenants")
                     .hasMessageContaining("permission denied for table request_ledger_tenants");
+            }
+        }
+    }
+
+    /**
+     * nexus-rfvyy.6.6 (RDR-243, catalog-047-2): after a full production-shaped walk, nexus_svc can INSERT
+     * into and SELECT from {@code nexus.catalog_sensitivity_changes} (the grants-nexus-svc-1 loop and its
+     * default privileges), and nexus_diag holds NOTHING on it: the audit trail is tenant-scoped, nexus_diag
+     * bypasses RLS, and a grant would show every tenant's flagged tumblers and reasons.
+     *
+     * <p><b>Grant era covered: the VIEW era only.</b> {@link #provisionAndMigrate} walks the changelog twice
+     * with nexus_diag provisioned BEFORE it, so {@code nexus.diag_chash_conformance} exists, grants-nexus-diag-1
+     * returns at its era guard and grants-nexus-diag-2's per-relation REVOKE loop strips whatever the table
+     * would otherwise carry. The LEGACY era (no counts view) is not covered, and there nexus_diag does read
+     * every table by design (grants-nexus-diag-1: GRANT SELECT ON ALL TABLES plus default privileges), this
+     * one included. That is the established diag boundary for the legacy era, not a defect of this table.
+     * The catalog-047 changeset header names the same limit.
+     *
+     * <p><b>The pin is the last block: a real {@code nexus_diag} connection that must be refused with
+     * {@code permission denied}.</b> A Java constant such as {@code NEXUS_DIAG_READABLE_TABLES} is not a pin, no
+     * grant change could fail it, and the test that asserted it on the table was removed.
+     */
+    @Test
+    void catalogSensitivityChanges_svcHasDml_diagIsDenied() throws Exception {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(pg.getJdbcUrl());
+            cfg.setUsername("nexus_svc");
+            cfg.setPassword("nexus_svc_pass");
+            cfg.setMaximumPoolSize(2);
+            cfg.setAutoCommit(true);
+            try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                TenantScope scope = new TenantScope(svcDs);
+                String tenant = "sens-audit-grants";
+                int inserted = scope.withTenant(tenant, ctx -> ctx.insertInto(CATALOG_SENSITIVITY_CHANGES,
+                        CATALOG_SENSITIVITY_CHANGES.TENANT_ID, CATALOG_SENSITIVITY_CHANGES.TUMBLER,
+                        CATALOG_SENSITIVITY_CHANGES.OLD, CATALOG_SENSITIVITY_CHANGES.NEW,
+                        CATALOG_SENSITIVITY_CHANGES.REASON, CATALOG_SENSITIVITY_CHANGES.ACTOR)
+                    .values(tenant, "1.1.1", false, true, "set", "tester").execute());
+                assertThat(inserted).as("nexus_svc INSERT").isEqualTo(1);
+                Integer seen = scope.withTenant(tenant, ctx -> ctx.fetchCount(CATALOG_SENSITIVITY_CHANGES));
+                assertThat(seen).as("nexus_svc SELECT").isEqualTo(1);
+            }
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> countAs(diag, "nexus", "catalog_sensitivity_changes"))
+                    .as("nexus_diag must hold no SELECT on nexus.catalog_sensitivity_changes (view era)")
+                    .hasMessageContaining("permission denied for table catalog_sensitivity_changes");
             }
         }
     }

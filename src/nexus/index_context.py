@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from nexus.sensitive_write import SensitiveDocs
     from nexus.config import TuningConfig
     from nexus.hook_registry import HookRegistry
     from nexus.indexer_utils import StalenessCache
@@ -124,6 +125,11 @@ class IndexContext:
     # one-upsert-per-file path. Service mode only — the batcher's flush
     # fn posts raw text for server-side embedding.
     batcher: "object | None" = field(default=None)
+
+    # RDR-243 (fix round 2): the run's one batched read of which documents are flagged sensitive in the
+    # catalog. A repo run has no --ack-external-embedder, so a flagged document is skipped for a Voyage
+    # collection. ``None`` (a direct caller) makes the per-file indexer read the flag for itself.
+    sensitive_docs: "SensitiveDocs | None" = field(default=None)
 
     def __post_init__(self) -> None:
         if self.hooks is None:

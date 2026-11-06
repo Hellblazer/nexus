@@ -207,7 +207,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-186](rdr-186-client-persistence-closure-no-sqlite.md) | Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Substrate Outside RDR-158's Seven-Domain Scope, and End Self-Granted Exemptions | Architecture | Closed | 2026-07-18 |
 | [RDR-187](rdr-187-retire-chash-index-router-table.md) | Retire chash_index: the Chunks Tables Are the Chash-Keyed Store — Drop the Router Remnant of the Split-Store Architecture | Architecture | Closed | 2026-07-20 |
 | [RDR-188](rdr-188-server-side-rerank.md) | Server-Side Reranking: Retire the Last Client-Side Voyage Consumer So the Client Carries Zero Voyage Credentials | Architecture | Closed | 2026-07-22 |
-| [RDR-189](rdr-189-target-definition-layer.md) | Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer | Architecture | Accepted | 2026-07-25 |
+| [RDR-189](rdr-189-target-definition-layer.md) | Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer | Architecture | Deferred | 2026-07-25 |
 | [RDR-190](rdr-190-plan-ir-loop-collect-primitives.md) | Plan-IR Fan-Out and Fold: Add `loop` and `collect` Step Primitives So Plans Can Process More Than 100 Items Without Truncating or Round-Tripping Through the Agent | Architecture | Deferred | 2026-07-26 |
 | [RDR-191](rdr-191-unify-chunk-tables-enable-manifest-fk.md) | Unify the Dim-Sharded Chunk Tables into One nexus.chunks with Nullable Typed Embedding Columns: Make the Manifest FK Expressible and Retire the Client-Side Integrity Apparatus | Architecture | Closed | 2026-08-10 |
 | [RDR-192](rdr-192-superseded-note-chunks-outlive-manifest-less-is-live.md) | Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition | Bug Fix | Closed | 2026-08-12 |
@@ -259,7 +259,9 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-240](rdr-240-procedures-as-sandboxed-lua-scripts.md) | Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It | Feature | Draft | 2026-11-01 |
 | [RDR-241](rdr-241-no-client-walks-of-the-managed-catalog.md) | No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs | Architecture | Draft | 2026-11-02 |
 | [RDR-242](rdr-242-sandboxed-lua-runtime.md) | Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First | Architecture | Draft | 2026-11-02 |
+| [RDR-243](rdr-243-first-class-document-sensitivity.md) | First-Class Document Sensitivity: Route, Stamp and Exempt Sensitive Documents from Every LLM and External Surface | Feature | Accepted | 2026-11-03 |
 | [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Accepted | 2026-11-03 |
+| [RDR-245](rdr-245-structured-asks-on-the-threads-board.md) | Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox | Feature | Accepted | 2026-11-05 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

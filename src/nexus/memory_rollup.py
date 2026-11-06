@@ -29,6 +29,8 @@ from typing import Any, Literal, Protocol
 import httpx
 import structlog
 
+from nexus.sensitivity import llm_bound
+
 _log = structlog.get_logger(__name__)
 
 #: ``produced_by`` stamped on every summary row this module writes.
@@ -159,9 +161,13 @@ def dispatch_summarizer(*, model: str | None = None, timeout: float = 300.0) -> 
         from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deferred: operator deps stay off CLI startup
 
         prompt, schema = build_summarize_request(group_prompt_content(group))
-        result = asyncio.run(claude_dispatch(
-            prompt, schema, timeout=timeout, model=model, operator="operator_summarize",
-        ))
+        # RDR-243 census row 18: T2 notes are not documents, so the rollup is recorded as an
+        # unprotected gap, but it still enters the scope its dispatch root asserts.
+        # asyncio.run copies this context into its task.
+        with llm_bound("memory_rollup"):
+            result = asyncio.run(claude_dispatch(
+                prompt, schema, timeout=timeout, model=model, operator="operator_summarize",
+            ))
         return str(result.get("summary", ""))
 
     return _summarize

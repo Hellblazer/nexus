@@ -23,15 +23,13 @@ A coordinator bead is any bead tagged `metadata.coordinator=true` (set with `bd 
 
 The dispatched subagent uses `Read`, `Grep`, `Glob` only. Serena symbol resolution is NOT needed — the
 Phase 1a hard-case spike verified CA-1 as `READ-ONLY-SUFFICIENT` against
-`src/nexus/search_engine.py:149` (`search_cross_corpus`). Nexus and ART coordinator targets use `Any`
+`search_cross_corpus` in nexus's [search engine](https://github.com/Hellblazer/nexus/blob/main/src/nexus/search_engine.py). Nexus and ART coordinator targets use `Any`
 at injection boundaries with runtime dict-key contracts; typed generics requiring inference were not
 present in the verified corpus.
 
 Do NOT include Serena tool instructions in the subagent prompt. If a future target requires Serena
 escalation (e.g., `typing.Protocol` / `TypeVar` intensive composition), escalate to the user before
 dispatching — do not silently extend the tool budget.
-
-**T2 reference**: `nexus_rdr/066-research-5-ca1-ca2-ca3-hard-case-spike`
 
 ## Behavior
 
@@ -68,7 +66,7 @@ elif package.json present:    runner = "npm test -- /tmp/probe-<id>.ts"
 else:                         surface language-detection failure to the user; halt
 ```
 
-`pom.xml` counts when it sits at the root or under `service/`. `<mvn>` is `scripts/mvnw-leased.sh` when the project has that script (the nexus repo, nexus-c00dw, where Maven lives under `service/` and the script wraps `service/mvnw`). The script takes the single-builder lease before it runs Maven, so a probe run cannot collide with a concurrent service build; never use a bare `mvn` or `./mvnw` there. In any other project `<mvn>` is `./mvnw` when it exists, else `mvn`.
+`pom.xml` counts when it sits at the root or under `service/`. `<mvn>` is `scripts/mvnw-leased.sh` when the project has that script (the nexus repo, nexus-c00dw, where Maven lives under `service/` and the script, [mvnw-leased.sh](https://github.com/Hellblazer/nexus/blob/main/scripts/mvnw-leased.sh), wraps `service/mvnw`). The script takes the single-builder lease before it runs Maven, so a probe run cannot collide with a concurrent service build; never use a bare `mvn` or `./mvnw` there. In any other project `<mvn>` is `./mvnw` when it exists, else `mvn`.
 
 Map the runner to a file extension: `pytest` → `.py`, `<mvn>` → `.java`, `npm` → `.ts`. Fill the `<id>` and `<classname>` in the chosen runner; that command line is `<runner>` in Step 4.
 

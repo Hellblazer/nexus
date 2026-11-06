@@ -43,6 +43,8 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 import structlog
 
 from nexus.db.limits import QUOTAS
+from nexus.doc_sensitivity import SensitivityUnknown, sensitive_tumbler_for_uri
+from nexus.sensitivity import SensitiveDocumentRefused, current_posture, current_surface
 
 _log = structlog.get_logger(__name__)
 
@@ -1265,6 +1267,12 @@ _READERS: dict[str, Callable[..., ReadResult]] = {
 }
 
 
+#: The schemes whose source read leaves the catalog and T3 behind (a disk file, the network, the
+#: DEVONthink app) and so escapes the engine's read filter (RDR-243 Technical Design item 6).
+#: ``nx-note`` is a T3 read; the phase 2 engine filter owns it.
+_SENSITIVITY_GATED_SCHEMES: frozenset[str] = frozenset({"file", "https", "x-devonthink-item"})
+
+
 def read_source(
     uri: str,
     *,
@@ -1325,6 +1333,22 @@ def read_source(
             reason="scheme_unknown",
             detail=f"no reader for scheme {scheme!r}",
         )
+    # RDR-243 Technical Design item 6: under the sensitivity scope, a sensitive document's
+    # source is not read. The catalog document whose ``source_uri`` is this URI says whether it is
+    # sensitive; a URI the catalog does not know cannot be flagged. The scope's posture decides:
+    # indexing, doctor and the other default-posture readers are not refused. A catalog that cannot
+    # answer is a transport failure (retried), never a clear.
+    if scheme in _SENSITIVITY_GATED_SCHEMES and current_posture() == "llm_bound":
+        try:
+            sensitive_tumbler = sensitive_tumbler_for_uri(uri)
+        except SensitivityUnknown as exc:
+            return ReadFail(reason="transport", detail=f"sensitivity unknown: {exc.detail}")
+        if sensitive_tumbler:
+            _log.info(
+                "sensitive_document_refused", tumbler=sensitive_tumbler,
+                surface=current_surface() or "aspect_extraction_cli", scheme=scheme,
+            )
+            raise SensitiveDocumentRefused(sensitive_tumbler, current_surface())
     # ``tenant`` carries per-request context for local-scheme handlers (e.g.
     # obsidian:// needs ``tenant["vault_root"]``).  Handlers that don't need it
     # accept ``**_kw`` and ignore it; the kwarg is always forwarded so new

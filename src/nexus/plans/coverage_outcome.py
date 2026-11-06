@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from nexus.plans.answer_shape import (
+    EXACT_KEY_JOIN_NOTICE_PREFIX,
     INSUFFICIENT_EVIDENCE_NOTICE_PREFIX,
     NON_ANSWER_SHAPES,
     AnswerShape,
@@ -41,7 +42,10 @@ from nexus.plans.coverage_ledger import (
 __all__ = [
     "NO_USABLE_ANSWER_REASON",
     "OutcomeVerdict",
+    "EXACT_KEY_JOIN_NOTICE_PREFIX",
     "decide_outcome",
+    "has_merged_join",
+    "render_exact_key_join_notice",
     "render_insufficient_evidence",
 ]
 
@@ -97,6 +101,16 @@ def decide_outcome(coverage: CoverageResult | None, classified: AnswerShape) -> 
     if coverage is None or coverage.state == "unassessed":
         return OutcomeVerdict(classified, classified not in NON_ANSWER_SHAPES, False, coverage)
 
+    if coverage.state == "unavailable" and coverage.reason == "uncovered" and coverage.repair.generated_on_join:
+        # RDR-147 option 1 (nexus-irndi): the resolution branch entered and merged a joined item, so generation ran on a
+        # ledger that covers no facet. Answered prose is an answer (success), never grown: the coverage check did not
+        # confirm it. The ledger and the final coverage state are left as the re-check found them. Prose that is not an
+        # answer (empty, a refusal, a payload) gets the rule every other row has: its classified shape stands and the
+        # coverage becomes ``unavailable`` / ``no_usable_answer``.
+        if classified is AnswerShape.ANSWERED:
+            return OutcomeVerdict(AnswerShape.ANSWERED, True, True, coverage)
+        return OutcomeVerdict(classified, False, True, _unavailable(coverage, NO_USABLE_ANSWER_REASON))
+
     if coverage.state == "unavailable":
         # Nothing reached the reduction: no_evidence (a scope conflict that removed it all included). Evidence
         # that covered no facet: uncovered. Whatever generation returned is not an answer.
@@ -114,6 +128,32 @@ def decide_outcome(coverage: CoverageResult | None, classified: AnswerShape) -> 
     if coverage.state == "partial":
         return OutcomeVerdict(AnswerShape.INSUFFICIENT_EVIDENCE, True, True, coverage)
     return OutcomeVerdict(AnswerShape.ANSWERED, True, False, coverage)
+
+
+def has_merged_join(coverage: CoverageResult | None) -> bool:
+    """Whether the resolution branch entered and merged at least one joined item into the reduction's input (RDR-147):
+    the condition for an answer to carry the exact-key-join notice, whatever the final ledger. A report that says
+    ``generated_on_join`` always carries it: an answer the coverage check did not confirm is never returned without its notice."""
+    if coverage is None:
+        return False
+    r = coverage.repair
+    return r.generated_on_join or (r.resolution_entered and r.joined_added > 0 and bool(r.joined_keys))
+
+
+def render_exact_key_join_notice(coverage: CoverageResult, prose: str) -> str:
+    """An answer from a run that merged an exact-key join (RDR-147): one notice line, a blank line, then *prose*.
+
+    ``[exact-key join: <n> record(s) joined by exact key (<keys>)]``, where the keys are those of the joined items that
+    were merged (``RepairReport.joined_keys``, not every resolved key; distinct) and ``n`` is how many records they name.
+    When the final ledger was uncovered and generation went ahead because of option 1 (``generated_on_join``) the line
+    ends ``; the coverage check did not confirm this answer]``. It has its own wording: the insufficient-evidence notice
+    says the answer does not cover parts of the request, which would contradict an answer the join produced. On a partial
+    answer it opens the text, ahead of that notice.
+    """
+    repair = coverage.repair
+    keys = repair.joined_keys
+    clause = "; the coverage check did not confirm this answer" if repair.generated_on_join else ""
+    return f"{EXACT_KEY_JOIN_NOTICE_PREFIX} {len(keys)} record(s) joined by exact key ({', '.join(keys)}){clause}]\n\n{prose}"
 
 
 def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[str, str], prose: str) -> str:

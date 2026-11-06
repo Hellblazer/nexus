@@ -55,8 +55,8 @@ public final class PgVersionFloor {
         return Optional.of("PostgreSQL " + found.versionText() + " (server_version_num " + found.versionNum()
             + ") is below this engine's floor, PostgreSQL 17 (server_version_num " + MIN_SERVER_VERSION_NUM
             + "): the manifest pushdown's jsonpath .number() and the numeric range predicates fail at execution on"
-            + " an older server. Point NX_DB_URL at a PostgreSQL 17 or later server (see docs/configuration.md,"
-            + " \"Storage Service (Postgres) Prerequisites\"); if this is a restored or forked copy, check which"
+            + " an older server. Point NX_DB_URL at a PostgreSQL 17 or later server (see "
+            + "https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#storage-service-postgres-prerequisites); if this is a restored or forked copy, check which"
             + " server version it was restored onto.");
     }
 

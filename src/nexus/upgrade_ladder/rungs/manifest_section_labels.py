@@ -55,9 +55,10 @@ and collection it read, and no span key, so the row is the same chunk written ag
 stamps the document's ``indexed_at`` on every manifest write. Left alone, that would switch off the
 chunk-newer guard above for the document's OTHER rows (the guard compares against the document's stamp),
 so the next pass would copy a departed co-owner's label, and ``meta_backfill``'s own guard would look at
-the document more leniently. So after each document's append succeeds, the rung writes the document's
-``indexed_at`` back to the value it read at scan (``update(doc, indexed_at=...)``; the engine honours a
-caller-supplied stamp). A document whose stamp cannot be written back is counted and named, and the run
+the document more leniently. So after a batch's appends, the rung writes each written document's
+``indexed_at`` back to the value it read at scan, in one ``update_many`` for the batch (the engine honours a
+caller-supplied stamp; one ``update`` per document cost a WAN round trip each, nexus-mr443.1). An entry the
+batch did not update, or a failed batch, gets ``update(doc, indexed_at=...)`` with one retry. A document whose stamp cannot be written back is counted and named, and the run
 ends DEFERRED: its stamp is the run time until someone restores it.
 
 WHAT IT DOES.
@@ -527,8 +528,8 @@ class ManifestSectionLabelsRung:
             by_collection.setdefault(collection, {}).setdefault(tumbler, []).append({
                 "chash": row.chash, "position": row.position, **labels, "labels_written": True,
             })
+        written: set[str] = set()
         for collection, per_doc in sorted(by_collection.items()):
-            written: set[str] = set()
             for request in self._requests(sorted(per_doc.items())):
                 result = writer.append_manifest_many(request, collection=collection)
                 failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
@@ -540,8 +541,31 @@ class ManifestSectionLabelsRung:
                         counts.by_collection[collection] += len(rows)
                         self._filled += len(rows)
                         written.add(doc_id)
-            for doc_id in sorted(written):  # once per document, however many requests carried its rows
-                self._restore_indexed_at(writer, doc_id, stamps.get(doc_id, ""), counts)
+        # once per document, however many requests or collections carried its rows
+        self._restore_batch(writer, sorted(written), stamps, counts)
+
+    @classmethod
+    def _restore_batch(cls, writer: Any, docs: list[str], stamps: dict[str, str], counts: Counts) -> None:
+        """Write the batch's stamps back in ONE ``update_many`` round trip (nexus-mr443.1: one ``update`` per
+        document was one WAN round trip each, about 200 documents a minute against the cloud). The engine
+        builds each entry with the same query as ``update``, so the caller's stamp is honoured the same way.
+        A failed call, or an entry that updated nothing, falls back to :meth:`_restore_indexed_at` for those
+        documents, which keeps its retry and its count of what could not be restored. A writer without
+        ``update_many`` restores one document at a time."""
+        if not docs:
+            return
+        many = getattr(writer, "update_many", None)
+        retry = docs
+        if callable(many):
+            try:
+                updated: list[int] = list(many([{"tumbler": d, "indexed_at": stamps.get(d, "")} for d in docs]))
+                if len(updated) != len(docs):
+                    raise ValueError(f"update_many returned {len(updated)} counts for {len(docs)} updates")
+                retry = [d for d, n in zip(docs, updated) if n != 1]
+            except Exception as exc:  # noqa: BLE001 — the whole call failed: every document takes the per-document path
+                _log.warning("manifest_section_labels_restore_batch_failed", docs=len(docs), error=str(exc))
+        for doc_id in retry:
+            cls._restore_indexed_at(writer, doc_id, stamps.get(doc_id, ""), counts)
 
     def _requests(self, docs_rows: list[tuple[str, list[dict]]]) -> list[list[tuple[str, list[dict]]]]:
         """Cut ``(doc_id, rows)`` pairs into requests of at most ``max_rows`` rows and ``doc_batch``

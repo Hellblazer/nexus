@@ -145,6 +145,26 @@ _log = structlog.get_logger(__name__)
     ),
 )
 @click.option(
+    "--sensitive-in-aspect-eligible",
+    "sensitive_in_aspect_eligible",
+    is_flag=True,
+    help=(
+        "RDR-243 (nexus-rfvyy.6.17): WARN for a sensitive document whose collection has an aspect "
+        "extractor or already holds aspect rows. Does not change the exit status. Not applicable "
+        "(never a pass) on a tenant with no sensitive documents."
+    ),
+)
+@click.option(
+    "--sensitive-with-aspects",
+    "sensitive_with_aspects",
+    is_flag=True,
+    help=(
+        "RDR-243 (nexus-rfvyy.6.17): FAIL for a sensitive document that already has an aspect row or "
+        "a queued aspect task; prints `nx enrich delete --tumbler <t>` for each. Not applicable "
+        "(never a pass) on a tenant with no sensitive documents."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -157,6 +177,8 @@ def doctor_cmd(
     store_put_integrity: bool,
     link_coverage: bool,
     visible_outside_manifest: bool,
+    sensitive_in_aspect_eligible: bool,
+    sensitive_with_aspects: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -180,14 +202,16 @@ def doctor_cmd(
         or chunk_size_distribution or chunk_text_dedup or t3_vs_catalog
         or name_vs_embed_dim or store_put_integrity
         or link_coverage or visible_outside_manifest
+        or sensitive_in_aspect_eligible or sensitive_with_aspects
     )
     if not any_check:
         raise click.UsageError(
             "Pass a check flag: --collections-drift, "
             "--chunk-size-distribution, --chunk-text-dedup, "
             "--t3-vs-catalog, --name-vs-embed-dim, "
-            "--store-put-integrity, --link-coverage, or "
-            "--visible-outside-manifest."
+            "--store-put-integrity, --link-coverage, "
+            "--visible-outside-manifest, --sensitive-in-aspect-eligible, or "
+            "--sensitive-with-aspects."
         )
 
     overall_pass = True
@@ -282,6 +306,28 @@ def doctor_cmd(
             _print_visible_outside_manifest_text(report)
             _printed_anything = True
         if not report["pass"]:
+            overall_pass = False
+
+    # RDR-243 (nexus-rfvyy.6.17): the two sensitivity rows. The text and the verdicts live in
+    # nexus.catalog.sensitivity_doctor, which `nx doctor` prints through too. Only the FAIL row gates.
+    for wanted, check in (
+        (sensitive_in_aspect_eligible, "check_sensitive_in_aspect_eligible"),
+        (sensitive_with_aspects, "check_sensitive_with_aspects"),
+    ):
+        if not wanted:
+            continue
+        from nexus.catalog import sensitivity_doctor as _sd  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost
+
+        report = getattr(_sd, check)()
+        if as_json:
+            json_payload[report["name"]] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            for line in _sd.render_text(report):
+                click.echo(line)
+            _printed_anything = True
+        if report["status"] == _sd.FAIL:
             overall_pass = False
 
     if as_json:

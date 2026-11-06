@@ -10,6 +10,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands._helpers import read_stdin_utf8
 from nexus.corpus import (
     EmbeddingProfileMismatchError,
@@ -23,6 +24,16 @@ from nexus.db.t3 import T3Database
 from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.metadata_schema import ttl_listing_label
+from nexus.sensitive_write import (
+    ExternalEmbedderRefusedError,
+    SensitiveFlagNotSetError,
+    ack_help,
+    import_ack_help,
+    refuse_external_existing_note,
+    resolve_sensitive_collection,
+    sensitive_help,
+    sensitive_write_kwargs,
+)
 from nexus.ttl import parse_ttl
 
 # C0 (NUL, tab, CR, LF, ESC ...), DEL and C1 controls: stored chunk text printed to an operator's terminal must
@@ -52,13 +63,12 @@ def store() -> None:
     """Permanent semantic knowledge store (served by the native nexus-service: bge-768 locally, Voyage AI in cloud mode)."""
 
 
-@store.command("put")
+@store.command("put", epilog=COLLECTIONS_RULES_EPILOG)
 @click.argument("source")
 @click.option("--collection", "-c", required=True,
               help="Collection: the bare subject this note belongs to, such as "
                    "distributed-systems. Required: the placeholders default/knowledge/"
-                   "notes/tmp/test are refused. Never a model token or version; see "
-                   "docs/collections.md.")
+                   "notes/tmp/test are refused. Never a model token or version; the rules are linked at the end of this help.")
 @click.option("--title", "-t", default="", help="Document title (required when SOURCE is -)")
 @click.option("--tags", default="", help="Comma-separated tags")
 @click.option("--category", default="", help="Category label")
@@ -70,6 +80,8 @@ def store() -> None:
                    "control characters, refused on a code__ collection. Unset: a collection "
                    "configured with an entity-key pattern stamps the title when the whole title "
                    "matches it. A re-put without it removes the stored key.")
+@click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
 @click.option("--session-id", default="", hidden=True)
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
@@ -80,6 +92,8 @@ def put_cmd(
     category: str,
     ttl: str,
     entity_key: str,
+    sensitive: bool,
+    ack_external_embedder: bool,
     session_id: str,
     agent: str,
 ) -> None:
@@ -129,6 +143,10 @@ def put_cmd(
     # itself as defense-in-depth, but this CLI path can never reach it.
     ttl_days = days
 
+    # RDR-243: the usage, cloud and engine refusals, before the T3 handle, the register call and any
+    # embedding. An engine that cannot hold the flag would otherwise drop it without an error.
+    sensitive_write_kwargs(sensitive, "store put --sensitive", ack=ack_external_embedder)
+
     db = _t3()
     # nexus-hmxi: pass t3 so the resolver grandfathers an existing
     # legacy 2-segment collection ahead of the auto-promoted
@@ -140,6 +158,13 @@ def put_cmd(
     # itself a ClickException, so the refusal prints cleanly here and on
     # every other CLI writer without a per-command catch.
     col_name = t3_collection_name(collection, t3=db, for_write=True)
+    if sensitive:
+        # RDR-243 Q3: a Voyage collection needs the acknowledgement; without it the note goes to the
+        # bge collection of the same subject (local mode).
+        # A live note of this title already in the Voyage collection would be left unflagged beside a
+        # new note in the sibling: refuse that without the ack, before anything is written.
+        refuse_external_existing_note(col_name, title, ack=ack_external_embedder, what="store put --sensitive")
+        col_name = resolve_sensitive_collection(col_name, ack=ack_external_embedder, what="store put --sensitive")
 
     # RDR-223 P2.6 (nexus-z0o2p.16): the note is written by the note writer, the
     # same sequence MCP store_put runs (nexus-z0o2p.12). put_note owns the whole
@@ -174,9 +199,9 @@ def put_cmd(
         outcome = put_note(
             content=content, collection=col_name, title=title, tags=tags,
             category=category, source_agent=agent,
-            ttl_days=ttl_days, entity_key=entity_key,
+            ttl_days=ttl_days, entity_key=entity_key, sensitive=sensitive,
         )
-    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError) as exc:
+    except (PutOversizedError, NoteUriEngineTooOldError, EntityKeyError, EntityConfigError, SensitiveFlagNotSetError) as exc:
         # EntityKeyError: an --entity-key the put refuses (a code collection, a control character,
         # over 256 characters; nexus-fai28), raised before any register or write. EntityConfigError
         # names its config file and key. Any other ValueError keeps its traceback.
@@ -230,11 +255,11 @@ from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa
 # note splitters, the oversize check) are no longer re-exported from this module.
 
 
-@store.command("list")
+@store.command("list", epilog=COLLECTIONS_RULES_EPILOG)
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
                    "knowledge, every knowledge collection). Never a model token or "
-                   "version; see docs/collections.md.")
+                   "version; the rules are linked at the end of this help.")
 @click.option("--limit", "-n", default=200, show_default=True,
               help="Maximum entries to show")
 @click.option("--offset", default=0, show_default=True,
@@ -419,7 +444,7 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
             raise click.ClickException(
                 "The connected engine predates POST /v1/vectors/reapable (RDR-192 Step 8, bead "
                 "nexus-wbfpw.17); upgrade to an engine tag that carries it (compare the deployed "
-                "engine's version against REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py)."
+                "engine's version against nexus.engine_version.REQUIRED_ENGINE_VERSION)."
             ) from exc
         raise click.ClickException(f"Failed to list reapable chunks for {col_name!r}: {exc}") from exc
     if shown == 0:
@@ -507,12 +532,12 @@ def _store_scope(collection: str, db: T3Database) -> tuple[list[str], list]:
     return store_read_scope(collection, t3=db, knowledge_collections=_knowledge), listed
 
 
-@store.command("get")
+@store.command("get", epilog=COLLECTIONS_RULES_EPILOG)
 @click.argument("doc_id")
 @click.option("--collection", "-c", default="knowledge", show_default=True,
               help="Collection: a bare subject such as distributed-systems (default: "
                    "knowledge, every knowledge collection). Never a model token or "
-                   "version; see docs/collections.md.")
+                   "version; the rules are linked at the end of this help.")
 @click.option("--json", "json_out", is_flag=True, default=False,
               help="Output as JSON")
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
@@ -1064,12 +1089,15 @@ def export_cmd(
                    "already holds: the stored chunk and vector stay, and the record still gets "
                    "its owner. Without it every record is written with the file's vector, which "
                    "replaces a stored one.")
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False,
+              help=import_ack_help())
 def import_cmd(
     file: str,
     collection: str | None,
     remaps: tuple[str, ...],
     assume_model: str | None,
     skip_existing: bool,
+    ack_external_embedder: bool,
 ) -> None:
     """Import a .nxexp export file into T3.
 
@@ -1146,7 +1174,10 @@ def import_cmd(
                 remaps=parsed_remaps,
                 assume_model=assume_model,
                 skip_existing=skip_existing,
+                ack_external_embedder=ack_external_embedder,
             )
+        except ExternalEmbedderRefusedError:
+            raise  # already a ClickException naming the document and the flag
         except FormatVersionError as exc:
             raise click.ClickException(str(exc)) from exc
         except EmbeddingDimensionMismatch as exc:

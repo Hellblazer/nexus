@@ -340,11 +340,12 @@ rdr_skills:
 # no predecessors/successors (not part of agent pipelines).
 
 standalone_skills:
-  # nexus-cnzei.6: test-authoring MOVED to .claude/skills/test-authoring/ —
-  # it is entirely nexus-repo-specific (this repo's own test suite, dev-loop
-  # layers, tests/AGENTS.md) and was shipping to every conexus plugin user
+  # nexus-cnzei.6: test-authoring MOVED out of the plugin into the nexus
+  # repo's own repo-local skills —
+  # it is entirely nexus-repo-specific (that repo's own test suite, dev-loop
+  # layers, test-authoring directives) and was shipping to every conexus plugin user
   # for no benefit outside this repo (injection audit S6). Repo-local skills
-  # like this one, plus release/ and engine-release/, live in .claude/skills/
+  # like this one, plus release and engine-release, live in the nexus repo
   # and are not part of the plugin's registry.
 
   enrich-plan:

@@ -546,6 +546,10 @@ class TestTheShapeVeto:
             pytest.param([{"tool": "mcp__plugin_conexus_nexus__operator_summarize"}], False, id="mcp-prefixed-operator"),
             pytest.param([{"tool": "mcp__plugin_conexus_nexus__summarize"}], False, id="mcp-prefixed-plan-name"),
             pytest.param([{"tool": "mcp__plugin_conexus_nexus__search"}], True, id="mcp-prefixed-retrieval-still-vetoed"),
+            # Sam, nexus-ynkw1: a check or verify verdict is an answer, so a plan ending in one is not vetoed.
+            pytest.param([{"tool": "search"}, {"tool": "check"}], False, id="check-answers"),
+            pytest.param([{"tool": "search"}, {"tool": "verify"}], False, id="verify-answers"),
+            pytest.param([{"tool": "mcp__plugin_conexus_nexus__operator_verify"}], False, id="mcp-prefixed-verify-answers"),
             pytest.param([{"tool": "summarize"}, {"tool": "traverse"}], True, id="only-the-last-step-counts"),
             pytest.param([], True, id="no-steps"),
             pytest.param(["x"], True, id="not-a-step"),

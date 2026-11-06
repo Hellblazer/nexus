@@ -51,7 +51,7 @@ doc:
   writers:
     - the ci-board-adapter AWS Lambda in the conexus repository, on GitHub workflow_run and workflow_job webhooks, with a board-scoped token that can write only this template
   readers:
-    - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (docs/agents/worktrees.md rule 7)
+    - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (rule 7 of the worktrees guide, https://github.com/Hellblazer/nexus/blob/main/docs/agents/worktrees.md)
     - nx tuple rd and nx tuple wait page the log
   fields:
     topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main)

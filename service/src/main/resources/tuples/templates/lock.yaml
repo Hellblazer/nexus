@@ -60,10 +60,10 @@ claim_log_ttl_seconds: 2592000
 doc:
   summary: One row per resource and one holder at a time; take the row with in, renew while working, end with release. The row expires on its own if the holder dies.
   writers:
-    - scripts/git-push-develop.sh creates the row with nx tuple out for the resource ci-develop-push, which is idempotent
-    - any session wanting mutual exclusion on a named resource, per conexus/skills/peer-messaging/SKILL.md
+    - the nexus repository's develop push script (https://github.com/Hellblazer/nexus/blob/main/scripts/git-push-develop.sh) creates the row with nx tuple out for the resource ci-develop-push, which is idempotent
+    - any session wanting mutual exclusion on a named resource, per the peer-messaging skill of the conexus plugin
   readers:
-    - scripts/git-push-develop.sh takes the lock with nx tuple in (lease 900 seconds) and ends it with nx tuple release
+    - the same push script takes the lock with nx tuple in (lease 900 seconds) and ends it with nx tuple release
     - a session holding a lock renews with tuple_renew and ends with tuple_release; ack is refused on a lock claim
     - nx doctor (nexus.health) flags a claim renewed far past its lease
   fields:
@@ -77,4 +77,4 @@ doc:
       from: example-peer
   see_also:
     - RDR-211
-    - conexus/skills/peer-messaging/SKILL.md
+    - https://github.com/Hellblazer/nexus/blob/main/conexus/skills/peer-messaging/SKILL.md

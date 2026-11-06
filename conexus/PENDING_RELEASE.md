@@ -43,35 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.95.0)
+## Awaiting the next release (pinned: v7.95.2)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-- `conexus/hooks/scripts/mailbox_drain.py` (nexus-1d6pz.1): every block the drain delivers, fresh or recovered from the pending record, is bracketed by a line saying it is peer data from another session, not the user's words or approval, and by an end marker after the body.
-- `conexus/skills/peer-messaging/SKILL.md` (nexus-1d6pz.3): a status question reads the threads board, where the sessions keep one, before mailing the peer.
-- `conexus/resources/tier-discipline.md` (nexus-0vh80): only the builtin tier may claim curated; project-tier declared plans read as saved.
-- `conexus/skills/nexus/SKILL.md` (nexus-0vh80): `plan_save` takes a required `answer_kind`, and a saved plan serves only that kind, in its own project.
-- `conexus/skills/nexus/reference.md` (nexus-0vh80): the saved provenance, its narrow eligibility and the retrieval-only shape veto.
-
-- `conexus/hooks/scripts/compact_checkpoint.py` (nexus-2v7da): on a compact start with nothing to restore (no checkpoint file, the stub post writes when pre did not run, a checkpoint already used by an earlier compaction, or one past the prune window), inject now emits a short notice saying no restore is available and pointing at the threads board entry and the working tree. It said nothing before, so a resumed session could not tell "nothing was lost" from "nothing was saved". The same notice covers a stamp past the prune window and a checkpoint an earlier compaction already injected (the commonest case: inject runs before post). A foreign session, a non-compact start, an unreadable checkpoint and a second fire for the same compaction (a sidecar under 30 seconds old) stay silent.
-
-- `conexus/agents/developer.md` (nexus-pplwc): names T3 store titles and T2 memory paths, not nonexistent `nx store` / `nx memory` subcommands.
-- `conexus/agents/strategic-planner.md` (nexus-pplwc): the same T3 store / T2 memory wording.
-- `conexus/agents/test-validator.md` (nexus-pplwc): the same T3 store / T2 memory wording.
-- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-pplwc): the naming conventions say T3 store title, not `nx store title`.
-- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-pplwc): the Input Artifacts row says T3 store docs and T2 memory.
-- `conexus/skills/architecture/SKILL.md` (nexus-pplwc): names `jet_brains_type_hierarchy` (JetBrains only), not a bare `type_hierarchy` no backend has.
-- `sn/hooks/scripts/session-start-section.md` (nexus-pplwc): the injected Serena section names the type hierarchy tool as `jet_brains_type_hierarchy`, JetBrains only.
-- `conexus/agents/architect-planner.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/code-review-expert.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/codebase-deep-analyzer.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/debugger.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/deep-analyst.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/deep-research-synthesizer.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/agents/substantive-critic.md` (nexus-pplwc): relay template names T3 knowledge IDs and T2 memory keys, not a nonexistent `nx` verb.
-- `conexus/resources/agent-shared/ERROR_HANDLING.md` (nexus-pplwc): the store-failure row is an engine connectivity failure with `nx doctor` as the check, not ChromaDB; the naming row cites the RDR-103 grammar.
-- `conexus/skills/nexus/SKILL.md` (nexus-pplwc): the collection-name separator cites the RDR-103 grammar, not ChromaDB.
-- `conexus/skills/nexus/reference.md` (nexus-pplwc): memory_search is PostgreSQL full-text search with no query grammar, not FTS5; the separator cites RDR-103, not ChromaDB.
-- `conexus/skills/serena-code-nav/SKILL.md` (nexus-pplwc): names only the Serena tools sn exposes under the claude-code context.
-- `conexus/skills/upgrade/SKILL.md` (nexus-pplwc): no longer calls the removed guided-upgrade, migrate-to-service and migration-audit primitives callable, nor cites a rollback verb that no code prints.
 
 ## Deferred to the next client release

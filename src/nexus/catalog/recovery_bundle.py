@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -375,6 +376,9 @@ def export_knowledge_doc(
         # not a NOTE_META_KEYS member, so it is read here on its own. Without it an import re-puts
         # the note with no key, and that put retracts the one the source held.
         "entity_key": _own_entity_key(entry),
+        # RDR-243 (nexus-rfvyy.6.12): the document's flag, from the catalog entry and never from a chunk
+        # row. An older bundle has no key and imports as not sensitive, leaving an existing true in place.
+        "sensitive": getattr(entry, "sensitive", False) is True,
         "content": content,
     }
 
@@ -665,7 +669,7 @@ class ImportDocUncertain(RuntimeError):
         self.stamp_refused = stamp_refused
 
 
-def _default_import_doc(t3: Any, rec: dict) -> None:
+def _default_import_doc(t3: Any, rec: dict, *, ack_external_embedder: bool = False) -> None:
     """Write one note through the note writer (RDR-223 P2.8, nexus-z0o2p.18).
 
     The note's pieces and its owner rows go to the engine as ONE ``write_manifest_many`` request
@@ -686,6 +690,16 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
       stamped (the engine refused the stamp, or it failed after the chains fired): raises
       :class:`ImportDocUncertain` too, the document staying ``indexing``.
 
+    A record with ``sensitive: true`` (RDR-243) passes the flag to ``put_note``, which sets it before any
+    chunk is written (born flagged when the put mints the note), after the engine-capability refusal; a flag
+    that cannot be set fails the record with nothing written.
+
+    A record the catalog already flags (matched by ``source_uri``, on the recorded or the target identity)
+    counts as flagged too, whatever the bundle says: the flag is a one-way property of the document, and an
+    unreadable catalog reads as flagged. A flagged record bound for a collection that embeds with Voyage (or
+    one whose embedder cannot be told) is refused unless *ack_external_embedder* (Sam's import ruling,
+    :func:`nexus.sensitive_write.gate_sensitive_import`): this record's definitive failure, nothing written.
+
     Deferred imports: this module sits below ``commands/`` and the writer's pieces live in sibling
     modules with heavy import graphs. *t3* is used only to resolve the target collection.
     """
@@ -700,6 +714,19 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
 
     col_name = target_collection_for(rec["collection"], t3)
     title = rec.get("title", "")
+    sensitive = rec.get("sensitive") is True
+    from nexus.sensitive_write import catalog_flags_uri, gate_sensitive_import, is_external_embedder  # noqa: PLC0415 — deferred, leaf module read only here
+
+    if not sensitive and is_external_embedder(col_name):
+        sensitive = catalog_flags_uri(rec.get("source_uri", ""), uri_for(col_name, title))
+    if sensitive:
+        gate_sensitive_import([repr(title)], col_name, ack=ack_external_embedder, what="nx catalog import")
+        # Before anything is written: an engine without the column would restore the note unflagged and
+        # say nothing. A RuntimeError here is this record's definitive failure, counted and reported.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred, factory has a heavy import graph
+        from nexus.catalog.http_catalog_client import require_catalog_sensitivity  # noqa: PLC0415 — deferred, as above
+
+        require_catalog_sensitivity(make_catalog_reader(), what=f"restoring sensitive note {title!r}")
     outcome = put_note(
         content=rec["content"], collection=col_name, title=rec["title"],
         tags=",".join(split_note_tags(rec.get("tags"))), category=rec.get("category", ""),
@@ -708,6 +735,11 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         # An old bundle has no key: the put stamps the title if a configured pattern matches it in
         # full, else none, as before. A code__ target takes none.
         entity_key=_importable_entity_key(rec, col_name),
+        # RDR-243: the note is born flagged, or flagged BEFORE any chunk is written when the put resolves an
+        # existing note; a flag that cannot be set raises with nothing written (SensitiveFlagNotSetError, a
+        # RuntimeError: this record's definitive failure). Never raised after the write, which would leave the
+        # new text in T3 unflagged.
+        sensitive=sensitive,
     )
     message = failure_message(outcome, subject=repr(title))
     if message is not None:
@@ -793,6 +825,7 @@ def import_bundle(
     path: Path,
     *,
     import_doc: Callable[[Any, dict], None] | None = None,
+    ack_external_embedder: bool = False,
 ) -> ImportSummary:
     """Import a bundle. Docs first (the bundle writes them first), then
     links resolved by source_uri. FAIL-LOUD SUMMARY, not abort: every
@@ -804,7 +837,7 @@ def import_bundle(
     links (``co_discovered_by``)."""
     _header, records = read_bundle(path)
     summary = ImportSummary()
-    do_import = import_doc or _default_import_doc
+    do_import = import_doc or partial(_default_import_doc, ack_external_embedder=ack_external_embedder)
 
     for rec in records:
         if rec.get("record") != "knowledge_doc":

@@ -195,9 +195,9 @@ tmux kill-pane -t "$PANE"
 
 ### Long-Running Process Monitoring
 <!-- nx-mvnw-allowlist (nexus-c00dw): generic tmux-driving example, not
-     scoped to this repo's own service/ build — `mvn clean install` here
+     scoped to this repo's own service build — `mvn clean install` here
      illustrates the pattern for ANY project this skill might drive, not a
-     literal command wired to nexus's service/target lease. -->
+     literal command wired to nexus's service build lease. -->
 ```bash
 PANE=$(tmux split-window -h -P -F '#{session_name}:#{window_index}.#{pane_index}' zsh)
 sleep 0.5

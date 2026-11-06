@@ -142,7 +142,7 @@ LOCAL_ENGINE_CLAUSE = (
     "needed in addition: it does not by itself override a configured "
     "service_url, and without it the pin can refuse to start a local engine. "
     "Set NX_VOYAGE_API_KEY if the data is Voyage-embedded. Steps: "
-    "docs/migration-runbook.md, 'Installs that predate Postgres'"
+    "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md, 'Installs that predate Postgres'"
 )
 
 #: Sentinel distinguishing "use the module constant" from an explicit

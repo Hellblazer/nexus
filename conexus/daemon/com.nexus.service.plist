@@ -44,7 +44,7 @@
   QoS), exactly reproducing the field-reported slow-indexing symptom.
   Indexing is user-initiated foreground work, not background maintenance, so
   the fix is to not classify the tree as background at all — never add this
-  key back. A pin test (tests/daemon/test_service_install.py) asserts its
+  key back. A pin test in the nexus repository asserts its
   absence.
 -->
 <plist version="1.0">

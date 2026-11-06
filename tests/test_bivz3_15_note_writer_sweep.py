@@ -64,7 +64,7 @@ _SITES: dict[tuple[str, str, str], tuple[str, int, str]] = {
     ("src/nexus/aspect_uri_repair.py", "uri_for", "call"): (
         ASPECT, 1, "re-derives the URI of an aspect row that has none"),
     ("src/nexus/catalog/recovery_bundle.py", "uri_for", "call"): (
-        TRANSIENT, 2, "the export's link join key and the import's endpoint re-derivation: lookups"),
+        TRANSIENT, 3, "the export's link join key, the import's endpoint re-derivation and its catalog-flag probe: lookups"),
     ("src/nexus/commands/catalog_cmds/backfill.py", "uri_for", "call"): (
         TRANSIENT, 1, "re-derives a file:// URI to compare with a stored one (file-routed residue repair)"),
     ("src/nexus/commands/enrich.py", "note_uri", "call"): (
