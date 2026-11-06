@@ -31,10 +31,9 @@
 # The tag `cosine-only` keeps this template out of the below-floor category
 # route (matcher._is_cosine_only_plan). That route orders a verb pool by raw
 # cosine, where any request scores something; this template's text is a
-# narrow bag, so below the floor it stole requests that are not entity
-# listings ("Find the retry helper in the code files", golden G08 and H30
-# in the shadow regime). On the cosine path it wins only at or above
-# min_confidence; the FTS5 fallback ignores the tag.
+# narrow bag, so below the floor it stole non-entity requests ("Find the retry
+# helper in the code files", golden G08 and H30 in the shadow regime). On the
+# cosine path it wins only at or above min_confidence; FTS5 ignores the tag.
 
 name: entity-resolution
 description: >-
