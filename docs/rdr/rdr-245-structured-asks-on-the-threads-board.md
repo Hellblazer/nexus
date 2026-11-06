@@ -1080,7 +1080,7 @@ dependency, no new surface, no second parser.
   Trust model distinguishes mediator and terminal evidence. New risks for
   misread and merged answers; test plan gains mediator evals; metrics, scope,
   proportionality and the CLAUDE.md line updated.
-- 2026-11-05: Gate round 1 — BLOCKED (2 Critical, 7 Significant, 2 ship-blocker(s)); commit `a25923a80`; critique `nexus_rdr/245-gate-critique-2026-11-05-r1`.
-- 2026-11-05: Gate round 2 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `e3ccf4250`; critique `nexus_rdr/245-gate-critique-2026-11-05-r2`.
-- 2026-11-05: Gate round 3 — PASSED (1 Critical, 4 Significant, 0 ship-blocker(s)); commit `0494e902d`; critique `nexus_rdr/245-gate-critique-2026-11-05-r3`.
-- 2026-11-05: Accept, round-3 residual dispositions: residual 1 fixed in `f33454580` (fix check `nexus_rdr/245-fix-check-f33454580`); residual S1 to `nexus-wc4jj.1`; S2 to `nexus-wc4jj.2`; S3 to `nexus-wc4jj.3`; S4 to `nexus-wc4jj.4` (Phase 1).
+- 2026-11-05: Gate round 1 — BLOCKED (2 Critical, 7 Significant, 2 ship-blocker(s)); commit `9ffdf1f9f`; critique `nexus_rdr/245-gate-critique-2026-11-05-r1`.
+- 2026-11-05: Gate round 2 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `6d60ca29b`; critique `nexus_rdr/245-gate-critique-2026-11-05-r2`.
+- 2026-11-05: Gate round 3 — PASSED (1 Critical, 4 Significant, 0 ship-blocker(s)); commit `5d5149ec0`; critique `nexus_rdr/245-gate-critique-2026-11-05-r3`.
+- 2026-11-05: Accept, round-3 residual dispositions: residual 1 fixed in `f1a344f16` (fix check `nexus_rdr/245-fix-check-f33454580`); residual S1 to `nexus-wc4jj.1`; S2 to `nexus-wc4jj.2`; S3 to `nexus-wc4jj.3`; S4 to `nexus-wc4jj.4` (Phase 1).
