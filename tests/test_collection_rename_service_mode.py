@@ -51,7 +51,6 @@ _SERVER_COUNTS = {
     "taxonomy_centroids": 1,  # RDR-191 Phase 4 unified key (nexus-o8dil.19/.47)
     "document_aspects": 2,
     "document_highlights": 1,
-    "aspect_extraction_queue": 2,
     "catalog_documents": 1,
     "relevance_log": 2,
     "search_telemetry": 2,
@@ -82,7 +81,9 @@ def test_service_mode_uses_single_endpoint_and_maps_counts() -> None:
     assert counts["tax_meta"] == 1
     assert counts["chash"] == 3
     assert counts["aspects"] == 2
-    assert counts["aspect_queue"] == 2
+    # nexus-hbnml: the aspect-queue table left the cascade; its engine count is gone and
+    # no client-side key is mapped for it.
+    assert "aspect_queue" not in counts
     assert counts["highlights"] == 1
     assert counts["tax_centroids"] == 1  # unified "taxonomy_centroids" key
     assert counts["relevance_log"] == 2

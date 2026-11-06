@@ -14,6 +14,7 @@ import dev.nexus.service.vectors.SuppliedVectorMismatchActivity;
 import java.io.IOException;
 import java.util.Map;
 import java.util.function.Supplier;
+import dev.nexus.service.db.AspectQueueDrain;
 
 /**
  * GET /v1/status — bead nexus-s71lr, deliverable 2. Live embed-activity counters
@@ -130,6 +131,20 @@ public final class StatusHandler implements HttpHandler {
      */
     public StatusHandler embedPosture(Supplier<EmbedPosture> embedPosture) {
         this.embedPosture = embedPosture;
+        return this;
+    }
+
+    private volatile Supplier<AspectQueueDrain.Result> aspectQueue;       // nullable — keys omitted
+
+    /**
+     * Bead nexus-hbnml, [additive]: the retired {@code aspect_extraction_queue} table as the engine-start drain
+     * left it. {@code aspect_queue_table_present} (bool) and {@code aspect_queue_rows_retained} (the rows still in
+     * it; {@code -1} when it is present and its rows could not be counted; {@code 0} otherwise), plus
+     * {@code aspect_queue_rows_retained_reasons} (reason to count) when rows remain. Absent = an engine that
+     * predates the field, or one whose drain has not run yet. A client must not read an absent key as zero.
+     */
+    public StatusHandler aspectQueue(Supplier<AspectQueueDrain.Result> aspectQueue) {
+        this.aspectQueue = aspectQueue;
         return this;
     }
 
@@ -578,6 +593,26 @@ public final class StatusHandler implements HttpHandler {
             Boolean intact = chunksTenantIsolationIntact.get();
             if (intact != null) {
                 body.append(",\"chunks_tenant_isolation_intact\":").append(intact);
+            }
+        }
+
+        // nexus-hbnml, [additive]: the retired aspect queue table, after the engine-start drain.
+        Supplier<AspectQueueDrain.Result> aq = aspectQueue;
+        if (aq != null) {
+            AspectQueueDrain.Result r = aq.get();
+            if (r != null) {
+                body.append(",\"aspect_queue_table_present\":").append(r.tablePresent());
+                body.append(",\"aspect_queue_rows_retained\":").append(r.rowsRetained());
+                if (r.rowsRetained() != 0 && !r.reasons().isEmpty()) {
+                    body.append(",\"aspect_queue_rows_retained_reasons\":{");
+                    boolean firstReason = true;
+                    for (var e : new java.util.TreeMap<>(r.reasons()).entrySet()) {
+                        if (!firstReason) body.append(',');
+                        firstReason = false;
+                        body.append(HttpUtil.jsonString(e.getKey())).append(':').append(e.getValue());
+                    }
+                    body.append('}');
+                }
             }
         }
 

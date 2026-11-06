@@ -25,7 +25,6 @@ import static dev.nexus.service.db.ReembedJobRepository.DONE;
 import static dev.nexus.service.db.ReembedJobRepository.DONE_WITH_SKIPS;
 import static dev.nexus.service.db.ReembedJobRepository.FAILED;
 import static dev.nexus.service.db.ReembedJobRepository.RUNNING;
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -106,6 +105,50 @@ class ReembedCutoverTest extends ReembedFixture {
         assertThat(chunkCount(fx, fx.src())).as("the source's chunks went with it").isZero();
         assertThat(chunkCount(fx, fx.tgt())).isEqualTo(9);
         for (String d : docs) assertThat(physical(fx, d)).isEqualTo(fx.tgt());
+    }
+
+    /**
+     * nexus-hbnml: a re-embed cutover on an install that KEPT the retired queue table. The cutover's residue checks
+     * no longer read the table, and the source's delete runs after the {@code delete_started} marker, where a
+     * refusal cannot be undone. A leftover row naming the source would hit the table's collection foreign key
+     * (ON DELETE RESTRICT before aspects-005-1) and fail the delete with nothing able to explain it; with ON DELETE
+     * CASCADE the job ends {@code deleted} and the leftover row goes with the source it names.
+     */
+    @Test
+    void theSourceIsDeleted_whenAKeptQueueTableHoldsARowNamingIt() {
+        Fx fx = pair("keptq");
+        List<String> docs = seedDocs(fx, 3, 3);
+        su(ctx -> {
+            try {
+                dev.nexus.service.RetiredAspectQueueTable.restore(ctx);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            dev.nexus.service.RetiredAspectQueueTable.seed(ctx, fx.tenant(), fx.src(), docs.get(0), "p/kept.md",
+                "pending");
+            return null;
+        });
+        try {
+            Job started = startJob(fx, null, false);
+            Probe probe = new Probe();
+            ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
+            runner.setPhaseHookForTests(probe.hook(Set.of()));
+
+            runner.tick();
+
+            Job done = job(fx, started.jobId());
+            assertThat(done.state()).isEqualTo(DONE);
+            assertThat(done.disposition()).isEqualTo("deleted");
+            assertThat(probe.deletes).hasValue(1);
+            assertThat(catalog.getCollection(fx.tenant(), fx.src())).isNull();
+            assertThat(this.<Integer>su(ctx -> dev.nexus.service.RetiredAspectQueueTable.rows(ctx, fx.tenant(), fx.src())))
+                .as("the leftover row went with the source it names").isZero();
+        } finally {
+            su(ctx -> {
+                dev.nexus.service.RetiredAspectQueueTable.drop(ctx);
+                return null;
+            });
+        }
     }
 
     @Test
@@ -356,7 +399,6 @@ class ReembedCutoverTest extends ReembedFixture {
     }
 
     private static final String SAT_ASPECTS = "document_aspects";
-    private static final String SAT_QUEUE = "aspect_extraction_queue";
     private static final String SAT_HIGHLIGHTS = "document_highlights";
 
     /** One satellite row of {@code table} naming {@code collection}, for document {@code doc}. */
@@ -368,11 +410,6 @@ class ReembedCutoverTest extends ReembedFixture {
                     DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
                 .values(fx.tenant(), collection, "p/" + doc, OffsetDateTime.now(), "m1", "docling", doc,
                     "file:///p/" + doc).execute();
-            case SAT_QUEUE -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
-                    ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                    ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .values(fx.tenant(), collection, "p/" + doc, "pending", OffsetDateTime.now(), doc).execute();
             case SAT_HIGHLIGHTS -> ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
                     DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
@@ -387,15 +424,13 @@ class ReembedCutoverTest extends ReembedFixture {
         return su(ctx -> switch (table) {
             case SAT_ASPECTS -> ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(fx.tenant()),
                 DOCUMENT_ASPECTS.COLLECTION.eq(collection));
-            case SAT_QUEUE -> ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(fx.tenant()),
-                ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection));
             case SAT_HIGHLIGHTS -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(fx.tenant()),
                 DOCUMENT_HIGHLIGHTS.COLLECTION.eq(collection));
             default -> throw new IllegalArgumentException(table);
         });
     }
 
-    private static final List<String> SATELLITE_TABLES = List.of(SAT_ASPECTS, SAT_QUEUE, SAT_HIGHLIGHTS);
+    private static final List<String> SATELLITE_TABLES = List.of(SAT_ASPECTS, SAT_HIGHLIGHTS);
 
     /** A runner whose hook counts deletes and runs {@code during} on every phase. */
     private ReembedRunner probedRunner(Fx fx, Probe probe, java.util.function.Consumer<String> during) {

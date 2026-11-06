@@ -132,8 +132,7 @@ class ReembedRenameRefusalTest {
         "/v1/taxonomy/rename_collection",
         "/v1/telemetry/rename_collection",
         "/v1/aspects/rename_collection",
-        "/v1/aspects/highlights/rename_collection",
-        "/v1/aspects/queue/rename_collection");
+        "/v1/aspects/highlights/rename_collection");
 
     private void assert409Naming(HttpResponse<String> resp, Job job) throws Exception {
         assertThat(resp.statusCode()).isEqualTo(409);

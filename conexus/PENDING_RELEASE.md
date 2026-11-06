@@ -73,5 +73,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/nexus/reference.md` (nexus-pplwc): memory_search is PostgreSQL full-text search with no query grammar, not FTS5; the separator cites RDR-103, not ChromaDB.
 - `conexus/skills/serena-code-nav/SKILL.md` (nexus-pplwc): names only the Serena tools sn exposes under the claude-code context.
 - `conexus/skills/upgrade/SKILL.md` (nexus-pplwc): no longer calls the removed guided-upgrade, migrate-to-service and migration-audit primitives callable, nor cites a rollback verb that no code prints.
+- `conexus/skills/upgrade/SKILL.md` (nexus-hbnml): the rung list no longer names `aspect_queue_tuples`, which is retired with the aspect queue table.
 
 ## Deferred to the next client release

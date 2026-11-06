@@ -153,10 +153,12 @@ class T2Database:
         # (Gaps 1-3 per the RDR).
         #
         # Lock type: ``threading.RLock`` (reentrant), NOT ``threading.Lock``.
-        # Rationale: T1.2 guarded ``claim_batch`` AND the inner
-        # ``claim_next`` it calls in a loop. A plain Lock would self-deadlock
-        # when the outer claim_batch acquire re-enters for each claim_next
-        # call. RLock allows the same thread to acquire again without blocking.
+        # Rationale: a mutator that holds the lock and calls another guarded
+        # mutator would self-deadlock on a plain Lock (T1.2 guarded the then
+        # ``claim_batch`` and the ``claim_next`` it looped on; both went with
+        # the aspect queue table, nexus-hbnml, and the queue is now the engine's
+        # ``aspects`` tuple space, which the engine serializes). RLock allows
+        # the same thread to acquire again without blocking.
         #
         # Lock ordering (forward constraint):
         #   RENAME_LOCK -> per-store self._lock   (RENAME_LOCK acquired FIRST)
@@ -350,7 +352,6 @@ class T2Database:
         Tables updated:
           - ``chash_index.physical_collection``
           - ``document_aspects.collection`` (with collision-defense DELETE)
-          - ``aspect_extraction_queue.collection`` (with collision-defense DELETE)
           - ``topics.collection`` / ``topic_assignments.source_collection`` /
             ``taxonomy_meta.collection``
           - ``search_telemetry.collection``
@@ -396,7 +397,6 @@ class T2Database:
         counts: dict[str, int] = {
             "chash": 0,
             "aspects": 0,
-            "aspect_queue": 0,
             "highlights": 0,
             "tax_topics": 0,
             "tax_assignments": 0,
@@ -410,8 +410,6 @@ class T2Database:
         # document_aspects: collision defense (#1057 dedup-on-live-PK) is
         # engine-side now, with the rest of the leg.
         counts["aspects"] = self.document_aspects.rename_collection(old=old, new=new)
-
-        counts["aspect_queue"] = self.aspect_queue.rename_collection(old=old, new=new)
 
         counts["highlights"] = self.document_highlights.rename_collection(old=old, new=new)
 
@@ -843,55 +841,41 @@ class T2Database:
         claim_id: str | None = None,
         claimant: str | None = None,
     ) -> bool:
-        """Persist an extracted aspect and clear its queue row in one call.
+        """Persist an extracted aspect, and consume its task when claimed.
 
-        nexus-zir76 (RDR-128 follow-up): the aspect worker previously
-        upserted ``document_aspects`` and called ``aspect_queue.mark_done``
-        via two DIRECT ``memory.db`` writes, competing with the daemon for
-        the single WAL writer lock. When the direct ``mark_done`` (or the
-        failure path's ``mark_failed``) lost that race, the row was
-        orphaned ``in_progress`` until the ``reclaim_stale`` backstop.
-        Folding both writes into one daemon-routable method keeps the
-        worker off the direct write path and closes that window.
+        nexus-zir76 (RDR-128 follow-up): one method does the upsert and the
+        task's ack, so the worker makes a single routed call.
 
         *record_fields* is ``dataclasses.asdict(AspectRecord)`` — a plain
         JSON-shaped dict, because the daemon wire protocol decodes a
         dataclass argument to its field dict (it does not reconstruct the
         object). The ``AspectRecord`` is rebuilt here, server-side.
 
-        Returns the ``document_aspects.upsert`` result. ``mark_done`` is
-        idempotent, so a reclaim-driven re-extraction after a crash
-        between the two writes simply re-upserts — no duplicate, no stuck
-        row.
+        Returns the ``document_aspects.upsert`` result. A re-extraction after
+        a crash between the upsert and the ack simply re-upserts: no
+        duplicate, no stuck task.
 
-        RDR-138 T1.2 (nexus-ra2vj): wraps the ENTIRE call — both the
-        ``document_aspects.upsert`` AND the ``aspect_queue.mark_done`` —
-        under ONE ``RENAME_LOCK`` acquisition. This closes Gap 3: a
-        ``rename_collection_cascade`` cannot interleave between the two
-        writes (which would rename the document_aspects row under the OLD
-        collection name before mark_done can clear the queue row, leaving
-        an orphaned queue row under OLD). The ``mark_done`` call
-        re-acquires RENAME_LOCK via the now-guarded mutator; the RLock
-        makes the re-entrant acquisition safe.
+        RDR-138 T1.2 (nexus-ra2vj): wraps the ENTIRE call under ONE
+        ``RENAME_LOCK`` acquisition, so a ``rename_collection_cascade``
+        cannot interleave between the upsert and the ack.
 
         RDR-235 (bead nexus-5r2sc.3.1): the optional *claim_id* and
-        *claimant* are the tuple-queue era's persist call. They are plain
+        *claimant* are the tuple queue's persist call. They are plain
         ``str | None`` keywords because the daemon wire passes JSON-shaped
         values. Given together: the upsert goes through the engine's claim
         fence (``POST /v1/aspects/upsert`` with the pair), and then
-        ``self.tuples.ack(claim_id, claimant)`` consumes the task, in place
-        of ``aspect_queue.mark_done``; the whole call stays under the one
-        ``RENAME_LOCK``. A lapsed claim at the fence raises
-        :class:`~nexus.db.t2.http_tuple_store.ClaimNotFoundError` (404) or
+        ``self.tuples.ack(claim_id, claimant)`` consumes the task; the whole
+        call stays under the one ``RENAME_LOCK``. A lapsed claim at the fence
+        raises :class:`~nexus.db.t2.http_tuple_store.ClaimNotFoundError` (404) or
         ``ClaimOwnershipError`` / ``ClaimTaskMismatchError`` (403) with
-        nothing written, nothing acked and the table untouched; the caller
+        nothing written and nothing acked; the caller
         drops the result and does not retry. A lapse between the write and
         the ack leaves the row written and the ack raises
         ``ClaimNotFoundError``; the next claim of the task overwrites the
         same row. A retired collection name raises
         :class:`~nexus.collection_errors.SupersededCollectionWriteError`
         with the claim still live. Given one of the two: ``ValueError``.
-        Given neither: today's path, unchanged.
+        Given neither: the upsert alone (there is no task to consume).
         """
         from nexus.db.t2.records import AspectRecord  # noqa: PLC0415 — deferred import — circular-dep avoidance between T2 facade and stores
         if (claim_id is None) != (claimant is None):
@@ -900,12 +884,10 @@ class T2Database:
         with self.RENAME_LOCK:
             if claim_id is None:
                 upserted = self.document_aspects.upsert(record)
-                self.aspect_queue.mark_done(record.collection, record.source_path)
             else:
-                # RDR-235: the task is a tuple, so the write is fenced on the
-                # live claim (a 403/404 raises the typed error here, before
-                # the ack: no ack, no retry, no table touch) and the claim is
-                # consumed with the tuple ack instead of the table's mark_done.
+                # RDR-235: the write is fenced on the live claim (a 403/404
+                # raises the typed error here, before the ack: no ack, no
+                # retry) and the claim is consumed with the tuple ack.
                 upserted = self.document_aspects.upsert(
                     record, claim_id=claim_id, claimant=claimant,
                 )

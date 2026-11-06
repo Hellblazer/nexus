@@ -43,7 +43,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -335,14 +334,6 @@ class DocumentMoveTest {
             .execute());
     }
 
-    void seedQueue(String collection, String docId, String path, String status) {
-        su(ctx -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-            .values(TENANT, collection, path, status, OffsetDateTime.now(), docId)
-            .execute());
-    }
-
     void seedHighlight(String collection, String docId) {
         su(ctx -> ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
                 DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
@@ -356,14 +347,6 @@ class DocumentMoveTest {
         return su(ctx -> ctx.select(DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.MODEL_VERSION)
             .from(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
             .orderBy(DOCUMENT_ASPECTS.SOURCE_PATH).fetch(r -> r.value1() + "|" + r.value2() + "|" + r.value3()));
-    }
-
-    /** {@code collection|source_path|status} per queue row of the document, sorted. */
-    List<String> queueRows(String docId) {
-        return su(ctx -> ctx.select(ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                ASPECT_EXTRACTION_QUEUE.STATUS).from(ASPECT_EXTRACTION_QUEUE)
-            .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT)).and(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId))
-            .orderBy(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH).fetch(r -> r.value1() + "|" + r.value2() + "|" + r.value3()));
     }
 
     List<String> highlightCollections(String docId) {
@@ -383,10 +366,8 @@ class DocumentMoveTest {
         String moved = docs.get(0);
         String stays = docs.get(1);
         seedAspect(fx.src(), moved, "p/moved.md", "v1");
-        seedQueue(fx.src(), moved, "p/moved.md", "pending");
         seedHighlight(fx.src(), moved);
         seedAspect(fx.src(), stays, "p/stays.md", "v1");
-        seedQueue(fx.src(), stays, "p/stays.md", "pending");
         seedHighlight(fx.src(), stays);
         List<String> chashes = docTexts.get(moved).stream().map(DocumentMoveTest::ch).toList();
         int embedBefore = tgtEmbed.calls.get();
@@ -407,24 +388,22 @@ class DocumentMoveTest {
         assertThat(physical(moved)).isEqualTo(fx.tgt());
         // satellites follow the document
         assertThat(aspectRows(moved)).containsExactly(fx.tgt() + "|p/moved.md|v1");
-        assertThat(queueRows(moved)).containsExactly(fx.tgt() + "|p/moved.md|pending");
         assertThat(highlightCollections(moved)).containsExactly(fx.tgt());
         assertThat(satellites(r)).containsEntry("document_aspects_moved", 1).containsEntry("document_aspects_replaced", 0)
-            .containsEntry("aspect_extraction_queue_moved", 1).containsEntry("aspect_extraction_queue_replaced", 0)
-            .containsEntry("document_highlights_moved", 1);
+            .containsEntry("document_highlights_moved", 1)
+            .doesNotContainKey("aspect_extraction_queue_moved").doesNotContainKey("aspect_extraction_queue_replaced");
         // the source's chunks stay (LEAVE) until the job deletes the source
         assertThat(chunkCount(fx.src())).isEqualTo(sourceChunksBefore);
         // the other document is untouched in every table
         assertThat(manifestCollections(stays)).containsExactly(fx.src());
         assertThat(physical(stays)).isEqualTo(fx.src());
         assertThat(aspectRows(stays)).containsExactly(fx.src() + "|p/stays.md|v1");
-        assertThat(queueRows(stays)).containsExactly(fx.src() + "|p/stays.md|pending");
         assertThat(highlightCollections(stays)).containsExactly(fx.src());
     }
 
     @Test
     void noDocLessSatelliteRowCanExist_theRdrsPathArmMatchesNothing() {
-        // RDR-210 named a second arm for aspects and queue: an empty doc_id with a source_path equal to
+        // RDR-210 named a second arm for aspects and the (since retired) queue: an empty doc_id with a source_path equal to
         // the document's path. doc_id is NOT NULL with a composite foreign key to catalog_documents, so
         // such a row cannot be written, and the move matches by doc_id alone. If this ever stops failing,
         // the move needs the path arm (and a test that seeds it).
@@ -433,14 +412,9 @@ class DocumentMoveTest {
         // the NOT NULL half (23502) that keeps it out: pinned separately.
         assertThatThrownBy(() -> seedAspect(fx.src(), "", "p/orphan.md", "v1"))
             .hasMessageContaining("violates foreign key constraint");
-        assertThatThrownBy(() -> seedQueue(fx.src(), "", "p/orphan.md", "pending"))
-            .hasMessageContaining("violates foreign key constraint");
         assertThat(sqlState(catchThrowable(() -> seedAspect(fx.src(), "", "p/orphan.md", "v1")))).isEqualTo("23503");
-        assertThat(sqlState(catchThrowable(() -> seedQueue(fx.src(), "", "p/orphan.md", "pending")))).isEqualTo("23503");
         assertThat(sqlState(catchThrowable(() -> seedAspect(fx.src(), null, "p/orphan.md", "v1"))))
             .as("NULL doc_id on document_aspects: not_null_violation").isEqualTo("23502");
-        assertThat(sqlState(catchThrowable(() -> seedQueue(fx.src(), null, "p/orphan.md", "pending"))))
-            .as("NULL doc_id on aspect_extraction_queue: not_null_violation").isEqualTo("23502");
     }
 
     static String sqlState(Throwable t) {
@@ -458,21 +432,48 @@ class DocumentMoveTest {
     void sameUniqueKeyTargetRowStands_sourceRowIsDeleted() {
         Fx fx = pair("stands");
         String doc = seedDocs(fx, 1, 2).get(0);
-        // the unique key of aspects and queue is (tenant, collection, source_path)
+        // the unique key of aspects is (tenant, collection, source_path)
         seedAspect(fx.tgt(), doc, "p/a.md", "target-wins");
         seedAspect(fx.src(), doc, "p/a.md", "source-loses");
         seedAspect(fx.src(), doc, "p/b.md", "source-moves");
-        seedQueue(fx.tgt(), doc, "p/a.md", "failed");
-        seedQueue(fx.src(), doc, "p/a.md", "pending");
-        seedQueue(fx.src(), doc, "p/b.md", "pending");
 
         Map<String, Object> r = move(fx, List.of(doc));
 
         assertThat(failedIds(r)).isEmpty();
         assertThat(aspectRows(doc)).containsExactly(fx.tgt() + "|p/a.md|target-wins", fx.tgt() + "|p/b.md|source-moves");
-        assertThat(queueRows(doc)).containsExactly(fx.tgt() + "|p/a.md|failed", fx.tgt() + "|p/b.md|pending");
-        assertThat(satellites(r)).containsEntry("document_aspects_moved", 1).containsEntry("document_aspects_replaced", 1)
-            .containsEntry("aspect_extraction_queue_moved", 1).containsEntry("aspect_extraction_queue_replaced", 1);
+        assertThat(satellites(r)).containsEntry("document_aspects_moved", 1).containsEntry("document_aspects_replaced", 1);
+    }
+
+    /**
+     * nexus-hbnml: a document move on an install that KEPT the retired queue table. The move has no statement on the
+     * table any more; the document's leftover row names the source, which still exists (a move leaves the source's
+     * chunks for the job), so the move completes and the row is neither blocking nor lost.
+     */
+    @Test
+    void moveCompletes_withAKeptPopulatedQueueTable_andTheLeftoverRowIsNotLost() throws Exception {
+        Fx fx = pair("kept");
+        String doc = seedDocs(fx, 1, 2).get(0);
+        su(ctx -> {
+            try {
+                RetiredAspectQueueTable.restore(ctx);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            RetiredAspectQueueTable.seed(ctx, TENANT, fx.src(), doc, "p/kept.md", "pending");
+            return null;
+        });
+        try {
+            Map<String, Object> r = move(fx, List.of(doc));
+            assertThat(failedIds(r)).isEmpty();
+            assertThat(physical(doc)).isEqualTo(fx.tgt());
+            assertThat(this.<Integer>su(ctx -> RetiredAspectQueueTable.rows(ctx, TENANT, fx.src())))
+                .as("the leftover row is not lost").isEqualTo(1);
+        } finally {
+            su(ctx -> {
+                RetiredAspectQueueTable.drop(ctx);
+                return null;
+            });
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════════
@@ -924,7 +925,6 @@ class DocumentMoveTest {
         String failing = docs.get(0);
         String fine = docs.get(1);
         seedAspect(fx.src(), failing, "p/f.md", "v1");
-        seedQueue(fx.src(), failing, "p/f.md", "pending");
         seedHighlight(fx.src(), failing);
         List<String> chashesBefore = catalog.getManifest(TENANT, failing).stream().map(m -> (String) m.get("chash")).toList();
         // the seam fires after completeMove: physical_collection and the satellites are already updated
@@ -945,7 +945,6 @@ class DocumentMoveTest {
         assertThat(catalog.getManifest(TENANT, failing).stream().map(m -> (String) m.get("chash")).toList())
             .containsExactlyElementsOf(chashesBefore);
         assertThat(aspectRows(failing)).containsExactly(fx.src() + "|p/f.md|v1");
-        assertThat(queueRows(failing)).containsExactly(fx.src() + "|p/f.md|pending");
         assertThat(highlightCollections(failing)).containsExactly(fx.src());
         for (String text : docTexts.get(failing)) assertThat(chunkIn(fx.tgt(), ch(text))).as("no target chunk for the rolled-back document").isFalse();
         assertThat(chunkCount(fx.tgt())).as("only the other document's three chunks").isEqualTo(3);

@@ -76,70 +76,21 @@ _STOP_TICK_S: float = DEFAULT_HEARTBEAT_INTERVAL
 #: the real :class:`~nexus.aspect_worker.AspectExtractionWorker`.
 WorkerFactory = Callable[[], Any]
 
-#: Stale-claim reclaim window (RDR-173 P3 / review CRITICAL-2). MUST exceed the
-#: ``extract_aspects`` subprocess budget (``aspect_extractor`` runs ``claude -p``
-#: with ``timeout=180``) with margin — otherwise the reclaim loop would reset a
-#: row this daemon's own worker is ACTIVELY extracting back to ``pending``, a
-#: second worker would re-claim it, and the original ``mark_done`` (a DELETE by
-#: doc_id with no status guard) would silently cancel the second slot →
-#: double-extraction + wasted quota. 300s = 180s budget + 120s margin. The old
-#: in-process SQLite default (60s) was safe only because the reclaim shared the
-#: worker's process; the multi-process daemon makes the race real.
-_DEFAULT_STALE_TIMEOUT_S: int = 300
-
-#: Reclaim SWEEP cadence (s) — how often we ask the service to reclaim, distinct
-#: from the staleness threshold above. 30s matches the T2 predecessor
-#: (``_ASPECT_RECLAIM_INTERVAL``), so a row that crosses the staleness threshold
-#: is reclaimed within ~30s rather than waiting a full threshold-length interval.
-#: This is the BASE cadence: the loop backs off on consecutive empty sweeps
-#: (nexus-e0ypa, see :func:`next_reclaim_wait`) and returns here on any reclaim.
-_DEFAULT_RECLAIM_INTERVAL: float = 30.0
-
 #: How long (s) the engine may go unanswered before the daemon exits
-#: (nexus-wl9pk). The clock starts at a failed reclaim sweep and is cleared by
-#: any later success: a reclaim sweep that answers, or a claim round trip from
-#: the hosted worker (``note_engine_contact``), so a worker whose reclaim route
-#: alone fails while its claims work never exits. The daemon outlives
+#: (nexus-wl9pk). The clock starts at a failed claim round trip of the hosted
+#: worker (``note_engine_failure``) and is cleared by the next answered one
+#: (``note_engine_contact``). The daemon outlives
 #: ``nx daemon service stop`` by design and idles with the stack down, so the
 #: bound has to be far longer than a restart or an upgrade; it is the backstop
 #: for a worker whose engine is never coming back (a gate's throwaway service,
 #: a deleted install) and whose config directory still exists, which the
 #: directory check cannot see. Exiting costs nothing the design does not already
-#: accept: the next enqueue spawns a new worker, and its reclaim-first sweep
-#: returns whatever rows this one held. A failed sweep backs off to at most the
-#: stale window (300 s by default) and never past half the bound
-#: (:meth:`AspectWorkerDaemon._wait_cap`), so a recovered engine resets the
-#: clock before the bound. ``None`` or 0 turns the bound off.
+#: accept: the next enqueue spawns a new worker, and a claim of a task this one
+#: held lapses with its lease (the engine returns it on the next claim). A failed
+#: claim retries within 30 s (``aspect_worker._TUPLE_CLAIM_RETRY_S``), far inside
+#: the bound, so a recovered engine resets the clock before the bound. ``None`` or
+#: 0 turns the bound off.
 _ENGINE_UNREACHABLE_EXIT_S: float = 3600.0
-
-
-def next_reclaim_wait(
-    current: float, *, reclaimed: int | None, base: float, stale_timeout: float,
-) -> float:
-    """The wait before the next reclaim sweep (nexus-e0ypa, Sam 2026-09-08;
-    failure arm nexus-g5rz5).
-
-    A sweep that reclaimed rows resets the wait to *base*; an empty sweep
-    doubles it, capped at the stale window (a row cannot become reclaimable
-    faster than that, so sweeping an idle queue more often than the window
-    only samples what it cannot detect); a failed sweep (``reclaimed is
-    None``) doubles it on the same ladder to the same cap. A failure is no
-    evidence the queue is idle, but it is evidence the service cannot be
-    asked, and this daemon outlives ``nx daemon service stop`` by design
-    (RDR-224: the worker belongs to the store path, not to the service), so
-    with the stack stopped every sweep fails. Holding the base there made
-    2,880 failed attempts a day, each rebuilding the client, against a
-    service that was not there. The cap bounds the cost of the backoff:
-    once the service returns, the next sweep is at most one stale window
-    away, the same latency an idle queue already accepts. The base is a
-    floor: a window smaller than the base (test sizes) caps growth without
-    shrinking the sweep. On an idle queue this cuts the 30s cadence's 2,880
-    empty requests a day to about a tenth; on a live queue it keeps the
-    RDR-173 review-M1 promptness the 30s base was chosen for.
-    """
-    if reclaimed is not None and reclaimed > 0:
-        return base
-    return max(base, min(current * 2, float(stale_timeout)))
 
 
 #: Grace window (s) to catch a daemon child that crashes immediately after spawn
@@ -164,14 +115,6 @@ def _default_worker_factory() -> Any:
     from nexus.aspect_worker import AspectExtractionWorker  # noqa: PLC0415 - deferred; heavy import + avoids cycle
 
     return AspectExtractionWorker()
-
-
-def _default_aspect_queue(tenant: str) -> Any:
-    """Build the tenant-scoped service queue handle for the reclaim loop (RF-5).
-    Deferred import; the service endpoint resolves via the standard chain."""
-    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 - deferred; service-mode only
-
-    return HttpAspectQueue(tenant=tenant)
 
 
 def _process_age_ms_from(stat: str, uptime: str, clk_tck: int) -> float | None:
@@ -230,9 +173,6 @@ class AspectWorkerDaemon:
         worker_factory: WorkerFactory = _default_worker_factory,
         clock: Callable[[], float] = time.time,
         heartbeat_interval: float = _HEARTBEAT_INTERVAL,
-        stale_timeout_seconds: int = _DEFAULT_STALE_TIMEOUT_S,
-        reclaim_interval: float | None = None,
-        queue_factory: Callable[[], Any] | None = None,
         engine_unreachable_exit_seconds: float | None = _ENGINE_UNREACHABLE_EXIT_S,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -257,39 +197,14 @@ class AspectWorkerDaemon:
             clock=clock,
             ttl=ttl_for_tier(TIER),
         )
-        # RDR-173 P3 (RF-5): the daemon owns reclaim_stale. TWO decoupled knobs
-        # (review M1): _stale_timeout is the STALENESS THRESHOLD (a row must be
-        # in_progress longer than this to be reclaimed — kept > the 180s
-        # extraction budget to avoid false-reclaiming an in-flight row), while
-        # _reclaim_interval is the SWEEP CADENCE's BASE (how often we ask the
-        # service to reclaim while the queue is live: 30s, matching the T2
-        # predecessor, so a genuinely-stranded row recovers promptly once it
-        # crosses the threshold). On an idle queue the loop backs off from it
-        # up to the threshold (nexus-e0ypa, next_reclaim_wait), so the
-        # worst case for a row stranded on a long-idle queue is threshold +
-        # threshold, the same as a flat threshold-length cadence; the base
-        # buys promptness only while sweeps are finding rows.
-        self._stale_timeout = stale_timeout_seconds
-        self._reclaim_interval = (
-            float(reclaim_interval) if reclaim_interval is not None else _DEFAULT_RECLAIM_INTERVAL
-        )
-        # nexus-e0ypa: the wait actually used by the loop; backs off from the
-        # base on empty sweeps and returns to it on a reclaim.
-        self._current_reclaim_wait: float = self._reclaim_interval
-        self._queue_factory = (
-            queue_factory if queue_factory is not None
-            else (lambda: _default_aspect_queue(self._tenant))
-        )
         self._supervisor: ServiceSupervisor | None = None
         self._worker: Any = None
         self._hb_thread: threading.Thread | None = None
-        self._reclaim_queue: Any = None
-        self._reclaim_thread: threading.Thread | None = None
         self._stop = threading.Event()
-        # nexus-wl9pk: when the reclaim sweeps began failing with no success
-        # since (monotonic seconds), and whether the daemon is leaving because
-        # that outlasted the bound. The sweep thread writes, the heartbeat
-        # thread reads; a float assignment needs no lock.
+        # nexus-wl9pk: when the worker's claim round trips began failing with no
+        # answer since (monotonic seconds), and whether the daemon is leaving
+        # because that outlasted the bound. The worker thread writes, the
+        # heartbeat thread reads; a float assignment needs no lock.
         self._engine_unreachable_exit_s = (
             float(engine_unreachable_exit_seconds) if engine_unreachable_exit_seconds else None
         )
@@ -344,10 +259,14 @@ class AspectWorkerDaemon:
         if callable(_attach):
             _attach(self._on_worker_self_fault)
         # nexus-wl9pk: the worker reports each claim round trip the engine
-        # answered, which clears the unreachable clock the reclaim thread owns.
+        # answered, which clears the unreachable clock, and each one that failed,
+        # which starts it.
         _attach_contact = getattr(self._worker, "set_engine_contact_handler", None)
         if callable(_attach_contact):
             _attach_contact(self.note_engine_contact)
+        _attach_failure = getattr(self._worker, "set_engine_failure_handler", None)
+        if callable(_attach_failure):
+            _attach_failure(self.note_engine_failure)
         # Cleared BEFORE the worker starts: the worker thread can report a
         # self fault the instant it runs, and clearing afterwards would erase
         # that stand-down (nexus-yg70j).
@@ -360,16 +279,6 @@ class AspectWorkerDaemon:
             daemon=True,
         )
         self._hb_thread.start()
-        # RDR-173 P3 (RF-5): the reclaim owner. Built here (not in __init__) so a
-        # failed queue construction surfaces at start, alongside the lease.
-        self._reclaim_queue = self._queue_factory()
-        t_queue_built = self._clock()
-        self._reclaim_thread = threading.Thread(
-            target=self._reclaim_loop,
-            name=f"aspect-worker-reclaim-{self._tenant}",
-            daemon=True,
-        )
-        self._reclaim_thread.start()
         t_done = self._clock()
         _log.info(
             "aspect_worker_daemon.started",
@@ -377,7 +286,6 @@ class AspectWorkerDaemon:
             lease_publish_ms=round((t_lease - t_start) * 1000, 1),
             worker_build_ms=round((t_worker_built - t_lease) * 1000, 1),
             worker_start_ms=round((t_worker_started - t_worker_built) * 1000, 1),
-            queue_build_ms=round((t_queue_built - t_worker_started) * 1000, 1),
             total_startup_ms=round((t_done - t_start) * 1000, 1),
             process_age_ms=_process_age_ms(),
         )
@@ -388,8 +296,8 @@ class AspectWorkerDaemon:
 
         Setting ``_stop`` releases ``run_until_signal``, whose caller's
         ``finally`` calls :meth:`stop` and relinquishes the tenant lease. The
-        next enqueue then spawns a daemon with a fresh environment, and its
-        reclaim-first sweep returns the rows this worker was holding.
+        next enqueue then spawns a daemon with a fresh environment; the claims
+        this worker held are released by :meth:`stop` or lapse with their leases.
         """
         _log.error(
             "aspect_worker_daemon.worker_self_fault",
@@ -398,127 +306,18 @@ class AspectWorkerDaemon:
         )
         self._stop.set()
 
-    def _reclaim_loop(self) -> None:
-        """Periodically reset stranded ``in_progress`` rows to ``pending`` so a
-        worker death self-heals (RF-5). Per-tenant: the service applies the
-        tenant GUC. A transient failure is logged and the loop continues.
-
-        RECLAIM-FIRST, then sleep (review H1, mirroring the T2 predecessor
-        nexus-nhqll): a freshly (re)spawned daemon clears the stale-row backlog a
-        prior worker death left BEHIND immediately, rather than waiting a full
-        interval — in service mode this daemon is the SOLE reclaim owner.
-
-        RDR-235: this loop is the TABLE's reclaim and nothing else. It never
-        touches the ``aspects`` tuple queue: a tuple claim lives and dies by its
-        lease (the engine reclaims a lapsed one on the next claim and counts an
-        attempt), so there is nothing here to sweep for it. It keeps running in
-        every mode because the table can still hold rows the retired table producer
-        wrote (nexus-bpikw: an older client on another box, rows left by a rollback,
-        ``in_progress`` rows of an older worker), and the worker drains both
-        queues (gate S1)."""
-        while True:
-            self._reclaim_once()
-            if self._stop.wait(self._current_reclaim_wait):
-                break
-
-    def _reclaim_once(self) -> int | None:
-        """One reclaim sweep (the loop body; also the main-thread test seam).
-        Emits a structured signal when rows are reset (RDR-173 P5 observability,
-        nexus-xv5fl) so self-healing is observable, and logs a failure without
-        killing the loop. Returns the reclaimed count, or None when the sweep
-        failed, and updates ``_current_reclaim_wait`` from it (nexus-e0ypa).
-
-        nexus-64np7: rebuilds ``self._reclaim_queue`` on demand (here, not
-        just once at a failure site) so a rotated/expired credential baked
-        into the handle at construction time self-heals within one interval
-        instead of retrying the same broken client forever — this daemon is
-        long-lived and previously held ONE handle for its whole lifetime,
-        unlike the claim_batch path (mcp_infra._service_t2_write_locked)
-        which already evicts-and-rebuilds on any exception. The
-        2026-07-10 incident (401 every 30s for 23+ hours) had no recovery
-        short of a manual daemon restart before this fix. Retrying the
-        rebuild every call (rather than once at eviction time) also covers
-        a rebuild that itself transiently fails (e.g. the service is briefly
-        unreachable) — it gets another chance next interval instead of
-        going permanently silent.
-        """
-        if self._reclaim_queue is None:
-            try:
-                self._reclaim_queue = self._queue_factory()
-            except Exception as rebuild_exc:  # noqa: BLE001 - rebuild is best-effort; next interval retries
-                _log.warning(
-                    "aspect_worker_daemon.reclaim_queue_rebuild_failed",
-                    tenant=self._tenant, error=str(rebuild_exc),
-                )
-                self._back_off_after_failed_sweep()
-                return None
-        queue = self._reclaim_queue
-        try:
-            n = int(queue.reclaim_stale(self._stale_timeout) or 0)
-            self._unreachable_since = None
-            if n:
-                _log.info(
-                    "aspect_worker_daemon.reclaimed_stale",
-                    tenant=self._tenant, count=n, stale_timeout_seconds=self._stale_timeout,
-                )
-            previous = self._current_reclaim_wait
-            self._current_reclaim_wait = next_reclaim_wait(
-                previous, reclaimed=n,
-                base=self._reclaim_interval, stale_timeout=self._wait_cap(),
-            )
-            if self._current_reclaim_wait != previous:
-                # Review of 53923fe3e: the backoff is otherwise invisible in
-                # this daemon's own logs and only inferable from edge traffic.
-                _log.info(
-                    "aspect_worker_daemon.reclaim_wait_changed",
-                    tenant=self._tenant, reclaimed=n,
-                    previous_wait_seconds=previous,
-                    next_wait_seconds=self._current_reclaim_wait,
-                )
-            return n
-        except Exception as exc:  # noqa: BLE001 - reclaim is best-effort; keep the loop alive for the next interval
-            _log.warning(
-                "aspect_worker_daemon.reclaim_failed",
-                tenant=self._tenant, error=str(exc),
-            )
-            self._reclaim_queue = None
-            self._back_off_after_failed_sweep()
-            try:
-                queue.close()
-            except Exception as close_exc:  # noqa: BLE001 - best-effort teardown of an already-broken client
-                _log.warning(
-                    "aspect_worker_daemon.reclaim_queue_close_failed",
-                    tenant=self._tenant, error=str(close_exc),
-                )
-            return None
-
-    def _back_off_after_failed_sweep(self) -> None:
-        """Grow the wait after a sweep that could not reach the service (the
-        sweep raised, or the client could not be rebuilt). nexus-g5rz5. Also
-        starts the unreachable clock if no failure is already running it
-        (nexus-wl9pk)."""
-        if self._unreachable_since is None:
-            self._unreachable_since = self._monotonic()
-        self._current_reclaim_wait = next_reclaim_wait(
-            self._current_reclaim_wait, reclaimed=None,
-            base=self._reclaim_interval, stale_timeout=self._wait_cap(),
-        )
-
-    def _wait_cap(self) -> float:
-        """The longest wait between reclaim sweeps: the stale window, and when
-        the unreachable bound is on, at most half of it, so a long
-        ``--stale-timeout-seconds`` cannot put the next sweep past the bound
-        (nexus-wl9pk). :func:`next_reclaim_wait` keeps the base as its floor."""
-        bound = self._engine_unreachable_exit_s
-        cap = float(self._stale_timeout)
-        return min(cap, bound / 2.0) if bound else cap
-
     def note_engine_contact(self) -> None:
         """The hosted worker's claim round trip was answered: the engine is
-        reachable, whatever the reclaim route says. Clears the unreachable
-        clock (nexus-wl9pk). Called from the worker thread; a float
-        assignment needs no lock."""
+        reachable. Clears the unreachable clock (nexus-wl9pk). Called from the
+        worker thread; a float assignment needs no lock."""
         self._unreachable_since = None
+
+    def note_engine_failure(self) -> None:
+        """The hosted worker's claim round trip failed: starts the unreachable
+        clock if no earlier failure is already running it (nexus-wl9pk). The
+        next answered round trip clears it. Called from the worker thread."""
+        if self._unreachable_since is None:
+            self._unreachable_since = self._monotonic()
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
@@ -526,8 +325,8 @@ class AspectWorkerDaemon:
             self._supervisor.heartbeat_tick()
 
     def _engine_unreachable_past_bound(self) -> bool:
-        """True once every reclaim sweep since ``_unreachable_since`` failed and
-        that has lasted past the bound (nexus-wl9pk)."""
+        """True once every claim round trip since ``_unreachable_since`` failed
+        and that has lasted past the bound (nexus-wl9pk)."""
         since = self._unreachable_since
         bound = self._engine_unreachable_exit_s
         return since is not None and bound is not None and self._monotonic() - since >= bound
@@ -594,10 +393,9 @@ class AspectWorkerDaemon:
 
     def stop(self, timeout: float = 10.0) -> None:
         """Stop the worker, then relinquish the lease (idempotent)."""
-        # nexus-cd1k0.6 finding (6): captured once, up front, so both the
-        # reclaim-sweep guard below and the later mark/relinquish guard see
-        # the SAME answer even if a heartbeat tick flips `supervisor.fenced`
-        # mid-stop.
+        # nexus-cd1k0.6 finding (6): captured once, up front, so the
+        # mark/relinquish guard below sees the SAME answer even if a heartbeat
+        # tick flips `supervisor.fenced` mid-stop.
         fenced = self.is_fenced()
         self._stop.set()
         if self._hb_thread is not None:
@@ -608,24 +406,14 @@ class AspectWorkerDaemon:
                 # lingering reassert is not mistaken for a leak (code-review M1).
                 _log.warning("aspect_worker_daemon.heartbeat_thread_join_timeout", tenant=self._tenant)
             self._hb_thread = None
-        if self._reclaim_thread is not None:
-            # 5s (> a normal sub-second reclaim_stale SQL UPDATE) so a reclaim
-            # call in flight at shutdown finishes rather than spuriously logging a
-            # join timeout (review M2); the loop wakes immediately on _stop.
-            self._reclaim_thread.join(timeout=5.0)
-            if self._reclaim_thread.is_alive():
-                _log.warning("aspect_worker_daemon.reclaim_thread_join_timeout", tenant=self._tenant)
-            self._reclaim_thread = None
-        # Stop the worker BEFORE the final reclaim sweep so any row it was
-        # extracting counts as genuinely-undrained owned work.
+        # Stop the worker first, then release the claims it still holds.
         if self._worker is not None:
             try:
                 self._worker.stop(timeout=timeout)
             except Exception as exc:  # noqa: BLE001 - worker stop is best-effort during teardown
                 _log.warning("aspect_worker_daemon.worker_stop_failed", tenant=self._tenant, error=str(exc))
-            # RDR-235: the tuple half of the stop sweep. A claim on the aspects
-            # queue is the engine's, not a table row: the table sweep below
-            # cannot see it, and its lease would run out (an attempt counted)
+            # RDR-235: the stop sweep. A claim on the aspects queue is the
+            # engine's, and its lease would run out (an attempt counted)
             # before the next daemon could take the task. Each claim is released
             # by its own claim_id and claimant string, so this runs when FENCED
             # too: the claimant strings are this process's alone (W is unique per
@@ -651,72 +439,15 @@ class AspectWorkerDaemon:
                         tenant=self._tenant, error=str(exc),
                     )
             self._worker = None
-        if self._reclaim_queue is not None and not fenced and self._left_for_unreachable_engine:
-            # nexus-wl9pk: the engine has not answered for the whole bound; a
-            # final sweep would only wait out the client's timeouts. The rows
-            # this worker held return to pending through the next worker's
-            # reclaim-first sweep, as after a crash.
-            _log.info("aspect_worker_daemon.reclaim_skipped_engine_unreachable", tenant=self._tenant)
-        elif self._reclaim_queue is not None and not fenced:
-            # RDR-173 P5 item 3 (review): a final sweep makes the daemon's death
-            # OBSERVABLE — the rows it owned but could not finish — AND resets them
-            # to pending for the next daemon (recovery in one). reclaim_stale(0):
-            # the worker is already stopped, so any in_progress row is abandoned.
-            # count_attempt=False (nexus-j67ix.3): those rows did nothing wrong, so
-            # this sweep spends no retry attempt; only the periodic age-based sweep
-            # counts. The self-fault stand-down ends here too (it sets _stop), so a
-            # persistent host fault's respawn loop cannot terminal-fail the rows it
-            # keeps claiming.
-            #
-            # nexus-cd1k0.6 finding (6): reclaim_stale(0) resets ANY stale
-            # in_progress row in this tenant's scope, not only rows THIS
-            # daemon owned. When this daemon was FENCED -- a newer-generation
-            # owner already won the scope and may already be claiming/working
-            # rows -- an unconditional sweep here can reset the successor's
-            # freshly-claimed in-progress rows back to pending out from
-            # under it. A fenced loser does not own the scope any more (same
-            # reasoning as the mark/relinquish guard below); skip the sweep
-            # entirely and let the successor's own heartbeat/reclaim cadence
-            # own recovery.
-            try:
-                undrained = self._reclaim_queue.reclaim_stale(0, count_attempt=False)
-                if undrained:
-                    _log.warning(
-                        "aspect_worker_daemon.stopping_with_undrained_rows",
-                        tenant=self._tenant, count=undrained,
-                    )
-            except Exception as exc:  # noqa: BLE001 - shutdown diagnostic is best-effort
-                _log.warning("aspect_worker_daemon.final_reclaim_failed", tenant=self._tenant, error=str(exc))
-        elif self._reclaim_queue is not None:
-            # A fenced loser skips the sweep, so the rows it held wait for the
-            # successor's periodic age sweep, which counts them (nexus-j67ix.3):
-            # one attempt per row in a rare lease overlap, by design.
-            _log.info("aspect_worker_daemon.reclaim_skipped_fenced", tenant=self._tenant)
-        if self._reclaim_queue is not None:
-            try:
-                self._reclaim_queue.close()
-            except Exception as exc:  # noqa: BLE001 - queue close is best-effort during teardown
-                _log.warning("aspect_worker_daemon.reclaim_queue_close_failed", tenant=self._tenant, error=str(exc))
-            self._reclaim_queue = None
         supervisor = self._supervisor
         if supervisor is not None:
             # A fenced loser does not own the record; mark/relinquish are
             # owner-token-guarded no-ops there, but skip them to avoid noise.
             #
-            # nexus-cd1k0.6 review-wave2 follow-up: this used to re-read
-            # `supervisor.fenced` LIVE here, while the reclaim-sweep guard
-            # above uses `fenced`, captured ONCE at the top of this method.
-            # A fence transition landing in the window between that
-            # capture and this check (the heartbeat thread's last tick
-            # before it was joined, or -- with the join already done by
-            # this point -- any other path that could still flip the
-            # supervisor's own `fenced` flag) made the two guards
-            # disagree: the reclaim sweep decided under the PRE-fence
-            # answer while this decided under the POST-fence one. Both
-            # guards now use the SAME single captured value, so they can
-            # never disagree with each other -- the only question stop()
-            # answers is "was this daemon fenced when its shutdown
-            # began", not "is it fenced right now at every checkpoint".
+            # nexus-cd1k0.6 review-wave2 follow-up: `fenced` is captured ONCE
+            # at the top of this method, so the only question stop() answers
+            # is "was this daemon fenced when its shutdown began", not "is it
+            # fenced right now at every checkpoint".
             # Safe even when this races the true state: mark_shutting_down
             # /relinquish are already owner-token-guarded no-ops on a
             # record this daemon no longer owns (the comment above), so a
@@ -941,7 +672,7 @@ def ensure_aspect_worker_daemon(
         # the parent sees a clean return. Poll briefly so that fast crash is
         # LOUD at the spawning (store) process, not only in the child's crash log.
         # Best-effort + racy: a fast crash is caught; a slow one is missed (rarer)
-        # and the reclaim loop / next enqueue still recover the work.
+        # and the next enqueue recovers the work.
         _warn_if_child_died_fast(proc, tenant=tenant)
     return True
 
@@ -968,15 +699,13 @@ def run_aspect_worker_daemon(
     *,
     config_dir: Path,
     tenant: str,
-    stale_timeout_seconds: int = _DEFAULT_STALE_TIMEOUT_S,
     engine_unreachable_exit_seconds: float | None = _ENGINE_UNREACHABLE_EXIT_S,
 ) -> None:
     """Run an aspect-worker daemon to completion (start → serve → stop on signal).
 
     The spawn entrypoint. MUST be launched as a child of a process that already
     has ``claude -p`` credentials (RDR-173 credential model); it inherits that
-    environment. ``stale_timeout_seconds`` is the reclaim staleness threshold —
-    keep it above the ``claude -p`` extraction budget (review L3 operator knob).
+    environment.
     """
     import os  # noqa: PLC0415 — branch-local, startup-cost avoidance
 
@@ -1014,7 +743,6 @@ def run_aspect_worker_daemon(
     _require_extraction_credentials()
     daemon = AspectWorkerDaemon(
         config_dir=config_dir, tenant=tenant,
-        stale_timeout_seconds=stale_timeout_seconds,
         engine_unreachable_exit_seconds=engine_unreachable_exit_seconds,
     )
     try:
@@ -1111,8 +839,8 @@ def stop_aspect_workers(config_dir: Path | str) -> HolderStopResult:
     involved, so a worker serving another config directory is never touched. A
     live pid that fails the re-check is reported in ``foreign`` and its lease
     stays (``keep_foreign_leases``): the stop must not read as done. A gate's
-    cleanup calls it BEFORE it stops the service, so the worker's final reclaim
-    sweep still has an engine.
+    cleanup calls it BEFORE it stops the service, so the worker's stop sweep
+    (releasing its held claims) still has an engine.
     """
     from nexus.daemon.service_registry import stop_tier_holders  # noqa: PLC0415 — deferred; stop-path only
 

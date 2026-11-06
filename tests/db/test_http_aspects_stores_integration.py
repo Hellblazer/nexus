@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cross-language integration test for HttpDocumentAspectsStore, HttpDocumentHighlightsStore,
-and HttpAspectQueue against the real Java service.
+"""Cross-language integration test for HttpDocumentAspectsStore and HttpDocumentHighlightsStore
+against the real Java service. The aspect queue's table tests left with the table (nexus-hbnml);
+the tuple producer is pinned by tests/test_http_aspect_queue_tuples_producer.py.
 
 Requires (on THIS machine — darwin/aarch64 with JDK25 GraalVM):
   - PostgreSQL binaries discoverable (NEXUS_PG_BIN / Homebrew / system dirs / PATH)
@@ -21,12 +22,8 @@ What is exercised (bead nexus-gmiaf.15 gate requirements):
   c) document_aspects rename_collection
   d) document_aspects salient_sentences set/get
   e) document_highlights upsert/get/get_by_source_uri/list
-  f) queue enqueue / claim_next / mark_done round-trip
-  g) QUEUE CONCURRENCY (headline fix): N concurrent claim_next calls each get a DISTINCT
-     row — none double-claimed, proving FOR UPDATE SKIP LOCKED works against real PG
   h) Cross-tenant RLS negative: tenant A aspects invisible to tenant B; fail-closed unset GUC
   i) ETL fidelity: import_aspect preserves timestamps verbatim; idempotent re-import no-clobber
-  j) ETL fidelity: import_queue_row never downgrades in_progress; GREATEST for retry_count
   k) promotion_log record/list round-trip
   l) document_aspects confidence < 0.3 gate (upsert rejected)
   x) cross-store FK enforcement: upsert with unknown doc_id is rejected (fk_doc_aspects_catalog_doc)
@@ -213,8 +210,7 @@ def service(pg_instance):
 def _seed_catalog_docs(pg_instance, service):
     """Seed catalog_documents rows referenced by the aspects tests.
 
-    document_aspects.doc_id and aspect_extraction_queue.doc_id carry real cross-store
-    FKs (fk_doc_aspects_catalog_doc, fk_aspect_queue_catalog_doc) added by
+    document_aspects.doc_id carries a real cross-store FK (fk_doc_aspects_catalog_doc) added by
     fk-001-catalog-cross-store.xml Liquibase changeset.  Non-null doc_id values must
     have a matching nexus.catalog_documents(tenant_id, tumbler) row or the INSERT is
     rejected by Postgres FK enforcement.
@@ -222,8 +218,6 @@ def _seed_catalog_docs(pg_instance, service):
     Superuser psql bypasses FORCE RLS; depends on `service` so Liquibase has created
     catalog_documents first.
 
-    Queue rows all use a NULL doc_id (NULL satisfies the FK), so the queue tests
-    (test_f, test_j unique-per-run, concurrency) need no catalog seed.
     """
     docs = [
         # document_aspects test doc_ids
@@ -263,7 +257,7 @@ def _register_collections(service):
 
     The engine no longer auto-registers a collection on first write.
     ``HttpDocumentAspectsStore.upsert`` / ``HttpDocumentHighlightsStore
-    .upsert`` / ``HttpAspectQueue.enqueue`` self-heal via
+    .upsert`` self-heal via
     ``write_with_registration_retry``, but its DEFAULT registrar
     (``nexus.catalog.factory.make_catalog_writer``) resolves ``NX_SERVICE_URL``
     from the AMBIENT env, not from this module's own ``base_url`` -- either
@@ -287,11 +281,6 @@ def _register_collections(service):
         "knowledge__rls-inttest",
         "knowledge__etl-inttest",
         "knowledge__highlights-inttest",
-        "knowledge__concurrency-inttest",
-        "knowledge__queue-inttest",
-        "knowledge__claimbatch-inttest",
-        "knowledge__queue-etl-inttest",
-        "knowledge__queue-fk-pos-inttest",
     )
     saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
     os.environ["NX_LOCAL"] = "1"
@@ -338,16 +327,6 @@ def highlights_store(service):
     from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
     base_url, token, _ = service
     s = HttpDocumentHighlightsStore(base_url=base_url, tenant="default", _token=token)
-    yield s
-    s.close()
-
-
-@pytest.fixture(scope="module")
-def queue_store(service):
-    """HttpAspectQueue connected to the real Java service."""
-    from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-    base_url, token, _ = service
-    s = HttpAspectQueue(base_url=base_url, tenant="default", _token=token)
     yield s
     s.close()
 
@@ -549,273 +528,6 @@ class TestDocumentHighlightsMVV:
         assert "doc-highlights-inttest-e" in doc_ids
 
 
-class TestQueueMVV:
-    """Minimum viable verification for HttpAspectQueue (gmiaf.15 gate f, j)."""
-
-    def test_f_enqueue_claim_mark_done(self, service) -> None:
-        """f) enqueue -> claim_next -> mark_done round-trip.
-
-        Uses a direct HTTP client to access the raw response (status field) since
-        QueueRow is a NamedTuple and does not carry status.
-        """
-        import httpx, json as _json, time as _time
-        base_url, token, _ = service
-        # AuthFilter (Phase E, nexus-gmiaf.32.5) binds tenant to the presented
-        # bearer token server-side; the per-test X-Nexus-Tenant value below is
-        # NOT honored (it's logged at debug on mismatch) — every call using the
-        # root NX_SERVICE_TOKEN actually lands in tenant='default' regardless
-        # of this header. "queue-mvv-f-..." only keeps source_path/content_hash
-        # collision-free across parallel test runs. doc_id must therefore
-        # reference a catalog_documents row seeded under 'default' —
-        # "doc-fk-control" (seeded in _seed_catalog_docs) fits.
-        tenant = f"queue-mvv-f-{_time.time_ns()}"
-        doc_id = "doc-fk-control"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        with httpx.Client(base_url=base_url, headers=headers) as client:
-            # hygiene-001: doc_id is NOT NULL on aspect_extraction_queue now,
-            # and must reference a real catalog_documents row for this tenant.
-            enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
-                "collection": "knowledge__queue-inttest",
-                "source_path": "/queue/doc-f.pdf",
-                "content_hash": "hash-f",
-                "content": "Content F",
-                "doc_id": doc_id,
-            }))
-            assert enq.status_code == 200, f"enqueue failed: {enq.text}"
-
-            # Claim
-            claim_resp = client.post("/v1/aspects/queue/claim_next", content=_json.dumps({}))
-            assert claim_resp.status_code == 200
-            data = claim_resp.json()
-            assert data.get("claimed") is True, f"Expected claimed=true, got {data}"
-            row = data["row"]
-            assert row["status"] == "in_progress", f"Claimed row must be in_progress: {row}"
-
-            # Mark done
-            done = client.post("/v1/aspects/queue/mark_done", content=_json.dumps({
-                "collection": row["collection"],
-                "source_path": row["source_path"],
-            }))
-            assert done.status_code == 200
-
-    def test_claim_batch_client_roundtrip_real_service(self, service, monkeypatch: pytest.MonkeyPatch) -> None:
-        """nexus-575kd boundary guard: HttpAspectQueue.claim_batch (the CLIENT
-        method the aspect worker polls with) must parse the real service's
-        BARE-ARRAY /claim_batch response.
-
-        The pre-fix unit mock returned a {"rows":[...]} envelope the service
-        never sends, so it stayed green while the live service-mode worker
-        claimed nothing (claim_batch raised every poll -> document_aspects=0,
-        ALL service-mode aspect extraction dead). Only a real round-trip
-        through the client catches the contract — exactly the 'integration over
-        mocks' lesson. Isolated tenant so claim_batch is deterministic.
-
-        AuthFilter binds tenant to the presented bearer token server-side
-        (Phase E, nexus-gmiaf.32.5); the `tenant=` constructor arg below only
-        sets the X-Nexus-Tenant header, which is not honored for a non-minted
-        tenant token — the root token used here always resolves to 'default'.
-        doc_id must therefore reference a 'default'-tenant catalog document —
-        "doc-fk-control" (seeded in _seed_catalog_docs) fits."""
-        import time as _time
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-
-        # The subject is the TABLE client's wire shape. The table producer is retired
-        # (nexus-bpikw step A), so the seam writes the rows: under the tuple producer
-        # the enqueue writes tasks and claim_batch's table has nothing to return.
-        from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-        use_table_producer(monkeypatch)
-        base_url, token, _ = service
-        tenant = f"queue-claimbatch-{_time.time_ns()}"
-        doc_id = "doc-fk-control"
-        q = HttpAspectQueue(base_url=base_url, tenant=tenant, _token=token)
-        coll = "knowledge__claimbatch-inttest"
-        for i in range(3):
-            q.enqueue(coll, f"/cb/doc{i}.pdf", content_hash=f"h{i}", content="x", doc_id=doc_id)
-
-        rows = q.claim_batch(10)
-        assert len(rows) == 3, f"client claim_batch must return the 3 enqueued rows, got {rows}"
-        assert sorted(r.source_path for r in rows) == [
-            "/cb/doc0.pdf", "/cb/doc1.pdf", "/cb/doc2.pdf",
-        ]
-
-    def test_j_etl_never_downgrade_in_progress(self, service) -> None:
-        """j) import_queue_row never downgrades in_progress rows; GREATEST retry_count.
-
-        Uses a fresh unique source_path so claim_next deterministically grabs
-        this row (AuthFilter binds every call on this root token to
-        tenant='default' regardless of X-Nexus-Tenant — see test_f's
-        comment — so real isolation comes from no other 'default'-tenant
-        pending row existing yet at this point in the file's test order, not
-        from the tenant header). doc_id references the 'default'-tenant
-        "doc-fk-control" catalog document seeded in _seed_catalog_docs.
-        """
-        import httpx, json as _json, time as _time
-        base_url, token, _ = service
-        unique = f"{_time.time_ns()}"
-        tenant = f"queue-etl-{unique}"
-        unique_path = f"/etl/{unique}.pdf"
-        doc_id = "doc-fk-control"
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        with httpx.Client(base_url=base_url, headers=headers) as client:
-            # hygiene-001: doc_id is NOT NULL on aspect_extraction_queue now;
-            # must reference a real catalog_documents row for this tenant.
-            enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
-                "collection": "knowledge__queue-etl-inttest",
-                "source_path": unique_path,
-                "content_hash": f"hash-{unique}",
-                "content": "ETL content",
-                "doc_id": doc_id,
-            }))
-            assert enq.status_code == 200
-
-            # Claim it (must get our unique row since tenant is isolated)
-            claim_resp = client.post("/v1/aspects/queue/claim_next", content=_json.dumps({}))
-            assert claim_resp.status_code == 200
-            data = claim_resp.json()
-            assert data.get("claimed") is True, f"Expected claimed=true, got {data}"
-            row = data["row"]
-            assert row["source_path"] == unique_path, (
-                f"Expected to claim {unique_path}, got {row['source_path']}"
-            )
-            assert row["status"] == "in_progress"
-
-            # Try to import with 'pending' status — must NOT downgrade to pending.
-            # hygiene-001: the ON CONFLICT DO UPDATE arm sets doc_id =
-            # EXCLUDED.doc_id, and the column is NOT NULL now, so a re-import
-            # must re-supply the same doc_id the row already carries.
-            imp = client.post("/v1/aspects/queue/import", content=_json.dumps({
-                "collection": "knowledge__queue-etl-inttest",
-                "source_path": unique_path,
-                "doc_id": doc_id,
-                "content_hash": f"hash-{unique}",
-                "content": "ETL content",
-                "status": "pending",
-                "retry_count": 0,
-                "enqueued_at": "2026-01-01T00:00:00Z",
-                "last_attempt_at": None,
-                "last_error": None,
-            }))
-            assert imp.status_code == 200
-
-            # Check list_pending — should be 0 because our row is in_progress (not downgraded)
-            count_resp = client.get("/v1/aspects/queue/pending_count")
-            count = count_resp.json().get("count", -1)
-            assert count == 0, (
-                f"pending_count must be 0 after import (row must stay in_progress, not downgraded); got {count}"
-            )
-
-            # Mark done to clean up
-            client.post("/v1/aspects/queue/mark_done", content=_json.dumps({
-                "collection": "knowledge__queue-etl-inttest",
-                "source_path": unique_path,
-            }))
-
-
-class TestQueueConcurrency:
-    """HEADLINE gate: N concurrent claim_next calls each get a DISTINCT row.
-
-    Proves FOR UPDATE SKIP LOCKED works against real Postgres — no double-claims.
-    Uses a dedicated isolated tenant to avoid interference from other tests.
-    Uses direct HTTP calls so we get the full row map (including status field).
-    """
-
-    _N_ROWS    = 8
-    _N_WORKERS = 6
-    _COLL      = "knowledge__concurrency-inttest"
-
-    @pytest.fixture(autouse=True, scope="class")
-    def seed_concurrency_queue(self, service) -> None:
-        """Seed N rows for the concurrency tenant via direct HTTP.
-
-        hygiene-001: doc_id is NOT NULL on aspect_extraction_queue now, and
-        fk_aspect_queue_catalog_doc requires a real catalog_documents row.
-        AuthFilter binds every call on this root token to tenant='default'
-        regardless of X-Nexus-Tenant (Phase E, nexus-gmiaf.32.5 — see
-        test_f's comment in TestQueueMVV); "isolated" here means no other
-        'default'-tenant pending row exists yet at this point in the file's
-        test order (TestQueueMVV fully drains its own rows), not real
-        per-tenant isolation. doc_id references the already-seeded
-        'default'-tenant "doc-fk-control" catalog document.
-        """
-        import httpx, json as _json, time as _time
-        base_url, token, _ = service
-        tenant = f"concurrency-tenant-{_time.time_ns()}"
-        doc_id = "doc-fk-control"
-        self.__class__._base_url = base_url
-        self.__class__._token = token
-        self.__class__._tenant = tenant
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        with httpx.Client(base_url=base_url, headers=headers) as client:
-            for i in range(self._N_ROWS):
-                resp = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
-                    "collection": self._COLL,
-                    "source_path": f"/concurrent/doc-{i}.pdf",
-                    "content_hash": f"hash-{i}",
-                    "content": f"Content {i}",
-                    "doc_id": doc_id,
-                }))
-                assert resp.status_code == 200, f"seed enqueue failed: {resp.text}"
-
-    def test_g_concurrent_claim_distinct_rows(self) -> None:
-        """g) N concurrent claim_next calls each get a DISTINCT row — no double-claims."""
-        import httpx, json as _json
-
-        base_url = self.__class__._base_url
-        token    = self.__class__._token
-        tenant   = self.__class__._tenant
-
-        def claim_one(_: int) -> dict | None:
-            """Each worker gets its own httpx.Client for true concurrency."""
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "X-Nexus-Tenant": tenant,
-                "Content-Type": "application/json",
-            }
-            with httpx.Client(base_url=base_url, headers=headers, timeout=10.0) as client:
-                resp = client.post("/v1/aspects/queue/claim_next", content=_json.dumps({}))
-                if resp.status_code != 200:
-                    return None
-                data = resp.json()
-                if not data.get("claimed"):
-                    return None
-                return data.get("row")
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self._N_WORKERS) as ex:
-            futures = list(ex.map(claim_one, range(self._N_WORKERS)))
-
-        claimed = [r for r in futures if r is not None]
-        assert len(claimed) == self._N_WORKERS, (
-            f"Expected {self._N_WORKERS} claimed rows, got {len(claimed)} "
-            f"(some workers got None — claim_next must return a row for every available row)"
-        )
-
-        source_paths = [r["source_path"] for r in claimed]
-        assert len(source_paths) == len(set(source_paths)), (
-            f"DOUBLE CLAIM DETECTED — FOR UPDATE SKIP LOCKED failure: {source_paths}"
-        )
-
-        # All claimed must be in_progress
-        for row in claimed:
-            assert row["status"] == "in_progress", (
-                f"Claimed row must be in_progress, got {row['status']}: {row['source_path']}"
-            )
-
-
 class TestRLSIsolation:
     """Cross-tenant RLS isolation (gmiaf.15 gate h)."""
 
@@ -880,46 +592,6 @@ class TestETLFidelity:
         # document_aspects import is EXCLUDED.* overwrite — last-writer-wins for confidence
         # The test verifies the row persists (no crash, no duplicate) and confidence is a number
         assert isinstance(fetched2.confidence, float), "confidence must remain a float after re-import"
-
-
-class TestQueuePositiveFK:
-    """Positive queue FK path: enqueue with a known-good catalog doc_id must succeed."""
-
-    def test_y_enqueue_with_valid_catalog_doc_id_succeeds(self, service) -> None:
-        """y) FK acceptance path: enqueue with a seeded catalog doc_id is NOT rejected.
-
-        The queue tests in TestQueueMVV all omit doc_id (NULL, which satisfies
-        fk_aspect_queue_catalog_doc trivially).  This test proves the non-NULL path:
-        a real tumbler that IS in catalog_documents must be accepted.  Without this
-        test the FK acceptance branch is untested and a misconfigured FK that rejects
-        ALL non-null doc_ids would go undetected.
-
-        doc-fk-control is seeded in _seed_catalog_docs.
-        """
-        import httpx, json as _json, time as _time
-        base_url, token, _ = service
-        tenant = f"queue-fk-pos-{_time.time_ns()}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        # _seed_catalog_docs seeds under tenant='default'. We must seed for this
-        # per-run tenant too, or use tenant='default'.  Use tenant='default' to
-        # leverage the already-seeded row.
-        headers["X-Nexus-Tenant"] = "default"
-        with httpx.Client(base_url=base_url, headers=headers) as client:
-            enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
-                "collection": "knowledge__queue-fk-pos-inttest",
-                "source_path": f"/queue/fk-pos-{_time.time_ns()}.pdf",
-                "content_hash": f"hash-fk-pos-{_time.time_ns()}",
-                "content": "FK positive control content",
-                "doc_id": "doc-fk-control",
-            }))
-            assert enq.status_code == 200, (
-                f"enqueue with a seeded doc_id must succeed (HTTP 200); "
-                f"got {enq.status_code}: {enq.text}"
-            )
 
 
 class TestPromotionLog:

@@ -19,8 +19,6 @@ from nexus.db import gateway_hold
 from nexus.db.t2 import _refreshable_client as rc
 from nexus.db.t2.http_aspect_queue import aspects_census
 from nexus.db.t2.http_tuple_store import CensusTimeoutError, HttpTupleStore
-from nexus.upgrade_ladder.protocol import ConvergeOutcome
-from nexus.upgrade_ladder.rungs.aspect_queue_tuples import AspectQueueTuplesRung
 from tests._module_seam import module_time
 
 _CENSUS_BODY = {
@@ -124,54 +122,3 @@ class TestAspectsCensusPassesTheFlag:
         assert t.requests == 2
 
 
-class TestTheRungsDetectOverTheRealStore:
-    """The whole path: the rung's detect() over a real ``HttpTupleStore`` on the counting transport."""
-
-    @pytest.mark.parametrize("respond", [_read_timeout, _census_timeout_503], ids=["read-timeout", "census-503"])
-    def test_detect_sends_the_census_once_and_says_pending(self, respond) -> None:
-        t = _Transport(respond)
-        rung = AspectQueueTuplesRung(
-            mode_fn=lambda: "tuples", tuples_factory=lambda: _store(t),
-            queue_factory=lambda: pytest.fail("no waiting-row read after the census failed"),
-            record_fn=lambda: None,
-        )
-        status = rung.detect()
-        assert (status.applicable, status.converged) == (True, False)
-        assert "census" in status.pending_detail
-        assert t.requests == 1
-
-
-class _Report:
-    def emit(self, event: str, **fields: object) -> None:
-        pass
-
-
-class TestTheRungsConvergeAndVerifyOverTheRealStore:
-    """converge's census is one attempt (a timeout defers; retries only delay it, and the 503 hold slows the whole
-    box); verify's census keeps the mixin's retries (it gates a move already made, and has no deferral)."""
-
-    @staticmethod
-    def _rung(t: _Transport) -> AspectQueueTuplesRung:
-        return AspectQueueTuplesRung(
-            mode_fn=lambda: "tuples", tuples_factory=lambda: _store(t),
-            queue_factory=lambda: pytest.fail("no waiting-row read after the census failed"),
-            record_fn=lambda: None,
-        )
-
-    @pytest.mark.parametrize("respond", [_read_timeout, _census_timeout_503], ids=["read-timeout", "census-503"])
-    def test_converge_sends_the_census_once_with_no_backoff_or_hold_and_defers(
-        self, respond, _no_sleep_no_shared_hold, tmp_path,
-    ) -> None:
-        t = _Transport(respond)
-        result = self._rung(t).converge(_Report())
-        assert result.outcome is ConvergeOutcome.DEFERRED
-        assert t.requests == 1
-        assert _no_sleep_no_shared_hold == [], "no backoff sleep"
-        assert not (tmp_path / gateway_hold.HOLD_FILENAME).exists(), "no box-wide hold"
-
-    def test_verify_keeps_the_retries_the_control(self, _no_sleep_no_shared_hold) -> None:
-        t = _Transport(_census_timeout_503)
-        rung = self._rung(t)
-        assert rung.verify() is False
-        assert "could not read" in rung.verify_detail()
-        assert t.requests > 1 and _no_sleep_no_shared_hold, "verify's census is not single-shot"

@@ -14,7 +14,7 @@ port, so no write reaches any store):
 
 * the worker exits within seconds of its config directory being removed, and
   does not bring the directory back;
-* the worker exits once every reclaim sweep has failed for the stated bound,
+* the worker exits once its claim round trips have failed for the stated bound,
   and not before; with the bound off it stays up (the non-vacuity control);
 * ``nx daemon aspect-worker stop --config-dir D`` stops the worker leased in D,
   by its lease record, and leaves a worker serving another directory alone.
@@ -23,6 +23,7 @@ Every process a test starts is stopped by pid in its own ``finally``.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import shutil
 import socket
@@ -130,19 +131,44 @@ def test_dir_exists_reads_a_stat_error_as_present(tmp_path: Path, monkeypatch: p
 # ── unit: the daemon's two exits, on fakes ───────────────────────────────────
 
 
-class _Worker:
-    def start(self) -> None: ...
-    def stop(self, timeout: float = 0) -> None: ...
+class _ClaimWorker:
+    """A hosted worker that reports claim outcomes through the two hooks the
+    daemon attaches (nexus-wl9pk). ``outcome`` runs once per tick on the worker
+    thread and returns ``"failure"``, ``"contact"`` or ``None`` (no claim)."""
 
+    def __init__(self, outcome: Callable[[], str | None]) -> None:
+        self._outcome = outcome
+        self.on_failure: Callable[[], None] | None = None
+        self.on_contact: Callable[[], None] | None = None
+        self.released = 0
+        self._stopping = False
+        self._thread: threading.Thread | None = None
 
-class _Queue:
-    def __init__(self, behaviour: Callable[[], int]) -> None:
-        self._behaviour = behaviour
+    def set_engine_failure_handler(self, handler: Callable[[], None] | None) -> None:
+        self.on_failure = handler
 
-    def reclaim_stale(self, _t: float, *, count_attempt: bool = True) -> int:
-        return self._behaviour()
+    def set_engine_contact_handler(self, handler: Callable[[], None] | None) -> None:
+        self.on_contact = handler
 
-    def close(self) -> None: ...
+    def start(self) -> None:
+        def _claims() -> None:
+            while not self._stopping:
+                verdict = self._outcome()
+                if verdict == "failure" and self.on_failure is not None:
+                    self.on_failure()
+                elif verdict == "contact" and self.on_contact is not None:
+                    self.on_contact()
+                time.sleep(0.02)
+
+        self._thread = threading.Thread(target=_claims, daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 0) -> None:
+        self._stopping = True
+
+    def release_held_claims(self) -> int:
+        self.released += 1
+        return 0
 
 
 class _Mono:
@@ -153,12 +179,13 @@ class _Mono:
         return self.now
 
 
-def _daemon(cfg: Path, behaviour: Callable[[], int], mono: _Mono, bound: float | None = 100.0) -> awd.AspectWorkerDaemon:
+def _daemon(
+    cfg: Path, worker: _ClaimWorker, mono: _Mono, bound: float | None = 100.0,
+) -> awd.AspectWorkerDaemon:
     return awd.AspectWorkerDaemon(
         config_dir=cfg, tenant="default",
-        worker_factory=_Worker, queue_factory=lambda: _Queue(behaviour),
-        heartbeat_interval=0.02, reclaim_interval=3600.0,
-        engine_unreachable_exit_seconds=bound, monotonic=mono,
+        worker_factory=lambda: worker,
+        heartbeat_interval=0.02, engine_unreachable_exit_seconds=bound, monotonic=mono,
     )
 
 
@@ -173,7 +200,7 @@ def _wait(pred: Callable[[], bool], seconds: float = 5.0) -> bool:
 
 def test_the_daemon_requests_its_own_stop_when_its_directory_is_removed(tmp_path: Path) -> None:
     cfg = tmp_path / "cfg"
-    d = _daemon(cfg, lambda: 0, _Mono())
+    d = _daemon(cfg, _ClaimWorker(lambda: None), _Mono())
     d.start()
     try:
         assert not d._stop.is_set()
@@ -184,20 +211,20 @@ def test_the_daemon_requests_its_own_stop_when_its_directory_is_removed(tmp_path
     assert not cfg.exists(), "stop() must not mark or relinquish into a directory that is gone"
 
 
-def test_unreachable_sweeps_stop_the_daemon_only_after_the_bound(tmp_path: Path) -> None:
+def test_failed_claims_stop_the_daemon_only_after_the_bound(tmp_path: Path) -> None:
     mono = _Mono()
     calls = {"n": 0}
 
-    def _down() -> int:
+    def _down() -> str:
         calls["n"] += 1
-        raise ConnectionError("engine unreachable")
+        return "failure"
 
-    d = _daemon(tmp_path / "cfg", _down, mono, bound=100.0)
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(_down), mono, bound=100.0)
     d.start()
     try:
-        assert _wait(lambda: calls["n"] >= 1), "the reclaim-first sweep runs at start"
+        assert _wait(lambda: calls["n"] >= 1), "the worker's first claim failed"
         time.sleep(0.2)  # several heartbeat ticks, clock not advanced
-        assert not d._stop.is_set(), "a failing sweep alone is not an exit"
+        assert not d._stop.is_set(), "a failing claim alone is not an exit"
         mono.now += 99.0
         time.sleep(0.2)
         assert not d._stop.is_set(), "99 s of a 100 s bound"
@@ -208,13 +235,13 @@ def test_unreachable_sweeps_stop_the_daemon_only_after_the_bound(tmp_path: Path)
         d.stop()
 
 
-def test_one_good_sweep_restarts_the_unreachable_clock(tmp_path: Path) -> None:
+def test_one_answered_claim_restarts_the_unreachable_clock(tmp_path: Path) -> None:
     mono = _Mono()
-    d = _daemon(tmp_path / "cfg", lambda: 0, mono, bound=100.0)
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(lambda: "contact"), mono, bound=100.0)
     d._unreachable_since = mono.now - 90.0  # failing for 90 s
     d.start()
     try:
-        assert _wait(lambda: d._unreachable_since is None), "the start sweep succeeded: the clock is cleared"
+        assert _wait(lambda: d._unreachable_since is None), "an answered claim clears the clock"
         mono.now += 500.0
         time.sleep(0.2)
         assert not d._stop.is_set()
@@ -224,11 +251,7 @@ def test_one_good_sweep_restarts_the_unreachable_clock(tmp_path: Path) -> None:
 
 def test_a_zero_bound_turns_the_exit_off(tmp_path: Path) -> None:
     mono = _Mono()
-
-    def _down() -> int:
-        raise ConnectionError("engine unreachable")
-
-    d = _daemon(tmp_path / "cfg", _down, mono, bound=0)
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(lambda: "failure"), mono, bound=0)
     d.start()
     try:
         time.sleep(0.2)
@@ -590,106 +613,44 @@ def test_uninstall_still_drops_a_recycled_pids_lease(tmp_path: Path, bystander: 
     assert registry.records() == []
 
 
-# ── fix round 1: the unreachable clock is the engine, not the reclaim thread ─
+# ── nexus-wl9pk: the claim outcomes drive the unreachable clock ──────────────
 
 
-class _ContactWorker:
-    """A worker that reports engine contact as a real one does after each
-    successful claim round trip (the daemon hands it the hook)."""
-
-    def __init__(self) -> None:
-        self.handler: Callable[[], None] | None = None
-        self.released = 0
-        self._stopping = False
-        self._thread: Any = None
-
-    def set_engine_contact_handler(self, handler: Callable[[], None] | None) -> None:
-        self.handler = handler
-
-    def start(self) -> None:
-        def _claims() -> None:
-            while not self._stopping:
-                if self.handler is not None:
-                    self.handler()
-                time.sleep(0.02)
-
-        self._thread = threading.Thread(target=_claims, daemon=True)
-        self._thread.start()
-
-    def stop(self, timeout: float = 0) -> None:
-        self._stopping = True
-
-    def release_held_claims(self) -> int:
-        self.released += 1
-        return 0
-
-
-def _contact_daemon(
-    cfg: Path, behaviour: Callable[[], int], mono: _Mono, worker: Any, *,
-    bound: float | None = 100.0, stale: int = 300,
-) -> awd.AspectWorkerDaemon:
-    return awd.AspectWorkerDaemon(
-        config_dir=cfg, tenant="default",
-        worker_factory=lambda: worker, queue_factory=lambda: _Queue(behaviour),
-        heartbeat_interval=0.02, reclaim_interval=3600.0, stale_timeout_seconds=stale,
-        engine_unreachable_exit_seconds=bound, monotonic=mono,
-    )
-
-
-def _down() -> int:
-    raise ConnectionError("reclaim route failing")
-
-
-def test_a_worker_whose_claims_succeed_never_exits_on_a_failing_reclaim(tmp_path: Path) -> None:
-    """The reclaim route alone failing (a 401 on that route, an older engine
-    without it) while claim and complete work: the engine is reachable, so the
+def test_a_worker_whose_claims_keep_answering_never_exits(tmp_path: Path) -> None:
+    """Failed claim round trips, each followed by an answered one, never let the
+    unreachable clock run for the bound: the engine is reachable, so the
     one-hour exit must not fire."""
     mono = _Mono()
-    worker = _ContactWorker()
-    sweeps = {"n": 0}
-    contacts = {"n": 0}
+    seen = {"failure": 0, "contact": 0}
+    script = itertools.cycle(["failure", "contact"])
 
-    def _counted_down() -> int:
-        sweeps["n"] += 1
-        raise ConnectionError("reclaim route failing")
+    def _outcome() -> str:
+        verdict = next(script)
+        seen[verdict] += 1
+        return verdict
 
-    install = worker.set_engine_contact_handler
-
-    def _counting_install(handler: Callable[[], None] | None) -> None:
-        # The daemon hands the worker its hook; count each contact the worker reports.
-        def _counted() -> None:
-            contacts["n"] += 1
-            if handler is not None:
-                handler()
-
-        install(_counted if handler is not None else None)
-
-    worker.set_engine_contact_handler = _counting_install  # type: ignore[method-assign]
-    d = _contact_daemon(tmp_path / "cfg", _counted_down, mono, worker, bound=100.0)
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(_outcome), mono, bound=100.0)
     d.start()
     try:
-        assert _wait(lambda: sweeps["n"] >= 1), "the reclaim-first sweep ran and failed (non-vacuity)"
-        # Time passes in steps shorter than the bound, with claim contact in between, as it does
-        # for a live worker: a single fake-clock jump past the bound between two claims models an
-        # instant real time cannot take, and raced on a loaded CI runner (develop shard 6/6 at
-        # 61c0ec233). Twenty steps of 60 s carry the clock to 12x the bound.
+        assert _wait(lambda: seen["failure"] >= 1), "non-vacuity: failed claims reached the daemon"
+        # Time passes in steps shorter than the bound, with an answered claim in
+        # between, as it does for a live worker. Twenty steps of 60 s carry the
+        # clock to 12x the bound.
         for _ in range(20):
-            seen = contacts["n"]
-            assert _wait(lambda: contacts["n"] > seen), "a claim reported contact between clock steps"
+            before = seen["contact"]
+            assert _wait(lambda: seen["contact"] > before), "an answered claim between clock steps"
             mono.now += 60.0
-            assert not d._stop.is_set(), "a worker with a live claim path was stopped by the reclaim clock"
-        assert sweeps["n"] >= 1 and mono.now >= 1200.0
+            assert not d._stop.is_set(), "a worker with a live claim path was stopped by the failure clock"
+        assert mono.now >= 2200.0 and seen["failure"] >= 1
     finally:
         d.stop()
 
 
-def test_the_same_failing_reclaim_without_claim_contact_does_exit(tmp_path: Path) -> None:
-    """The control: with no claim contact the clock runs, so the test above is
+def test_the_same_failing_claims_without_contact_do_exit(tmp_path: Path) -> None:
+    """The control: with no answered claim the clock runs, so the test above is
     held up by the contact and not by something that disables the exit."""
     mono = _Mono()
-    worker = _ContactWorker()
-    worker.set_engine_contact_handler = lambda handler: None  # type: ignore[method-assign]
-    d = _contact_daemon(tmp_path / "cfg", _down, mono, worker, bound=100.0)
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(lambda: "failure"), mono, bound=100.0)
     d.start()
     try:
         assert _wait(lambda: d._unreachable_since is not None)
@@ -699,24 +660,12 @@ def test_the_same_failing_reclaim_without_claim_contact_does_exit(tmp_path: Path
         d.stop()
 
 
-def test_a_long_stale_window_cannot_push_the_backoff_past_the_bound(tmp_path: Path) -> None:
-    """The backoff cap is the stale window (300 s by default); with a bound
-    shorter than that, a recovered engine would go unnoticed until after the
-    exit. The wait is clamped to half the bound."""
-    d = _contact_daemon(tmp_path / "cfg", lambda: 0, _Mono(), _ContactWorker(), bound=100.0, stale=3600)
-    d._reclaim_interval = 30.0
-    for _ in range(10):
-        d._back_off_after_failed_sweep()
-    assert d._current_reclaim_wait <= 50.0, d._current_reclaim_wait
-
-
 def test_the_unreachable_exit_skips_the_tuple_claim_release(tmp_path: Path) -> None:
     """Releasing held claims asks the dead engine and waits out its client
     timeouts; the leases lapse on their own."""
     mono = _Mono()
-    worker = _ContactWorker()
-    worker.set_engine_contact_handler = lambda handler: None  # type: ignore[method-assign]
-    d = _contact_daemon(tmp_path / "cfg", _down, mono, worker, bound=100.0)
+    worker = _ClaimWorker(lambda: "failure")
+    d = _daemon(tmp_path / "cfg", worker, mono, bound=100.0)
     d.start()
     try:
         assert _wait(lambda: d._unreachable_since is not None)
@@ -728,8 +677,8 @@ def test_the_unreachable_exit_skips_the_tuple_claim_release(tmp_path: Path) -> N
 
 
 def test_an_ordinary_stop_still_releases_the_tuple_claims(tmp_path: Path) -> None:
-    worker = _ContactWorker()
-    d = _contact_daemon(tmp_path / "cfg", lambda: 0, _Mono(), worker)
+    worker = _ClaimWorker(lambda: None)
+    d = _daemon(tmp_path / "cfg", worker, _Mono())
     d.start()
     d.stop()
     assert worker.released == 1
@@ -748,7 +697,7 @@ def test_the_cli_default_for_the_bound_is_the_module_constant_and_one_hour() -> 
     assert awd._ENGINE_UNREACHABLE_EXIT_S == 3600.0, "an hour: outlasts a Liquibase migration and an engine restart"
 
 
-# ── fix round 1: the worker reports engine contact from its claim loop ───────
+# ── the worker's claim loop reports each round trip to its host ─────────────
 
 
 def _drive_loop(worker: Any, *, until: Callable[[], bool], seconds: float = 5.0) -> bool:
@@ -765,62 +714,119 @@ def test_the_real_worker_reports_contact_after_a_claim_that_answered(tmp_path: P
     w.set_engine_contact_handler(lambda: calls.append(1))
     monkeypatch.setattr(w._tuple_side, "supported", lambda: True)
     monkeypatch.setattr(w._tuple_side, "claim_batch", lambda park: ([], False))
-    monkeypatch.setattr(w, "_claim_table_rows", lambda: [])
     assert _drive_loop(w, until=lambda: bool(calls)), "an answered (empty) claim is engine contact"
 
 
-def test_the_real_worker_reports_no_contact_when_every_claim_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    w = AspectExtractionWorker(poll_interval=0.05, config_dir=tmp_path)
-    calls: list[int] = []
-    w.set_engine_contact_handler(lambda: calls.append(1))
-    attempts: list[int] = []
-
-    def _fail() -> list:
-        attempts.append(1)
-        raise ConnectionError("engine gone")
-
-    monkeypatch.setattr(w._tuple_side, "supported", lambda: True)
-    monkeypatch.setattr(w._tuple_side, "claim_batch", lambda park: ([], True))
-    monkeypatch.setattr(w, "_claim_table_rows", _fail)
-    assert not _drive_loop(w, until=lambda: bool(calls), seconds=1.0)
-    assert attempts, "the loop must have tried (non-vacuity)"
-    assert not calls
-
-
-def test_a_tuple_claim_that_answered_clears_the_clock_while_the_table_route_fails(
+def test_the_real_worker_reports_failure_and_no_contact_when_a_claim_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tuple-mode worker whose table claim route fails while the tuple claim
-    answers (empty): the tuple claim alone carries the contact, so the host's
-    unreachable clock is cleared."""
+    w = AspectExtractionWorker(poll_interval=0.05, config_dir=tmp_path)
+    contacts: list[int] = []
+    failures: list[int] = []
+    attempts: list[int] = []
+    w.set_engine_contact_handler(lambda: contacts.append(1))
+    w.set_engine_failure_handler(lambda: failures.append(1))
+
+    def _fail(park: bool) -> tuple[list, bool]:
+        attempts.append(1)
+        return [], True
+
+    monkeypatch.setattr(w._tuple_side, "supported", lambda: True)
+    monkeypatch.setattr(w._tuple_side, "claim_batch", _fail)
+    assert _drive_loop(w, until=lambda: bool(failures)), "a failed claim reports failure to its host"
+    assert attempts, "the loop must have tried (non-vacuity)"
+    assert not contacts, "a failed claim is not engine contact"
+
+
+def test_an_answered_tuple_claim_clears_the_clock_a_failed_one_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker whose claims answer (empty) clears the host's unreachable clock
+    that an earlier failure started."""
     mono = _Mono()
-    d = _contact_daemon(tmp_path / "cfg", lambda: 0, mono, _ContactWorker())
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(lambda: None), mono, bound=100.0)
     d._unreachable_since = mono.now - 50.0
     w = AspectExtractionWorker(poll_interval=0.05, config_dir=tmp_path)
     w.set_engine_contact_handler(d.note_engine_contact)
-    table_attempts: list[int] = []
+    attempts: list[int] = []
 
-    def _table_down() -> list:
-        table_attempts.append(1)
-        raise ConnectionError("table claim route failing")
+    def _answered(park: bool) -> tuple[list, bool]:
+        attempts.append(1)
+        return [], False
 
     monkeypatch.setattr(w._tuple_side, "supported", lambda: True)
-    monkeypatch.setattr(w._tuple_side, "claim_batch", lambda park: ([], False))
-    monkeypatch.setattr(w, "_claim_table_rows", _table_down)
+    monkeypatch.setattr(w._tuple_side, "claim_batch", _answered)
     cleared = _drive_loop(w, until=lambda: d._unreachable_since is None)
-    assert table_attempts, "the table route must have been tried and failed (non-vacuity)"
-    assert cleared, "an answered tuple claim is engine contact even when the table route fails"
+    assert attempts, "the claim must have run (non-vacuity)"
+    assert cleared, "an answered claim is engine contact and clears the clock"
 
 
-def test_a_table_only_worker_reports_contact_after_its_table_claim_answered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An engine without the aspects template: the table claim is the only
-    round trip, and it must carry the contact signal on its own."""
+def test_an_unsupported_tuple_side_still_starts_the_unreachable_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the engine lacks the ``aspects`` template the worker makes no claim round trip for up
+    to an hour; the host's clock must still run, or an engine that goes away during that hour is
+    not noticed until it is out (nexus-hbnml review r1)."""
+    mono = _Mono()
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(lambda: None), mono, bound=100.0)
     w = AspectExtractionWorker(poll_interval=0.05, config_dir=tmp_path)
-    calls: list[int] = []
-    w.set_engine_contact_handler(lambda: calls.append(1))
+    w.set_engine_contact_handler(d.note_engine_contact)
+    w.set_engine_failure_handler(d.note_engine_failure)
+    probes: list[int] = []
+
+    def _claim_must_not_run(park: bool) -> tuple[list, bool]:
+        raise AssertionError("an unsupported side makes no claim")
+
+    def _probe() -> bool:
+        probes.append(1)
+        return False
+
     monkeypatch.setattr(w._tuple_side, "supported", lambda: False)
-    monkeypatch.setattr(w, "_claim_table_rows", lambda: [])
-    assert _drive_loop(w, until=lambda: bool(calls))
+    monkeypatch.setattr(w._tuple_side, "claim_batch", _claim_must_not_run)
+    monkeypatch.setattr(w._tuple_side, "probe_engine", _probe)
+    assert d._unreachable_since is None
+    assert _drive_loop(w, until=lambda: d._unreachable_since is not None), \
+        "the failed probe starts the host's unreachable clock"
+    assert probes, "the loop must have probed (non-vacuity)"
+
+
+def test_an_unsupported_tuple_side_clears_the_clock_when_the_engine_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mono = _Mono()
+    d = _daemon(tmp_path / "cfg", _ClaimWorker(lambda: None), mono, bound=100.0)
+    d._unreachable_since = mono.now - 50.0
+    w = AspectExtractionWorker(poll_interval=0.05, config_dir=tmp_path)
+    w.set_engine_contact_handler(d.note_engine_contact)
+    w.set_engine_failure_handler(d.note_engine_failure)
+    monkeypatch.setattr(w._tuple_side, "supported", lambda: False)
+    monkeypatch.setattr(w._tuple_side, "probe_engine", lambda: True)
+    assert _drive_loop(w, until=lambda: d._unreachable_since is None), "an answered probe is engine contact"
+
+
+def test_probe_engine_reads_a_missing_template_as_an_answer_and_a_transport_error_as_none(
+    tmp_path: Path,
+) -> None:
+    import httpx
+
+    from nexus.db.t2.http_tuple_store import UnknownSubspaceError
+
+    w = AspectExtractionWorker(poll_interval=0.05, config_dir=tmp_path)
+    side = w._tuple_side
+
+    class _Store:
+        def __init__(self, exc: Exception | None) -> None:
+            self.exc = exc
+
+        def subspace_stats(self, subspace: str, **kw: object) -> object:
+            if self.exc is not None:
+                raise self.exc
+            return object()
+
+    for exc, expected in ((None, True), (UnknownSubspaceError("aspects"), True), (httpx.ConnectError("down"), False)):
+        store = _Store(exc)
+        side._call = lambda fn, _s=store: fn(_s)  # type: ignore[method-assign]
+        assert side.probe_engine() is expected, repr(exc)
 
 
 def test_aspect_worker_running_reads_the_lease_in_the_given_dir(tmp_path: Path) -> None:

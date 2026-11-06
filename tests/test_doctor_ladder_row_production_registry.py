@@ -13,26 +13,23 @@ through the interactive run the remedy names, then again.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from nexus import health
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.registry import (
-    RUNG_ASPECT_QUEUE_TUPLES,
     RUNG_MANIFEST_SECTION_LABELS,
     RUNG_NOTE_TAGS_ARRAY,
     LadderRegistry,
     default_registry,
 )
-from nexus.upgrade_ladder.rungs.aspect_queue_tuples import DETECT_READ_LIMIT
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from tests.upgrade.conftest import InMemoryCompletionLedger
 
 #: The rungs that answer an unattended run on a managed service only from a record (or, on an engine with the route,
-#: manifest-section-labels from the engine's count; this install's fake engine has none).
-REFUSABLE = (RUNG_ASPECT_QUEUE_TUPLES, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS)
+#: manifest-section-labels from the engine's count; this install's fake engine has none). The aspect-queue rung
+#: was retired with the table (nexus-hbnml).
+REFUSABLE = (RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS)
 
 
 class _Install:
@@ -42,12 +39,6 @@ class _Install:
         self.ledger = InMemoryCompletionLedger()
         self.memo: dict[tuple[str, str], str] = {}
         self.scan_reads: list[str] = []
-        # A full page of waiting rows none of which can move: detect() cannot tell 'converged' from that page.
-        self.queue = [
-            SimpleNamespace(collection="docs__x__m__v1", source_path=f"/stay{i}.md", doc_id="", status="pending",
-                            content_hash="h", retry_count=0, delay_s=0)
-            for i in range(DETECT_READ_LIMIT)
-        ]
 
 
 @pytest.fixture
@@ -106,28 +97,11 @@ def install(monkeypatch: pytest.MonkeyPatch, cloud_mode) -> _Install:
         def close(self) -> None:
             pass
 
-    class Queue:
-        def list_waiting(self, limit: int | None = None):
-            if limit is None:
-                inst.scan_reads.append("list_waiting(whole)")
-            return list(inst.queue if limit is None else inst.queue[:limit])
-
-        def close(self) -> None:
-            pass
-
-    class Tuples:
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr("nexus.upgrade_ladder.http_store.HttpLadderStore", Ledger)
     monkeypatch.setattr("nexus.db.t2.http_memory_store.HttpMemoryStore", Memory)
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: Catalog())
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda *a, **k: Catalog())
     monkeypatch.setattr("nexus.db.make_t3", lambda *a, **k: object())
-    monkeypatch.setattr("nexus.upgrade_ladder.rungs.aspect_queue_tuples.HttpAspectQueue", Queue)
-    monkeypatch.setattr("nexus.upgrade_ladder.rungs.aspect_queue_tuples.aspects_census", lambda *a, **k: object())
-    monkeypatch.setattr("nexus.db.t2.http_tuple_store.HttpTupleStore", Tuples)
-    monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)  # the default: tuples
     return inst
 
 
@@ -161,7 +135,7 @@ def test_the_interactive_run_the_remedy_names_clears_every_not_checked_entry(ins
     refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
     report = LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
     assert [(r.name, r.outcome) for r in report.runs] == [(n, RungOutcome.RECORDED) for n in (
-        RUNG_ASPECT_QUEUE_TUPLES, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS)], [
+        RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS)], [
         (r.name, r.outcome, r.detail) for r in report.runs]
     assert install.ledger.verified_rungs() == frozenset(REFUSABLE)
     install.scan_reads.clear()
@@ -197,7 +171,7 @@ def test_a_row_answered_from_a_record_says_so_and_when_the_record_was_made(insta
     refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
     LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
     records = install.ledger.completions()
-    answered = (RUNG_NOTE_TAGS_ARRAY, RUNG_ASPECT_QUEUE_TUPLES)
+    answered = (RUNG_NOTE_TAGS_ARRAY,)
     assert all(records[r].verified_at for r in answered), "non-vacuity: the records carry a time"
 
     row = _row()

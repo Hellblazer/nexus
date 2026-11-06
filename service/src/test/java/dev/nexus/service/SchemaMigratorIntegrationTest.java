@@ -93,7 +93,8 @@ class SchemaMigratorIntegrationTest {
         "hook_failures", "frecency",
         "topics", "taxonomy_meta", "topic_assignments", "topic_links",
         "document_aspects", "document_highlights",
-        "aspect_extraction_queue", "aspect_promotion_log",
+        // ("aspect_extraction_queue" left the end-state -- nexus-hbnml, aspects-005-2 DROP)
+        "aspect_promotion_log",
         // ("chash_index" left the end-state — RDR-187/nexus-piwya.9 DROP)
         "catalog_owners", "catalog_documents", "catalog_links",
         "catalog_document_chunks", "catalog_collections", "catalog_meta",
@@ -953,7 +954,7 @@ class SchemaMigratorIntegrationTest {
      * outlive its table). No collection FK is added on nexus.chunks in this
      * batch (deliberately deferred to Phase 5, beads nexus-o8dil.29/.31), so by
      * the time this test's end-state is observed, ZERO of the three per-dim
-     * collection FKs survive -- only the six FKs on tables the unify never
+     * collection FKs survive -- only the five FKs on tables the unify never
      * touched remain to validate.
      */
     @Test
@@ -971,10 +972,11 @@ class SchemaMigratorIntegrationTest {
             // RDR-187 (nexus-piwya.9): chash_index_collection_fk died with its
             // table even earlier.
             assertThat(constraintExists(conn, "chash_index_collection_fk")).isFalse();
-            // The six collection FKs on tables the unify never touched.
+            // The five collection FKs on tables the unify never touched.
             assertThat(constraintValidated(conn, "topic_assignments_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "document_aspects_collection_fk")).isTrue();
-            assertThat(constraintValidated(conn, "aspect_extraction_queue_collection_fk")).isTrue();
+            // nexus-hbnml: aspect_extraction_queue_collection_fk died with its table (aspects-005-2).
+            assertThat(constraintExists(conn, "aspect_extraction_queue_collection_fk")).isFalse();
             assertThat(constraintValidated(conn, "topics_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "taxonomy_meta_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "document_highlights_collection_fk")).isTrue();

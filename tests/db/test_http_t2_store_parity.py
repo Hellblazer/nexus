@@ -321,7 +321,6 @@ def test_removing_a_supplemental_method_is_detected(label, victim):
 # T2_SUPPLEMENTAL_CONTRACT — do not simply delete the entry here, which would
 # leave it silently uncovered.
 _ETL_DYING_WITH_THE_WAVE: dict[str, set[str]] = {
-    'aspect_queue': {'import_queue_batch', 'import_queue_row'},
     'chash_index': {'import_rows'},
     'document_aspects': {
         'import_aspect', 'import_aspects_batch', 'import_promotion_batch',

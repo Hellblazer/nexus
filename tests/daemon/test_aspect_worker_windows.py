@@ -175,7 +175,6 @@ class _TickRecorder:
 def _daemon(tmp_path: Path) -> AspectWorkerDaemon:
     return AspectWorkerDaemon(
         config_dir=tmp_path, tenant="default", worker_factory=MagicMock,
-        queue_factory=MagicMock,
     )
 
 

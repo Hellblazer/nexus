@@ -62,7 +62,6 @@ class TestCascadeAllStoresServiceMode:
     def test_all_stores_routed_in_full_service_mode(self, tmp_path: Path) -> None:
         spy_chash = _SpyStore()
         spy_aspects = _SpyStore()
-        spy_queue = _SpyStore()
         spy_highlights = _SpyStore()
         spy_taxonomy = MagicMock()
         spy_taxonomy.rename_collection.return_value = {
@@ -76,7 +75,6 @@ class TestCascadeAllStoresServiceMode:
             with T2Database(tmp_path / "t2.db") as db:
                 db.chash_index = spy_chash  # type: ignore[assignment]
                 db.document_aspects = spy_aspects  # type: ignore[assignment]
-                db.aspect_queue = spy_queue  # type: ignore[assignment]
                 db.document_highlights = spy_highlights  # type: ignore[assignment]
                 db.taxonomy = spy_taxonomy  # type: ignore[assignment]
                 db.telemetry = spy_telemetry  # type: ignore[assignment]
@@ -87,7 +85,6 @@ class TestCascadeAllStoresServiceMode:
 
         assert spy_chash.calls == expected_call, f"chash: {spy_chash.calls}"
         assert spy_aspects.calls == expected_call, f"aspects: {spy_aspects.calls}"
-        assert spy_queue.calls == expected_call, f"queue: {spy_queue.calls}"
         assert spy_highlights.calls == expected_call, f"highlights: {spy_highlights.calls}"
         spy_taxonomy.rename_collection.assert_called_once_with("code__old", "code__new")
         assert spy_telemetry.calls == expected_call, f"telemetry: {spy_telemetry.calls}"
@@ -95,7 +92,8 @@ class TestCascadeAllStoresServiceMode:
         # Verify counts are correctly populated from each store's return value
         assert counts["chash"] == 1
         assert counts["aspects"] == 1
-        assert counts["aspect_queue"] == 1
+        # nexus-hbnml: the aspect-queue table left the cascade, so no count key is reported for it.
+        assert "aspect_queue" not in counts
         assert counts["highlights"] == 1
         assert counts["tax_topics"] == 1
         assert counts["search_telemetry"] == 2

@@ -4,21 +4,21 @@
 
 Tests for:
   - AspectExtractionWorker.drain(timeout=...) drains and blocks
-  - drain() raises DrainTimeoutError when stuck in_progress rows remain
+  - drain() raises DrainTimeoutError when aspects tasks remain (available or claimed)
   - drain() is idempotent on an already-drained queue
-  - Stop signal prevents new claim_next calls
+  - Stop signal prevents new claims
   - Restart (start() after drain) re-arms the worker for new claims
-  - Worker-not-running edge case: drain() is just is_drained() once
+  - Worker-not-running edge case: drain() is one census read
   - Thread-join timeout warning (S-5, nexus-1091)
   - Default timeout is 120s (SIG-3, nexus-1091)
   - MCP-vs-CLI lock detection (SIG-5, nexus-1091)
 
-Substrate (nexus-i711w Stage 2 sub-stage A): the SQLite
-``AspectExtractionQueue`` died with the SQLite T2 stores; the queue is now
-``HttpAspectQueue`` unconditionally, backed here by the hermetic engine
-substrate (autouse ``_pin_t2_substrate`` -> ``t2_service_env``, fresh tenant
-per test). The queue's own state-machine semantics (pending/in_progress/
-failed vs. is_drained) are owned engine-side by
+The queue is the engine's ``aspects`` tuple subspace (RDR-235), read through
+``HttpTupleStore`` by ``drain_worker``. Tests here run against the hermetic
+engine substrate (autouse ``_pin_t2_substrate`` -> ``t2_service_env``, fresh
+tenant per test), or against a stub tuple side where a test pins a read shape
+the engine cannot be made to produce cheaply. The queue's own state machine
+(available/claimed/dead) is owned engine-side by
 ``service/src/test/java/dev/nexus/service/AspectRepositoryTest.java``; this
 file tests the drain ORCHESTRATION in ``nexus.aspect_worker`` on top of it.
 """
@@ -38,15 +38,6 @@ from tests._catalog_fixture_ops import register_real_doc_id
 from tests._module_seam import patch_time
 
 
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path. The producer's table mode is
-    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
-    ``tests/_aspect_table_producer.py``, not from the environment."""
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
-
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
 # engine's POST /v1/aspects/queue/enqueue 400 -- see the identical cache in
@@ -61,6 +52,44 @@ def _shared_doc_id() -> str:
     if key not in _doc_id_cache:
         _doc_id_cache[key] = register_real_doc_id()
     return _doc_id_cache[key]
+
+
+def _claim_one(claimant: str):
+    """Claim the oldest available ``aspects`` task: ``(row, claim_id)`` or None."""
+    from nexus.db.t2.http_tuple_store import HttpTupleStore
+
+    tuples = HttpTupleStore()
+    try:
+        return tuples.inp("aspects", {"queue": "aspects"}, claimant=claimant, lease_s=60)
+    finally:
+        tuples.close()
+
+
+def _settle(claim_id: str, claimant: str, *, dead: bool = False) -> None:
+    """Ack a claimed task, or nack it dead."""
+    from nexus.db.t2.http_tuple_store import HttpTupleStore
+
+    tuples = HttpTupleStore()
+    try:
+        if dead:
+            tuples.nack(claim_id, claimant, dead=True)
+        else:
+            tuples.ack(claim_id, claimant)
+    finally:
+        tuples.close()
+
+
+def _aspects_live() -> int:
+    """available + claimed on ``aspects``, read the way drain_worker reads it."""
+    from nexus.db.t2.http_aspect_queue import aspects_census
+    from nexus.db.t2.http_tuple_store import HttpTupleStore
+
+    tuples = HttpTupleStore()
+    try:
+        census = aspects_census(tuples)
+    finally:
+        tuples.close()
+    return 0 if census is None else census.available + census.claimed
 
 
 # nexus-9eaz family flake-skip helper retired 2026-05-22: RDR-120 P3b
@@ -118,7 +147,7 @@ def queue_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def _empty_tuple_side(monkeypatch):
-    """The unit stubs below replace `HttpAspectQueue` and touch no engine; the
+    """The unit stubs below touch no engine; the
     tuple side (RDR-235) must not reach one either. Reads as an engine whose
     `aspects` subspace is empty."""
     from nexus.db.t2 import http_tuple_store as tmod
@@ -132,41 +161,12 @@ def _empty_tuple_side(monkeypatch):
 
 @pytest.mark.usefixtures("_empty_tuple_side")
 class TestServiceModeDrain:
-    """drain_worker must poll the SERVICE queue (HttpAspectQueue.is_drained()).
+    """drain_worker's poll, timeout and lock-skip contracts, on a stub tuple side.
 
-    Historically this class guarded the RDR-173 P4.1 routing seam (SERVICE
-    backend -> HttpAspectQueue, never the local-sqlite queue). The seam is
-    COLLAPSED (nexus-i711w): HttpAspectQueue is the only queue, so the
-    negative guard is structurally impossible to violate; the poll/timeout/
-    lock-skip contracts below are still live drain_worker behaviour."""
-
-    def test_drain_polls_http_queue_in_service_mode(
-        self, monkeypatch, locks_dir: Path, tmp_path: Path,
-    ) -> None:
-        from nexus.aspect_worker import drain_worker
-        from nexus.db.t2 import http_aspect_queue as hmod
-
-        calls = {"http_is_drained": 0, "http_closed": False, "http_built": 0}
-
-        class _FakeHttpQueue:
-            def __init__(self, *a, **k) -> None:
-                calls["http_built"] += 1
-
-            def is_drained(self) -> bool:
-                calls["http_is_drained"] += 1
-                return True
-
-            def close(self) -> None:
-                calls["http_closed"] = True
-
-        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
-
-        # queue_path is irrelevant in service mode; pass an unused path.
-        drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
-
-        assert calls["http_built"] == 1, "service mode must construct HttpAspectQueue"
-        assert calls["http_is_drained"] >= 1, "must poll the SERVICE queue's is_drained()"
-        assert calls["http_closed"] is True, "must close the http queue"
+    The census is read through HttpTupleStore, which ``_empty_tuple_side``
+    replaces with an empty ``aspects`` subspace. The queue-routing seam
+    (RDR-173 P4.1) died with the table (nexus-hbnml); the contracts below are
+    still live drain_worker behaviour."""
 
     def test_a_thread_the_drain_cannot_join_stays_on_record_so_start_refuses_beside_it(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
@@ -177,19 +177,7 @@ class TestServiceModeDrain:
 
         from nexus import aspect_worker
         from nexus.aspect_worker import AspectExtractionWorker, drain_worker
-        from nexus.db.t2 import http_aspect_queue as hmod
 
-        class _Drained:
-            def __init__(self, *a, **k) -> None:
-                pass
-
-            def is_drained(self) -> bool:
-                return True
-
-            def close(self) -> None:
-                pass
-
-        monkeypatch.setattr(hmod, "HttpAspectQueue", _Drained)
         release = threading.Event()
         worker = AspectExtractionWorker()
         thread = threading.Thread(target=release.wait, args=(30,), daemon=True)
@@ -207,135 +195,28 @@ class TestServiceModeDrain:
             release.set()
             thread.join(5)
 
-    def test_drain_timeout_raises_DrainTimeoutError_with_pending_count(
+    def test_drain_poll_loop_exits_when_the_census_drains(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
-        """OBS-1 (timeout path): when is_drained() never returns True, drain_worker
-        must raise DrainTimeoutError with stuck_count from pending_count() -- NOT
-        AttributeError from queue.conn (HttpAspectQueue has no .conn).
-
-        This is the CRITICAL fix: the pre-fix code called queue.conn.execute(...)
-        unconditionally, which raises AttributeError on HttpAspectQueue.
-        """
-        from nexus.aspect_worker import DrainTimeoutError, drain_worker
-        from nexus.db.t2 import http_aspect_queue as hmod
-
-        _STUCK = 3
-
-        class _FakeHttpQueue:
-            def __init__(self, *a, **k) -> None:
-                pass
-
-            def is_drained(self) -> bool:
-                return False  # never drains -> timeout fires
-
-            def pending_count(self) -> int:
-                return _STUCK
-
-            def close(self) -> None:
-                pass
-
-        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
-
-        with pytest.raises(DrainTimeoutError) as exc_info:
-            drain_worker(
-                tmp_path / "unused.db",
-                _locks_dir=locks_dir,
-                timeout=0.15,
-                poll_interval=0.05,
-            )
-
-        err = exc_info.value
-        assert err.stuck_count == _STUCK, (
-            f"stuck_count must come from pending_count() ({_STUCK}), got {err.stuck_count}"
-        )
-        # Normal timeout path (pending > 0) must NOT attach the in_progress hint.
-        assert err.detail is None, (
-            f"detail must be None on the normal (pending>0) timeout path; got {err.detail!r}"
-        )
-
-    def test_drain_timeout_in_progress_only_gives_honest_message(
-        self, monkeypatch, locks_dir: Path, tmp_path: Path,
-    ) -> None:
-        """Service-mode timeout with pending_count()==0 but is_drained()==False.
-
-        The common crashed-worker scenario: all rows are in_progress (not
-        pending), so pending_count() returns 0 while is_drained() is still
-        False.  DrainTimeoutError must still be raised (timeout fires
-        correctly), and the error message / detail must mention 'in_progress'
-        and the stale-reclaim recovery so the operator knows the action.
-        """
-        from nexus.aspect_worker import DrainTimeoutError, drain_worker
-        from nexus.db.t2 import http_aspect_queue as hmod
-
-
-        class _FakeHttpQueueInProgressOnly:
-            def __init__(self, *a, **k) -> None:
-                pass
-
-            def is_drained(self) -> bool:
-                return False  # rows stuck in in_progress -> never drains
-
-            def pending_count(self) -> int:
-                return 0  # no pending rows; all stuck in in_progress
-
-            def close(self) -> None:
-                pass
-
-        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueueInProgressOnly)
-
-        with pytest.raises(DrainTimeoutError) as exc_info:
-            drain_worker(
-                tmp_path / "unused.db",
-                _locks_dir=locks_dir,
-                timeout=0.15,
-                poll_interval=0.05,
-            )
-
-        err = exc_info.value
-        assert err.stuck_count == 0, (
-            f"stuck_count must be 0 (pending_count() returns 0), got {err.stuck_count}"
-        )
-        msg = str(err)
-        assert "in_progress" in msg, (
-            f"error message must mention 'in_progress' for the crashed-worker hint; got: {msg!r}"
-        )
-        assert "reclaim" in msg, (
-            f"error message must mention 'reclaim' (stale-reclaim recovery); got: {msg!r}"
-        )
-
-    def test_drain_poll_loop_exits_when_is_drained_becomes_true(
-        self, monkeypatch, locks_dir: Path, tmp_path: Path,
-    ) -> None:
-        """OBS-1 (poll loop): drain_worker must keep polling until is_drained()
-        returns True — False x 2 then True must succeed without error."""
+        """OBS-1 (poll loop): drain_worker must keep polling until the aspects census
+        has no live task. Live, live, then empty must succeed without error, and the
+        census is read once per poll."""
         from nexus.aspect_worker import drain_worker
-        from nexus.db.t2 import http_aspect_queue as hmod
 
-        _answers = iter([False, False, True])
+        side = _wire_sides(monkeypatch, census=[
+            _aspects_census(available=1, total=1),
+            _aspects_census(claimed=1, total=1),
+            _aspects_census(),
+        ])
 
-        class _FakeHttpQueue:
-            def __init__(self, *a, **k) -> None:
-                pass
-
-            def is_drained(self) -> bool:
-                try:
-                    return next(_answers)
-                except StopIteration:
-                    return True  # safety valve
-
-            def close(self) -> None:
-                pass
-
-        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
-
-        # Must NOT raise: the loop should see False, False, True and return.
+        # Must NOT raise: the loop should see live, live, empty and return.
         drain_worker(
             tmp_path / "unused.db",
             _locks_dir=locks_dir,
             timeout=5.0,
             poll_interval=0.05,
         )
+        assert side.calls == 3, f"one census read per poll: {side.calls}"
 
     def test_drain_skips_mcp_lock_check_in_service_mode(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
@@ -349,52 +230,39 @@ class TestServiceModeDrain:
         drain if anyone reintroduces a lock check.
         """
         from nexus.aspect_worker import drain_worker
-        from nexus.db.t2 import http_aspect_queue as hmod
-
 
         # Place a PID-1 lock file — would block drain in LOCAL mode.
         (locks_dir / "aspect_worker.1").write_text("1")
-
-        class _FakeHttpQueue:
-            def __init__(self, *a, **k) -> None:
-                pass
-
-            def is_drained(self) -> bool:
-                return True
-
-            def close(self) -> None:
-                pass
-
-        monkeypatch.setattr(hmod, "HttpAspectQueue", _FakeHttpQueue)
 
         # Must NOT raise — lock files are ignored.
         drain_worker(tmp_path / "unused.db", _locks_dir=locks_dir, timeout=1.0)
 
     def test_cli_drain_surfaces_detail_hint_on_timeout(self, monkeypatch) -> None:
         """OBS / Medium-1: `nx aspects drain` must surface DrainTimeoutError.detail
-        (the stale-reclaim hint) to the operator — not swallow it behind the
-        generic 'Re-run...' message. The crashed-worker case (stuck_count==0
-        with a detail hint) is exactly when the operator needs the hint.
+        (the lapsed-claim hint) to the operator — not swallow it behind the
+        generic 'Re-run...' message. The stuck_count==0 case with a detail hint is
+        exactly when the operator needs the hint.
         """
         from click.testing import CliRunner
         from nexus.aspect_worker import DrainTimeoutError
         from nexus.commands import aspects as aspects_mod
 
         hint = (
-            "Note (service mode): pending_count is 0 ... a running "
-            "aspect-worker's stale-reclaim loop resets them to pending."
+            "Tuple queue 'aspects': 0 available, 1 claimed (1 of them lapsed). "
+            "A running aspect worker claims the available tasks and releases "
+            "the lapsed ones."
         )
 
         def _raise(*a, **k):
-            raise DrainTimeoutError(stuck_count=0, timeout=1.0, detail=hint)
+            raise DrainTimeoutError(stuck_count=1, timeout=1.0, detail=hint)
 
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: "/tmp/x.db")
         monkeypatch.setattr("nexus.aspect_worker.drain_worker", _raise)
 
         result = CliRunner().invoke(aspects_mod.aspects_drain, ["--timeout", "1"])
         assert result.exit_code == 1
-        assert "stale-reclaim" in result.output, (
-            f"CLI must surface the stale-reclaim hint; got: {result.output!r}"
+        assert "releases the lapsed ones" in result.output, (
+            f"CLI must surface the lapsed-claim hint; got: {result.output!r}"
         )
 
 
@@ -414,16 +282,20 @@ class TestStopSignal:
         infra_mod.t2_ctx = lambda: T2Database(queue_path)
 
         try:
-            worker = AspectExtractionWorker(poll_interval=0.05)
+            # A 1 s park (not the 25 s default): the loop exits once its parked
+            # ``in`` returns, so the stop is seen inside the join window below.
+            worker = AspectExtractionWorker(
+                poll_interval=0.05, tuple_options={"park_timeout_s": 1},
+            )
             worker.start()
             assert worker.is_running()
 
             worker.stop_claiming()
 
-            # Thread should exit within one poll interval
+            # The thread exits once its park returns (at most park_timeout_s).
             thread = worker._thread
             if thread is not None:
-                thread.join(timeout=1.0)
+                thread.join(timeout=3.0)
                 assert not thread.is_alive(), (
                     "worker thread should have exited after stop_claiming()"
                 )
@@ -446,17 +318,13 @@ class TestDrain:
     def test_drain_on_empty_queue_is_noop(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
-        """Drain on already-drained queue returns immediately."""
+        """Drain on an already-drained queue returns immediately."""
         from nexus.aspect_worker import drain_worker
 
-        # monkeypatch t2_ctx is unnecessary here -- we need a real queue
-        with T2Database(queue_path) as db:
-            db.aspect_queue.is_drained()  # just verifies it exists
-
-        # nexus-scc9t: drain_worker's own is_drained() short-circuit
-        # (src/nexus/aspect_worker.py: "if queue.is_drained(): ...
-        # return") fires before the poll loop, so time.sleep(poll_interval)
-        # is never called for an already-drained queue. Asserted directly
+        # nexus-scc9t: drain_worker's own census short-circuit (the
+        # ``if _drained(): return`` before the poll loop) fires before
+        # time.sleep(poll_interval) is ever called for an already-drained
+        # queue. Asserted directly
         # -- a loaded box can blow a wall-clock elapsed bound with no
         # regression present, since the assertion cares about REAL
         # scheduler-delay-inflated seconds rather than whether the
@@ -465,36 +333,36 @@ class TestDrain:
             drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
         mock_sleep.assert_not_called()
 
-    def test_drain_waits_for_in_progress_rows_to_resolve(
+    def test_drain_waits_for_a_claimed_task_to_be_acked(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
-        """drain() blocks until an in_progress row is marked_done."""
+        """drain() blocks until a claimed aspects task is acked."""
         from nexus.aspect_worker import drain_worker
 
-        # Insert a pending row, claim it (make in_progress), then resolve
-        # it from a background thread after a short delay.
+        # Enqueue a task, claim it (it is in flight), then ack it from a
+        # background thread after a short delay.
         with T2Database(queue_path) as db:
             db.aspect_queue.enqueue("knowledge__test", "/async.pdf", doc_id=_shared_doc_id())
-            db.aspect_queue.claim_next()
+        got = _claim_one("t-async")
+        assert got is not None, "the enqueued task must be claimable"
+        claim_id = got[1]
 
-        def resolve_after_delay():
+        def ack_after_delay():
             time.sleep(0.2)
-            with T2Database(queue_path) as db:
-                db.aspect_queue.mark_done("knowledge__test", "/async.pdf")
+            _settle(claim_id, "t-async")
 
-        t = threading.Thread(target=resolve_after_delay, daemon=True)
+        t = threading.Thread(target=ack_after_delay, daemon=True)
         t.start()
 
         drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
         t.join()
 
-        with T2Database(queue_path) as db:
-            assert db.aspect_queue.is_drained()
+        assert _aspects_live() == 0
 
     def test_drain_raises_on_timeout(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
-        """drain() raises DrainTimeoutError if stuck in_progress exceeds timeout.
+        """drain() raises DrainTimeoutError if claimed aspects tasks outlive timeout.
 
         SG-2 (nexus-1091): increased margins to 1.0s timeout / 0.05s poll so
         this test is not flaky on loaded CI.
@@ -503,8 +371,8 @@ class TestDrain:
 
         with T2Database(queue_path) as db:
             db.aspect_queue.enqueue("knowledge__test", "/stuck.pdf", doc_id=_shared_doc_id())
-            db.aspect_queue.claim_next()
-            # Never mark_done -- row stays in_progress
+        assert _claim_one("t-stuck") is not None
+        # Never ack -- the task stays claimed
 
         with pytest.raises(DrainTimeoutError) as exc_info:
             drain_worker(
@@ -525,20 +393,21 @@ class TestDrain:
         drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
         drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)  # second call safe
 
-    def test_drain_with_only_failed_rows_returns_immediately(
+    def test_drain_with_only_dead_tasks_returns_immediately(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
-        """Failed rows are considered terminal; drain treats them as done."""
+        """Dead tasks are terminal; drain treats them as done."""
         from nexus.aspect_worker import drain_worker
 
         with T2Database(queue_path) as db:
             db.aspect_queue.enqueue("knowledge__test", "/fail.pdf", doc_id=_shared_doc_id())
-            db.aspect_queue.claim_next()
-            db.aspect_queue.mark_failed("knowledge__test", "/fail.pdf", "broken")
+        got = _claim_one("t-fail")
+        assert got is not None
+        _settle(got[1], "t-fail", dead=True)
 
         # nexus-scc9t: see test_drain_on_empty_queue_is_noop -- a queue
-        # with only terminal (failed) rows is_drained() immediately, so
-        # the short-circuit fires and time.sleep is never called.
+        # with only terminal (dead) tasks is drained at once, so the
+        # short-circuit fires and time.sleep is never called.
         with patch_time("nexus.aspect_worker", "sleep") as mock_sleep:
             drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
         mock_sleep.assert_not_called()
@@ -575,23 +444,16 @@ class TestWorkerDrainIntegration:
     ) -> None:
         """After drain, calling start() re-arms the worker to process new rows.
 
-        The row is a TABLE row, so the worker runs the table-only cadence (an engine
-        with no ``aspects`` template). With the template the worker parks slot 0's
-        ``in`` for up to 25 s and looks at the table on the poll interval, which is
-        right for production and too slow for this test's 3 s window; the variable
-        used to select that cadence and no longer reaches the worker (nexus-bpikw
-        step A).
+        The restarted worker must claim and process the enqueued ``aspects``
+        task within the 3 s window below.
 
-        SG-1 fix (nexus-1091): replaces the vacuous ``or True`` assertion with
-        a real verification that the enqueued row was actually claimed (removed
-        from the pending queue) within a polling window.
+        SG-1 fix (nexus-1091): a real verification that the enqueued task was
+        claimed and acked (no live task left) within a polling window.
         """
         import nexus.aspect_extractor as extractor_mod
         import nexus.mcp_infra as infra_mod
         from nexus.aspect_worker import drain_worker, ensure_worker_started
-        from nexus.aspect_worker_tuples import TupleQueueSide
 
-        monkeypatch.setattr(TupleQueueSide, "supported", lambda self: False)
         original_t2_ctx = infra_mod.t2_ctx
         original_t2_index_write = infra_mod.t2_index_write
         original_extract = extractor_mod.extract_aspects
@@ -604,11 +466,20 @@ class TestWorkerDrainIntegration:
                 return write_fn(db)
         infra_mod.t2_index_write = _direct_poll
         # Stub extraction: return None (unsupported-collection short-circuit)
-        # so the worker calls mark_done without real Claude calls.
+        # so the worker acks each task without real Claude calls.
         extractor_mod.extract_aspects = lambda **_kw: None
+        # The singleton gets a 1 s park. At the 25 s default a parked thread
+        # outlives drain's 2 s join, drain records it, and the restart below is
+        # refused beside it. The park is set at construction; ensure_worker_started
+        # takes no tuple options, so the built worker is installed as the singleton.
+        import nexus.aspect_worker as worker_mod
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        worker = AspectExtractionWorker(poll_interval=0.05, tuple_options={"park_timeout_s": 1})
+        monkeypatch.setattr(worker_mod, "_worker", worker)
 
         try:
-            worker = ensure_worker_started(poll_interval=0.05, _locks_dir=locks_dir)
+            ensure_worker_started(poll_interval=0.05, _locks_dir=locks_dir)
             drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
             assert not worker.is_running()
 
@@ -623,16 +494,15 @@ class TestWorkerDrainIntegration:
             with T2Database(queue_path) as db:
                 db.aspect_queue.enqueue("knowledge__test", "/new.pdf", doc_id=_shared_doc_id())
 
-            # Poll until the queue is drained (row claimed + marked_done)
-            # or 3 seconds pass.
+            # Poll until the aspects census has no live task (claimed and
+            # acked) or 3 seconds pass.
             deadline = time.monotonic() + 3.0
             drained = False
             while time.monotonic() < deadline:
                 time.sleep(0.05)
-                with T2Database(queue_path) as db:
-                    if db.aspect_queue.is_drained():
-                        drained = True
-                        break
+                if _aspects_live() == 0:
+                    drained = True
+                    break
 
             assert drained, (
                 "worker restarted after drain must claim and process the new row "
@@ -643,10 +513,10 @@ class TestWorkerDrainIntegration:
             infra_mod.t2_index_write = original_t2_index_write
             extractor_mod.extract_aspects = original_extract
 
-    def test_worker_not_running_drain_is_just_is_drained(
+    def test_worker_not_running_drain_is_one_census_read(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
-        """When no worker thread is alive, drain() is a simple is_drained() check."""
+        """When no worker thread is alive, drain() is a single census check."""
         from nexus.aspect_worker import drain_worker
 
         # No worker started -- queue is empty
@@ -663,17 +533,20 @@ class TestWorkerDrainIntegration:
         infra_mod.t2_ctx = lambda: T2Database(queue_path)
 
         try:
-            worker = AspectExtractionWorker(poll_interval=0.05)
+            # 1 s park, as in the stop test above: the thread exits within the join.
+            worker = AspectExtractionWorker(
+                poll_interval=0.05, tuple_options={"park_timeout_s": 1},
+            )
             worker.start()
             assert worker.is_running()
 
             worker.stop_claiming()
             assert worker.is_claiming_stopped()
 
-            # Wait for thread to exit
+            # Wait for thread to exit (at most one park_timeout_s)
             thread = worker._thread
             if thread is not None:
-                thread.join(timeout=1.0)
+                thread.join(timeout=3.0)
 
             # Restart: start() clears _stop_event and spawns a new thread
             worker.start()
@@ -704,7 +577,6 @@ class TestThreadJoinTimeoutWarning:
         """
         import nexus.mcp_infra as infra_mod
         from nexus.aspect_worker import drain_worker, ensure_worker_started
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
         original_t2_ctx = infra_mod.t2_ctx
         infra_mod.t2_ctx = lambda: T2Database(queue_path)
@@ -727,17 +599,8 @@ class TestThreadJoinTimeoutWarning:
                 # the 2s join.
                 worker._thread = slow_thread
 
-            # Patch the queue to appear drained immediately so drain_worker
-            # skips the polling loop and goes straight to the thread-join.
-            # (HttpAspectQueue is the only queue post-i711w; drain_worker
-            # constructs one internally, so a class-attribute patch reaches it.)
-            _orig_is_drained = HttpAspectQueue.is_drained
-
-            def _always_drained(self_):
-                return True
-
-            HttpAspectQueue.is_drained = _always_drained  # type: ignore[method-assign]
-
+            # The aspects census is empty on this tenant, so drain_worker skips
+            # the polling loop and goes straight to the thread-join.
             try:
                 drain_worker(
                     queue_path=queue_path,
@@ -746,7 +609,6 @@ class TestThreadJoinTimeoutWarning:
                     _locks_dir=locks_dir,
                 )
             finally:
-                HttpAspectQueue.is_drained = _orig_is_drained  # type: ignore[method-assign]
                 barrier.set()  # Let the hanging thread exit
 
         finally:
@@ -828,27 +690,10 @@ class _TupleSide:
         type(self).closed = True
 
 
-def _wire_sides(monkeypatch, *, table_drained, pending: int = 0, census=None):
-    """Stub both sides. `table_drained` is a bool or a list of bools."""
-    from nexus.db.t2 import http_aspect_queue as hmod
+def _wire_sides(monkeypatch, *, census=None):
+    """Stub the `aspects` census read. `census` is one census (or an exception to
+    raise), or a list with one entry per poll (the last one repeats)."""
     from nexus.db.t2 import http_tuple_store as tmod
-
-    answers = iter(table_drained) if not isinstance(table_drained, bool) else None
-
-    class _Q:
-        def __init__(self, *a, **k) -> None:
-            pass
-
-        def is_drained(self) -> bool:
-            if answers is None:
-                return table_drained
-            return next(answers, True)
-
-        def pending_count(self) -> int:
-            return pending
-
-        def close(self) -> None:
-            pass
 
     class Side(_TupleSide):
         pass
@@ -856,15 +701,14 @@ def _wire_sides(monkeypatch, *, table_drained, pending: int = 0, census=None):
     Side.answers = list(census) if isinstance(census, list) else [census or _aspects_census()]
     Side.calls = 0
     Side.closed = False
-    monkeypatch.setattr(hmod, "HttpAspectQueue", _Q)
     monkeypatch.setattr(tmod, "HttpTupleStore", Side)
     return Side
 
 
 class TestDrainCountsTheTupleSide:
-    """The drained test is the table drained AND `available + claimed == 0` on
-    `aspects`. Dead tasks never block (a failed row does not today). Backoff-
-    delayed tasks count as available, which makes the gate conservative."""
+    """The drained test is `available + claimed == 0` on `aspects`. Dead tasks
+    never block. Backoff-delayed tasks count as available, which makes the gate
+    conservative."""
 
     def _drain(self, tmp_path, locks_dir, timeout=0.2):
         from nexus.aspect_worker import drain_worker
@@ -876,70 +720,56 @@ class TestDrainCountsTheTupleSide:
         {"claimed": 1, "total": 1},
         {"available": 2, "claimed": 3, "total": 5},
     ])
-    def test_a_drained_table_with_live_tasks_is_not_drained(
+    def test_live_aspects_tasks_are_not_drained(
         self, monkeypatch, locks_dir: Path, tmp_path: Path, census,
     ) -> None:
         from nexus.aspect_worker import DrainTimeoutError
 
-        _wire_sides(monkeypatch, table_drained=True, census=_aspects_census(**census))
+        _wire_sides(monkeypatch, census=_aspects_census(**census))
         with pytest.raises(DrainTimeoutError) as exc:
             self._drain(tmp_path, locks_dir)
         assert exc.value.stuck_count == census.get("available", 0) + census.get("claimed", 0)
 
-    def test_a_drained_tuple_side_with_a_busy_table_is_not_drained(
-        self, monkeypatch, locks_dir: Path, tmp_path: Path,
-    ) -> None:
-        from nexus.aspect_worker import DrainTimeoutError
-
-        _wire_sides(monkeypatch, table_drained=False, pending=2)
-        with pytest.raises(DrainTimeoutError) as exc:
-            self._drain(tmp_path, locks_dir)
-        assert exc.value.stuck_count == 2
-
     def test_dead_tasks_alone_do_not_block(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
-        side = _wire_sides(
-            monkeypatch, table_drained=True, census=_aspects_census(dead=4, total=4),
-        )
+        side = _wire_sides(monkeypatch, census=_aspects_census(dead=4, total=4))
         self._drain(tmp_path, locks_dir)
         assert side.calls >= 1, "the tuple side must have been read"
         assert side.closed is True, "the tuple store must be closed"
 
-    def test_both_sides_drain_during_the_poll(
+    def test_the_census_drains_during_the_poll(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
-        side = _wire_sides(
-            monkeypatch, table_drained=[False, True],
-            census=[_aspects_census(available=2, total=2), _aspects_census(claimed=1, total=1),
-                    _aspects_census()],
-        )
+        side = _wire_sides(monkeypatch, census=[
+            _aspects_census(available=2, total=2), _aspects_census(claimed=1, total=1),
+            _aspects_census(),
+        ])
         self._drain(tmp_path, locks_dir, timeout=5.0)
         assert side.calls >= 3
 
-    def test_an_engine_without_the_aspects_template_drains_on_the_table_alone(
+    def test_an_engine_without_the_aspects_template_drains(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
         from nexus.db.t2.http_tuple_store import UnknownSubspaceError
 
-        _wire_sides(monkeypatch, table_drained=True, census=UnknownSubspaceError("none"))
+        _wire_sides(monkeypatch, census=UnknownSubspaceError("none"))
         self._drain(tmp_path, locks_dir)
 
     def test_a_tuple_read_that_fails_is_not_read_as_drained(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
-        _wire_sides(monkeypatch, table_drained=True, census=RuntimeError("503"))
+        _wire_sides(monkeypatch, census=RuntimeError("503"))
         with pytest.raises(RuntimeError, match="503"):
             self._drain(tmp_path, locks_dir)
 
-    def test_the_timeout_names_both_sides_and_reads_claimed_and_lapsed_for_tasks(
+    def test_the_timeout_names_the_aspects_side_with_claimed_and_lapsed_counts(
         self, monkeypatch, locks_dir: Path, tmp_path: Path,
     ) -> None:
         from nexus.aspect_worker import DrainTimeoutError
 
         _wire_sides(
-            monkeypatch, table_drained=False, pending=0,
-            census=_aspects_census(available=3, claimed=2, lapsed=1, total=5),
+            monkeypatch, census=_aspects_census(available=3, claimed=2, lapsed=1, total=5),
         )
         with pytest.raises(DrainTimeoutError) as exc:
             self._drain(tmp_path, locks_dir)
@@ -947,20 +777,10 @@ class TestDrainCountsTheTupleSide:
         assert err.stuck_count == 5
         text = str(err)
         assert "aspects" in text and "claimed" in text and "lapsed" in text
-        assert "in_progress" in text, "the crashed-worker hint for the table side stays"
-
-    def test_the_table_side_message_is_unchanged_when_the_tuple_side_is_empty(
-        self, monkeypatch, locks_dir: Path, tmp_path: Path,
-    ) -> None:
-        from nexus.aspect_worker import DrainTimeoutError
-
-        _wire_sides(monkeypatch, table_drained=False, pending=3)
-        with pytest.raises(DrainTimeoutError) as exc:
-            self._drain(tmp_path, locks_dir)
-        assert exc.value.detail is None
+        assert "releases the lapsed ones" in text, "the lapsed-claim hint for the aspects side stays"
 
 
 # The drain CLI against the real engine (Test Plan scenario 21, drain half: exit 0
-# only when the table and the `aspects` tuple side are both drained) is a step of the
-# journeys in tests/test_aspects_requeue_failed_tuples.py (nexus-9edxe): it needs a
-# tenant, and those journeys already hold one.
+# only when the `aspects` tuple side is drained) is a step of the journeys in
+# tests/test_aspects_requeue_failed_tuples.py (nexus-9edxe): it needs a tenant,
+# and those journeys already hold one.

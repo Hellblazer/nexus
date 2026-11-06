@@ -602,7 +602,6 @@ class AspectWorkerRecordHarness(_LeaseHarness):
 
         tenant = f"tenant-fence-{id(self)}"
         stopped: dict[str, bool] = {"A": False, "B": False}
-        closed: dict[str, bool] = {"A": False, "B": False}
 
         class _FakeWorker:
             def __init__(self, name: str) -> None:
@@ -614,26 +613,14 @@ class AspectWorkerRecordHarness(_LeaseHarness):
             def stop(self, timeout: float = 0) -> None:
                 stopped[self._name] = True
 
-        class _FakeQueue:
-            def __init__(self, name: str) -> None:
-                self._name = name
-
-            def reclaim_stale(self, _t: float, *, count_attempt: bool = True) -> int:
-                return 0
-
-            def close(self) -> None:
-                closed[self._name] = True
-
         a = awd.AspectWorkerDaemon(
             config_dir=self._cd, tenant=tenant, clock=self._clock,
             worker_factory=lambda: _FakeWorker("A"),
-            queue_factory=lambda: _FakeQueue("A"),
             heartbeat_interval=0.05,
         )
         b = awd.AspectWorkerDaemon(
             config_dir=self._cd, tenant=tenant, clock=self._clock,
             worker_factory=lambda: _FakeWorker("B"),
-            queue_factory=lambda: _FakeQueue("B"),
             heartbeat_interval=0.05,
         )
         a.start()
@@ -657,18 +644,16 @@ class AspectWorkerRecordHarness(_LeaseHarness):
             )
             assert not b.is_fenced(), "the successor must never be fenced by its own predecessor's fencing"
 
-            # "The child is reaped": A's own worker/queue are torn down by
-            # a real .stop() call, exactly as run_aspect_worker_daemon's
-            # own finally-block would do next.
+            # "The child is reaped": A's own worker is torn down by a real
+            # .stop() call, exactly as run_aspect_worker_daemon's own
+            # finally-block would do next.
             a.stop()
             assert stopped["A"] is True, "the fenced owner's worker must be stopped"
-            assert closed["A"] is True, "the fenced owner's queue must be closed"
 
             # Foreign state untouched: B is still live, still unfenced,
-            # and its own worker/queue are untouched by A's teardown.
+            # and its own worker is untouched by A's teardown.
             assert not b.is_fenced()
             assert stopped["B"] is False
-            assert closed["B"] is False
         finally:
             b.stop()
 
@@ -684,16 +669,9 @@ class AspectWorkerRecordHarness(_LeaseHarness):
             def stop(self, timeout: float = 0) -> None:
                 pass
 
-        class _FakeQueue:
-            def reclaim_stale(self, _t: float, *, count_attempt: bool = True) -> int:
-                return 0
-
-            def close(self) -> None:
-                pass
-
         daemon = awd.AspectWorkerDaemon(
             config_dir=self._cd, tenant=f"tenant-orphan-{id(self)}", clock=self._clock,
-            worker_factory=_FakeWorker, queue_factory=_FakeQueue,
+            worker_factory=_FakeWorker,
             heartbeat_interval=0.05,
         )
         daemon.start()

@@ -26,7 +26,6 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.stream.Stream;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -110,7 +109,7 @@ class GhostSweepDormantMarkingTest {
         // Anchor fixtures for the parametrised test below: an existing document and
         // two existing (never-swept-in-an-assertion) collections to hang the
         // FK-required prerequisites of document_aspects/document_highlights/
-        // aspect_extraction_queue/catalog_document_chunks/topic_assignments/topics
+        // catalog_document_chunks/topic_assignments/topics
         // off of, WITHOUT registering those prerequisite rows under the collection
         // actually under test in each parametrised case — keeping each case's own
         // catalog_collections row isolated to (at most) the FK-coupled tables
@@ -281,12 +280,6 @@ class GhostSweepDormantMarkingTest {
                                DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                                DOCUMENT_HIGHLIGHTS.INGESTED_AT)
                 .values(TENANT_PARAM, ANCHOR_DOC, coll, "file:///" + coll + "-hl", "hi", OffsetDateTime.now())
-                .execute();
-            case "aspect_extraction_queue" -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
-                               ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                               ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                               ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .values(TENANT_PARAM, coll, "/p/" + coll + "-q.md", "pending", OffsetDateTime.now(), ANCHOR_DOC)
                 .execute();
             case "catalog_documents" -> ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
                                CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,

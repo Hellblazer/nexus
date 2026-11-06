@@ -1,26 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""HttpAspectQueue — thin HTTP client over the RDR-152 Java aspects/queue service.
+"""HttpAspectQueue — the producer side of the engine's ``aspects`` tuple queue.
 
-Drop-in replacement for :class:`~nexus.db.t2.aspect_extraction_queue.AspectExtractionQueue`.
-Activated when ``NX_STORAGE_BACKEND_ASPECT_QUEUE=service``.
+One task per document, written by ``out`` ``mode=replace`` on the identity
+body (RDR-235): :meth:`HttpAspectQueue.enqueue` and :meth:`enqueue_many`, plus
+the census the diagnostics read (:meth:`HttpAspectQueue.tuple_counts`,
+:func:`aspects_census`). The consumer is the aspect worker
+(``nexus.aspect_worker_tuples``); the ``aspect_extraction_queue`` table and its
+``/v1/aspects/queue/*`` routes are retired (nexus-hbnml, RDR-235).
 
 Config:
     NX_SERVICE_HOST  — service host (default: 127.0.0.1)
     NX_SERVICE_PORT  — service port (required; raises if missing)
     NX_SERVICE_TOKEN — bearer token (required; raises if missing)
 
-Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5):
-    enqueue, claim_next, claim_batch, mark_done, mark_failed,
-    mark_retry, reclaim_stale, pending_count, is_drained,
-    list_pending, list_waiting, rename_collection, close
-
-Queue claim strategy: the Java service uses
-``SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`` — eliminates WAL contention
-vs the SQLite CAS loop and is the primary motivation for this migration.
-
-The ``rename_lock`` constructor parameter accepted by AspectExtractionQueue
-is accepted but ignored here (no Python-side threading; the Java service owns
+The ``rename_lock`` constructor parameter is accepted for constructor parity
+with the other T2 stores and ignored (no Python-side threading; the engine owns
 all serialization).
 """
 from __future__ import annotations
@@ -35,9 +30,6 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.collection_errors import SupersededCollectionWriteError
-from nexus.db.t2.records import QueueRow
-
 _log = structlog.get_logger(__name__)
 
 DEFAULT_TENANT: str = "default"
@@ -45,9 +37,10 @@ DEFAULT_TENANT: str = "default"
 # ── RDR-235: the producer behind NX_ASPECT_QUEUE ─────────────────────────────
 
 #: The variable that once selected the producer. ``tuples`` (or unset) is the only
-#: producer. ``table`` is retired (nexus-bpikw): the producer paths warn once and use
-#: tuples (:func:`producer_queue_mode`); the operator surfaces refuse it
-#: (:func:`aspect_queue_mode`, :class:`AspectQueueTableModeRetiredError`).
+#: producer. ``table`` is retired (nexus-bpikw, table dropped by nexus-hbnml): the
+#: producer paths warn once and use tuples (:func:`producer_queue_mode`); the
+#: operator surface refuses it (:func:`aspect_queue_mode`,
+#: :class:`AspectQueueTableModeRetiredError`).
 ASPECT_QUEUE_ENV: str = "NX_ASPECT_QUEUE"
 ASPECT_QUEUE_MODES: tuple[str, ...] = ("tuples",)
 
@@ -92,21 +85,19 @@ def _env_mode() -> str:
 
 
 def aspect_queue_mode() -> str:
-    """The STRICT reader, for the operator surfaces (``nx aspects requeue-failed``,
-    the ``aspect-queue-tuples`` rung): ``"tuples"``, or
+    """The STRICT reader, for the operator surface (``nx aspects requeue-failed``):
+    ``"tuples"``, or
     :class:`AspectQueueTableModeRetiredError` for ``NX_ASPECT_QUEUE=table``. An
     operator who typed the retired value is told so and nothing runs, instead of a
     quiet reroute.
 
     The producer paths do not call this: they use :func:`producer_queue_mode`, which
-    never drops a document over a stale value. The worker calls neither: it drains
-    both queues whatever the variable says (RDR-235 gate S1)."""
+    never drops a document over a stale value. The worker calls neither."""
     if _env_mode() == "table":
         raise AspectQueueTableModeRetiredError(
-            f"{ASPECT_QUEUE_ENV}=table is retired: the aspect queue table producer was "
-            "removed (nexus-bpikw, RDR-235) and the engine's 'aspects' tuple queue is the "
-            f"only producer. Unset {ASPECT_QUEUE_ENV} (or set it to 'tuples'). Rows already "
-            "in the table are still drained by the worker."
+            f"{ASPECT_QUEUE_ENV}=table is retired: the aspect queue table and its producer "
+            "were removed (nexus-bpikw, nexus-hbnml, RDR-235) and the engine's 'aspects' tuple "
+            f"queue is the only queue. Unset {ASPECT_QUEUE_ENV} (or set it to 'tuples')."
         )
     return "tuples"
 
@@ -117,13 +108,7 @@ def producer_queue_mode() -> str:
     ``"tuples"``. A stale ``NX_ASPECT_QUEUE=table`` (a shell profile, an MCP server
     config) logs one warning per process saying to unset it and uses tuples; a
     refusal here would drop the documents of every ingest until someone found the
-    variable (nexus-bpikw design decision D1).
-
-    ``enqueue`` and ``enqueue_many`` still carry a legacy table branch, taken only
-    when this function returns ``"table"``, which production never does. It is the
-    seam the suite uses to seed legacy table rows for the worker's drain and the
-    table readers (``tests/_aspect_table_producer.py``); nexus-hbnml deletes it with
-    the table."""
+    variable (nexus-bpikw design decision D1)."""
     if _env_mode() == "table" and not _warned_table_retired:
         _warned_table_retired.append(True)
         _log.warning(
@@ -148,39 +133,59 @@ class AspectTupleCounts:
     dead: int
 
 
-class AspectQueueEngineUnsupportedError(RuntimeError):
-    """``NX_ASPECT_QUEUE=tuples`` against an engine with no ``aspects``
-    template (it predates ``engine-service-v0.1.169``)."""
-
-
-#: The engine release that carries ``GET /v1/aspects/queue/list_waiting``
-#: (RDR-235 Phase 1 step 3, nexus-5r2sc.3.6): the read the table-to-tuples
-#: migration rung uses. An engine older than this answers 404.
-LIST_WAITING_ENGINE_RELEASE: str = "engine-service-v0.1.170"
-
-
-class AspectQueueListWaitingUnsupportedError(RuntimeError):
-    """The engine has no ``/v1/aspects/queue/list_waiting`` route (it predates
-    ``engine-service-v0.1.170``)."""
+#: The one-line remedy printed beside any row the engine kept from the retired queue table
+#: (nexus-hbnml). The runbook section has the owner-role SQL recipe.
+RETIRED_TABLE_REMEDY: str = (
+    "rows the engine could not move to the aspects queue are stranded in nexus.aspect_extraction_queue: "
+    "`nx enrich aspects <collection>` re-extracts documents that lack aspects, and deleting the rows "
+    "(as the table owner) lets the next engine start drop the table; "
+    "docs/migration-runbook.md, 'aspect_extraction_queue rows'"
+)
 
 
 @dataclass(frozen=True)
-class WaitingRow:
-    """One row of ``list_waiting``: a queue row still owed a worker.
+class RetiredQueueTable:
+    """What the engine says about the retired ``nexus.aspect_extraction_queue`` table
+    (``GET /v1/status``, ``aspect_queue_table_present`` / ``aspect_queue_rows_retained``).
 
-    ``status`` is ``pending`` or ``in_progress``. ``delay_s`` is the whole
-    seconds until the row's ``next_retry_at``, rounded up, computed on the
-    DATABASE clock; 0 when it has none or it has passed. There is no content:
-    the body of a tuples task is identity only.
-    """
+    ``state`` is one of: ``gone`` (no table), ``empty`` (present, no rows: the next engine
+    start drops it), ``retained`` (``rows`` > 0 stranded rows), ``uncounted`` (present and
+    its rows could not be counted) or ``unreported`` (the status could not be read, or the
+    engine predates the field or has not run its start-up drain yet). Only ``gone`` and
+    ``empty`` are clean: a caller must never render the other three as a zero."""
 
-    collection: str
-    source_path: str
-    content_hash: str
-    doc_id: str
-    retry_count: int
-    status: str
-    delay_s: int
+    state: str
+    rows: int | None = None
+    reasons: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def clean(self) -> bool:
+        return self.state in ("gone", "empty")
+
+
+def retired_queue_table(status: Any) -> RetiredQueueTable:
+    """Read the retired-table fields out of an engine ``/v1/status`` body (``None`` when it
+    could not be fetched)."""
+    if not isinstance(status, dict):
+        return RetiredQueueTable("unreported")
+    present = status.get("aspect_queue_table_present")
+    rows = status.get("aspect_queue_rows_retained")
+    if not isinstance(present, bool) or isinstance(rows, bool) or not isinstance(rows, int):
+        return RetiredQueueTable("unreported")
+    if not present:
+        return RetiredQueueTable("gone", 0)
+    if rows < 0:
+        return RetiredQueueTable("uncounted", None)
+    raw = status.get("aspect_queue_rows_retained_reasons")
+    reasons = tuple(sorted((str(k), int(v)) for k, v in raw.items())) if isinstance(raw, dict) else ()
+    if rows == 0:
+        return RetiredQueueTable("empty", 0)
+    return RetiredQueueTable("retained", rows, reasons)
+
+
+class AspectQueueEngineUnsupportedError(RuntimeError):
+    """The engine has no ``aspects`` tuple template (it predates
+    ``engine-service-v0.1.169``)."""
 
 
 _warned_no_aspects_template: list[bool] = []
@@ -190,16 +195,15 @@ def aspects_census(store: Any, *, timeout: float | None = None, single_shot: boo
     """The ``aspects`` subspace's census from *store* (an ``HttpTupleStore``),
     or ``None`` when the engine has no ``aspects`` template.
 
-    The readers of the old table (queue-depth hook, drain, requeue-failed)
-    count this side beside the table's (RDR-235). An engine that predates
-    ``engine-service-v0.1.169`` has no such template, and every reader must go
-    on working there exactly as it did: ``None`` means "no tuple side", the
-    caller reads it as zero, and one log line per process says so. Any other
+    The readers (queue-depth hook, drain, requeue-failed, doctor) count this
+    side. An engine that predates ``engine-service-v0.1.169`` has no such
+    template: ``None`` means "no tuple side", the caller reads it as zero, and
+    one log line per process says so. Any other
     failure propagates; a caller decides what an unreadable side means.
 
     *timeout* caps the one request (seconds); ``None`` sends it unchanged. *single_shot*
     (nexus-g6ic6) sends it once: no ``ReadTimeout`` resend, no gateway backoff."""
-    from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
+    from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: keeps this module's import light
 
     try:
         if timeout is None and not single_shot:
@@ -212,7 +216,7 @@ def aspects_census(store: Any, *, timeout: float | None = None, single_shot: boo
         if not _warned_no_aspects_template:
             _warned_no_aspects_template.append(True)
             _log.info(
-                "aspects_tuple_template_absent_reading_table_only",
+                "aspects_tuple_template_absent",
                 needs=ASPECTS_ENGINE_RELEASE,
             )
         return None
@@ -252,19 +256,8 @@ from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
-def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
-    return QueueRow(
-        collection=body.get("collection", ""),
-        source_path=body.get("source_path", ""),
-        content_hash=body.get("content_hash", ""),
-        content=body.get("content", ""),
-        retry_count=int(body.get("retry_count", 0)),
-        doc_id=body.get("doc_id", "") or "",
-    )
-
-
 class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
-    """AspectExtractionQueue drop-in that delegates to the RDR-152 Java HTTP service.
+    """The producer of the engine's ``aspects`` tuple queue.
 
     Uses a keep-alive :class:`httpx.Client` connection pool via
     :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
@@ -274,10 +267,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     401 or a connection-refused/reset — see the mixin's own docstring for
     the full resolution order.
 
-    The ``rename_lock`` parameter is accepted to match AspectExtractionQueue's
-    constructor signature (T2Database injects it). It is ignored — no
-    Python-side threading guards are needed when the Java service owns all
-    queue state. ``timeout`` is this store's own public constructor kwarg
+    The ``rename_lock`` parameter is accepted for constructor parity (T2Database
+    injects it). It is ignored — no Python-side threading guards are needed when
+    the engine owns all queue state. ``timeout`` is this store's own public constructor kwarg
     (pre-dating the mixin); it is threaded through to the mixin's
     ``__init__`` unchanged so callers that pin a non-default HTTP timeout
     keep working identically post-adoption.
@@ -285,8 +277,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     Args:
         base_url:    Optional override for the service base URL.
         tenant:      Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
-        rename_lock: Accepted for constructor parity with AspectExtractionQueue;
-                     NOT used (no-op).
+        rename_lock: Accepted for constructor parity; NOT used (no-op).
         timeout:     HTTP client timeout in seconds (default: 30.0).
         client:      Optional pre-constructed ``httpx.Client`` (nexus-m20mf
                      P3, additive) -- when supplied, this store shares that
@@ -306,9 +297,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         client: httpx.Client | None = None,
     ) -> None:
         super().__init__(base_url, tenant, _token=_token, timeout=timeout, client=client)
-        # RDR-235: the construction arguments the tuples-mode store is built
-        # from (lazily, on first use), so it resolves its endpoint and token
-        # and self-heals exactly as this store does. Table mode never builds it.
+        # RDR-235: the construction arguments the tuple store is built from
+        # (lazily, on first use), so it resolves its endpoint and token and
+        # self-heals exactly as this store does.
         self._ctor_base_url = base_url
         self._ctor_token = _token
         self._tuple_store: Any = None
@@ -319,40 +310,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             rename_lock if rename_lock is not None else threading.RLock()
         )
 
-    # ── Internal helpers ───────────────────────────────────────────────────────
-    #
-    # These stay LOCAL overrides (not a straight inherit) because every method
-    # in this class calls self._post/self._get with a SHORT path suffix
-    # (e.g. "/enqueue") — the "/v1/aspects/queue" prefix is store-specific
-    # routing, not part of the mixin's shared contract. Every actual HTTP
-    # round-trip still goes through the inherited, self-healing
-    # super()._post/_get (RefreshableHttpStoreMixin._send), never
-    # self._client directly.
-
-    def _post(
-        self, path: str, body: dict[str, Any], *, idempotent: bool = True, mutates: bool = True
-    ) -> Any:
-        # nexus-a2qhz: mutates forwarded unchanged (every call site in this
-        # class is a write, default True; forwarding it anyway closes the
-        # latent TypeError trap a future read-via-POST addition would
-        # otherwise hit -- the class of regression caught in
-        # HttpTokenStore.list_tokens during review).
-        return super()._post(
-            f"/v1/aspects/queue{path}", body, idempotent=idempotent, mutates=mutates
-        )
-
-    def _get(
-        self,
-        path: str,
-        params: dict[str, Any] | None = None,
-        *,
-        idempotent: bool = True,
-        timeout: float | None = None,
-    ) -> Any:
-        q = {k: str(v) for k, v in (params or {}).items() if v is not None}
-        return super()._get(f"/v1/aspects/queue{path}", q, idempotent=idempotent, timeout=timeout)
-
-    # ── Public API — mirrors AspectExtractionQueue ────────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def _signal_wake(self) -> None:
         """Best-effort same-box wake touch after a successful enqueue
@@ -373,7 +331,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         doc_id: str = "",
     ) -> None:
-        """Persist a new pending row for (collection, source_path).
+        """Queue a document for aspect extraction.
 
         Writes one ``aspects`` task, replaced by ``doc_id`` (RDR-235): a re-enqueue
         replaces the task and never adds a second.
@@ -382,120 +340,37 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("collection must not be empty")
         if not source_path:
             raise ValueError("source_path must not be empty")
-        if producer_queue_mode() == "tuples":
-            # RDR-235 E2: the identity goes out as a replace; ``content`` is
-            # dropped (the worker re-reads the document).
-            self._enqueue_tuple(collection, source_path, content_hash, doc_id)
-            self._signal_wake()
-            return
-        # LEGACY table branch (nexus-bpikw): reached only through
-        # tests/_aspect_table_producer.py, which patches ``producer_queue_mode``
-        # to seed table rows for the worker's drain and the table readers;
-        # production never gets here. nexus-hbnml deletes it with the table.
-        # RDR-204 Phase 1 (nexus-f5wwx): the engine no longer
-        # auto-registers a collection on first write — ensure it here,
-        # once per process per collection (cached), and retry once if
-        # the engine's per-tenant boot sweep (bead .3) reaped a
-        # registered-but-chunkless row between registration and this
-        # write.
-        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
-        write_with_registration_retry(collection, lambda: self._post("/enqueue", {
-            "collection": collection,
-            "source_path": source_path,
-            "content_hash": content_hash,
-            "content": content,
-            "doc_id": doc_id,
-        }), registrar=self._catalog_registrar)
+        producer_queue_mode()  # warns once about a stale NX_ASPECT_QUEUE=table
+        # RDR-235 E2: the identity goes out as a replace; ``content`` is
+        # dropped (the worker re-reads the document).
+        self._enqueue_tuple(collection, source_path, content_hash, doc_id)
         self._signal_wake()
 
     def enqueue_many(self, rows: list[dict]) -> int:
-        """Batch-enqueue N documents. In production this is the tuple fan-out
-        (:meth:`_enqueue_many_tuples`); the rest of this docstring describes the
-        legacy table batch that nexus-hbnml deletes.
-
-        Table form: N documents in ONE round trip (nexus-nj4ch,
-        nexus-duoak follow-up: replaces the indexer's per-document
-        ``enqueue()`` call under the ChunkBatcher's flush-grain hook,
-        measured at ~34.7s across ~250 real inserts in this repo's own
-        shakeout).
+        """Batch-enqueue N documents: the bounded tuple fan-out
+        (:meth:`_enqueue_many_tuples`), one ``out`` per document.
 
         Each dict carries the same fields as :meth:`enqueue`'s keyword
-        arguments (``collection``, ``source_path``, and optionally
-        ``content_hash``/``content``/``doc_id``). Returns the count of
-        rows actually enqueued (malformed rows are skipped server-side,
-        not counted).
-
-        The whole batch shares ONE Postgres transaction server-side
-        (``ctx.batch(...)`` inside one ``tenantScope.withTenant``), so a
-        single row's constraint violation (e.g. a ``doc_id`` FK to a
-        catalog document that hasn't landed yet) fails the WHOLE batch,
-        not just that row — unlike the per-row isolation
-        ``updateDocumentsMany``/``register_many`` get from their looser
-        constraints. A batch the engine refuses because a collection it names is
-        retired (:class:`~nexus.collection_errors.SupersededCollectionWriteError`)
-        is raised as is: the refusal is deterministic, so no per-row replay.
-        On any other batch failure this falls back to per-row
-        :meth:`enqueue` calls, isolating the genuinely bad row from its
-        batch-mates (mirrors :meth:`nexus.catalog.http_catalog_client.
-        HttpCatalogClient.register_many`'s page-failure fallback).
+        arguments (``collection``, ``source_path``, ``doc_id`` and optionally
+        ``content_hash``). Returns the count of tasks written; a malformed row
+        is skipped and counted in one warning. A batch the engine refuses
+        because a collection it names is retired
+        (:class:`~nexus.collection_errors.SupersededCollectionWriteError`) is
+        raised as is: the refusal is deterministic.
         """
         if not rows:
             return 0
-        if producer_queue_mode() == "tuples":
-            return self._enqueue_many_tuples(rows)
-        # LEGACY table branch (nexus-bpikw): reached only through
-        # tests/_aspect_table_producer.py; production never gets here.
-        # nexus-hbnml deletes it with the table.
-        try:
-            result = self._post("/enqueue_many", {"rows": rows})
-            enqueued = int((result or {}).get("enqueued", 0))
-            if enqueued:
-                self._signal_wake()
-            return enqueued
-        except SupersededCollectionWriteError:
-            # nexus-i15oc: the engine refused the batch because a collection it names is
-            # retired (409 collection_superseded). That is deterministic, not one bad
-            # row: the per-row replay below would repeat the same refusal N times, each
-            # with a traceback. Raise it to the caller as it is; the one caller
-            # (indexer flush hook) is best-effort and logs any exception.
-            raise
-        except Exception:  # noqa: BLE001 — batch unrecoverable (e.g. one row's constraint violation); per-row isolation fallback
-            _log.warning(
-                "aspect_enqueue_many_failed_falling_back_per_row",
-                row_count=len(rows),
-                exc_info=True,
-            )
-            enqueued = 0
-            for row in rows:
-                collection = row.get("collection", "")
-                source_path = row.get("source_path", "")
-                if not collection or not source_path:
-                    continue
-                try:
-                    self.enqueue(
-                        collection, source_path,
-                        content_hash=row.get("content_hash", ""),
-                        content=row.get("content", ""),
-                        doc_id=row.get("doc_id", ""),
-                    )
-                    enqueued += 1
-                except Exception:  # noqa: BLE001 — per-row fallback failure isolation (mirrors register_many's per-doc try/except upstream)
-                    _log.warning(
-                        "aspect_enqueue_fallback_row_failed",
-                        collection=collection,
-                        source_path=source_path,
-                        exc_info=True,
-                    )
-            return enqueued
+        producer_queue_mode()  # warns once about a stale NX_ASPECT_QUEUE=table
+        return self._enqueue_many_tuples(rows)
 
-    # ── RDR-235: the tuples-mode producer ─────────────────────────────────────
+    # ── RDR-235: the tuple producer ───────────────────────────────────────────
 
     def _tuples(self) -> Any:
-        """The ``HttpTupleStore`` tuples mode writes through, built on first use
+        """The ``HttpTupleStore`` the producer writes through, built on first use
         over this store's own keep-alive pool."""
         with self._tuple_store_lock:
             if self._tuple_store is None:
-                from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: table mode never builds it
+                from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: keeps this module's import light
 
                 self._tuple_store = HttpTupleStore(
                     self._ctor_base_url, self._tenant,
@@ -509,7 +384,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         unique per document across collections), so a re-enqueue replaces the
         task and never adds a second. Raises ``TooLargeError`` before any send
         when the body is over the 4,096-byte cap (a very long ``source_path``)."""
-        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
+        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: keeps this module's import light
 
         body = _identity_body(collection, source_path, doc_id, content_hash)
         try:
@@ -518,8 +393,8 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             )
         except UnknownSubspaceError as exc:
             raise AspectQueueEngineUnsupportedError(
-                f"{ASPECT_QUEUE_ENV}=tuples needs the 'aspects' tuple template, which the "
-                f"engine does not have; it predates {ASPECTS_ENGINE_RELEASE}. Upgrade the engine."
+                f"the 'aspects' tuple template is missing from the engine, which "
+                f"predates {ASPECTS_ENGINE_RELEASE}. Upgrade the engine."
             ) from exc
         return outcome
 
@@ -528,7 +403,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ) -> None:
         if not doc_id:
             raise ValueError(
-                f"doc_id must not be empty when {ASPECT_QUEUE_ENV}=tuples: it is the task's identity"
+                "doc_id must not be empty: it is the task's identity"
             )
         # The registered-and-not-retired check (O4). A retired name raises
         # SupersededCollectionWriteError here, before anything is sent to the
@@ -561,7 +436,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Returns the number of tasks written (created, replaced or dirtied).
         """
         from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — circular-dep avoidance (corpus)
-        from nexus.db.t2.http_tuple_store import TooLargeError  # noqa: PLC0415 — deferred: table mode never loads it
+        from nexus.db.t2.http_tuple_store import TooLargeError  # noqa: PLC0415 — deferred: keeps this module's import light
 
         work: list[tuple[str, str, str, str]] = []
         malformed = 0
@@ -652,220 +527,3 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if store is not None:
             store.close()
         super().close()
-
-    def claim_next(self) -> QueueRow | None:
-        """Atomically claim the oldest pending row via SELECT ... FOR UPDATE SKIP LOCKED.
-
-        Returns the claimed row as a QueueRow, or None when no pending row exists.
-        The Java service uses FOR UPDATE SKIP LOCKED — no CAS retry loop needed.
-        """
-        # nexus-tjvgf: claiming is NOT retry-safe — a lost response
-        # after a successful server-side claim orphans the row
-        # in_progress until reclaim_stale. Single attempt; the worker
-        # loop owns recovery. Exception (nexus-ig3qe): a definitive 401
-        # re-mints and retries once inside the mixin — the auth layer
-        # rejected the request before the claim SQL ran, so no row was
-        # claimed and no orphan is possible.
-        r = self._post("/claim_next", {}, idempotent=False)
-        if not r or r.get("claimed") is False or not r.get("row"):
-            return None
-        return _body_to_queue_row(r["row"])
-
-    def claim_batch(self, limit: int) -> list[QueueRow]:
-        """Claim up to *limit* pending rows in FIFO order."""
-        if limit <= 0:
-            return []
-        # nexus-tjvgf: see claim_next — single attempt (with the mixin's
-        # nexus-ig3qe 401-remint carve-out; the long-running worker's data
-        # token expires on TTL and this is its claim path).
-        r = self._post("/claim_batch", {"limit": limit}, idempotent=False)
-        # nexus-575kd: the Java service sends a BARE JSON ARRAY here
-        # (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
-        # unlike claim_next which is enveloped. Accept the array directly;
-        # tolerate a future {"rows":[...]} envelope defensively. The prior
-        # ``r.get("rows", [])`` raised AttributeError on the list every poll,
-        # so the service-mode worker claimed nothing and document_aspects never
-        # populated (all service-mode aspect extraction was dead).
-        rows = r if isinstance(r, list) else r.get("rows", [])
-        return [_body_to_queue_row(row) for row in rows]
-
-    def mark_done(
-        self,
-        collection: str = "",
-        source_path: str = "",
-        *,
-        doc_id: str = "",
-    ) -> int:
-        """DELETE the row at (doc_id) or (collection, source_path) — success path.
-
-        Returns deleted row count.
-        """
-        r = self._post("/mark_done", {
-            "collection": collection,
-            "source_path": source_path,
-            "doc_id": doc_id,
-        })
-        return int(r.get("deleted", 0))
-
-    def mark_failed(
-        self,
-        collection: str,
-        source_path: str,
-        error: str,
-    ) -> None:
-        """Mark the row as 'failed' (terminal until re-enqueued)."""
-        self._post("/mark_failed", {
-            "collection": collection,
-            "source_path": source_path,
-            "error": error[:2000],
-        })
-
-    def mark_retry(self, collection: str, source_path: str,
-                   interval_seconds: int = 0) -> None:
-        """Reset the row to 'pending', increment retry_count, and back it off.
-
-        ``interval_seconds`` is the worker-chosen backoff; the service stamps
-        ``next_retry_at = now() + interval_seconds`` server-side (RDR-163 P1,
-        nexus-ztpt6). Default 0 = ready immediately.
-        """
-        # nexus-tjvgf: retry_count = retry_count + 1 server-side — a
-        # retried request double-increments the budget toward premature
-        # terminal mark_failed. Single attempt (the mixin's nexus-ig3qe
-        # 401-remint carve-out applies: a 401'd request never reached the
-        # increment).
-        self._post("/mark_retry", {
-            "collection": collection,
-            "source_path": source_path,
-            "interval_seconds": interval_seconds,
-        }, idempotent=False)
-
-    def reclaim_stale(
-        self, timeout_seconds: int = 300, *, count_attempt: bool = True,
-    ) -> int:
-        """Reclaim in_progress rows older than timeout.
-
-        ``count_attempt=True`` (default, the age-based sweep): each row goes
-        back to 'pending' with retry_count + 1, or to 'failed' when it was
-        already at the retry cap (the engine's reclaimStale counts a reclaim as
-        an attempt, nexus-j67ix.2).
-
-        ``count_attempt=False`` (the daemon's graceful-stop sweep, nexus-j67ix.3):
-        every stale row goes back to 'pending' with retry_count and last_error
-        unchanged, and is never failed, because the rows a stopping worker
-        abandons did nothing wrong. An engine without this change ignores the key:
-        every released engine through 0.1.165 never counted a reclaim, and a
-        develop build that carries only nexus-j67ix.2 counts.
-
-        Returns the number of rows reclaimed, whichever way they went.
-
-        ``idempotent=False`` (nexus-ll31n sibling): an age-predicate sweep
-        over a discovered population, the same shape as ``mark_retry``
-        just above -- a retry after a lost response re-evaluates the same
-        predicate against rows already reclaimed by attempt 1 and reports
-        fewer (often zero), misreporting a completed reclaim as having
-        done nothing (RDR-173's shutdown-observability warning line
-        reads this count).
-        """
-        r = self._post(
-            "/reclaim_stale",
-            {"timeout_seconds": timeout_seconds, "count_attempt": count_attempt},
-            idempotent=False,
-        )
-        return int(r.get("reclaimed", 0))
-
-    def pending_count(self, *, timeout: float | None = None) -> int:
-        """Return the number of rows currently in 'pending' status.
-
-        ``timeout`` (nexus-m20mf P3 fold-in): optional per-request
-        override -- lets a caller sharing this store's client across a
-        longer-timeout run (e.g. an ``index_repository()`` shared pool)
-        still cap THIS specific call strictly, without needing its own
-        dedicated short-timeout client. ``None`` (default): no override,
-        unchanged from before this kwarg existed.
-        """
-        r = self._get("/pending_count", timeout=timeout)
-        return int(r.get("count", 0))
-
-    def is_drained(self) -> bool:
-        """Return True iff no actionable rows remain (count of non-failed rows is 0)."""
-        r = self._get("/is_drained")
-        return bool(r.get("drained", False))
-
-    def list_pending(self, limit: int | None = None) -> list[QueueRow]:
-        """Return pending rows in claim order (FIFO by enqueued_at)."""
-        params: dict[str, Any] = {}
-        if limit is not None:
-            params["limit"] = limit
-        rows: list[dict] = self._get("/list_pending", params)
-        return [_body_to_queue_row(r) for r in rows]
-
-    def list_waiting(self, limit: int | None = None) -> list[WaitingRow]:
-        """Return the rows still owed a worker, ``pending`` AND ``in_progress``,
-        in claim order, each with ``status`` and ``delay_s`` (RDR-235 Phase 1
-        step 3). Read-only: it flips nothing, so a row a live worker holds stays
-        as it is.
-
-        Raises :class:`AspectQueueListWaitingUnsupportedError` on an engine that
-        predates ``engine-service-v0.1.170`` (the route answers 404)."""
-        params: dict[str, Any] = {}
-        if limit is not None:
-            params["limit"] = limit
-        try:
-            rows: list[dict] = self._get("/list_waiting", params)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                raise AspectQueueListWaitingUnsupportedError(
-                    f"the engine has no aspects queue list_waiting route; it predates "
-                    f"{LIST_WAITING_ENGINE_RELEASE}"
-                ) from exc
-            raise
-        return [
-            WaitingRow(
-                collection=r.get("collection", ""),
-                source_path=r.get("source_path", ""),
-                content_hash=r.get("content_hash", "") or "",
-                doc_id=r.get("doc_id", "") or "",
-                retry_count=int(r.get("retry_count", 0)),
-                status=r.get("status", ""),
-                delay_s=int(r.get("delay_s", 0)),
-            )
-            for r in rows
-        ]
-
-    def list_failed(self, collection: str | None = None) -> list[QueueRow]:
-        """Return terminal-failed rows, optionally scoped to one collection."""
-        params: dict[str, Any] = {}
-        if collection:
-            params["collection"] = collection
-        rows: list[dict] = self._get("/list_failed", params)
-        return [_body_to_queue_row(r) for r in rows]
-
-    def rename_collection(self, *, old: str, new: str) -> int:
-        """Re-point every row's collection from *old* to *new*.
-
-        RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine no longer
-        auto-registers the rename DESTINATION — ``new`` must be a
-        registered ``catalog_collections`` row before the fan-out.
-        """
-        from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)
-        r = write_with_registration_retry(
-            new,
-            lambda: self._post("/rename_collection", {"old": old, "new": new}),
-            registrar=self._catalog_registrar,
-        )
-        return int(r.get("updated", 0))
-
-    # ── ETL import ────────────────────────────────────────────────────────────
-
-    def import_queue_row(self, body: dict[str, Any]) -> int:
-        """Fidelity-preserving import for ETL. Returns 1 on success."""
-        r = self._post("/import", body)
-        return int(r.get("imported", 0))
-
-    def import_queue_batch(self, rows: list[dict[str, Any]]) -> int:
-        """RDR-176 P3 (bead nexus-t9rmg.18): GUC-once bulk queue import — POST all
-        *rows* to /v1/aspects/queue/import in ONE request."""
-        if not rows:
-            return 0
-        r = self._post("/import", {"rows": rows})
-        return int(r.get("imported", 0))

@@ -4088,8 +4088,8 @@ def _reset_aspect_worker_singleton() -> None:
     so any OTHER test that fires such a hook leaks the singleton. The leaked
     worker keeps polling ``t2_index_write`` (degraded fallback to
     ``T2Database(default_db_path())``), and when a later test patches
-    ``default_db_path`` to its own tmp db the worker claims + ``mark_done``s
-    rows out from under that test — the exact mechanism behind the
+    ``default_db_path`` to its own tmp db the worker claims + acks
+    tasks out from under that test — the exact mechanism behind the
     ``test_collection_rename`` aspect-cascade canary (debugger verdict
     2026-05-28: 95% repro). Resetting before AND after each test confines a
     spawned worker to its own test so it can never poll a sibling's db.

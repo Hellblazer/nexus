@@ -176,6 +176,7 @@ def test_health_sessions_config_dir_resolves_at_call_time_not_import_time(
     engine either.
     """
     from nexus.console.routes import health as health_mod
+    from nexus.db.t2.http_aspect_queue import AspectTupleCounts
 
     poisoned = tmp_path / "poisoned"
     try:
@@ -187,8 +188,7 @@ def test_health_sessions_config_dir_resolves_at_call_time_not_import_time(
         with patch(
             "nexus.db.t2.http_aspect_queue.HttpAspectQueue",
         ) as q, patch.object(health_mod, "scan_sessions_sync") as scan:
-            q.return_value.pending_count.return_value = 0
-            q.return_value.list_failed.return_value = []
+            q.return_value.tuple_counts.return_value = AspectTupleCounts(0, 0, 0)
             scan.return_value = []
             health_mod._collect_health_data()
         scan.assert_called_once_with(live)

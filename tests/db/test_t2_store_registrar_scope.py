@@ -46,26 +46,6 @@ from nexus.db.t2.records import AspectRecord
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 
-@pytest.fixture(autouse=True)
-def _aspect_queue_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each aspect-queue case names the producer it drives, so it says so: the unset default is
-    ``tuples`` since nexus-lnwn1 (RDR-235 Activation Step 1), and the table producer
-    (``HttpAspectQueue`` case) is retired (nexus-bpikw step A), so the seam in
-    ``tests/_aspect_table_producer.py`` drives it. The tuples producer registers through its own
-    ``ensure_collection_registered(..., registrar=self._catalog_registrar)`` call, a different
-    site from the table's ``write_with_registration_retry`` (nexus-zqu6r); its batch form
-    (``enqueue_many``, ``_enqueue_many_tuples``) registers at a third site of its own. Every other store is
-    unaffected by the flag; they run with it at the table value, as before."""
-    params = getattr(getattr(request.node, "callspec", None), "params", {})
-    tuples = params.get("drive_write") in (_drive_aspect_queue_tuples, _drive_aspect_queue_tuples_enqueue_many)
-    if tuples:
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
-    else:
-        from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-        use_table_producer(monkeypatch)
-
-
 OWN_TOKEN = "own-server-token-w1ip"
 AMBIENT_TOKEN = "ambient-server-token-w1ip"
 
@@ -145,10 +125,6 @@ def _mk_aspect_queue(base_url: str, token: str):
     return HttpAspectQueue(base_url=base_url, _token=token)
 
 
-def _drive_aspect_queue(store) -> None:
-    store.enqueue("some_col", "path/to/doc.md", "chash123", "content", doc_id="doc-1")
-
-
 def _drive_aspect_queue_tuples(store) -> None:
     """The tuples producer (the default since nexus-lnwn1): the same call, a different registering site."""
     store.enqueue("some_col", "path/to/doc.md", "chash123", "content", doc_id="doc-1")
@@ -215,7 +191,6 @@ def _drive_catalog_write_manifest_many(store) -> None:
 #: the ambient server before driving the "own"-pinned store.
 _CASES = [
     pytest.param(_mk_chash, _drive_chash, "new_col", id="HttpChashIndex"),
-    pytest.param(_mk_aspect_queue, _drive_aspect_queue, "some_col", id="HttpAspectQueue"),
     pytest.param(_mk_aspect_queue, _drive_aspect_queue_tuples, "some_col", id="HttpAspectQueue.tuples"),
     pytest.param(
         _mk_aspect_queue, _drive_aspect_queue_tuples_enqueue_many, "some_col",
@@ -355,7 +330,6 @@ def test_an_ambient_resolved_store_uses_the_ambient_registration_cache(
 #: The same stores built with no endpoint of their own, keyed by driver.
 _UNPINNED = {
     _drive_chash: HttpChashIndex,
-    _drive_aspect_queue: HttpAspectQueue,
     _drive_aspect_queue_tuples: HttpAspectQueue,
     _drive_aspect_queue_tuples_enqueue_many: HttpAspectQueue,
     _drive_document_aspects: HttpDocumentAspectsStore,

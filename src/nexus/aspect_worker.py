@@ -11,10 +11,10 @@ pattern (RDR-048 ``pipeline_buffer`` reuse):
     → enqueue (microseconds)
     → ingest path returns
 
-  worker thread polls queue (`AspectExtractionWorker._run_loop`)
+  worker thread claims tasks (`AspectExtractionWorker._run_loop`)
     → calls extract_aspects (the synchronous P1.2 extractor)
     → upserts document_aspects on success
-    → mark_done (DELETE row from queue)
+    → acks the claim (the task is consumed)
 
 The synchronous extract_aspects is reusable verbatim — only the
 dispatch shape changed from inline to queued. The worker calls it
@@ -24,39 +24,28 @@ Worker contract:
 
 * Single worker per process (singleton: ``get_worker()``,
   ``ensure_worker_started()``).
-* Daemon thread; dies with the process. Durable queue absorbs
-  process death — the next worker run picks up unprocessed rows.
-* Polls every ``poll_interval`` seconds (default ``DEFAULT_POLL_INTERVAL_S``,
-  30 s — nexus-59611; the idle poll is edge load, see the constant).
-* Reclaims rows stuck in ``in_progress`` for > ``stale_timeout``
-  seconds (default 300 s) before each poll, so worker process
-  death does not wedge a row forever. The age-based reclaim counts as an
-  attempt (engine ``AspectRepository.reclaimStale``, nexus-j67ix.2): it adds
-  one to ``retry_count`` and, from ``_RETRY_MAX_ATTEMPTS`` on, terminal-fails
-  the row, so a document that kills its worker every time is not reclaimed
-  forever. The daemon's final sweep at a graceful stop does not count
-  (``count_attempt=False``, nexus-j67ix.3): rows a stopping worker leaves
-  behind did nothing wrong.
+* Daemon thread; dies with the process. The durable ``aspects`` tuple queue
+  absorbs process death: a claim a dead worker held lapses with its lease and
+  the engine returns the task on the next claim (an attempt counted, and a task
+  that reaches the engine's ``max_attempts`` is dead-lettered).
+* Waits ``poll_interval`` seconds (default ``DEFAULT_POLL_INTERVAL_S``) between
+  idle rounds; the claim itself parks on the engine, and a same-box enqueue
+  touches the wake file (nexus-59611).
 
-Result handling:
+Result handling (the verdicts live in ``aspect_worker_tuples``):
 
 * ``record is not None and has populated fields`` → upsert
-  document_aspects, mark_done (DELETE).
+  document_aspects through the claim fence, ack.
 * ``record is None`` (unsupported collection, the extractor's
-  short-circuit before subprocess) → mark_done (drop silently).
+  short-circuit before subprocess) → ack (drop silently).
 * ``record is null-fields`` (extractor's internal 3-retry budget
-  exhausted) → upsert null record, mark_done. The extractor
+  exhausted) → upsert null record, ack. The extractor
   already retried; the worker MUST NOT retry again.
-* Uncaught exception in the worker body → routed by
-  ``_mark_retry_or_fail_routed`` into one of THREE classes
+* Uncaught exception in the worker body → nack into one of THREE classes
   (nexus-yg70j): a transient remote failure retries with backoff;
-  a bad document terminal-fails for triage; a SELF FAULT — this
-  process's own environment is broken — writes no row state at
-  all, stands the worker down, and leaves the claimed rows for
-  ``reclaim_stale``. The middle class is terminal, and so is an
-  age-based reclaim of a row whose attempts have reached the cap (the engine's
-  ``reclaimStale`` counts each reclaim as an attempt); both stay
-  terminal until manually re-enqueued.
+  a bad document dead-letters for triage; a SELF FAULT — this
+  process's own environment is broken — changes no task state at
+  all, stands the worker down, and leaves the claims to lapse or be released.
 
 The hook function ``aspect_extraction_enqueue_hook`` is registered
 in ``mcp/core.py`` alongside the other post-document consumers. It
@@ -101,13 +90,11 @@ _ENQUEUE_TENANT: str = "default"
 
 # ── Bounded backoff-retry ladder (RDR-163 P1, nexus-ztpt6) ──────────────────
 #
-# A transient failure re-queues the row with a backoff interval the WORKER
-# chooses; the service stamps the absolute next_retry_at = now()+interval
-# server-side. retry_count is monotonic and is the cap's source of truth, so
-# termination is guaranteed even under the ±1 race of concurrent reclaim. The
-# engine applies this same cap to a reclaim (AspectRepository.RETRY_MAX_ATTEMPTS,
-# pinned equal by tests/test_aspect_retry_cap_parity.py).
-_RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >= cap
+# A transient failure nacks the task with a backoff interval the WORKER
+# chooses; the engine hides it from the claim until now()+interval on its own
+# clock. The claim's attempts count is the cap's source of truth, so
+# termination is guaranteed even under the ±1 race of a concurrent lapse.
+_RETRY_MAX_ATTEMPTS: int = 5          # dead-letter once attempts >= cap
 _RETRY_BASE_SECONDS: float = 30.0     # interval = base * 2**retry_count, jittered
 _RETRY_JITTER_FRACTION: float = 0.2   # ±20% — spreads re-claims when a wide outage clears
 
@@ -238,8 +225,8 @@ def _self_fault_reason(exc: BaseException) -> str | None:
 
     A self fault means the failure had nothing to do with the row that happened
     to be in hand when it surfaced, so no verdict about that row is honest —
-    neither ``mark_failed`` (terminal is a claim about the document) nor
-    ``mark_retry`` (retry says the document may succeed later, which is true
+    neither a dead-letter (terminal is a claim about the document) nor a
+    retry nack (retry says the document may succeed later, which is true
     here but for reasons that are not about the document).
 
     Two arms:
@@ -280,7 +267,7 @@ def _backoff_interval_seconds(retry_count: int, *, rng=random.random) -> int:
     """Worker-chosen backoff for the next retry, in integer seconds.
 
     ``base * 2**retry_count`` with ±``_RETRY_JITTER_FRACTION`` jitter. The
-    service stamps the absolute ``next_retry_at = now()+interval``; only the
+    engine hides the task until ``now()+interval`` on its own clock; only the
     interval is chosen here. ``rng`` is injectable so the jitter is deterministic
     under test without patching the global ``random`` module.
     """
@@ -296,12 +283,10 @@ class DrainTimeoutError(RuntimeError):
     """Raised by ``drain_worker`` when the queue still has actionable work
     after the configured timeout.
 
-    Actionable work is a table row in ``pending`` or ``in_progress`` state
-    (``status != 'failed'``) or an ``aspects`` task that is available or
-    claimed (dead tasks are terminal). ``stuck_count`` is the sum of both
-    sides. The operator must triage: inspect ``aspect_extraction_queue`` for
-    stuck ``in_progress`` rows and ``aspects`` for claimed tasks, kill any
-    hung workers, and re-run the drain after the queue is clear.
+    Actionable work is an ``aspects`` task that is available or claimed (dead
+    tasks are terminal). ``stuck_count`` is their number. The operator must
+    triage: inspect ``aspects`` for claimed tasks, kill any hung workers, and
+    re-run the drain after the queue is clear.
     """
 
     def __init__(
@@ -315,10 +300,9 @@ class DrainTimeoutError(RuntimeError):
         self.detail = detail
         msg = (
             f"Drain timeout after {timeout:.1f}s: "
-            f"{stuck_count} actionable row(s) or task(s) remain: rows in "
-            "aspect_extraction_queue (status pending or in_progress), tasks in "
-            "the 'aspects' tuple queue (available or claimed). "
-            "Triage stuck workers before retrying the PK migration."
+            f"{stuck_count} actionable task(s) remain in the 'aspects' tuple "
+            "queue (available or claimed). "
+            "Triage stuck workers before draining again."
         )
         if detail:
             msg = f"{msg} {detail}"
@@ -326,32 +310,30 @@ class DrainTimeoutError(RuntimeError):
 
 
 class AspectExtractionWorker:
-    """Background drain thread for ``aspect_extraction_queue``.
+    """Background drain thread for the ``aspects`` tuple queue.
 
-    Owns one daemon thread that polls the queue and processes one
-    row per iteration. Idle when the queue is empty (sleeps
-    ``poll_interval`` seconds). Stop via ``stop()`` for clean
-    shutdown; otherwise dies with the process (daemon).
+    Owns one daemon thread that claims tasks and processes them. Idle when
+    the queue is empty (the claim parks, then sleeps ``poll_interval``
+    seconds). Stop via ``stop()`` for clean shutdown; otherwise dies with the
+    process (daemon).
 
-    Constructor injection: caller may pass ``poll_interval`` and
-    ``stale_timeout`` for tests; defaults are tuned for production.
+    Constructor injection: caller may pass ``poll_interval`` for tests;
+    defaults are tuned for production.
 
-    Stale-row reclamation is owned by the T2 daemon, not this worker
-    (nexus-we61e) — see ``_run_loop``.
+    A lapsed claim is returned by the engine on the next claim (an attempt
+    counted); nothing here sweeps for it (see ``_run_loop``).
     """
 
-    # Batch-extraction threshold (RDR-089 Phase D). When the queue
-    # has at least this many pending rows, drain them in a single
-    # ``extract_aspects_batch`` call rather than per-row. Below this,
-    # use the single-paper path so small queues don't pay the
-    # batch-overhead tax for one-or-two-paper drains.
+    # Batch-extraction threshold (RDR-089 Phase D). A claim of at least this
+    # many tasks drains in a single ``extract_aspects_batch`` call rather than
+    # per-row. Below this, use the single-paper path so small queues don't pay
+    # the batch-overhead tax for one-or-two-paper drains.
     _DEFAULT_BATCH_SIZE = 5
 
     def __init__(
         self,
         *,
         poll_interval: float = DEFAULT_POLL_INTERVAL_S,
-        stale_timeout_seconds: int = 60,
         batch_size: int = _DEFAULT_BATCH_SIZE,
         on_self_fault: Callable[[str], None] | None = None,
         config_dir: Path | None = None,
@@ -365,7 +347,6 @@ class AspectExtractionWorker:
         # nexus_config_dir(), which is the loose in-process worker's case.
         self._config_dir: Path | None = config_dir
         self._poll_interval = poll_interval
-        self._stale_timeout_seconds = stale_timeout_seconds
         self._batch_size = batch_size
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -383,13 +364,14 @@ class AspectExtractionWorker:
         # nexus-wl9pk: the host's "the engine answered" hook (see
         # ``set_engine_contact_handler``); None for a loose in-process worker.
         self._on_engine_contact: Callable[[], None] | None = None
+        self._on_engine_failure: Callable[[], None] | None = None
         # nexus-59611 stage 2: mtime baseline for the local wake file, so a
         # touch is consumed exactly once. None means "no wake file observed
         # yet" (absent, or not yet baselined by start()).
         self._last_wake_mtime: float | None = None
-        # RDR-235: the aspects tuple queue's side of the worker. Used only where
-        # the engine has the template (see ``_run_loop``); on an engine without
-        # it the worker sends one request, logs once and skips tuple claiming.
+        # RDR-235: the aspects tuple queue's side of the worker. On an engine
+        # without the template the worker sends one request, logs once and
+        # skips claiming for an hour.
         # *tuple_options* overrides the side's lease, park, renewal and deadline
         # (tests).
         from nexus.aspect_worker_tuples import TupleQueueSide, worker_id  # noqa: PLC0415 — deferred: that module imports this one lazily
@@ -454,12 +436,25 @@ class AspectExtractionWorker:
         """Install the host's "the engine answered" hook (nexus-wl9pk).
 
         Called after each claim round trip the engine answered, empty or not,
-        from this worker's thread. ``AspectWorkerDaemon`` uses it to tell a
-        reachable engine from a dead one: its own reclaim sweep is one route,
-        and that route failing alone (a rotated credential, an older engine
-        without it) while claims work is not a reason to leave.
+        from this worker's thread. ``AspectWorkerDaemon`` uses it, with the
+        failure hook, to tell a reachable engine from a dead one.
         """
         self._on_engine_contact = handler
+
+    def set_engine_failure_handler(self, handler: Callable[[], None] | None) -> None:
+        """Install the host's "a claim round trip failed" hook. The mirror of
+        :meth:`set_engine_contact_handler`: the host starts its engine-unreachable
+        clock on the first failure and clears it on the next answered claim."""
+        self._on_engine_failure = handler
+
+    def _note_engine_failure(self) -> None:
+        handler = self._on_engine_failure
+        if handler is None:
+            return
+        try:
+            handler()
+        except Exception:  # noqa: BLE001 — a host hook must not kill the claim loop
+            _log.warning("aspect_worker_engine_failure_handler_failed", exc_info=True)
 
     def _note_engine_contact(self) -> None:
         handler = self._on_engine_contact
@@ -629,31 +624,18 @@ class AspectExtractionWorker:
     def _run_loop(self) -> None:
         """Drain loop. Runs until ``_stop_event`` is set.
 
-        Each iteration (RDR-235: two queues, one worker):
-          1. Table turn: claim a batch of up to ``batch_size`` pending
-             rows (on every iteration in ``table`` mode; in ``tuples``
-             mode while the table has rows, on a wake-file touch, and
-             once per ``poll_interval``).
-          2. Tuple turn: claim up to ``batch_size`` tasks from the
-             ``aspects`` tuple queue, one claimant per slot, where the
-             engine has the template. Slot 0 parks (25 s) in ``tuples``
-             mode when the table is empty; otherwise every slot probes.
-          3. If both are empty: sleep ``poll_interval`` (the park was the
-             wait in ``tuples`` mode).
-          4. A table batch of >= 2: extract_aspects_batch (one Claude
-             call extracts all rows, RDR-089 Phase D); a batch of 1 uses
-             the single-paper extract_aspects. Tuple tasks take the same
-             two paths (``_extract_tuple_rows``) and finish through
-             :class:`~nexus.aspect_worker_tuples.TupleQueueSide`.
+        Each iteration claims up to ``batch_size`` tasks from the ``aspects``
+        tuple queue, one claimant per slot. Slot 0 parks (25 s) on the engine
+        when nothing else was found, so an idle worker is one parked request,
+        not a poll. A batch of >= 2 takes extract_aspects_batch (one Claude
+        call extracts all rows, RDR-089 Phase D); a batch of 1 uses the
+        single-paper extract_aspects (``_extract_tuple_rows``), and the
+        results finish through :class:`~nexus.aspect_worker_tuples.TupleQueueSide`.
 
-        Stale-row reclamation is NOT done here (nexus-we61e). It is a
-        GLOBAL janitor op, but this worker runs inside every nx-mcp
-        process, so N workers each RPC'd a redundant ``reclaim_stale``
-        UPDATE into the single T2 daemon — N-fold WAL contention that
-        pegged a core on ``database is locked`` after a restart with a
-        stale-row backlog. Reclaim now runs exactly once, on the
-        daemon's own periodic loop (``T2Daemon._reclaim_stale_loop``),
-        which is singular by construction.
+        Nothing here sweeps for stranded work. A claim lives and dies by its
+        lease: the engine returns a lapsed claim on the next claim, counting
+        an attempt, so a worker that died holding tasks costs a lease, not a
+        row.
 
         All exceptions inside the loop are caught and recorded; the
         worker thread itself never dies from a row's failure.
@@ -661,8 +643,6 @@ class AspectExtractionWorker:
         from nexus.migration.state import is_migrating as _migration_in_progress  # noqa: PLC0415 — deferred to avoid circular import (migration.state)
 
         side = self._tuple_side
-        table_busy = False
-        next_table_check = 0.0
         while not self._stop_event.is_set():
             # RDR-159 P1c (S2 quiesce): while a guided upgrade migration holds
             # the migration.state sentinel, SUSPEND the claim/extract cycle.
@@ -673,108 +653,46 @@ class AspectExtractionWorker:
                 self._wait_for_wake_or_timeout(self._poll_interval)
                 continue
 
-            # RDR-235 gate S1 (decided): this worker drains BOTH queues whenever
-            # the engine has the ``aspects`` template, whatever NX_ASPECT_QUEUE
-            # says; the variable no longer reaches the worker at all (nexus-bpikw
-            # step A retired the producer's table mode), so a table row an older
-            # client left behind is still claimed. The cadence follows the tuples
-            # path whenever the template is supported: slot 0's ``in`` parks (a
-            # claim in under a second) and the table is checked on the poll
-            # interval or a wake-file touch. On an engine with no template the
-            # table is polled alone.
-            tuples_ok = side.supported()
-            claim_failed = False
-
-            # Table turn.
-            rows: list = []
-            table_due = (
-                not tuples_ok
-                or table_busy
-                or self._wake_touched()
-                or time.monotonic() >= next_table_check
-            )
-            if table_due:
-                try:
-                    rows = self._claim_table_rows()
+            if not side.supported():
+                # The engine has no ``aspects`` template (it predates
+                # engine-service-v0.1.169; the pin makes this unreachable on a
+                # supported install). The side re-probes after an hour. No claim round
+                # trip is made meanwhile, so ask the engine one cheap question per
+                # tick: the host's engine-unreachable clock must keep running (and
+                # clearing) through the suspension, or an engine that goes away
+                # during it is not noticed until the hour is out.
+                if side.probe_engine():
                     self._note_engine_contact()
-                except Exception:  # noqa: BLE001 — best-effort claim loop: must not crash worker thread, logged + retried
-                    _log.warning("aspect_worker_claim_failed", exc_info=True)
-                    claim_failed = True
-                next_table_check = time.monotonic() + self._poll_interval
-                table_busy = bool(rows)
-            if rows:
-                if len(rows) == 1:
-                    self._process_row(rows[0])
                 else:
-                    self._process_batch(rows)
-
-            # Tuple turn. While the table has rows the turn is a probe (slot 0
-            # an ``inp``), so the two queues alternate one batch each; when the
-            # table is empty slot 0 parks again.
-            claims: list = []
-            parked = False
-            tuple_failed = False
-            if tuples_ok and not self._stop_event.is_set():
-                park = not table_busy
-                claims, failed = side.claim_batch(park=park)
-                if not failed:
-                    self._note_engine_contact()
-                claim_failed = claim_failed or failed
-                tuple_failed = failed
-                parked = park and side.supported() and not failed and not claims
-                if claims and self._stop_event.is_set():
-                    side.release_held_claims()
-                    break
-                if claims:
-                    side.process(claims)
-
-            if rows or claims:
+                    self._note_engine_failure()
+                self._wait_for_wake_or_timeout(self._poll_interval)
                 continue
-            if parked and not claim_failed:
+
+            claims, failed = side.claim_batch(park=True)
+            if failed:
+                self._note_engine_failure()
+            else:
+                self._note_engine_contact()
+            parked = side.supported() and not failed and not claims
+            if claims and self._stop_event.is_set():
+                side.release_held_claims()
+                break
+            if claims:
+                side.process(claims)
+                continue
+            if parked:
                 continue  # the park was the wait
-            # A failed tuple claim is the main path blipping, not
-            # an idle queue: retry within half a minute, not a poll interval.
-            retry_s = (
-                min(self._poll_interval, _TUPLE_CLAIM_RETRY_S)
-                if tuple_failed else self._poll_interval
-            )
+            # A failed claim is the main path blipping, not an idle queue:
+            # retry within half a minute, not a poll interval.
+            retry_s = min(self._poll_interval, _TUPLE_CLAIM_RETRY_S) if failed else self._poll_interval
             self._wait_for_wake_or_timeout(retry_s)
-
-    def _claim_table_rows(self) -> list:
-        """One table ``claim_batch`` (routed, RDR-128 P3), as ``QueueRow`` objects.
-
-        RDR-128 P3 (nexus-sbxbe.3): the claim routes through the T2 daemon path
-        so this worker stops opening memory.db directly. nexus-we61e:
-        ``reclaim_stale`` is deliberately NOT called here; the daemon owns
-        reclaim on its own periodic loop.
-        """
-        from nexus.db.t2.records import QueueRow  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra <-> aspect_worker)
-
-        def _poll(t2):
-            return t2.aspect_queue.claim_batch(self._batch_size)
-
-        rows = t2_index_write(_poll)
-        # The daemon RPC decodes QueueRow to a plain dict; the direct-fallback
-        # path returns QueueRow objects. Normalise so downstream attribute
-        # access (row.collection, ...) is uniform regardless of which path
-        # served the claim.
-        return [r if isinstance(r, QueueRow) else QueueRow(**r) for r in rows]
-
-    def _wake_touched(self) -> bool:
-        """True once per touch of the local wake file (consumes it)."""
-        current = self._read_wake_mtime()
-        if current != self._last_wake_mtime:
-            self._last_wake_mtime = current
-            return True
-        return False
 
     def _extract_tuple_rows(self, claims: list) -> list:
         """Extract the rows of a tuple batch: one result per claim, in order.
 
-        The same two paths the table batch takes (``_process_row`` for one,
-        ``_process_batch`` for several, per-row when the batch mixes extractor
-        configs), minus the persist: each result is an ``AspectRecord``,
+        One claim takes the single-paper extractor, several take the batch
+        extractor (per-row when the batch mixes extractor configs), and none
+        persists: each result is an ``AspectRecord``,
         ``None``, an ``ExtractFail`` or an :class:`ExtractRaised` for the verdict
         map. A task carries no text, so ``content`` is ``""`` and the extractor
         reads the document itself: the file for a CLI row, the chunks through
@@ -827,290 +745,25 @@ class AspectExtractionWorker:
             return list(_extract_aspects_batch(items, manifest_lookup=manifest_lookup))
         except Exception as exc:  # noqa: BLE001 — batch extract is best-effort; every row is routed on its own
             _log.warning("aspect_worker_batch_extract_raised", row_count=len(rows), exc_info=True)
+            if _self_fault_reason(exc) is None and not _is_retryable(exc):
+                # A non-retryable batch failure is terminal for every row it is routed to
+                # (dead-lettered). One bad document must not take its healthy neighbours with
+                # it, so extract each row on its own and let each earn its own verdict. A self
+                # fault (this process's environment is broken) and a retryable failure (the
+                # whole batch backs off together) stay batch-level.
+                _log.info("aspect_worker_batch_nonretryable_per_row_fallback", row_count=len(rows))
+                return [_one(row) for row in rows]
             return [ExtractRaised(exc) for _ in rows]
 
-    def _process_batch(self, rows: list) -> None:
-        """Run batch extraction on multiple queue rows in one
-        Claude call. RDR-089 Phase D — cost-amortised drain.
-
-        Each row's content was captured at enqueue time when in
-        scope. CLI rows with empty content are sourced via
-        ``nx-note://`` URI inside ``extract_aspects_batch`` (RDR-096
-        P5.1 / nexus-8g79.34 — the batch path now mirrors the
-        single-doc extractor's read contract).
-        """
-        import dataclasses  # noqa: PLC0415 — stdlib import deferred to method scope (rare branch)
-
-        from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
-
-        # extract_aspects_batch now supports mixed configs internally
-        # (nexus-kmbys: it partitions by per-document resolved config and
-        # runs deterministic parser_fn configs inline). This pre-filter is
-        # retained as a conservative simplification: a claim mixing prefix
-        # configs (knowledge__ + rdr__) falls back to per-row processing
-        # rather than relying on the batch partition path for cross-prefix
-        # mixes. Same-prefix claims (the common case) go through the batch.
-        configs = {select_config(row.collection) for row in rows}
-        if len(configs - {None}) > 1:
-            _log.info(
-                "aspect_worker_batch_heterogeneous_fallback",
-                row_count=len(rows),
-                configs=sorted(c.extractor_name for c in configs if c is not None),
-            )
-            for row in rows:
-                self._process_row(row)
-            return
-
-        # nexus-8g79.34: build manifest_lookup once; pass queue-captured
-        # doc_id per row via the 4-tuple form (extract_aspects_batch
-        # uses it to construct the per-row doc_id_lookup, matching
-        # _process_row's pattern at lines 406-411).
-        manifest_lookup = None
-        try:
-            from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
-            manifest_lookup = _build_catalog_manifest_lookup()
-        except Exception as exc:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
-            _log.debug("aspect_worker_manifest_lookup_unavailable", error=str(exc))
-
-        items: list[tuple[str, str, str, str]] = [
-            (row.collection, row.source_path, row.content,
-             getattr(row, "doc_id", "") or "")
-            for row in rows
-        ]
-
-        try:
-            records = _extract_aspects_batch(items, manifest_lookup=manifest_lookup)
-        except Exception as exc:  # noqa: BLE001 — batch extract is best-effort; failure logged and rows re-queued
-            _log.warning(
-                "aspect_worker_batch_extract_raised",
-                row_count=len(rows),
-                exc_info=True,
-            )
-            # nexus-yg70j defect A: ROUTE, do not terminal-fail the batch.
-            #
-            # This arm used to call mark_failed() on EVERY row -- terminal,
-            # "terminal until re-enqueued" -- for ANY batch-extract exception.
-            # The single-row path at the bottom of this method already routes
-            # through _mark_retry_or_fail_routed, which carries the real
-            # transient-vs-terminal taxonomy (RDR-163 P1, nexus-ztpt6) and a
-            # retry budget with backoff. Only the batch path bypassed it.
-            #
-            # MEASURED COST of that bypass, on the 2026-08-24 incident's 26
-            # terminally-failed rows:
-            #     7  relative source_paths  -- genuine victims of the fault
-            #    19  absolute source_paths  -- ALL 19 EXIST ON DISK
-            # The 19 were healthy documents killed solely by sharing a batch of
-            # five with one bad neighbour. 73% collateral. A per-batch verdict
-            # on a per-row property is the defect: the batch is a transport
-            # detail, not a fact about any document in it.
-            #
-            # The router decides per row: a SELF FAULT (this process's own
-            # environment is broken -- a deleted cwd, this incident's actual
-            # cause) writes no row state at all and stands the worker down;
-            # otherwise a non-retryable exception or an exhausted budget is
-            # terminal, and anything else is mark_retry with backoff. The self
-            # fault is latched inside the router, so this loop reports one
-            # episode rather than one per row.
-            for row in rows:
-                try:
-                    self._mark_retry_or_fail_routed(row, exc)
-                except Exception:  # noqa: BLE001 — per-row routing is best-effort; reclaim_stale backstops
-                    _log.warning(
-                        "aspect_worker_batch_route_failed",
-                        collection=row.collection, source_path=row.source_path,
-                        exc_info=True,
-                    )
-            return
-
-        # nexus-zir76: one routed write_fn does the whole batch's persist;
-        # each row clears via the daemon (``complete_aspect`` /
-        # ``mark_done``) instead of a direct memory.db transaction.
-        transport_rows: list[tuple[Any, ExtractFail]] = []
-
-        def _persist_all(db):  # noqa: ANN001
-            for row, record in zip(rows, records):
-                if record is None:
-                    # Unsupported collection — drop silently.
-                    db.aspect_queue.mark_done(
-                        row.collection, row.source_path,
-                    )
-                    continue
-                # nexus-8g79.34: ExtractFail per-row — typed read-failure
-                # sentinel from URI-based reading. Mark queue done so we
-                # don't retry an unreadable source on every drain;
-                # operators re-enqueue manually after fixing source
-                # identity (mirrors _process_row's handling).
-                if isinstance(record, ExtractFail):
-                    if record.reason == READ_FAIL_TRANSPORT:
-                        # A transport failure is not a verdict on the document:
-                        # route it to the backed-off retry after this write
-                        # (nexus-5r2sc.3.10), never mark_done.
-                        transport_rows.append((row, record))
-                        continue
-                    _log.info(
-                        "aspect_worker_batch_extract_skip",
-                        uri=record.uri,
-                        reason=record.reason,
-                        detail=record.detail,
-                    )
-                    db.aspect_queue.mark_done(
-                        row.collection, row.source_path,
-                    )
-                    continue
-                attributed = _attributed(record, row)
-                if _is_unattributable(attributed):
-                    # nexus-r0kum: refuse to upsert a file-routed row with
-                    # no source_uri — it can never be attributed by
-                    # aspects-004 and is invisible to search_aspect_scoped
-                    # by construction. Terminal fail (never retried
-                    # automatically): the identity gap is in the writer
-                    # that enqueued it, not a transient condition a retry
-                    # would clear.
-                    _log.warning(
-                        "aspect_worker_unattributable_identity",
-                        collection=row.collection,
-                        source_path=row.source_path,
-                    )
-                    db.aspect_queue.mark_failed(
-                        row.collection, row.source_path,
-                        error="unattributable_identity",
-                    )
-                    continue
-                try:
-                    db.complete_aspect(dataclasses.asdict(attributed))
-                except SupersededCollectionWriteError as exc:
-                    # nexus-i15oc: the engine refuses an aspect write to a retired
-                    # collection name. That is a fact about THIS row's collection,
-                    # not a transient and not a verdict on its neighbours: take the
-                    # single-row path's terminal ``mark_failed`` (it is not
-                    # retryable there either) and go on with the rest of the
-                    # batch. Letting it abort the loop left every later row
-                    # unmarked, and ``reclaim_stale`` reset those without touching
-                    # retry_count (it now counts the reclaim), so the extractor
-                    # re-ran them indefinitely.
-                    _log.warning(
-                        "aspect_worker_batch_row_superseded",
-                        collection=row.collection,
-                        source_path=row.source_path,
-                        successor=exc.successor,
-                    )
-                    db.aspect_queue.mark_failed(
-                        row.collection, row.source_path, error=str(exc),
-                    )
-        try:
-            t2_index_write(_persist_all)
-        except Exception:  # noqa: BLE001 — batch persist best-effort; failure logged via log.warning
-            _log.warning(
-                "aspect_worker_batch_persist_failed",
-                exc_info=True,
-            )
-        for row, record in transport_rows:
-            self._route_transport_fail(row, record)
-
-    def _route_transport_fail(self, row, record: ExtractFail) -> None:
-        """A read that failed on the transport (T3, the manifest, an HTTP fetch)
-        takes the same backed-off retry as a raised transient error and is
-        terminal-failed only when the budget is spent (nexus-5r2sc.3.10). Before
-        this the table path ``mark_done``d it, a silent drop of the extraction."""
-        _log.warning(
-            "aspect_worker_extract_transport_failure",
-            uri=record.uri, detail=record.detail,
-            collection=row.collection, source_path=row.source_path,
-        )
-        self._mark_retry_or_fail_routed(row, TransportReadFailure(record.detail))
-
-    def _mark_failed_routed(self, row, error: str) -> None:
-        """Route a queue ``mark_failed`` through the daemon (nexus-zir76).
-
-        The failure path must not open ``memory.db`` directly either: a
-        direct ``mark_failed`` losing the WAL writer race is exactly what
-        orphaned rows ``in_progress`` until the reclaim backstop. If even
-        the routed write raises (daemon down AND the direct fallback
-        contended), ``reclaim_stale`` recovers the row; we log and move on
-        without killing the worker thread.
-        """
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
-        try:
-            t2_index_write(
-                lambda db: db.aspect_queue.mark_failed(
-                    row.collection, row.source_path, error=error,
-                )
-            )
-        except Exception:  # noqa: BLE001 — mark-failed persist best-effort; logged via log.warning
-            _log.warning(
-                "aspect_worker_mark_failed_persist_failed",
-                collection=row.collection,
-                source_path=row.source_path,
-                exc_info=True,
-            )
-
-    def _mark_retry_or_fail_routed(self, row, exc: BaseException) -> None:
-        """Route a failed row to a backed-off retry, or terminal-fail it
-        (RDR-163 P1, nexus-ztpt6).
-
-        Decision, in order:
-        * SELF FAULT — this process's own environment is broken (nexus-yg70j)
-          → NO row-state write at all. Stand the worker down and leave the
-          claimed rows for ``reclaim_stale``. Checked FIRST, because the two
-          branches below both record a verdict about the document and neither
-          verdict is honest when the fault was never about the document;
-        * non-retryable exception (programming bug / malformed record) →
-          terminal ``mark_failed``;
-        * retry budget exhausted (``retry_count >= _RETRY_MAX_ATTEMPTS``) →
-          terminal ``mark_failed``;
-        * otherwise → ``mark_retry`` with a worker-chosen backoff interval; the
-          service stamps ``next_retry_at = now()+interval`` so the claim gate
-          holds the row back until the backoff elapses.
-
-        Routed through ``t2_index_write`` (nexus-zir76) so the worker never opens
-        ``memory.db`` directly. A routing failure is logged and falls to
-        ``reclaim_stale`` rather than killing the worker thread — the same
-        best-effort posture as ``_mark_failed_routed``.
-        """
-        self_fault = _self_fault_reason(exc)
-        if self_fault is not None:
-            self._stand_down(self_fault, row=row, exc=exc)
-            return
-
-        retry_count = getattr(row, "retry_count", 0) or 0
-        if not _is_retryable(exc) or retry_count >= _RETRY_MAX_ATTEMPTS:
-            self._mark_failed_routed(row, str(exc))
-            return
-
-        interval = _backoff_interval_seconds(retry_count)
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
-        try:
-            t2_index_write(
-                lambda db: db.aspect_queue.mark_retry(
-                    row.collection, row.source_path, interval_seconds=interval,
-                )
-            )
-            _log.info(
-                "aspect_worker_retry_scheduled",
-                collection=row.collection,
-                source_path=row.source_path,
-                retry_count=retry_count + 1,
-                interval_seconds=interval,
-            )
-        except Exception:  # noqa: BLE001 — retry persist best-effort; reclaim_stale backstops; logged
-            _log.warning(
-                "aspect_worker_mark_retry_persist_failed",
-                collection=row.collection,
-                source_path=row.source_path,
-                exc_info=True,
-            )
-
     def _stand_down(self, reason: str, *, row, exc: BaseException) -> None:
-        """Report a self fault and stop claiming, WITHOUT touching row state.
+        """Report a self fault and stop claiming, WITHOUT touching task state.
 
-        Latched, because the batch arm calls the router once per row: an
+        Latched, because a batch routes each of its claims through here: an
         episode produces one ERROR line and one stand-down, not five.
 
-        The rows this worker holds stay ``in_progress``. They are recovered by
-        the daemon's ``reclaim_stale`` sweep, which is documented as
-        RECLAIM-FIRST precisely so a freshly respawned daemon clears the
-        backlog a dead worker left behind rather than waiting an interval.
+        The claims this worker holds are released by the host's stop sweep
+        (``release_held_claims``, no attempt counted) or lapse with their
+        leases, and the engine returns them to the next claimant.
 
         Stopping the THREAD is not enough on its own. The host daemon
         heartbeats a per-tenant lease, so a process whose worker has quietly
@@ -1120,13 +773,11 @@ class AspectExtractionWorker:
         the lease is relinquished and the next enqueue spawns a daemon with a
         fresh environment. A persistent host fault (a full disk) therefore
         becomes a respawn loop rather than a silent one. That is the intended
-        trade: loud and non-destructive over quiet and destructive. One
-        cost (nexus-j67ix.2) is bounded by nexus-j67ix.3: the stopping
-        daemon's own sweep (``reclaim_stale(0, count_attempt=False)``) returns
-        the rows this worker leaves behind without spending an attempt, so a
-        respawn loop on a persistent fault does not terminal-fail them. A row
-        that stays ``in_progress`` until the periodic age-based sweep reclaims
-        it (the daemon died without stopping) still spends one.
+        trade: loud and non-destructive over quiet and destructive. The
+        stopping daemon releases the claims its worker holds without spending
+        an attempt (nexus-j67ix.3), so a respawn loop on a persistent fault
+        does not dead-letter them; a claim whose daemon died without stopping
+        lapses with its lease and spends one.
         """
         with self._self_fault_lock:
             first = self._self_fault is None
@@ -1143,7 +794,7 @@ class AspectExtractionWorker:
             collection=getattr(row, "collection", None),
             source_path=getattr(row, "source_path", None),
             error=str(exc),
-            action="row state untouched; worker standing down for reclaim_stale",
+            action="task state untouched; worker standing down, claims released or lapse",
         )
         self._stop_event.set()
 
@@ -1154,122 +805,6 @@ class AspectExtractionWorker:
             handler(reason)
         except Exception:  # noqa: BLE001 — the host hook must not mask the fault it reports
             _log.warning("aspect_worker_self_fault_handler_failed", exc_info=True)
-
-    def _process_row(self, row) -> None:
-        """Run extraction on one queue row and dispatch on the result.
-
-        nexus-zir76: every persist routes through ``t2_index_write`` (the
-        daemon when reachable, a direct fallback when not) so the worker
-        never opens ``memory.db`` directly and cannot contend with the
-        daemon for the single WAL writer lock.
-        """
-        import dataclasses  # noqa: PLC0415 — stdlib import deferred to method scope (rare branch)
-
-        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
-        try:
-            # Content was captured at enqueue time when in scope (MCP
-            # store_put). For CLI rows where content was not in scope
-            # at enqueue, ``row.content`` is "" and the extractor's
-            # content-sourcing fallback will read source_path.
-            # nexus-tdgc: when the queue row carries a doc_id, build a
-            # lookup callable so the chroma reader can route to the
-            # doc_id-keyed chunk lookup. Empty doc_id passes through as
-            # a None lookup; the extractor falls back to legacy probes.
-            queued_doc_id = getattr(row, "doc_id", "") or ""
-            doc_id_lookup = (
-                (lambda _coll, _sid, _d=queued_doc_id: _d)
-                if queued_doc_id
-                else None
-            )
-            # nexus-8g79.2: manifest lookup gives the chroma reader the
-            # canonical chunk-order from document_chunks instead of the
-            # dropped chunk_index metadata field.
-            manifest_lookup = None
-            try:
-                from nexus.commands.enrich import _build_catalog_manifest_lookup  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
-                manifest_lookup = _build_catalog_manifest_lookup()
-            except Exception as exc:  # noqa: BLE001 — optional manifest-lookup enrichment; absence is non-fatal, falls through
-                _log.debug("aspect_worker_manifest_lookup_unavailable", error=str(exc))
-            record = _extract_aspects(
-                content=row.content,
-                source_path=row.source_path,
-                collection=row.collection,
-                doc_id_lookup=doc_id_lookup,
-                manifest_lookup=manifest_lookup,
-            )
-        except Exception as exc:  # noqa: BLE001 — extract is best-effort; failure logged via log.warning
-            _log.warning(
-                "aspect_worker_extract_raised",
-                collection=row.collection,
-                source_path=row.source_path,
-                exc_info=True,
-            )
-            self._mark_retry_or_fail_routed(row, exc)
-            return
-
-        try:
-            if record is None:
-                # Unsupported collection — drop silently.
-                t2_index_write(
-                    lambda db: db.aspect_queue.mark_done(
-                        row.collection, row.source_path,
-                    )
-                )
-                return
-            # RDR-096 P1.2: ExtractFail is the typed read-failure
-            # sentinel. No row written; mark queue done so we
-            # don't retry the unreadable source on every drain.
-            # Operators can re-enqueue manually after fixing the
-            # source identity.
-            if isinstance(record, ExtractFail):
-                if record.reason == READ_FAIL_TRANSPORT:
-                    # nexus-5r2sc.3.10: the network failed, not the document.
-                    self._route_transport_fail(row, record)
-                    return
-                _log.info(
-                    "aspect_worker_extract_skip",
-                    uri=record.uri,
-                    reason=record.reason,
-                    detail=record.detail,
-                )
-                t2_index_write(
-                    lambda db: db.aspect_queue.mark_done(
-                        row.collection, row.source_path,
-                    )
-                )
-                return
-            # AspectRecord — either a populated record or a null-fields
-            # record from a subprocess-side failure (the extractor
-            # already retried up to 3 attempts internally for those
-            # paths). nexus-zir76: persist + clear the queue row in one
-            # daemon-routed call (``complete_aspect``) so the worker
-            # never writes memory.db directly. asdict() because the wire
-            # protocol decodes a dataclass arg to its field dict.
-            attributed = _attributed(record, row)
-            if _is_unattributable(attributed):
-                # nexus-r0kum: same terminal refusal as the batch path —
-                # see _persist_all's matching comment.
-                _log.warning(
-                    "aspect_worker_unattributable_identity",
-                    collection=row.collection,
-                    source_path=row.source_path,
-                )
-                self._mark_failed_routed(row, "unattributable_identity")
-                return
-            t2_index_write(
-                lambda db, _r=attributed: db.complete_aspect(
-                    dataclasses.asdict(_r)
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 — persist is best-effort; failure logged via log.warning
-            _log.warning(
-                "aspect_worker_persist_failed",
-                collection=row.collection,
-                source_path=row.source_path,
-                exc_info=True,
-            )
-            self._mark_retry_or_fail_routed(row, exc)
-
 
 # ── Module-level singleton ──────────────────────────────────────────────────
 
@@ -1367,7 +902,6 @@ def _remove_worker_lock(locks_dir: Path | None = None) -> None:
 def ensure_worker_started(
     *,
     poll_interval: float = DEFAULT_POLL_INTERVAL_S,
-    stale_timeout_seconds: int = 60,
     _locks_dir: Path | None = None,
 ) -> AspectExtractionWorker:
     """Lazy-start the singleton worker. Returns the worker.
@@ -1387,7 +921,6 @@ def ensure_worker_started(
         if _worker is None:
             _worker = AspectExtractionWorker(
                 poll_interval=poll_interval,
-                stale_timeout_seconds=stale_timeout_seconds,
             )
         _worker.start()
     _write_worker_lock(_locks_dir)
@@ -1436,39 +969,29 @@ def drain_worker(
 ) -> None:
     """Stop the singleton worker and wait until the queue is fully drained.
 
-    A queue is considered drained when BOTH sides are (RDR-235, which keeps
-    the old table and the ``aspects`` tuple queue side by side until the table
-    retires):
+    The queue is drained when the ``aspects`` tuple queue has
+    ``available + claimed == 0``. A backoff-delayed task counts as available,
+    so the test is conservative. Dead tasks are terminal and do not block a PK
+    migration. On an engine with no ``aspects`` template the queue reads as
+    empty.
 
-    * the table: ``SELECT count(*) FROM aspect_extraction_queue WHERE
-      status != 'failed'`` returns 0 — no rows are pending or in_progress; and
-    * the tuple queue: ``available + claimed == 0`` on the ``aspects`` subspace.
-      A backoff-delayed task counts as available, so the test is conservative.
-
-    Failed rows and dead tasks are terminal and do not block a PK migration.
-    On an engine with no ``aspects`` template the tuple side reads as empty.
-
-    Protocol (RDR-108 Phase 1 S1, nexus-he24; the SIG-5 lock-file
-    pre-check that used to lead it was a SQLite-queue concern and died
-    with the =sqlite opt-out — on the service queue PG's FOR UPDATE SKIP
-    LOCKED owns cross-process claim safety):
+    Protocol (RDR-108 Phase 1 S1, nexus-he24; PG's claim safety owns
+    cross-process correctness, so no lock-file pre-check):
 
       1. Set the stop signal on the singleton worker (if one exists) so
-         it claims no new rows.  In-flight row processing continues.
-      2. Poll both sides at ``poll_interval`` (default 100 ms) until the table's
-         ``is_drained()`` returns True and the tuple side shows no live task, or
-         ``timeout`` elapses.
+         it claims no new tasks.  In-flight processing continues.
+      2. Poll the census at ``poll_interval`` (default 100 ms) until no task is
+         live, or ``timeout`` elapses.
       3. On success: join the worker thread (it has already exited or will
          exit imminently after the last iteration).  If the thread does not
          exit within 2 seconds, log a warning (S-5) and continue — the
          thread is a daemon and will die with the process.
       4. On timeout: raise ``DrainTimeoutError`` so the operator is alerted
-         to inspect stuck ``in_progress`` rows or claimed tasks.
+         to inspect claimed tasks.
 
     Args:
         queue_path: Legacy path parameter, retained for signature stability.
-            The queue is engine-side (``HttpAspectQueue``, nexus-i711w Stage 2
-            sub-stage A); the ``is_drained()`` poll goes over HTTP and no
+            The queue is engine-side and the census poll goes over HTTP; no
             local connection is opened from this path.
         timeout: Seconds to wait for the queue to drain.  Default 120s.
             RDR-089 P1.3 measured ~26.5s median extraction time with a
@@ -1477,34 +1000,20 @@ def drain_worker(
             still surfacing genuinely stuck workers within two minutes.
             Callers that know their workload is lighter may pass a smaller
             value.
-        poll_interval: Seconds between is_drained() checks (default 0.1).
-        _locks_dir: Retained-and-ignored for signature stability. The
-            lock-file pre-check this seam parameterised died with the
-            =sqlite opt-out (RDR-158 P3, nexus-7bomn).
+        poll_interval: Seconds between census checks (default 0.1).
+        _locks_dir: Retained-and-ignored for signature stability.
 
     Raises:
-        DrainTimeoutError: The table still has pending/in_progress rows, or
-            ``aspects`` still has available/claimed tasks, after ``timeout``
-            seconds.
+        DrainTimeoutError: ``aspects`` still has available/claimed tasks after
+            ``timeout`` seconds.
 
     Note:
         If no worker has been started in this process (``get_worker()``
-        returns None), the function simply checks ``is_drained()`` once and
+        returns None), the function simply checks the census once and
         returns — there is no thread to stop and no in-flight work to wait
-        for.  This handles the quiescent case (e.g., the caller's process
-        never ran the worker, or the worker finished and was reset).
+        for.
     """
-    # SIG-5 history (nexus-1091 / RDR-173 P4.1 nexus-4st62): the local
-    # file-lock check that used to run here detected a live MCP worker in
-    # another process before stopping the local singleton — a SQLite-queue
-    # concern. On the service queue ALL workers share the same PG rows with
-    # FOR UPDATE SKIP LOCKED, so cross-process claim safety is handled by
-    # PG, not by the file lock; checking it would make drain always raise
-    # DrainBlockedByActiveWorker while the MCP server is running, defeating
-    # the primary use case (drain during migration while MCP is live). The
-    # check went with the =sqlite opt-out (RDR-158 P3, nexus-7bomn).
-    #
-    # Validation only: drain constructs HttpAspectQueue directly (bypassing
+    # Validation only: drain builds its store directly (bypassing
     # T2Database's validation seam), so a stranded
     # NX_STORAGE_BACKEND[_ASPECT_QUEUE]=sqlite export hard-errors here
     # rather than being silently ignored on the drain path.
@@ -1518,17 +1027,8 @@ def drain_worker(
     queue_path = Path(queue_path)
     deadline = time.monotonic() + timeout
 
-    # RDR-173 P4.1 (nexus-4st62): in SERVICE mode the authoritative
-    # aspect_extraction_queue is PG, reached via ``HttpAspectQueue``. The
-    # local-sqlite ``AspectExtractionQueue`` is empty/stale there, so polling it
-    # yields a spurious "drained" — leaving ``nx aspects drain`` and the
-    # migration drain gate inert in service mode. Poll the SERVICE queue's
-    # ``is_drained()`` instead. (Local/SQLite mode is unchanged.)
-    # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A): HttpAspectQueue is
-    # the only queue — the SQLite AspectExtractionQueue died with the store.
-    from nexus.db.t2.http_aspect_queue import HttpAspectQueue, aspects_census  # noqa: PLC0415 — deferred (optional service dep)
+    from nexus.db.t2.http_aspect_queue import aspects_census  # noqa: PLC0415 — deferred (optional service dep)
     from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred (optional service dep)
-    queue = HttpAspectQueue()
     tuples: HttpTupleStore | None = None
 
     def _tuple_live() -> int:
@@ -1538,11 +1038,8 @@ def drain_worker(
         census = aspects_census(tuples)
         return 0 if census is None else census.available + census.claimed
 
-    last_table_drained = [False]  # the table's answer at the most recent poll
-
     def _drained() -> bool:
-        last_table_drained[0] = queue.is_drained()
-        return last_table_drained[0] and _tuple_live() == 0
+        return _tuple_live() == 0
 
     def _join_worker_thread(w: AspectExtractionWorker) -> None:
         """Join the worker thread; log a warning if it does not exit in 2s.
@@ -1585,54 +1082,23 @@ def drain_worker(
                     _join_worker_thread(worker)
                 return
 
-        # Timeout: count stuck rows for the error message.
-        # The queue is HttpAspectQueue (the SQLite arm died in nexus-i711w
-        # Stage 2 sub-stage A, taking the raw `status != 'failed'` count
-        # with it). pending_count() counts only 'pending' rows — NOT
-        # in_progress. A crashed worker leaves rows in in_progress with NO
-        # lock held (FOR UPDATE locks are transaction-scoped; they are
-        # released when the transaction ends, which happens when the worker
-        # process dies). Those orphaned rows are recovered by
-        # reclaim_stale(), not by a held lock. Consequence: if the drain
-        # times out because rows are stuck in_progress (the common
-        # crashed-worker scenario), pending_count() returns 0 even though
-        # is_drained() is still False. We detect this gap and include an
-        # honest operator hint in the error detail.
-        pending = queue.pending_count()
+        # Timeout: count the live tasks for the error message.
         census = aspects_census(tuples)
         tasks_live = 0 if census is None else census.available + census.claimed
-        if pending == 0 and not last_table_drained[0]:
-            # The table's is_drained() was False at the last poll, but
-            # pending_count() is 0 — rows are stuck in in_progress (crashed-
-            # worker case). pending_count() is a pending-only proxy and cannot
-            # see them.
-            detail = (
-                "Note (service mode): pending_count is 0, but is_drained() "
-                "is still False — rows may be stuck in in_progress from a "
-                "crashed worker. A running aspect-worker's stale-reclaim "
-                "loop resets them to pending automatically; ensure one is "
-                "up ('nx daemon aspect-worker start', or it spawns on the "
-                "next aspect enqueue), then retry the drain."
-            )
-            stuck_count = 0
-        else:
-            detail = None
-            stuck_count = pending
+        detail = None
         if tasks_live:
-            # The tuple side reads claimed and lapsed where the table reads
-            # pending_count (RDR-235). A lapsed claim is still counted as
-            # claimed; the next claim releases it.
-            tasks_detail = (
+            # A lapsed claim is still counted as claimed; the next claim
+            # releases it.
+            detail = (
                 f"Tuple queue 'aspects': {census.available} available, "
                 f"{census.claimed} claimed ({census.lapsed} of them lapsed). "
                 "A running aspect worker claims the available tasks and "
-                "releases the lapsed ones; ensure one is up, then retry the drain."
+                "releases the lapsed ones; ensure one is up ('nx daemon "
+                "aspect-worker start', or it spawns on the next aspect "
+                "enqueue), then retry the drain."
             )
-            detail = f"{detail} {tasks_detail}" if detail else tasks_detail
-            stuck_count += tasks_live
-        raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout, detail=detail)
+        raise DrainTimeoutError(stuck_count=tasks_live, timeout=timeout, detail=detail)
     finally:
-        queue.close()
         if tuples is not None:
             tuples.close()
 
@@ -1651,10 +1117,9 @@ _CHASH_RE = re.compile(r"^([0-9a-f]{32}|[0-9a-f]{64})$")
 def _attributed(record: "AspectRecord", row: object) -> "AspectRecord":
     """Stamp the queue row's catalog identity onto *record* before it is
     completed (nexus-x1de2 (52)). The extractor never sets ``doc_id``; the
-    row carries the one captured at enqueue (nexus-tdgc). Both completion
-    paths (batch ``_persist_all`` and the single-row ``_process_row``) go
-    through here so a row with a known identity is never persisted
-    unattributed.
+    row carries the one captured at enqueue (nexus-tdgc). The completion
+    path (``TupleQueueSide``'s verdict map) goes through here so a row with a
+    known identity is never persisted unattributed.
 
     nexus-r0kum: also resolves a missing ``source_uri`` on a file-routed
     collection (``rdr__``/``docs__``/``code__``) via the record's
@@ -1899,7 +1364,7 @@ def aspect_extraction_enqueue_hook(
     *,
     doc_id: str = "",
 ) -> None:
-    """Post-document hook: enqueue a row for async aspect extraction.
+    """Post-document hook: enqueue a task for async aspect extraction.
 
     Signature matches ``HookRegistry.fire_document(source_path,
     collection, content)``. This hook does NOT call extract_aspects
@@ -1909,33 +1374,24 @@ def aspect_extraction_enqueue_hook(
       1. Skips collections without a registered extractor config
          (currently ``knowledge__*``, ``rdr__*``, ``docs__*``).
       2. Resolves ``doc_id`` when the caller did not supply one (hygiene-001,
-         nexus-tk070.p6a follow-on, review round item B): the queue's
-         ``doc_id`` carries a REAL FK to ``catalog_documents``, so a blank
-         one is refused by the engine. This is the CHOKE POINT for that
+         nexus-tk070.p6a follow-on, review round item B): the task's identity
+         is its ``doc_id``, so a blank one cannot be enqueued. This is the CHOKE POINT for that
          decision — every ``fire_document`` call site shares it, so the
          resolve-or-skip logic lives here once. A caller-supplied doc_id is
          never overridden; a blank one is looked up via the catalog reader
          by ``(collection, source_path)``. Still unresolvable -> the
          enqueue is SKIPPED entirely, logged as
          ``aspect_enqueue_skipped_no_doc_id`` — never enqueued with ``""``.
-      3. Writes a pending row to ``aspect_extraction_queue``
-         (microsecond-scale T2 INSERT). The row carries ``content``
-         when non-empty (MCP path) so the worker has the document
-         text without needing to re-read from disk; CLI paths pass
-         ``content=""`` and the worker falls back to a file read.
+      3. Writes one task to the ``aspects`` tuple queue (a replace by
+         ``doc_id``). The task carries the document's identity, never its
+         text: the worker re-reads the document from T3 chunks or the file.
       4. Lazy-starts the worker if not already running.
 
     The hook is synchronous (RDR-089 P0.1 contract). It does not
     block on extraction; the worker drains in a background thread.
 
-    Content-sourcing contract (audit F4 + critical-issue fix):
-      * MCP store_put → ``content=<full document text>`` is in scope.
-        The hook persists it in the queue so the worker reads from
-        the row, not from disk (``source_path`` is a doc_id at the
-        MCP boundary, not a real filesystem path).
-      * CLI ingest → ``content=""`` (chunk scope only). Queue row
-        carries the empty string; worker falls back to
-        ``Path(source_path).read_text()``.
+    Content-sourcing contract: ``content`` is accepted for the hook signature
+    and dropped; the task carries identity only (RDR-235 E2).
     """
     from nexus.aspect_extractor import extraction_applies_to_source, select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
     if select_config(collection) is None:
@@ -2073,56 +1529,39 @@ def record_batch_enqueue_failure(collection: str, count: int, exc: BaseException
 
 def _best_effort_queue_depth() -> int | None:
     """Pending work for the diagnostic signal (RDR-173 P5), or None if it cannot
-    be obtained cheaply: the old table's pending rows plus the ``aspects`` tuple
-    queue's available tasks (RDR-235 keeps both until the table retires, so a
-    reader of only one goes blind to new work the day the producer flips).
+    be obtained cheaply: the ``aspects`` tuple queue's available tasks.
 
     The service queue is usually reachable even when the WORKER daemon is not
     (the daemon-spawn path is only reached AFTER a successful enqueue), so this
-    normally answers. A SHORT 2s cap on EACH call (review H1) keeps the
+    normally answers. A SHORT 2s cap on the call (review H1) keeps the
     observability path from blocking the store hook for the client's default
-    30s in a full outage. (HttpAspectQueue.__init__ emits an info on construct
-    — expected on this diagnostic path.)
+    30s in a full outage.
 
-    One side failing returns None, never the other side's count alone: a partial
-    sum would pass for the real depth, and None is this function's word for "not
-    known". The one exception is an engine with no ``aspects`` template (it
-    predates ``engine-service-v0.1.169``): that tuple side is genuinely empty
-    and reads as 0, with one log line per process."""
+    A failed read returns None ("not known"). An engine with no ``aspects``
+    template (it predates ``engine-service-v0.1.169``) is genuinely empty and
+    reads as 0, with one log line per process."""
     try:
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue, aspects_census  # noqa: PLC0415 — deferred; service-side
+        from nexus.db.t2.http_aspect_queue import aspects_census  # noqa: PLC0415 — deferred; service-side
         from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred; service-side
         from nexus.mcp_infra import current_index_run_t2_client  # noqa: PLC0415 — deferred to avoid circular import
 
-        # nexus-m20mf P3 fold-in (round-2 critique finding 2): the earlier
-        # "sharing here would defeat the 2s cap" framing was self-
-        # inflicted, not fundamental -- _get() (and HttpAspectQueue's own
-        # _get override, and pending_count()) now carry the SAME optional
-        # per-request timeout= override _post() already had (nexus-y9t08),
-        # so the strict 2s cap and pool sharing are no longer mutually
-        # exclusive: share the ACTIVE index run's client when there is
-        # one (constructed WITHOUT a constructor-time timeout= -- the
-        # mixin rejects client=+non-default-timeout= together -- and cap
-        # THIS call via pending_count(timeout=2.0) instead), falling back
-        # to this diagnostic's own dedicated short-timeout client exactly
-        # as before when no run is active (e.g. a live MCP store-hook
-        # call, outside any index_repository() run). The tuple store
-        # follows the same two shapes, and subspace_stats(timeout=2.0)
-        # caps its call the same way.
+        # nexus-m20mf P3 fold-in (round-2 critique finding 2): share the ACTIVE
+        # index run's client when there is one (constructed WITHOUT a
+        # constructor-time timeout= -- the mixin rejects client=+non-default-
+        # timeout= together -- and cap THIS call via subspace_stats(timeout=2.0)
+        # instead), falling back to this diagnostic's own dedicated
+        # short-timeout client when no run is active (e.g. a live MCP
+        # store-hook call, outside any index_repository() run).
         shared_client = current_index_run_t2_client()
         if shared_client is not None:
-            q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, client=shared_client)
             t = HttpTupleStore(tenant=_ENQUEUE_TENANT, client=shared_client)
         else:
-            q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, timeout=2.0)
             t = HttpTupleStore(tenant=_ENQUEUE_TENANT, timeout=2.0)
         try:
-            table_pending = int(q.pending_count(timeout=2.0) if shared_client is not None else q.pending_count())
             census = aspects_census(t, timeout=2.0 if shared_client is not None else None)
-            return table_pending + (0 if census is None else int(census.available))
+            return 0 if census is None else int(census.available)
         finally:
-            q.close()  # no-op when the shared client is not owned by this store
-            t.close()
+            t.close()  # no-op when the shared client is not owned by this store
     except Exception:  # noqa: BLE001 — diagnostic only; never block the store
         return None
 

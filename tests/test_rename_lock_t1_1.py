@@ -12,32 +12,13 @@ Tests covering:
 """
 from __future__ import annotations
 
-import os
 import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from tests._catalog_fixture_ops import register_real_doc_id
-
 pytestmark = pytest.mark.t2_tenant
-
-# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
-# now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
-# engine's POST /v1/aspects/queue/enqueue 400 -- see the identical cache in
-# tests/test_document_aspects_store.py for the full rationale. One real
-# registration per test, memoized on the test's freshly-minted
-# NX_SERVICE_TOKEN.
-_doc_id_cache: dict[str, str] = {}
-
-
-def _shared_doc_id() -> str:
-    key = os.environ.get("NX_SERVICE_TOKEN", "")
-    if key not in _doc_id_cache:
-        _doc_id_cache[key] = register_real_doc_id()
-    return _doc_id_cache[key]
-
 
 # ── T2Database has RENAME_LOCK ────────────────────────────────────────────────
 
@@ -200,62 +181,18 @@ class TestCascadeHoldsLock:
             db.close()
 
 
-# ── Re-entrant acquisition (claim_batch -> claim_next) ───────────────────────
+# ── Contention: the cascade's hold excludes a second thread ──────────────────
 
 
-class TestReentrantAcquisition:
-    def test_claim_batch_via_claim_next_no_deadlock(self, tmp_path: Path) -> None:
-        """RLock allows claim_batch to call claim_next repeatedly under T1.2.
-
-        Simulate the T1.2 pattern: outer RENAME_LOCK acquire (as claim_batch
-        would take it), then inner RENAME_LOCK acquire (as claim_next would take
-        it). With RLock this must not deadlock. With plain Lock it would.
-
-        This test proves the chosen lock type makes T1.2's guarding safe.
-        """
-        from nexus.db.t2 import T2Database
-        db = T2Database(tmp_path / "t2.db")
-
-        result: list[str] = []
-
-        def simulate_claim_batch_then_claim_next() -> None:
-            # Outer: simulate claim_batch acquiring RENAME_LOCK.
-            with db.RENAME_LOCK:
-                result.append("outer_acquired")
-                # Inner: simulate claim_next (called by claim_batch) also acquiring.
-                with db.RENAME_LOCK:
-                    result.append("inner_acquired")
-                result.append("inner_released")
-            result.append("outer_released")
-
-        t = threading.Thread(target=simulate_claim_batch_then_claim_next)
-        t.start()
-        t.join(timeout=2.0)
-
-        assert not t.is_alive(), (
-            "claim_batch->claim_next simulation deadlocked! "
-            "RENAME_LOCK must be an RLock (reentrant)."
-        )
-        assert result == [
-            "outer_acquired", "inner_acquired", "inner_released", "outer_released"
-        ], f"Expected clean re-entrant sequence, got: {result}"
-
-        try:
-            db.close()
-        except Exception:  # noqa: BLE001
-            pass
-
-    def test_claim_batch_does_not_block_with_rename_lock_held_externally(
+class TestContention:
+    def test_a_second_thread_is_blocked_while_rename_lock_is_held(
         self, tmp_path: Path
     ) -> None:
-        """When the cascade holds RENAME_LOCK, claim_batch from a second thread blocks.
-
-        This validates that the two sides DO contend — the rename serializes
-        against aspect queue operations as intended.
+        """While a holder has RENAME_LOCK, a second thread cannot take it: the rename
+        serializes against the other RENAME_LOCK users as intended.
         """
         from nexus.db.t2 import T2Database
         db = T2Database(tmp_path / "t2.db")
-        db.aspect_queue.enqueue("code__test", "/file.py", "abc123", doc_id=_shared_doc_id())
 
         # Scenario: cascade holds the lock for a moment.
         lock_released = threading.Event()
@@ -268,16 +205,16 @@ class TestReentrantAcquisition:
                 # Hold while second thread tries to acquire.
                 lock_released.wait(timeout=2.0)
 
-        def try_claim_under_lock() -> None:
+        def try_acquire_under_lock() -> None:
             second_started.wait(timeout=2.0)
-            # Try to acquire RENAME_LOCK (simulating what T1.2 claim_next would do).
+            # Try to acquire RENAME_LOCK (as a second RENAME_LOCK user would).
             got = db.RENAME_LOCK.acquire(blocking=True, timeout=0.1)
             second_completed.append(got)
             if got:
                 db.RENAME_LOCK.release()
 
         t1 = threading.Thread(target=hold_rename_lock)
-        t2 = threading.Thread(target=try_claim_under_lock)
+        t2 = threading.Thread(target=try_acquire_under_lock)
         t1.start()
         t2.start()
 

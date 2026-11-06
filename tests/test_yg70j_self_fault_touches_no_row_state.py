@@ -11,12 +11,18 @@ simply fell through to the else-branch.
 MEASURED, on the 2026-08-24 incident's 26 terminally-failed production rows:
 
      7  relative source_paths  -- genuine victims of the deleted-cwd fault
-    19  absolute source_paths  -- ALL 19 EXIST ON DISK, killed as batch collateral
+     19  absolute source_paths  -- ALL 19 EXIST ON DISK, killed as batch collateral
 
 The 19 were covered by routing the batch arm per row (shipped 7.16.3). These
 tests cover the 7: the honest response to "my process cannot resolve its own
 cwd" is to write NO row state and stand the worker down, leaving the claimed
-rows to ``reclaim_stale``.
+rows to their leases and the stop sweep.
+
+The verdicts are the tuple side's (``TupleQueueSide``, RDR-235): the router
+that used to be ``AspectExtractionWorker._mark_retry_or_fail_routed`` is
+``TupleQueueSide._route_failure``, and the claim ends are ack / nack / release.
+The fakes below record those calls, so "no row state" is "no ack, nack or
+complete" and a release (no attempt counted) is allowed.
 
 RECORDED TRAP, from the bead. ``_is_retryable`` is TYPE-based, not
 type-based: ``RuntimeError("connection refused")`` is NOT retryable, because the
@@ -43,36 +49,63 @@ from nexus.aspect_worker import (
     AspectExtractionWorker,
     _self_fault_reason,
 )
+import nexus.commands.enrich as _en
+from nexus.aspect_worker_tuples import HeldClaim
 
 
 # ── scaffolding ─────────────────────────────────────────────────────────────
 
 
-class _FakeQueue:
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
+class _FakeTuples:
+    """The tuple store's claim-ending calls, recorded in order."""
 
-    def mark_failed(self, collection, source_path, error) -> None:  # noqa: ANN001
-        self.calls.append(("failed", collection, source_path, error))
+    def __init__(self, calls: list[tuple]) -> None:
+        self._calls = calls
 
-    def mark_retry(self, collection, source_path, interval_seconds=0) -> None:  # noqa: ANN001
-        self.calls.append(("retry", collection, source_path, interval_seconds))
+    def ack(self, claim_id, claimant) -> None:  # noqa: ANN001
+        self._calls.append(("ack", claim_id))
 
-    def mark_done(self, collection, source_path) -> None:  # noqa: ANN001
-        self.calls.append(("done", collection, source_path))
+    def nack(self, claim_id, claimant, *, retry_after_s=None, dead=False) -> None:  # noqa: ANN001
+        self._calls.append(("nack", claim_id, {"retry_after_s": retry_after_s, "dead": dead}))
+
+    def release(self, claim_id, claimant) -> None:  # noqa: ANN001
+        self._calls.append(("release", claim_id))
+
+    def renew(self, claim_id, claimant, lease_s) -> None:  # noqa: ANN001
+        self._calls.append(("renew", claim_id))
 
 
 class _FakeDb:
     def __init__(self) -> None:
-        self.aspect_queue = _FakeQueue()
+        self.calls: list[tuple] = []
+        self.tuples = _FakeTuples(self.calls)
+
+    def complete_aspect(self, fields, claim_id, claimant) -> bool:  # noqa: ANN001
+        self.calls.append(("complete", claim_id))
+        return True
 
 
-def _row(retry_count: int = 0, source_path: str = "/p.pdf"):
+_VERDICT_OPS = ("ack", "nack", "complete")
+
+
+def _verdicts(db: _FakeDb) -> list[tuple]:
+    """Every call that writes row state: the calls a document verdict is made of."""
+    return [c for c in db.calls if c[0] in _VERDICT_OPS]
+
+
+def _row(source_path: str = "/p.pdf") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         collection="rdr__1-1__voyage-context-3__v1",
         source_path=source_path,
         content="body",
-        retry_count=retry_count,
+        doc_id="1.2.3",
+    )
+
+
+def _claim(attempts: int = 0, source_path: str = "/p.pdf", n: int = 0) -> HeldClaim:
+    return HeldClaim(
+        slot=0, claimant="W:0", claim_id=f"c{n}", task_id=f"t{n}",
+        attempts=attempts, row=_row(source_path),
     )
 
 
@@ -219,13 +252,13 @@ def test_self_fault_writes_no_row_state_and_stands_the_worker_down(worker_and_db
     worker, db, faults = worker_and_db
 
     with capture_logs() as logs:
-        worker._mark_retry_or_fail_routed(
-            _row(), OSError(errno.ENOSPC, "No space left on device"),
+        worker._tuple_side._route_failure(
+            _claim(), OSError(errno.ENOSPC, "No space left on device"),
         )
 
-    assert db.aspect_queue.calls == [], (
+    assert _verdicts(db) == [], (
         "a self fault recorded a verdict about the row: "
-        f"{db.aspect_queue.calls!r}"
+        f"{db.calls!r}"
     )
     assert worker.is_claiming_stopped() is True
     assert worker.self_fault() == "host_resource_exhausted (ENOSPC)"
@@ -240,30 +273,34 @@ def test_self_fault_writes_no_row_state_and_stands_the_worker_down(worker_and_db
 
 
 @pytest.mark.parametrize(
-    ("exc", "retry_count", "expected"),
+    ("exc", "attempts", "expected_dead"),
     [
-        pytest.param(httpx.ConnectError("connection refused"), 0, "retry", id="transient-remote"),
-        pytest.param(ValueError("malformed"), 0, "failed", id="bad-document"),
+        pytest.param(httpx.ConnectError("connection refused"), 0, False, id="transient-remote"),
+        pytest.param(ValueError("malformed"), 0, True, id="bad-document"),
         pytest.param(
-            httpx.ConnectError("connection refused"), _RETRY_MAX_ATTEMPTS, "failed",
+            httpx.ConnectError("connection refused"), _RETRY_MAX_ATTEMPTS, True,
             id="budget-exhausted",
         ),
     ],
 )
 def test_the_existing_two_buckets_are_unchanged(
-    worker_and_db, exc: BaseException, retry_count: int, expected: str,
+    worker_and_db, exc: BaseException, attempts: int, expected_dead: bool,
 ) -> None:
     """The negative control for the new first branch.
 
     The self-fault check runs ahead of the existing decision, so it is capable
     of swallowing the whole taxonomy. These three cases are what proves it did
-    not: a healthy process still retries what is transient and still
-    terminal-fails what is a bad document.
+    not: a healthy process still nacks for a retry what is transient, still
+    nacks dead what is a bad document, and dead-letters a transient failure
+    once its budget is spent.
     """
     worker, db, faults = worker_and_db
-    worker._mark_retry_or_fail_routed(_row(retry_count), exc)
+    worker._tuple_side._route_failure(_claim(attempts), exc)
 
-    assert [c[0] for c in db.aspect_queue.calls] == [expected]
+    verdicts = _verdicts(db)
+    assert [(c[0], c[2]["dead"]) for c in verdicts] == [("nack", expected_dead)], verdicts
+    if not expected_dead:
+        assert verdicts[0][2]["retry_after_s"] is not None, "a retry carries its backoff"
     assert faults == []
     assert worker.is_claiming_stopped() is False
 
@@ -276,9 +313,9 @@ def test_the_stand_down_is_latched_once_per_episode(worker_and_db) -> None:
 
     with capture_logs() as logs:
         for i in range(5):
-            worker._mark_retry_or_fail_routed(_row(source_path=f"/p{i}.pdf"), exc)
+            worker._tuple_side._route_failure(_claim(source_path=f"/p{i}.pdf", n=i), exc)
 
-    assert db.aspect_queue.calls == []
+    assert _verdicts(db) == []
     assert faults == ["host_resource_exhausted (ENOSPC)"]
     assert len([e for e in logs if e.get("event") == "aspect_worker_self_fault"]) == 1
 
@@ -287,7 +324,7 @@ def test_a_restarted_worker_can_stand_down_again(worker_and_db) -> None:
     """The latch gates ``_stop_event`` too, so a latch surviving a restart would
     make the worker permanently unable to report the NEXT fault."""
     worker, _db, faults = worker_and_db
-    worker._mark_retry_or_fail_routed(_row(), OSError(errno.ENOSPC, "full"))
+    worker._tuple_side._route_failure(_claim(), OSError(errno.ENOSPC, "full"))
     assert worker.self_fault() is not None
 
     worker.start()
@@ -303,14 +340,16 @@ def test_a_restarted_worker_can_stand_down_again(worker_and_db) -> None:
 def test_a_batch_failing_on_a_self_fault_leaves_all_five_rows_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The 2026-08-24 shape. Five claimed rows, one environmental fault, and
+    """The 2026-08-24 shape. Five claimed tasks, one environmental fault, and
     the queue must come out of it saying nothing at all about any of them —
-    they stay ``in_progress`` for ``reclaim_stale``."""
+    no ack, nack or complete; they stay claimed and their leases lapse or the
+    stop sweep releases them."""
     import nexus.aspect_worker as aw
     import nexus.mcp_infra as infra
 
     db = _FakeDb()
     monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(db))
+    monkeypatch.setattr(_en, "_build_catalog_manifest_lookup", lambda: None, raising=False)
 
     def _boom(*_a, **_k):
         raise OSError(errno.ENOSPC, "No space left on device")
@@ -318,16 +357,17 @@ def test_a_batch_failing_on_a_self_fault_leaves_all_five_rows_alone(
     monkeypatch.setattr(aw, "_extract_aspects_batch", _boom)
 
     worker = AspectExtractionWorker(poll_interval=10.0)
+    worker._tuple_side._document_gone = lambda _doc_id: False  # no catalog in this test
     faults: list[str] = []
     worker.set_self_fault_handler(faults.append)
-    rows = [_row(source_path=f"/p{i}.pdf") for i in range(5)]
+    claims = [_claim(source_path=f"/p{i}.pdf", n=i) for i in range(5)]
 
     with capture_logs() as logs:
-        worker._process_batch(rows)
+        worker._tuple_side.process(claims)
 
-    assert db.aspect_queue.calls == [], (
+    assert _verdicts(db) == [], (
         "the batch recorded row state despite an environmental fault: "
-        f"{db.aspect_queue.calls!r}"
+        f"{db.calls!r}"
     )
     assert faults == ["host_resource_exhausted (ENOSPC)"]
     assert worker.is_claiming_stopped() is True
@@ -343,6 +383,7 @@ class _FakeHostedWorker:
     def __init__(self) -> None:
         self.handler = None
         self.started = 0
+        self.releases = 0
 
     def set_self_fault_handler(self, handler) -> None:  # noqa: ANN001
         self.handler = handler
@@ -353,13 +394,9 @@ class _FakeHostedWorker:
     def stop(self, timeout: float = 10.0) -> None:
         ...
 
-
-class _NoopQueue:
-    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
+    def release_held_claims(self) -> int:
+        self.releases += 1
         return 0
-
-    def close(self) -> None:
-        ...
 
 
 def test_the_daemon_stands_down_when_its_worker_reports_a_self_fault(tmp_path: Path) -> None:
@@ -371,7 +408,7 @@ def test_the_daemon_stands_down_when_its_worker_reports_a_self_fault(tmp_path: P
     hosted = _FakeHostedWorker()
     d = AspectWorkerDaemon(
         config_dir=tmp_path, tenant="tenant-A",
-        worker_factory=lambda: hosted, queue_factory=_NoopQueue,
+        worker_factory=lambda: hosted,
     )
     d.start()
     try:
@@ -392,27 +429,21 @@ def test_the_daemon_stands_down_when_its_worker_reports_a_self_fault(tmp_path: P
         d.stop()
 
 
-class _CountingQueue(_NoopQueue):
-    def __init__(self) -> None:
-        self.reclaims: list[tuple[int, bool]] = []
-
-    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-        self.reclaims.append((timeout_seconds, count_attempt))
-        return 0
-
-
-def test_the_stand_down_stop_returns_rows_without_spending_an_attempt(tmp_path: Path) -> None:
+def test_the_stand_down_stop_releases_the_claims_the_worker_holds(tmp_path: Path) -> None:
     """nexus-j67ix.3: a persistent host fault (a full disk) respawns this daemon in
-    a loop, and each cycle ends in the stop sweep. That sweep must not charge the
-    rows it frees, or the loop terminal-fails the same head-of-queue rows after the
-    retry cap: the collateral kill nexus-yg70j exists to prevent."""
+    a loop, and each cycle ends in the stop sweep. That sweep releases the claims
+    the worker holds (the tuple side's ``release``: no attempt counted), and it must
+    run on the stand-down path, which is unfenced. A sweep that charged the rows
+    would dead-letter the same head-of-queue rows after the retry cap: the collateral
+    kill nexus-yg70j exists to prevent. The no-attempt property itself is the
+    engine's ``release`` and is pinned by the engine journey in
+    ``tests/test_aspect_worker_tuples.py``."""
     from nexus.daemon.aspect_worker_daemon import AspectWorkerDaemon
 
     hosted = _FakeHostedWorker()
-    q = _CountingQueue()
     d = AspectWorkerDaemon(
         config_dir=tmp_path, tenant="tenant-A",
-        worker_factory=lambda: hosted, queue_factory=lambda: q,
+        worker_factory=lambda: hosted,
     )
     d.start()
     try:
@@ -421,8 +452,7 @@ def test_the_stand_down_stop_returns_rows_without_spending_an_attempt(tmp_path: 
         assert d.is_fenced() is False, "the stand-down path must reach the unfenced stop sweep"
     finally:
         d.stop()
-    assert q.reclaims, "the stop sweep never ran"
-    assert q.reclaims[-1] == (0, False), q.reclaims
+    assert hosted.releases == 1, f"the stop sweep released {hosted.releases} times, expected once"
 
 
 def test_the_real_worker_exposes_the_hook_the_daemon_attaches() -> None:

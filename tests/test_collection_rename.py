@@ -22,7 +22,6 @@ T2+T3 land, mirroring the delete-cascade contract.
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -470,13 +469,11 @@ class TestCascadeOrchestration:
         }
         chash_spy = MagicMock(**{"rename_collection.return_value": 1})
         aspects_spy = MagicMock(**{"rename_collection.return_value": 1})
-        queue_spy = MagicMock(**{"rename_collection.return_value": 1})
         highlights_spy = MagicMock(**{"rename_collection.return_value": 1})
 
         with T2Database(db_path) as t2db:
             t2db.chash_index = chash_spy
             t2db.document_aspects = aspects_spy
-            t2db.aspect_queue = queue_spy
             t2db.document_highlights = highlights_spy
             t2db.taxonomy = tax_spy
             t2db.telemetry = tel_spy
@@ -487,8 +484,6 @@ class TestCascadeOrchestration:
             old="code__old", new="code__new")
         aspects_spy.rename_collection.assert_called_once_with(
             old="code__old", new="code__new")
-        queue_spy.rename_collection.assert_called_once_with(
-            old="code__old", new="code__new")
         highlights_spy.rename_collection.assert_called_once_with(
             old="code__old", new="code__new")
         tax_spy.rename_collection.assert_called_once_with("code__old", "code__new")
@@ -498,7 +493,6 @@ class TestCascadeOrchestration:
         assert counts == {
             "chash": 1,
             "aspects": 1,
-            "aspect_queue": 1,
             "highlights": 1,
             "tax_topics": 1,
             "tax_assignments": 0,

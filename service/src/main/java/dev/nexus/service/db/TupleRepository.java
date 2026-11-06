@@ -59,12 +59,12 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * claim statement's exact shape.
  *
  * <p>Reuses {@link TenantScope} (forced-RLS tenant-scoped transactions) and
- * mirrors {@link AspectRepository#claimNext}'s {@code FOR ... SKIP LOCKED}
- * shape, but with {@code FOR NO KEY UPDATE} (RDR-205's own reasoning: the
+ * mirrors the {@code FOR ... SKIP LOCKED} shape of the retired aspect-queue
+ * table's claim, but with {@code FOR NO KEY UPDATE} (RDR-205's own reasoning: the
  * update touches no key column, and the weaker lock lets the claim log's
  * foreign key coexist without a lock upgrade inside the transaction). Does
- * NOT reuse {@link AspectRepository#claimBatch} — that method's repeated-
- * single-claim loop is a different shape from the bounded dead-letter
+ * NOT reuse the retired aspect-queue batch claim — its repeated-
+ * single-claim loop was a different shape from the bounded dead-letter
  * re-run this class's claim statement performs internally.
  *
  * <p>Now/interval split follows the established codebase convention (see
@@ -72,7 +72,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * stored columns use {@link DSL#currentOffsetDateTime()} (the Postgres
  * server clock, typed — never a raw {@code now()} string); values WRITTEN
  * into a row use the JVM clock ({@code OffsetDateTime.now(ZoneOffset.UTC)}),
- * the same split {@link AspectRepository#claimNext} already uses between its
+ * the same split the retired aspect-queue claim used between its
  * WHERE-clause backoff gate and its {@code last_attempt_at} write. The announce
  * stamps ({@code tuples.announced_at}, {@code tuple_deliveries.announced_at}) are
  * the exception and are written with the database clock (bead nexus-4h7fo): they
@@ -905,6 +905,18 @@ public final class TupleRepository {
                                 Long delaySecondsOrNull) {
         PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false,
                 delaySecondsOrNull);
+        requireReplaceable(prepared);
+        byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
+                prepared.keys(), prepared.dims(), nonce, body);
+        OutOutcome outcome = tenantScope.withTenant(tenant,
+                ctx -> writeReplace(ctx, tenant, prepared, body, id, senderSession));
+        // Signal AFTER the commit, like out. A dirtied row adds nothing claimable; the wake is harmless.
+        waitRegistry.signalAll(tenant, subspace);
+        return new OutResult(id, outcome);
+    }
+
+    /** The {@code mode=replace} template rules, shared by {@link #outReplace} and {@link #drainReplaceWithin}. */
+    private static void requireReplaceable(PreparedOut prepared) {
         if (prepared.template().idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
             throw new SchemaViolationException("mode", "replace is allowed only on an id_from=keys+nonce "
                     + "template, because the caller's nonce names the row to replace; template '"
@@ -916,13 +928,73 @@ public final class TupleRepository {
             throw new SchemaViolationException("mode", "replace is refused on a lock template; template '"
                     + prepared.template().name() + "' is lock: true");
         }
+    }
+
+    /** What {@link #drainReplaceWithin} did. */
+    public enum DrainWrite {
+        /** A task was written (created, or replaced a consumed or expired one). */
+        WRITTEN,
+        /** A live task already holds the id (available, claimed or dead): left as it is, nothing written. */
+        ALREADY_QUEUED
+    }
+
+    /**
+     * The retention of the template {@code subspace} resolves to, in seconds: the longest {@code delay_s} an
+     * {@code out} on it accepts. Throws {@link UnknownSubspaceException} when no template matches.
+     */
+    public long retentionSeconds(String subspace) {
+        return resolveOrThrow(subspace).retentionSeconds();
+    }
+
+    /** Wakes the parked claimers of {@code subspace}; call AFTER the transaction a drain wrote in has committed. */
+    public void signalAvailable(String tenant, String subspace) {
+        waitRegistry.signalAll(tenant, subspace);
+    }
+
+    /**
+     * Bead nexus-hbnml: the engine-start drain of the retired {@code aspect_extraction_queue} table writes one
+     * task per row with this, INSIDE the caller's tenant-scoped transaction ({@code ctx} is the one
+     * {@link TenantScope#withTenant} handed out), so the task and the deletion of the table row commit together
+     * or not at all. {@code out mode=replace} semantics on an {@code id_from=keys+nonce} template, with one
+     * difference: a LIVE task already holding the id is left alone ({@link DrainWrite#ALREADY_QUEUED}). The table
+     * row is older than any task a current client wrote for the same document, and a replace would overwrite
+     * that body, spend its claim as dirty, or revive a dead task into available.
+     *
+     * <p>{@code dead} writes the task and then dead-letters it the way the template's own dead-letter path does
+     * ({@code claim_state='dead'}, attempts at the template's {@code max_attempts}, no availability, one
+     * {@code dead} claim-log row), so {@code nx aspects requeue-failed} finds and revives it.
+     * {@code delaySecondsOrNull} is the task's {@code delay_s}. Validation (size, shape, delay) is
+     * {@code out}'s and runs before any write; the exceptions it raises ({@link TooLargeException},
+     * {@link SchemaViolationException}, {@link MaxLiveRowsExceededException}, {@link UnknownSubspaceException})
+     * leave the transaction usable. Call {@link #signalAvailable} after the commit.
+     */
+    public DrainWrite drainReplaceWithin(DSLContext ctx, String tenant, String subspace, Map<String, String> keys,
+                                         String body, String nonce, Long delaySecondsOrNull, boolean dead) {
+        PreparedOut prepared = prepareOut(subspace, keys, null, body, null, nonce, false, delaySecondsOrNull);
+        requireReplaceable(prepared);
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
-        OutOutcome outcome = tenantScope.withTenant(tenant,
-                ctx -> writeReplace(ctx, tenant, prepared, body, id, senderSession));
-        // Signal AFTER the commit, like out. A dirtied row adds nothing claimable; the wake is harmless.
-        waitRegistry.signalAll(tenant, subspace);
-        return new OutResult(id, outcome);
+        OffsetDateTime now = ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class);
+        boolean live = ctx.fetchExists(TUPLES,
+                TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant))
+                        .and(TUPLES.CONSUMED_AT.isNull()).and(TUPLES.EXPIRES_AT.gt(now)));
+        if (live) {
+            return DrainWrite.ALREADY_QUEUED;
+        }
+        writeReplace(ctx, tenant, prepared, body, id, null);
+        if (dead) {
+            Long cap = prepared.template().take().maxAttempts();
+            int attempts = cap == null ? 0 : (int) Math.min(cap, Integer.MAX_VALUE);
+            ctx.update(TUPLES)
+                    .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
+                    .set(TUPLES.AVAILABLE_AT, (OffsetDateTime) null)
+                    .set(TUPLES.ATTEMPTS, attempts)
+                    .where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant)))
+                    .execute();
+            insertClaimLog(ctx, tenant, prepared.subspace(), prepared.template().name(), id, null, null,
+                    TRANSITION_DEAD, now);
+        }
+        return DrainWrite.WRITTEN;
     }
 
     private OutOutcome writeReplace(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id,

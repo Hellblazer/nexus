@@ -566,22 +566,6 @@ CREATE TABLE document_aspects (
 CREATE INDEX idx_document_aspects_extractor
             ON document_aspects(extractor_name, model_version);
 
-CREATE TABLE aspect_extraction_queue (
-            collection      TEXT NOT NULL,
-            source_path     TEXT NOT NULL,
-            content_hash    TEXT NOT NULL DEFAULT '',
-            content         TEXT NOT NULL DEFAULT '',
-            status          TEXT NOT NULL DEFAULT 'pending',
-            retry_count     INTEGER NOT NULL DEFAULT 0,
-            enqueued_at     TEXT NOT NULL,
-            last_attempt_at TEXT,
-            last_error      TEXT,
-            PRIMARY KEY (collection, source_path)
-        );
-
-CREATE INDEX idx_aspect_queue_status
-            ON aspect_extraction_queue(status);
-
 CREATE TABLE aspect_promotion_log (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             field_name      TEXT NOT NULL,

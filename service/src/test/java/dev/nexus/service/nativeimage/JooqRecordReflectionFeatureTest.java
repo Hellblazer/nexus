@@ -292,7 +292,9 @@ class JooqRecordReflectionFeatureTest {
     // TABLE function, one generated Record type (ManifestQualifyingHitsRecord), +1.
     // 126 -> 127: nexus-u9dc5, vectors-051-route-c-manifest-keys.xml added nexus.manifest_admits_chunk, a RETURNS TABLE
     // function (a one-row SQL function, so that it inlines), one generated Record type (ManifestAdmitsChunkRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 127;
+    // 127 -> 126: nexus-hbnml, aspects-005-2 dropped nexus.aspect_extraction_queue, so AspectExtractionQueueRecord is no longer generated, -1.
+    // (aspects-005-1's counting helper returns a scalar and is dropped by 005-2 on a fresh walk, so it adds no Record type.)
+    private static final int EXPECTED_RECORD_TYPES = 126;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

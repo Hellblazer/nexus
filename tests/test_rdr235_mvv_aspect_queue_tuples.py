@@ -38,8 +38,8 @@ THE BULLETS (numbering follows the RDR):
    its upsert and its ack answer 404, and the row holds the second worker's
    extraction;
 6. a batch of 5 holds five distinct tasks, one claimant string each;
-7. with the old table holding pending rows and the tuple queue holding tasks,
-   both drain and neither holds the other back;
+7. the tuple queue drains to zero available tasks (the old table left with
+   nexus-hbnml, so there is no second queue to hold back);
 8. no document text in any task body, each under 4,096 bytes.
 
 Scenario 24 (a parked worker is woken by an ``out`` from a second client
@@ -50,7 +50,7 @@ MUTATIONS, each run red and then restored (recorded in T2
 nexus/rdr235-mvv-2026-10-29): see that entry; in short, stub the fence in
 ``HttpDocumentAspectsStore.upsert`` fails bullet 5; a ladder interval of 0 fails
 bullet 2; a document 13 that does not crash fails bullet 3; the per-slot
-claimant removed fails bullet 6; a worker that ignores the table fails bullet 7.
+claimant removed fails bullet 6; a worker that leaves a task unclaimed fails bullet 7.
 """
 from __future__ import annotations
 
@@ -87,7 +87,6 @@ _KEYS = {"queue": "aspects"}
 N_DOCS = 50
 DOC_RETRY = 7
 DOC_CRASH = 13
-N_TABLE_DOCS = 6
 
 #: Lease asked of every claim in the journey. The engine's template cap is 900;
 #: 2 s makes the six lapses of document 13 take seconds, not an hour (gate O6).
@@ -291,8 +290,7 @@ class _Extractor:
     ``fence`` path blocks its first call on a gate and answers
     ``first-worker``, then ``second-worker`` to every later call; everything
     else answers ``extracted:<path>`` after a short pace. Every call is
-    recorded, and a table-side and a tuple-side call each note the OTHER
-    queue's depth at that moment (bullet 7).
+    recorded.
     """
 
     def __init__(self, db: Any) -> None:
@@ -301,8 +299,6 @@ class _Extractor:
         self.calls: dict[str, int] = {}
         self.order: list[str] = []
         self.crashes: list[str] = []
-        self.table_pending_seen_by_tuple_calls: list[int] = []
-        self.tuples_available_seen_by_table_calls: list[int] = []
         self.gates: dict[str, threading.Event] = {}
         self.pace = _PACE_S
 
@@ -329,14 +325,7 @@ class _Extractor:
         m = _PATH_RE.match(source_path)
         assert m, f"unexpected source_path {source_path!r}"
         kind, key = m.groups()
-        if kind == "table":
-            seen = self._db.tuples.subspace_stats(_SUB).available
-            with self._lock:
-                self.tuples_available_seen_by_table_calls.append(seen)
-        elif kind == "doc":
-            pending = self._db.aspect_queue.pending_count()
-            with self._lock:
-                self.table_pending_seen_by_tuple_calls.append(pending)
+        if kind == "doc":
             if int(key) == DOC_CRASH:
                 with self._lock:
                     self.crashes.append(source_path)
@@ -455,26 +444,15 @@ def test_mvv_journey_on_the_tuple_queue(
         "this engine has no 'aspects' tuple template (an engine older than RDR-235 E3)"
     )
     live = db.tuples.subspace_stats(_SUB)
-    assert live.available + live.claimed + live.dead + live.consumed == 0 and db.aspect_queue.pending_count() == 0, (
+    assert live.available + live.claimed + live.dead + live.consumed == 0, (
         "this tenant already holds aspect-queue work; the journey counts every task in it and needs a fresh tenant"
     )
 
-    # ── setup: one tenant, a collection, 50 documents, and a few old-table rows ──
+    # ── setup: one tenant, a collection and 50 documents ──
     coll = _register_collection("mvv")
     docs = [_register_doc(f"d{i:02d}", coll) for i in range(N_DOCS)]
-    table_docs = [_register_doc(f"t{i}", coll) for i in range(N_TABLE_DOCS)]
 
-    # The table's pending rows are written through the test seam (the table producer
-    # is retired, nexus-bpikw step A; a producer on an older box still wrote rows);
-    # the tuple tasks after, with the variable unset, which is the default and so the
-    # producer a user gets (nexus-lnwn1).
-    from tests._aspect_table_producer import table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    with table_producer():
-        for i, d in enumerate(table_docs):
-            db.aspect_queue.enqueue(coll, f"/nx235/table-{i}.md", content_hash="t", doc_id=d)
-    assert db.aspect_queue.pending_count() == N_TABLE_DOCS
-
+    # The variable is unset: the default is the tuple producer a user gets (nexus-lnwn1).
     monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
     from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415
 
@@ -541,7 +519,6 @@ def test_mvv_journey_on_the_tuple_queue(
                 b_worker = fleet.spawn()
             if (
                 b_worker is not None
-                and db.aspect_queue.pending_count() == 0
                 and census.available == 0 and census.claimed == 0 and census.dead >= 1
             ):
                 break
@@ -602,7 +579,7 @@ def test_mvv_journey_on_the_tuple_queue(
     assert db.tuples.subspace_stats(_SUB).dead == 1
     dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run", "--collection", coll])
     assert dry.exit_code == 0, dry.output
-    assert "Would re-enqueue 1 dead task(s)" in dry.output, dry.output
+    assert "Would revive 1 dead task(s)" in dry.output, dry.output
     assert _doc_path(DOC_CRASH) in dry.output and f"attempts={_MAX_ATTEMPTS}" in dry.output, dry.output
     assert _doc_path(0) not in dry.output
     assert [t.id for t in _tasks(db) if t.claim_state == "dead"] == [task13], "a dry run revives nothing"
@@ -646,18 +623,8 @@ def test_mvv_journey_on_the_tuple_queue(
     census = db.tuples.subspace_stats(_SUB)
     assert census.consumed == N_DOCS - 1 and census.available == 0 and census.claimed == 0
 
-    # ── bullet 7: the old table and the tuple queue both drain, neither held back ─
-    assert db.aspect_queue.pending_count() == 0 and not db.aspect_queue.list_failed(coll)
-    for i, d in enumerate(table_docs):
-        rec = db.document_aspects.get_by_doc_id(d)
-        assert rec is not None and rec.problem_formulation == f"extracted:/nx235/table-{i}.md"
-        assert by_doc.get(d) == 1
-    assert any(n > 0 for n in ex.tuples_available_seen_by_table_calls), (
-        "a table row was extracted while tuple tasks were waiting: the tuple queue did not hold it back"
-    )
-    assert any(n > 0 for n in ex.table_pending_seen_by_tuple_calls), (
-        "a tuple task was extracted while table rows were waiting: the table did not hold it back"
-    )
+    # ── bullet 7: the tuple queue drains, and no task is left waiting ─
+    assert db.aspect_queue.tuple_counts().available == 0
 
     # ── bullet 5: a worker whose claim is not live writes nothing ────────────
     fence_opts = _worker_opts(

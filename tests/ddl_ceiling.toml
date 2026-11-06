@@ -163,7 +163,13 @@ migration_wal_bytes_per_worker = 11038000
 # statement to a fresh migration: 1 CREATE OR REPLACE FUNCTION, a replacement of an existing function with the same signature, so no GRANT EXECUTE follows; the post-condition DO block is not DDL.
 # Counted from the changeset's statements (1) and measured: chas (lab-m), 2026-11-03, scoped substrate run of
 # tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2249.
-migration_ddl_per_worker = 2249
+# 2249 -> 2253 (2026-11-04, after vectors-053 above): aspects-005-1/-2 (nexus-hbnml, the aspect_extraction_queue table's guarded drop) add 6 DDL statements to a fresh
+# migration and the dropped table takes 2 away: 1 CREATE FUNCTION (nexus.aspect_queue_rows_unscoped) and its REVOKE, the helper's two NESTED ALTER TABLE ... NO FORCE /
+# FORCE ROW LEVEL SECURITY (the event trigger counts DDL a function runs; the guard's sqlCheck calls it once on the fresh walk), 1 DROP TABLE and 1 DROP FUNCTION; and
+# the runAlways grants loop (grants-nexus-svc-1) no longer grants on the queue table and its BIGSERIAL id sequence, -2 (its GRANT per owned relation). Counted (+6 -2) and
+# measured: chas (lab-l), 2026-11-04, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker),
+# ddl: migration=2253.
+migration_ddl_per_worker = 2253
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

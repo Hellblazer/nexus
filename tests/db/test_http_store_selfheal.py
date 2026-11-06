@@ -5,7 +5,7 @@ stores (RefreshableHttpStoreMixin adoption sweep: nexus-bikit.4 canonical
 adopter, nexus-f2qvx.1/.2/.3 batches A/B/C).
 
 Supersedes the 9 near-identical ``test_http_<store>_selfheal.py`` files
-(memory, taxonomy, aspect_queue, centroid, chash_index, document_aspects,
+(memory, taxonomy, centroid, chash_index, document_aspects,
 document_highlights, plan_library, telemetry). ``tests/db/test_refreshable_client.py``
 (nexus-bikit.2/.3) already proves the MIXIN self-heals over a synthetic
 ``/v1/echo`` endpoint; this file proves the same behaviour end-to-end
@@ -64,25 +64,6 @@ from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 from nexus.db.t2.records import AspectRecord, HighlightRecord
 
-
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path. The producer's table mode is
-    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
-    ``tests/_aspect_table_producer.py``, not from the environment.
-
-    A test whose :class:`SelfHealCase` sets ``producer == "tuples"`` (nexus-dm617) is
-    about the DEFAULT producer: it gets no seam and an unset ``NX_ASPECT_QUEUE``,
-    exactly what production runs. (``TestTuplesProducerEndpointRefresh`` overrides
-    this fixture with the same rule.)"""
-    callspec = getattr(request.node, "callspec", None)
-    case = callspec.params.get("case") if callspec is not None else None
-    if getattr(case, "producer", "table") == "tuples":
-        monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
-        return
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
 
 _SRC_T2_DIR = Path(__file__).resolve().parent.parent.parent / "src" / "nexus" / "db" / "t2"
 _BYPASS_PATTERN = re.compile(r"self\._client\.(get|post|put|delete|patch|request)\(")
@@ -316,41 +297,6 @@ class _TaxonomyHandler(_RotatableBearerHandlerBase):
             self._send(404, {"error": "not found"})
             return
         self._send(200, {"count": self.state.rows[collection]})
-
-
-# aspect_queue --------------------------------------------------------------
-
-_ASPECT_QUEUE_STATE = _FakeState(initial_bearer="selfheal-aspect-queue-initial-bearer")
-_ASPECT_QUEUE_STATE.rows = []
-_ASPECT_QUEUE_STATE.extra["pending_count"] = 0
-
-
-class _AspectQueueHandler(_RotatableBearerHandlerBase):
-    state = _ASPECT_QUEUE_STATE
-
-    def do_POST(self):  # noqa: N802
-        path = self.path.split("?")[0]
-        self._record("POST", path)
-        if path != "/v1/aspects/queue/enqueue":
-            self._send(404, {"error": "not found"})
-            return
-        if not self._check_bearer():
-            return
-        length = int(self.headers.get("Content-Length", "0"))
-        json.loads(self.rfile.read(length)) if length else {}
-        self.state.extra["pending_count"] += 1
-        self._send(200, {})
-
-    def do_GET(self):  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path
-        self._record("GET", path)
-        if path != "/v1/aspects/queue/pending_count":
-            self._send(404, {"error": "not found"})
-            return
-        if not self._check_bearer():
-            return
-        self._send(200, {"count": self.state.extra["pending_count"]})
 
 
 # aspect_queue_tuples --------------------------------------------------------
@@ -725,10 +671,6 @@ class SelfHealCase:
     missing_expected: Any = None
     # optional chartered bypass-method exemptions (telemetry only)
     chartered_bypass_methods: tuple[str, ...] = ()
-    # which aspect-queue producer the autouse fixture leaves in force:
-    # "table" (the legacy seam, every case but one) or "tuples" (the default
-    # producer; nexus-dm617)
-    producer: str = "table"
 
 
 # Per-store assertion callables. Named functions rather than inline lambdas
@@ -751,14 +693,6 @@ def _assert_taxonomy_write(state: _FakeState, r1: Any, r2: Any) -> None:
 
 def _assert_taxonomy_read(result: Any) -> None:
     assert result is False, "expected no-growth => no rebalance"
-
-
-def _assert_aspect_queue_write(state: _FakeState, r1: Any, r2: Any) -> None:
-    assert state.extra["pending_count"] == 2, "expected 2 enqueued rows"
-
-
-def _assert_aspect_queue_read(result: Any) -> None:
-    assert result == 1, "expected pending_count == 1"
 
 
 def _assert_aspect_tuples_write(state: _FakeState, r1: Any, r2: Any) -> None:
@@ -861,23 +795,8 @@ CASES: list[SelfHealCase] = [
         missing_expected=True,
     ),
     SelfHealCase(
-        store_id="aspect_queue",
-        source_file="http_aspect_queue.py",
-        handler_cls=_AspectQueueHandler,
-        state=_ASPECT_QUEUE_STATE,
-        make_store=HttpAspectQueue,
-        do_write=lambda store, tag: store.enqueue("selfheal-coll", f"doc{tag}.pdf"),
-        write_count_key="POST /v1/aspects/queue/enqueue",
-        assert_write_effect=_assert_aspect_queue_write,
-        seed_for_read=lambda store: store.enqueue("selfheal-coll-r", "doc.pdf"),
-        do_read=lambda store, ctx: store.pending_count(),
-        read_count_key="GET /v1/aspects/queue/pending_count",
-        assert_read_result=_assert_aspect_queue_read,
-    ),
-    SelfHealCase(
         store_id="aspect_queue_tuples",
-        # The tuples producer's transport is the HttpTupleStore ``_tuples()`` builds;
-        # the table case above already guards http_aspect_queue.py itself.
+        # The tuples producer's transport is the HttpTupleStore ``_tuples()`` builds.
         source_file="http_tuple_store.py",
         handler_cls=_AspectTuplesHandler,
         state=_ASPECT_TUPLES_STATE,
@@ -889,7 +808,6 @@ CASES: list[SelfHealCase] = [
         do_read=lambda store, ctx: store.tuple_counts(),
         read_count_key="GET /v1/tuples/subspace_stats",
         assert_read_result=_assert_aspect_tuples_read,
-        producer="tuples",
     ),
     SelfHealCase(
         store_id="centroid",
@@ -1110,6 +1028,15 @@ def test_zero_inline_client_call_sites(case: SelfHealCase) -> None:
     )
 
 
+def test_aspect_queue_module_has_no_inline_client_call_sites() -> None:
+    """nexus-hbnml: the table case carried the bypass scan for http_aspect_queue.py, and that case
+    left with the table. The module still makes its requests through the store's own client
+    (the tuple producer, its census and the catalog registration), so the same scan runs here."""
+    source = (_SRC_T2_DIR / "http_aspect_queue.py").read_text()
+    matches = _BYPASS_PATTERN.findall(source)
+    assert matches == [], f"inline self._client.<verb>(...) call site(s) in http_aspect_queue.py: {matches}"
+
+
 # ── Store-specific deltas (do not fit the shared contract) ─────────────
 
 
@@ -1262,12 +1189,6 @@ class TestTuplesProducerEndpointRefresh:
     built with a pinned ``base_url`` would keep retrying the dead port, and a store
     pinned on both halves would refuse to re-resolve at all.)
     """
-
-    @pytest.fixture(autouse=True)
-    def _aspect_queue_table_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Overrides the module's autouse table-producer seam: this class is about the
-        # default producer, with NX_ASPECT_QUEUE unset.
-        monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
 
     @staticmethod
     def _start(bearer: str) -> tuple[HTTPServer, int, _FakeState]:

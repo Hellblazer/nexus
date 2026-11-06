@@ -1,42 +1,36 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-nj4ch: HttpAspectQueue.enqueue_many batches N document enqueues
-into one round trip, completing the register_many/update_many/delete_many/
-get_all_metadata batch pattern for the aspect-extraction queue.
+"""nexus-nj4ch: HttpAspectQueue.enqueue_many batches N document enqueues.
+
+RDR-235: the batch is the bounded tuple fan-out (one ``out mode=replace`` per
+document on the ``aspects`` template). The table route it once posted to, and the
+per-row fallback that replayed a failed batch through ``enqueue``, are retired
+(nexus-hbnml); those tests are gone. The producer's own batch pins live in
+``tests/test_http_aspect_queue_tuples_producer.py``.
 """
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
+import httpx
 import pytest
 
+from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-
-
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path. The producer's table mode is
-    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
-    ``tests/_aspect_table_producer.py``, not from the environment."""
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
+from nexus.db.t2.http_tuple_store import HttpTupleStore
 
 
 @pytest.fixture(autouse=True)
 def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
-    """RDR-204 Phase 1 (nexus-f5wwx): ``HttpAspectQueue.enqueue`` now
-    routes through ``nexus.corpus.write_with_registration_retry``,
-    which registers the collection before the write. This file's
-    tests are pure HTTP-shape/behavior tests that mock ``_post``
-    directly and never configure a real catalog endpoint — stub the
-    registration step to a bare passthrough (call ``write_fn()``
-    directly), matching the identical fixture in
-    tests/db/test_http_vector_client.py.
+    """The producer checks collection registration before each write (RDR-204,
+    O4). This file's tests are pure HTTP-shape and fan-out tests that never
+    configure a real catalog endpoint, so the registration step is a passthrough.
     """
     monkeypatch.setattr(
         "nexus.corpus.write_with_registration_retry",
         lambda name, write_fn, **kwargs: write_fn(),
     )
+    monkeypatch.setattr("nexus.corpus.ensure_collection_registered", lambda *a, **k: None)
 
 
 @pytest.fixture
@@ -45,187 +39,107 @@ def queue(monkeypatch) -> HttpAspectQueue:
     return HttpAspectQueue(base_url="http://mock.test")
 
 
+def _outs(out_mock) -> list[dict]:
+    """The identity bodies of a patched ``out_replace``, with their nonces."""
+    return [
+        {"nonce": c.kwargs["nonce"], "subspace": c.args[0], "body": json.loads(c.args[3])}
+        for c in out_mock.call_args_list
+    ]
+
+
 class TestEnqueueManyRealUrlConstruction:
     """Genuine end-to-end URL-construction check via httpx.MockTransport —
-    NOT mocking _post itself, which (as found during this bead's own
-    shakeout) can pass while asserting the SAME bug it should catch: a
-    prior version of this test mocked _post and asserted the WRONG path
-    ("/queue/enqueue_many"), matching the actual doubled-segment bug
-    ("/v1/aspects/queue/queue/enqueue_many") that 404'd against the live
-    service. This test drives the real httpx.Client + _post's hard-coded
-    "/v1/aspects/queue" prefix, so a future path regression 404s HERE,
-    not only in production.
+    NOT mocking the store's methods, which can pass while asserting the SAME
+    bug it should catch (the doubled ``/queue/queue`` segment that 404'd against
+    the live service). This test drives the real httpx.Client and the tuple
+    store's real path join, so a future path regression 404s HERE, not only in
+    production.
     """
 
-    def test_enqueue_many_hits_the_real_service_path(self, monkeypatch) -> None:
-        import httpx
-
+    def test_enqueue_many_hits_the_real_service_path(self) -> None:
         requests: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request.url.path)
-            return httpx.Response(200, json={"enqueued": 1})
+            return httpx.Response(200, json={"id": "task-1", "outcome": "created"})
 
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-        queue = HttpAspectQueue(base_url="http://mock.test")
-        queue._client = httpx.Client(
-            base_url="http://mock.test",
-            transport=httpx.MockTransport(handler),
+        queue = HttpAspectQueue(
+            base_url="http://mock.test", _token="test-token",
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
 
-        n = queue.enqueue_many([{"collection": "code__x", "source_path": "a.py"}])
+        n = queue.enqueue_many([{"collection": "code__x", "source_path": "a.py", "doc_id": "1.1.1"}])
 
-        assert requests == ["/v1/aspects/queue/enqueue_many"]
+        assert requests == ["/v1/tuples/out"]
         assert n == 1
 
 
 class TestEnqueueMany:
-    def test_posts_to_enqueue_many_endpoint(self, queue: HttpAspectQueue) -> None:
+    def test_each_row_is_one_replace_on_the_aspects_template(self, queue: HttpAspectQueue) -> None:
         rows = [
-            {"collection": "code__x", "source_path": "a.py"},
-            {"collection": "code__x", "source_path": "b.py", "doc_id": "1.1.1"},
+            {"collection": "code__x", "source_path": "a.py", "doc_id": "1.1.1"},
+            {"collection": "code__x", "source_path": "b.py", "doc_id": "1.1.2", "content_hash": "h"},
         ]
-        with patch(
-            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
-            return_value={"enqueued": 2},
-        ) as mock_post:
+        with patch.object(HttpTupleStore, "out_replace", return_value=("t", "created")) as out:
             n = queue.enqueue_many(rows)
 
-        path, body = mock_post.call_args[0]
-        # NOT "/queue/enqueue_many" -- self._base_url already ends in
-        # ".../v1/aspects/queue" (confirmed via a real shakeout: the
-        # doubled-segment path 404'd against the live service and this
-        # test's own mock-only assertion had matched the SAME bug it
-        # should have caught, since it never exercises _post's real base_url
-        # join).
-        assert path == "/enqueue_many"
-        assert body == {"rows": rows}
         assert n == 2
+        outs = sorted(_outs(out), key=lambda o: o["nonce"])
+        assert [o["nonce"] for o in outs] == ["1.1.1", "1.1.2"], "the nonce is the document"
+        assert all(o["subspace"] == "aspects" for o in outs)
+        assert outs[1]["body"] == {
+            "collection": "code__x", "source_path": "b.py", "doc_id": "1.1.2", "content_hash": "h",
+        }, "the body is the identity, nothing else"
 
     def test_empty_list_is_noop(self, queue: HttpAspectQueue) -> None:
-        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue._post") as mock_post:
+        with patch.object(HttpTupleStore, "out_replace") as out:
             assert queue.enqueue_many([]) == 0
-        mock_post.assert_not_called()
+        out.assert_not_called()
 
-    def test_superseded_collection_refusal_is_raised_without_a_per_row_replay(
-        self, monkeypatch
+    def test_superseded_collection_refusal_is_raised_before_any_task_is_written(
+        self, queue: HttpAspectQueue, monkeypatch,
     ) -> None:
-        """nexus-i15oc: the engine answers a batch to a retired collection name 409
-        ``collection_superseded``. That is deterministic, so replaying every row through
-        ``enqueue`` only repeats N refusals and N tracebacks. The typed error goes to the
-        caller (the indexer's flush hook logs it and skips the worker spawn) after
-        exactly ONE request."""
-        import httpx
+        """nexus-i15oc: a batch naming a retired collection is refused by the
+        registration check (O4) before any ``out`` is sent, so the refusal is not
+        replayed row by row. The typed error goes to the caller (the indexer's
+        flush hook logs it and skips the worker spawn)."""
 
-        from nexus.collection_errors import SupersededCollectionWriteError
+        def refuse(*_a, **_k):
+            raise SupersededCollectionWriteError("code__x", "code__y")
 
-        requests: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(request.url.path)
-            return httpx.Response(409, json={
-                "error": "collection_superseded",
-                "reason": "collection_superseded",
-                "message": "collection 'code__x' was superseded by 'code__y'",
-                "collection": "code__x",
-                "superseded_by": "code__y",
-            })
-
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-        queue = HttpAspectQueue(base_url="http://mock.test")
-        queue._client = httpx.Client(
-            base_url="http://mock.test", transport=httpx.MockTransport(handler),
-        )
+        monkeypatch.setattr("nexus.corpus.ensure_collection_registered", refuse)
         rows = [
-            {"collection": "code__x", "source_path": "a.py"},
-            {"collection": "code__x", "source_path": "b.py"},
-            {"collection": "code__x", "source_path": "c.py"},
+            {"collection": "code__x", "source_path": "a.py", "doc_id": "1.1.1"},
+            {"collection": "code__x", "source_path": "b.py", "doc_id": "1.1.2"},
+            {"collection": "code__x", "source_path": "c.py", "doc_id": "1.1.3"},
         ]
 
-        with pytest.raises(SupersededCollectionWriteError) as caught:
-            queue.enqueue_many(rows)
+        with patch.object(HttpTupleStore, "out_replace") as out:
+            with pytest.raises(SupersededCollectionWriteError) as caught:
+                queue.enqueue_many(rows)
 
         assert caught.value.name == "code__x"
         assert caught.value.successor == "code__y"
-        assert requests == ["/v1/aspects/queue/enqueue_many"], (
-            f"the refusal was replayed per row: {requests}"
-        )
+        assert out.call_count == 0, "the refusal was replayed as writes: no task may be written"
 
-    def test_batch_failure_falls_back_to_per_row_enqueue(self, queue: HttpAspectQueue) -> None:
-        # nexus-nj4ch: the whole batch shares one Postgres transaction
-        # server-side, so a single row's constraint violation fails the
-        # WHOLE batch -- must fall back to per-row enqueue(), isolating
-        # the bad row from its batch-mates.
+    def test_malformed_rows_are_skipped_and_the_good_one_lands(self, queue: HttpAspectQueue) -> None:
+        """A row with no collection, or no doc_id (the task's identity), is skipped
+        and counted in one warning; its batch-mates still land."""
         rows = [
-            {"collection": "code__x", "source_path": "a.py"},
-            {"collection": "code__x", "source_path": "b.py"},
+            {"collection": "", "source_path": "missing-collection.py", "doc_id": "1.1.1"},
+            {"collection": "code__x", "source_path": "nodoc.py"},
+            {"collection": "code__x", "source_path": "good.py", "doc_id": "1.1.2"},
         ]
-        single_calls: list[tuple] = []
-
-        def _fake_post(path: str, body: dict) -> dict:
-            if path == "/queue/enqueue_many":
-                raise RuntimeError("500: FK violation in batch")
-            assert path == "/enqueue"
-            single_calls.append((body["collection"], body["source_path"]))
-            return {"enqueued": True}
-
-        with patch(
-            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
-            side_effect=_fake_post,
-        ):
-            n = queue.enqueue_many(rows)
-
-        assert single_calls == [("code__x", "a.py"), ("code__x", "b.py")]
-        assert n == 2
-
-    def test_partial_per_row_fallback_failure_isolated(self, queue: HttpAspectQueue) -> None:
-        """One bad row in the per-row fallback must not sink its siblings."""
-        rows = [
-            {"collection": "code__x", "source_path": "good-a.py"},
-            {"collection": "code__x", "source_path": "bad.py"},
-            {"collection": "code__x", "source_path": "good-b.py"},
-        ]
-
-        def _fake_post(path: str, body: dict) -> dict:
-            if path == "/queue/enqueue_many":
-                raise RuntimeError("batch failed")
-            if body["source_path"] == "bad.py":
-                raise RuntimeError("still fails per-row")
-            return {"enqueued": True}
-
-        with patch(
-            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
-            side_effect=_fake_post,
-        ):
-            n = queue.enqueue_many(rows)
-
-        assert n == 2, "the 2 good rows must still be counted despite the bad row"
-
-    def test_malformed_row_skipped_in_fallback(self, queue: HttpAspectQueue) -> None:
-        rows = [
-            {"collection": "", "source_path": "missing-collection.py"},
-            {"collection": "code__x", "source_path": "good.py"},
-        ]
-
-        def _fake_post(path: str, body: dict) -> dict:
-            if path == "/queue/enqueue_many":
-                raise RuntimeError("batch failed")
-            assert body["source_path"] == "good.py"
-            return {"enqueued": True}
-
-        with patch(
-            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
-            side_effect=_fake_post,
-        ):
+        with patch.object(HttpTupleStore, "out_replace", return_value=("t", "created")) as out:
             n = queue.enqueue_many(rows)
 
         assert n == 1
+        assert [o["nonce"] for o in _outs(out)] == ["1.1.2"]
 
 
 class TestEnqueueManyWakeSignal:
-    """nexus-59611 stage 2: enqueue_many's batch-success path bypasses
-    enqueue() entirely (it posts to /enqueue_many directly), so the wake
-    signal needs its own call site there — this pins it."""
+    """nexus-59611 stage 2: enqueue_many's batch path does not go through
+    enqueue(), so the wake signal has its own call site there — this pins it."""
 
     def test_batch_success_signals_wake_once(
         self, queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
@@ -235,18 +149,15 @@ class TestEnqueueManyWakeSignal:
             "nexus.aspect_worker.signal_aspect_wake",
             lambda *a, **k: calls.append(None),
         )
-        with patch(
-            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
-            return_value={"enqueued": 2},
-        ):
+        with patch.object(HttpTupleStore, "out_replace", return_value=("t", "created")):
             n = queue.enqueue_many([
-                {"collection": "code__x", "source_path": "a.py"},
-                {"collection": "code__x", "source_path": "b.py"},
+                {"collection": "code__x", "source_path": "a.py", "doc_id": "1.1.1"},
+                {"collection": "code__x", "source_path": "b.py", "doc_id": "1.1.2"},
             ])
         assert n == 2
-        assert len(calls) == 1
+        assert len(calls) == 1, "one wake for the whole batch, not one per document"
 
-    def test_batch_zero_enqueued_does_not_signal(
+    def test_a_batch_that_writes_nothing_does_not_signal(
         self, queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         calls: list[None] = []
@@ -254,37 +165,8 @@ class TestEnqueueManyWakeSignal:
             "nexus.aspect_worker.signal_aspect_wake",
             lambda *a, **k: calls.append(None),
         )
-        with patch(
-            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
-            return_value={"enqueued": 0},
-        ):
+        with patch.object(HttpTupleStore, "out_replace") as out:
             n = queue.enqueue_many([{"collection": "code__x", "source_path": "a.py"}])
         assert n == 0
+        out.assert_not_called()
         assert calls == []
-
-    def test_per_row_fallback_signals_once_per_successful_row(
-        self, queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The fallback loop calls enqueue() per row, which already signals —
-        no separate call site needed for the fallback branch itself."""
-        calls: list[None] = []
-        monkeypatch.setattr(
-            "nexus.aspect_worker.signal_aspect_wake",
-            lambda *a, **k: calls.append(None),
-        )
-
-        def _fake_post(path: str, body: dict) -> dict:
-            if path == "/enqueue_many":
-                raise RuntimeError("batch failed")
-            return {"enqueued": True}
-
-        with patch(
-            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
-            side_effect=_fake_post,
-        ):
-            n = queue.enqueue_many([
-                {"collection": "code__x", "source_path": "a.py"},
-                {"collection": "code__x", "source_path": "b.py"},
-            ])
-        assert n == 2
-        assert len(calls) == 2

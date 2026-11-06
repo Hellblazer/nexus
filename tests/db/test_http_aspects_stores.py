@@ -9,30 +9,17 @@ returns an HttpDocumentAspectsStore, etc.
 from __future__ import annotations
 
 import json
-import os
 import threading
-import time
 from pathlib import Path
 
 import httpx
 import pytest
 
-from nexus.db.t2.records import QueueRow
 from nexus.db.t2.records import AspectRecord
 from nexus.db.t2.records import HighlightRecord
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
 from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-
-
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path. The producer's table mode is
-    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
-    ``tests/_aspect_table_producer.py``, not from the environment."""
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
 
 
 # ── Mock transport helpers ─────────────────────────────────────────────────────
@@ -98,6 +85,25 @@ def _make_aspect(**kwargs) -> AspectRecord:
 
 
 # ── HttpDocumentAspectsStore unit tests ────────────────────────────────────────
+
+
+def _fake_out_replace(monkeypatch: pytest.MonkeyPatch, *, error: BaseException | None = None) -> list[tuple[str, str]]:
+    """Replace the tuple store's ``out_replace`` with a recorder: one ``(subspace, nonce)`` per call.
+
+    The catalog registration that precedes the write is stubbed too: it reads the engine's
+    embedding profile, and the producer's registration is pinned on the real engine by
+    ``tests/test_http_aspect_queue_tuples_producer.py``, not here."""
+    monkeypatch.setattr("nexus.corpus.ensure_collection_registered", lambda *a, **k: None)
+    calls: list[tuple[str, str]] = []
+
+    def fake(self, subspace, keys, dims=None, body=None, *, nonce, **_kw):
+        calls.append((subspace, nonce))
+        if error is not None:
+            raise error
+        return f"task-{nonce}", "created"
+
+    monkeypatch.setattr("nexus.db.t2.http_tuple_store.HttpTupleStore.out_replace", fake)
+    return calls
 
 
 class TestHttpDocumentAspectsStore:
@@ -528,10 +534,12 @@ class TestHttpAspectQueue:
         store._client = httpx.Client(transport=transport)
         return store
 
-    @pytest.mark.t2_tenant
-    def test_enqueue_calls_endpoint(self):
-        store = self._queue({"/v1/aspects/queue/enqueue": {"ok": True}})
-        store.enqueue("coll", "doc.pdf", content_hash="abc", content="text", doc_id="1.2.3")
+    def test_enqueue_is_one_replace_out_on_the_aspects_template_nonce_doc_id(self, monkeypatch):
+        """RDR-235: an enqueue is one ``out mode=replace`` on ``aspects``, its nonce the doc_id,
+        so a re-enqueue replaces the task and never adds a second."""
+        calls = _fake_out_replace(monkeypatch)
+        self._queue({}).enqueue("coll", "doc.pdf", content_hash="abc", content="text", doc_id="1.2.3")
+        assert calls == [("aspects", "1.2.3")]
 
     def test_enqueue_validates_collection(self):
         store = self._queue({})
@@ -543,222 +551,42 @@ class TestHttpAspectQueue:
         with pytest.raises(ValueError, match="source_path"):
             store.enqueue("coll", "")
 
-    @pytest.mark.t2_tenant
     def test_enqueue_success_signals_local_wake(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """nexus-59611 stage 2: a successful enqueue touches the local wake
         signal so a same-box worker's poll wait returns early instead of
         waiting out DEFAULT_POLL_INTERVAL_S."""
+        _fake_out_replace(monkeypatch)
         calls: list[None] = []
         monkeypatch.setattr(
             "nexus.aspect_worker.signal_aspect_wake",
             lambda *a, **k: calls.append(None),
         )
-        store = self._queue({"/v1/aspects/queue/enqueue": {"ok": True}})
-        store.enqueue("coll", "doc.pdf")
+        self._queue({}).enqueue("coll", "doc.pdf", doc_id="1.2.3")
         assert len(calls) == 1
 
-    @pytest.mark.t2_tenant
     def test_enqueue_failure_does_not_signal_wake(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failed enqueue must not touch the wake file — there is no new
         row for a same-box worker to claim."""
+        _fake_out_replace(monkeypatch, error=RuntimeError("boom"))
         calls: list[None] = []
         monkeypatch.setattr(
             "nexus.aspect_worker.signal_aspect_wake",
             lambda *a, **k: calls.append(None),
         )
-        store = self._queue({"/v1/aspects/queue/enqueue": RuntimeError("boom")})
-        with pytest.raises(Exception, match="boom"):
-            store.enqueue("coll", "doc.pdf")
+        with pytest.raises(RuntimeError, match="boom"):
+            self._queue({}).enqueue("coll", "doc.pdf", doc_id="1.2.3")
         assert calls == []
 
-    def test_claim_next_returns_row(self):
-        store = self._queue({
-            "/v1/aspects/queue/claim_next": {
-                "claimed": True,
-                "row": {
-                    "collection": "c",
-                    "source_path": "doc.pdf",
-                    "content_hash": "h",
-                    "content": "t",
-                    "retry_count": 0,
-                    "doc_id": "1.2.3",
-                },
-            }
-        })
-        result = store.claim_next()
-        assert result is not None
-        assert isinstance(result, QueueRow)
-        assert result.collection == "c"
-        assert result.source_path == "doc.pdf"
-        assert result.doc_id == "1.2.3"
-
-    def test_claim_next_returns_none_when_empty(self):
-        store = self._queue({
-            "/v1/aspects/queue/claim_next": {"claimed": False}
-        })
-        assert store.claim_next() is None
-
-    def test_claim_batch_returns_list(self):
-        # nexus-575kd: the Java service's /queue/claim_batch sends a BARE JSON
-        # ARRAY (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
-        # NOT a {"rows":[...]} envelope. The prior version of this test mocked
-        # the envelope — i.e. the client's wrong assumption — so it stayed green
-        # while the real service-mode worker claimed nothing (claim_batch raised
-        # on every poll -> document_aspects=0). Mock what the service ACTUALLY
-        # sends so this pins the real contract.
-        rows = [
-            {"collection": "c", "source_path": f"doc{i}.pdf",
-             "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}
-            for i in range(3)
-        ]
-        store = self._queue({
-            "/v1/aspects/queue/claim_batch": rows  # bare array, as the service sends
-        })
-        result = store.claim_batch(5)
-        assert len(result) == 3
-        assert all(isinstance(r, QueueRow) for r in result)
-        assert [r.source_path for r in result] == ["doc0.pdf", "doc1.pdf", "doc2.pdf"]
-
-    def test_claim_batch_tolerates_rows_envelope(self):
-        # Defensive: if a future engine ever wraps as {"rows":[...]} (matching
-        # claim_next's envelope), the client must still parse it. Locks the
-        # isinstance fallback branch.
-        rows = [{"collection": "c", "source_path": "d.pdf",
-                 "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}]
-        store = self._queue({
-            "/v1/aspects/queue/claim_batch": {"rows": rows}
-        })
-        result = store.claim_batch(5)
-        assert len(result) == 1
-        assert result[0].source_path == "d.pdf"
-
-    def test_claim_batch_zero_limit_returns_empty(self):
-        store = self._queue({})
-        assert store.claim_batch(0) == []
-
-    def test_mark_done_returns_count(self):
-        store = self._queue({"/v1/aspects/queue/mark_done": {"deleted": 1}})
-        assert store.mark_done("c", "doc.pdf") == 1
-
-    def test_mark_done_by_doc_id(self):
-        store = self._queue({"/v1/aspects/queue/mark_done": {"deleted": 1}})
-        assert store.mark_done(doc_id="1.2.3") == 1
-
-    def test_mark_failed(self):
-        store = self._queue({"/v1/aspects/queue/mark_failed": {"ok": True}})
-        store.mark_failed("c", "doc.pdf", "some error")
-
-    def test_mark_retry(self):
-        store = self._queue({"/v1/aspects/queue/mark_retry": {"ok": True}})
-        store.mark_retry("c", "doc.pdf")
-
-    def test_mark_retry_posts_interval_seconds(self):
-        # RDR-163 P1 (nexus-ztpt6): the worker-chosen backoff must reach the
-        # service so it can stamp next_retry_at = now()+interval server-side.
-        captured = {}
-
-        def handle_request(request: httpx.Request) -> httpx.Response:
-            captured["body"] = json.loads(request.content)
-            return httpx.Response(200, json={"ok": True})
-
-        store = HttpAspectQueue(base_url="http://test", _token="tok")
-        store._client = httpx.Client(transport=httpx.MockTransport(handle_request))
-        store.mark_retry("c", "doc.pdf", interval_seconds=120)
-        assert captured["body"]["interval_seconds"] == 120
-        assert captured["body"]["collection"] == "c"
-        assert captured["body"]["source_path"] == "doc.pdf"
-
-    def test_reclaim_stale_returns_count(self):
-        store = self._queue({"/v1/aspects/queue/reclaim_stale": {"reclaimed": 3}})
-        assert store.reclaim_stale(300) == 3
-
-    @pytest.mark.parametrize(
-        ("kwargs", "expected"),
-        [
-            ({}, True),
-            ({"count_attempt": True}, True),
-            ({"count_attempt": False}, False),
-        ],
-    )
-    def test_reclaim_stale_posts_count_attempt(self, kwargs, expected):
-        # nexus-j67ix.3: the body always carries both keys; the stop sweep passes
-        # count_attempt=False so only the age-based sweep spends an attempt.
-        captured = {}
-
-        def handle_request(request: httpx.Request) -> httpx.Response:
-            captured["body"] = json.loads(request.content)
-            return httpx.Response(200, json={"reclaimed": 2})
-
-        store = HttpAspectQueue(base_url="http://test", _token="tok")
-        store._client = httpx.Client(transport=httpx.MockTransport(handle_request))
-        assert store.reclaim_stale(0, **kwargs) == 2
-        assert captured["body"] == {"timeout_seconds": 0, "count_attempt": expected}
-
-    def test_pending_count(self):
-        store = self._queue({"/v1/aspects/queue/pending_count": {"count": 7}})
-        assert store.pending_count() == 7
-
-    def test_is_drained_true(self):
-        store = self._queue({"/v1/aspects/queue/is_drained": {"drained": True}})
-        assert store.is_drained() is True
-
-    def test_is_drained_false(self):
-        store = self._queue({"/v1/aspects/queue/is_drained": {"drained": False}})
-        assert store.is_drained() is False
-
-    def test_list_pending_returns_rows(self):
-        rows = [
-            {"collection": "c", "source_path": "doc.pdf",
-             "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}
-        ]
-        store = self._queue({"/v1/aspects/queue/list_pending": rows})
-        result = store.list_pending()
-        assert len(result) == 1
-        assert isinstance(result[0], QueueRow)
-
-    def test_list_failed_returns_rows_and_preserves_doc_id(self):
-        rows = [
-            {"collection": "c", "source_path": "f.pdf",
-             "content_hash": "h", "content": "x", "retry_count": 6, "doc_id": "1.2"}
-        ]
-        store = self._queue({"/v1/aspects/queue/list_failed": rows})
-        result = store.list_failed()
-        assert len(result) == 1
-        assert isinstance(result[0], QueueRow)
-        assert result[0].doc_id == "1.2"
-        assert result[0].retry_count == 6
-
-    def test_list_failed_forwards_collection_param(self):
-        # nexus-2c51v: --collection scope must reach the service as a query param.
-        captured = {}
-
-        def handle_request(request: httpx.Request) -> httpx.Response:
-            captured["params"] = dict(request.url.params)
-            return httpx.Response(200, json=[])
-
-        store = HttpAspectQueue(base_url="http://test", _token="tok")
-        store._client = httpx.Client(transport=httpx.MockTransport(handle_request))
-        store.list_failed(collection="knowledge__x")
-        assert captured["params"].get("collection") == "knowledge__x"
-
-    def test_list_pending_with_limit(self):
-        rows = [
-            {"collection": "c", "source_path": f"doc{i}.pdf",
-             "content_hash": "", "content": "", "retry_count": 0, "doc_id": ""}
-            for i in range(5)
-        ]
-        store = self._queue({"/v1/aspects/queue/list_pending": rows})
-        result = store.list_pending(limit=5)
-        assert len(result) == 5
-
-    @pytest.mark.t2_tenant
-    def test_rename_collection(self):
-        store = self._queue({"/v1/aspects/queue/rename_collection": {"updated": 4}})
-        assert store.rename_collection(old="old", new="new") == 4
-
-    def test_import_queue_row(self):
-        store = self._queue({"/v1/aspects/queue/import": {"imported": 1}})
-        assert store.import_queue_row({"collection": "c", "source_path": "s"}) == 1
+    def test_the_table_verbs_are_gone(self):
+        """nexus-hbnml: the producer is the tuple space. The table's claim, mark, reclaim, list,
+        rename and import verbs left with the engine's /v1/aspects/queue routes, so the client
+        must not carry them: a caller that reaches for one fails at once, not on a 404."""
+        for name in (
+            "claim_next", "claim_batch", "mark_done", "mark_failed", "mark_retry",
+            "reclaim_stale", "pending_count", "is_drained", "list_pending", "list_failed",
+            "list_waiting", "rename_collection", "import_queue_row",
+        ):
+            assert not hasattr(HttpAspectQueue, name), name
 
     def test_rename_lock_accepted_but_ignored(self):
         """rename_lock parameter accepted for constructor parity but not used."""

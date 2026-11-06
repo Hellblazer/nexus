@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-hbnml (RDR-235 step B of nexus-bpikw): retire nexus.aspect_extraction_queue.
+
+    RDR-235 moved aspect extraction onto the engine's `aspects` tuple subspace. Step A (client 7.95.0) stopped
+    every producer writing the table; this change drops it, with the /v1/aspects/queue/* routes and the
+    repository code that read it, which leave the engine in the same release. The table was empty on all five
+    managed tenants when measured (T2 conexus/bpikw-aspect-queue-census-2026-11-03: 0 rows, 5 of 5 reads).
+
+    A TABLE THAT HOLDS ROWS IS KEPT, AND DRAINED BY THE ENGINE. A local install that an older client left rows in
+    must not lose them, so the drop is conditional on the table being empty. Nothing in this file moves a row:
+    the engine does, once, at start (AspectQueueDrain, run by NexusService after this migration): pending and
+    in_progress rows become `aspects` tasks, failed rows become dead-lettered `aspects` tasks (so
+    `nx aspects requeue-failed` can revive them), each row is deleted in the same transaction that wrote its
+    task, and `event=aspect_queue_rows_drained` / `event=aspect_queue_rows_retained` report what happened. The
+    NEXT boot's aspects-005-2 then finds the table empty and drops it. Rows the drain cannot move stay and are
+    counted in GET /v1/status `aspect_queue_rows_retained`, which the nx doctor aspect-queue check and the console
+    health page show with a remedy. docs/migration-runbook.md has the owner-role SQL recipe as a last resort.
+
+    THE GUARD, AND WHY IT IS NOT A PLAIN count(*).
+    The condition is a preCondition with onFail="CONTINUE" and onError="CONTINUE", on purpose:
+      - never HALT: a boot-time halt crash-loops an install (the nexus-lgdel.l1 no-wedge directive);
+      - never MARK_RAN: that would record the changeset as run and stop it being retried, so the table would
+        stay for ever. CONTINUE skips the changeset WITHOUT recording it, so every boot re-evaluates it and the
+        table goes the first time it is empty.
+    The count cannot be a bare `SELECT count(*)`. nexus.aspect_extraction_queue is FORCE ROW LEVEL SECURITY
+    with the policy `tenant_id = current_setting('nexus.tenant', true)`, and the migration role owns the table
+    with no BYPASSRLS (the nexus-1wjmq class, catalog-013-1b's header). With no tenant GUC set, a count by that
+    role sees ZERO rows on every tenant, so a naive guard would read "empty" on a populated table and the DROP
+    would discard the rows. aspects-005-1 therefore creates nexus.aspect_queue_rows_unscoped(), which lifts FORCE
+    for the length of one count and puts back what it found (the hygiene-001-2 and note-uri-001-1 toggle), and
+    the precondition calls it. AspectQueueRetireLiquibaseTest proves the point on a table that holds a row: a
+    plain count reads 0 there, the helper reads 1, and the table survives.
+
+    THE COUNT AND THE DROP ARE ONE TRANSACTION. Liquibase ends the precondition's transaction (a rollback in a
+    finally) before it runs the changeset body, so the ACCESS EXCLUSIVE lock the helper's ALTER TABLE took during
+    the precondition is gone when the DROP runs: a writer could land a row in that window. aspects-005-2's body is
+    therefore a DO block that calls the helper AGAIN, inside the transaction that drops, and drops only at zero.
+    The helper's ALTER TABLE holds ACCESS EXCLUSIVE until that transaction ends, so no row can land between the
+    second count and the drop. If the second count is not zero the block raises, and the changeset has
+    failOnError="false": Liquibase rolls the body back, logs it, sets execType FAILED, and writes NO
+    DATABASECHANGELOG row (MarkChangeSetRanGenerator refuses FAILED and SKIPPED), so the changeset is retried at
+    the next boot exactly like a precondition skip. A DO block that simply skipped the DROP would have been
+    recorded as run and never retried. The precondition stays: it is the quiet path, and the raise is the rare one.
+
+    THE GUARD CANNOT HALT A BOOT. A sqlCheck that THROWS (the migration role is not the table owner, so the
+    ALTER TABLE is refused) is an error, not a failed check, and onError="CONTINUE" turns it into the same skip.
+    The helper also returns 0 when the table is already gone, so a store where an operator dropped it out of band
+    reaches the DROP ... IF EXISTS statements, which then do nothing and remove the helper.
+
+    A KEPT TABLE IS INERT, NOT MERELY UNUSED. The table's collection foreign key was ON DELETE RESTRICT with
+    ON UPDATE NO ACTION (fk-003-2: the explicit child re-home in every collection delete, rename and document move
+    was what kept RESTRICT from firing). This change removes those explicit statements, so a kept table with RESTRICT
+    would make the registry refuse to delete or rename a collection a leftover row names, with nothing in the
+    pre-checks able to see why. aspects-005-1 (recorded on every install, whether or not the table is later
+    dropped) therefore replaces the foreign key by ON DELETE CASCADE ON UPDATE CASCADE: a collection delete takes
+    the leftover rows of that collection with it, a registry rename of the name follows, and nothing blocks. The
+    constraint is added NOT VALID and validated in a block that tolerates failure, so an install with an orphan
+    row (a state fk-003 stubs prevent) boots instead of halting. The rollback restores RESTRICT / NO ACTION.
+    The document foreign key is ON DELETE CASCADE already.
+
+    Placed after vectors-053 and before the runAlways grants blocks (the D0.1 late-append convention): the grants
+    block then no longer sees the table, and nothing is granted on a table that is gone.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: the guard's row counter, and the kept table's collection foreign key ───────────── -->
+    <changeSet id="aspects-005-1" author="nexus-hbnml">
+        <comment>(1) Create nexus.aspect_queue_rows_unscoped(): the number of rows nexus.aspect_extraction_queue holds across ALL tenants, counted with FORCE ROW LEVEL SECURITY lifted for the length of the count and put back as it was found (the migration role owns the table with no BYPASSRLS, so a count under FORCE sees zero rows on every tenant). Returns 0 when the table is already gone. Used by aspects-005-2's precondition and body; aspects-005-2 drops it. (2) Replace aspect_extraction_queue_collection_fk (ON DELETE RESTRICT, ON UPDATE NO ACTION) by ON DELETE CASCADE ON UPDATE CASCADE, so a table kept because it holds rows cannot block a collection delete, rename or move now that no engine code re-homes its rows. DATA EFFECT: none at this changeset (it creates a function and swaps a constraint; no row is read or written); the new constraint, later, deletes a queue row only when the collection it names is deleted, which is the row's own parent.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.aspect_queue_rows_unscoped() RETURNS bigint
+LANGUAGE plpgsql
+AS $fn$
+DECLARE
+    v_forced boolean;
+    v_rows   bigint;
+BEGIN
+    SELECT c.relforcerowsecurity INTO v_forced
+      FROM pg_class c
+     WHERE c.oid = to_regclass('nexus.aspect_extraction_queue');
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+    ALTER TABLE nexus.aspect_extraction_queue NO FORCE ROW LEVEL SECURITY;
+    SELECT count(*) INTO v_rows FROM nexus.aspect_extraction_queue;
+    IF v_forced THEN
+        ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+    END IF;
+    RETURN v_rows;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION nexus.aspect_queue_rows_unscoped() FROM PUBLIC;
+
+DO $fk$
+BEGIN
+    IF to_regclass('nexus.aspect_extraction_queue') IS NOT NULL THEN
+        ALTER TABLE nexus.aspect_extraction_queue DROP CONSTRAINT IF EXISTS aspect_extraction_queue_collection_fk;
+        ALTER TABLE nexus.aspect_extraction_queue
+            ADD CONSTRAINT aspect_extraction_queue_collection_fk
+            FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name)
+            ON DELETE CASCADE ON UPDATE CASCADE
+            NOT VALID;
+        BEGIN
+            ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'aspect_extraction_queue_collection_fk left NOT VALID: %', SQLERRM;
+        END;
+    END IF;
+END
+$fk$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DO $fk$
+BEGIN
+    IF to_regclass('nexus.aspect_extraction_queue') IS NOT NULL THEN
+        ALTER TABLE nexus.aspect_extraction_queue DROP CONSTRAINT IF EXISTS aspect_extraction_queue_collection_fk;
+        ALTER TABLE nexus.aspect_extraction_queue
+            ADD CONSTRAINT aspect_extraction_queue_collection_fk
+            FOREIGN KEY (tenant_id, collection)
+            REFERENCES nexus.catalog_collections (tenant_id, name)
+            ON DELETE RESTRICT
+            NOT VALID;
+        BEGIN
+            ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'aspect_extraction_queue_collection_fk left NOT VALID: %', SQLERRM;
+        END;
+    END IF;
+END
+$fk$;
+
+DROP FUNCTION IF EXISTS nexus.aspect_queue_rows_unscoped();
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: drop the table, only if it holds no row ───────────────── -->
+    <changeSet id="aspects-005-2" author="nexus-hbnml" failOnError="false">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT nexus.aspect_queue_rows_unscoped()</sqlCheck>
+        </preConditions>
+        <comment>Retire nexus.aspect_extraction_queue (RDR-235 step B, nexus-bpikw): DROP TABLE, which takes its indexes, its sequence, its RLS policy and its two foreign keys (to catalog_documents and catalog_collections) with it, then DROP the counting helper of aspects-005-1. Guarded twice: a preCondition that the table holds zero rows across all tenants (counted with FORCE ROW LEVEL SECURITY lifted, see aspects-005-1), onFail="CONTINUE" onError="CONTINUE"; and the body itself, a DO block that counts again through the helper in the SAME transaction as the DROP and drops only at zero (Liquibase ends the precondition's transaction before the body runs, so the precondition alone leaves a window). A table that still holds rows is left in place, boot continues, and the changeset is NOT recorded as run (a precondition skip records nothing, and the body raises with failOnError="false", which Liquibase also does not record) so it is retried at every boot, never HALT and never MARK_RAN. The engine drains a kept table at start (AspectQueueDrain), so the next boot finds it empty. DATA EFFECT: DROPs nexus.aspect_extraction_queue only when it holds no row, so no row is ever discarded (managed service, 2026-11-03: 0 rows in all 5 tenants); the table's structure goes and the rollback recreates it EMPTY, so the effect is reversible for the structure and discards no data (the changeset only ever runs on an empty table); a table that holds rows is untouched.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $drop$
+DECLARE
+    v_rows bigint;
+BEGIN
+    v_rows := nexus.aspect_queue_rows_unscoped();
+    IF v_rows &lt;&gt; 0 THEN
+        RAISE EXCEPTION 'nexus.aspect_extraction_queue holds % row(s); aspects-005-2 does not drop it and is retried at the next boot', v_rows;
+    END IF;
+    DROP TABLE IF EXISTS nexus.aspect_extraction_queue;
+    DROP FUNCTION IF EXISTS nexus.aspect_queue_rows_unscoped();
+END
+$drop$;
+        </sql>
+        <!-- Only the STRUCTURE is restored: the changeset ran only on an empty table, so there is no data to
+             bring back. The end state is what aspects-001-5/-6, aspects-002-1, fk-001-4, fk-003-2/-8,
+             hygiene-001-2 and aspects-005-1 leave (the collection foreign key is the CASCADE one). It has to
+             exist because the older changesets' own rollbacks (fk-003-2 drops its constraint, hygiene-001-2 drops
+             NOT NULL on doc_id, aspects-002-1 drops next_retry_at) run ALTER TABLE on it, and a rollback chain
+             that reaches them with no table fails there.
+             nexus_svc's table privilege is not restored here: the runAlways grants block re-issues it at the
+             next update. -->
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.aspect_extraction_queue (
+    id              BIGSERIAL    NOT NULL,
+    tenant_id       TEXT         NOT NULL,
+    collection      TEXT         NOT NULL,
+    source_path     TEXT         NOT NULL,
+    doc_id          TEXT         NOT NULL,
+    content_hash    TEXT         NOT NULL DEFAULT '',
+    content         TEXT         NOT NULL DEFAULT '',
+    status          TEXT         NOT NULL DEFAULT 'pending',
+    retry_count     INTEGER      NOT NULL DEFAULT 0,
+    enqueued_at     TIMESTAMPTZ  NOT NULL,
+    last_attempt_at TIMESTAMPTZ,
+    last_error      TEXT,
+    next_retry_at   TIMESTAMPTZ,
+    CONSTRAINT aspect_queue_pk PRIMARY KEY (id),
+    CONSTRAINT aspect_queue_tenant_col_path_uq UNIQUE (tenant_id, collection, source_path),
+    CONSTRAINT fk_aspect_queue_catalog_doc FOREIGN KEY (tenant_id, doc_id)
+        REFERENCES nexus.catalog_documents (tenant_id, tumbler) ON DELETE CASCADE,
+    CONSTRAINT aspect_extraction_queue_collection_fk FOREIGN KEY (tenant_id, collection)
+        REFERENCES nexus.catalog_collections (tenant_id, name) ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX idx_aspect_queue_status ON nexus.aspect_extraction_queue (tenant_id, status);
+CREATE INDEX idx_aspect_queue_fifo   ON nexus.aspect_extraction_queue (tenant_id, status, enqueued_at ASC);
+CREATE INDEX idx_aspect_queue_doc_id ON nexus.aspect_extraction_queue (tenant_id, doc_id) WHERE doc_id IS NOT NULL;
+ALTER TABLE nexus.aspect_extraction_queue ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.aspect_extraction_queue
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+            </sql>
+            <!-- The counting helper comes back too: this changeset's forward step dropped it, and the state a
+                 rollback of this changeset alone must leave is the state after aspects-005-1, where the
+                 precondition can call it. Without it, an update after the rollback would find the helper
+                 missing and skip the changeset (onError="CONTINUE") for ever. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.aspect_queue_rows_unscoped() RETURNS bigint
+LANGUAGE plpgsql
+AS $fn$
+DECLARE
+    v_forced boolean;
+    v_rows   bigint;
+BEGIN
+    SELECT c.relforcerowsecurity INTO v_forced
+      FROM pg_class c
+     WHERE c.oid = to_regclass('nexus.aspect_extraction_queue');
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+    ALTER TABLE nexus.aspect_extraction_queue NO FORCE ROW LEVEL SECURITY;
+    SELECT count(*) INTO v_rows FROM nexus.aspect_extraction_queue;
+    IF v_forced THEN
+        ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+    END IF;
+    RETURN v_rows;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION nexus.aspect_queue_rows_unscoped() FROM PUBLIC;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -108,30 +108,6 @@ class TestIdempotentOptOut:
             p._post("/anything", {})
         assert p.attempts > 2, "default (idempotent) path lost its gateway retry loop"
 
-    @pytest.mark.parametrize("verb,call", [
-        ("claim_next", lambda q: q.claim_next()),
-        ("claim_batch", lambda q: q.claim_batch(5)),
-        ("mark_retry", lambda q: q.mark_retry("col", "src", interval_seconds=5)),
-    ])
-    def test_aspect_queue_verbs_opt_out(self, verb, call, monkeypatch) -> None:
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-
-        captured: dict = {}
-
-        def _capture_send(self, method, path, *, idempotent=True, **kwargs):
-            captured["path"] = path
-            captured["idempotent"] = idempotent
-            return {"rows": [], "row": None}
-
-        monkeypatch.setattr(RefreshableHttpStoreMixin, "_send", _capture_send)
-        q = HttpAspectQueue(base_url="http://127.0.0.1:9", _token="t")
-        try:
-            call(q)
-        except Exception:  # noqa: BLE001,S110 — response-shape mismatch is irrelevant; the capture is the assertion
-            pass
-        assert captured.get("idempotent") is False, (
-            f"{verb} must pass idempotent=False (nexus-tjvgf)"
-        )
 
     def test_fully_pinned_401_stays_single_attempt(self) -> None:
         """A fixture-pinned store (explicit base_url + token, e.g. against a

@@ -129,8 +129,7 @@ def _spy_out_replace(monkeypatch: pytest.MonkeyPatch, fail_after: int | None = N
 
 
 class _MockEngine:
-    """The engine's ``/v1/tuples/out`` and the table queue's two enqueue routes,
-    as an ``httpx.MockTransport`` handler.
+    """The engine's ``/v1/tuples/out``, as an ``httpx.MockTransport`` handler.
 
     ``out`` models the ``aspects`` template: one task per nonce (``created`` the
     first time, ``replaced`` after). After *fail_after* accepted outs every
@@ -154,8 +153,6 @@ class _MockEngine:
         payload = json.loads(request.content) if request.content else {}
         with self._lock:
             self.paths.append(path)
-        if path == "/v1/aspects/queue/enqueue_many":
-            return httpx.Response(200, json={"enqueued": len(payload["rows"])})
         if path != "/v1/tuples/out":
             return httpx.Response(200, json={})
         with self._lock:
@@ -365,7 +362,7 @@ class TestBatchOverAMockEngine:
         engine answers 429 ``MaxLiveRowsExceeded`` from the seventh ``out``). That
         is not one bad row: the typed error reaches the caller, an error log names
         the counts, the remaining rows are not sent, and nothing is replayed
-        through the per-row table path."""
+        as per-row enqueues."""
         eng = _MockEngine(fail_after=6)
         queue = eng.queue()
         coll = _coll()
@@ -380,8 +377,8 @@ class TestBatchOverAMockEngine:
         assert aborted[0]["error_type"] == "MaxLiveRowsExceededError"
         assert aborted[0]["enqueued"] == 6
         assert aborted[0]["unsent"] > 0 and eng.attempts < len(rows), "the batch stopped sending"
-        assert not [p for p in eng.paths if p.startswith("/v1/aspects/queue")], (
-            "never replayed per row through the table"
+        assert not [p for p in eng.paths if p != "/v1/tuples/out"], (
+            "every write was an out on the tuple space: nothing went anywhere else"
         )
         assert len(eng.tasks) == 6, "rows that landed stay"
         # The single form raises it too (the engine is still at its ceiling).
@@ -394,7 +391,6 @@ class TestBatchOverAMockEngine:
         queue = eng.queue()
         with pytest.raises(AspectQueueEngineUnsupportedError, match="engine-service-v0.1.169") as one:
             queue.enqueue(_coll(), "/p/a.md", doc_id=_tumbler())
-        assert ASPECT_QUEUE_ENV in str(one.value)
         assert "table" not in str(one.value), "the retired queue is not offered as a way out (nexus-bpikw D2)"
         assert "Upgrade the engine" in str(one.value)
         assert isinstance(one.value.__cause__, UnknownSubspaceError)

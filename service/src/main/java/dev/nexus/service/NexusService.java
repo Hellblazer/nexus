@@ -306,6 +306,15 @@ public final class NexusService {
     private volatile java.util.function.Supplier<Long> chunksLeavesSweepSeconds;
     /** nexus-6pfgb.43: the admin-connection DDL behind {@code /v1/admin/chunk-keys/add-constraints} and {@code validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
+    /**
+     * nexus-hbnml: the result of the engine-start drain of the retired aspect queue table, served by
+     * {@code GET /v1/status} as {@code aspect_queue_table_present} / {@code aspect_queue_rows_retained}. Null until
+     * the drain has run (the keys are omitted), and an engine whose drain was never bound omits them for good.
+     */
+    private volatile dev.nexus.service.db.AspectQueueDrain.Result aspectQueueDrainResult;
+    private volatile dev.nexus.service.db.AspectQueueDrain aspectQueueDrain;
+    /** The drain runs this long after boot, on the sweep thread, so it never delays the HTTP bind. */
+    static final long ASPECT_QUEUE_DRAIN_DELAY_SECONDS = 5L;
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
@@ -671,6 +680,7 @@ public final class NexusService {
                                 dataSource, java.time.Clock.systemUTC()),
                         this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
                         .embedPosture(() -> this.embedPosture)
+                        .aspectQueue(() -> this.aspectQueueDrainResult)
                         .testTenantResetRoute(tenantResetRoute));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
@@ -1149,6 +1159,40 @@ public final class NexusService {
      */
     public void chunkConstraintAdmin(dev.nexus.service.vectors.ChunkConstraintAdmin admin) {
         this.chunkConstraintAdmin = admin;
+    }
+
+    /**
+     * Bind the engine-start drain of the retired {@code aspect_extraction_queue} table (nexus-hbnml) and schedule it
+     * once, {@value #ASPECT_QUEUE_DRAIN_DELAY_SECONDS} seconds after the call, on the sweep thread. {@code Main}
+     * calls it once with the same {@code NX_DB_ADMIN_*} values the migrator uses (the table's owner, which can count
+     * every tenant's rows). Idempotent: a boot with no table, or an empty one, does nothing but record that.
+     */
+    public void aspectQueueDrain(dev.nexus.service.db.AdminConnection admin) {
+        aspectQueueDrain(new dev.nexus.service.db.AspectQueueDrain(tenantScope, tupleRepo,
+            new dev.nexus.service.db.AspectQueueDrain.AdminCensus(admin), this::reaperTenants));
+    }
+
+    /** {@link #aspectQueueDrain(dev.nexus.service.db.AdminConnection)} with the drain supplied (tests). */
+    void aspectQueueDrain(dev.nexus.service.db.AspectQueueDrain drain) {
+        this.aspectQueueDrain = drain;
+        this.sweepScheduler.schedule(surviving("aspect_queue_drain_failed", this::runAspectQueueDrain),
+            ASPECT_QUEUE_DRAIN_DELAY_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /** Runs the bound drain now and records its result. Package-private: the scheduled task and the tests run THIS. */
+    dev.nexus.service.db.AspectQueueDrain.Result runAspectQueueDrain() {
+        var drain = aspectQueueDrain;
+        if (drain == null) {
+            return null;
+        }
+        var result = drain.run();
+        this.aspectQueueDrainResult = result;
+        return result;
+    }
+
+    /** The last drain result, or null before the drain has run (keys omitted). */
+    dev.nexus.service.db.AspectQueueDrain.Result aspectQueueDrainStatus() {
+        return aspectQueueDrainResult;
     }
 
     /** The bound object, or null before {@link #chunksLeafBloat(java.util.function.Supplier)} (key omitted). */

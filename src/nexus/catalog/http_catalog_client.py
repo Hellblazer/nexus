@@ -733,7 +733,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``topic_assignments``, ``topics``, ``taxonomy_centroids``
         — the RDR-191 unified centroid relation, was
         ``taxonomy_centroids_*`` — ``document_aspects``,
-        ``document_highlights``, ``aspect_extraction_queue``,
+        ``document_highlights``,
         ``catalog_documents``, ``catalog_collections``; ``chash_index`` is
         retired, RDR-187). The streaming pipeline buffer is swept via
         its own engine endpoint (``/v1/pipeline/delete_collection``, RDR-186
@@ -3653,7 +3653,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         — ``topic_assignments``, ``topics``, ``taxonomy_meta``,
         ``taxonomy_centroids`` — the RDR-191 unified centroid relation, was
         ``taxonomy_centroids_*`` — ``document_aspects``,
-        ``document_highlights``, ``aspect_extraction_queue``,
+        ``document_highlights``,
         ``catalog_documents``, ``search_telemetry``, ``hook_failures``,
         ``catalog_collections_deleted``; ``chash_index`` is retired, RDR-187).
         The streaming pipeline buffer lives engine-side

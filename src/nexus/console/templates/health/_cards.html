@@ -87,7 +87,8 @@
 
   {# RDR-089 aspect-extraction queue depth (nexus-qf48). Mirrors
      `nx doctor --check-aspect-queue`. #}
-  <article class="health-card {% if not aspect_queue.present %}warn{% elif aspect_queue.failed_count %}warn{% elif aspect_queue.total == 0 %}ok{% else %}ok{% endif %}">
+  {% set retired = aspect_queue.retired_table if aspect_queue.present else none %}
+  <article class="health-card {% if not aspect_queue.present %}warn{% elif aspect_queue.failed_count %}warn{% elif retired and retired.state in ('retained', 'uncounted') %}warn{% elif aspect_queue.total == 0 %}ok{% else %}ok{% endif %}">
     <header>Aspect Queue</header>
     {% if not aspect_queue.present %}
     <div class="stat-value" style="color:var(--console-muted);">&mdash;</div>
@@ -103,6 +104,15 @@
     </div>
     {% if aspect_queue.oldest_pending %}
     <small style="color:var(--console-muted);">oldest pending: <code>{{ aspect_queue.oldest_pending }}</code></small>
+    {% endif %}
+    {% if retired and retired.state == 'retained' %}
+    <div class="stat-label" style="color:var(--console-err);">{{ retired.rows }} row(s) stranded in the retired aspect_extraction_queue table{% if retired.reasons %} ({% for reason, count in retired.reasons.items() %}{{ reason }}={{ count }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}</div>
+    <small>{{ retired.remedy }}</small>
+    {% elif retired and retired.state == 'uncounted' %}
+    <div class="stat-label" style="color:var(--console-err);">the retired aspect_extraction_queue table is present and its rows could not be counted</div>
+    <small>{{ retired.remedy }}</small>
+    {% elif retired and retired.state == 'unreported' %}
+    <small style="color:var(--console-muted);">retired aspect_extraction_queue table: unknown (engine status unreadable or the engine predates the field)</small>
     {% endif %}
     {% endif %}
   </article>

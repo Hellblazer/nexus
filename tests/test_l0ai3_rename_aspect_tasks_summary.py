@@ -2,8 +2,9 @@
 """nexus-l0ai3: the rename summary shows the aspects tasks the engine rewrote.
 
 The engine's rename counts include ``aspects_tasks`` (the unconsumed task
-bodies it points at the new collection, RDR-235) and, until that table is
-dropped, ``aspect_extraction_queue``. The summary printed neither.
+bodies it points at the new collection, RDR-235). The summary printed nothing
+for it. The old ``aspect_extraction_queue`` count left with the table (nexus-hbnml),
+so the summary has no queue clause any more.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ class TestAspectsTasksSummary:
     def test_data_plane_maps_aspects_tasks(self):
         client = MagicMock()
         client.rename_collection_cascade = MagicMock(return_value={
-            "aspects_tasks": 4, "aspect_extraction_queue": 2,
+            "aspects_tasks": 4,
         })
         t3 = MagicMock()
         t3.collection_exists = MagicMock(side_effect=lambda n: n == "docs__old")
@@ -37,7 +38,7 @@ class TestAspectsTasksSummary:
             "docs__old", "docs__new", t3_db=t3, catalog=client,
         )
         assert counts["aspect_tasks"] == 4
-        assert counts["aspect_queue"] == 2
+        assert "aspect_queue" not in counts
 
     def test_data_plane_zero_when_the_engine_omits_the_key(self):
         client = MagicMock()
@@ -49,10 +50,10 @@ class TestAspectsTasksSummary:
         )
         assert counts["aspect_tasks"] == 0
 
-    def test_summary_parts_name_tasks_and_queue(self):
+    def test_summary_parts_name_tasks_and_no_queue_rows(self):
         parts = rename_summary_parts({**_COUNTS, "aspect_tasks": 4, "aspect_queue": 2})
         assert "4 aspect tasks" in parts
-        assert "2 aspect queue rows" in parts
+        assert not any("queue" in part for part in parts), parts
 
     def test_summary_parts_omit_zero_and_tolerate_missing_keys(self):
         assert rename_summary_parts({**_COUNTS}) == []
@@ -85,7 +86,7 @@ class TestAspectsTasksSummary:
             "nexus.db.collection_state.probe_collection_state",
         ) as probe, patch(
             "nexus.commands.collection.rename_collection_data_plane",
-            return_value={**_COUNTS, "aspect_tasks": 4, "aspect_queue": 1},
+            return_value={**_COUNTS, "aspect_tasks": 4},
         ), patch("nexus.corpus.ensure_collection_registered"):
             from nexus.db.collection_state import CollectionState
 
@@ -98,4 +99,4 @@ class TestAspectsTasksSummary:
             )
         assert result.exit_code == 0, result.output
         assert "4 aspect tasks" in result.output
-        assert "1 aspect queue rows" in result.output
+        assert "aspect queue" not in result.output

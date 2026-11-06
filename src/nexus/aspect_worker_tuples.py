@@ -3,7 +3,7 @@
 """The aspect worker's side of the ``aspects`` tuple queue (RDR-235, client half).
 
 ``AspectExtractionWorker`` keeps the extraction half (``_extract_aspects`` and
-its batch form) and the table drain; this module owns what is new:
+its batch form); this module owns the rest:
 
 * a worker id ``W`` unique per live process, and one claimant string
   ``W:<slot>`` per claim in a batch (a repeat ``in``/``inp`` by one claimant
@@ -26,7 +26,7 @@ its batch form) and the table drain; this module owns what is new:
 
 The ladder index is the claimed tuple's own ``attempts`` (``TupleRow.attempts``
 is the number of earlier failed attempts: 0 on a first claim, +1 for each nack
-and each lapsed lease), which is what the table's ``retry_count`` was.
+and each lapsed lease).
 """
 from __future__ import annotations
 
@@ -272,6 +272,21 @@ class TupleQueueSide:
             return True
         return False
 
+    def probe_engine(self) -> bool:
+        """Ask the engine one cheap question while claiming is suspended (the ``aspects`` template
+        is missing): True when it ANSWERED (a missing template is an answer), False when the
+        request failed. The worker feeds this to its host's engine-unreachable clock, which only
+        claim round trips fed before, so a suspension of up to an hour left an engine that went
+        away mid-suspension unnoticed for the whole of it."""
+        from nexus.db.t2.http_aspect_queue import aspects_census  # noqa: PLC0415 — deferred: keeps this module's import light
+
+        try:
+            self._call(lambda t: aspects_census(t, timeout=10.0, single_shot=True))
+        except Exception:  # noqa: BLE001 — any failure to get an answer is an unreachable engine; logged at debug, the clock decides
+            _log.debug("aspect_worker_engine_probe_failed", exc_info=True)
+            return False
+        return True
+
     def claim_batch(self, *, park: bool) -> tuple[list[HeldClaim], bool]:
         """Visit every slot; return ``(claims, failed)``.
 
@@ -319,7 +334,7 @@ class TupleQueueSide:
             if self._unsupported_until is None:
                 _log.warning(
                     _ENGINE_UNSUPPORTED_EVENT,
-                    action="tuple claiming skipped; the table is still drained",
+                    action="tuple claiming skipped; the engine is re-probed in an hour",
                 )
             self._unsupported_until = self._clock() + UNSUPPORTED_REPROBE_S
             return claims, False
@@ -557,8 +572,8 @@ class TupleQueueSide:
         self._release(claim)
 
     def _gone_verdict(self, claim: HeldClaim) -> None:
-        """The catalog answered and has no such document (nexus-1o3ft). The table's
-        doc_id FK refused such a row at enqueue; the tuple queue checks nothing, and
+        """The catalog answered and has no such document (nexus-1o3ft). The tuple
+        queue checks nothing at enqueue, and
         the enqueue hook can fire (and wake a worker, ~11 ms) before the catalog row
         commits. So the FIRST claim (``attempts == 0``) is a short retryable nack on
         the ladder's first interval, never a drop; a document still gone on a later

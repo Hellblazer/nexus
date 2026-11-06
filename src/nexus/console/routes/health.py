@@ -125,9 +125,9 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
 
     ``{"present": True, "backend": "service", "total": N, "failed_count": N}``.
 
-    RDR-235 F18: both sides of the queue are counted. ``pending`` is the table's
-    pending plus the ``aspects`` tuple queue's ``available``; ``failed_count``
-    adds its ``dead`` tasks; ``claimed`` (in flight) is neither.
+    RDR-235 F18: ``pending`` is the ``aspects`` tuple queue's ``available``;
+    ``failed_count`` is its ``dead`` tasks; ``claimed`` (in flight) is neither.
+    The retired ``aspect_extraction_queue`` table is not read (nexus-hbnml).
 
     Two deliberate shape differences from the sqlite collector, both because the
     service list endpoint does not carry the data — declared rather than filled
@@ -145,16 +145,13 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
 
     try:
         q = HttpAspectQueue()
-        pending = q.pending_count()
-        failed = len(q.list_failed())
-        # RDR-235 F18: the `aspects` tuple queue is the other side of the depth.
-        # `available` is pending, `dead` is failed (the card keys its warn on
-        # failed_count), `claimed` is in flight and is neither. An unreadable
-        # tuple side falls to `unavailable` below: a count without it would
-        # understate the queue, which is the false-clean this collector avoids.
+        # RDR-235 F18: `available` is pending, `dead` is failed (the card keys
+        # its warn on failed_count), `claimed` is in flight and is neither. An
+        # unreadable queue falls to `unavailable` below: a zero would be the
+        # false-clean this collector avoids.
         tuples = q.tuple_counts()
-        pending += tuples.available
-        failed += tuples.dead
+        pending = tuples.available
+        failed = tuples.dead
     except (httpx.HTTPError, RuntimeError) as exc:
         return {"present": True, "backend": "service", "unavailable": True,
                 "error": str(exc)[:200]}
@@ -165,20 +162,36 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
         "pending": pending,
         "failed_count": failed,
         "oldest_pending": None,
+        "retired_table": _retired_queue_table_card(),
+    }
+
+
+def _retired_queue_table_card() -> dict[str, Any]:
+    """The retired ``aspect_extraction_queue`` table as the engine reports it (nexus-hbnml),
+    for the Aspect Queue card: ``{"state", "rows", "reasons", "remedy"}``. Only ``gone`` and
+    ``empty`` are clean; ``retained``, ``uncounted`` and ``unreported`` never render as zero."""
+    from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.t2.http_aspect_queue import RETIRED_TABLE_REMEDY, retired_queue_table  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    table = retired_queue_table(fetch_engine_status())
+    return {
+        "state": table.state,
+        "rows": table.rows,
+        "reasons": dict(table.reasons),
+        "remedy": RETIRED_TABLE_REMEDY,
     }
 
 
 def _collect_aspect_queue_data() -> dict[str, Any]:
-    """Return aspect_extraction_queue depth + per-status breakdown.
+    """Return the aspect queue's depth.
 
-    nexus-k0luu: reads the SERVICE queue (PG) — the console used to read
+    nexus-k0luu: reads the SERVICE queue — the console used to read
     the frozen SQLite queue on a migrated box and report it as current
-    (false-clean, second surface of the doctor fix). The SQLite reader
-    leg died with the =sqlite opt-out (RDR-158 P3, nexus-7bomn); the
-    resolver call below is validation only, so a stranded =sqlite export
-    hard-errors on this route rather than being silently ignored (the
-    service collector constructs HttpAspectQueue directly, bypassing
-    T2Database's validation seam).
+    (false-clean, second surface of the doctor fix). The resolver call below
+    is validation only, so a stranded =sqlite export hard-errors on this
+    route rather than being silently ignored (the service collector
+    constructs HttpAspectQueue directly, bypassing T2Database's validation
+    seam).
     """
     from nexus.db.storage_mode import storage_backend_for  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 

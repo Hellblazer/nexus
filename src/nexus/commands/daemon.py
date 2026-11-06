@@ -1989,8 +1989,8 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
 @daemon_group.group("aspect-worker")
 def aspect_worker_group() -> None:
     """Aspect-worker daemon: a leased, per-tenant host for the aspect-extraction
-    loop (claim → claude -p → upsert document_aspects → mark_done) and the
-    reclaim_stale loop. One more leased tier on the RDR-149 substrate."""
+    loop (claim → claude -p → upsert document_aspects → ack). One more leased
+    tier on the RDR-149 substrate."""
 
 
 def _engine_unreachable_exit_default() -> float:
@@ -2015,29 +2015,19 @@ def _engine_unreachable_exit_default() -> float:
     help="Tenant scope for the lease (per-tenant; per-host needs BYPASSRLS, forbidden by RDR-152).",
 )
 @click.option(
-    "--stale-timeout-seconds",
-    "stale_timeout_seconds",
-    type=int,
-    default=300,
-    show_default=True,
-    help="Reclaim staleness threshold; MUST exceed the claude -p extraction budget (180s) "
-    "or an in-flight row could be false-reclaimed.",
-)
-@click.option(
     "--engine-unreachable-exit-seconds",
     "engine_unreachable_exit_seconds",
     type=click.FloatRange(min=0),
     default=_engine_unreachable_exit_default,
     show_default="3600",
-    help="Exit when the engine has not answered for this long (reclaim sweeps failing "
-    "and no claim round trip answered; the engine is gone for good); the next enqueue "
+    help="Exit when the engine has not answered for this long (the worker's claim round "
+    "trips failing and none answered; the engine is gone for good); the next enqueue "
     "spawns a new worker. 0 disables the bound. The worker also exits as soon as its "
     "config directory is removed.",
 )
 def aspect_worker_start_cmd(
     config_dir_str: str | None,
     tenant: str,
-    stale_timeout_seconds: int,
     engine_unreachable_exit_seconds: float,
 ) -> None:
     """Start the aspect-worker daemon (foreground; runs until SIGTERM/SIGINT).
@@ -2059,7 +2049,6 @@ def aspect_worker_start_cmd(
     run_aspect_worker_daemon(
         config_dir=config_dir,
         tenant=tenant,
-        stale_timeout_seconds=stale_timeout_seconds,
         engine_unreachable_exit_seconds=engine_unreachable_exit_seconds,
     )
 

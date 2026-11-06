@@ -22,7 +22,9 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * RDR-152 bead nexus-gmiaf.15 — Aspects / highlights / queue HTTP endpoints.
+ * RDR-152 bead nexus-gmiaf.15 — Aspects / highlights / promotion-log HTTP endpoints.
+ * The {@code /v1/aspects/queue/*} routes are gone (nexus-hbnml: the aspect_extraction_queue table was retired,
+ * RDR-235 step B); they answer the 404 of any unknown op.
  *
  * <p>Routes (all under {@code /v1/aspects/}):
  * <pre>
@@ -57,22 +59,6 @@ import java.util.Optional;
  *   POST  /v1/aspects/highlights/delete            delete by doc_id
  *   POST  /v1/aspects/highlights/import            ETL import
  *   POST  /v1/aspects/highlights/rename_collection rename collection denorm
-
- *   POST  /v1/aspects/queue/enqueue               enqueue document (400 {"error":"doc_id required"} on missing/blank doc_id — hygiene-001; the column is NOT NULL now)
- *   POST  /v1/aspects/queue/enqueue_many          batch-enqueue N documents in ONE round trip (nexus-nj4ch); same 400 as /queue/enqueue on any row's blank doc_id — aborts the whole batch, not a per-row skip
- *   POST  /v1/aspects/queue/claim_next            atomically claim one pending row
- *   POST  /v1/aspects/queue/claim_batch           claim up to limit= pending rows
- *   POST  /v1/aspects/queue/mark_done             delete row on success
- *   POST  /v1/aspects/queue/mark_failed           mark as failed
- *   POST  /v1/aspects/queue/mark_retry            reset to pending
- *   POST  /v1/aspects/queue/reclaim_stale         reclaim stale in_progress rows; timeout_seconds= (default 300) and optional boolean count_attempt= (default true: each reclaim spends one retry attempt and a row at the cap fails; false: rows go back to pending untouched, the daemon's graceful-stop sweep, nexus-j67ix.3; a non-boolean value is a 400 naming the field)
- *   GET   /v1/aspects/queue/pending_count         count pending rows
- *   GET   /v1/aspects/queue/is_drained            check drained
- *   GET   /v1/aspects/queue/list_pending          list pending (limit= optional)
- *   GET   /v1/aspects/queue/list_waiting          list pending AND in_progress rows with status and delay_s (seconds to next_retry_at on the DB clock, whole, rounded up, 0 when null or past); no content; limit= optional (nexus-5r2sc.3.6, engine-service-v0.1.170)
- *   GET   /v1/aspects/queue/list_failed           list terminal-failed (collection= optional)
- *   POST  /v1/aspects/queue/rename_collection     rename collection in queue
- *   POST  /v1/aspects/queue/import                ETL import of queue row
  *
  *   POST  /v1/aspects/promotion/record            record promotion event
  *   GET   /v1/aspects/promotion/list              list promotion history
@@ -134,22 +120,6 @@ public final class AspectHandler implements HttpHandler {
                 case "/highlights/delete"               -> handleHighlightDelete(exchange, tenant, method);
                 case "/highlights/import"               -> handleHighlightImport(exchange, tenant, method);
                 case "/highlights/rename_collection"    -> handleHighlightRenameCollection(exchange, tenant, method);
-                // ── aspect_extraction_queue ───────────────────────────────────
-                case "/queue/enqueue"                   -> handleQueueEnqueue(exchange, tenant, method);
-                case "/queue/enqueue_many"               -> handleQueueEnqueueMany(exchange, tenant, method);
-                case "/queue/claim_next"                -> handleQueueClaimNext(exchange, tenant, method);
-                case "/queue/claim_batch"               -> handleQueueClaimBatch(exchange, tenant, method);
-                case "/queue/mark_done"                 -> handleQueueMarkDone(exchange, tenant, method);
-                case "/queue/mark_failed"               -> handleQueueMarkFailed(exchange, tenant, method);
-                case "/queue/mark_retry"                -> handleQueueMarkRetry(exchange, tenant, method);
-                case "/queue/reclaim_stale"             -> handleQueueReclaimStale(exchange, tenant, method);
-                case "/queue/pending_count"             -> handleQueuePendingCount(exchange, tenant, method);
-                case "/queue/is_drained"                -> handleQueueIsDrained(exchange, tenant, method);
-                case "/queue/list_pending"              -> handleQueueListPending(exchange, tenant, method);
-                case "/queue/list_waiting"              -> handleQueueListWaiting(exchange, tenant, method);
-                case "/queue/list_failed"               -> handleQueueListFailed(exchange, tenant, method);
-                case "/queue/rename_collection"         -> handleQueueRenameCollection(exchange, tenant, method);
-                case "/queue/import"                    -> handleQueueImport(exchange, tenant, method);
                 // ── aspect_promotion_log ──────────────────────────────────────
                 case "/promotion/record"                -> handlePromotionRecord(exchange, tenant, method);
                 case "/promotion/list"                  -> handlePromotionList(exchange, tenant, method);
@@ -538,165 +508,6 @@ public final class AspectHandler implements HttpHandler {
         }
         int n = repo.renameHighlightsCollection(tenant, oldColl, newColl);
         HttpUtil.send(ex, 200, "{\"updated\":" + n + "}");
-    }
-
-    // ── aspect_extraction_queue handlers ──────────────────────────────────────
-
-    private void handleQueueEnqueue(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        repo.enqueue(tenant, readBody(ex));
-        HttpUtil.send(ex, 200, "{\"enqueued\":true}");
-    }
-
-    /**
-     * POST /v1/aspects/queue/enqueue_many (nexus-nj4ch: batches the
-     * indexer's per-document aspect-extraction enqueue into ONE round
-     * trip, mirroring the catalog update_many/delete_many and vectors
-     * get-all-metadata pattern).
-     *
-     * <p>Body: {"rows": [{"collection": "...", "source_path": "...", ...}, ...]}
-     * (each row has the same shape as {@code /queue/enqueue}'s body).
-     * Response 200: {"enqueued": N} (count of rows actually enqueued;
-     * malformed rows -- missing collection/source_path -- are silently
-     * skipped, not counted, mirroring register_many's per-doc isolation).
-     *
-     * <p>A malformed *shape* (non-list body, non-object element) 400s
-     * rather than silently shrinking the input, mirroring
-     * handleManifestWriteMany / handleUpdateMany's validation pattern.
-     */
-    @SuppressWarnings("unchecked")
-    private void handleQueueEnqueueMany(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        Object raw = body.get("rows");
-        if (!(raw instanceof List<?> l)) {
-            HttpUtil.send(ex, 400, "{\"error\":\"'rows' must be a list\"}"); return;
-        }
-        if (l.stream().anyMatch(o -> !(o instanceof Map))) {
-            HttpUtil.send(ex, 400, "{\"error\":\"every 'rows' element must be an object\"}"); return;
-        }
-        List<Map<String, Object>> rows = l.stream().map(o -> (Map<String, Object>) o).toList();
-        int enqueued = repo.enqueueMany(tenant, rows);
-        HttpUtil.send(ex, 200, "{\"enqueued\":" + enqueued + "}");
-    }
-
-    private void handleQueueClaimNext(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Optional<Map<String, Object>> row = repo.claimNext(tenant);
-        if (row.isEmpty()) { HttpUtil.send(ex, 200, "{\"claimed\":false}"); return; }
-        // Wrap in {"claimed":true,"row":{...}} to match Python protocol in http_aspect_queue.py
-        Map<String, Object> envelope = new java.util.LinkedHashMap<>();
-        envelope.put("claimed", true);
-        envelope.put("row", row.get());
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(envelope));
-    }
-
-    private void handleQueueClaimBatch(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        int limit = body.containsKey("limit") ? ((Number) body.get("limit")).intValue() : 1;
-        List<Map<String, Object>> rows = repo.claimBatch(tenant, limit);
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(rows));
-    }
-
-    private void handleQueueMarkDone(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        int n = repo.markDone(tenant,
-            (String) body.get("doc_id"),
-            (String) body.get("collection"),
-            (String) body.get("source_path"));
-        HttpUtil.send(ex, 200, "{\"deleted\":" + n + "}");
-    }
-
-    private void handleQueueMarkFailed(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        repo.markFailed(tenant, (String) body.get("collection"), (String) body.get("source_path"),
-            (String) body.getOrDefault("error", ""));
-        HttpUtil.send(ex, 200, "{\"ok\":true}");
-    }
-
-    private void handleQueueMarkRetry(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        // RDR-163 P1 (nexus-ztpt6): worker passes interval_seconds; the service
-        // stamps next_retry_at = now()+interval server-side. Default 0 (ready now)
-        // keeps any legacy caller behaving as the pre-backoff reset.
-        long intervalSeconds = body.containsKey("interval_seconds")
-            ? ((Number) body.get("interval_seconds")).longValue() : 0L;
-        repo.markRetry(tenant, (String) body.get("collection"), (String) body.get("source_path"),
-            intervalSeconds);
-        HttpUtil.send(ex, 200, "{\"ok\":true}");
-    }
-
-    private void handleQueueReclaimStale(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        int timeoutSec = body.containsKey("timeout_seconds")
-            ? ((Number) body.get("timeout_seconds")).intValue() : 300;
-        // nexus-j67ix.3: absent means true (the counted age-based sweep, so an older
-        // client is unchanged). A present value must be a JSON boolean: a string,
-        // number, null or object is a caller bug, and silently counting would spend
-        // the very attempt the caller asked to keep.
-        boolean countAttempt = true;
-        if (body.containsKey("count_attempt")) {
-            if (!(body.get("count_attempt") instanceof Boolean b)) {
-                HttpUtil.send(ex, 400, "{\"error\":\"count_attempt must be a boolean\"}");
-                return;
-            }
-            countAttempt = b;
-        }
-        int n = repo.reclaimStale(tenant, timeoutSec, countAttempt);
-        HttpUtil.send(ex, 200, "{\"reclaimed\":" + n + "}");
-    }
-
-    private void handleQueuePendingCount(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
-        HttpUtil.send(ex, 200, "{\"count\":" + repo.pendingCount(tenant) + "}");
-    }
-
-    private void handleQueueIsDrained(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
-        HttpUtil.send(ex, 200, "{\"drained\":" + repo.isDrained(tenant) + "}");
-    }
-
-    private void handleQueueListPending(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
-        String limitStr = parseQuery(ex.getRequestURI()).get("limit");
-        int limit = limitStr != null ? Integer.parseInt(limitStr) : 0;
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(repo.listPending(tenant, limit)));
-    }
-
-    private void handleQueueListWaiting(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
-        String limitStr = parseQuery(ex.getRequestURI()).get("limit");
-        int limit = limitStr != null ? Integer.parseInt(limitStr) : 0;
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(repo.listWaiting(tenant, limit)));
-    }
-
-    private void handleQueueListFailed(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
-        String collection = parseQuery(ex.getRequestURI()).get("collection");
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(repo.listFailed(tenant, collection)));
-    }
-
-    private void handleQueueRenameCollection(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        int n = repo.renameQueueCollection(tenant, (String) body.get("old"), (String) body.get("new"));
-        HttpUtil.send(ex, 200, "{\"updated\":" + n + "}");
-    }
-
-    private void handleQueueImport(HttpExchange ex, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
-        if (body.containsKey("rows")) {  // RDR-176 P3: GUC-once batch
-            HttpUtil.send(ex, 200, "{\"imported\":" + repo.importQueueBatch(tenant, castRows(body.get("rows"))) + "}");
-            return;
-        }
-        int n = repo.importQueueRow(tenant, body);
-        HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
 
     // ── aspect_promotion_log handlers ─────────────────────────────────────────

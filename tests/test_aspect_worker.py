@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-089 follow-up (nexus-qeo8): async aspect-extraction worker.
 
-The worker drains ``aspect_extraction_queue``, calls
+The worker drains the ``aspects`` tuple queue, calls
 ``extract_aspects``, and writes results to ``document_aspects``.
 The hook ``aspect_extraction_enqueue_hook`` is registered as a
 ``post_document_hook`` and writes one queue row per fired document
@@ -14,17 +14,17 @@ Worker contract:
 * Daemon thread; dies with the process — durable queue absorbs
   process death.
 * Polls every ``poll_interval`` seconds.
-* On extract success → ``document_aspects`` upsert, queue
-  ``mark_done`` (DELETE).
-* On extract returning ``None`` (unsupported collection) → queue
-  ``mark_done`` (drop silently).
+* On extract success → ``document_aspects`` upsert, task acked
+  (consumed).
+* On extract returning ``None`` (unsupported collection) → task acked
+  (drop silently).
 * On extract returning a null-fields record (extractor's internal
   3-retry budget exhausted) → ``document_aspects`` upsert with
-  null fields, queue ``mark_done``. The extractor already retried;
+  null fields, task acked. The extractor already retried;
   the worker must NOT retry again.
 * On uncaught exception in the worker body (T2 failure, programming
-  bug) → queue ``mark_failed``. Triage via ``nx taxonomy status`` /
-  manual sweep.
+  bug) → task nacked on the retry ladder, dead at the cap. Dead tasks
+  are revived with ``nx aspects requeue-failed``.
 """
 
 from __future__ import annotations
@@ -94,12 +94,6 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             return write_fn(db)
 
     monkeypatch.setattr(infra, "t2_index_write", _direct_index_write)
-    # This module's drain, hook and batch classes test the TABLE producer, which is
-    # retired (nexus-bpikw step A): the seam in tests/_aspect_table_producer.py seeds
-    # its rows. The tuple-loop tests set their own mode (TestTupleLoop._start).
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
     return db_path
 
 
@@ -189,8 +183,8 @@ class TestWorkerDrain:
         _isolate_t2: Path,
     ) -> None:
         """If extract_aspects returns ``None`` (unsupported collection
-        OR transient failure), the worker still mark_dones the queue
-        row so it doesn't loop forever. No document_aspects row is
+        OR transient failure), the worker still acks the task so it
+        doesn't loop forever. No document_aspects row is
         written. Uses code__* — unsupported by design — to avoid
         coupling to whichever prefix is currently in the registry."""
         from nexus.aspect_worker import AspectExtractionWorker
@@ -284,129 +278,6 @@ class TestWorkerDrain:
             "consumers); reverting the floor check fails this assert"
         )
 
-    @pytest.mark.t2_tenant
-    def test_mcp_path_content_survives_the_queue(
-        self,
-        _isolate_t2: Path,
-    ) -> None:
-        """Critical-issue regression test (substantive critic finding):
-        MCP ``store_put`` passes ``content=<full text>`` and
-        ``source_path=<doc_id>``. The doc_id is a 16-char hex hash,
-        not a filesystem path. The worker must therefore use the
-        content the hook captured at enqueue time — re-reading
-        source_path would attempt to open a non-existent file,
-        produce a null-fields record, and silently lose the
-        extraction.
-        """
-        from nexus.aspect_extractor import AspectRecord
-        from nexus.aspect_worker import (
-            AspectExtractionWorker,
-            aspect_extraction_enqueue_hook,
-        )
-
-        # Simulate the MCP store_put boundary: source_path is a
-        # 16-char content-hash doc_id, content is the full text.
-        # Not to be confused with the CATALOG doc_id the enqueue call
-        # attributes to below (_shared_doc_id()) -- that FK is unrelated
-        # to this content-hash identity.
-        doc_id = "a3b9c2d1e4f5a6b7"
-        full_text = "Paper introduces a new approach to BFT consensus."
-        aspect_extraction_enqueue_hook(
-            source_path=doc_id,
-            collection="knowledge__delos",
-            content=full_text,
-            doc_id=_shared_doc_id(),
-        )
-
-        # Capture what extract_aspects sees.
-        seen: list[tuple[str, str]] = []
-
-        def fake_extract(content, source_path, collection, **_kw):
-            seen.append((content, source_path))
-            return AspectRecord(
-                collection=collection,
-                source_path=source_path,
-                problem_formulation="P",
-                proposed_method="M",
-                experimental_datasets=["d1"],
-                experimental_baselines=["b1"],
-                experimental_results="R",
-                extras={"venue": "V"},
-                confidence=0.9,
-                extracted_at="2026-04-26T00:00:00+00:00",
-                model_version="claude-haiku-4-5-20251001",
-                extractor_name="scholarly-paper-v1",
-            )
-
-        with patch("nexus.aspect_worker._extract_aspects", fake_extract):
-            worker = AspectExtractionWorker(poll_interval=0.05)
-            worker.start()
-            try:
-                _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=_WAIT_S,
-                )
-            finally:
-                worker.stop(timeout=5.0)
-
-        # The worker MUST have called extract_aspects with the
-        # captured content, NOT with content="" (which would force a
-        # file-read fallback against a non-existent path).
-        assert seen
-        captured_content, captured_source = seen[0]
-        assert captured_content == full_text, (
-            "MCP-path content was not propagated through the queue: "
-            "the worker received an empty string and would fall back "
-            "to reading the doc_id as a filesystem path."
-        )
-        assert captured_source == doc_id
-
-        # The aspect record landed in document_aspects with the doc_id
-        # as source_path (the MCP boundary identifier).
-        with T2Database(_isolate_t2) as db:
-            rec = db.document_aspects.get("knowledge__delos", doc_id)
-        assert rec is not None
-        assert rec.problem_formulation == "P"
-
-    @pytest.mark.t2_tenant
-    def test_worker_uncaught_exception_marks_failed(
-        self,
-        _isolate_t2: Path,
-    ) -> None:
-        """A genuinely-broken state (T2 connection lost, programming
-        bug) raises and is caught at the top of the worker loop. The
-        row is marked ``failed`` for triage and the worker keeps
-        running."""
-        from nexus.aspect_worker import AspectExtractionWorker
-
-        with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue(
-                "knowledge__delos", "/p1.pdf", doc_id=_shared_doc_id()
-            )
-
-        def fake_extract(content, source_path, collection, **_kw):
-            raise RuntimeError("worker-level failure (not extractor)")
-
-        with patch("nexus.aspect_worker._extract_aspects", fake_extract):
-            worker = AspectExtractionWorker(poll_interval=0.05)
-            worker.start()
-            try:
-                _wait_until(
-                    lambda: _row_status(_isolate_t2, "/p1.pdf") == "failed",
-                    timeout=_WAIT_S,
-                )
-            finally:
-                worker.stop(timeout=5.0)
-
-        with T2Database(_isolate_t2) as db:
-            q = db.aspect_queue
-            # Service substrate: last_error is not exposed on the public
-            # QueueRow surface; assert the observable failed-state via
-            # list_failed (RDR-155 P4b P0a' has_raw_access branch).
-            failed = [r for r in q.list_failed() if r.source_path == "/p1.pdf"]
-            assert len(failed) == 1
-            assert failed[0].retry_count >= 1
-
 
 # ── Worker lifecycle ─────────────────────────────────────────────────────────
 
@@ -491,7 +362,7 @@ class TestEnqueueHook:
             doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
-            rows = db.aspect_queue.list_pending()
+            rows = _aspect_tasks(db)
         assert len(rows) == 1
         assert rows[0].source_path == "/p1.pdf"
         assert rows[0].collection == "knowledge__delos"
@@ -521,7 +392,7 @@ class TestEnqueueHook:
             doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
-            rows = db.aspect_queue.list_pending()
+            rows = _aspect_tasks(db)
         assert rows == []
         assert get_worker() is None  # no lazy start either
 
@@ -680,7 +551,7 @@ class TestGap2SourcePathNormalization:
             doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
-            rows = db.aspect_queue.list_pending()
+            rows = _aspect_tasks(db)
         assert len(rows) == 1
         assert rows[0].source_path == "papers/foo.md"
 
@@ -715,7 +586,7 @@ class TestGap2SourcePathNormalization:
                 doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
-            rows = db.aspect_queue.list_pending()
+            rows = _aspect_tasks(db)
         assert len(rows) == 1
         assert rows[0].source_path == stray  # unchanged — never guessed
         assert any(
@@ -756,7 +627,7 @@ class TestGap2SourcePathNormalization:
                 doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
-            rows = db.aspect_queue.list_pending()
+            rows = _aspect_tasks(db)
         assert len(rows) == 1
         assert rows[0].source_path == chash
         assert not any(e.get("event") == "aspect_source_path_uncanonical" for e in cap)
@@ -789,7 +660,7 @@ class TestGap2SourcePathNormalization:
                 doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
-            rows = db.aspect_queue.list_pending()
+            rows = _aspect_tasks(db)
         assert len(rows) == 1
         assert rows[0].source_path == path
         assert not any(e.get("event") == "aspect_source_path_uncanonical" for e in cap)
@@ -830,7 +701,7 @@ class TestGap2SourcePathNormalization:
                 doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
-            rows = db.aspect_queue.list_pending()
+            rows = _aspect_tasks(db)
         assert len(rows) == 1
         assert rows[0].source_path == stray  # absolute canonical -> not normalized
         assert not any(e.get("event") == "aspect_source_path_uncanonical" for e in cap)
@@ -932,7 +803,7 @@ class TestEnqueueFailureTripwire:
             doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
-            pending = db.aspect_queue.list_pending()
+            pending = _aspect_tasks(db)
             # Service substrate: hook_failures has no public read surface
             # — the spy above proves zero tripwire persists fired
             # (RDR-155 P4b P0a' has_raw_access branch).
@@ -999,27 +870,40 @@ def _wait_until(predicate, timeout: float = _WAIT_S, poll: float = 0.05) -> None
 
 
 def _queue_size(db_path: Path) -> int:
-    """Total row count on the SQLite substrate; 0/1 drained-indicator on the
-    service substrate (no raw handle — RDR-155 P4b P0a' has_raw_access
-    branch). Every call site only compares ``== 0``, and ``is_drained``'s
-    "no non-failed rows" matches the drain tests (which never leave failed
-    rows behind)."""
+    """Tuple tasks still available or claimed: 0 once the worker has consumed every
+    task. A dead task is not counted; the drain tests never leave one behind."""
     with T2Database(db_path) as db:
-        q = db.aspect_queue
-        return 0 if q.is_drained() else 1
+        c = db.aspect_queue.tuple_counts()
+    return c.available + c.claimed
 
 
-def _row_status(db_path: Path, source_path: str) -> str | None:
-    with T2Database(db_path) as db:
-        q = db.aspect_queue
-        # Service substrate: no raw handle — derive status from the public
-        # list surfaces (failed is the only status the waiting tests poll
-        # for; pending covers the rest of the observable states).
-        if any(r.source_path == source_path for r in q.list_failed()):
-            return "failed"
-        if any(r.source_path == source_path for r in q.list_pending()):
-            return "pending"
+def _aspect_tasks(db):  # noqa: ANN001, ANN202
+    """The ``aspects`` tuple tasks, read WITHOUT claiming them (oldest first), as
+    namespaces with the identity-body fields (collection, source_path, doc_id,
+    content_hash)."""
+    import json
+    from types import SimpleNamespace
+
+    from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE
+
+    return [SimpleNamespace(**json.loads(r.body)) for r in db.tuples.rd(ASPECTS_SUBSPACE, ASPECTS_KEYS, n=300)]
+
+
+def _claim_aspect_task(db):  # noqa: ANN001, ANN202
+    """Claim the next ``aspects`` task, read its identity, then release the claim so
+    the task stays queued (a claim left behind would leave the tenant non-empty).
+    Returns None when the queue is empty."""
+    import json
+    from types import SimpleNamespace
+
+    from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE
+
+    got = db.tuples.inp(ASPECTS_SUBSPACE, ASPECTS_KEYS, claimant="test-claimant", lease_s=60)
+    if got is None:
         return None
+    row, claim_id = got
+    db.tuples.release(claim_id, "test-claimant")
+    return SimpleNamespace(**json.loads(row.body))
 
 
 # ── Batch path (RDR-089 Phase D) ────────────────────────────────────────────
@@ -1028,86 +912,6 @@ def _row_status(db_path: Path, source_path: str) -> str | None:
 @pytest.mark.t2_tenant
 class TestBatchPath:
     """Worker drains in batches when queue depth allows it."""
-
-    def test_worker_drains_batch_in_one_extract_call(
-        self,
-        _isolate_t2: Path,
-    ) -> None:
-        """Five enqueues, batch_size=5: the worker calls
-        extract_aspects_batch ONCE for all five, not five times."""
-        from nexus.aspect_extractor import AspectRecord
-        from nexus.aspect_worker import AspectExtractionWorker
-
-        # Enqueue directly to T2 (bypass the hook so no worker is
-        # lazy-spawned before the patches are in place).
-        with T2Database(_isolate_t2) as db:
-            for i in range(5):
-                db.aspect_queue.enqueue(
-                    "knowledge__delos",
-                    f"/papers/p{i}.pdf",
-                    content=f"content {i}",
-                    doc_id=_shared_doc_id(),
-                )
-
-        batch_calls: list[int] = []
-        single_calls: list[int] = []
-
-        def fake_batch(items, *_args, **_kwargs):
-            batch_calls.append(len(items))
-            return [
-                AspectRecord(
-                    collection=c,
-                    source_path=sp,
-                    problem_formulation=f"P-{sp}",
-                    proposed_method="M",
-                    experimental_datasets=["d"],
-                    experimental_baselines=["b"],
-                    experimental_results="R",
-                    extras={},
-                    confidence=0.9,
-                    extracted_at="2026-04-26T00:00:00+00:00",
-                    model_version="claude-haiku-4-5-20251001",
-                    extractor_name="scholarly-paper-v1",
-                )
-                for c, sp, _content, *_ in items
-            ]
-
-        def fake_single(content, source_path, collection, **_kw):
-            single_calls.append(source_path)
-            raise AssertionError("single path should not fire on batch>=2")
-
-        with (
-            patch("nexus.aspect_worker._extract_aspects_batch", fake_batch),
-            patch("nexus.aspect_worker._extract_aspects", fake_single),
-        ):
-            worker = AspectExtractionWorker(
-                poll_interval=0.05,
-                batch_size=5,
-            )
-            worker.start()
-            try:
-                _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=_WAIT_S,
-                )
-            finally:
-                worker.stop(timeout=5.0)
-
-        # Exactly one batch call covering all 5 papers.
-        assert batch_calls == [5]
-        assert single_calls == []
-
-        # All five aspect rows landed (public read surface — works on both
-        # substrates, RDR-155 P4b P0a').
-        with T2Database(_isolate_t2) as db:
-            for i in range(5):
-                assert (
-                    db.document_aspects.get(
-                        "knowledge__delos",
-                        f"/papers/p{i}.pdf",
-                    )
-                    is not None
-                )
 
     def test_worker_uses_single_path_when_only_one_row(
         self,
@@ -1172,96 +976,6 @@ class TestBatchPath:
         assert batch_calls == []
         assert single_calls == ["/p1.pdf"]
 
-    def test_worker_falls_through_to_per_row_on_heterogeneous_batch(
-        self,
-        _isolate_t2: Path,
-    ) -> None:
-        """When a claimed batch crosses ExtractorConfig boundaries
-        (e.g. knowledge__ + rdr__ rows in the same claim), the worker
-        falls through to per-row processing rather than letting
-        extract_aspects_batch raise on heterogeneous configs.
-
-        Pre-fix repro: this test would fail because ``_extract_aspects_batch``
-        was invoked once with mixed configs and raised
-        ``ValueError: extract_aspects_batch requires all items to share
-        a single ExtractorConfig``, marking every row in the batch
-        as failed.
-        """
-        from nexus.aspect_extractor import AspectRecord
-        from nexus.aspect_worker import AspectExtractionWorker
-
-        # 3 knowledge__ rows (scholarly-paper config) + 2 rdr__ rows
-        # (rdr-frontmatter config) — claimed together when batch_size=5.
-        with T2Database(_isolate_t2) as db:
-            for i in range(3):
-                db.aspect_queue.enqueue(
-                    "knowledge__delos",
-                    f"/papers/p{i}.pdf",
-                    content=f"paper {i}",
-                    doc_id=_shared_doc_id(),
-                )
-            for i in range(2):
-                db.aspect_queue.enqueue(
-                    "rdr__test-aaaaaaaa",
-                    f"/rdrs/r{i}.md",
-                    content=f"---\ntitle: r{i}\n---\nbody",
-                    doc_id=_shared_doc_id(),
-                )
-
-        batch_calls: list[int] = []
-        single_calls: list[str] = []
-
-        def fake_batch(items, *_args, **_kwargs):
-            batch_calls.append(len(items))
-            raise AssertionError("batch path must NOT fire on heterogeneous configs")
-
-        def fake_single(content, source_path, collection, **_kw):
-            single_calls.append(source_path)
-            return AspectRecord(
-                collection=collection,
-                source_path=source_path,
-                problem_formulation=f"P-{source_path}",
-                proposed_method="M",
-                experimental_datasets=["d"],
-                experimental_baselines=["b"],
-                experimental_results="R",
-                extras={},
-                confidence=0.9,
-                extracted_at="2026-05-06T00:00:00+00:00",
-                model_version="claude-haiku-4-5-20251001",
-                extractor_name="scholarly-paper-v1",
-            )
-
-        with (
-            patch("nexus.aspect_worker._extract_aspects_batch", fake_batch),
-            patch("nexus.aspect_worker._extract_aspects", fake_single),
-        ):
-            worker = AspectExtractionWorker(
-                poll_interval=0.05,
-                batch_size=5,
-            )
-            worker.start()
-            try:
-                _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0,
-                    timeout=_WAIT_S,
-                )
-            finally:
-                worker.stop(timeout=5.0)
-
-        # Batch never fired — heterogeneity detected first.
-        assert batch_calls == []
-        # All 5 rows went through the single-row path.
-        assert sorted(single_calls) == sorted(
-            [
-                "/papers/p0.pdf",
-                "/papers/p1.pdf",
-                "/papers/p2.pdf",
-                "/rdrs/r0.md",
-                "/rdrs/r1.md",
-            ]
-        )
-
 
 # ── Bounded backoff-retry ladder (RDR-163 P1, nexus-ztpt6) ──────────────────
 
@@ -1322,220 +1036,7 @@ class TestBackoffInterval:
         assert hi == int(base * (1.0 + _RETRY_JITTER_FRACTION))
 
 
-class _FakeQueue:
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-
-    def mark_failed(self, collection, source_path, error) -> None:  # noqa: ANN001
-        self.calls.append(("failed", collection, source_path, error))
-
-    def mark_retry(self, collection, source_path, interval_seconds=0) -> None:  # noqa: ANN001
-        self.calls.append(("retry", collection, source_path, interval_seconds))
-
-
-class _FakeDb:
-    def __init__(self) -> None:
-        self.aspect_queue = _FakeQueue()
-
-
-class TestRetryLadderRouting:
-    """`_mark_retry_or_fail_routed` decision: retry vs terminal."""
-
-    def _worker_and_db(self, monkeypatch):  # noqa: ANN001
-        import nexus.mcp_infra as infra
-        from nexus.aspect_worker import AspectExtractionWorker
-
-        fake_db = _FakeDb()
-        monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(fake_db))
-        return AspectExtractionWorker(poll_interval=10.0), fake_db
-
-    def _row(self, retry_count: int):
-        import types
-
-        return types.SimpleNamespace(
-            collection="knowledge__delos",
-            source_path="/p.pdf",
-            retry_count=retry_count,
-        )
-
-    def test_retryable_under_cap_marks_retry_with_backoff(self, monkeypatch) -> None:  # noqa: ANN001
-        import httpx
-
-        worker, db = self._worker_and_db(monkeypatch)
-        worker._mark_retry_or_fail_routed(
-            self._row(0), httpx.ConnectError("connection refused")
-        )
-        assert len(db.aspect_queue.calls) == 1
-        kind, _coll, _sp, interval = db.aspect_queue.calls[0]
-        assert kind == "retry"
-        assert interval > 0  # backed off (retry_count=0 -> base*1, jittered)
-
-    def test_non_retryable_marks_failed_immediately(self, monkeypatch) -> None:  # noqa: ANN001
-        worker, db = self._worker_and_db(monkeypatch)
-        worker._mark_retry_or_fail_routed(self._row(0), ValueError("malformed"))
-        assert len(db.aspect_queue.calls) == 1
-        assert db.aspect_queue.calls[0][0] == "failed"
-
-    def test_retryable_at_cap_marks_failed(self, monkeypatch) -> None:  # noqa: ANN001
-        import httpx
-        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS
-
-        worker, db = self._worker_and_db(monkeypatch)
-        worker._mark_retry_or_fail_routed(
-            self._row(_RETRY_MAX_ATTEMPTS),
-            httpx.ConnectError("connection refused"),
-        )
-        assert db.aspect_queue.calls[0][0] == "failed"
-
-
-class TestTransportReadFailureOnTheTable:
-    """nexus-5r2sc.3.10: on the table path an ``ExtractFail(transport)`` is a
-    backed-off retry (terminal only at the budget), never ``mark_done``. This
-    CHANGES the table path: every ExtractFail reason used to be dropped. A
-    permanent reason (the control) still is."""
-
-    class _Queue(_FakeQueue):
-        def mark_done(self, collection, source_path) -> None:  # noqa: ANN001
-            self.calls.append(("done", collection, source_path))
-
-    class _Db:
-        def __init__(self, queue) -> None:  # noqa: ANN001
-            self.aspect_queue = queue
-
-        def complete_aspect(self, fields) -> None:  # noqa: ANN001
-            raise AssertionError("an unreadable source persists nothing")
-
-    def _env(self, monkeypatch):  # noqa: ANN001
-        import nexus.commands.enrich as enrich
-        import nexus.mcp_infra as infra
-
-        queue = self._Queue()
-        db = self._Db(queue)
-        monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(db))
-        monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
-        return queue
-
-    def _row(self, sp: str, retry_count: int = 0):
-        import types
-
-        return types.SimpleNamespace(
-            collection="knowledge__delos", source_path=sp, content="", doc_id="",
-            retry_count=retry_count,
-        )
-
-    def test_single_row_transport_is_retried_a_permanent_reason_is_done_and_the_budget_is_terminal(
-        self, monkeypatch,  # noqa: ANN001
-    ) -> None:
-        from nexus.aspect_extractor import ExtractFail
-        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS, AspectExtractionWorker
-
-        queue = self._env(monkeypatch)
-        reason_for = {"/t.md": "transport", "/p.md": "unreachable", "/cap.md": "transport"}
-        monkeypatch.setattr(
-            "nexus.aspect_worker._extract_aspects",
-            lambda **kw: ExtractFail(uri="u", reason=reason_for[kw["source_path"]], detail="d"),
-        )
-        w = AspectExtractionWorker(poll_interval=10.0)
-        w._process_row(self._row("/t.md"))
-        w._process_row(self._row("/p.md"))
-        w._process_row(self._row("/cap.md", retry_count=_RETRY_MAX_ATTEMPTS))
-        kinds = {c[2]: c[0] for c in queue.calls}
-        assert kinds == {"/t.md": "retry", "/p.md": "done", "/cap.md": "failed"}, queue.calls
-
-    def test_batch_transport_is_retried_beside_a_dropped_neighbour(self, monkeypatch) -> None:  # noqa: ANN001
-        from nexus.aspect_extractor import ExtractFail
-        from nexus.aspect_worker import AspectExtractionWorker
-
-        queue = self._env(monkeypatch)
-
-        def fake_batch(items, *_a, **_k):  # noqa: ANN001, ANN202
-            return [
-                ExtractFail(uri="u", reason="transport" if sp == "/t.md" else "unreachable", detail="d")
-                for _c, sp, *_ in items
-            ]
-
-        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", fake_batch)
-        AspectExtractionWorker(poll_interval=10.0)._process_batch(
-            [self._row("/t.md"), self._row("/p.md")],
-        )
-        kinds = {c[2]: c[0] for c in queue.calls}
-        assert kinds == {"/t.md": "retry", "/p.md": "done"}, queue.calls
-
-
 # ── nexus-w8lg1: the queue row carries the CATALOG doc_id ────────────────────
-
-
-class TestBatchPersistRouting:
-    """``_process_batch``'s ``_persist_all`` decides per row; no tenant needed (fake db)."""
-
-    def test_superseded_row_in_a_batch_is_failed_and_the_rest_of_the_batch_still_lands(
-        self, monkeypatch,  # noqa: ANN001
-    ) -> None:
-        """nexus-i15oc: the engine refuses an aspect write to a retired collection
-        name (409 collection_superseded -> SupersededCollectionWriteError). One such
-        refusal in ``_persist_all`` used to abort the loop: the rows after it were
-        never marked, ``reclaim_stale`` reset them without touching retry_count, and
-        the extractor re-ran them indefinitely. The refused row must reach the same
-        terminal ``mark_failed`` the single-row path gives it, and the other rows
-        of the batch must still be completed."""
-        import types
-
-        import nexus.commands.enrich as enrich
-        import nexus.mcp_infra as infra
-        from nexus.aspect_extractor import AspectRecord
-        from nexus.aspect_worker import AspectExtractionWorker
-        from nexus.collection_errors import SupersededCollectionWriteError
-
-        refusal = SupersededCollectionWriteError("knowledge__delos", "knowledge__delos__v2")
-
-        class _Queue(_FakeQueue):
-            def mark_done(self, collection, source_path) -> None:  # noqa: ANN001
-                self.calls.append(("done", collection, source_path))
-
-        class _Db:
-            def __init__(self) -> None:
-                self.aspect_queue = _Queue()
-                self.completed: list[str] = []
-
-            def complete_aspect(self, record_fields) -> None:  # noqa: ANN001
-                if record_fields["source_path"] == "/papers/retired.pdf":
-                    raise refusal
-                self.completed.append(record_fields["source_path"])
-
-        fake_db = _Db()
-        monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(fake_db))
-        monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
-
-        def fake_batch(items, *_args, **_kwargs):  # noqa: ANN001, ANN202
-            return [
-                AspectRecord(
-                    collection=c, source_path=sp, problem_formulation=f"P-{sp}",
-                    proposed_method="M", experimental_datasets=["d"],
-                    experimental_baselines=["b"], experimental_results="R", extras={},
-                    confidence=0.9, extracted_at="2026-04-26T00:00:00+00:00",
-                    model_version="claude-haiku-4-5-20251001",
-                    extractor_name="scholarly-paper-v1",
-                )
-                for c, sp, _content, *_ in items
-            ]
-
-        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", fake_batch)
-        paths = ["/papers/ok-before.pdf", "/papers/retired.pdf", "/papers/ok-after.pdf"]
-        rows = [
-            types.SimpleNamespace(
-                collection="knowledge__delos", source_path=sp, content=f"content {sp}",
-                doc_id="", retry_count=0,
-            )
-            for sp in paths
-        ]
-        AspectExtractionWorker(poll_interval=10.0)._process_batch(rows)
-
-        assert fake_db.completed == ["/papers/ok-before.pdf", "/papers/ok-after.pdf"], (
-            "a neighbour's refusal dropped the rows after it"
-        )
-        assert fake_db.aspect_queue.calls == [
-            ("failed", "knowledge__delos", "/papers/retired.pdf", str(refusal)),
-        ]
 
 
 @pytest.mark.t2_tenant
@@ -1582,7 +1083,7 @@ class TestEnqueueHookDocIdWiring:
         )
 
         with T2Database(_isolate_t2) as db:
-            row = db.aspect_queue.claim_next()
+            row = _claim_aspect_task(db)
         assert row is not None
         assert row.doc_id == doc_id
         assert row.source_path == chunk_id
@@ -1616,7 +1117,7 @@ class TestEnqueueHookDocIdWiring:
                 content="body",
             )
         with T2Database(_isolate_t2) as db:
-            row = db.aspect_queue.claim_next()
+            row = _claim_aspect_task(db)
         assert row is None, "an unresolvable doc_id must be refused, not enqueued"
         skipped = [
             e for e in cap if e.get("event") == "aspect_enqueue_skipped_no_doc_id"
@@ -1650,7 +1151,7 @@ class TestEnqueueHookDocIdWiring:
             content="body",
         )
         with T2Database(_isolate_t2) as db:
-            row = db.aspect_queue.claim_next()
+            row = _claim_aspect_task(db)
         assert row is not None, "a resolvable doc_id must be enqueued, not skipped"
         assert row.doc_id == resolved_doc_id
 
@@ -1677,7 +1178,7 @@ class TestEnqueueHookDocIdWiring:
             doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
-            row = db.aspect_queue.claim_next()
+            row = _claim_aspect_task(db)
         assert row is not None
         assert row.doc_id == _shared_doc_id()
 
@@ -2010,38 +1511,37 @@ class TestBestEffortQueueDepthSharedClient:
 
         _best_effort_queue_depth()  # return value not asserted -- may be None on a slow/absent daemon; the CONSTRUCTION shape is what's under test
 
-        # RDR-235: one dedicated client per store it reads, the table queue
-        # and the `aspects` tuple store (each 2 s, never shared with a run).
-        assert len(tally) == 2, (
-            f"expected the diagnostic to build exactly 2 dedicated "
-            f"httpx.Client() (queue + tuple store) outside an active index "
-            f"run; got {len(tally)}"
+        # RDR-235: the diagnostic reads one side now, the ``aspects`` tuple store,
+        # on its own 2 s client (the table queue is retired).
+        assert len(tally) == 1, (
+            f"expected the diagnostic to build exactly 1 dedicated httpx.Client() "
+            f"(the tuple store) outside an active index run; got {len(tally)}"
         )
 
     def test_inside_an_index_run_shares_the_run_client_and_keeps_its_cap(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Inside ``use_shared_t2_client_for_index_run``, the diagnostic's
-        ``HttpAspectQueue`` must share that client (zero additional
-        httpx.Client() constructions) AND still cap ITS OWN call via
-        ``pending_count(timeout=2.0)`` -- proving the earlier "sharing
+        tuple store must share that client (zero additional httpx.Client()
+        constructions) AND still cap ITS OWN call via
+        ``subspace_stats(timeout=2.0)`` -- proving the earlier "sharing
         would defeat the 2s cap" framing no longer holds."""
         import httpx
 
         from nexus.aspect_worker import _best_effort_queue_depth
         from nexus.db.t2._refreshable_client import build_shared_t2_client
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.db.t2.http_tuple_store import HttpTupleStore
         from nexus.mcp_infra import use_shared_t2_client_for_index_run
 
         shared = build_shared_t2_client()
         captured_timeouts: list[float | None] = []
-        orig_pending_count = HttpAspectQueue.pending_count
+        orig_subspace_stats = HttpTupleStore.subspace_stats
 
-        def _capturing_pending_count(self, *, timeout=None):  # noqa: ANN001, ANN202
+        def _capturing_subspace_stats(self, subspace, *, timeout=None, single_shot=False):  # noqa: ANN001, ANN202
             captured_timeouts.append(timeout)
-            return orig_pending_count(self, timeout=timeout)
+            return orig_subspace_stats(self, subspace, timeout=timeout, single_shot=single_shot)
 
-        monkeypatch.setattr(HttpAspectQueue, "pending_count", _capturing_pending_count)
+        monkeypatch.setattr(HttpTupleStore, "subspace_stats", _capturing_subspace_stats)
 
         tally: list[int] = []
         orig_init = httpx.Client.__init__
@@ -2164,33 +1664,9 @@ class _FakeTuples:
         return [c for c in self.calls if c[0] == name]
 
 
-class _FakeTable:
-    def __init__(self, rows=(), order=None) -> None:  # noqa: ANN001
-        self.rows = list(rows)
-        self.claims = 0
-        self.done: list = []
-        self.order = order if order is not None else []
-
-    def claim_batch(self, n):  # noqa: ANN001
-        self.claims += 1
-        self.order.append("table")
-        out, self.rows = self.rows[:n], self.rows[n:]
-        return out
-
-    def mark_done(self, collection, source_path):  # noqa: ANN001
-        self.done.append((collection, source_path))
-
-    def mark_failed(self, *a, **k):  # noqa: ANN001
-        pass
-
-    def mark_retry(self, *a, **k):  # noqa: ANN001
-        pass
-
-
 class _FakeTupleDb:
-    def __init__(self, tuples, table=None) -> None:  # noqa: ANN001
+    def __init__(self, tuples) -> None:  # noqa: ANN001
         self.tuples = tuples
-        self.aspect_queue = table or _FakeTable()
         self.completed: list = []
         self.complete_raises: list = []
 
@@ -2202,13 +1678,6 @@ class _FakeTupleDb:
             self.tuples.calls.append(("persist", claim_id, claimant))
             self.tuples._drop(claimant, claim_id)  # what the real call's ack does
         return True
-
-
-def _queue_row(source_path, doc_id):  # noqa: ANN001
-    from nexus.db.t2.records import QueueRow
-
-    return QueueRow(collection="knowledge__delos", source_path=source_path, content_hash="",
-                    content="x", retry_count=0, doc_id=doc_id)
 
 
 def _task_body(i=0, collection="knowledge__delos", doc_id=None):  # noqa: ANN001
@@ -2781,6 +2250,61 @@ class TestSupersededBound:
         assert "task0" not in side._superseded and len(db.completed) == 1
 
 
+class TestBatchLevelFailureRouting:
+    """A batch extraction that raises for the whole batch (nexus-hbnml review r1): a
+    NON-retryable error falls back to one extraction per row, so one bad document is the only
+    one dead-lettered; a retryable one keeps backing the batch off together."""
+
+    def _batch(self, tuple_env, monkeypatch, exc, *, bad_path):  # noqa: ANN001
+        tuples = _FakeTuples([
+            {"collection": "knowledge__delos", "source_path": f"/papers/p{i}.pdf", "doc_id": f"1.1.{i}",
+             "content_hash": "h"}
+            for i in range(3)
+        ])
+        db = _FakeTupleDb(tuples)
+        tuple_env.install(db)
+        singles: list[str] = []
+
+        def batch(items, **kw):  # noqa: ANN001
+            raise exc
+
+        def single(content, source_path, collection, **kw):  # noqa: ANN001
+            singles.append(source_path)
+            if source_path == bad_path:
+                raise ValueError("this document cannot be parsed")
+            return _record_for(collection, source_path)
+
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", batch)
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects", single)
+        side = _tuple_worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        assert len(claims) == 3, "premise: one batch of three"
+        side.process(claims)
+        return tuples, db, singles
+
+    def test_a_nonretryable_batch_error_costs_only_the_bad_row(self, tuple_env, monkeypatch) -> None:  # noqa: ANN001
+        tuples, db, singles = self._batch(
+            tuple_env, monkeypatch, ValueError("batch parse failed"), bad_path="/papers/p1.pdf")
+        assert sorted(singles) == ["/papers/p0.pdf", "/papers/p1.pdf", "/papers/p2.pdf"], \
+            "each row is extracted on its own after the batch failed"
+        assert sorted(c[0] for c in db.completed) == ["/papers/p0.pdf", "/papers/p2.pdf"], "the healthy rows persisted"
+        dead = [c for c in tuples.ops("nack") if c[3]["dead"]]
+        assert len(dead) == 1, "only the bad document is dead-lettered"
+
+    def test_a_retryable_batch_error_stays_batch_level(self, tuple_env, monkeypatch) -> None:  # noqa: ANN001
+        import httpx
+
+        import nexus.aspect_worker as aw
+
+        exc = httpx.ConnectError("engine blip")
+        assert aw._is_retryable(exc), "premise: a transport error is retryable"
+        tuples, db, singles = self._batch(tuple_env, monkeypatch, exc, bad_path="/papers/p1.pdf")
+        assert singles == [], "no per-row fallback: the whole batch backs off together"
+        assert db.completed == []
+        nacks = tuples.ops("nack")
+        assert len(nacks) == 3 and not any(c[3]["dead"] for c in nacks), "three retry nacks, none dead"
+
+
 class TestStandDownReleasesClaims:
     def test_a_self_fault_releases_every_held_claim_and_stands_down(
         self, tuple_env, monkeypatch,  # noqa: ANN001
@@ -2820,12 +2344,12 @@ class TestStandDownReleasesClaims:
 
 
 class TestTupleLoop:
-    def _start(self, tuple_env, monkeypatch, *, tuples, table=None, mode="tuples", batch_size=5, **kw):  # noqa: ANN001
+    def _start(self, tuple_env, monkeypatch, *, tuples, mode="tuples", batch_size=5, **kw):  # noqa: ANN001
         if mode:
             monkeypatch.setenv("NX_ASPECT_QUEUE", mode)
         else:
             monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
-        db = _FakeTupleDb(tuples, table)
+        db = _FakeTupleDb(tuples)
         tuple_env.install(db)
         monkeypatch.setattr("nexus.aspect_worker._extract_aspects",
                             lambda content, source_path, collection, **k: _record_for(collection, source_path))
@@ -2839,34 +2363,31 @@ class TestTupleLoop:
         w.start()
         return w, db
 
-    def test_tuples_mode_idle_parks_and_checks_the_table_once_per_poll(
+    def test_tuples_mode_idle_parks_again_and_again(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
         tuples = _FakeTuples()
         tuples.park_sleep = 0.05
-        table = _FakeTable()
-        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table)
+        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples)
         try:
             time.sleep(1.0)
         finally:
             w.stop(timeout=5)
         assert len(tuples.ops("in_")) >= 5, "slot 0 parks again and again"
-        assert 2 <= table.claims <= 5, f"table checked on the poll interval, not every park: {table.claims}"
 
     def test_a_stale_table_value_does_not_change_the_worker_cadence(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
         """nexus-bpikw step A: the variable no longer reaches the worker. With a
-        leftover NX_ASPECT_QUEUE=table in the environment it still parks slot 0 and
-        checks the table on the poll interval, exactly as with the variable unset."""
-        tuples, table = _FakeTuples(), _FakeTable()
-        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table, mode="table")
+        leftover NX_ASPECT_QUEUE=table in the environment it still parks slot 0,
+        as with the variable unset."""
+        tuples = _FakeTuples()
+        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples, mode="table")
         try:
             time.sleep(0.9)
         finally:
             w.stop(timeout=5)
         assert len(tuples.ops("in_")) >= 5, "slot 0 parks again and again"
-        assert 2 <= table.claims <= 5, f"table checked on the poll interval, not every park: {table.claims}"
 
     def test_a_stale_table_value_still_drains_leftover_tuple_tasks(
         self, tuple_env, monkeypatch,  # noqa: ANN001
@@ -2885,34 +2406,13 @@ class TestTupleLoop:
 
         tuples = _FakeTuples()
         tuples.raise_on["inp"] = UnknownSubspaceError("aspects")
-        table = _FakeTable([_queue_row("/t.md", "1.1.1")])
-        w, db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table)
+        w, _db = self._start(tuple_env, monkeypatch, tuples=tuples)
         try:
-            _wait_until(lambda: table.rows == [] and db.completed, timeout=5)
             time.sleep(0.8)
         finally:
             w.stop(timeout=5)
         assert tuple_env.events.count("aspect_worker_tuples_unsupported_by_engine") == 1
         assert len(tuples.calls) == 1, "one request, then none: develop stays usable on an older engine"
-        assert table.claims >= 2, "the table is still drained"
-
-    def test_pending_table_rows_and_tuple_tasks_alternate_and_neither_starves(
-        self, tuple_env, monkeypatch,  # noqa: ANN001
-    ) -> None:
-        order: list = []
-        rows = [_queue_row(f"/t{i}.md", f"1.2.{i}") for i in range(4)]
-        table = _FakeTable(rows, order)
-        tuples = _FakeTuples([_task_body(i) for i in range(4)], order=order)
-        w, db = self._start(tuple_env, monkeypatch, tuples=tuples, table=table, batch_size=2)
-        try:
-            _wait_until(lambda: len(db.completed) == 8, timeout=5)
-        finally:
-            w.stop(timeout=5)
-        assert table.rows == [] and tuples.tasks == [], "both queues drained"
-        first_park = order.index("in_") if "in_" in order else len(order)
-        assert order[:first_park].count("table") >= 2, "the table was claimed again before any park"
-        assert "inp" in order[:first_park], "tuple turns ran as probes while the table had rows"
-        assert order.index("inp") < order.index("table", order.index("inp")), "the two queues interleave"
 
 
 class TestTupleLoopFailureAndShortResults:
@@ -2947,3 +2447,106 @@ class TestTupleLoopFailureAndShortResults:
         side.process(claims)
         assert len(tuples.ops("release")) == 2 and len(tuples.ops("persist")) == 1
         assert side.held() == []
+
+
+class TestEngineHandlersFollowTheClaims:
+    """nexus-wl9pk: the daemon's engine-unreachable clock runs off the worker's
+    claim round trips, so the loop must call the failure handler on a failed claim
+    and the contact handler on an answered one. Engine-free (fake tuple store)."""
+
+    def test_a_failed_claim_calls_the_failure_handler_and_an_answered_claim_the_contact_handler(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        monkeypatch.setattr("nexus.aspect_worker._TUPLE_CLAIM_RETRY_S", 0.05)
+        tuples = _FakeTuples()
+        tuples.raise_on["inp"] = RuntimeError("engine blip")
+        tuple_env.install(_FakeTupleDb(tuples))
+        failures: list[int] = []
+        contacts: list[int] = []
+        w = AspectExtractionWorker(poll_interval=30.0, tuple_options={"park_timeout_s": 1})
+        w.set_engine_failure_handler(lambda: failures.append(1))
+        w.set_engine_contact_handler(lambda: contacts.append(1))
+        w.start()
+        try:
+            _wait_until(lambda: len(failures) >= 2, timeout=3)
+            assert contacts == [], "no claim has been answered while the engine is failing"
+            tuples.raise_on.clear()
+            _wait_until(lambda: len(contacts) >= 1, timeout=3)
+        finally:
+            w.stop(timeout=5)
+
+
+class TestTupleBatchPath:
+    """The batch arm of the tuple side, engine-free (fake tuple store). One claim
+    batch of several tasks takes ``extract_aspects_batch`` once; a batch that mixes
+    extractor configs falls through to one ``extract_aspects`` call per row."""
+
+    def _run(self, tuple_env, monkeypatch, bodies, batch_size):  # noqa: ANN001
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        tuples = _FakeTuples(bodies)
+        tuples.park_sleep = 0.05
+        db = _FakeTupleDb(tuples)
+        tuple_env.install(db)
+        batch_calls: list[int] = []
+        single_calls: list[str] = []
+
+        def record(collection, source_path):  # noqa: ANN001, ANN202
+            # rdr__ rows are file-routed: a record without source_uri is dropped as
+            # unattributable (nexus-r0kum), so the fake stamps one as the extractor would.
+            import dataclasses
+
+            return dataclasses.replace(
+                _record_for(collection, source_path), source_uri=f"file://{source_path}",
+            )
+
+        def fake_batch(items, *_args, **_kwargs):  # noqa: ANN001, ANN202
+            batch_calls.append(len(items))
+            return [record(c, s) for (c, s, *_r) in items]
+
+        def fake_single(content, source_path, collection, **_kw):  # noqa: ANN001, ANN202
+            single_calls.append(source_path)
+            return record(collection, source_path)
+
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", fake_batch)
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects", fake_single)
+        # 1 s park: the loop exits within the wait below once every task is done.
+        w = AspectExtractionWorker(
+            poll_interval=0.05, batch_size=batch_size, tuple_options={"park_timeout_s": 1},
+        )
+        w.start()
+        try:
+            _wait_until(lambda: len(db.completed) == len(bodies), timeout=5)
+        finally:
+            w.stop(timeout=5)
+        return batch_calls, single_calls
+
+    def test_one_claim_batch_takes_the_batch_extractor_once(self, tuple_env, monkeypatch) -> None:  # noqa: ANN001
+        bodies = [
+            {"collection": "knowledge__delos", "source_path": f"/papers/p{i}.pdf",
+             "doc_id": f"1.1.{i}", "content_hash": "h"}
+            for i in range(5)
+        ]
+        batch_calls, single_calls = self._run(tuple_env, monkeypatch, bodies, batch_size=5)
+        assert batch_calls == [5], "five tasks in one claim batch: one batch call covering all five"
+        assert single_calls == [], "the single-paper path does not fire on a batch of five"
+
+    def test_a_batch_mixing_extractor_configs_falls_through_to_one_call_per_row(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        bodies = [
+            {"collection": "knowledge__delos", "source_path": f"/papers/p{i}.pdf",
+             "doc_id": f"1.1.{i}", "content_hash": "h"}
+            for i in range(3)
+        ] + [
+            {"collection": "rdr__test-aaaaaaaa", "source_path": f"/rdrs/r{i}.md",
+             "doc_id": f"1.2.{i}", "content_hash": "h"}
+            for i in range(2)
+        ]
+        batch_calls, single_calls = self._run(tuple_env, monkeypatch, bodies, batch_size=5)
+        assert batch_calls == [], "the batch extractor must not see two extractor configs"
+        assert sorted(single_calls) == sorted(
+            ["/papers/p0.pdf", "/papers/p1.pdf", "/papers/p2.pdf", "/rdrs/r0.md", "/rdrs/r1.md"]
+        )

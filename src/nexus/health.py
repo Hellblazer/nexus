@@ -4281,7 +4281,6 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # nexus.agent_dispatches: nexus-mtheb.4 (telemetry-018-agent-dispatches.xml),
     # one row per agent dispatch with its T1 put count; tier_writes RLS shape.
     "nexus.agent_dispatches",
-    "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
     # nexus.capability_census: nexus-gjv9b PART 1 (telemetry-010-capability-
     # census.xml), replacing capability_census.jsonl. Per-session UPSERT

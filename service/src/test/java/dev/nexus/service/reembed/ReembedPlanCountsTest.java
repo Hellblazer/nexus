@@ -13,7 +13,6 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
@@ -190,10 +189,6 @@ class ReembedPlanCountsTest extends ReembedFixture {
                     DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
                     DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
                 .values(fx.tenant(), fx.src(), "/p/tomb.md", now, "v1", "docling", tomb, "file:///p/tomb.md").execute();
-            ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .values(fx.tenant(), fx.src(), "/p/tomb-q.md", "pending", now, tomb).execute();
             ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
                     DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
@@ -202,7 +197,7 @@ class ReembedPlanCountsTest extends ReembedFixture {
         });
 
         assertThat(reader.planCounts(fx.tenant(), fx.src()).unmatchedSatelliteRows())
-            .as("aspect + queue + highlight rows of the tombstoned document").isEqualTo(3);
+            .as("aspect + highlight rows of the tombstoned document").isEqualTo(2);
     }
 
     @Test

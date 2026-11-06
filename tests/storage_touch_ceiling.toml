@@ -40,8 +40,18 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5128
+provisioned_tests = 5115
 tolerance_tests = 0
+# 5129 -> 5115 (nexus-hbnml, 2026-11-04, on develop 7dc537fe0): -14. scripts/tenant_delta.py --base f8d3e1be3 (the fork point) counts -14 for the change
+# that retires the aspect queue table and answers its review (tests/daemon/test_aspect_worker_reclaim.py 1 -> 0,
+# tests/db/test_http_aspects_stores.py 9 -> 5, tests/test_aspect_worker.py 29 -> 25, tests/test_rename_lock_t1_1.py 10 -> 9,
+# t1_2.py 8 -> 5, t2_race.py 6 -> 5, tests/upgrade/test_aspect_queue_migration_rung.py 1 -> 0, and +1 for the console
+# Aspect Queue card test in tests/test_false_clean_diagnostics_service_mode.py, which boots the console app and so takes a
+# tenant). The base count was one above its ceiling until 7dc537fe0 raised it to 5129, so 5129 - 14 = 5115 is the real count;
+# the first full run after the push confirms it.
+# 5128 -> 5129 (nexus-0vh80, 2026-11-04): +1. tests/test_plan_answer_kind.py::test_a_real_saved_row_read_back_through_the_library_carries_its_project_and_the_filter_uses_it
+# writes a saved plan through plan_save and reads it back from the real engine, so the eligibility filter's project
+# check is pinned against a row that actually carries its project (a fake row would pass with a library that dropped it).
 # 5126 -> 5128 (nexus-z7ddd, 2026-11-04): +2. tests/hooks/test_subagent_start_preflight_row.py drives the SubagentStart hook
 # as a child process in two throwaway git repos (with and without the worktree preflight script) and reads its real
 # injection; the hook's T2 scan reaches the engine, so each takes a tenant, as the hook module's own tests do.

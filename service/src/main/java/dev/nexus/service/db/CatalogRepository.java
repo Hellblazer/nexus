@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -6231,7 +6230,7 @@ public final class CatalogRepository {
      * equal what the caller read ({@link MovePreconditionFailedException}), a tombstoned document
      * ({@link TombstonedDocumentException}), (2) sets {@code catalog_documents.physical_collection} to
      * {@code collection}, and (3) re-homes the document's {@code document_aspects},
-     * {@code aspect_extraction_queue} and {@code document_highlights} rows (see {@link #completeMove}).
+     * and {@code document_highlights} rows, and the document's unconsumed {@code aspects} task (see {@link #completeMove}).
      * The response gains {@code move} ({@code source}, {@code satellites}) for the documents that
      * committed. Sweep is not combined with a move: the source chunks are left for the job to delete.
      */
@@ -6629,7 +6628,6 @@ public final class CatalogRepository {
     /** Keys of the satellite counters of a document move, in counter order. */
     private static final List<String> MOVE_SATELLITE_KEYS = List.of(
         "document_aspects_moved", "document_aspects_replaced",
-        "aspect_extraction_queue_moved", "aspect_extraction_queue_replaced",
         "document_highlights_moved");
 
     /**
@@ -6678,16 +6676,16 @@ public final class CatalogRepository {
     /**
      * The rest of a document move, after {@link #writeManifestRows} replaced the manifest with rows
      * naming {@code target}: point the document at {@code target} and re-home its satellites, in the same
-     * transaction (RDR-210 §"Every collection-scoped table's disposition": the three REPOINT satellites).
+     * transaction (RDR-210 §"Every collection-scoped table's disposition": the REPOINT satellites).
      *
      * <p>A satellite belongs to the document by {@code doc_id} equal to its tumbler. The RDR also named a
      * second arm, an empty {@code doc_id} with a {@code source_path} equal to the document's path; it can
-     * match nothing: {@code document_aspects.doc_id} and {@code aspect_extraction_queue.doc_id} are NOT
+     * match nothing: {@code document_aspects.doc_id} is NOT
      * NULL with a composite foreign key to {@code catalog_documents} (fk-001, hygiene-001), so a row with
      * no document cannot exist. {@code DocumentMoveTest#noDocLessSatelliteRowCanExist} pins that premise.
      *
      * <p>Where {@code target} already holds a row with the same unique key ({@code (tenant, collection,
-     * source_path)} for aspects and queue), the target row stands and the source row is deleted.
+     * source_path)} for aspects), the target row stands and the source row is deleted.
      * {@code document_highlights} is unique on {@code (tenant, doc_id)}, collection not included, so it
      * has no such case. {@code counts} receives the {@link #MOVE_SATELLITE_KEYS} counters.
      */
@@ -6728,23 +6726,7 @@ public final class CatalogRepository {
                    .and(DOCUMENT_ASPECTS.COLLECTION.eq(source))
                    .and(DOCUMENT_ASPECTS.DOC_ID.eq(docId)))
             .execute();
-        var targetQueue = ASPECT_EXTRACTION_QUEUE.as("move_target_queue");
-        counts[3] = ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
-            .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
-                   .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
-                   .and(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId))
-                   .and(DSL.exists(ctx.selectOne().from(targetQueue)
-                       .where(targetQueue.TENANT_ID.eq(tenant)
-                              .and(targetQueue.COLLECTION.eq(target))
-                              .and(targetQueue.SOURCE_PATH.eq(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH))))))
-            .execute();
-        counts[2] = ctx.update(ASPECT_EXTRACTION_QUEUE)
-            .set(ASPECT_EXTRACTION_QUEUE.COLLECTION, target)
-            .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
-                   .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
-                   .and(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId)))
-            .execute();
-        counts[4] = ctx.update(DOCUMENT_HIGHLIGHTS)
+        counts[2] = ctx.update(DOCUMENT_HIGHLIGHTS)
             .set(DOCUMENT_HIGHLIGHTS.COLLECTION, target)
             .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_HIGHLIGHTS.SOURCE_URI, source, target))
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
@@ -9376,15 +9358,15 @@ public final class CatalogRepository {
      *
      * <p>Order (children → registry): chunks → chash_index → topic_assignments →
      * topics → taxonomy_centroids → document_aspects → document_highlights →
-     * aspect_extraction_queue → catalog_documents (fk-001 cascades any doc-rooted
-     * aspect/highlight/queue/manifest remainder) → catalog_collections. (RDR-191,
+     * catalog_documents (fk-001 cascades any doc-rooted
+     * aspect/highlight/manifest remainder) → catalog_collections. (RDR-191,
      * nexus-o8dil.48: {@code chunks_384/768/1024} and {@code
      * taxonomy_centroids_384/768/1024} are unified into single {@code nexus.chunks}
      * / {@code nexus.taxonomy_centroids} tables — one DELETE each, not three.)
      *
      * <p>This is where RDR-164 closes <strong>nexus-tquoj</strong> (the client cascade
-     * never purged {@code aspect_extraction_queue}; the explicit DELETE here catches it,
-     * including doc-less {@code doc_id=''} rows the fk-001 document cascade cannot reach)
+     * never purged the aspect queue; the explicit DELETE here caught its doc-less {@code doc_id=''}
+     * rows, which the fk-001 document cascade cannot reach; the queue table is retired, nexus-hbnml)
      * and the service-mode <strong>nexus-cugrk</strong> centroid leak ({@code
      * taxonomy_centroids} has no FK to {@code topics}, CA-6 — purged by explicit
      * {@code DELETE WHERE collection=?} in the same txn).
@@ -9607,9 +9589,8 @@ public final class CatalogRepository {
             //    doc-less (doc_id='') rows fk-001's document cascade cannot reach — the tquoj fix.
             counts.put("document_aspects",        ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.COLLECTION.eq(name)).execute());
             counts.put("document_highlights",     ctx.deleteFrom(DOCUMENT_HIGHLIGHTS).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(name)).execute());
-            counts.put("aspect_extraction_queue", ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(name)).execute());
             // 6. catalog documents for this physical collection; fk-001 cascades any
-            //    doc-rooted aspect/highlight/queue/manifest rows still present.
+            //    doc-rooted aspect/highlight/manifest rows still present.
             // The ONLY production HARD delete of document rows. fk-001 cascades
             // the four FK children; topic_assignments (no doc-rooted FK) is
             // cleaned explicitly by this method's collection-scoped taxonomy
@@ -10034,7 +10015,6 @@ public final class CatalogRepository {
         new CollectionScopedTable("taxonomy_centroids",      TAXONOMY_CENTROIDS,      TAXONOMY_CENTROIDS.COLLECTION),
         new CollectionScopedTable("document_aspects",        DOCUMENT_ASPECTS,        DOCUMENT_ASPECTS.COLLECTION),
         new CollectionScopedTable("document_highlights",     DOCUMENT_HIGHLIGHTS,     DOCUMENT_HIGHLIGHTS.COLLECTION),
-        new CollectionScopedTable("aspect_extraction_queue", ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.COLLECTION),
         new CollectionScopedTable("catalog_documents",       CATALOG_DOCUMENTS,       CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
         new CollectionScopedTable("relevance_log",           RELEVANCE_LOG,           RELEVANCE_LOG.COLLECTION),
         new CollectionScopedTable("search_telemetry",        SEARCH_TELEMETRY,        SEARCH_TELEMETRY.COLLECTION),
@@ -10084,7 +10064,6 @@ public final class CatalogRepository {
         Map.entry("taxonomy_centroids",      CrossModelDisposition.REBUILD),
         Map.entry("document_aspects",        CrossModelDisposition.REPOINT),
         Map.entry("document_highlights",     CrossModelDisposition.REPOINT),
-        Map.entry("aspect_extraction_queue", CrossModelDisposition.REPOINT),
         Map.entry("catalog_documents",       CrossModelDisposition.REPOINT),
         Map.entry("relevance_log",           CrossModelDisposition.LEAVE),
         Map.entry("search_telemetry",        CrossModelDisposition.LEAVE),
@@ -10094,11 +10073,11 @@ public final class CatalogRepository {
     /**
      * RDR-235 (bead nexus-5r2sc.2.6): the cross-model disposition of the unconsumed {@code aspects} tasks, which
      * name their collection in a body field and so cannot be a {@link #COLLECTION_SCOPED_TABLES} entry or a line
-     * of {@link #CROSS_MODEL_DISPOSITIONS} ({@code CrossModelDispositionParityTest} pins that map to five REPOINT
+     * of {@link #CROSS_MODEL_DISPOSITIONS} ({@code CrossModelDispositionParityTest} pins that map to four REPOINT
      * tables, and {@code nexus.tuples} has no collection column). A re-embed move rewrites a document's task to
-     * name the target inside its move transaction: {@link AspectTaskRefs#rewriteCollectionForDoc}. When
-     * {@code aspect_extraction_queue} retires, its registry entry and line go and the tasks stand as the fifth
-     * REPOINT line.
+     * name the target inside its move transaction: {@link AspectTaskRefs#rewriteCollectionForDoc}. The
+     * {@code aspect_extraction_queue} table, a fifth REPOINT table until nexus-hbnml retired it, is gone from the
+     * registry and the map, and the tasks stand as the fifth REPOINT line.
      */
     static final CrossModelDisposition ASPECT_TASKS_DISPOSITION = CrossModelDisposition.REPOINT;
 

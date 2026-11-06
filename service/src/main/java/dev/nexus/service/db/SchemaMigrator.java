@@ -693,7 +693,10 @@ public final class SchemaMigrator {
                             + "mismatch means a second writer advanced "
                             + "public.databasechangelog's orderexecuted sequence "
                             + "during this walk, or a changeset failed or was "
-                            + "skipped without leaving a databasechangelog row",
+                            + "skipped without leaving a databasechangelog row (a precondition "
+                            + "CONTINUE is such a skip: aspects-005-2 on a retired "
+                            + "aspect_extraction_queue table that still holds rows lands here at "
+                            + "every boot; GET /v1/status aspect_queue_rows_retained says whether)",
                             accountedFor, pending, newChangesets, reexecuted, markRan);
                 }
                 // The old line logged the PRE-update pending count as

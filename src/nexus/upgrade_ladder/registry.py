@@ -26,8 +26,8 @@ ladder walks (wired in P3, nexus-n7u38.23) — they are NOT rungs and never
 appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
-:data:`RUNG_ORDER` holds four rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
-:data:`RUNG_ASPECT_QUEUE_TUPLES`, :data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`). One
+:data:`RUNG_ORDER` holds three rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
+:data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`). One
 depends on another: section labels waits on the RDR-192 backfill, whose rows it fills. The walk follows the edges
 (nexus-dfemn): a deferred rung holds back only the rungs with an edge from it.
 Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
@@ -58,13 +58,17 @@ from nexus.upgrade_ladder.protocol import Rung
 #: (``Rdr192BackfillGate.RUNG_NAME``, Java); a test pins the two equal.
 RUNG_RDR192_MANIFEST_BACKFILL = "rdr192-manifest-backfill"
 
-#: RDR-235 Phase 1 step 3 (nexus-5r2sc.3.6): move the aspect queue table's
-#: waiting rows to ``aspects`` tuples. It applies only with ``NX_ASPECT_QUEUE`` unset or
-#: ``tuples`` (the default since nexus-lnwn1; ``table`` is retired since nexus-bpikw step A, and the rung
-#: reports it as not applicable) on an engine that has the template and the
-#: ``list_waiting`` route, and reports every other case as not applicable, so
-#: nothing is recorded and it is detected again on the next ``nx upgrade``.
-RUNG_ASPECT_QUEUE_TUPLES = "aspect-queue-tuples"
+#: RDR-235 aspect-queue-tuples rung (nexus-5r2sc.3.6) -- RETIRED nexus-hbnml.
+#: It moved the aspect queue table's waiting rows to ``aspects`` tuples, through
+#: the ``/v1/aspects/queue/*`` routes, which leave the engine with the table. The
+#: move now belongs to the engine: at start it drains a table that still holds
+#: rows (``AspectQueueDrain``: pending and in_progress rows become tasks, failed
+#: rows become dead tasks that ``nx aspects requeue-failed`` revives) and the
+#: next boot's ``aspects-005-2`` drops the emptied table. Rows it cannot move
+#: stay, and ``GET /v1/status`` / ``nx doctor`` report them. The canonical name
+#: is retired with the rung rather than kept as a dead reservation (the
+#: chash-rekey precedent above). An install that recorded the rung keeps a
+#: harmless extra line in its ledger.
 
 #: RDR-236 RF-17 (nexus-6pfgb.38): rewrite a note's tags in its catalog entry's ``meta`` from the
 #: comma string older clients stored to the JSON array. Exempt from the backfill's fill-only rule by
@@ -90,7 +94,7 @@ ALL_RUNGS = "*"
 #: fails immediately rather than walking in a wrong order. Empty from
 #: nexus-lgdel.l1 (which retired chash-rekey) until nexus-wbfpw.41.
 RUNG_ORDER: tuple[str, ...] = (
-    RUNG_RDR192_MANIFEST_BACKFILL, RUNG_ASPECT_QUEUE_TUPLES, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS,
+    RUNG_RDR192_MANIFEST_BACKFILL, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS,
 )
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
@@ -242,10 +246,6 @@ def default_registry() -> LadderRegistry:
         Rdr192ManifestBackfillRung,
     )
 
-    from nexus.upgrade_ladder.rungs.aspect_queue_tuples import (  # noqa: PLC0415 — deferred; keeps registry import cheap and avoids a cycle
-        AspectQueueTuplesRung,
-    )
-
     from nexus.upgrade_ladder.rungs.note_tags_array import (  # noqa: PLC0415 — deferred; keeps registry import cheap and avoids a cycle
         NoteTagsArrayRung,
     )
@@ -255,5 +255,5 @@ def default_registry() -> LadderRegistry:
     )
 
     return LadderRegistry((
-        Rdr192ManifestBackfillRung(), AspectQueueTuplesRung(), NoteTagsArrayRung(), ManifestSectionLabelsRung(),
+        Rdr192ManifestBackfillRung(), NoteTagsArrayRung(), ManifestSectionLabelsRung(),
     ))

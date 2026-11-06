@@ -604,6 +604,21 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("ChunkReaper.tenants", "a supplier of the tenant list, re-read from service_tokens on "
                 + "every pass; the reaper keeps no copy");
             notKeyed.put("Rdr192BackfillGate.emptyTenant", "a predicate that reads PG on each call; it caches nothing");
+            notKeyed.put("NexusService.aspectQueueDrainResult", "the one-shot result of the engine-start drain of the retired "
+                + "aspect_extraction_queue table (nexus-hbnml): install-wide totals and a reason tally, no per-tenant entry");
+            notKeyed.put("NexusService.aspectQueueDrain", "the drain object bound once at boot; it keeps its state in a "
+                + "per-run tally that dies with the run");
+            notKeyed.put("StatusHandler.aspectQueue", "a supplier of the install-wide drain result; not keyed by tenant");
+            notKeyed.put("AspectQueueDrain.TENANT", "the tenant_id column of the retired queue table, a jOOQ field "
+                + "constant; no state");
+            notKeyed.put("AspectQueueDrain.Snapshot.rowsByTenant", "one census read of the retired queue table, "
+                + "returned to the run that asked and dropped with it; the drain keeps no copy");
+            notKeyed.put("AspectQueueDrain.Result.reasons", "reason to row count across the whole run; no tenant key");
+            notKeyed.put("AspectQueueDrain.fallbackTenants", "a supplier of the engine's known tenants (the reaper's), "
+                + "re-read when the census cannot run; the drain keeps no copy");
+            notKeyed.put("AspectQueueDrain.Tally.perTenant", "per-tenant counts for the log lines of ONE run, built "
+                + "and dropped inside run(); the drain runs once per boot and keeps nothing between runs");
+            notKeyed.put("AspectQueueDrain.Tally.reasons", "reason to row count for ONE run; no tenant key");
             notKeyed.put("StatusHandler.chunksTenantIsolationIntact", "a supplier of one process-wide policy check; "
                 + "not keyed by tenant");
             notKeyed.put("TokenStore.tenantCreationBound", "attempt and timeout bounds for a token insert; "

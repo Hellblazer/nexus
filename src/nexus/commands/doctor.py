@@ -1083,81 +1083,58 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
 
 
 def _report_aspect_queue_service() -> None:
-    """Aspect-queue depth from the LIVE PG queue over HTTP (nexus-k0luu).
+    """Aspect-queue depth from the LIVE ``aspects`` tuple queue over HTTP (nexus-k0luu).
 
-    Mirrors the sqlite branch's output shape (total, per-status breakdown,
-    failed rows with last_error) so the operator reads one report regardless of
-    backend. Sourced from HttpAspectQueue, never from the frozen local file.
-
-    Fails LOUD on a transport error rather than degrading to the sqlite path:
-    silently falling back would reproduce the exact defect being fixed — a
-    frozen-file reading presented as the live queue. A transport failure is
-    reported as UNKNOWN (exit 0 -- not reporting pass or fail); a nonzero
-    FAILED-row count from a reachable queue is a genuine content failure and
-    raises ``click.exceptions.Exit(1)`` with a ✗ FAIL: marker (nexus-fylxo),
+    Fails LOUD on a transport error rather than degrading: silently falling
+    back would present a stale reading as the live queue. A transport failure
+    is reported as UNKNOWN (exit 0 -- not reporting pass or fail); a nonzero
+    dead-task count from a reachable queue is a genuine content failure and
+    raises ``click.exceptions.Exit(1)`` with a FAIL marker (nexus-fylxo),
     matching the 4 sibling supplementary checks (resources / plan-library /
     taxonomy / t1) that already signal failure this way.
 
-    RDR-235 F18: the queue has two sides while rows the retired table producer
-    wrote (nexus-bpikw) drain, and new work goes to the ``aspects`` tuple template. Pending is the table's
-    pending plus the tuple side's ``available``; failed is the table's failed
-    plus the tuple side's ``dead``. ``claimed`` is in flight and counts as
-    neither. A tuple side that cannot be read is reported UNKNOWN and no combined
-    figure is printed (a total that guessed zero for it would be the false-clean
-    this check exists to remove); a subspace that does not exist yet is zero.
+    RDR-235 F18: pending is the tuple queue's ``available`` and failed is its
+    ``dead``. ``claimed`` is in flight and counts as neither. A queue that
+    cannot be read is reported UNKNOWN and no figure is printed (a total that
+    guessed zero would be the false-clean this check exists to remove); a
+    subspace that does not exist yet is zero. The retired
+    ``aspect_extraction_queue`` table is no longer read (nexus-hbnml).
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    tuple_unknown: str | None = None
-    tuple_counts = None
     try:
         q = HttpAspectQueue()
-        pending = q.pending_count()
-        failed = q.list_failed()
-        try:
-            tuple_counts = q.tuple_counts()
-        except (httpx.HTTPError, RuntimeError) as texc:
-            tuple_unknown = _exc_detail(texc)
+        tuple_counts = q.tuple_counts()
     except (httpx.HTTPError, RuntimeError) as exc:
         # RuntimeError is NOT redundant with httpx.HTTPError: constructing the
         # store resolves the endpoint, and an unresolvable one raises
         # ServiceEndpointUnresolvableError, which subclasses RuntimeError and
         # NOT httpx.HTTPError (review 2026-07-25). Catching only the transport
         # error let a missing supervisor lease / absent NX_SERVICE_TOKEN escape
-        # as a traceback out of `nx doctor` — turning a health check into a
-        # crash, in the very commit whose purpose was to stop doctor from
-        # misreporting health. The console twin
-        # (console/routes/health.py::_collect_aspect_queue_data_service) had
-        # this right; this call site did not.
+        # as a traceback out of `nx doctor`. The console twin
+        # (console/routes/health.py::_collect_aspect_queue_data_service) has
+        # the same shape.
         click.echo(
-            f"aspect_extraction_queue: service backend unreachable ({_exc_detail(exc)}). "
+            f"aspect queue: service backend unreachable ({_exc_detail(exc)}). "
             "Queue depth UNKNOWN — not reporting a count.",
             err=True,
         )
         return
 
-    n_failed = len(failed)
-    if tuple_counts is not None:
-        pending += tuple_counts.available
-        n_failed += tuple_counts.dead
-        click.echo(f"aspect_extraction_queue: {pending} pending, {n_failed} failed (service backend)")
-        if tuple_counts.available or tuple_counts.claimed or tuple_counts.dead:
-            click.echo(
-                f"  tuple queue (aspects): {tuple_counts.available} available, "
-                f"{tuple_counts.claimed} claimed (in flight, not pending), "
-                f"{tuple_counts.dead} dead"
-            )
-        if tuple_counts.dead:
-            click.echo("  dead tuple tasks: nx tuple stats aspects")
-    else:
+    pending = tuple_counts.available
+    n_failed = tuple_counts.dead
+    click.echo(f"aspect queue: {pending} pending, {n_failed} failed (service backend)")
+    if tuple_counts.available or tuple_counts.claimed or tuple_counts.dead:
         click.echo(
-            f"aspect_extraction_queue: table side {pending} pending and {n_failed} failed; "
-            f"tuple queue (aspects) UNKNOWN ({tuple_unknown}). "
-            "No combined count: the tuple side was not read.",
-            err=True,
+            f"  tuple queue (aspects): {tuple_counts.available} available, "
+            f"{tuple_counts.claimed} claimed (in flight, not pending), "
+            f"{tuple_counts.dead} dead"
         )
+    if tuple_counts.dead:
+        click.echo("  dead tuple tasks: nx tuple stats aspects")
+    retired_failed = _report_retired_queue_table()
     # The spawner declines to start the aspect worker when `claude` is not on
     # PATH and notes it once per process at debug level; this is the durable
     # signal. A WARNING, not a failure: rows wait in the queue until a worker
@@ -1197,53 +1174,75 @@ def _report_aspect_queue_service() -> None:
                     err=True,
                 )
     if n_failed:
-        if failed:
-            click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
-            for row in failed[:20]:
-                click.echo(
-                    f"  {row.collection or '?'} :: {row.source_path or '?'} "
-                    f"(retries {row.retry_count})"
-                )
-        # KNOWN GAP, stated rather than silently omitted: the sqlite branch
-        # prints each row's last_error, this one cannot. AspectRepository
-        # .listFailed does not select LAST_ERROR, so it never crosses the wire
-        # — QueueRow has no field for it either. Omitting it quietly would make
-        # a failing queue look like it had no recorded errors, which is the same
-        # false-clean class this fix exists to remove. Closing it needs an
-        # engine change (add LAST_ERROR to the projection) + a tag; tracked on
-        # nexus-k0luu.
-        click.echo(
-            "\n  (last_error is not carried by the service list endpoint — "
-            "see the worker logs for the failure text)"
-        )
         click.echo("\nRe-enqueue them with: nx aspects requeue-failed")
-        # nexus-fylxo: a nonzero failed-row backlog is a real content
+        # nexus-fylxo: a nonzero dead-task backlog is a real content
         # problem, not merely descriptive detail -- its 4 siblings
         # (resources / plan-library / taxonomy / t1) all emit a ✗/FAIL:
-        # marker and raise Exit on their own failure condition; this check
-        # printed the numbers and silently returned 0 regardless of how
-        # large the backlog grew. Match the sibling contract.
+        # marker and raise Exit on their own failure condition. Match the
+        # sibling contract.
         click.echo(
-            f"\n✗ FAIL: {n_failed} failed aspect-extraction row(s) in "
+            f"\n✗ FAIL: {n_failed} failed aspect-extraction task(s) in "
             "the queue.",
             err=True,
         )
+    if n_failed or retired_failed:
         raise click.exceptions.Exit(1)
 
 
+def _report_retired_queue_table() -> bool:
+    """Say what the engine reports about the retired ``aspect_extraction_queue`` table, never
+    a clean zero while rows remain in it (nexus-hbnml). Returns True when stranded rows
+    are a failure.
+
+    The table is dropped when it holds no row; an install an older client left rows in keeps
+    it, and the engine moves what it can onto the ``aspects`` queue once at start. What it
+    could not move stays, and the depth lines above count only the tuple queue, so without this
+    line those rows are invisible. The engine's ``GET /v1/status`` carries the count; an
+    unreadable status or an engine without the field is UNKNOWN, not clean.
+    """
+    from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.db.t2.http_aspect_queue import RETIRED_TABLE_REMEDY, retired_queue_table  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    table = retired_queue_table(fetch_engine_status())
+    if table.state == "gone":
+        return False
+    if table.state == "empty":
+        click.echo("  retired aspect_extraction_queue table: present and empty (the next engine start drops it)")
+        return False
+    if table.state == "unreported":
+        click.echo(
+            "  retired aspect_extraction_queue table: UNKNOWN (the engine status could not be read, or "
+            "the engine predates the field); not reporting it clean.",
+            err=True,
+        )
+        return False
+    if table.state == "uncounted":
+        click.echo(
+            "  WARN: the retired aspect_extraction_queue table is present and the engine could not count "
+            f"its rows; {RETIRED_TABLE_REMEDY}.",
+            err=True,
+        )
+        return False
+    reasons = ", ".join(f"{k}={v}" for k, v in table.reasons)
+    click.echo(
+        f"\n✗ FAIL: {table.rows} row(s) are stranded in the retired aspect_extraction_queue table"
+        + (f" ({reasons})" if reasons else "")
+        + f"; {RETIRED_TABLE_REMEDY}.",
+        err=True,
+    )
+    return True
+
+
 def _run_check_aspect_queue() -> None:
-    """Report aspect_extraction_queue depth + per-status breakdown.
+    """Report the aspect queue's depth: pending, claimed and dead tasks.
 
     RDR-089 follow-up nexus-qeo8 introduced an async worker
-    (``aspect_worker.py``) that drains this table on a daemon thread.
+    (``aspect_worker.py``) that drains the queue on a daemon thread.
     Without observability, a backlog grows silently.
 
-    nexus-k0luu: reads the SERVICE queue (PG). This check once had no
-    service branch — on a migrated box it read the FROZEN SQLite queue and
-    reported it as current while the live queue was in PG, which is worse
-    than useless here: `nx aspects requeue-failed` directs operators to
-    this very check for backlog visibility. The SQLite reader leg died
-    with the =sqlite opt-out (RDR-158 P3, nexus-7bomn).
+    nexus-k0luu: reads the SERVICE queue, never a frozen local file:
+    `nx aspects requeue-failed` directs operators to this very check for
+    backlog visibility.
     """
     _report_aspect_queue_service()
 
@@ -3121,9 +3120,8 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
     "check_aspect_queue",
     is_flag=True,
     default=False,
-    help="Report aspect_extraction_queue depth, per-status counts, "
-         "oldest pending row, and any failed rows with their last "
-         "error. nexus-1pfq.",
+    help="Report the aspect queue's depth: pending, claimed and dead "
+         "tasks of the 'aspects' tuple queue. nexus-1pfq.",
 )
 @click.option(
     "--check-t1",

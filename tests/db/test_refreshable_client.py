@@ -1935,7 +1935,8 @@ class TestGetPerRequestTimeoutOverride:
     since nexus-y9t08 -- previously ``_get`` had none, which was the
     self-inflicted reason ``aspect_worker._best_effort_queue_depth`` was
     left unable to share a pool while keeping its strict 2s cap (its
-    ONLY read is a GET via ``HttpAspectQueue.pending_count``)."""
+    ONLY read was a GET via ``HttpAspectQueue.pending_count``, before the
+    table retired in nexus-hbnml)."""
 
     def test_get_with_timeout_reaches_the_request(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
@@ -2058,7 +2059,8 @@ class TestMintTokenResolutionSeam:
     ) -> None:
         """nexus-ig3qe: the tjvgf opt-out's 401 carve-out, full-fidelity.
 
-        The aspect worker's ``claim_batch`` rides ``idempotent=False``; its
+        The aspect worker's table ``claim_batch`` rode ``idempotent=False``
+        (the table retired in nexus-hbnml; the carve-out it motivated stands); its
         data token expires on TTL while the worker runs. A 401 there is an
         auth-layer rejection BEFORE the handler runs (nothing applied), so
         the mixin re-mints and retries exactly once even on the

@@ -29,9 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * shape as the schema-parity gate ({@code tests/catalog/test_collection_scoped_tables_schema_parity.py})
  * gates the registry against the schema. A table that is in the schema and in neither list is that gate's
  * to catch (it fails the registry first); this one starts where the registry ends. It does not check that
- * the move code does what a REPOINT row says: {@code DocumentMoveTest} pins the five REPOINT tables'
- * behaviour, and {@link #theRepointTablesAreTheFiveTheMoveReHomes} pins that the two lists name the same
- * five.
+ * the move code does what a REPOINT row says: {@code DocumentMoveTest} pins the REPOINT tables'
+ * behaviour, and {@link #theRepointTablesAreTheFourTheMoveReHomes} pins that the two lists name the same
+ * four (the unconsumed {@code aspects} tasks are the fifth re-homed thing, outside this map).
  *
  * <p>The check is a pure function over a registry and a map, so the planted-table test runs the SAME
  * function over a registry with one extra entry and sees it fail. No database.
@@ -125,14 +125,14 @@ class CrossModelDispositionParityTest {
     }
 
     @Test
-    void theRepointTablesAreTheFiveTheMoveReHomes() {
-        // CatalogRepository#completeMove and writeManifestRows re-point exactly these. A sixth REPOINT line
+    void theRepointTablesAreTheFourTheMoveReHomes() {
+        // CatalogRepository#completeMove and writeManifestRows re-point exactly these. A fifth REPOINT line
         // needs move code (and a DocumentMoveTest case); fewer means the move does something the list denies.
         Set<String> repoint = new TreeSet<>();
         CatalogRepository.CROSS_MODEL_DISPOSITIONS.forEach((table, d) -> {
             if (d == CrossModelDisposition.REPOINT) repoint.add(table);
         });
-        assertThat(repoint).containsExactly("aspect_extraction_queue", "catalog_document_chunks", "catalog_documents",
+        assertThat(repoint).containsExactly("catalog_document_chunks", "catalog_documents",
             "document_aspects", "document_highlights");
     }
 }

@@ -14,7 +14,6 @@ import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -39,18 +38,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *       here runs through typed jOOQ DSL rather than raw JDBC).</li>
  *   <li>ON DELETE CASCADE: deleting a catalog_documents row removes dependent
  *       topic_assignments, document_aspects, and document_highlights rows.</li>
- *   <li>ON DELETE CASCADE for queue: deleting a catalog_documents row removes dependent
- *       aspect_extraction_queue rows (stale queue items for a deleted doc have no purpose;
- *       null-doc-id queue items are unaffected). CASCADE chosen over SET NULL because PG14
- *       SET NULL on a composite FK nullifies ALL FK columns including the NOT NULL tenant_id.</li>
+ *   <li>(The aspect_extraction_queue leg of this class went with the table, nexus-hbnml; its FK chose CASCADE
+ *       over SET NULL because PG14 SET NULL on a composite FK nullifies ALL FK columns including the NOT NULL
+ *       tenant_id, the same reason the surviving FKs cascade.)</li>
  *   <li>TENANT-CORRECTNESS (headline): a composite FK prevents cross-tenant references.
  *       Tenant-A's topic_assignment/aspect/highlight CANNOT reference a catalog_documents
  *       row that belongs to tenant-B, even when that tumbler exists — the composite
  *       (tenant_id, doc_id) FK rejects it. This proves the FK bypasses RLS correctly
  *       (checks table owner, not tenant GUC) but still enforces tenant scope via the
  *       composite key.</li>
- *   <li>NULLABLE CONVERSION: document_aspects.doc_id and aspect_extraction_queue.doc_id
- *       accept NULL (valid FK — no reference = no violation).</li>
  *   <li>RLS NEGATIVE: RLS tenant isolation still holds after FK addition; tenant A rows
  *       remain invisible to tenant B via GUC.</li>
  * </ol>
@@ -92,7 +88,7 @@ class ForeignKeyConstraintTest {
         }
 
         // Phase 3.5 (RDR-164 P1a): register the collections these fixtures reference so the
-        // new fk-003 collection FKs on document_aspects / aspect_extraction_queue / topics
+        // new fk-003 collection FKs on document_aspects / topics
         // are satisfied. These tests exercise the fk-001 document-rooted FKs, not collection
         // registration, so the collections are pre-seeded here rather than per-insert.
         try (Connection su = pg.createConnection("")) {
@@ -132,13 +128,12 @@ class ForeignKeyConstraintTest {
     @Test @Order(1)
     void fkChangeset_appliesCleanly_allFkConstraintsPresent() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            // Verify the 4 cross-store FK constraints exist in pg_constraint.
+            // Verify the 3 cross-store FK constraints exist in pg_constraint.
             // topic_assignments is intentionally EXCLUDED (nexus-sa14p): its doc_id is a
             // chunk chash, not a document tumbler, so no fk_ta_catalog_doc is registered.
             List<String> expectedFks = List.of(
                 "fk_doc_aspects_catalog_doc",
                 "fk_doc_highlights_catalog_doc",
-                "fk_aspect_queue_catalog_doc",
                 "fk_catalog_chunks_catalog_doc"
             );
             // And assert fk_ta_catalog_doc does NOT exist.
@@ -209,26 +204,6 @@ class ForeignKeyConstraintTest {
             );
             assertThat(ex.getMessage())
                 .as("document_aspects.doc_id must be NOT NULL (hygiene-001 step 1)")
-                .containsIgnoringCase("null value in column \"doc_id\"");
-        }
-    }
-
-    @Test @Order(3)
-    void aspectQueueDocId_isNotNullable() throws Exception {
-        // hygiene-001 step 2: aspect_extraction_queue.doc_id reverses fk-001-4's
-        // nullable conversion -- it is NOT NULL again.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            DataAccessException ex = assertThrows(DataAccessException.class, () ->
-                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                        ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
-                    .values(TENANT_A, "knowledge__q", "path/not-nullable-queue.pdf", OffsetDateTime.now())
-                    .execute()
-            );
-            assertThat(ex.getMessage())
-                .as("aspect_extraction_queue.doc_id must be NOT NULL (hygiene-001 step 2)")
                 .containsIgnoringCase("null value in column \"doc_id\"");
         }
     }
@@ -483,99 +458,6 @@ class ForeignKeyConstraintTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // REFERENTIAL INTEGRITY — aspect_extraction_queue
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(40)
-    void queue_nullDocId_isRejected() throws Exception {
-        // hygiene-001 step 2: aspect_extraction_queue.doc_id is NOT NULL again --
-        // reverses fk-001-4's nullable conversion.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            DataAccessException ex = assertThrows(DataAccessException.class, () ->
-                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                        ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
-                    .values(TENANT_A, "knowledge__q", "path/queue-null.pdf", OffsetDateTime.now())
-                    .execute()
-            );
-            assertThat(ex.getMessage())
-                .as("aspect_extraction_queue.doc_id must be NOT NULL (hygiene-001 step 2)")
-                .containsIgnoringCase("null value in column \"doc_id\"");
-        }
-    }
-
-    @Test @Order(41)
-    void queue_validDocId_succeeds() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "5.1");
-            ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
-                .values(TENANT_A, "knowledge__q", "path/queue-valid.pdf", "5.1", OffsetDateTime.now())
-                .execute();
-            String docId = ctx.select(ASPECT_EXTRACTION_QUEUE.DOC_ID).from(ASPECT_EXTRACTION_QUEUE)
-                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A))
-                .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("path/queue-valid.pdf"))
-                .fetchOne(ASPECT_EXTRACTION_QUEUE.DOC_ID);
-            assertThat(docId).isEqualTo("5.1");
-        }
-    }
-
-    @Test @Order(42)
-    void queue_orphanDocId_rejectsWithFKViolation() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            DataAccessException ex = assertThrows(DataAccessException.class, () ->
-                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                        ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
-                    .values(TENANT_A, "knowledge__q", "path/queue-orphan.pdf", "no-such-tumbler-q",
-                        OffsetDateTime.now())
-                    .execute()
-            );
-            assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
-        }
-    }
-
-    @Test @Order(43)
-    void deleteCatalogDoc_cascadesToQueue() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "5.99");
-            ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
-                .values(TENANT_A, "knowledge__q", "path/queue-cascade.pdf", "5.99", OffsetDateTime.now())
-                .execute();
-
-            ctx.deleteFrom(CATALOG_DOCUMENTS)
-                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENTS.TUMBLER.eq("5.99"))
-                .execute();
-
-            // Queue item must be deleted (ON DELETE CASCADE — stale queue for a deleted doc is moot)
-            int count = ctx.selectCount().from(ASPECT_EXTRACTION_QUEUE)
-                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A))
-                .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("path/queue-cascade.pdf"))
-                .fetchOne(0, int.class);
-            assertThat(count)
-                .as("Cascade delete must remove queue item for deleted catalog doc").isZero();
-        }
-    }
-
-    // queue_nullDocId_survivesDocDeletion DELETED (hygiene-001 step 2,
-    // nexus-tk070.p6a follow-on): its subject -- a queue row unbound to any
-    // catalog doc (doc_id=NULL) surviving an unrelated doc deletion -- is no
-    // longer representable now that aspect_extraction_queue.doc_id is NOT
-    // NULL; an inverted "insert with NULL doc_id is rejected" assertion would
-    // only duplicate queue_nullDocId_isRejected above.
-
-    // ══════════════════════════════════════════════════════════════════════════
     // TENANT-CORRECTNESS — the headline property
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -628,26 +510,6 @@ class ForeignKeyConstraintTest {
             );
             assertThat(ex.getMessage())
                 .as("FK must reject cross-tenant highlight reference")
-                .containsIgnoringCase("foreign key");
-        }
-    }
-
-    @Test @Order(53)
-    void crossTenantQueueItem_isRejectedByCompositeFk() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, TUMBLER_A);
-
-            DataAccessException ex = assertThrows(DataAccessException.class, () ->
-                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                        ASPECT_EXTRACTION_QUEUE.DOC_ID, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT)
-                    .values(TENANT_B, "knowledge__y", "path/ct-queue.pdf", TUMBLER_A, OffsetDateTime.now())
-                    .execute()
-            );
-            assertThat(ex.getMessage())
-                .as("FK must reject cross-tenant queue reference")
                 .containsIgnoringCase("foreign key");
         }
     }
