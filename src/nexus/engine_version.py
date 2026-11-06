@@ -719,7 +719,16 @@ from __future__ import annotations
 #: boot-refusal messages, the grants-004 RAISE text and the tuple templates' doc
 #: links (nexus-z7ddd). No wire change; the pin rises so the release's source
 #: tree and its pinned engine tag agree.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 179)
+#: 0.1.180 (conexus 7.96.0): pairs with engine-service-v0.1.180. It carries the
+#: engine halves of RDR-243 Phase 1 (nexus-rfvyy): the catalog-047 schema
+#: (catalog_documents.sensitive and the catalog_sensitivity_changes audit
+#: table), the audited POST /v1/catalog/sensitivity, the sensitive field on
+#: document and chash_positions JSON, catalog_sensitivity_supported on GET
+#: /version, and the one-way write rules (upsert, import, register, merge and
+#: tombstone inheritance). It also carries the root-names-the-target chunk-key
+#: sweep with its gc_audit rows (nexus-6pfgb.43). The client refuses --sensitive
+#: against an older engine, so the pin rises with it.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 180)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

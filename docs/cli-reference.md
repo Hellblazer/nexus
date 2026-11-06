@@ -851,9 +851,12 @@ Day 2 Ops: show the full aspect record for a single document. Takes no options �
 ```
 nx enrich delete COLLECTION SOURCE_PATH [--yes]
 nx enrich delete COLLECTION --all [--no-dry-run] [--yes]
+nx enrich delete --tumbler T [--yes]
 ```
 
 Day 2 Ops: remove aspect rows. Pass SOURCE_PATH to remove a single row — use when re-indexing a document with a content change that should drop the prior aspects rather than overwrite. `--yes` skips the confirmation prompt. Safe: the underlying chunks in T3 are untouched.
+
+`--tumbler T` (RDR-243, nexus-rfvyy.6.17) removes the aspect row of the document with catalog tumbler `T`, whatever its collection. It is the remedy `nx catalog doctor --sensitive-with-aspects` prints for each flagged document that already has an aspect row. It takes no COLLECTION, SOURCE_PATH or `--all`, and it does not remove a task still queued for the document.
 
 `--all` (nexus-3foc9) removes every aspect row in COLLECTION instead — the cleanup step after opting a collection out of `aspects.docs_collections` (opting out stops new extraction but leaves rows already written fully visible to aspect-scoped search and groupby). Exactly one of SOURCE_PATH or `--all` is required. `--all` is **dry-run by default**: it reports the row count and collection and writes nothing; pass `--no-dry-run --yes` (or answer the confirmation prompt) to actually delete. Refuses on a collection name the catalog does not know at all; a known collection with zero aspect rows is reported as a no-op.
 
@@ -2208,9 +2211,9 @@ Exit codes:
 | 5 | The apply stalled: three calls in a row swept nothing while rows remain. |
 | 6 | The engine ran the sweep but could not write its audit row (`audit_write_failed`: the rows were changed, the verb prints how many), or the sweep failed part-way (`sweep_failed`, partial counts printed). |
 
-Needs the engine release that carries nexus-6pfgb.43; naming a tenant other than the credential's own, and the audit of every root sweep, need the engine release that carries the root-names-the-target change, which is newer than `engine-service-v0.1.178` (an older engine gives exit 4, as above). Both halves are required: the engine, and a client that carries `--tenant` and `--operator` (until the client release that ships them, a `develop` checkout).
+Needs the engine release that carries nexus-6pfgb.43; naming a tenant other than the credential's own, and the audit of every root sweep, need the engine release that carries the root-names-the-target change, which is carried first by `engine-service-v0.1.180` (an older engine gives exit 4, as above). Both halves are required: the engine, and a client that carries `--tenant` and `--operator` (conexus 7.96.0 and later).
 
-**Managed service (Phase E), the operator procedure.** On a managed cloud client credentials are mint-locked, so a per-tenant token cannot be made: the root service token is the credential. Set it as `NX_SERVICE_TOKEN` (and the managed endpoint as `NX_SERVICE_URL`) for the command; never paste its value into a shell history, a ticket or a log. Requirements: an engine at or past the tag that carries the root-names-the-target change (before the first dry run, `nx t3 retire-keys --tenant ID` against an older engine prints the one-line exit-4 message and writes nothing) and a client that carries `--tenant`, which until a release is a `develop` checkout. In order:
+**Managed service (Phase E), the operator procedure.** On a managed cloud client credentials are mint-locked, so a per-tenant token cannot be made: the root service token is the credential. Set it as `NX_SERVICE_TOKEN` (and the managed endpoint as `NX_SERVICE_URL`) for the command; never paste its value into a shell history, a ticket or a log. Requirements: an engine at or past the tag that carries the root-names-the-target change (before the first dry run, `nx t3 retire-keys --tenant ID` against an older engine prints the one-line exit-4 message and writes nothing) and a client that carries `--tenant` (conexus 7.96.0 and later). In order:
 
 1. A dry run for every tenant, one at a time, each with your name: `nx t3 retire-keys --tenant nexus --operator <you> --max-rps 2`, then the same for each other tenant (for example `gate-xr789`). Read the counts and the preconditions; the dry run writes no chunk row, but it is audited, so it leaves two rows.
 2. Accept only the residues you have judged (`--accept NAME=N`, N at least the live count).
