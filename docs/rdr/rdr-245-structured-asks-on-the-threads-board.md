@@ -2,12 +2,14 @@
 title: "Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox"
 id: RDR-245
 type: Feature
-status: draft
+status: accepted
+accepted_date: 2026-11-06
 priority: medium
 author: Claude (architect-planner, for Sam)
 created: 2026-11-05
 related_issues: [nexus-wc4jj]
 related_rdrs: [RDR-064, RDR-208, RDR-211, RDR-212, RDR-213, RDR-233, RDR-239]
+reviewed-by: self
 ---
 
 # RDR-245: Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox
@@ -1081,3 +1083,4 @@ dependency, no new surface, no second parser.
 - 2026-11-05: Gate round 1 — BLOCKED (2 Critical, 7 Significant, 2 ship-blocker(s)); commit `a25923a80`; critique `nexus_rdr/245-gate-critique-2026-11-05-r1`.
 - 2026-11-05: Gate round 2 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `e3ccf4250`; critique `nexus_rdr/245-gate-critique-2026-11-05-r2`.
 - 2026-11-05: Gate round 3 — PASSED (1 Critical, 4 Significant, 0 ship-blocker(s)); commit `0494e902d`; critique `nexus_rdr/245-gate-critique-2026-11-05-r3`.
+- 2026-11-05: Accept, round-3 residual dispositions: residual 1 fixed in `f33454580` (fix check `nexus_rdr/245-fix-check-f33454580`); residual S1 to `nexus-wc4jj.1`; S2 to `nexus-wc4jj.2`; S3 to `nexus-wc4jj.3`; S4 to `nexus-wc4jj.4` (Phase 1).
