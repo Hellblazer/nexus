@@ -112,8 +112,7 @@ class NexusServicePciStatusWiringTest {
         maintenance.set(dev.nexus.service.vectors.PciMaintenanceStatus.phase1(java.util.List.of()));
         JsonNode empty = status().at("/per_collection_indexes/this_engine/maintenance");
         assertThat(empty.get("reindex").asText()).isEqualTo("off");
-        assertThat(empty.at("/canary/indexes").isArray()).isTrue();
-        assertThat(empty.at("/canary/indexes")).isEmpty();
+        assertThat(empty.at("/canary/indexes").isMissingNode()).as("counts only on the unauthenticated route").isTrue();
         assertThat(empty.at("/canary/green").asInt()).isZero();
 
         maintenance.set(dev.nexus.service.vectors.PciMaintenanceStatus.phase1(java.util.List.of(
@@ -121,7 +120,7 @@ class NexusServicePciStatusWiringTest {
                 "no_queries", 2, null, null, 0, "stale", Instant.parse("2026-10-10T08:00:00Z"), null, null, null))));
         JsonNode one = status().at("/per_collection_indexes/this_engine/maintenance/canary");
         assertThat(one.get("unmeasured").asInt()).as("read per request, not captured at binding").isEqualTo(1);
-        assertThat(one.at("/indexes/0/queries").asInt()).isEqualTo(2);
+        assertThat(one.has("indexes")).as("no per-index entry, so no pci_ name, on /v1/status").isFalse();
     }
 
     /**

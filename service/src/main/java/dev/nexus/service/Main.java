@@ -585,7 +585,8 @@ public final class Main {
         service.chunksLeafBloat(() -> dev.nexus.service.http.StatusHandler.ChunksLeafBloat.of(
                 leafBloatSweep.status(), leafBloatSweep.periodSeconds()));
         // nexus-i827c: the same cache, named, on the operator-only GET /v1/admin/chunks-leaves.
-        service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds);
+        // RDR-230 Phase 1 (Sam, 2026-11-06): plus the recall canary's per-index list, which GET /v1/status does not carry.
+        service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds, pciReconciler::maintenance);
         // nexus-6pfgb.43: the chunk CHECK add/validate routes run DDL on the admin connection; nothing calls them.
         service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
         // nexus-hbnml: a retired aspect_extraction_queue table that still holds rows (aspects-005-2 keeps it) is

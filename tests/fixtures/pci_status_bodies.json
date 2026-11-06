@@ -41,33 +41,21 @@
       "this_engine": {"builder_state": "ok", "building": 1, "failing": 0, "last_ddl_pass_at": "2026-10-10T07:30:00Z",
                       "pass_started_at": "2026-10-10T07:58:30Z", "pass_in_progress": true,
                       "maintenance": {"reindex": "off", "reindexing": null, "last_reindex_at": null, "reindexes": 0,
-          "canary": {"green": 1, "red": 1, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z", "indexes": [
-            {"index": "pci_aaaaaaaaaaaaaaaaaaaaaaaa", "state": "red", "reason": null, "queries": 10, "min_recall": 0.82, "mean_recall": 0.9,
-             "top1_misses": 2, "trigger": "vacuum", "measured_at": "2026-10-20T08:01:10Z", "anchor": "adopted", "size_ratio": null, "deletes_since_build": 0.25},
-            {"index": "pci_bbbbbbbbbbbbbbbbbbbbbbbb", "state": "unmeasured", "reason": "no_queries", "queries": 2, "min_recall": null, "mean_recall": null,
-             "top1_misses": 0, "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z", "anchor": null, "size_ratio": null, "deletes_since_build": null},
-            {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null, "queries": 10, "min_recall": 0.983, "mean_recall": 0.998,
-             "top1_misses": 0, "trigger": "after_build", "measured_at": "2026-10-20T08:01:10Z", "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.031}]}}}
+          "canary": {"green": 1, "red": 1, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z"}}}
     },
     "standby_with_canary_history": {
       "valid": 4, "invalid": 0, "unparsed": 0, "reindex_leftover": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "standby", "building": null, "failing": null, "last_ddl_pass_at": "2026-10-10T07:30:00Z",
                       "pass_started_at": null, "pass_in_progress": false,
                       "maintenance": {"reindex": "off", "reindexing": null, "last_reindex_at": null, "reindexes": 0,
-          "canary": {"green": 1, "red": 1, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z", "indexes": [
-            {"index": "pci_aaaaaaaaaaaaaaaaaaaaaaaa", "state": "red", "reason": null, "queries": 10, "min_recall": 0.82, "mean_recall": 0.9,
-             "top1_misses": 2, "trigger": "vacuum", "measured_at": "2026-10-20T08:01:10Z", "anchor": "adopted", "size_ratio": null, "deletes_since_build": 0.25},
-            {"index": "pci_bbbbbbbbbbbbbbbbbbbbbbbb", "state": "unmeasured", "reason": "no_queries", "queries": 2, "min_recall": null, "mean_recall": null,
-             "top1_misses": 0, "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z", "anchor": null, "size_ratio": null, "deletes_since_build": null},
-            {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null, "queries": 10, "min_recall": 0.983, "mean_recall": 0.998,
-             "top1_misses": 0, "trigger": "after_build", "measured_at": "2026-10-20T08:01:10Z", "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.031}]}}}
+          "canary": {"green": 1, "red": 1, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z"}}}
     },
     "never_held_lock": {
       "valid": 4, "invalid": 0, "unparsed": 0, "reindex_leftover": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "standby", "building": null, "failing": null, "last_ddl_pass_at": null,
                       "pass_started_at": null, "pass_in_progress": false,
                       "maintenance": {"reindex": "off", "reindexing": null, "last_reindex_at": null, "reindexes": 0,
-          "canary": {"green": 0, "red": 0, "unmeasured": 0, "last_run_at": null, "indexes": []}}}
+          "canary": {"green": 0, "red": 0, "unmeasured": 0, "last_run_at": null}}}
     }
   }
 }

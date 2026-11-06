@@ -306,6 +306,8 @@ public final class NexusService {
      */
     private volatile java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> chunksLeavesView;
     private volatile java.util.function.Supplier<Long> chunksLeavesSweepSeconds;
+    /** The recall canary's status for {@code canary_indexes} on that route; null until bound, which omits the key. */
+    private volatile java.util.function.Supplier<dev.nexus.service.vectors.PciMaintenanceStatus> chunksLeavesCanary;
     /** nexus-6pfgb.43: the admin-connection DDL behind {@code /v1/admin/chunk-keys/add-constraints} and {@code validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
     /**
@@ -717,7 +719,8 @@ public final class NexusService {
         var chunksLeavesCtx = server.createContext(dev.nexus.service.http.ChunksLeavesHandler.PATH,
                 new dev.nexus.service.http.ChunksLeavesHandler(
                         () -> { var v = chunksLeavesView; return v == null ? null : v.get(); },
-                        () -> { var v = chunksLeavesSweepSeconds; return v == null ? null : v.get(); }));
+                        () -> { var v = chunksLeavesSweepSeconds; return v == null ? null : v.get(); },
+                        () -> { var v = chunksLeavesCanary; return v == null ? null : v.get(); }));
         chunksLeavesCtx.getFilters().addAll(authFilter);
 
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
@@ -1181,8 +1184,20 @@ public final class NexusService {
      */
     public void chunksLeaves(java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> view,
                              java.util.function.Supplier<Long> sweepSeconds) {
+        chunksLeaves(view, sweepSeconds, null);
+    }
+
+    /**
+     * As above, with the recall canary's status (RDR-230 Phase 1, Sam, 2026-11-06): its per-index entries are the
+     * {@code canary_indexes} key of this operator-only route, which {@code GET /v1/status} does not carry. {@code canary}
+     * must answer from the reconciler's memory; a null supplier, or one answering null, omits the key.
+     */
+    public void chunksLeaves(java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> view,
+                             java.util.function.Supplier<Long> sweepSeconds,
+                             java.util.function.Supplier<dev.nexus.service.vectors.PciMaintenanceStatus> canary) {
         this.chunksLeavesView = view;
         this.chunksLeavesSweepSeconds = sweepSeconds;
+        this.chunksLeavesCanary = canary;
     }
 
     /**

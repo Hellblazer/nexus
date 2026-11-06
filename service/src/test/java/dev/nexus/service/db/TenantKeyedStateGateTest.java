@@ -653,12 +653,13 @@ public class TenantKeyedStateGateTest {
                 + "request_ledger_tenants), re-read on every pass; the expiry keeps no copy");
             notKeyed.put("VectorHandler.queryRing", "the handle of the one query ring, bound once at boot; "
                 + "the ring keeps no per-tenant state of its own beyond its short queue");
-            // CONFIG (15)
+            // CONFIG (16)
             for (String f : List.of(
                 "Bge768Embedder.admissionGate",
                 "ChunkReaper.Settings.floorExemptCollections",
                 "HttpUtil.gzipper",
                 "NexusService.chunksLeafBloat",
+                "NexusService.chunksLeavesCanary",
                 "NexusService.chunksLeavesSweepSeconds",
                 "NexusService.chunksLeavesView",
                 "NexusService.embedPosture",
@@ -1016,7 +1017,8 @@ public class TenantKeyedStateGateTest {
                 "PciReconciler.Tally.builtTargets")) {
                 notKeyed.put(f, PCI_OFF);
             }
-            // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the /v1/status maintenance snapshot. A per-read list of at
+            // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the maintenance snapshot (counts on /v1/status, entries on
+            // the operator-only /v1/admin/chunks-leaves). A per-read list of at
             // most 64 entries keyed by the opaque pci_ index name, built from the reconciler's memory for one response
             // and dropped with it; no field of an entry names a tenant or a collection.
             notKeyed.put("PciMaintenanceStatus.Canary.indexes", PCI_OFF);

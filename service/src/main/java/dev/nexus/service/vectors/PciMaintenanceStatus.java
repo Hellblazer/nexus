@@ -2,9 +2,14 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -13,8 +18,11 @@ import java.util.Optional;
  * query (RDR-227's rule). Phase 1 reports the canary half; the REINDEX half is fixed at {@code off}, no index in
  * flight, no reindex yet, because nothing reindexes until Phase 2.
  *
- * <p><b>Who may read it.</b> The route is unauthenticated. An entry is keyed by the opaque {@code pci_<24 hex>} name and
- * has no field that carries a collection, a tenant or a leaf name; the log lines carry those for operators.
+ * <p><b>Who may read what.</b> {@code GET /v1/status} is unauthenticated, so by Sam's rulings of 2026-10-19 and
+ * 2026-11-06 it renders the counts of {@link Canary} and nothing else: no {@code pci_} name and no per-index list. The
+ * entries ({@link Canary#indexes()}) are rendered only by the operator-only {@code GET /v1/admin/chunks-leaves}, as its
+ * {@code canary_indexes} key ({@link Entry#wire()}). An entry is keyed by the opaque {@code pci_<24 hex>} name and has no
+ * field that carries a collection, a tenant or a leaf name; the log lines carry those for operators.
  *
  * <p><b>Order and cap.</b> {@link #MAX_ENTRIES} entries: red first, then unmeasured (an index nobody could measure is
  * more worth a look than a green one), then green; newest {@code measured_at} first within a state, then index name.
@@ -62,7 +70,38 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      */
     public record Entry(String index, String state, String reason, int queries, Double minRecall, Double meanRecall,
                         int top1Misses, String trigger, Instant measuredAt, String anchor, Double sizeRatio,
-                        Double deletesSinceBuild) { }
+                        Double deletesSinceBuild) {
+
+        /**
+         * The entry as the {@code canary_indexes} element of {@code GET /v1/admin/chunks-leaves}: the twelve keys in
+         * the order of this record's components. Times are whole seconds; recall is rounded to three places, the size
+         * ratio to two and the delete fraction to three, as plain decimals; a value that is not finite is null.
+         */
+        public Map<String, Object> wire() {
+            var m = new LinkedHashMap<String, Object>();
+            m.put("index", index);
+            m.put("state", state);
+            m.put("reason", reason);
+            m.put("queries", queries);
+            m.put("min_recall", decimal(minRecall, 3));
+            m.put("mean_recall", decimal(meanRecall, 3));
+            m.put("top1_misses", top1Misses);
+            m.put("trigger", trigger);
+            m.put("measured_at", measuredAt == null ? null : measuredAt.truncatedTo(ChronoUnit.SECONDS).toString());
+            m.put("anchor", anchor);
+            m.put("size_ratio", decimal(sizeRatio, 2));
+            m.put("deletes_since_build", decimal(deletesSinceBuild, 3));
+            return m;
+        }
+    }
+
+    /** A number at {@code scale} places, or null for null, NaN or an infinity. */
+    private static BigDecimal decimal(Double value, int scale) {
+        if (value == null || value.isNaN() || value.isInfinite()) {
+            return null;
+        }
+        return BigDecimal.valueOf(value).setScale(scale, RoundingMode.HALF_UP);
+    }
 
     /** The Phase 1 status: the canary half over {@code entries} (any order, any number), the reindex half off. */
     public static PciMaintenanceStatus phase1(List<Entry> entries) {

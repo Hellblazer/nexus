@@ -343,7 +343,7 @@ public final class StatusHandler implements HttpHandler {
          *                      object, the canary's latest results and the reindex half (off in Phase 1). Null omits
          *                      the key: an engine, or a wiring, with no canary source. Entries carry the opaque
          *                      {@code pci_} name and no collection or tenant name, because this route is
-         *                      unauthenticated.
+         *                      unauthenticated: it renders the canary's counts only, not its per-index entries.
          */
         public record ThisEngine(String builderState, Integer building, Integer failing,
                                  java.time.Instant lastDdlPassAt, java.time.Instant passStartedAt,
@@ -669,8 +669,9 @@ public final class StatusHandler implements HttpHandler {
     }
 
     /**
-     * nexus-4lnn1.1.5 ([additive]): {@code this_engine.maintenance}. Recall to three places, the size ratio to two and
-     * the delete fraction to three, as plain decimals (never an exponent); a value that is not finite is null.
+     * nexus-4lnn1.1.5 ([additive]): {@code this_engine.maintenance}. Counts only: this route is unauthenticated, so the
+     * canary's per-index entries (the {@code pci_} names) are not rendered here; they are the {@code canary_indexes} key
+     * of the authenticated {@code GET /v1/admin/chunks-leaves} (Sam, 2026-11-06).
      */
     private static void appendMaintenance(StringBuilder body, dev.nexus.service.vectors.PciMaintenanceStatus m) {
         body.append(",\"maintenance\":{\"reindex\":").append(HttpUtil.jsonString(m.reindex()))
@@ -684,43 +685,7 @@ public final class StatusHandler implements HttpHandler {
             .append(",\"unmeasured\":").append(c.unmeasured())
             .append(",\"last_run_at\":");
         appendSeconds(body, c.lastRunAt());
-        body.append(",\"indexes\":[");
-        boolean first = true;
-        for (var e : c.indexes()) {
-            if (!first) {
-                body.append(',');
-            }
-            first = false;
-            body.append("{\"index\":").append(HttpUtil.jsonString(e.index()))
-                .append(",\"state\":").append(HttpUtil.jsonString(e.state()))
-                .append(",\"reason\":").append(e.reason() == null ? "null" : HttpUtil.jsonString(e.reason()))
-                .append(",\"queries\":").append(e.queries())
-                .append(",\"min_recall\":");
-            appendDecimal(body, e.minRecall(), 3);
-            body.append(",\"mean_recall\":");
-            appendDecimal(body, e.meanRecall(), 3);
-            body.append(",\"top1_misses\":").append(e.top1Misses())
-                .append(",\"trigger\":").append(e.trigger() == null ? "null" : HttpUtil.jsonString(e.trigger()))
-                .append(",\"measured_at\":");
-            appendSeconds(body, e.measuredAt());
-            body.append(",\"anchor\":").append(e.anchor() == null ? "null" : HttpUtil.jsonString(e.anchor()))
-                .append(",\"size_ratio\":");
-            appendDecimal(body, e.sizeRatio(), 2);
-            body.append(",\"deletes_since_build\":");
-            appendDecimal(body, e.deletesSinceBuild(), 3);
-            body.append('}');
-        }
-        body.append("]}}");
-    }
-
-    /** A number as a plain decimal at {@code scale} places, or JSON null for null, NaN or an infinity. */
-    private static void appendDecimal(StringBuilder body, Double value, int scale) {
-        if (value == null || value.isNaN() || value.isInfinite()) {
-            body.append("null");
-        } else {
-            body.append(java.math.BigDecimal.valueOf(value).setScale(scale, java.math.RoundingMode.HALF_UP)
-                .toPlainString());
-        }
+        body.append("}}");
     }
 
     private static void appendChunksLeafBloat(StringBuilder body, ChunksLeafBloat b) {

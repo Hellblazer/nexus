@@ -599,7 +599,8 @@ class StatusHandlerTest {
         assertThat(m.get("reindexing").isNull()).isTrue();
         assertThat(m.get("last_reindex_at").isNull()).isTrue();
         assertThat(m.get("reindexes").asInt()).isZero();
-        assertThat(keys(m.get("canary"))).containsExactly("green", "red", "unmeasured", "last_run_at", "indexes");
+        assertThat(keys(m.get("canary"))).as("counts only: the per-index list is on GET /v1/admin/chunks-leaves")
+            .containsExactly("green", "red", "unmeasured", "last_run_at");
         assertThat(m.at("/canary/green").asInt()).isEqualTo(1);
         assertThat(m.at("/canary/red").asInt()).isEqualTo(1);
         assertThat(m.at("/canary/unmeasured").asInt()).isEqualTo(1);
@@ -607,41 +608,30 @@ class StatusHandlerTest {
             .isEqualTo("2026-10-20T08:01:10Z");
     }
 
+    /**
+     * Sam's ruling of 2026-11-06 (ask pci-names-on-status, option b), on top of his 2026-10-19 one: the route is
+     * unauthenticated, so it carries counts and names no index. The list is on the authenticated
+     * {@code GET /v1/admin/chunks-leaves}.
+     */
     @Test
-    void maintenance_entryHasExactlyTheTwelveDocumentedKeys_keyedByAnOpaqueName_inTheEnginesOrder() throws Exception {
+    void maintenance_namesNoIndex_andCarriesNoIndexesKey() throws Exception {
         var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
         start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, canaryHistory())));
 
-        JsonNode indexes = get().at("/per_collection_indexes/this_engine/maintenance/canary/indexes");
+        HttpResponse<String> resp = http.send(
+            HttpRequest.newBuilder(URI.create(baseUrl + "/v1/status")).GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(resp.statusCode()).isEqualTo(200);
 
-        assertThat(indexes).hasSize(3);
-        assertThat(indexes.get(0).get("state").asText()).as("red first").isEqualTo("red");
-        assertThat(indexes.get(1).get("state").asText()).isEqualTo("unmeasured");
-        assertThat(indexes.get(2).get("state").asText()).isEqualTo("green");
-        for (JsonNode e : indexes) {
-            assertThat(keys(e)).containsExactly("index", "state", "reason", "queries", "min_recall", "mean_recall",
-                "top1_misses", "trigger", "measured_at", "anchor", "size_ratio", "deletes_since_build");
-            assertThat(e.get("index").asText()).matches("^pci_[0-9a-f]{24}$");
-        }
+        assertThat(resp.body()).as("no pci_ name anywhere on the unauthenticated route").doesNotContain("pci_");
+        JsonNode canary = MAPPER.readTree(resp.body()).at("/per_collection_indexes/this_engine/maintenance/canary");
+        assertThat(canary.has("indexes")).isFalse();
+        assertThat(canary.at("/red").asInt()).as("the counts still cover every result").isEqualTo(1);
+        assertThat(canary.at("/unmeasured").asInt()).isEqualTo(1);
+        assertThat(canary.at("/green").asInt()).isEqualTo(1);
     }
 
     @Test
-    void maintenance_anUnmeasuredEntryCarriesItsQueries_andNoRecall() throws Exception {
-        var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
-        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, canaryHistory())));
-
-        JsonNode unmeasured = get().at("/per_collection_indexes/this_engine/maintenance/canary/indexes/1");
-
-        assertThat(unmeasured.get("reason").asText()).isEqualTo("no_queries");
-        assertThat(unmeasured.get("queries").asInt()).as("the ring's count, not zero").isEqualTo(2);
-        assertThat(unmeasured.get("min_recall").isNull()).isTrue();
-        assertThat(unmeasured.get("mean_recall").isNull()).isTrue();
-        assertThat(unmeasured.get("anchor").isNull()).isTrue();
-    }
-
-    @Test
-    void maintenance_rendersTheListAsCappedAndOrderedByTheStatusObject()
-            throws Exception {
+    void maintenance_aListLongerThanTheCapStillRendersCountsOverEveryResult() throws Exception {
         var all = new java.util.ArrayList<PciMaintenanceStatus.Entry>();
         for (int n = 0; n < 80; n++) {
             all.add(entry(String.format("pci_%024x", n), n % 10 == 0 ? "red" : "green", null, 10, 0.99, 0.99,
@@ -653,13 +643,8 @@ class StatusHandlerTest {
 
         JsonNode canary = get().at("/per_collection_indexes/this_engine/maintenance/canary");
 
-        assertThat(canary.get("indexes")).hasSize(64);
         assertThat(canary.get("red").asInt()).isEqualTo(8);
         assertThat(canary.get("green").asInt()).isEqualTo(72);
-        for (int i = 0; i < 8; i++) {
-            assertThat(canary.at("/indexes/" + i + "/state").asText()).isEqualTo("red");
-        }
-        assertThat(canary.at("/indexes/8/state").asText()).isEqualTo("green");
     }
 
     private static List<String> keys(JsonNode o) {

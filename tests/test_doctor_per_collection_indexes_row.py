@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -326,11 +325,11 @@ def test_the_golden_off_body_passes_with_the_switch_note() -> None:
 # nexus-4lnn1.1.5 (RDR-230 Technical Design 7): this_engine.maintenance. The row that reads it and warns on a red canary
 # is nexus-dxsjc's; here the new bodies must round-trip: the row reads the same verdict from a body with the object as
 # from the same body without it, and the object has the shape the engine renders (the Java test pins the same keys).
+# Sam's ruling of 2026-11-06 (ask pci-names-on-status): /v1/status is unauthenticated, so the canary there is counts
+# only; the per-index list is on the authenticated GET /v1/admin/chunks-leaves (key canary_indexes).
 
 _MAINTENANCE_KEYS = ["reindex", "reindexing", "last_reindex_at", "reindexes", "canary"]
-_CANARY_KEYS = ["green", "red", "unmeasured", "last_run_at", "indexes"]
-_CANARY_ENTRY_KEYS = ["index", "state", "reason", "queries", "min_recall", "mean_recall", "top1_misses", "trigger",
-                      "measured_at", "anchor", "size_ratio", "deletes_since_build"]
+_CANARY_KEYS = ["green", "red", "unmeasured", "last_run_at"]
 _WITH_MAINTENANCE = ("holder_with_canary", "standby_with_canary_history", "never_held_lock")
 
 
@@ -362,25 +361,20 @@ def test_the_golden_maintenance_object_has_the_documented_shape() -> None:
         assert list(m["canary"]) == _CANARY_KEYS, name
         # Phase 1: the reindex half is fixed.
         assert (m["reindex"], m["reindexing"], m["last_reindex_at"], m["reindexes"]) == ("off", None, None, 0), name
-        entries = m["canary"]["indexes"]
-        assert len(entries) <= 64, name
-        counts = {"green": 0, "red": 0, "unmeasured": 0}
-        for e in entries:
-            assert list(e) == _CANARY_ENTRY_KEYS, (name, e)
-            assert re.fullmatch(r"pci_[0-9a-f]{24}", e["index"]), (name, e["index"])
-            counts[e["state"]] += 1
-        assert counts == {k: m["canary"][k] for k in counts}, name  # the fixture lists every result it counts
 
 
-def test_the_golden_canary_history_lists_red_first_and_an_unmeasured_entry_carries_its_queries() -> None:
-    entries = _GOLDEN["holder_with_canary"]["this_engine"]["maintenance"]["canary"]["indexes"]
-    assert [e["state"] for e in entries] == ["red", "unmeasured", "green"]
-    unmeasured = entries[1]
-    assert unmeasured["reason"] == "no_queries" and unmeasured["queries"] > 0
-    assert unmeasured["min_recall"] is None and unmeasured["mean_recall"] is None
+def test_no_golden_status_body_carries_a_pci_name_or_a_per_index_list() -> None:
+    """The route is unauthenticated: counts only, no index name anywhere (Sam, 2026-10-19 and 2026-11-06)."""
+    assert "pci_" not in json.dumps(_GOLDEN)
+    for name in _WITH_MAINTENANCE:
+        assert "indexes" not in _GOLDEN[name]["this_engine"]["maintenance"]["canary"], name
+
+
+def test_the_golden_canary_counts_and_the_empty_engine() -> None:
+    counts = _GOLDEN["holder_with_canary"]["this_engine"]["maintenance"]["canary"]
+    assert (counts["green"], counts["red"], counts["unmeasured"]) == (1, 1, 1)
     empty = _GOLDEN["never_held_lock"]["this_engine"]["maintenance"]["canary"]
-    assert (empty["green"], empty["red"], empty["unmeasured"], empty["last_run_at"], empty["indexes"]) == (
-        0, 0, 0, None, [])
+    assert (empty["green"], empty["red"], empty["unmeasured"], empty["last_run_at"]) == (0, 0, 0, None)
 
 
 def test_the_older_golden_bodies_carry_no_maintenance_key_and_read_as_before() -> None:
