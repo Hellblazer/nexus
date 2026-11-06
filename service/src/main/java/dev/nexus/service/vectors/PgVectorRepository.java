@@ -9792,7 +9792,8 @@ FROM scope s
         beforeSensitiveLookupHookForTests = hook;
     }
 
-    private static void runBeforeSensitiveLookupHook() {
+    /** Run the seam if a test installed one; the catalog by-address reads call it too (CatalogRepository). */
+    public static void runBeforeSensitiveLookupHook() {
         Runnable h = beforeSensitiveLookupHookForTests;
         if (h != null) h.run();
     }

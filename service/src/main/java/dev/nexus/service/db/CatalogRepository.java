@@ -8961,7 +8961,12 @@ public final class CatalogRepository {
                        .limit(1).fetchOne();
             if (r == null) return null;
             Map<String, Object> m = chunkRow(chash, r.value1(), r.value2());
-            m.put("sensitive", !ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, List.of(chash)).isEmpty());
+            dev.nexus.service.vectors.PgVectorRepository.runBeforeSensitiveLookupHook();
+            boolean sensitive = !ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, List.of(chash)).isEmpty();
+            // The lookup is a second statement: an owner flagged after the read is seen here. Under exclude that
+            // chunk is a miss too, so the text is never returned with sensitive=true (the F2 rule for search and get).
+            if (excludeSensitive && sensitive) return null;
+            m.put("sensitive", sensitive);
             return m;
         });
     }
@@ -9048,7 +9053,12 @@ public final class CatalogRepository {
             m.put("doc_id",              docId);
             m.put("chunk_text",          textVal);
             m.put("metadata",            metaVal != null ? parseMetaJson(metaVal.data()) : Map.of());
-            m.put("sensitive", !ChunkSensitivity.sensitiveChashes(ctx, tenant, colVal, List.of(chash)).isEmpty());
+            dev.nexus.service.vectors.PgVectorRepository.runBeforeSensitiveLookupHook();
+            boolean sensitive = !ChunkSensitivity.sensitiveChashes(ctx, tenant, colVal, List.of(chash)).isEmpty();
+            // The lookup is a second statement: an owner flagged after the read is seen here. Under exclude that
+            // chunk is a miss too, so the text is never returned with sensitive=true (the F2 rule for search and get).
+            if (excludeSensitive && sensitive) return null;
+            m.put("sensitive", sensitive);
             return m;
         });
     }

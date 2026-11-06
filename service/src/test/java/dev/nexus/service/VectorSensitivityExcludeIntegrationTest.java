@@ -915,6 +915,32 @@ class VectorSensitivityExcludeIntegrationTest {
     @FunctionalInterface
     private interface ThrowingRunnable { void run() throws Exception; }
 
+    /**
+     * The by-address reads (confirmation review of the F1-F5 round, nexus-rfvyy.7.4): the flag lookup is a second
+     * statement after the read, so an owner flagged in between is seen only there. Under exclude that chunk is a miss;
+     * the text is never served with sensitive=true. Without exclude the read is served, flagged.
+     */
+    @Test
+    void resolveRoutes_aDocumentFlaggedAfterTheReadIsNotServedUnderExclude() throws Exception {
+        String span = "/v1/catalog/resolve_span?collection=" + coll(384) + "&span_chash=" + hex("n1");
+        String chash = "/v1/catalog/resolve_chash?chash=" + hex("n1") + "&prefer_collection=" + coll(384);
+        withFlagAppearingBetweenReadAndLookup(List.of("n1"), () -> {
+            assertThat(getCatalog(span + "&sensitivity=exclude").statusCode())
+                .as("resolve_span: flagged between read and lookup, a miss under exclude").isEqualTo(404);
+            var plain = getCatalog(span);
+            assertThat(plain.statusCode()).isEqualTo(200);
+            assertThat(MAPPER.readTree(plain.body()).get("sensitive").asBoolean())
+                .as("without exclude the same window serves it, flagged").isTrue();
+            var r = getCatalog(chash + "&sensitivity=exclude");
+            if (r.statusCode() == 200) {
+                assertThat(MAPPER.readTree(r.body()).get("sensitive").asBoolean())
+                    .as("resolve_chash under exclude never serves text flagged sensitive").isFalse();
+            } else {
+                assertThat(r.statusCode()).isEqualTo(404);
+            }
+        });
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("routes")
     void route_aDocumentFlaggedAfterTheSearchIsDroppedFromAnExcludedPage(Route route) throws Exception {
