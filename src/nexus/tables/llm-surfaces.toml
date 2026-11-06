@@ -134,10 +134,7 @@ match = { surface = "aspect_worker_drain" }
 census_row = 2
 label = "Aspect extraction: worker drain"
 sends = "queued or on-disk document content, passed to the LLM"
-targets = [
-    "nexus.aspect_worker:AspectExtractionWorker._process_row",
-    "nexus.aspect_worker:AspectExtractionWorker._process_batch",
-  ]
+targets = ["nexus.aspect_worker:AspectExtractionWorker._extract_tuple_rows"]
 endpoints = ["anthropic"]
 behaviour = "skip"
 phase = 1

@@ -388,6 +388,27 @@ def aspects_requeue_failed(
         click.echo(f"aspects queue: no dead tasks{scope}.")
         return
 
+    # RDR-243 census row 1: a revive is an enqueue, so it passes the one enqueue gate. A dead
+    # task whose document was flagged after it died is not revived; it stays dead (the body is
+    # identity only, never text, and retention clears it). A catalog that cannot answer revives
+    # nothing, before any write.
+    from nexus.aspect_worker import sensitive_enqueue_filter  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.doc_sensitivity import SensitivityUnknown  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    idents = [i for t in dead if (i := _task_identity(t)) is not None]
+    try:
+        clear = {r["doc_id"] for r in sensitive_enqueue_filter(idents)}
+    except SensitivityUnknown as exc:
+        click.echo(
+            "The catalog could not say whether the dead tasks' documents are sensitive "
+            f"({exc.detail}). Nothing was revived.",
+            err=True,
+        )
+        raise SystemExit(1) from exc
+    flagged = [t for t in dead if (i := _task_identity(t)) is not None and i["doc_id"] not in clear]
+    flagged_ids = {t.id for t in flagged}
+    dead = [t for t in dead if t.id not in flagged_ids]
+
     if dry_run:
         click.echo(f"Would revive {len(dead)} dead task(s){scope}:")
         for task in dead:
@@ -396,9 +417,21 @@ def aspects_requeue_failed(
                 f"  {ident.get('collection', '?')}  {ident.get('source_path', '?')}"
                 f"  (attempts={task.attempts})"
             )
+        if flagged:
+            click.echo(f"Would leave {len(flagged)} dead task(s): the document is flagged sensitive:")
+            for task in flagged:
+                ident = _task_identity(task) or {}
+                click.echo(f"  {ident.get('collection', '?')}  {ident.get('source_path', '?')}  ({ident.get('doc_id', '?')})")
         click.echo("Re-run without --dry-run to revive.")
         return
 
+    for task in flagged:
+        ident = _task_identity(task) or {}
+        click.echo(
+            f"Left dead task {task.id} dead: its document {ident.get('doc_id', '?')} "
+            f"({ident.get('collection', '?')} {ident.get('source_path', '?')}) is flagged sensitive.",
+            err=True,
+        )
     revived = 0
     for task in dead:
         ident = _task_identity(task)
@@ -416,5 +449,6 @@ def aspects_requeue_failed(
             )
         )
         revived += 1
-    click.echo(f"Revived {revived} dead task(s){scope} to available.")
+    left = f"; left {len(flagged)} dead (sensitive document)" if flagged else ""
+    click.echo(f"Revived {revived} dead task(s){scope} to available{left}.")
 

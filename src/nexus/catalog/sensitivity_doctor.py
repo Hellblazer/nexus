@@ -107,24 +107,17 @@ def check_sensitive_in_aspect_eligible(
 
 
 def _queued_doc_ids(queue: Any) -> set[str]:
-    """Every doc id with a task in either side of the aspect queue: the old table's waiting and failed
-    rows, and the ``aspects`` tuple subspace (every claim state, a dead task included)."""
+    """Every doc id with a task in the ``aspects`` tuple subspace (every claim state, a dead task
+    included). The old queue table and its read routes are retired (nexus-hbnml); rows an engine still
+    holds in a kept table are drained into the subspace at engine start, so they show here after that."""
     from nexus.commands.aspects import _task_identity  # noqa: PLC0415 — deferred, the verb module has a heavy import graph
     from nexus.db.t2.http_aspect_queue import (  # noqa: PLC0415 — deferred, CLI startup cost
         ASPECTS_KEYS,
         ASPECTS_SUBSPACE,
-        AspectQueueListWaitingUnsupportedError,
         aspects_census,
     )
 
     ids: set[str] = set()
-    try:
-        waiting = queue.list_waiting()
-    except AspectQueueListWaitingUnsupportedError:
-        waiting = queue.list_pending()
-    ids.update(r.doc_id for r in waiting if r.doc_id)
-    ids.update(r.doc_id for r in queue.list_failed() if r.doc_id)
-
     tuples = queue._tuples()
     census = aspects_census(tuples)
     if census is not None and (census.available + census.claimed + census.dead) > 0:

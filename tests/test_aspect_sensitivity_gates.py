@@ -230,6 +230,45 @@ def test_the_enqueue_filter_drops_flagged_rows_and_fails_closed(monkeypatch: pyt
         sensitive_enqueue_filter(rows)
 
 
+def _dead(db: Any, doc_id: str, source: str) -> None:
+    """A task of *doc_id* that ran out of attempts: out, claimed, nacked dead."""
+    _out(db, doc_id, source)
+    got = db.tuples.inp(_SUB, dict(_KEYS), claimant="t-dead", lease_s=60)
+    assert got is not None and json.loads(got[0].body)["doc_id"] == doc_id, "harness: the oldest available task is this one"
+    db.tuples.nack(got[1], "t-dead", dead=True)
+
+
+def _states(db: Any) -> dict[str, str]:
+    return {json.loads(r.body)["doc_id"]: r.claim_state for r in db.tuples.rd(_SUB, dict(_KEYS), n=300)}
+
+
+def test_requeue_failed_leaves_a_dead_task_of_a_document_flagged_after_it_died_dead(db: Any, logs: _Log) -> None:
+    """A revive is an enqueue: ``nx aspects requeue-failed`` passes the dead tasks through the one enqueue
+    gate (nexus-hbnml). The flagged document's task stays dead and is named on stderr; the clear one is
+    revived. The dry run lists the skip and writes nothing."""
+    from click.testing import CliRunner
+
+    from nexus.commands.aspects import aspects_group
+
+    flagged, clear = _doc("requeue-flagged"), _doc("requeue-clear")
+    _dead(db, flagged, "/f.md")
+    _dead(db, clear, "/c.md")
+    _flag(flagged)
+
+    dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "Would revive 1 dead task(s)" in dry.output and "/c.md" in dry.output, dry.output
+    assert "Would leave 1 dead task(s): the document is flagged sensitive" in dry.output and flagged in dry.output, dry.output
+    assert _states(db) == {flagged: "dead", clear: "dead"}, "a dry run writes nothing"
+
+    result = CliRunner().invoke(aspects_group, ["requeue-failed"])
+    assert result.exit_code == 0, result.output
+    assert f"its document {flagged}" in result.output and "is flagged sensitive" in result.output, result.output
+    assert "Revived 1 dead task(s) to available; left 1 dead (sensitive document)." in result.output, result.output
+    assert _states(db) == {flagged: "dead", clear: "available"}
+    assert [e["tumbler"] for e in logs.named("aspect_enqueue_skipped_sensitive")] == [flagged, flagged]
+
+
 # ── Row 2: the worker drain after a late flag ───────────────────────────────────────────────────
 
 

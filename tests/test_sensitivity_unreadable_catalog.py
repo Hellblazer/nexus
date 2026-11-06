@@ -8,8 +8,9 @@ control (a readable catalog) already pinned beside it in ``tests/test_aspect_sen
 * ``read_source`` answers ``ReadFail("transport")`` (retried), never the text;
 * ``extract_aspects`` and ``extract_aspects_batch`` raise ``SensitivityUnknown`` with no prompt built;
 * the ``--validate-sample`` frame validates nothing and says why;
-* ``nx aspects requeue-failed`` keeps the failed row and says why;
-* the table drain retries every row of a batch; the enqueue hook queues nothing.
+* ``nx aspects requeue-failed`` revives nothing, says why and exits 1 (the dry run too);
+* the enqueue hook queues nothing. The drain's own unknown-flag retry is pinned in
+  ``tests/test_aspect_sensitivity_gates.py`` (the tuple drain is the only drain since nexus-hbnml).
 
 VACUITY: for each case the ``except SensitivityUnknown`` (or the ``raise SensitivityUnknown`` that feeds a
 propagating one) was turned into a swallow and the case went red; the runs are in the fix-round report.
@@ -23,8 +24,6 @@ from typing import Any
 import pytest
 
 from nexus import doc_sensitivity
-from nexus.aspect_extractor import AspectRecord
-from nexus.aspect_worker import AspectExtractionWorker
 from nexus.doc_sensitivity import SensitivityUnknown
 from nexus.sensitivity import llm_bound
 from tests.test_aspect_sensitivity_gates import (  # noqa: F401 — fixtures reused by name
@@ -104,70 +103,39 @@ def test_the_validation_sample_validates_nothing_and_says_why(
     assert logs.named("validate_sample_sensitivity_unknown")
 
 
-def test_requeue_failed_keeps_the_failed_row_when_the_catalog_cannot_answer(
+def test_requeue_failed_revives_nothing_when_the_catalog_cannot_answer(
     db: Any, logs: _Log, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from click.testing import CliRunner
 
     from nexus.commands.aspects import aspects_group
-    from tests._aspect_table_producer import table_producer
+    from tests.test_aspect_sensitivity_gates import _dead, _states
 
     doc = _doc("requeue-unknown")
-    with table_producer():
-        db.aspect_queue.enqueue(_COLL, "/u.md", content=_SECRET, doc_id=doc)
-        assert db.aspect_queue.claim_next() is not None
-        db.aspect_queue.mark_failed(_COLL, "/u.md", "boom")
+    _dead(db, doc, "/u.md")
     down = lambda: (_ for _ in ()).throw(ConnectionError("catalog unreachable"))  # noqa: E731
     monkeypatch.setattr(doc_sensitivity, "_catalog_reader", down)
 
-    result = CliRunner().invoke(aspects_group, ["requeue-failed"])
-
-    assert result.exit_code == 0, result.output
-    assert "the catalog could not say whether its document is sensitive" in result.output, result.output
-    assert _task_docs(db) == [], "no task was made from a row whose document may be sensitive"
-    assert len(db.aspect_queue.list_failed()) == 1, "the failed row stays for the next run"
-
-
-def test_a_table_batch_retries_every_row_when_the_catalog_cannot_answer(
-    db: Any, model: list[dict[str, Any]], logs: _Log, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests._aspect_table_producer import table_producer
-
-    docs = [_doc(f"batch-unknown-{i}") for i in range(2)]
-    with table_producer():
-        for i, d in enumerate(docs):
-            db.aspect_queue.enqueue(_COLL, f"/u{i}.md", content=_SECRET, doc_id=d)
-        rows = db.aspect_queue.claim_batch(10)
-    assert len(rows) == 2
-    down = lambda: (_ for _ in ()).throw(ConnectionError("catalog unreachable"))  # noqa: E731
-    monkeypatch.setattr(doc_sensitivity, "_catalog_reader", down)
-
-    AspectExtractionWorker(poll_interval=0.1)._process_batch(rows)
-
-    assert model == [], "nothing reached the model"
-    assert logs.named("aspect_worker_sensitivity_unknown")
-    assert not db.aspect_queue.is_drained(), "the rows were retried or failed, never dropped as clear"
+    for argv in (["requeue-failed", "--dry-run"], ["requeue-failed"]):
+        result = CliRunner().invoke(aspects_group, argv)
+        assert result.exit_code == 1, (argv, result.output)
+        assert "could not say whether the dead tasks' documents are sensitive" in result.output, result.output
+        assert "Nothing was revived." in result.output, result.output
+    assert _states(db) == {doc: "dead"}, "a task whose document may be sensitive stays dead"
 
 
-@pytest.mark.parametrize("producer", ["tuples", "table"])
 def test_the_enqueue_hook_queues_nothing_when_the_catalog_cannot_answer(
-    db: Any, logs: _Log, producer: str, monkeypatch: pytest.MonkeyPatch,
+    db: Any, logs: _Log, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nexus.aspect_worker import aspect_extraction_enqueue_hook
-    from tests._aspect_table_producer import table_producer
 
     doc = _doc("enqueue-unknown")
     down = lambda: (_ for _ in ()).throw(ConnectionError("catalog unreachable"))  # noqa: E731
     monkeypatch.setattr(doc_sensitivity, "_catalog_reader", down)
 
-    if producer == "tuples":
-        aspect_extraction_enqueue_hook("/u.md", _COLL, _SECRET, doc_id=doc)
-        queued = _task_docs(db)
-    else:
-        with table_producer():
-            aspect_extraction_enqueue_hook("/u.md", _COLL, _SECRET, doc_id=doc)
-            queued = [r.doc_id for r in db.aspect_queue.claim_batch(10)]
+    aspect_extraction_enqueue_hook("/u.md", _COLL, _SECRET, doc_id=doc)
+    queued = _task_docs(db)
 
-    assert queued == [], f"{producer}: a flag that cannot be read queues nothing"
+    assert queued == [], "a flag that cannot be read queues nothing"
     assert logs.named("aspect_enqueue_skipped_sensitivity_unknown")
     assert json.dumps(queued) == "[]"

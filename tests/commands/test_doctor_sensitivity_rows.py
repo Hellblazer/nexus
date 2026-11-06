@@ -183,6 +183,38 @@ def test_catalog_doctor_fails_on_a_flagged_document_with_an_aspect_row_and_warns
 
 
 @substrate
+def test_the_default_queue_read_finds_a_dead_tuple_task_of_a_flagged_document(t2_service_env) -> None:
+    """nexus-hbnml: the row's DEFAULT ``queued_doc_ids`` (no injection) reads the ``aspects`` tuple
+    subspace. Before the fix it called the retired table's ``list_waiting``; the AttributeError landed in
+    the row's catch-all and the row said NOT APPLICABLE, so a flagged document with a queued task never
+    failed. A dead task counts: ``nx aspects requeue-failed`` could bring it back."""
+    import json as _json
+
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.db.t2.http_tuple_store import HttpTupleStore
+
+    coll = "knowledge__hbnmldoc__bge-base-en-v15-768__v1"
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner("hbnmldoc-owner", owner_type="curator", tumbler_prefix="73.1")
+        doc = str(cat.register(owner, "queued", content_type="knowledge", physical_collection=coll,
+                               source_uri="file:///hbnmldoc/q.md", file_path="q.md"))
+        cat.set_sensitivity([doc], True, reason="hbnml")
+    keys = {"queue": "aspects"}
+    body = _json.dumps({"collection": coll, "source_path": "q.md", "doc_id": doc, "content_hash": "h"},
+                       separators=(",", ":"))
+    store = HttpTupleStore()
+    store.out("aspects", keys, None, body, nonce=doc)
+    got = store.inp("aspects", keys, claimant="hbnml-dead", lease_s=60)
+    assert got is not None
+    store.nack(got[1], "hbnml-dead", dead=True)
+
+    report = sd.check_sensitive_with_aspects()
+    assert report["status"] == sd.FAIL, report
+    assert [f["tumbler"] for f in report["findings"]] == [doc]
+    assert report["findings"][0]["why"] == "has a queued aspect task"
+
+
+@substrate
 def test_nx_doctor_supplementary_rows_are_not_applicable_on_a_virgin_tenant_and_never_gate(t2_service_env, capsys) -> None:
     from nexus.commands import doctor as doctor_mod
 
