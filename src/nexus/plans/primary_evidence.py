@@ -1724,6 +1724,10 @@ def select_primary_evidence(
             try:
                 got = fetch_chunks(collection, chashes)
             except Exception as exc:  # noqa: BLE001 — those chunks are missing and said so
+                from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+                if isinstance(exc, SensitivityExcludeUnavailable):
+                    raise  # RDR-243 review r1 F5: a refused read is not a missing chunk; the primary read refuses
                 _log.warning("primary_evidence_fetch_failed", collection=collection, count=len(chashes), error=str(exc))
                 fetch_errors += 1
                 continue

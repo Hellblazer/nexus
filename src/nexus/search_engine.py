@@ -39,6 +39,7 @@ from nexus.corpus import (
 from nexus.db.http_vector_client import (
     HttpVectorClient,
     PerCollectionEnvelopeError,
+    SensitivityExcludeUnavailable,
     VectorServiceError,
     per_collection_route_enabled,
     route_lexical_enabled,
@@ -1743,6 +1744,8 @@ def search_cross_corpus(
             else:
                 lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
                                            where=effective_where, sensitivity=sensitivity, **chash_kw)
+        except SensitivityExcludeUnavailable:
+            raise  # RDR-243 review r1 F5: a refusal is not a lexical-leg failure, and `retry without --lexical` would be wrong advice
         except VectorServiceError as lex_exc:
             raise LexicalLegUnavailableError(
                 f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
@@ -1829,6 +1832,11 @@ def search_cross_corpus(
                 seen_ids = {r.get("id") for r in raw}
                 raw = list(raw) + [r for r in lex_raw
                                    if r.get("id") not in seen_ids]
+        except SensitivityExcludeUnavailable:
+            # RDR-243 review r1 F5: the engine cannot be shown to filter sensitive chunks. That holds for every
+            # collection, so it is not one collection's failure to isolate, and a per-collection fallback
+            # would re-probe and could return a partial result that looks complete.
+            raise
         except VectorServiceError as exc:
             # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
             # unservable collection in the batch (embedding-space mismatch,
@@ -2083,6 +2091,8 @@ def search_cross_corpus(
                 consequence="this group is searched by the batched /search path",
             )
             return None
+        except SensitivityExcludeUnavailable:
+            raise  # RDR-243 review r1 F5: a refused read is not this group's failure
         except VectorServiceError as exc:
             if allow_split and len(group) > 1 and _is_mixed_model_error(exc):
                 _log.warning(
