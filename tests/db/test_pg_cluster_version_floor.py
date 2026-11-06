@@ -125,3 +125,34 @@ def test_the_supervisor_refuses_before_discovery_with_the_message_unwrapped(
     assert isinstance(err.value.__cause__, PgClusterBelowFloorError)
     assert "A local cluster older than PostgreSQL 17" in str(err.value)
     assert "Check the Postgres data directory" not in str(err.value)
+
+
+def test_a_running_old_cluster_takes_the_provision_fast_path_unrefused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The hoisted refusal sits after the fast path: a serving cluster is the engine's to refuse.
+    config_dir = tmp_path / "cfg"
+    (config_dir / "postgres").mkdir(parents=True)
+    (config_dir / "postgres" / "PG_VERSION").write_text("16\n")
+    (config_dir / pp.CREDENTIALS_FILENAME).write_text(f"PG_PORT=5433\nNX_SERVICE_TOKEN={'t' * 64}\n")
+
+    def no_binaries():
+        raise pp.PgBinaryNotFoundError("none in this test")
+
+    monkeypatch.setattr(pp, "refuse_root", lambda: None)
+    monkeypatch.setattr(pp, "refuse_smart_app_control", lambda: None)
+    monkeypatch.setattr(pp, "_port_accepting", lambda host, port: True)
+    monkeypatch.setattr(pp, "discover_pg_binaries", no_binaries)
+    assert pp.provision(config_dir).already_provisioned
+
+
+def test_the_quiesce_restart_refuses_before_its_conf_rewrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.daemon import replace_quiesce
+
+    pgdata = _pgdata(tmp_path, "16")
+    (tmp_path / pp.CREDENTIALS_FILENAME).write_text(f"PG_DATA={pgdata}\nPG_PORT=5433\n")
+    rewrites: list[Path] = []
+    monkeypatch.setattr(pp, "apply_managed_conf_before_start", lambda d, port: rewrites.append(d))
+    with pytest.raises(PgClusterBelowFloorError):
+        replace_quiesce.default_ops(tmp_path).start_pg()
+    assert rewrites == []
