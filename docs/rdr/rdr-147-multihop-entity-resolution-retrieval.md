@@ -2,7 +2,8 @@
 title: "Multi-hop entity-resolution retrieval: an exact-key resolve step and a resolution repair inside the coverage boundary"
 id: RDR-147
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-06
 resumed_date: 2026-11-03
 priority: high
 author: Hal Hildebrand
@@ -10,7 +11,7 @@ reviewed-by: self
 created: 2026-06-03
 accepted_date: 2026-11-03
 deferred_date: 2026-07-08
-deferred_reason: "All 11 tracking beads, including epic nexus-bwct4, are DEFERRED (P1/P2/P3 rungs incl. entity-linker hook, resolve operator, type-mismatch trigger, phase-review gates, E2E/MVV) as of 2026-07-08. Corrects 2026-08-18 audit finding: this deferral was visible in beads but not reflected in the RDR frontmatter, the audit's highest-value single correction."
+deferred_reason: "Historical: the June design and its 11 beads were deferred 2026-07-08; the redesign resumed 2026-11-03 (nexus-t9npq) and was accepted that day."
 related_issues: []
 ---
 
@@ -22,8 +23,8 @@ related_issues: []
 ## Revision note (2026-11-03, nexus-t9npq)
 
 This revision replaces the June 2026 design. It is a redesign, not an anchor
-refresh, and it needs a new gate before any implementation bead starts. The
-status stays `deferred`; Sam moves every lifecycle step.
+refresh, and it needed a new gate before any implementation bead started. The
+status then stayed `deferred` until Sam moved it (accepted 2026-11-03).
 
 What changed, and why:
 
@@ -798,7 +799,10 @@ where evidence is seen.
   merged join; the notice says so; `no_grow` keeps such answers from growing a
   plan (a library plan that answered still has its success counted, as for a
   partial answer today); the MVV reports precision split by `generated_on_join`, and the held-out
-  set counts answered outcomes as well as firings.
+  set counts answered outcomes as well as firings. Since Phase 2 the switch is on
+  by default, so the remaining guards are the notice and the `entity.collections`
+  requirement; option-1 precision is unmeasured beyond 2 of 2 (147-research-14),
+  and nexus-bwct4.4 measures it.
 
 ### Failure Modes
 
@@ -980,7 +984,10 @@ a `$ref` step") is dropped: it already works.
      precision 1.00). Then a fresh MVV run on a reseeded sandbox.
 3. **Gate condition (Gap 4).** The resolution branch fires on the HERB issue
    questions and does not fire on a held-out set of single-hop questions; count
-   both and record the counts.
+   both and record the counts. As measured, the held-out count (entered 0 of 20)
+   is structural: 12 questions had no key in their anchors and 8 never reached
+   the repair, so none had both conjuncts of the gate, and its selectivity is not
+   yet shown (close critique r2; a key-bearing held-out arm is nexus-bwct4.4).
 4. **Generation after an entered join (option 1, Sam 2026-11-05;
    147-research-13).** Added after the 2026-11-05 MVV, where the re-check
    rejected 4 of 15 entered joins: when the branch entered and merged at least
@@ -1012,7 +1019,7 @@ it off, and an unrecognised value reads as off. An install with no
 `entity.collections` configured does not consider the branch at all, so its
 repair and wire are as before RDR-147. The preconditions, as measured
 (147-research-17): the MVV green, P2 29 of 29, the single-hop held-out set
-entered 0 of 20, and precision on `generated_on_join` answers reported with
+entered 0 of 20 (structural, see Step 4 sub-step 3), and precision on `generated_on_join` answers reported with
 n = 0 in the final MVV (every entered join, 8 of 8, passed the re-check; the only live option-1
 answers are 2 of 2 correct on 2026-11-06, 147-research-14). The linker stays off.
 
@@ -1141,3 +1148,4 @@ plus tests on the MVV path (resolve, the repair branch, entity keys), and about
 - 2026-11-06: wording follows the reviewed branch (c) code (c764cc95f, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted; and the anchor domain (Sam's 2026-11-06 decision) in Scope Verification.
 - 2026-11-06: close-time critique (partial, 0 Critical, 3 Significant) answered in the text: the scan reads the coverage anchors, not all evidence, and the HERB backend question stays declined (Gap 3, Approach, Consequences); the final MVV result and its F1 (147-research-17) in Scope Verification and the ladder; the scorecard path; Phase 2 turned on (Sam, nexus-bwct4.2: on by default, silent with no entity config; the bead closes on develop CI); prerequisite and Assumption #2 checkboxes dispositioned.
 - 2026-11-06: the last two fix checks of the day (both PASS) observations applied: the backend question's 8 runs and id counts cited to their row files, the F1 gap's later-work bead scoped, Phase 2 recorded as turned on until its bead closes.
+- 2026-11-06: close critique r2 (partial, 0 Critical, 3 Significant; T2 `147-close-critique-2026-11-06-r2`): the held-out 0 of 20 marked structural and option-1 precision as unmeasured, both carried by nexus-bwct4.4 (Sam: close with the gap as a bead); the frontmatter deferral and the revision note put in the past tense.
