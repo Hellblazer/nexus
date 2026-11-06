@@ -1557,15 +1557,15 @@ def refuse_cluster_below_floor(pgdata: Path) -> None:
     except (OSError, UnicodeDecodeError):
         return
     head = text.split(".", 1)[0]
-    if not head.isdigit() or int(head) >= PG_VERSION_FLOOR:
+    if not (head.isascii() and head.isdigit()) or int(head) >= PG_VERSION_FLOOR:
         return
+    # The remedy comes before the path: the supervisor's last-error line is cut at 600 characters.
     raise PgClusterBelowFloorError(
-        f"the local cluster at {pgdata} was created by PostgreSQL {text}, and a cluster keeps the version "
-        f"that created it; nexus needs PostgreSQL {PG_VERSION_FLOOR} or newer, so it was not started. "
-        f"Upgrade it to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS), or, "
-        "if you do not need its data, move the directory aside and re-run nx init: "
-        "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md "
-        "(section 'A local cluster older than PostgreSQL 17')"
+        f"the local PostgreSQL cluster was created by PostgreSQL {text} and nexus needs {PG_VERSION_FLOOR} or "
+        f"newer, so it was not started. Upgrade it with pg_upgrade, or move it aside and re-run nx init if you "
+        "do not need its data: docs/migration-runbook.md, section 'A local cluster older than PostgreSQL 17' "
+        "(https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md). "
+        f"Data directory: {pgdata}"
     )
 
 
@@ -3439,6 +3439,12 @@ def _provision_impl(
                 result.already_provisioned = True
                 result.port = stored_port
                 return result
+
+    # ── Refuse a data directory below the PostgreSQL floor (nexus-hck2c) ──────
+    # Before binary discovery and the conf rewrite: an old cluster is left as it
+    # was, and an install with no extracted bundle reads this, not "binaries not
+    # found". _start_cluster checks again for its other callers.
+    refuse_cluster_below_floor(pgdata)
 
     # ── Discover binaries ──────────────────────────────────────────────────────
     bins = discover_pg_binaries()
