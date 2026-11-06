@@ -1149,8 +1149,13 @@ public final class VectorHandler implements HttpHandler {
      * }
      * </pre>
      *
-     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}, or, under
+     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...], "sensitives":[...]}, or, under
      * {@code include_non_live=true}, {"ids":[...], "metadatas":[...]} only.
+     *
+     * <p>{@code "sensitivity": "exclude"} (nexus-rfvyy.7.4, RDR-243; any other value is a 400, absent or null is the
+     * read as it was) drops, inside the statement, every chunk with a live sensitive owner, on both branches.
+     * {@code sensitives} is a list of booleans parallel to {@code ids}: true when any live owner of the chunk is
+     * sensitive, from one batched lookup over the returned chashes.
      */
     private void handleGet(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1166,12 +1171,14 @@ public final class VectorHandler implements HttpHandler {
         int offset                     = optInt(body, "offset", 0);
         boolean includeSourceUri       = optBool(body, "include_source_uri", false);
         boolean includeNonLive         = optBool(body, "include_non_live", false);
+        boolean excludeSensitive       = optExcludeSensitive(body);
 
         if (rejectContentWithNonLive(ex, body, includeNonLive)) {
             return;
         }
 
-        var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri, includeNonLive);
+        var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri, includeNonLive,
+                                   excludeSensitive);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -1252,7 +1259,11 @@ public final class VectorHandler implements HttpHandler {
      * }
      * </pre>
      *
-     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}
+     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...], "sensitives":[...]}
+     *
+     * <p>{@code "sensitivity": "exclude"} and the {@code sensitives} list behave as on {@link #handleGet}
+     * (nexus-rfvyy.7.4, RDR-243): the ids branch (get-many) and the paginated branch both filter inside the
+     * statement, so {@code limit}, {@code offset} and {@code count} are over the surviving rows.
      *
      * <p><strong>ids-branch cap (nexus-hdx2u E2):</strong> {@code ids} is capped at
      * {@value #MAX_BATCH_IDS} — 400 on oversize — same rationale and value as
@@ -1277,6 +1288,7 @@ public final class VectorHandler implements HttpHandler {
         int limit          = optInt(body, "limit", defaultLimit);
         int offset         = optInt(body, "offset", 0);
         boolean includeSourceUri = optBool(body, "include_source_uri", false);
+        boolean excludeSensitive = optExcludeSensitive(body);
 
         if (ids != null && ids.size() > MAX_BATCH_IDS) {
             HttpUtil.send(ex, 400, "{\"error\":\"too many ids (max " + MAX_BATCH_IDS + ")\"}");
@@ -1291,15 +1303,15 @@ public final class VectorHandler implements HttpHandler {
                 HttpUtil.send(ex, 400, "{\"error\":\"include_non_live requires ids\"}");
                 return;
             }
-            HttpUtil.send(ex, 200, json(repo.presentRows(tenant, collection, ids)));
+            HttpUtil.send(ex, 200, json(repo.presentRows(tenant, collection, ids, excludeSensitive)));
             return;
         }
 
         // No ids → paginated full fetch (same envelope); getWhere with no
         // predicates is exactly that shape.
         var result = (ids == null)
-                ? repo.getWhere(tenant, collection, null, limit, offset, includeSourceUri)
-                : repo.get(tenant, collection, ids, limit, offset, includeSourceUri);
+                ? repo.getWhere(tenant, collection, null, limit, offset, includeSourceUri, false, excludeSensitive)
+                : repo.get(tenant, collection, ids, limit, offset, includeSourceUri, excludeSensitive);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -2879,11 +2891,7 @@ public final class VectorHandler implements HttpHandler {
      * silently include the rows the caller meant to keep out. Served by every vector search route.
      */
     static boolean optExcludeSensitive(Map<String, Object> body) {
-        Object val = body.get("sensitivity");
-        if (val == null) return false;
-        if (val instanceof String s && s.equals("exclude")) return true;
-        throw new IllegalArgumentException(
-            "field 'sensitivity' must be \"exclude\" or absent, got " + (val instanceof String ? "\"" + val + "\"" : val));
+        return dev.nexus.service.vectors.ChunkSensitivity.excludeFlag(body.get("sensitivity"));
     }
 
     private List<String> optStringList(Map<String, Object> body, String key) {

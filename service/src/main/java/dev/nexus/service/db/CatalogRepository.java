@@ -36,6 +36,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.vectors.ChunkSensitivity;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.RacedEmbedActivity;
 import org.jooq.Condition;
@@ -8938,13 +8939,29 @@ public final class CatalogRepository {
      * @return {@code {chunk_text, metadata, chunk_hash}} or {@code null} on miss
      */
     public Map<String, Object> resolveSpan(String tenant, String collection, String chash) {
+        return resolveSpan(tenant, collection, chash, false);
+    }
+
+    /**
+     * {@link #resolveSpan(String, String, String)} under RDR-243's {@code sensitivity} (nexus-rfvyy.7.4): the result
+     * carries {@code sensitive}, true when any LIVE owner of the chunk is sensitive, and with {@code excludeSensitive}
+     * such a chunk resolves to {@code null} (a miss), the way an excluded row is simply absent from a search page.
+     * The flag comes from one {@code chunk_sensitive_many} call in the same transaction as the read.
+     */
+    public Map<String, Object> resolveSpan(String tenant, String collection, String chash,
+                                           boolean excludeSensitive) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CHUNKS.CHUNK_TEXT, CHUNKS.METADATA)
                        .from(CHUNKS)
-                       .where(CHUNKS.COLLECTION.eq(collection).and(CHUNKS_CHASH_HEX.eq(chash)))
+                       .where(CHUNKS.COLLECTION.eq(collection).and(CHUNKS_CHASH_HEX.eq(chash))
+                           .and(excludeSensitive
+                               ? ChunkSensitivity.notSensitive(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                               : DSL.trueCondition()))
                        .limit(1).fetchOne();
-            if (r != null) return chunkRow(chash, r.value1(), r.value2());
-            return null;
+            if (r == null) return null;
+            Map<String, Object> m = chunkRow(chash, r.value1(), r.value2());
+            m.put("sensitive", !ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, List.of(chash)).isEmpty());
+            return m;
         });
     }
 
@@ -8975,13 +8992,27 @@ public final class CatalogRepository {
      *         metadata}} or {@code null} on miss
      */
     public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection) {
+        return resolveChash(tenant, chash, preferCollection, false);
+    }
+
+    /**
+     * {@link #resolveChash(String, String, String)} under RDR-243's {@code sensitivity} (nexus-rfvyy.7.4): the result
+     * carries {@code sensitive} (any LIVE owner of the winning chunk is sensitive), and with {@code excludeSensitive}
+     * the candidate rows are those without a live sensitive owner, so the tie-break picks among them and a chash
+     * held only by sensitive chunks is a miss ({@code null}).
+     */
+    public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection,
+                                            boolean excludeSensitive) {
         return tenantScope.withTenant(tenant, ctx -> {
             // prefer_collection is a bind parameter via the typed .eq(pref) predicate below.
             String pref = preferCollection != null ? preferCollection : "";
 
             var row = ctx.select(CHUNKS.COLLECTION, CHUNKS.CHUNK_TEXT, CHUNKS.METADATA, CHUNKS.CREATED_AT)
                           .from(CHUNKS)
-                          .where(CHUNKS_CHASH_HEX.eq(chash))
+                          .where(CHUNKS_CHASH_HEX.eq(chash)
+                              .and(excludeSensitive
+                                  ? ChunkSensitivity.notSensitive(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                                  : DSL.trueCondition()))
                           // Third key `collection ASC` matches the canonical _sort_key
                           // (preferred, newest created_at, deterministic name) so a chash in two
                           // collections with equal created_at resolves stably (njrcn.4 review).
@@ -9016,6 +9047,7 @@ public final class CatalogRepository {
             m.put("doc_id",              docId);
             m.put("chunk_text",          textVal);
             m.put("metadata",            metaVal != null ? parseMetaJson(metaVal.data()) : Map.of());
+            m.put("sensitive", !ChunkSensitivity.sensitiveChashes(ctx, tenant, colVal, List.of(chash)).isEmpty());
             return m;
         });
     }

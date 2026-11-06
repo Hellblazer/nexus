@@ -42,6 +42,7 @@ import java.util.function.Supplier;
  *  "search_row_owner_span_supported":true,
  *  "vector_search_chash_allow_supported":true,
  *  "catalog_sensitivity_supported":true,
+ *  "vector_sensitivity_exclude_supported":true,
  *  "route_b_manifest_keys_supported":true,
  *  "route_c_manifest_keys_supported":true,
  *  "schema_latest_id":"vectors-002",
@@ -473,6 +474,24 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-rfvyy.7.4 capability advertisement (RDR-243 Phase 2): does this engine drop chunks with a live sensitive
+     * owner from a read that sends {@code "sensitivity": "exclude"}, on every route that returns chunk text (the
+     * eight vector searches, {@code POST /v1/vectors/get} and {@code /store-get}, and {@code GET
+     * /v1/catalog/resolve_span} and {@code /resolve_chash}), and put {@code sensitive} on each hit and row
+     * (Liquibase {@code vectors-055-1}, the {@code sensitives} list of the get envelope)?
+     *
+     * <p>An independent flag, and the only evidence: an engine without the feature ignores the unknown key and answers
+     * 200 with the sensitive rows IN, so a client that depends on the exclusion must read this flag before it relies
+     * on an {@code exclude} read, and treat a failed or absent probe as unsupported. Always present, always {@code
+     * true} on an engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it
+     * (the {@code vector_search_chash_allow_supported} precedent): that allowlist entry is paired conexus work
+     * (nexus-rfvyy.7.5) that lands before the client release.
+     */
+    static void appendVectorSensitivityExcludeCapabilityField(StringBuilder body) {
+        body.append(",\"vector_sensitivity_exclude_supported\":true");
+    }
+
+    /**
      * nexus-qpt52 capability advertisement (RDR-236 Phase 3, the route (b) dispatch the Phase 4 sweep precondition
      * reads, RDR-236 line 1760): does every route (b) search ({@code POST /v1/vectors/search-metadata-scoped},
      * {@code /search-aspect-scoped}, {@code /search-graph-hop}) answer a {@code where} on EVERY key {@code
@@ -707,6 +726,8 @@ public final class VersionHandler implements HttpHandler {
         appendVectorSearchChashAllowCapabilityField(body);
         // nexus-rfvyy.6.5 (RDR-243): the document sensitivity flag, the audited route and the key on the wire.
         appendCatalogSensitivityCapabilityField(body);
+        // nexus-rfvyy.7.4 (RDR-243 Phase 2): sensitivity=exclude on every chunk-text route, sensitive on each row.
+        appendVectorSensitivityExcludeCapabilityField(body);
         // nexus-qpt52: route (b) answers every stage-answered key and operator per owning document.
         appendRouteBManifestKeysCapabilityField(body);
         // nexus-u9dc5: route (c), the get routes, answers the same keys per owning document.

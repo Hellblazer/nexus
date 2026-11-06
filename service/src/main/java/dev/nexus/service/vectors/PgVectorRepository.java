@@ -27,7 +27,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNK_SENSITIVE_MANY;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
@@ -4076,9 +4075,23 @@ public final class PgVectorRepository {
     public Map<String, Object> get(String tenant, String collection,
                                    List<String> ids, int limit, int offset,
                                    boolean includeSourceUri) {
+        return get(tenant, collection, ids, limit, offset, includeSourceUri, false);
+    }
+
+    /**
+     * {@link #get(String, String, List, int, int, boolean)} with RDR-243's {@code sensitivity} (nexus-rfvyy.7.4).
+     * When {@code excludeSensitive} is true a chunk with any live sensitive owner is dropped INSIDE the statement's
+     * WHERE ({@link ChunkSensitivity#notSensitive}), so {@code limit}, {@code offset} and the {@code count} window
+     * are all taken over the surviving rows, never trimmed after the fetch. The envelope always carries {@code
+     * sensitives}, a list of booleans parallel to {@code ids}, from one {@code chunk_sensitive_many} call over the
+     * returned chashes after the read; under the exclusion every entry is false.
+     */
+    public Map<String, Object> get(String tenant, String collection,
+                                   List<String> ids, int limit, int offset,
+                                   boolean includeSourceUri, boolean excludeSensitive) {
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) {
-            return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of());
+            return Map.of("ids", List.of(), "documents", List.of(), "metadatas", List.of(), "sensitives", List.of());
         }
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -4101,7 +4114,8 @@ public final class PgVectorRepository {
         final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
         var result = tenantScope.withTenant(tenant, ctx -> {
             org.jooq.Condition cond = scope.and(ch.chash().in(ids))
-                                          .and(liveChunksCondition(ctx, ch));
+                                          .and(liveChunksCondition(ctx, ch))
+                                          .and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition());
             var rows = ctx.select(ch.chash(), ch.chunkText(), ch.metadata(), countField)
                .from(ch.table())
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
@@ -4147,7 +4161,29 @@ public final class PgVectorRepository {
         // single-snapshot (see above) — never a race between two reads.
         envelope.put("count", matchedLive);
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return enrichGetEnvelope(tenant, collection, envelope, includeSourceUri);
+        return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection, envelope, includeSourceUri));
+    }
+
+    /** The exclusion predicate over a chunk-table row: no live owner of the chunk is sensitive. */
+    private static org.jooq.Condition notSensitiveCondition(DimTables.ChunkTable ch) {
+        return ChunkSensitivity.notSensitive(ch.tenantId(), ch.collection(), ch.table().field("chash", byte[].class));
+    }
+
+    /**
+     * Add {@code sensitives} to a get envelope: booleans parallel to {@code ids}, true when any LIVE owner of the
+     * chunk is sensitive, from ONE {@code chunk_sensitive_many} call over the returned chashes (nexus-rfvyy.7.4,
+     * RDR-243 Technical Design item 3). The existing keys are untouched.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> withSensitives(String tenant, String collection, Map<String, Object> envelope) {
+        List<String> ids = (List<String>) envelope.get("ids");
+        Set<String> sensitive = ids.isEmpty() ? Set.of()
+            : tenantScope.withTenant(tenant, ctx -> ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, ids));
+        List<Boolean> flags = new ArrayList<>(ids.size());
+        for (String id : ids) flags.add(sensitive.contains(id));
+        Map<String, Object> out = new LinkedHashMap<>(envelope);
+        out.put("sensitives", flags);
+        return out;
     }
 
     /**
@@ -4162,6 +4198,15 @@ public final class PgVectorRepository {
      * live owner. The where-scan reads offer the same with {@code includeNonLive}.
      */
     public Map<String, Object> presentRows(String tenant, String collection, List<String> ids) {
+        return presentRows(tenant, collection, ids, false);
+    }
+
+    /**
+     * {@link #presentRows(String, String, List)} under RDR-243's {@code sensitivity} (nexus-rfvyy.7.4): with {@code
+     * excludeSensitive} a chunk with a live sensitive owner is not listed, as on the content reads.
+     */
+    public Map<String, Object> presentRows(String tenant, String collection, List<String> ids,
+                                           boolean excludeSensitive) {
         if (ids == null || ids.isEmpty()) {
             return Map.of("ids", List.of(), "metadatas", List.of());
         }
@@ -4171,7 +4216,8 @@ public final class PgVectorRepository {
         var rows = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               .where(scope.and(ch.chash().in(ids)))
+               .where(scope.and(ch.chash().in(ids))
+                   .and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition()))
                .orderBy(ch.chash().asc())
                .fetch());
         List<String> outIds = new ArrayList<>(rows.size());
@@ -4321,6 +4367,24 @@ public final class PgVectorRepository {
                                         int limit, int offset,
                                         boolean includeSourceUri,
                                         boolean includeNonLive) {
+        return getWhere(tenant, collection, where, limit, offset, includeSourceUri, includeNonLive, false);
+    }
+
+    /**
+     * {@link #getWhere(String, String, Map, int, int, boolean, boolean)} with RDR-243's {@code sensitivity}
+     * (nexus-rfvyy.7.4): under {@code excludeSensitive} the live read drops a chunk with any live sensitive owner
+     * inside its WHERE ({@link ChunkSensitivity#notSensitive}), so paging is taken over the surviving rows, and the
+     * envelope carries {@code sensitives} parallel to {@code ids}. The physical-scan mode ({@code includeNonLive})
+     * returns ids and metadata, never text, and so is not flagged; under {@code excludeSensitive} it too drops a
+     * chunk with a live sensitive owner, so "exclude" means one thing on every branch of the route (a chunk with no
+     * live owner is never sensitive, so the maintenance inventory that reads the unowned chunks is unaffected).
+     */
+    public Map<String, Object> getWhere(String tenant, String collection,
+                                        Map<String, Object> where,
+                                        int limit, int offset,
+                                        boolean includeSourceUri,
+                                        boolean includeNonLive,
+                                        boolean excludeSensitive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
@@ -4333,7 +4397,7 @@ public final class PgVectorRepository {
                 PgSession.setSearchPlanCacheMode(ctx);
                 return ctx.select(ch.chash(), ch.metadata())
                    .from(ch.table())
-                   .where(finalCond)
+                   .where(finalCond.and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition()))
                    .orderBy(ch.chash().asc())
                    .limit(limit).offset(offset)
                    .fetch();
@@ -4357,7 +4421,8 @@ public final class PgVectorRepository {
                // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
                // this fetch-by-where read was structurally invisible to the
                // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
-               .where(finalCond.and(liveChunksCondition(ctx, ch)).and(driver))
+               .where(finalCond.and(liveChunksCondition(ctx, ch)).and(driver)
+                   .and(excludeSensitive ? notSensitiveCondition(ch) : DSL.trueCondition()))
                .orderBy(ch.chash().asc())
                .limit(limit).offset(offset)
                .fetch();
@@ -4373,9 +4438,9 @@ public final class PgVectorRepository {
             outMetas.add(fromJson(meta != null ? meta.data() : null));
         }
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return enrichGetEnvelope(tenant, collection,
+        return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection,
             new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
-            includeSourceUri);
+            includeSourceUri));
     }
 
     /**
@@ -9667,14 +9732,8 @@ FROM scope s
         Set<String> sensitive = tenantScope.withTenant(tenant, ctx -> {
             Set<String> out = new HashSet<>();
             for (var e : chashesByCollection.entrySet()) {
-                byte[][] chashes = e.getValue().stream()
-                    .map(h -> java.util.HexFormat.of().parseHex(h)).toArray(byte[][]::new);
-                var many = CHUNK_SENSITIVE_MANY.call(tenant, e.getKey(), chashes);
-                for (Record r : ctx.selectFrom(many).fetch()) {
-                    if (Boolean.TRUE.equals(r.get(many.SENSITIVE))) {
-                        out.add(ManifestLabelStage.ownerKey(e.getKey(),
-                                                            java.util.HexFormat.of().formatHex(r.get(many.CHASH))));
-                    }
+                for (String hex : ChunkSensitivity.sensitiveChashes(ctx, tenant, e.getKey(), e.getValue())) {
+                    out.add(ManifestLabelStage.ownerKey(e.getKey(), hex));
                 }
             }
             return out;

@@ -586,6 +586,225 @@ class VectorSensitivityExcludeIntegrationTest {
         }
     }
 
+    // ── get-by-id, store-get and the catalog by-address reads (nexus-rfvyy.7.4) ──
+
+    /** The routes this class drives for the get reads; the coverage test below ties them to the derived set. */
+    private static final String GET = "/v1/vectors/get";
+    private static final String STORE_GET = "/v1/vectors/store-get";
+    private static final List<String> ALL_HEX = hexes(S1, X, S2, "n1", "n2", "n3", "n4", "n5", "n6");
+    private static final List<String> NON_SENSITIVE_HEX = hexes("n1", "n2", "n3", "n4", "n5", "n6");
+
+    private JsonNode postJson(String path, Map<String, Object> b, int expectedStatus) throws Exception {
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(b)))
+            .build();
+        var r = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(expectedStatus);
+        return MAPPER.readTree(r.body());
+    }
+
+    private static List<String> texts(JsonNode arr) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode n : arr) out.add(n.asText());
+        return out;
+    }
+
+    private static List<Boolean> flags(JsonNode arr) {
+        List<Boolean> out = new ArrayList<>();
+        for (JsonNode n : arr) out.add(n.asBoolean());
+        return out;
+    }
+
+    /** A get request for {@code route}: store-get names every chunk id, get scans the collection. */
+    private static Map<String, Object> getBody(String route, int dim, Object... extra) {
+        Map<String, Object> b = body("collection", coll(dim), "limit", 50);
+        if (route.equals(STORE_GET)) b.put("ids", ALL_HEX);
+        for (int i = 0; i < extra.length; i += 2) b.put((String) extra[i], extra[i + 1]);
+        return b;
+    }
+
+    static Stream<org.junit.jupiter.params.provider.Arguments> getRouteByDim() {
+        List<org.junit.jupiter.params.provider.Arguments> out = new ArrayList<>();
+        for (String route : new String[] {GET, STORE_GET}) {
+            for (int dim : DIMS) out.add(org.junit.jupiter.params.provider.Arguments.of(route, dim));
+        }
+        return out.stream();
+    }
+
+    @ParameterizedTest(name = "{0} dim {1}")
+    @MethodSource("getRouteByDim")
+    void getRoutes_excludeDropsSensitiveChunks_andSensitivesIsParallelToIds(String route, int dim) throws Exception {
+        // baseline: every chunk is served, and flagged
+        JsonNode all = postJson(route, getBody(route, dim), 200);
+        List<String> ids = texts(all.get("ids"));
+        assertThat(ids).containsExactlyInAnyOrderElementsOf(ALL_HEX);
+        List<Boolean> flags = flags(all.get("sensitives"));
+        assertThat(flags).as("sensitives parallel to ids").hasSameSizeAs(ids);
+        for (int i = 0; i < ids.size(); i++) {
+            assertThat(flags.get(i)).as("sensitive flag of " + ids.get(i)).isEqualTo(SENSITIVE_HEX.contains(ids.get(i)));
+        }
+        assertThat(flags).as("the baseline holds a sensitive row").contains(true);
+        assertThat(all.get("documents")).hasSameSizeAs(all.get("ids"));
+
+        // exclude: the three sensitive chunks (s1, s2 and the shared x) are gone, the rest remain, none flagged
+        JsonNode ex = postJson(route, getBody(route, dim, "sensitivity", "exclude"), 200);
+        assertThat(texts(ex.get("ids"))).containsExactlyInAnyOrderElementsOf(NON_SENSITIVE_HEX);
+        assertThat(flags(ex.get("sensitives"))).hasSize(6).containsOnly(false);
+        assertThat(ex.get("documents")).hasSize(6);
+        for (JsonNode d : ex.get("documents")) {
+            assertThat(d.asText()).as("no sensitive chunk's text is served").doesNotContain("chunk s1 ").doesNotContain("chunk s2 ")
+                .doesNotContain("chunk x ");
+        }
+        if (route.equals(STORE_GET)) {
+            assertThat(ex.get("count").asLong()).as("the matched-live count is over the surviving rows").isEqualTo(6);
+            assertThat(all.get("count").asLong()).isEqualTo(9);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {GET, STORE_GET})
+    void getRoutes_pageOverTheSurvivingRows_notTheFetchedOnes(String route) throws Exception {
+        // limit 4 over six survivors: a post-filter over a nine-row page would come back short or empty
+        List<String> seen = new ArrayList<>();
+        for (int offset = 0; offset < 8; offset += 4) {
+            JsonNode page = postJson(route, getBody(route, 384, "sensitivity", "exclude", "limit", 4,
+                                                     "offset", offset), 200);
+            assertThat(page.get("ids").size()).as("offset " + offset).isEqualTo(offset == 0 ? 4 : 2);
+            seen.addAll(texts(page.get("ids")));
+        }
+        assertThat(seen).containsExactlyInAnyOrderElementsOf(NON_SENSITIVE_HEX);
+        if (route.equals(STORE_GET)) {
+            JsonNode first = postJson(route, getBody(route, 384, "sensitivity", "exclude", "limit", 4), 200);
+            assertThat(first.get("count").asLong()).as("count is the surviving total, not the page").isEqualTo(6);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {GET, STORE_GET})
+    void getRoutes_refuseAnySensitivityValueButExclude(String route) throws Exception {
+        for (Object bad : new Object[] {"include", "EXCLUDE", "", "none", 1, true, List.of("exclude")}) {
+            JsonNode err = postJson(route, getBody(route, 384, "sensitivity", bad), 400);
+            assertThat(err.toString()).contains("sensitivity");
+        }
+        postJson(route, getBody(route, 384, "sensitivity", null), 200);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {GET, STORE_GET})
+    void getRoutes_sharedChunkFollowsTheSensitiveOwnersTombstone(String route) throws Exception {
+        assertThat(texts(postJson(route, getBody(route, 384, "sensitivity", "exclude"), 200).get("ids")))
+            .doesNotContain(hex(X));
+        String sx = tumbler("sx", 384);
+        setTombstone(sx, true);
+        try {
+            JsonNode after = postJson(route, getBody(route, 384, "sensitivity", "exclude"), 200);
+            assertThat(texts(after.get("ids"))).as("x comes back once its sensitive owner is tombstoned")
+                .contains(hex(X)).doesNotContain(hex(S1), hex(S2));
+            assertThat(flags(after.get("sensitives"))).containsOnly(false);
+            // and the baseline flags it false too, since no live owner is sensitive now
+            JsonNode base = postJson(route, getBody(route, 384), 200);
+            int at = texts(base.get("ids")).indexOf(hex(X));
+            assertThat(flags(base.get("sensitives")).get(at)).isFalse();
+        } finally {
+            setTombstone(sx, false);
+        }
+    }
+
+    @Test
+    void getRoutes_theInventoryBranchesDropSensitiveChunksToo() throws Exception {
+        JsonNode viaGet = postJson(GET, getBody(GET, 384, "include_non_live", true, "sensitivity", "exclude"), 200);
+        assertThat(texts(viaGet.get("ids"))).containsExactlyInAnyOrderElementsOf(NON_SENSITIVE_HEX);
+        JsonNode viaStoreGet = postJson(STORE_GET,
+            getBody(STORE_GET, 384, "include_non_live", true, "sensitivity", "exclude"), 200);
+        assertThat(texts(viaStoreGet.get("ids"))).containsExactlyInAnyOrderElementsOf(NON_SENSITIVE_HEX);
+        // without the parameter the inventory is complete, as it always was
+        JsonNode full = postJson(STORE_GET, getBody(STORE_GET, 384, "include_non_live", true), 200);
+        assertThat(texts(full.get("ids"))).containsExactlyInAnyOrderElementsOf(ALL_HEX);
+    }
+
+    private HttpResponse<String> getCatalog(String path) throws Exception {
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
+            .header("Authorization", "Bearer " + TOKEN).GET().build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void resolveSpan_carriesSensitive_andExcludeMakesASensitiveChunkAMiss() throws Exception {
+        String c = coll(384);
+        String base = "/v1/catalog/resolve_span?collection=" + c + "&span_chash=";
+        var sens = getCatalog(base + hex(S1));
+        assertThat(sens.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(sens.body()).get("sensitive").asBoolean()).isTrue();
+        var plain = getCatalog(base + hex("n1"));
+        assertThat(plain.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(plain.body()).get("sensitive").asBoolean()).isFalse();
+
+        assertThat(getCatalog(base + hex(S1) + "&sensitivity=exclude").statusCode()).as("sensitive: a miss").isEqualTo(404);
+        assertThat(getCatalog(base + hex(X) + "&sensitivity=exclude").statusCode()).as("shared with a live sensitive owner")
+            .isEqualTo(404);
+        var kept = getCatalog(base + hex("n1") + "&sensitivity=exclude");
+        assertThat(kept.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(kept.body()).get("chunk_text").asText()).isEqualTo(text("n1"));
+        for (String bad : new String[] {"include", "EXCLUDE", ""}) {
+            var r = getCatalog(base + hex("n1") + "&sensitivity=" + bad);
+            assertThat(r.statusCode()).as("sensitivity=" + bad + ": " + r.body()).isEqualTo(400);
+            assertThat(r.body()).contains("sensitivity");
+        }
+    }
+
+    @Test
+    void resolveChash_excludeSkipsSensitiveCandidates_andFallsThroughToAnotherCopy() throws Exception {
+        String base = "/v1/catalog/resolve_chash?chash=";
+        var sens = getCatalog(base + hex(S1) + "&prefer_collection=" + coll(384));
+        assertThat(sens.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(sens.body()).get("sensitive").asBoolean()).isTrue();
+        assertThat(getCatalog(base + hex(S1) + "&sensitivity=exclude").statusCode())
+            .as("held only by sensitive chunks: a miss").isEqualTo(404);
+        var plain = getCatalog(base + hex("n1") + "&sensitivity=exclude");
+        assertThat(plain.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(plain.body()).get("sensitive").asBoolean()).isFalse();
+        var bad = getCatalog(base + hex("n1") + "&sensitivity=nope");
+        assertThat(bad.statusCode()).isEqualTo(400);
+
+        // x is sensitive in all three collections; once its sensitive owners in 768 and 1024 are tombstoned the
+        // copies there are not, and an exclude read that prefers 384 resolves to one of them
+        String s768 = tumbler("sx", 768), s1024 = tumbler("sx", 1024);
+        setTombstone(s768, true);
+        setTombstone(s1024, true);
+        try {
+            var prefer = base + hex(X) + "&prefer_collection=" + coll(384);
+            var withSensitive = MAPPER.readTree(getCatalog(prefer).body());
+            assertThat(withSensitive.get("physical_collection").asText()).isEqualTo(coll(384));
+            assertThat(withSensitive.get("sensitive").asBoolean()).isTrue();
+            var excluded = getCatalog(prefer + "&sensitivity=exclude");
+            assertThat(excluded.statusCode()).isEqualTo(200);
+            var node = MAPPER.readTree(excluded.body());
+            assertThat(node.get("physical_collection").asText()).isIn(coll(768), coll(1024));
+            assertThat(node.get("sensitive").asBoolean()).isFalse();
+        } finally {
+            setTombstone(s768, false);
+            setTombstone(s1024, false);
+        }
+    }
+
+    // ── every route the parity census derives has a behaviour recipe here ─────
+
+    @Test
+    void everyChunkTextRouteTheCensusDerivesHasARecipeInThisClass() throws Exception {
+        Set<String> derived = VectorSensitivityRouteParityTest.derivedTextRoutes(
+            VectorSensitivityRouteParityTest.findings(
+                VectorSensitivityRouteParityTest.textFunctionsFromPgProc(pg).keySet()));
+        Set<String> recipes = new java.util.TreeSet<>();
+        routes().forEach(r -> recipes.add(r.path()));
+        recipes.add(GET);
+        recipes.add(STORE_GET);
+        assertThat(derived).as("non-vacuity").hasSizeGreaterThanOrEqualTo(10);
+        assertThat(recipes).as("a derived chunk-text route with no behaviour recipe: add one, and its exclusion test")
+            .containsAll(derived);
+    }
+
     // ── the planner: the term is inlined, and gone when the argument is false ──
 
     private String planOf(boolean exclude) {

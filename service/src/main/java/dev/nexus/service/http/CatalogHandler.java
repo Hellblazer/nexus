@@ -1933,8 +1933,9 @@ public final class CatalogHandler implements HttpHandler {
      * full span string client-side and sends only the truncated chash +
      * collection so the server does a simple keyed lookup.
      *
-     * <p>Response: {@code {"chunk_text": "...", "metadata": {...}, "chunk_hash": "..."}}
-     * or 404 on miss.
+     * <p>Response: {@code {"chunk_text": "...", "metadata": {...}, "chunk_hash": "...", "sensitive": false}}
+     * or 404 on miss. Optional {@code sensitivity=exclude} (nexus-rfvyy.7.4, RDR-243; any other value is a 400) makes
+     * a chunk with a live sensitive owner a miss; {@code sensitive} is true when any live owner is sensitive.
      */
     private void handleResolveSpan(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1943,7 +1944,8 @@ public final class CatalogHandler implements HttpHandler {
         if (spanChash == null || spanChash.isBlank() || collection == null || collection.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"span_chash and collection query params required\"}"); return;
         }
-        var result = repo.resolveSpan(tenant, collection, spanChash);
+        boolean excludeSensitive = dev.nexus.service.vectors.ChunkSensitivity.excludeFlag(queryParam(exchange, "sensitivity"));
+        var result = repo.resolveSpan(tenant, collection, spanChash, excludeSensitive);
         if (result == null) {
             HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
         }
@@ -1958,7 +1960,9 @@ public final class CatalogHandler implements HttpHandler {
      * provided) then newest created_at.
      *
      * <p>Response: {@code {"chash": "...", "chunk_hash": "...", "physical_collection": "...",
-     * "doc_id": "...", "chunk_text": "...", "metadata": {...}}} or 404 on miss.
+     * "doc_id": "...", "chunk_text": "...", "metadata": {...}, "sensitive": false}} or 404 on miss. Optional
+     * {@code sensitivity=exclude} (nexus-rfvyy.7.4, RDR-243; any other value is a 400) skips candidates with a live
+     * sensitive owner; {@code sensitive} is true when any live owner of the returned chunk is sensitive.
      */
     private void handleResolveChash(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1967,7 +1971,8 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"chash query param required\"}"); return;
         }
         String preferCollection = queryParam(exchange, "prefer_collection"); // may be null
-        var result = repo.resolveChash(tenant, chash, preferCollection);
+        boolean excludeSensitive = dev.nexus.service.vectors.ChunkSensitivity.excludeFlag(queryParam(exchange, "sensitivity"));
+        var result = repo.resolveChash(tenant, chash, preferCollection, excludeSensitive);
         if (result == null) {
             HttpUtil.send(exchange, 404, "{\"error\":\"chunk not found\"}"); return;
         }

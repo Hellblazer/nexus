@@ -242,4 +242,13 @@ class VersionHandlerReleaseVersionTest {
         VersionHandler.appendVectorSearchChashAllowCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"vector_search_chash_allow_supported\":true");
     }
+
+    // ── nexus-rfvyy.7.4 (RDR-243 Phase 2): sensitivity=exclude on every chunk-text route ──
+
+    @Test
+    void versionAdvertisesTheSensitivityExcludeReadsAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendVectorSensitivityExcludeCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"vector_sensitivity_exclude_supported\":true");
+    }
 }
