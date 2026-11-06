@@ -2924,12 +2924,14 @@ def _subprocess_tool_grant() -> tuple[dict[str, Any], list[str]]:
     omitted when unset (CLI / non-plugin contexts) so we never inject a
     literal ``${...}`` placeholder.
     """
-    env: dict[str, str] = {}
+    # RDR-243 review r1 F4: the nested servers are LLM-bound by construction. The posture rides the env block of the
+    # server registration itself, so it does not depend on Claude Code handing the parent's environment on (A5).
+    env: dict[str, str] = {_sensitivity.POSTURE_ENV: "llm_bound"}
     plugin_root = _os.environ.get("CLAUDE_PLUGIN_ROOT")
     if plugin_root:
         env["CLAUDE_PLUGIN_ROOT"] = plugin_root
 
-    server_env = {"env": env} if env else {}
+    server_env = {"env": env}
     mcp_servers: dict[str, Any] = {
         "nexus": {"command": "nx-mcp", "args": [], **server_env},
         "nexus_catalog": {"command": "nx-mcp-catalog", "args": [], **server_env},
