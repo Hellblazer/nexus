@@ -98,6 +98,8 @@ conexus/
 │       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
 │       ├── compact_checkpoint.py      # PreCompact / PostCompact / SessionStart(compact): write down and
 │       │                              # re-inject the session's working state across a compaction
+│       ├── stop_wake_guard.py         # Stop: continue a turn once when it ends promising a later check
+│       │                              # or timed step with nothing armed to wake it
 │       ├── version_lockstep_action.py # Detached, extras-preserving reinstall the lockstep
 │       │                              # hook dispatches
 │       ├── routing/                   # PreToolUse(Bash) guards + their shared _lib.py
@@ -338,6 +340,7 @@ names each handler by its program and verb.
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/credential_print_guard.py` | Deny commands that would reveal a Claude credential: a keychain read, a `.credentials.json` read, naming a protected token variable, or reading another process's environment (RDR-219 Gap 2, no escape) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `SubagentStop` (matcher `.+`) | `hooks/scripts/nx_hook_shim.py subagent-stop-t1-nudge` | When a named agent stops and its own transcript shows no successful T1 put (an MCP `scratch` call with `action=put`, or a Bash `nx scratch put`), return `additionalContext` that gives the agent one more turn with a one-sentence request to write its findings to T1. A warning, not a veto: no `decision` key. Silent on the stop that follows its own nudge (`stop_hook_active`), when the transcript is missing or unparseable, and for harness-internal stops with no `agent_type`, which the `.+` matcher never spawns it for (nexus-mtheb.3) |
+| `Stop` | `hooks/scripts/stop_wake_guard.py` | Continue a turn once when its closing text promises work that nothing will wake: a CI or run wait, a promise to check or do something later, or a timed step, while `background_tasks` and `session_crons` are both empty and `stop_hook_active` is false. Clauses where Sam is the actor, a peer, mailbox, notification or restart is the wake, or that report past tense are dropped first. Returns `{"decision": "block", "reason": ...}` once (the reason quotes the sentence and says to arm a Monitor, a background Bash until-loop, ScheduleWakeup or CronCreate, or to say who the wake is); logs every decision to `hook.log`; fails open. `NX_STOP_WAKE_GUARD=0` turns it off (nexus-4cgop) |
 | `PreToolUse` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls; paired with the PermissionRequest entry below because the two events fire in different permission modes |
 | `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls |
 
