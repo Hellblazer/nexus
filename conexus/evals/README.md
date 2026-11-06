@@ -171,7 +171,11 @@ the queue presented), so the control does not show the skill's effect on them be
 `--json` read and the judged echo-back in o06. With the skill 7/7 passed (score 1.00, $1.76,
 the skill loaded in all seven). That run predates the review fixes to the stub and graders
 (refs and choices in the CHECK line, markers that occur in the user's own words, echo-back
-graders that need the user's words); the control was not rerun after them.
+graders that need the user's words); the control was not rerun after them. After the fixes,
+and with the skill's echo-back-before-confirmation rule added, the eight asks cases (o06-o13)
+ran once each: 7/8 passed, and o12 failed with no `nx` call at all (the stub logged nothing);
+o12 passed on its rerun, and o07, which had skipped the echo-back in 2 of 4 earlier runs,
+passed 3/3. One sample per case, below this corpus's `--runs 3` floor.
 
 ### The grading rule (nexus-dg7i6.7, 2026-10-17)
 
