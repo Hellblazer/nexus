@@ -6742,3 +6742,64 @@ RDR (Research-Design-Review) authoring helpers.
 | `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-gate`, `rdr-fix`, `rdr-accept`, `rdr-research`, `rdr-audit`). `rdr-fix <id>` prints the latest gate's findings with their `Sites:` lists, the diff range and fix commits since the gated commit, whether a fix-check record exists for the file's tip, the pre-edit research title, and the fix rules (nexus-zbdm0). `rdr-verdict <id> <critique-title>` computes a gate's outcome from the stored critique and the derived round (issue blocks and `Ship-blocker: yes` marks counted, the larger of each self-reported and counted number used, a missing `ship_blockers` line read as `critical_count`) under `review-rounds.toml`'s rdr-gate rows, and prints the gate record to write with the `prior:` chain pre-filled (nexus-yxo2l). `rdr-audit` in default mode leads with a Gate loop health block: per gated RDR, rounds, Criticals per round from the `prior:` chain, residual count, and a flag when the loop ran past the round cap |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.
+
+---
+
+## nx ask
+
+Structured asks on the threads board (RDR-245, nexus-wc4jj.7): the mediator's tool and Sam's fallback. An ask is an `ask:` block in a session's T2 `threads` entry. It is named `<entry>/<id>`; a bare `<id>` is accepted only when exactly one entry holds it. Answers are recorded in T2 project `asks` (title `<asker session id>/<ask id>/<version>`) and mailed to `mailbox/<asker session id>` as a raw `tuple_out`. The record, batch record and mail body shapes are pinned by `tests/fixtures/asks/`.
+
+| Subcommand | Description |
+|------------|-------------|
+| `list [--json] [--all]` | Interrupt asks, then the batch, then one-line counts of quiet, conditional and answered asks (`--all` lists them), then legacy asks and needs-sam beads (a bead that a structured ask folds into carries `-> <entry>/<ask id>`; the ask stays in its own group), then lint findings, then the last 48 hours of answers. `--json` carries every parsed field of every ask with its version, the bead objects with `ask_pointers`, the lint findings and the digest |
+| `show <ref> [--json]` | Every field of one ask: numbered options with the recommendation marked, the version, the asker session, the entry age and the answer record for this version, if any |
+| `answer <ref> <n\|text> --expect VERSION [--note TEXT] [--via cli\|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]` | Answer one ask. A number picks that option; any other text is a note-only answer that authorizes no option |
+| `digest` | Every answer of the last seven days, newest first: time, `via`, Sam's words, the batch reply they came from, and the tuple id (or the `sending` / `failed` status) |
+
+### nx ask answer
+
+```
+nx ask answer ENTRY/ID N|TEXT --expect VERSION [--note TEXT] [--via cli|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]
+```
+
+Refused, with nothing recorded or sent: `--expect` differs from the ask's current version (the current text is printed); the ask has an `after:` value; the entry has no `session:` line, or one that is not a lower-case canonical UUID, or two or more entries carry the same `session:` id; a number outside `1..` the option count; a `sent` record for the same version without `--replace`; a `sending` record under 10 minutes old (even with `--replace`). A `sending` record over 10 minutes old, or a `failed` one, is retried without `--replace`. The record is written `sending` with a fresh `answer_id`, read back, and the command stops without sending if the `answer_id` read back is not its own (first record wins). It then posts the tuple and updates the record to `sent` with the tuple id, or `failed` with the error, and prints which.
+
+| Flag | Description |
+|------|-------------|
+| `--expect VERSION` | Required. The 16-hex version of the ask Sam saw |
+| `--note TEXT` | A note on a chosen option. Not allowed with a free-text reply (the reply is the note) |
+| `--via cli\|mediator` | `cli` (default): stdin must be a TTY; the note, or the text of a note-only answer, is recorded as Sam's words. `mediator`: a session relaying Sam's words; needs `--sam-words` and this session's own id (tuple-watch marker, then `NX_T1_SESSION_ID`) |
+| `--sam-words TEXT` | `--via mediator` only. The contiguous span Sam typed for this ask, 1 to 500 characters |
+| `--batch-words TEXT` | `--via mediator` only. Sam's whole reply when it covered several asks, at most 2000 characters; shown only by `digest`. Answers sent with the same words by the same mediator within 10 minutes share one `batch/<mediator session>/<YYYYMMDDTHHMMSSZ>` record |
+| `--replace` | Supersede a `sent` answer to the same version |
+
+`--via cli` mails with a sender id minted once and kept in the nexus config dir (`ask-cli-sender`); `--via mediator` mails with the mediator's own session id.
+
+### nx ask list
+
+```
+nx ask list [--json] [--all]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | One JSON object with the groups `interrupt`, `batch`, `quiet`, `conditional`, `answered`, plus `legacy`, `beads`, `beads_error`, `lint`, `unreadable` and `digest` |
+| `--all` | List the quiet, conditional and answered asks instead of only counting them |
+
+### nx ask show
+
+```
+nx ask show ENTRY/ID [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | The ask as one JSON object (every parsed field, `entry_age`, and `answer`: the answer record for this version or null) |
+
+### nx ask digest
+
+```
+nx ask digest
+```
+
+Lists every answer record of the last seven days, newest first. Takes no flags.

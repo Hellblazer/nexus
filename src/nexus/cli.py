@@ -36,6 +36,7 @@ for _stream in (sys.stdout, sys.stderr):
         # capsys, which monkey-patches stdout/stderr to non-text streams).
         pass
 
+from nexus.commands.ask import ask_group
 from nexus.commands.catalog import catalog
 from nexus.commands.collection import collection
 from nexus.commands.command_context import command_context
@@ -303,6 +304,7 @@ def _reraise_config_error(exc: BaseException) -> None:
         raise exc
 
 
+main.add_command(ask_group, name="ask")
 main.add_command(catalog)
 main.add_command(collection)
 main.add_command(command_context, name="command-context")
