@@ -276,6 +276,12 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "p=/Library/Developer/CommandLineTools/usr/libexec/git-core/git-; ${p}add f",
         "scripts/git-push-develop.sh abc123",
         "NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh abc123",
+        # the flag forms (no env prefix) are the same script and the same denial
+        "scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range abc123",
+        "scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range=0123456789ab abc123",
+        "scripts/git-push-develop.sh --allowed-paths 'a b' --skip-lock reason abc123",
+        "scripts/git-push-develop.sh --allowed-paths-from /tmp/list.txt abc123",
+        "scripts/git-push-develop.sh --skip-scope-audit reason --batch-minutes 0 abc123",
     ],
     # Quoting, escaping and line-continuation inside or around the verb.
     "quoting_and_escapes": [

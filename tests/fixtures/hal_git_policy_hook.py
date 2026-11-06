@@ -754,7 +754,7 @@ def _bare_push_message(branch: str) -> str:
         f"Use  scripts/git-push-develop.sh <sha> [<sha> ...]  naming the commits "
         f"you made; it fetches, reads origin/{branch}..{branch}, and pushes only "
         f"when the range equals your list (--source HEAD from a detached "
-        f"worktree, with --allowed-paths-from-range or --allowed-paths).\n"
+        f"worktree, with --allowed-paths-from-range, which prints the files and a digest first, or --allowed-paths).\n"
         f"To override, append `# routing-allow: <reason>` (>=8 chars); the escape "
         f"is logged."
     )

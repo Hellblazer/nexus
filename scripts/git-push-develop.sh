@@ -24,6 +24,9 @@
 #   from a detached worktree:
 #
 #     scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <sha> [<sha> ...]
+#       -> prints the files your commits touch and a 12-hex digest, exits 7
+#     scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range=<digest> <sha> [<sha> ...]
+#       -> pushes, only if the digest still matches the outbound range
 #
 #   Flags (each also takes the `--flag=value` form; a value may not begin
 #   with `--`; a literal `--` ends flag parsing, so everything after it is
@@ -40,16 +43,24 @@
 #     --allowed-paths-from <file> The same list read from a file (whitespace and
 #                                 newlines separate entries). Repeatable, and
 #                                 accumulates with --allowed-paths.
-#     --allowed-paths-from-range  The allowlist is the union of every path touched by
-#                                 every outbound commit
-#                                 (`git log --name-only --format= <remote>/<branch>..<source>`).
-#                                 The list is printed to stderr (PUSH_ALLOWED_PATHS_FROM_RANGE).
-#                                 This is the by-hand allowlist built mechanically:
-#                                 it states what the commits touch and refuses nothing
-#                                 a commit touches, so it does NOT catch a foreign file
-#                                 swept into your commit (nexus-bbriq). Read the printed
-#                                 list; use --allowed-paths when you can name the files.
-#                                 Cannot be combined with --allowed-paths[-from].
+#     --allowed-paths-from-range[=<digest>]
+#                                 A two-step confirm. The allowlist is the union of every
+#                                 path touched by every outbound commit (per commit, the same
+#                                 `git diff-tree -r --root` listing the scope audit uses, so a
+#                                 rename lists both paths). Step 1, no digest: nothing is
+#                                 pushed; the list and a digest of it (first 12 hex of the
+#                                 sha256 of the sorted, newline-joined list) are printed
+#                                 with the pasteable step-2 command, exit 7. Step 2,
+#                                 `=<digest>`: pushes only when the digest matches the
+#                                 current outbound range, else refuses and reprints, so a
+#                                 file added to a commit after you read the list changes the
+#                                 digest and stops the push. The audit cannot catch a foreign
+#                                 file swept into your commit (nexus-bbriq) because the list
+#                                 is derived from that commit; the check is YOUR READ of the
+#                                 printed list. A confirmed push says so on stdout
+#                                 (PUSH_SCOPE_CONFIRMED_RANGE). Use --allowed-paths when you
+#                                 can name the files. Cannot be combined with
+#                                 --allowed-paths[-from].
 #     --skip-scope-audit <reason> NX_PUSH_SKIP_SCOPE_AUDIT
 #     --skip-lock <reason>        NX_PUSH_SKIP_LOCK
 #     --batch-minutes <n>         NX_PUSH_BATCH_MINUTES
@@ -304,12 +315,13 @@ trap _release_push_lock EXIT
 # assignment. Parsed before the first remote call: a typo costs nothing.
 _usage_refuse() {
   echo "PUSH_REFUSED_USAGE $*"
-  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range --skip-scope-audit --skip-lock --batch-minutes --tenant-check (see the header of $0)."
+  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check (see the header of $0)."
   exit 64
 }
 _vouch_args=()
 _echo_flags=()          # flags worth repeating in a pasteable suggestion
 _range_allowlist=0
+_range_digest=""
 _flag_allowed=""
 _flag_allowed_given=0
 while [[ $# -gt 0 ]]; do
@@ -331,7 +343,10 @@ while [[ $# -gt 0 ]]; do
     fi
     case "$_name" in
     --allowed-paths-from-range)
-      (( _has_val )) && _usage_refuse "$_name takes no value"
+      if (( _has_val )); then
+        [[ "$_val" =~ ^[0-9a-f]{12}$ ]] || _usage_refuse "$_name=<digest> takes the 12 hex digits the bare form printed, got '$_val'"
+        _range_digest="$_val"
+      fi
       _range_allowlist=1
       shift
       continue
@@ -366,7 +381,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --allowed-paths-from)
       [[ -r "$_val" && -f "$_val" ]] || _usage_refuse "--allowed-paths-from: cannot read file '$_val'"
-      _from_text="$(tr '\n' ' ' < "$_val")"
+      _from_text="$(tr '\r\n' '  ' < "$_val")"
       [[ -n "${_from_text//[[:space:]]/}" ]] || _usage_refuse "--allowed-paths-from: '$_val' lists no paths"
       _flag_allowed+="${_flag_allowed:+ }$_from_text"
       _flag_allowed_given=1
@@ -381,6 +396,9 @@ while [[ $# -gt 0 ]]; do
 done
 if (( _range_allowlist && _flag_allowed_given )); then
   _usage_refuse "--allowed-paths-from-range cannot be combined with --allowed-paths or --allowed-paths-from"
+fi
+if (( _flag_allowed_given || _range_allowlist )) && [[ -n "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
+  echo "PUSH_NOTE the allowlist flag wins: the NX_PUSH_ALLOWED_PATHS environment value is ignored." >&2
 fi
 (( _flag_allowed_given )) && NX_PUSH_ALLOWED_PATHS="$_flag_allowed"
 set -- "${_vouch_args[@]+"${_vouch_args[@]}"}"
@@ -518,7 +536,18 @@ _outbound_files() {
   local sha
   for sha in "${range[@]}"; do
     git -c core.quotePath=false diff-tree --no-commit-id --name-only -r --root "$sha"
-  done | sort -u
+  done | LC_ALL=C sort -u
+}
+
+# First 12 hex of the sha256 of stdin. shasum on macOS, sha256sum elsewhere.
+_digest12() {
+  local out
+  if command -v sha256sum >/dev/null 2>&1; then
+    out="$(sha256sum)"
+  else
+    out="$(shasum -a 256)"
+  fi
+  printf '%s' "${out:0:12}"
 }
 
 # ── Scope audit (nexus-bbriq) ────────────────────────────────────────────
@@ -531,24 +560,46 @@ _outbound_files() {
 # coincide) and break anywhere else.
 audit="$_script_dir/../tests/e2e/lib/commit_scope_audit.sh"
 
-# --allowed-paths-from-range: the allowlist is the union of the paths every
-# outbound commit touches, printed so the list used is on the record. The
-# array is filled here, not word-split from a string, so a path with a space
-# in it reaches the audit whole. Not computed when the audit is skipped.
+# --allowed-paths-from-range: the two-step confirm. The list comes from the
+# same per-commit diff-tree call the audit uses (a rename lists BOTH paths; a
+# `git log --name-only` list collapses it to the new one and the audit then
+# refuses the old). The digest binds the confirming call to the list the
+# caller was shown: a file added to a commit between the two steps changes it.
+# The array is filled here, not word-split from a string, so a path with a
+# space in it reaches the audit whole. Not computed when the audit is skipped.
 _allowed_paths=()
+_vouch_text="$*"   # a function's own $* is its arguments, not the script's
+_range_show() {
+  {
+    echo "PUSH_REFUSED_SCOPE $1"
+    echo "n=${#_allowed_paths[@]} files touched by $remote/$branch..$source (digest $_range_have):"
+    printf '    %s\n' "${_allowed_paths[@]}"
+    echo
+    echo "Read the list. If it is exactly what you meant to push, confirm it:"
+    echo
+    echo "    $0 ${_echo_flag_text}--allowed-paths-from-range=$_range_have $_vouch_text"
+    echo
+    echo "The audit cannot catch a file that is in your commit by mistake (nexus-bbriq): the list"
+    echo "is derived from your commits, so your read of it is the check."
+  }
+  exit 7
+}
 if (( _range_allowlist )) && [[ -z "${NX_PUSH_SKIP_SCOPE_AUDIT:-}" ]]; then
   while IFS= read -r _p; do
     [[ -n "$_p" ]] && _allowed_paths+=("$_p")
-  done < <(git -c core.quotePath=false log --name-only --format= "refs/remotes/$remote/$branch..$tip" | sort -u)
+  done < <(_outbound_files)
   if [[ ${#_allowed_paths[@]} -eq 0 ]]; then
     echo "PUSH_REFUSED_SCOPE --allowed-paths-from-range found no files in $remote/$branch..$source (merge commits only?); there is nothing to allowlist."
     echo "Name the files with --allowed-paths, or skip on the record with --skip-scope-audit '<reason>'."
     exit 7
   fi
-  {
-    echo "PUSH_ALLOWED_PATHS_FROM_RANGE n=${#_allowed_paths[@]} (union of the files touched by $remote/$branch..$source; read it, this audit cannot catch a file that is in your commit by mistake):"
-    printf '    %s\n' "${_allowed_paths[@]}"
-  } >&2
+  _range_have="$(printf '%s\n' "${_allowed_paths[@]}" | _digest12)"
+  if [[ -z "$_range_digest" ]]; then
+    _range_show "--allowed-paths-from-range prints the list first; nothing was pushed."
+  elif [[ "$_range_digest" != "$_range_have" ]]; then
+    _range_show "the digest $_range_digest does not match the outbound range (a commit changed, or the range moved, since you read the list); nothing was pushed."
+  fi
+  echo "PUSH_SCOPE_CONFIRMED_RANGE n=${#_allowed_paths[@]} digest=$_range_have (the allowlist was the printed range list, confirmed by digest; not hand-scoped)"
 fi
 
 if [[ -n "${NX_PUSH_SKIP_SCOPE_AUDIT:-}" ]]; then
@@ -580,7 +631,7 @@ elif (( ! _range_allowlist )) && [[ -z "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
   suggestion="$(printf '%s\n' "$files" | tr '\n' ' ')"
   echo "    $0 ${_echo_flag_text}--allowed-paths '${suggestion% }' $*"
   echo
-  echo "Or, once you have read that list and it is exactly what you meant to push:"
+  echo "Or take the list as is: this prints it with a digest, and you confirm with that digest:"
   echo
   echo "    $0 ${_echo_flag_text}--allowed-paths-from-range $*"
   exit 7
