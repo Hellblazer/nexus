@@ -50,7 +50,7 @@ import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
  *
  * <p><b>Fix round (nexus-rfvyy.7.16, exclude-plan fix).</b> The exact-route collection is read with fewer queries per
  * cell (QUERIES_C) and at one k, so that all four fractions fit the budget; its cells are repeated with JIT off to read
- * the JIT share directly. After the four fractions, BALLAST embedding-less chunks grow the tenant's manifest from 128k
+ * the JIT share directly. After the four fractions, BALLAST chunkless manifest rows grow the tenant's manifest from 128k
  * to about 512k rows and the 10 percent cells of A and B are measured again (the last CSV column is the tenant's
  * manifest row count).
  *
@@ -96,9 +96,9 @@ class VectorSensitivityExcludePlanMeasure {
     static final int QUERIES = intEnv("NX_RDR243_PLAN_QUERIES", 100);
     /** Queries per cell on the exact route (every query reads the whole 18,000-row collection, 0.2 to 0.5 s each). */
     static final int QUERIES_C = intEnv("NX_RDR243_PLAN_QUERIES_C", 30);
-    /** Chunks with no embedding added to the tenant's manifest for the flatness sweep (0 skips the sweep). */
+    /** Manifest rows (no chunk behind them) added to the tenant's manifest for the flatness sweep (0 skips the sweep). */
     static final int BALLAST = intEnv("NX_RDR243_PLAN_BALLAST", 384_000);
-    static final String COLL_D = "knowledge__rfvyy716-d__voyage-context-3__v1";
+    static final String COLL_D = "knowledge__rfvyy716-d__minilm-l6-v2-384__v1";
     /** No new cell starts after this many minutes; the output then says TRUNCATED. */
     static final int BUDGET_MINUTES = intEnv("NX_RDR243_PLAN_BUDGET_MIN", 26);
 
@@ -269,68 +269,59 @@ class VectorSensitivityExcludePlanMeasure {
     }
 
     /**
-     * Rows for the flatness sweep, written server side into the 1024-dimension leaf of the same tenant, a leaf no
-     * search of this class reads. Their vectors are one constant, so storage is small, and the leaf's HNSW indexes are
-     * dropped first so the load does not build a graph over identical points. The rows are real manifest rows of the
-     * tenant (5 per document, 10 percent of the documents sensitive at the fraction the caller sets), so the tenant's
-     * {@code catalog_document_chunks} and its {@code (tenant_id, chash)} index grow by {@code rows}; the searched
-     * collections, their leaf and their HNSW index stay as they were.
+     * Rows for the flatness sweep: {@code rows} manifest rows of the same tenant, in documents of 5, written server
+     * side with the foreign keys to {@code nexus.chunks} switched off for the session
+     * ({@code session_replication_role = replica}, this class's own superuser connection). The manifest rows name chunk
+     * keys that have no chunk row: a real chunk would carry an embedding of 1.5 to 4 KB, and 384k of them do not fit
+     * the 2 GB tmpfs of a test cluster (the first attempt of this sweep filled it). What the sweep needs from them is
+     * the growth of the tenant's {@code catalog_document_chunks} and of its {@code (tenant_id, chash)} index, and
+     * that is real. The searched collections, their leaf and their HNSW index are untouched. 10 percent of the
+     * ballast documents are sensitive at the fraction the caller sets next.
      */
     private void addBallast(Connection su, int rows) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-        String model = "voyage-context-3";
+        String model = MODEL;
         PgContainerHelper.insertCollection(ctx, TENANT, COLL_D);
-        String leaf1024 = PciCatalogIntegrationTest.leafName(model, TENANT);
         int docs = (rows + CHUNKS_PER_DOC - 1) / CHUNKS_PER_DOC;
-        // a leaf's index is a partition of its model partition's index, itself a partition of the parent's: only
-        // the root can be dropped. This container is this class's alone; nothing else uses the 1024 leaves.
-        var indexName = DSL.field(DSL.name("indexname"), String.class);
-        java.util.Set<String> roots = new java.util.LinkedHashSet<>();
-        for (String ix : ctx.select(indexName).from(DSL.table(DSL.name("pg_catalog", "pg_indexes")))
-                .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus"))
-                .and(DSL.field(DSL.name("tablename"), String.class).eq(leaf1024))
-                .and(DSL.field(DSL.name("indexdef"), String.class).like("%hnsw%"))
-                .fetch(indexName)) {
-            roots.add(ctx.select(DSL.function("pg_partition_root", SQLDataType.VARCHAR, DSL.inline("nexus." + ix)))
-                .fetchOne(0, String.class));
+        ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+        try {
+            var g = DSL.generateSeries(0, rows - 1).as("g", "i");
+            Field<Integer> i = g.field("i", Integer.class);
+            Field<byte[]> chash = DSL.function("sha256", SQLDataType.VARBINARY,
+                DSL.function("convert_to", SQLDataType.VARBINARY,
+                    DSL.inline("ballast|").concat(i.cast(SQLDataType.VARCHAR)), DSL.inline("UTF8")));
+            var d = DSL.generateSeries(0, docs - 1).as("gd", "d");
+            Field<Integer> di = d.field("d", Integer.class);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                    CATALOG_DOCUMENTS.SENSITIVE)
+                .select(ctx.select(DSL.inline(TENANT), DSL.inline("d-").concat(di.cast(SQLDataType.VARCHAR)),
+                    DSL.inline("doc ").concat(di.cast(SQLDataType.VARCHAR)), DSL.inline("paper"), DSL.inline(COLL_D),
+                    DSL.inline(false)).from(d))
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX)
+                .select(ctx.select(DSL.inline(TENANT),
+                    DSL.inline("d-").concat(DSL.floor(i.div(CHUNKS_PER_DOC)).cast(SQLDataType.INTEGER)
+                        .cast(SQLDataType.VARCHAR)),
+                    i.mod(CHUNKS_PER_DOC), chash, DSL.inline(COLL_D), DSL.inline(model), i.mod(CHUNKS_PER_DOC)).from(g))
+                .execute();
+        } finally {
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
         }
-        ctx.setSchema("nexus").execute(); // jOOQ renders the drop unqualified; resolve it in the nexus schema
-        for (String root : roots) {
-            String[] parts = root.split("\\.");
-            ctx.dropIndex(DSL.name(parts[parts.length - 1])).execute();
-        }
-        LOG.info("event=rdr243_measure_ballast_indexes dropped={}", roots);
-
-        var g = DSL.generateSeries(0, rows - 1).as("g", "i");
-        Field<Integer> i = g.field("i", Integer.class);
-        Field<byte[]> chash = DSL.function("sha256", SQLDataType.VARBINARY,
-            DSL.function("convert_to", SQLDataType.VARBINARY, DSL.inline("ballast|").concat(i.cast(SQLDataType.VARCHAR)),
-                DSL.inline("UTF8")));
-        float[] constant = new float[1024];
-        Arrays.fill(constant, 0.03125f);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-            .select(ctx.select(DSL.inline(TENANT), DSL.inline(COLL_D), chash, DSL.inline(model),
-                DSL.inline("t").concat(i.cast(SQLDataType.VARCHAR)), DSL.val(Vector.of(constant), CHUNKS.EMBEDDING_1024)).from(g))
-            .execute();
-        var d = DSL.generateSeries(0, docs - 1).as("gd", "d");
-        Field<Integer> di = d.field("d", Integer.class);
-        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                CATALOG_DOCUMENTS.SENSITIVE)
-            .select(ctx.select(DSL.inline(TENANT), DSL.inline("d-").concat(di.cast(SQLDataType.VARCHAR)),
-                DSL.inline("doc ").concat(di.cast(SQLDataType.VARCHAR)), DSL.inline("paper"), DSL.inline(COLL_D),
-                DSL.inline(false)).from(d))
-            .execute();
-        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .select(ctx.select(DSL.inline(TENANT),
-                DSL.inline("d-").concat(DSL.floor(i.div(CHUNKS_PER_DOC)).cast(SQLDataType.INTEGER).cast(SQLDataType.VARCHAR)),
-                i.mod(CHUNKS_PER_DOC), chash, DSL.inline(COLL_D), DSL.inline(model)).from(g))
-            .execute();
         PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
         PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
+    }
+
+    /** Write what has been measured so far, so a later failure does not lose it. */
+    private void flushOutput() throws Exception {
+        String out = System.getenv().getOrDefault("NX_RDR243_PLAN_OUT", "target/rdr243-plan/measure");
+        Path csvPath = Path.of(out + ".csv");
+        Files.createDirectories(csvPath.toAbsolutePath().getParent());
+        Files.writeString(csvPath, csv.toString());
+        Files.writeString(Path.of(out + ".plans.txt"), plans.toString());
     }
 
     // -- measurement -----------------------------------------------------------------------------------
@@ -532,10 +523,11 @@ class VectorSensitivityExcludePlanMeasure {
                     for (int k : ks) {
                         if (overBudget()) break;
                         cell(p, c[0], c[1], k, sensitive);
+                        flushOutput();
                     }
                 }
             }
-            // phase 2: the flatness sweep. BALLAST chunks with no embedding (invisible to the HNSW index and to every
+            // phase 2: the flatness sweep. BALLAST manifest rows with no chunk behind them (invisible to the HNSW index and to every
             // search) and their documents and manifest rows are added to the same tenant and leaf, so the tenant's
             // manifest grows from about 128k to about 512k rows while the searched collections stay as they were.
             if (BALLAST > 0 && !overBudget()) {
@@ -549,6 +541,7 @@ class VectorSensitivityExcludePlanMeasure {
                     for (int k : KS) {
                         if (overBudget()) break;
                         cell(10, c[0], c[1], k, sensitive);
+                        flushOutput();
                     }
                 }
             }
@@ -556,11 +549,7 @@ class VectorSensitivityExcludePlanMeasure {
         csv.append("# truncated=").append(truncated).append(" rows_a=").append(ROWS_A).append(" rows_b=")
             .append(ROWS_B).append(" rows_c=").append(ROWS_C).append(" queries=").append(QUERIES).append(" wall_s=")
             .append((System.nanoTime() - startedNanos) / 1_000_000_000L).append('\n');
-        String out = System.getenv().getOrDefault("NX_RDR243_PLAN_OUT", "target/rdr243-plan/measure");
-        Path csvPath = Path.of(out + ".csv");
-        Files.createDirectories(csvPath.toAbsolutePath().getParent());
-        Files.writeString(csvPath, csv.toString());
-        Files.writeString(Path.of(out + ".plans.txt"), plans.toString());
-        LOG.info("event=rdr243_measure_done out={} truncated={}", out, truncated);
+        flushOutput();
+        LOG.info("event=rdr243_measure_done truncated={}", truncated);
     }
 }
