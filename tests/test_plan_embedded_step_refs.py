@@ -48,7 +48,7 @@ class _Stubs:
             self.calls.append("search")
             return {"ids": [f"{0xA000:064x}"], "tumblers": [], "distances": [], "collections": ["code__x"]}
 
-        def get_many(ids, collections=None, structured=False):  # noqa: ARG001
+        def get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
             self.calls.append("store_get_many")
             return {"contents": ["CHUNK" for _ in ids], "missing": []}
 
@@ -59,7 +59,7 @@ class _Stubs:
 
         return (
             patch.object(mcp_core, "search", search),
-            patch.object(mcp_core, "store_get_many", get_many),
+            patch.object(mcp_core, "_store_get_many_impl", get_many),
             patch.object(mcp_core, "operator_generate", generate),
             patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()),
         )

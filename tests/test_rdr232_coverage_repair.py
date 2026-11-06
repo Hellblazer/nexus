@@ -792,7 +792,7 @@ def test_the_supplement_merges_in_the_ids_shape_too_ahead_of_the_hydrated_items(
         return {"contents": ["s0", "s1", "s2"], "missing": []}
 
     steps = [{"tool": "generate", "args": {"ids": ["a", "b", "c"], "collections": "knowledge"}}]
-    with patch.object(mcp_core, "store_get_many", stub_get_many), supplement_scope(_supplement("r1")), \
+    with patch.object(mcp_core, "_store_get_many_impl", stub_get_many), supplement_scope(_supplement("r1")), \
             capture_reducer_input() as captured:
         runner._mark_reserved_step(0, steps)
         _, args = runner._hydrate_operator_args("generate", {"ids": ["a", "b", "c"], "collections": "knowledge", "question": "q"})
@@ -815,7 +815,7 @@ async def test_scenario_1_under_the_real_default_dispatcher_the_repair_evidence_
         seen["search"].append(kwargs)
         return _structured([REPAIR_TEXT] if kwargs["query"].startswith("what the document") else VECTOR_TEXTS, RDR_COLL)
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         ids = ids if isinstance(ids, list) else [ids]
         return {"contents": [texts.get(str(i), "") for i in ids], "missing": []}
 
@@ -829,7 +829,7 @@ async def test_scenario_1_under_the_real_default_dispatcher_the_repair_evidence_
 
     plan = {"steps": [PLAN["steps"][0], PLAN["steps"][2] | {"args": {"ids": "$step1.ids", "collections": "rdr"}},
                       {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}}]}
-    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "store_get_many", stub_get_many), \
+    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_check", stub_check), patch.object(mcp_core, "operator_generate", stub_generate), \
          patch.object(runner, "_hydrate_operator_args", spy):
         result = await plan_run(_match(plan), {}, bundle_operators=False, coverage_boundary=CoverageBoundary(request=_request(3)))
@@ -861,7 +861,7 @@ def _handoff_patches(boundary: CoverageBoundary, check, generated: list):
     async def stub_search(**kwargs):
         return _structured([REPAIR_TEXT] if kwargs["query"].startswith("what the document") else VECTOR_TEXTS, RDR_COLL)
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         ids = ids if isinstance(ids, list) else [ids]
         return {"contents": [texts.get(str(i), "") for i in ids], "missing": []}
 
@@ -890,7 +890,7 @@ def _handoff_patches(boundary: CoverageBoundary, check, generated: list):
         patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True),
         patch("nexus.plans.runner.plan_run", with_boundary),
         patch.object(mcp_core, "search", stub_search),
-        patch.object(mcp_core, "store_get_many", stub_get_many),
+        patch.object(mcp_core, "_store_get_many_impl", stub_get_many),
         patch.object(mcp_core, "operator_check", stub_check),
         patch.object(mcp_core, "operator_generate", stub_generate),
     ]
@@ -1039,7 +1039,7 @@ async def test_a_ledger_with_no_evidence_gets_no_note_so_the_zero_evidence_path_
     async def stub_search(**kwargs):  # noqa: ARG001
         return _structured(VECTOR_TEXTS, RDR_COLL)
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         ids = ids if isinstance(ids, list) else [ids]
         return {"contents": ["" for _ in ids], "missing": []}
 
@@ -1048,7 +1048,7 @@ async def test_a_ledger_with_no_evidence_gets_no_note_so_the_zero_evidence_path_
         return {"text": "should not run"}
 
     plan = {"steps": [PLAN["steps"][0], {"tool": "generate", "args": {"ids": "$step1.ids", "collections": "rdr", "template": "t"}}]}
-    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "store_get_many", stub_get_many), \
+    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_generate", stub_generate):
         result = await plan_run(_match(plan), {}, bundle_operators=False, coverage_boundary=CoverageBoundary(request=_request(2)))
     cov = _cov(result)

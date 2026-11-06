@@ -2948,7 +2948,7 @@ _TIDY_MAX_ENTRIES = 30
 _TIDY_MAX_CHARS_PER_ENTRY = 2000
 
 
-def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
+def _tidy_prefetch(topic: str, collection: str, *, sensitivity: ReadSensitivity) -> tuple[str, int, str, bool, int]:
     """Retrieve + hydrate the entries to consolidate, server-side.
 
     nexus-mawqw / Fix A. The MCP server holds direct T3 access, so the
@@ -2958,11 +2958,19 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     post-CC-2.1.162 MCP-server-approval gate that broke the old
     subprocess-calls-MCP-tools design.
 
-    Returns ``(entries_block, n_entries, reason, genuine_miss)``. ``reason`` is
+    Returns ``(entries_block, n_entries, reason, genuine_miss, withheld)``. ``reason`` is
     ``""`` when entries were retrieved, and otherwise says WHY there are none.
     ``genuine_miss`` is True for EXACTLY ONE branch — the collection really had
     nothing near the topic — so the caller can never report a failure as an
     empty result.
+
+    ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.9; census row 15) is the read posture ``nx_tidy`` took once on
+    its own thread, and has no default. Both reads below go through the internal helpers behind ``search`` and
+    ``store_get_many`` with it, so under ``exclude`` the engine drops sensitive chunks from the search and the
+    hydration. On top of that the catalog is asked about every matched chunk: a chunk with a sensitive owner is
+    removed before it is hydrated, and ``withheld`` counts them (it is the catalog check's count: chunks the
+    engine already dropped are not visible to this function). A catalog that cannot say withholds every match.
+    ``withheld`` is 0 under ``include``.
 
     nexus-1obui: this previously collapsed six distinct outcomes to ``("", 0)``
     — search raised, search returned an unstructured payload, zero ids, hydrate
@@ -2973,19 +2981,20 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     proof the collection held nothing. Every branch now names itself.
     """
     try:
-        hits = search(
+        hits = _search_render(
             query=topic,
             corpus=collection,
             limit=_TIDY_MAX_ENTRIES,
             structured=True,
+            sensitivity=sensitivity,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_search_failed", exc_info=True)
-        return "", 0, f"retrieval FAILED ({type(exc).__name__}: {exc})", False
+        return "", 0, f"retrieval FAILED ({type(exc).__name__}: {exc})", False, 0
     if not isinstance(hits, dict):
         # search() returns a human-readable string on no-match / error.
-        return "", 0, f"retrieval returned an unstructured payload: {str(hits)[:300]}", False
+        return "", 0, f"retrieval returned an unstructured payload: {str(hits)[:300]}", False, 0
     ids = hits.get("ids") or []
     if not ids:
         # nexus-1obui: the uro6c threshold diagnostic now rides along on the
@@ -2994,17 +3003,37 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         dropped = bool(hits.get("threshold_dropped"))
         if dropped:
             reason = f"RETRIEVAL THRESHOLD DROPPED every candidate — {reason}"
-        return "", 0, str(reason), not dropped
+        return "", 0, str(reason), not dropped, 0
     cols = hits.get("chunk_collections") or hits.get("collections") or [collection]
+    withheld = 0
+    if sensitivity == "exclude":
+        from nexus.doc_sensitivity import SensitivityUnknown, flagged_owners_of_chashes  # noqa: PLC0415 — deferred: light, used only under the scope
+
+        try:
+            refused = set(flagged_owners_of_chashes([str(i) for i in ids]))
+        except SensitivityUnknown as exc:
+            _log.warning("tidy_prefetch_sensitivity_unknown", matched=len(ids), error=exc.detail)
+            refused = {str(i) for i in ids}
+        if refused:
+            _log.info("tidy_prefetch_sensitive_withheld", withheld=len(refused), matched=len(ids))
+            per_id_cols = len(cols) == len(ids)
+            keep = [k for k, i in enumerate(ids) if str(i) not in refused]
+            withheld = len(ids) - len(keep)
+            ids = [ids[k] for k in keep]
+            if per_id_cols:
+                cols = [cols[k] for k in keep]
+            if not ids:
+                return "", 0, f"all {withheld} matching entries are withheld as sensitive", True, withheld
 
     try:
         # The prefetch reads ``contents`` only; skip the owner lookup behind ``source_notes``.
         with without_source_notes():
-            hydrated = store_get_many(
+            hydrated = _store_get_many_impl(
                 ids,
                 cols,
                 max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
                 structured=True,
+                sensitivity=sensitivity,
             )
     except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -3012,7 +3041,7 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         return "", 0, (
             f"matched {len(ids)} entries but HYDRATION FAILED "
             f"({type(exc).__name__}: {exc})"
-        ), False
+        ), False, withheld
     if isinstance(hydrated, dict) and hydrated.get("error"):
         # store_get_many caught an internal error and returned it as a
         # structured field rather than raising. Surface it at DEBUG so a
@@ -3027,7 +3056,7 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         return "", 0, (
             f"matched {len(ids)} entries but HYDRATION RETURNED NO CONTENT"
             + (f" ({err})" if err else "")
-        ), False
+        ), False, withheld
     blocks: list[str] = []
     for i, (doc_id, raw) in enumerate(zip(ids, contents), start=1):
         # nexus-c0sdc: store_get_many truncates at _TIDY_MAX_CHARS_PER_ENTRY.
@@ -3056,8 +3085,8 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     if not blocks:
         return "", 0, (
             f"matched and hydrated {len(ids)} entries but every body was EMPTY"
-        ), False
-    return "\n\n".join(blocks), len(blocks), "", False
+        ), False, withheld
+    return "\n\n".join(blocks), len(blocks), "", False, withheld
 
 
 # ── Tier-discipline telemetry (Phase 1A nexus-kren) ─────────────────────────
@@ -6866,7 +6895,28 @@ def store_get_many(
     - Ids are chunk ids, so a note that `store_put` split comes back as its
       separate pieces; use `store_get` for the whole note.
     """
-    sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
+    return _store_get_many_impl(
+        ids=ids, collections=collections, max_chars_per_doc=max_chars_per_doc, structured=structured,
+        limit_per_source=limit_per_source,
+        sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
+    )
+
+
+def _store_get_many_impl(
+    ids: str | list,
+    collections: str | list = "knowledge",
+    *,
+    max_chars_per_doc: int = 4000,
+    structured: bool = False,
+    limit_per_source: int | list[int] | None = None,
+    sensitivity: ReadSensitivity,
+) -> str | dict:
+    """The body of the ``store_get_many`` tool, with the read posture as an argument.
+
+    RDR-243 Phase 2 (nexus-rfvyy.7.9). The tool reads :func:`nexus.sensitivity.read_sensitivity` once on its
+    own thread and calls this; an in-process caller that already holds the posture (the plan runner's
+    hydration, ``nx_tidy``'s prefetch) calls it directly, so it never goes through the tool function and the
+    model-facing schema never grows a ``sensitivity`` parameter. ``sensitivity`` has no default."""
     try:
         # Detect parallel-stream form: ids is a non-empty list of lists.
         parallel_form = (
@@ -15785,8 +15835,9 @@ async def nx_tidy(
     # nexus-mawqw / Fix A: pre-fetch the entries server-side and inline
     # them. The child claude -p then consolidates LLM-only with NO tools,
     # so it can never trip the post-CC-2.1.162 MCP-server-approval gate.
-    entries_block, n_entries, prefetch_reason, genuine_miss = _tidy_prefetch(
-        topic, collection,
+    sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on this thread; the prefetch takes it as an argument
+    entries_block, n_entries, prefetch_reason, genuine_miss, withheld = _tidy_prefetch(
+        topic, collection, sensitivity=sensitivity,
     )
     capped = n_entries >= _TIDY_MAX_ENTRIES
     if capped:
@@ -15850,6 +15901,12 @@ async def nx_tidy(
             f"\nNote: retrieval was capped at {_TIDY_MAX_ENTRIES} entries; "
             "the collection may contain additional matching content not seen "
             "by this consolidation pass."
+        )
+    if sensitivity == "exclude":
+        # RDR-243 Phase 2 (census row 15): the summary says what was kept from the model. The engine's own filter
+        # runs first and is not counted; this is the catalog check's count of matched entries it removed.
+        lines.append(
+            f"\nSensitive entries withheld from this pass: {withheld} (counted after the engine's own filter)."
         )
     if prefetch_reason and not genuine_miss:
         # Belt and braces: the child is instructed to report this, but the

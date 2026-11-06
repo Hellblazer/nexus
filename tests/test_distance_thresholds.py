@@ -250,11 +250,11 @@ class TestTidyPrefetchNamesItsFailures:
             if exc is not None:
                 raise exc
             return hits
-        monkeypatch.setattr(core, "search", fake_search)
-        return core._tidy_prefetch("some topic", "knowledge")
+        monkeypatch.setattr(core, "_search_render", fake_search)
+        return core._tidy_prefetch("some topic", "knowledge", sensitivity="include")
 
     def test_threshold_drop_is_not_a_genuine_miss(self, monkeypatch) -> None:
-        block, n, reason, genuine = self._prefetch(monkeypatch, hits={
+        block, n, reason, genuine, _withheld = self._prefetch(monkeypatch, hits={
             "ids": [], "threshold_dropped": True,
             "no_results_reason": "No results. Closest candidate was dropped "
                                  "at distance 0.6290 ...",
@@ -265,7 +265,7 @@ class TestTidyPrefetchNamesItsFailures:
         assert "0.6290" in reason
 
     def test_empty_collection_is_a_genuine_miss(self, monkeypatch) -> None:
-        block, n, reason, genuine = self._prefetch(monkeypatch, hits={
+        block, n, reason, genuine, _withheld = self._prefetch(monkeypatch, hits={
             "ids": [], "threshold_dropped": False,
             "no_results_reason": "No results.",
         })
@@ -274,7 +274,7 @@ class TestTidyPrefetchNamesItsFailures:
         assert "THRESHOLD DROPPED" not in reason
 
     def test_search_failure_is_not_a_genuine_miss(self, monkeypatch) -> None:
-        block, n, reason, genuine = self._prefetch(
+        block, n, reason, genuine, _withheld = self._prefetch(
             monkeypatch, exc=RuntimeError("T3 unreachable"),
         )
         assert (block, n) == ("", 0)
@@ -285,14 +285,14 @@ class TestTidyPrefetchNamesItsFailures:
     def test_hydration_failure_is_not_a_genuine_miss(self, monkeypatch) -> None:
         from nexus.mcp import core
 
-        monkeypatch.setattr(core, "search", lambda **_k: {
+        monkeypatch.setattr(core, "_search_render", lambda **_k: {
             "ids": ["a", "b"], "chunk_collections": ["c", "c"],
         })
 
         def boom(*_a, **_k):
             raise RuntimeError("hydrate exploded")
-        monkeypatch.setattr(core, "store_get_many", boom)
-        block, n, reason, genuine = core._tidy_prefetch("t", "knowledge")
+        monkeypatch.setattr(core, "_store_get_many_impl", boom)
+        block, n, reason, genuine, _withheld = core._tidy_prefetch("t", "knowledge", sensitivity="include")
         assert (block, n) == ("", 0)
         assert genuine is False, "an outage must not read as an empty collection"
         assert "HYDRATION FAILED" in reason
@@ -301,13 +301,13 @@ class TestTidyPrefetchNamesItsFailures:
     def test_successful_retrieval_reports_no_reason(self, monkeypatch) -> None:
         from nexus.mcp import core
 
-        monkeypatch.setattr(core, "search", lambda **_k: {
+        monkeypatch.setattr(core, "_search_render", lambda **_k: {
             "ids": ["a"], "chunk_collections": ["c"],
         })
-        monkeypatch.setattr(core, "store_get_many", lambda *_a, **_k: {
+        monkeypatch.setattr(core, "_store_get_many_impl", lambda *_a, **_k: {
             "contents": ["real body text"],
         })
-        block, n, reason, genuine = core._tidy_prefetch("t", "knowledge")
+        block, n, reason, genuine, _withheld = core._tidy_prefetch("t", "knowledge", sensitivity="include")
         assert n == 1
         assert "real body text" in block
         assert reason == ""
@@ -330,11 +330,11 @@ class TestTidyMarksDisplayTruncation:
     def _prefetch_one(self, monkeypatch, body: str):
         from nexus.mcp import core
 
-        monkeypatch.setattr(core, "search", lambda **_k: {
+        monkeypatch.setattr(core, "_search_render", lambda **_k: {
             "ids": ["doc1"], "chunk_collections": ["knowledge"],
         })
 
-        def fake_hydrate(_ids, _cols, *, max_chars_per_doc, structured):
+        def fake_hydrate(_ids, _cols, *, max_chars_per_doc, structured, sensitivity):
             # Reproduce store_get_many's real truncation shape (nexus-lugwx:
             # ellipsis plus display_truncation_marker), rather than asserting
             # against a hand-written marker.
@@ -345,8 +345,8 @@ class TestTidyMarksDisplayTruncation:
                     + core.display_truncation_marker(max_chars_per_doc)
                 )
             return {"contents": [out]}
-        monkeypatch.setattr(core, "store_get_many", fake_hydrate)
-        return core._tidy_prefetch("t", "knowledge")
+        monkeypatch.setattr(core, "_store_get_many_impl", fake_hydrate)
+        return core._tidy_prefetch("t", "knowledge", sensitivity="include")
 
     def test_a_healthy_long_entry_is_marked_as_display_truncated(
         self, monkeypatch,
@@ -357,7 +357,7 @@ class TestTidyMarksDisplayTruncation:
         body = ("Meta-Harness maps paper sections onto code modules. " * 120)
         assert len(body) > core._TIDY_MAX_CHARS_PER_ENTRY
 
-        block, n, reason, _genuine = self._prefetch_one(monkeypatch, body)
+        block, n, reason, _genuine, _withheld = self._prefetch_one(monkeypatch, body)
         assert n == 1
         assert reason == ""
         assert "TRUNCATED FOR DISPLAY" in block, (
@@ -367,7 +367,7 @@ class TestTidyMarksDisplayTruncation:
         assert "NOT a defect" in block
 
     def test_a_short_entry_is_not_marked(self, monkeypatch) -> None:
-        block, n, _reason, _genuine = self._prefetch_one(
+        block, n, _reason, _genuine, _withheld = self._prefetch_one(
             monkeypatch, "short intact body",
         )
         assert n == 1

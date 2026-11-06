@@ -22,7 +22,7 @@
 "src/nexus/catalog/orphan_backfill.py" = ["meta"]
 "src/nexus/health.py" = ["meta"]
 "src/nexus/mcp/core.py::store_get" = ["entry"]
-"src/nexus/mcp/core.py::store_get_many" = ["entry"]
+"src/nexus/mcp/core.py::_store_get_many_impl" = ["entry"]
 "src/nexus/mcp/core.py::store_list" = ["e"]
 "src/nexus/exporter.py" = ["meta"]
 "src/nexus/catalog/manifest_backfill.py" = ["meta"]
@@ -221,7 +221,7 @@ tags = 1
 title = 1
 ttl_days = 1
 
-[sites."src/nexus/mcp/core.py::store_get_many"]
+[sites."src/nexus/mcp/core.py::_store_get_many_impl"]
 section_type = 1
 
 # nexus-6pfgb.13: store_list shows each chunk's title, tags, ttl and index date from its owning notes;

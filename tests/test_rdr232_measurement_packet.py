@@ -192,12 +192,12 @@ def test_the_live_resolver_matches_each_body_to_its_chash_by_hashing_never_by_po
     body that hashes to its chash."""
     calls: list[tuple[list[str], str]] = []
 
-    def fake(ids, collections, *, structured, max_chars_per_doc):  # noqa: ARG001
+    def fake(ids, collections, *, structured, max_chars_per_doc, **_kw):  # noqa: ARG001
         calls.append((list(ids), collections))
         bodies = [f"[source: x.md]\n{TEXT_BY_CHASH[c]}" for c in reversed(ids) if c in TEXT_BY_CHASH]
         return {"contents": bodies[:-1], "missing": []}  # drops one body and reverses the rest
 
-    monkeypatch.setattr(core, "store_get_many", fake)
+    monkeypatch.setattr(core, "_store_get_many_impl", fake)
     refs = packet.anchor_refs(RECORDED)
     text_of = packet.live_text_resolver(refs)
     resolved = {chash: text_of(chash, col) for _i, chash, col in refs}

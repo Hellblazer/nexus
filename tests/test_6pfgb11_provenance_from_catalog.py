@@ -108,7 +108,7 @@ def test_a_chunk_shared_by_two_documents_gets_each_documents_own_note_under_its_
     ), patch("nexus.mcp.core._get_catalog", return_value=catalog), patch(
         "nexus.mcp.core._read_scope", return_value=[COLL],
     ):
-        out = _hydrate_tumbler_ids(["1.1.1", "1.1.2"])
+        out = _hydrate_tumbler_ids(["1.1.1", "1.1.2"], sensitivity="include")
 
     note_a, body_a = out["contents"][0].split("\n", 1)
     note_b, body_b = out["contents"][1].split("\n", 1)
@@ -333,12 +333,12 @@ def test_the_tidy_prefetch_does_not_pay_for_notes() -> None:
     catalog = _Catalog([a], [_position(X, "1.1.1")])
     hits = {"ids": [X], "chunk_collections": [COLL]}
 
-    with patch("nexus.mcp.core.search", return_value=hits), patch(
+    with patch("nexus.mcp.core._search_render", return_value=hits), patch(
         "nexus.mcp.core._get_t3", return_value=_t3({X: _B_ROW}),
     ), patch("nexus.mcp.core._get_catalog", return_value=catalog), patch(
         "nexus.mcp.core._read_scope", return_value=[COLL],
     ):
-        block, n, reason, _genuine = core._tidy_prefetch("topic", COLL)
+        block, n, reason, _genuine, _withheld = core._tidy_prefetch("topic", COLL, sensitivity="include")
 
     assert n == 1 and "shared text" in block, (n, reason)
     assert catalog.resolve_calls == []

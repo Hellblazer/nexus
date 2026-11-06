@@ -32,6 +32,9 @@ class NoSensitiveDocuments:
     def list_by_collection(self, collection: str, *, limit: int | None = None) -> list[Any]:
         return []
 
+    def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
+        return {}
+
     def get_manifests(self, doc_ids: list[str]) -> dict[str, list[Any]]:
         return {}
 

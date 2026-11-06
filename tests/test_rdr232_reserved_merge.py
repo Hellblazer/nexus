@@ -52,9 +52,9 @@ def _secondary_ids(n: int) -> list[str]:
 @pytest.fixture
 def ids_hydration():
     """``store_get_many`` returns "secondary i" for the i-th id; no catalog lookups."""
-    def fake(ids, collections=None, structured=False):  # noqa: ARG001
+    def fake(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
-    with patch("nexus.mcp.core.store_get_many", side_effect=fake), \
+    with patch("nexus.mcp.core._store_get_many_impl", side_effect=fake), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
         yield
 
@@ -236,7 +236,7 @@ async def test_plan_run_merges_ahead_of_inputs_and_reports_an_unbundled_rank_dro
     async def stub_search(**kwargs):  # noqa: ARG001
         return {"ids": _secondary_ids(3), "tumblers": [], "distances": [], "collections": []}
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
 
     async def stub_rank(**kwargs):
@@ -254,7 +254,7 @@ async def test_plan_run_merges_ahead_of_inputs_and_reports_an_unbundled_rank_dro
         {"tool": "generate", "args": {"instruction": "i", "context": "$step3.items"}},
     ]}
     with patch.object(mcp_core, "search", stub_search), \
-         patch.object(mcp_core, "store_get_many", stub_get_many), \
+         patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_rank", stub_rank), \
          patch.object(mcp_core, "operator_generate", stub_generate), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
@@ -349,7 +349,7 @@ async def test_plan_run_bundled_rank_then_generate_reports_no_drop() -> None:
     async def stub_search(**kwargs):  # noqa: ARG001
         return {"ids": _secondary_ids(3), "tumblers": [], "distances": [], "collections": []}
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
 
     async def fake_bundle(bundle, **kwargs):  # noqa: ARG001
@@ -357,7 +357,7 @@ async def test_plan_run_bundled_rank_then_generate_reports_no_drop() -> None:
         return {"text": "ok"}
 
     with patch.object(mcp_core, "search", stub_search), \
-         patch.object(mcp_core, "store_get_many", stub_get_many), \
+         patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch("nexus.plans.bundle.dispatch_bundle", AsyncMock(side_effect=fake_bundle)), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
         result = await plan_run(_match(_bundled_rank_generate_plan()), reserved_stream=stream)
@@ -511,7 +511,7 @@ async def test_plan_run_review_default_shape_merges_at_compare_not_extract() -> 
     async def stub_search(**kwargs):  # noqa: ARG001
         return {"ids": _secondary_ids(2), "tumblers": [], "distances": [], "collections": []}
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
 
     async def stub_extract(**kwargs):
@@ -529,7 +529,7 @@ async def test_plan_run_review_default_shape_merges_at_compare_not_extract() -> 
         {"tool": "compare", "args": {"focus": "f", "inputs": "$step2.contents"}},
     ]}
     with patch.object(mcp_core, "search", stub_search), \
-         patch.object(mcp_core, "store_get_many", stub_get_many), \
+         patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_extract", stub_extract), \
          patch.object(mcp_core, "operator_compare", stub_compare), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
@@ -671,7 +671,7 @@ async def test_the_continuation_envelope_carries_the_reserved_primary_evidence()
         return {"ids": ["a" * 64], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"],
                 "chunk_text_hash": ["h1"], "chunk_collections": ["knowledge"]}
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": ["the secondary hit" for _ in ids]}
 
     db_stub = MagicMock()
@@ -690,7 +690,7 @@ async def test_the_continuation_envelope_carries_the_reserved_primary_evidence()
          patch("nexus.mcp.core._nx_answer_primary_stream", return_value=(evidence, stream)), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()), \
          patch.object(mcp_core, "search", stub_search), \
-         patch.object(mcp_core, "store_get_many", stub_get_many):
+         patch.object(mcp_core, "_store_get_many_impl", stub_get_many):
         t2_ctx.return_value.__enter__.return_value = db_stub
         env = await nx_answer(question="q", continuation=True, structured=True)
 

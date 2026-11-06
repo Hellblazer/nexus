@@ -55,12 +55,12 @@ def _stubs():
     async def stub_search(**kwargs):  # noqa: ARG001
         return {"ids": [f"{0xA000 + i:064x}" for i in range(3)], "tumblers": [], "distances": [], "collections": []}
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
 
     return (
         patch.object(mcp_core, "search", stub_search),
-        patch.object(mcp_core, "store_get_many", stub_get_many),
+        patch.object(mcp_core, "_store_get_many_impl", stub_get_many),
         patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()),
     )
 
@@ -172,10 +172,10 @@ def test_ids_hydration_still_merges_once() -> None:
     stream = _stream()
     ids = [f"{0xB000 + i:064x}" for i in range(2)]
 
-    def fake(ids, collections=None, structured=False):  # noqa: ARG001
+    def fake(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
 
-    with patch("nexus.mcp.core.store_get_many", side_effect=fake), \
+    with patch("nexus.mcp.core._store_get_many_impl", side_effect=fake), \
          patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()), \
          reserved_scope(stream):
         set_reserved_step(4)

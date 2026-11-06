@@ -519,7 +519,7 @@ class TestS1TruncationMetadata:
             ],
         }
         with patch(
-            "nexus.mcp.core.store_get_many", return_value=oversized,
+            "nexus.mcp.core._store_get_many_impl", return_value=oversized,
         ):
             plan = {
                 "steps": [

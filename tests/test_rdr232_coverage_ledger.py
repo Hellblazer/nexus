@@ -843,7 +843,7 @@ async def test_the_terminal_step_is_hydrated_once_under_the_real_default_dispatc
     async def stub_search(**kwargs):  # noqa: ARG001
         return _structured(VECTOR_TEXTS, RDR_COLL)
 
-    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+    def stub_get_many(ids, collections=None, structured=False, **_kw):  # noqa: ARG001
         return {"contents": list(VECTOR_TEXTS)}
 
     async def stub_check(items, check_instruction, timeout=300.0, model=None):  # noqa: ARG001
@@ -857,7 +857,7 @@ async def test_the_terminal_step_is_hydrated_once_under_the_real_default_dispatc
     plan = {"steps": [PLAN["steps"][0], PLAN["steps"][2] | {"args": {"ids": "$step1.ids", "collections": "rdr"}},
                       {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}}]}
     stream = _reserved()
-    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "store_get_many", stub_get_many), \
+    with patch.object(mcp_core, "search", stub_search), patch.object(mcp_core, "_store_get_many_impl", stub_get_many), \
          patch.object(mcp_core, "operator_check", stub_check), patch.object(mcp_core, "operator_generate", stub_generate), \
          patch.object(runner, "_hydrate_operator_args", spy):
         result = await plan_run(_match(plan), {}, bundle_operators=False, reserved_stream=stream,

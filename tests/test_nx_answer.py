@@ -1723,12 +1723,12 @@ class TestNxTidy:
 
         # Pre-fetch surface: search returns structured ids, store_get_many
         # hydrates the bodies. Both run in-process on the server side.
-        monkeypatch.setattr(_core, "search", lambda **kw: {
+        monkeypatch.setattr(_core, "_search_render", lambda **kw: {
             "ids": ["id1", "id2"],
             "chunk_collections": ["knowledge__x", "knowledge__x"],
             "collections": ["knowledge__x"],
         })
-        monkeypatch.setattr(_core, "store_get_many", lambda *a, **kw: {
+        monkeypatch.setattr(_core, "_store_get_many_impl", lambda *a, **kw: {
             "contents": [
                 "ENTRY-BODY-SENTINEL-ONE about chromadb quotas",
                 "ENTRY-BODY-SENTINEL-TWO duplicate of one",
@@ -1766,12 +1766,12 @@ class TestNxTidy:
         from nexus.mcp.core import nx_tidy, _TIDY_MAX_ENTRIES
 
         n = _TIDY_MAX_ENTRIES
-        monkeypatch.setattr(_core, "search", lambda **kw: {
+        monkeypatch.setattr(_core, "_search_render", lambda **kw: {
             "ids": [f"id{i}" for i in range(n)],
             "chunk_collections": ["knowledge__x"] * n,
             "collections": ["knowledge__x"],
         })
-        monkeypatch.setattr(_core, "store_get_many", lambda *a, **kw: {
+        monkeypatch.setattr(_core, "_store_get_many_impl", lambda *a, **kw: {
             "contents": [f"body {i}" for i in range(n)],
             "missing": [],
         })
@@ -1796,7 +1796,7 @@ class TestNxTidy:
         def boom(**kw):
             raise RuntimeError("t3 down")
 
-        monkeypatch.setattr(_core, "search", boom)
+        monkeypatch.setattr(_core, "_search_render", boom)
 
         captured = {}
 

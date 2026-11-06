@@ -670,6 +670,13 @@ def _derive_search_return_keys() -> frozenset[str] | None:
     return _ast_return_keys(_mcp_core_module()._search_render)
 
 
+def _derive_store_get_many_return_keys() -> frozenset[str] | None:
+    """One-hop AST derivation of ``store_get_many()``'s return-key ground truth: the tool reads the posture and
+    returns ``_store_get_many_impl()``'s result unchanged (RDR-243 Phase 2, nexus-rfvyy.7.9), so the keys are that
+    function's dict literals."""
+    return _ast_return_keys(_mcp_core_module()._store_get_many_impl)
+
+
 def _derive_tuple_stats_return_keys() -> frozenset[str] | None:
     """One-hop AST derivation of ``tuple_stats()``'s return-key ground
     truth: ``tuple_stats`` itself only ever returns ``_tuple_census_to_dict(c)``
@@ -706,6 +713,7 @@ def _derive_nx_answer_return_keys() -> frozenset[str] | None:
 #: to re-verify.
 _DERIVED_RETURN_KEY_RESOLVERS: dict[str, Callable[[], frozenset[str] | None]] = {
     "search": _derive_search_return_keys,
+    "store_get_many": _derive_store_get_many_return_keys,
     "tuple_stats": _derive_tuple_stats_return_keys,
     "nx_answer": _derive_nx_answer_return_keys,
 }

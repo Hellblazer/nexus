@@ -231,7 +231,7 @@ class TestShapeBIdsAutoHydrationFidelity:
 
         monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_claude_dispatch)
         with patch.object(mcp_core, "search", stub_search), \
-             patch.object(mcp_core, "store_get_many", stub_store_get_many):
+             patch.object(mcp_core, "_store_get_many_impl", stub_store_get_many):
             match = _match({"steps": steps})
             result = await plan_run(match)
 
@@ -239,7 +239,7 @@ class TestShapeBIdsAutoHydrationFidelity:
         assert cut.shape is CutShape.SHAPE_B
         merged = merge_bindings(match.default_bindings, {})
 
-        with patch.object(mcp_core, "store_get_many", stub_store_get_many):
+        with patch.object(mcp_core, "_store_get_many_impl", stub_store_get_many):
             envelope = assemble_continuation_envelope(
                 cut=cut, steps=steps, bindings=merged, step_outputs=result.steps,
                 plan_id=match.plan_id, run_id=None,

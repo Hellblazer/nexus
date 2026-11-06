@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 import structlog
 
 from nexus import call_deadline
+from nexus import sensitivity as _sensitivity  # through the module, so one test patch reaches every entry point
 from nexus.plans.document_confinement import (
     CONFINED_TOOLS,
     DocumentConfinement,
@@ -68,6 +69,7 @@ from nexus.plans.document_confinement import (
     empty_confined_output,
 )
 from nexus.plans.match import Match
+from nexus.sensitivity import ReadSensitivity
 from nexus.plans.owner_narrowing import OWNERS_BINDING
 
 if TYPE_CHECKING:
@@ -476,6 +478,12 @@ class StepRecord:
     #: 0-based plan indices this one dispatch fused. Empty for every
     #: other source.
     bundled_steps: list[int] = field(default_factory=list)
+    #: RDR-243 Phase 2 (nexus-rfvyy.7.9): one ``{"tumbler", "surface", "route", ...}`` dict per sensitive document
+    #: (or chunk) the hydration behind this record refused to hand to a model, in the order it refused them. The
+    #: lines gathered since the previous record are attached to the next one, because hydration runs before the
+    #: step it feeds is recorded. Empty for a step that refused nothing, which is every step outside ``llm_bound``.
+    #: In-process only, like the rest of this record: the engine-side ``nx_answer_steps`` write does not carry it.
+    sensitive_skips: list[dict[str, str]] = field(default_factory=list)
 
     # Same landmine as DispatchUsage (dispatch.py): frozen=True + a
     # mutable list field would auto-generate a __hash__ that raises
@@ -752,6 +760,71 @@ from nexus.operators.witness import EvidenceRecord, bind as _bind_witness, defer
 #: attribute never hydrates (a test fake): it is handed the resolved args as it always was.
 _HYDRATES_ATTR: str = "hydrates_operator_args"
 _PREHYDRATED: ContextVar[bool] = ContextVar("nexus_operator_args_prehydrated", default=False)
+
+
+#: RDR-243 Phase 2 (nexus-rfvyy.7.9). The refusals hydration made since the last :class:`StepRecord`, collected for
+#: the run by :func:`plan_run` (``None`` outside a run: a refusal is then logged and not recorded). The list is
+#: shared by reference, so a hydration that runs on a worker thread holding a copy of the context still appends to it.
+_SENSITIVE_SKIPS: ContextVar[list[dict[str, str]] | None] = ContextVar("nexus_plan_run_sensitive_skips", default=None)
+
+
+@contextlib.contextmanager
+def _sensitive_skip_scope() -> Any:
+    token = _SENSITIVE_SKIPS.set([])
+    try:
+        yield
+    finally:
+        _SENSITIVE_SKIPS.reset(token)
+
+
+def _note_sensitive_skip(tumbler: str, route: str, *, chash: str = "", reason: str = "sensitive") -> None:
+    """Log one refusal and, inside a run, put it on the run record's next :class:`StepRecord`.
+
+    *tumbler* is the refused document (``""`` when the catalog could not say, *reason* then says so); *route* is
+    ``tumbler`` or ``chash``, the hydration path that met it (the coverage repair fetch uses the chash path); the surface is the registry name of the
+    innermost ``llm_bound`` scope, which names the surface that would have sent the text."""
+    from nexus.sensitivity import current_surface  # noqa: PLC0415 — deferred: the runner imports stay lazy
+
+    surface = current_surface() or ""
+    _log.info("sensitive_document_refused", tumbler=tumbler, surface=surface, route=route, chash=chash, reason=reason)
+    sink = _SENSITIVE_SKIPS.get()
+    if sink is not None:
+        line = {"tumbler": tumbler, "surface": surface, "route": route, "reason": reason}
+        if chash:
+            line["chash"] = chash
+        if line not in sink:  # a second hydration of the same step (the coverage repair) must not repeat a line
+            sink.append(line)
+
+
+def _drain_sensitive_skips() -> list[dict[str, str]]:
+    sink = _SENSITIVE_SKIPS.get()
+    if not sink:
+        return []
+    taken = list(sink)
+    sink.clear()
+    return taken
+
+
+def _withheld_sensitive_chashes(chashes: list[str], *, cat: Any = None) -> set[str]:
+    """The subset of *chashes* a model must not be handed because a sensitive live document owns it.
+
+    The explicit refusal on the chash route, beside the engine's ``exclude``: the engine drops these chunks from the
+    read, and this names the document (the skip line carries its tumbler) and still refuses on an engine or double
+    that does not filter. A catalog that cannot say fails closed: every chash is withheld, one line each."""
+    from nexus.doc_sensitivity import SensitivityUnknown, flagged_owners_of_chashes  # noqa: PLC0415 — deferred
+
+    ids = [str(c) for c in chashes if c]
+    try:
+        flagged_map = flagged_owners_of_chashes(ids, cat=cat)
+    except SensitivityUnknown as exc:
+        _log.warning("sensitive_chash_gate_unknown", chash_count=len(ids), error=exc.detail)
+        for c in dict.fromkeys(ids):
+            _note_sensitive_skip("", "chash", chash=c, reason="sensitivity unknown: withheld")
+        return set(ids)
+    for c, owners in flagged_map.items():
+        for t in owners:
+            _note_sensitive_skip(t, "chash", chash=c)
+    return set(flagged_map)
 
 
 def operator_args_prehydrated() -> bool:
@@ -2204,7 +2277,27 @@ def _zero_evidence_witness(resolved_tool: str, text: str) -> dict[str, Any]:
     return {**_bind_witness(reply, None, verb), "text": text}
 
 
-def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
+def _refuse_sensitive_tumblers(tumbler_ids: list[str], cat: Any) -> set[str]:
+    """The tumblers of *tumbler_ids* hydration refuses under ``exclude``, each with a skip line.
+
+    One batched catalog read. A catalog that cannot answer refuses every tumbler (a gate that cannot tell never
+    sends); the line says so."""
+    from nexus.doc_sensitivity import SensitivityUnknown, flagged  # noqa: PLC0415 — deferred
+
+    try:
+        refused = flagged(tumbler_ids, cat=cat)
+    except SensitivityUnknown as exc:
+        _log.warning("hydrate_tumbler_ids_sensitivity_unknown", tumbler_count=len(tumbler_ids), error=exc.detail)
+        for t in dict.fromkeys(tumbler_ids):
+            _note_sensitive_skip(t, "tumbler", reason="sensitivity unknown: withheld")
+        return set(tumbler_ids)
+    for t in tumbler_ids:
+        if t in refused:
+            _note_sensitive_skip(t, "tumbler")
+    return refused
+
+
+def _hydrate_tumbler_ids(tumbler_ids: list[str], *, sensitivity: ReadSensitivity) -> dict[str, Any]:
     """Resolve document tumblers to T3 content via the catalog manifest
     (nexus-mm5tx / nexus-zekpl class).
 
@@ -2222,6 +2315,12 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     Returns the same ``{contents, missing}`` shape ``store_get_many``
     returns (aligned 1:1 with *tumbler_ids*), so it slots into the same
     ``non_empty`` filtering the caller already does for the chash path.
+
+    *sensitivity* (RDR-243 Phase 2, nexus-rfvyy.7.9) is the read posture the caller took once on its own thread; it
+    has no default. ``exclude`` refuses every document whose catalog row is sensitive: it contributes no chunk, it is
+    reported in ``missing`` like any unusable document, and a skip line names it (:func:`_note_sensitive_skip`).
+    A catalog that cannot say refuses them all. The chunk read below is the internal helper behind
+    ``store_get_many`` with the same value, so the engine drops sensitive chunks as well.
     """
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -2265,6 +2364,8 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         doc_id for doc_id, entry in catalog_entries.items()
         if _entry_is_non_evidentiary(entry)
     }
+    if sensitivity == "exclude":
+        excluded_doc_ids |= _refuse_sensitive_tumblers(tumbler_ids, cat)
 
     flat_ids: list[str] = []
     flat_collections: list[str] = []
@@ -2316,8 +2417,8 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         _stack.enter_context(mcp_core.without_source_notes())
         if None not in flat_manifest_types:
             _stack.enter_context(mcp_core.without_owner_section_types())
-        hydrated = mcp_core.store_get_many(
-            ids=flat_ids, collections=flat_collections, structured=True,
+        hydrated = mcp_core._store_get_many_impl(
+            ids=flat_ids, collections=flat_collections, structured=True, sensitivity=sensitivity,
         )
     chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
     # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision 3):
@@ -2811,6 +2912,9 @@ def _hydrate_operator_args(
     """
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
+    # RDR-243 Phase 2 (nexus-rfvyy.7.9): the read posture, taken ONCE here on this thread and handed to every
+    # hydration below as an argument. ``llm_bound`` (the nx_answer scope) is ``exclude``.
+    sensitivity: ReadSensitivity = _sensitivity.read_sensitivity()
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
     evidence_source = args.get(_EVIDENCE_SOURCE_KEY)
     if _EVIDENCE_SOURCE_KEY in args:
@@ -2848,7 +2952,7 @@ def _hydrate_operator_args(
             )
             return resolved_tool, {
                 "_precomputed_result": _hydrate_tumbler_ids(
-                    [str(i) for i in id_list_raw],
+                    [str(i) for i in id_list_raw], sensitivity=sensitivity,
                 ),
             }
 
@@ -2887,12 +2991,12 @@ def _hydrate_operator_args(
                 tool=tool, resolved_tool=resolved_tool,
                 id_count=len(id_list_raw),
             )
-            hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
+            hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw], sensitivity=sensitivity)
             excluded_ids: set[str] = set()
         else:
             with mcp_core.capturing_owner_lookups() as owner_lookups:
-                hydrated = mcp_core.store_get_many(
-                    ids=ids, collections=collections, structured=True,
+                hydrated = mcp_core._store_get_many_impl(
+                    ids=ids, collections=collections, structured=True, sensitivity=sensitivity,
                 )
             # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
             # round 3): the chash-shaped path -- the far more common
@@ -2909,6 +3013,10 @@ def _hydrate_operator_args(
             # section_types the store_get_many call above already
             # fetched -- no extra round trip.
             excluded_ids |= _import_only_ids_from_hydrated(hydrated, id_list_raw)
+            if sensitivity == "exclude":
+                # RDR-243 Phase 2: the engine dropped the sensitive chunks; the catalog names their documents,
+                # writes the skip lines and refuses a chunk an unfiltering engine returned.
+                excluded_ids |= _withheld_sensitive_chashes([str(i) for i in id_list_raw])
         contents_raw = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
         if excluded_ids:
             contents = [
@@ -3880,6 +3988,7 @@ async def _plan_run_impl(
             cache_creation_input_tokens=cache_creation,
             cost_usd=cost, elapsed_ms=elapsed_ms, ok=ok,
             bundled_steps=list(bundled_steps) if bundled_steps else [],
+            sensitive_skips=_drain_sensitive_skips(),
         ))
 
     # One authoritative segmentation. When bundling is off or the caller
@@ -4036,6 +4145,9 @@ async def _plan_run_impl(
             raise PlanRunStepRefError(ref="store_get_many", reason="the repair fetch did not return one content per id")
         by_tumbler = bool(ids) and all(_is_tumbler_shaped(i) for i in ids)
         excluded = set() if by_tumbler else _resolve_non_evidentiary_chashes(ids) | _import_only_ids_from_hydrated(out, ids)
+        if not by_tumbler and _sensitivity.read_sensitivity() == "exclude":
+            # RDR-243 Phase 2: the repair fetch is a model-bound read like the operator's own (row 14).
+            excluded |= _withheld_sensitive_chashes(ids)
         notes = out.get("source_notes")
         items: list[SupplementItem] = []
         for k, (hit, text) in enumerate(zip(hits, contents)):
@@ -5125,7 +5237,7 @@ async def plan_run(
         _recorder.reset_run()
     supplement = RepairSupplement() if coverage_boundary is not None else None
     with reserved_scope(reserved_stream), supplement_scope(supplement), registry_listing_scope(), \
-            confinement_scope(document_confinement):
+            confinement_scope(document_confinement), _sensitive_skip_scope():
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
             deadline=deadline, budget_usd_remaining=budget_usd_remaining,
