@@ -773,9 +773,13 @@ runs against a corpus that includes it, with a capturing fake LLM backend
 and an `httpx` mock transport, and the string appears in no captured
 payload. Deleting any one gate turns its row red. This runs in phase 1.
 
-Phases 1 and 2 ship in one release: `--sensitive` is not released until
-the read filter is in, so no release describes protection it does not
-give (Sam, 2026-11-04). Phase 3 can ship later because each registry row
+Phase 1 ships alone in conexus 7.96.0 (Sam, 2026-11-05, superseding his
+2026-11-04 ruling that phases 1 and 2 ship together). The rule behind the
+earlier ruling still holds: no release describes protection it does not
+give. `RELEASE_ENFORCED_PHASE` is 1, so the privacy table and the
+`--sensitive` help list only phase-1 rows and name every pending surface
+that still reaches outward or the session model. Phase 2 raises the
+constant in the commit that lands its canary rows. Phase 3 can ship later because each registry row
 carries the phase that enforces it, and the privacy-policy table and the
 `--sensitive` help text are generated only from rows enforced in the
 release being built. The input-side external rules ship with phases 1 and
@@ -1099,3 +1103,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-05: Sam's rulings on the Phase 1 engine review: merge duplicate adopts the flag; fresh flagged registration is audited; upsert and import inherit from a sensitive tombstone.
 - 2026-11-05: Sam's rulings: the aspect drain drops a sensitive row (no skipped_sensitive status); a Voyage-profile local install refuses MCP store_put(sensitive); nx store import refuses a flagged document into a Voyage collection without --ack-external-embedder.
 - 2026-11-05: Implementation notes under Technical Design item 8 record how Phase 1 applies the catalog flag (index paths, repo and batch skips, re-embed hold-back, note re-put, dry runs, reindex). No design change.
+- 2026-11-05: Sam's ruling: Phase 1 ships alone in conexus 7.96.0 (paired with engine-service-v0.1.180), superseding the 2026-11-04 ship-together ruling; the release text claims phase 1 only.
