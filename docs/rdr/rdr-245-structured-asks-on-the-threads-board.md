@@ -970,8 +970,9 @@ and the frame, the convention text, the Trust model and the risks all say so.
 Classification checks `after:` first and keeps quiet blocking asks
 interrupt-class, matching `answer`'s `after:` refusal. B is described as the
 script behaves, with `need` named where the red dot is introduced or relied on
-(Context, Classification, Interrupt vs batch policy, Composition with A and B,
-the Existing Infrastructure Audit, Step 5, Alternative 6 and Decision 5). The
+(Provenance, Classification, Interrupt vs batch policy, Composition with A and
+B, the Existing Infrastructure Audit, Step 5, Alternative 6, Decision 5 and
+Assumption Verification). The
 worked example is an ask no standing rule decides. Gap 4's two reversible-share
 estimates remain, and nothing rests on them.
 
