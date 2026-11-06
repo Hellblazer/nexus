@@ -457,7 +457,8 @@ setting, same per-statement 30 s timeout):
 - for each `pci_` index, its anchor and `pg_relation_size`;
 - only when the leaf's deletes or non-HOT updates (`n_tup_upd - n_tup_hot_upd`)
   advanced since this engine last looked, or a stats reset moved them backward,
-  or the index's last check is older than 24 hours: the collection's uncapped
+  or the index's anchor changed, or the index's last check is older than 24
+  hours: the collection's uncapped
   row count and `written_since`, the count of its rows whose `last_written_at`
   is later than the anchor's `built_at`. `last_written_at` is set on insert and
   refreshed by every client re-write of a chunk, never by maintenance updates
@@ -467,7 +468,7 @@ setting, same per-statement 30 s timeout):
 Both counts carry the same explicit `tenant_id` predicate as the existing count,
 for the reason RDR-227 records (the admin role reads every tenant's chunks).
 Their cost is that of an exact scan of the collection's rows (0.3 to 0.6 s at
-60k), paid only when something was deleted or a day passed.
+60k), paid only when something was deleted, the anchor changed or a day passed.
 
 **3. REINDEX triggers (Phase 2).** For a parsed, valid `pci_` index on the
 holder's pass:
@@ -600,7 +601,12 @@ repair no graph; keying on the timestamp alone would run the canary on ingest,
 which this design holds perturbs nothing.
 The first observation of a leaf after a boot records the timestamp and does
 not trigger. A run that cannot happen yet (too few queries) is held as pending
-in memory and runs on the first pass that has the queries.
+in memory and runs on the first pass that has the queries. A run that fails
+with an error is not a run: it stamps no last-run time and keeps its trigger,
+and the index waits before its next try, 30 minutes after the first error,
+doubling per consecutive error to a cap of 24 hours. A measured result
+(green, red or `no_queries`) or a build of the index resets the wait
+(`PciCanaryPolicy.errorRetryAfter`, `PciCanarySchedule`).
 
 Cost and bounds: each statement takes one search permit, like an arm, so the
 canary yields to user load and its load is counted where search load is; the
@@ -629,7 +635,12 @@ row among the request's arms that share X's embedding model. The second
 condition is what "own-topic" means for a fan-out: RDR-227 measured that a far
 query reads 0.975 to 0.983 on a correct index (`code__1-20`, A2), so admitting
 every fan-out arm would turn ordinary approximation on far queries into red
-canaries.
+canaries. Seven routes admit. `/search`, `/search-per-collection` and
+`/hybrid-search` admit by both conditions. The metadata-, aspect-, graph-hop-
+and topic-scoped routes admit only a request that names a single collection:
+their nearest row is the nearest of a filtered set, which says nothing about
+how far the query is from the rest of the collection, so a fan-out on those
+routes admits nothing (`PgVectorRepository.scopedRingVector`).
 
 *The table.* `nexus.canary_query_ring`, created by one new changeset in the
 vectors family after today's tail, `vectors-051`
@@ -659,13 +670,17 @@ that ring's rows beyond the 32 newest by `added_at` and its rows older than
 the builder's pass also deletes every ring row older than 30 days, under each
 tenant's scope; while the lock holder's builder runs, no row outlives 30 days
 by more than one pass, and while it does not, rows on rings nobody writes are
-not aged (Failure Modes). The connection, statement and tenant list for that
-delete are not specified here: no existing path deletes across tenants for
-this table (the builder reaches tenants only through `nexus.chunks` leaves and
-only reads; ledger retention lists its own `request_ledger_tenants`;
-`nexus_rdr/230-research-31`), so implementation settles them.
-That statement is one Liquibase SQL function that jOOQ generates a routine
-for, so the Java side sends no SQL text. Rows are written only for collections
+not aged (Failure Modes). That delete is one typed jOOQ DELETE per tenant,
+one transaction per tenant under that tenant's scope as nexus_svc, so row-level
+security confines each to its own rows (`PciQueryRingExpiry`). Its tenants are
+the reaper's (the default tenant and every tenant with a `service_tokens`
+row), the `request_ledger_tenants`, and the distinct tenants of the
+reconciler's catalog-snapshot leaves; the leaves reach a tenant that holds ring
+rows but has neither a token row nor a ledger row (`nexus_rdr/230-research-31`
+found no existing cross-tenant path for this table). A tenant's failure is
+logged and the next tenant still runs.
+The write's upsert-and-trim statement is one Liquibase SQL function that jOOQ
+generates a routine for, so the Java side sends no SQL text. Rows are written only for collections
 in the valid-index set, so the table holds at most 32 rows per indexed
 collection: about 160 rows and under 1 MB for the cloud's five today
 (`nexus_rdr/230-research-26`).
@@ -700,7 +715,11 @@ exist (`nexus_rdr/230-research-23`):
   new name's index fresh. Its `CROSS_MODEL_DISPOSITIONS` line
   (`CatalogRepository.java:9886`) is `LEAVE`: a cross-model re-embed's target
   has another model and dimension, so the source's ring stays with the source
-  and goes when the source is deleted.
+  and goes when the source is deleted. A cross-model re-home of the name is
+  the exception: the foreign key names the model, so the ring rows cannot move
+  to a target of another model, and `rehomeCollection` deletes the source's
+  ring rows in the re-home's transaction rather than fail the re-home on the
+  foreign key. The ring is a cache that refills from live queries.
 - **Delete, drop-orphan-collections and the ghost sweep.** Each removes the
   collection's registry row. Census: four sites in `service/src/main` do,
   all in `CatalogRepository.java` (`:9361`, a quarantine sibling a delete
@@ -1109,7 +1128,8 @@ is test-first: its failing test lands first in the same branch.
 - P1.2 The query ring: admission rule, digest dedupe, the 32-row bound, the
   write queue and background writer, reads under the tenant's scope, nothing
   logged but counts. Tests: a single-collection search admits; a fan-out
-  admits only the nearest arm of its model; a second tenant never sees the
+  admits only the nearest arm of its model; a fan-out on a filtered scoped
+  route admits nothing; a second tenant never sees the
   first's rows; the 33rd distinct vector deletes the oldest; a row older than
   30 days is deleted by the write's trim and, on a ring with no new write, by
   the builder's pass; a repeated
@@ -1389,3 +1409,4 @@ bulk delete, both on an existing session under an existing lock.
   tenant-table lists added to Phase 1, Open Question 6 added and answered
   (30 days; `-23` to `-28`).
 - 2026-11-03: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `95d6388ef`; critique `nexus_rdr/230-gate-critique-2026-11-03-r1`.
+- 2026-11-06: Wording brought to the reviewed Phase 1 code (nexus-4lnn1.1.7): the seven admitting routes and the single-collection rule for the filtered scoped routes; the 30-day delete's typed per-tenant statement and its tenant source, leaf tenants included; a cross-model re-home deletes the source's ring; the anchor-changed recount trigger; the canary error retry wait.
