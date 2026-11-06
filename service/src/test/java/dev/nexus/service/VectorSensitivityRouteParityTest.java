@@ -133,6 +133,49 @@ class VectorSensitivityRouteParityTest {
         }
     }
 
+    /**
+     * {@code PgVectorRepository} methods that read chunk text (so they are sinks of the census above) but that no
+     * route reaches and no main source calls, with the reason. The route census only judges a sink a route reaches,
+     * so a method like this one is invisible to it: it takes no {@code excludeSensitive}, and the day a route or any
+     * caller wires it in, it would serve sensitive text. The test below pins the premise (still a sink, reached by no
+     * route, named by no main source) so that wiring it in fails here and the author must gate it first (review fix F4,
+     * the way {@link #NO_ROUTE_FUNCTIONS} pins {@code document_text}).
+     */
+    static final Map<String, String> NO_CALLER_SINKS = Map.of(
+        "fetchDocumentChunks", "a document's chunk text in manifest order (RDR-108); public, no flag, no main caller "
+            + "(only tests call it)");
+
+    @Test
+    void theSinksExemptedForHavingNoCallerAreStillSinksReachedByNoRouteAndCalledByNoMainSource() throws Exception {
+        String repoSrc = Files.readString(VECTOR_REPO);
+        Set<String> sinks = ChunkTextRouteCensus.allSinks(repoSrc, textFunctionArgs.keySet());
+        Set<String> reachedByRoutes = new TreeSet<>();
+        for (var f : findings()) {
+            reachedByRoutes.addAll(f.sinkMethods());
+            reachedByRoutes.addAll(f.exemptSinksReached());
+        }
+        assertThat(NO_CALLER_SINKS).as("non-vacuity").isNotEmpty();
+        int files = 0;
+        for (String method : NO_CALLER_SINKS.keySet()) {
+            assertThat(sinks).as("%s still reads chunk text: the exemption has ground", method).contains(method);
+            assertThat(reachedByRoutes).as("%s is now reached by a route: gate it with excludeSensitive and "
+                + "remove the exemption", method).doesNotContain(method);
+            // a call, or a method reference (this::m, Repo::m); comments and string literals are blanked first
+            Pattern use = Pattern.compile("\\b" + method + "\\s*\\(|::\\s*" + method + "\\b");
+            try (var walk = Files.walk(MAIN)) {
+                for (Path p : (Iterable<Path>) walk.filter(f -> f.toString().endsWith(".java"))::iterator) {
+                    files++;
+                    int uses = (int) use.matcher(KeyedRoutesCensusTest.blank(Files.readString(p))).results().count();
+                    // the declaration is the one occurrence in the repository itself
+                    int allowed = p.equals(VECTOR_REPO) ? 1 : 0;
+                    assertThat(uses).as("%s: main source %s uses %s, which serves chunk text with no sensitivity "
+                        + "flag", method, p, method).isEqualTo(allowed);
+                }
+            }
+        }
+        assertThat(files).as("non-vacuity: the walk read the engine sources").isGreaterThan(100);
+    }
+
     /** The by-address catalog routes that return chunk text: gated like the vector reads, checked by name below. */
     static final String GATED = "GATED";
 
