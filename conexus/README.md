@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-10 agents, 39 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](https://github.com/Hellblazer/nexus/blob/main/README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+10 agents, 40 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](https://github.com/Hellblazer/nexus/blob/main/README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
 
@@ -50,7 +50,7 @@ story.
 ## What You Get
 
 - **10 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility. The three MCP-tool redirect stubs (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted (nexus-cnzei.4) — call `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` directly
-- **39 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
+- **40 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt

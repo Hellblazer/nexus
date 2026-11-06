@@ -7,7 +7,7 @@ description: Use when cutting or deploying the Java engine-service binary (engin
 
 The Java engine-service is a separate release artifact from the conexus PyPI package. Cutting it is lightweight, frequent, and **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** — so the cloud engine can (and must) be kept current with develop's engine tip independently of develop being unreleasable. Conflating the two lifecycles is how the cloud engine silently drifts (2026-06-26: 22 `service/` commits / 4 days un-deployed, un-cloud-tested).
 
-Follow in order. The releaser is **Sam**: AI preps + validates; Sam pushes the tag, or authorizes the AI in-session to push one named tag (Step 4).
+Follow in order. The releaser is **Sam**: AI preps + validates; Sam pushes the tag, or his go for the release lets the AI push it (Step 4).
 
 ## Steps
 
@@ -146,17 +146,17 @@ uv run python scripts/check_release_holds.py --root "$TAG_TREE"   # exit 0 = REL
 
 `scripts/release-holds.txt` lists changesets that have landed on develop ahead of their release gates; a tag from develop would ship them to the cloud and, through the pin, to every local install. Exit 1 names each held changeset and its bead: do not tag. Either cut from a commit without the changeset, or release it by deleting its line in a reviewed commit once its bead says it may ship (for `vectors-030-1`: RDR-225's .19 closed, the PITR-fork rehearsal recorded, and Sam's go). The release workflow's `create-release` job runs the same check on the tagged tree and refuses to create the release, so a tag pushed past this step builds nothing.
 
-### 4. Push the tag (Sam, or the AI on Sam's in-session authorization for that tag)
+### 4. Push the tag (Sam, or the AI on Sam's go for the release)
 
-The releaser is **Sam**. Either Sam pushes the tag, or Sam authorizes the AI
-in-session to push ONE named tag ("tag and push engine-service-vX.Y.Z", Sam
-2026-10-27, nexus-jh2oi). With that authorization the AI pushes only the tag it
-names, only after every gate this skill names before Step 4 is green, and records
-the authorization (Sam's words, the session) and the gate evidence on the cut
-bead. Nothing else is that authorization: not a blanket "you can release", not an
-approval of the plan, not an authorization relayed from another session, and not
-one given for a previous tag. The AI does not decide it heard one; when in doubt
-it asks.
+The releaser is **Sam**. His go for a named release ("7.95.0 let's get that out
+the door", 2026-11-04; "tag and push engine-service-vX.Y.Z", 2026-10-27) lets the
+AI push every tag that release needs, its engine tag and its client tag, without
+asking again (nexus-e74o6: asking again stalled 7.95.0 for half a day). The AI
+pushes each tag only once every gate named before its push is green, and records
+Sam's words, the session and time he said them, and the gate evidence on the cut
+bead. A session driving the release for the one Sam told holds the same go, quoted
+the same way. The go covers the release it names, not the next one; an instruction
+that names no release is not a go.
 
 ```bash
 git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit> must be on origin

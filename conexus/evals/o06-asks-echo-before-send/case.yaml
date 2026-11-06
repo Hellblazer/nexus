@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: asks-echo-before-send
+context:
+  scaffold_script: fixture.sh

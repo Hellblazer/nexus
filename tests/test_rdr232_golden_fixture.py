@@ -1184,7 +1184,7 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
                 "search_corpus_resolved": run.resolved_search_corpus,
                 "scope_diagnostics": run.scope_diagnostics,
             },
-            # The builtins-only selections and measures are the FLOOR: the library holds the 12 builtins,
+            # The builtins-only selections and measures are the FLOOR: the library holds the builtins (12 when this was written, 13 since entity-resolution),
             # so the incident request selects research:default and scores as the right shape. The
             # grown-clone entries add plan 473's stand-in (nexus-jypmj.1.14), selected for G06 by
             # verbatim repeat: forced by construction, see its caveat.

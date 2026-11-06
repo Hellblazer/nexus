@@ -248,6 +248,80 @@ def test_route_uses_verb_synonym_classes():
     assert [m.plan_id for m in matches] == [1]
 
 
+# ── the cosine-only tag (RDR-147 branch (c), nexus-irndi) ──────────────────
+#
+# A builtin template tagged `cosine-only` is admitted on its own cosine at or above min_confidence and
+# never by the below-floor category route: entity-resolution's narrow match text is right above the
+# floor and noise below it, where the pool orders by raw cosine and any template scores something.
+
+_COSINE_ONLY = "builtin-template,cosine-only"
+
+
+def test_a_cosine_only_template_below_the_floor_never_enters_the_category_pool():
+    rows = [_row(1, name="narrow", verb="research", tags=_COSINE_ONLY)]
+    lib = _FakeLibrary(rows)
+    cache = _FakeCache([(1, 0.8)])  # cosine 0.2, below the 0.40 floor
+
+    assert plan_match("q", library=lib, cache=cache, category_verb="research") == []
+    assert lib.metrics == []
+
+
+def test_a_cosine_only_template_does_not_displace_an_untagged_one_in_the_pool():
+    """The tagged template has the higher raw cosine (0.30 vs 0.15) and would win the pool; it is not in it."""
+    rows = [
+        _row(1, name="default", verb="research"),
+        _row(2, name="narrow", verb="research", tags=_COSINE_ONLY),
+    ]
+    lib = _FakeLibrary(rows)
+    cache = _FakeCache([(2, 0.70), (1, 0.85)])
+
+    matches = plan_match("q", library=lib, cache=cache, category_verb="research")
+
+    assert [m.plan_id for m in matches] == [1]
+
+
+@pytest.mark.parametrize("category_verb", [None, "research"])
+def test_a_cosine_only_template_above_the_floor_scores_as_before(category_verb):
+    rows = [_row(1, name="narrow", verb="research", tags=_COSINE_ONLY)]
+
+    matches = plan_match(
+        "q", library=_FakeLibrary(rows), cache=_FakeCache([(1, 0.5)]), category_verb=category_verb,
+    )  # cosine 0.5, above the 0.40 floor
+
+    assert [m.plan_id for m in matches] == [1]
+    assert matches[0].confidence == pytest.approx(0.5)
+
+
+def test_a_cosine_only_template_above_the_floor_wins_on_cosine_over_a_routed_one():
+    """Above the floor the cosine path scores it and returns before the pool is read: same as an untagged one."""
+    rows = [
+        _row(1, name="default", verb="research"),
+        _row(2, name="narrow", verb="research", tags=_COSINE_ONLY),
+    ]
+    matches = plan_match(
+        "q", library=_FakeLibrary(rows), cache=_FakeCache([(2, 0.55), (1, 0.85)]), category_verb="research",
+    )
+    assert [m.plan_id for m in matches] == [2]
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected"),
+    [
+        ("builtin-template,cosine-only", True),
+        ("cosine-only,builtin-template,rdr-147", True),
+        ("builtin-template", False),
+        ("", False),
+        (None, False),
+        # Comma-token, not substring.
+        ("builtin-template,not-cosine-only-really", False),
+    ],
+)
+def test_cosine_only_predicate_matches_comma_tokens(tags, expected):
+    from nexus.plans.matcher import _is_cosine_only_plan  # noqa: PLC0415 — red until the predicate exists
+
+    assert _is_cosine_only_plan(tags) is expected
+
+
 # ── the predicate ──────────────────────────────────────────────────────────
 
 

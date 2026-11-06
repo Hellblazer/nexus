@@ -235,6 +235,9 @@ PRE_CHANGE_RESOLVED_CORPORA: dict[str, list[list]] = {
     "research:default": [[0, "search", "all"], [2, "search", "all"]],
     "review:default": [[0, "query", "all"]],
     "research:type-scoped": [[0, "search_metadata_scoped", "all"]],
+    # Added with RDR-147 Step 4 branch (c) (nexus-irndi); not part of the b3d57227d recording. Its search step is
+    # hybrid-factual-lookup's, and so is its resolved corpus.
+    "research:entity-resolution": [[0, "search", "all"]],
 }
 
 
@@ -250,7 +253,7 @@ def test_no_caller_scope_leaves_every_builtin_corpus_as_it_was() -> None:
             [a["step_index"], a["tool"], a["corpus"]] for a in result.resolved_step_args
         ]
         assert result.scope_diagnostics == [], "no caller scope: nothing to report"
-    assert len(seen) == len(PRE_CHANGE_RESOLVED_CORPORA) == 12, sorted(seen)
+    assert len(seen) == len(PRE_CHANGE_RESOLVED_CORPORA) == 13, sorted(seen)
     assert seen == PRE_CHANGE_RESOLVED_CORPORA
 
 

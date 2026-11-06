@@ -424,9 +424,10 @@ def test_a_reconciled_library_no_longer_trips_the_precondition_and_an_orphan_nev
     builtin with its declaration; after it nothing is undeclared, so an upgraded install enforces. A builtin-tagged
     orphan (dimensions no shipped template carries) is left in place by the seed loader and is not counted."""
     from nexus.plans.seed_loader import load_seed_directory
-    from tests.test_plan_answer_kind import _pre_declaration_library
+    from tests.test_plan_answer_kind import _ADDED_AFTER_DECLARATION, _pre_declaration_library
 
     shipped = len(list(_BUILTIN_DIR.glob("*.yml")))
+    previously_seeded = shipped - len(_ADDED_AFTER_DECLARATION)  # the library the previous release seeded
     lib = _pre_declaration_library()
     lib.save_plan(
         query="A builtin-tagged row no shipped template describes.", plan_json='{"steps": []}', outcome="success",
@@ -434,7 +435,7 @@ def test_a_reconciled_library_no_longer_trips_the_precondition_and_an_orphan_nev
         dimensions='{"scope":"global","verb":"orphan"}', default_bindings=None, parent_dims=None,
     )
     before = el.check_builtins(lib.rows.values())
-    assert before.checked == before.undeclared == shipped, "a pre-declaration install: every shipped builtin undeclared"
+    assert before.checked == before.undeclared == previously_seeded, "a pre-declaration install: every builtin it holds is undeclared"
     assert "orphan-builtin" not in before.undeclared_names
     load_seed_directory(_BUILTIN_DIR, library=lib, reconcile=True)
     orphan = next(r for r in lib.rows.values() if r["name"] == "orphan-builtin")

@@ -6368,7 +6368,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
 
     The engine refuses PostgreSQL below 17 (``event=pg_version_below_floor`` when an older server is already
     running), and an established cluster keeps whatever PostgreSQL created it; started cold from the bundle,
-    such a data directory fails earlier, in ``pg_ctl start`` ("database files are incompatible with server").
+    ``nx`` refuses such a data directory before ``pg_ctl start`` (``pg_provision.refuse_cluster_below_floor``).
     This row reads the data directory's ``PG_VERSION`` marker (no connection), names the version and the
     floor, and points at the upgrade.
 
@@ -6414,8 +6414,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
         detail=(
             f"the bundled cluster at {pg_data} was created by PostgreSQL {text}, and a cluster keeps the version "
             f"that created it; the engine refuses below PostgreSQL {PG_VERSION_FLOOR} "
-            "(event=pg_version_below_floor in the service log, or, started cold from the bundle, pg_ctl's "
-            "'database files are incompatible with server')"
+            "(event=pg_version_below_floor in the service log, or, started cold, nx refuses before pg_ctl runs)"
         ),
         fix_suggestions=[
             f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "

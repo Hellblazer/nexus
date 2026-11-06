@@ -587,8 +587,8 @@ interrupted — the ETL paths are idempotent and re-converge on
 
 The engine refuses PostgreSQL below 17. With an older server already running,
 the service log says `event=pg_version_below_floor` and the service exits 1;
-started cold, the bundled PostgreSQL 17 refuses the data directory first
-(`pg_ctl` reports "database files are incompatible with server"). A local
+started cold, `nx` refuses before `pg_ctl` runs, naming the version the data
+directory was created by and this section. A local
 cluster keeps the PostgreSQL that created it, so a data directory from before
 the bundled PostgreSQL (for example one made by a Homebrew PostgreSQL 16) stays
 at that version until it is upgraded. `nx doctor` names it in the "Local

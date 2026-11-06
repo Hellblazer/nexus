@@ -1,0 +1,105 @@
+# RDR-147 Step 4 branch (c) (nexus-irndi) — the routing fix for entity-listing questions.
+#
+# "Find the names of companies that were affected by issues in X" is a
+# discovery/listing request that needs the coverage boundary: the answer is
+# the set of entities the evidence links to the issue, not a list of
+# documents. Before this template the request-kind call decided its fate:
+# read as `lookup` (13 runs in 14 on the 2026-11-06 MVV, T2 nexus_rdr
+# 147-research-15) it reached hybrid-factual-lookup, a plan with a
+# coverage boundary; read once as `discovery/listing` the answer-kind gate
+# left only the single-query listing templates, document-discovery
+# answered with no coverage boundary, and the run lost a question.
+#
+# This template declares discovery/listing and carries the step body of
+# hybrid-factual-lookup.yml (search, traverse, fetch both streams, rank,
+# generate), so either reading of the request reaches a plan with a
+# coverage boundary. The steps are a copy, kept identical on purpose: see
+# hybrid-factual-lookup.yml for the per-stream budget and threshold
+# rationale. The nexus repo's entity-resolution route tests pin the
+# match text, the request kinds and the golden discovery requests.
+#
+# Match text: the RDR-079 cache embeds it with the bundled MiniLM and the
+# cosine tracks phrasal overlap. The phrasings are entity-listing requests
+# (the names of the companies tied to an issue, the company with the most
+# resolved bugs), which document-discovery's phrasings ("which documents
+# discuss", "list the papers") do not cover. Wording is narrow on purpose:
+# an earlier draft with "Which customers ... ?" sentences pulled document
+# listings such as "Which customers are mentioned in the RDRs?" above the
+# floor. Measured with the bundled MiniLM (tests pin the questions, not the
+# numbers): the 7 HERB questions score 0.47 to 0.54, the paraphrases 0.45 to 0.53.
+#
+# The tag `cosine-only` keeps this template out of the below-floor category
+# route (matcher._is_cosine_only_plan). That route orders a verb pool by raw
+# cosine, where any request scores something; this template's text is a
+# narrow bag, so below the floor it stole non-entity requests ("Find the retry
+# helper in the code files", golden G08 and H30 in the shadow regime). On the
+# cosine path it wins only at or above min_confidence; FTS5 ignores the tag.
+
+name: entity-resolution
+description: >-
+  Names of companies that were affected by issues in the product, and the clients hit by
+  the outage. Name of the company with the most resolved bugs.
+dimensions:
+  verb: research
+  scope: global
+  strategy: entity-resolution
+required_bindings:
+  - question
+optional_bindings:
+  - corpus
+  - limit
+  - depth
+  - vector_budget_chunks
+  - graph_budget_chunks
+default_bindings:
+  corpus: all
+  limit: 40
+  depth: 2
+  vector_budget_chunks: 6
+  graph_budget_chunks: 4
+# RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
+answer_kind: discovery/listing
+tags: builtin-template,cosine-only,rdr-147,nexus-irndi,entity-resolution,discovery-listing
+plan_json:
+  steps:
+    - tool: search
+      args:
+        query: $question
+        limit: $limit
+        corpus: $corpus
+        # Disable per-corpus distance filter during over-fetch — the
+        # rank step downstream handles relevance. RF-9; tracked
+        # systemically as nexus-h3e2.
+        threshold: 2.0
+    - tool: traverse
+      args:
+        seeds: $step1.tumblers
+        purpose: factual-evidence
+        depth: $depth
+        direction: both
+    - tool: store_get_many
+      args:
+        ids: $step1.ids
+        collections: $step1.collections
+        limit_per_source: $vector_budget_chunks
+    - tool: store_get_many
+      args:
+        ids: $step2.ids
+        collections: $step2.collections
+        limit_per_source: $graph_budget_chunks
+    - tool: rank
+      args:
+        criterion: >-
+          Relevance to the question the candidates were retrieved for.
+          Prefer factual evidence — concrete claims, named entities,
+          numeric values, dates — over topical mentions. The candidates
+          are fused from vector recall and citation/relation-graph
+          traversal; value direct evidence over loose association.
+        inputs:
+          - $step3.contents
+          - $step4.contents
+    - tool: generate
+      args:
+        template: factual-answer
+        cited: true
+        inputs: $step5.ranked

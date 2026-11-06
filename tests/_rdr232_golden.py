@@ -409,7 +409,7 @@ def build_rdr084_fixture() -> Fixture:
 
 #: nexus-jypmj.1.14. Plan 473 of the 2026-10-23 incident is the tenant's seeded copy of the builtin
 #: ``lookup:hybrid-factual-lookup`` (RDR-232 line 1606: "plan 473's template"). The fixture library holds
-#: only the 12 builtins, and the local matcher over them selects ``research:default`` for the incident
+#: only the builtins (12 when this was written, 13 since entity-resolution), and the local matcher over them selects ``research:default`` for the incident
 #: request, so the baseline scored it as the right shape. The clone below is a GROWN-shaped copy of 473
 #: (saved the way ``nx_answer``'s plan-grow path saves a plan: tags ``ad-hoc,grown``, scope ``personal``,
 #: a scope anchor) so the matcher has a lookup-shaped plan to select for the incident request, and the

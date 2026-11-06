@@ -50,5 +50,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/upgrade/SKILL.md` (nexus-hbnml): the rung list no longer names `aspect_queue_tuples`, which is retired with the aspect queue table.
 - `conexus/hooks/scripts/mailbox_drain.py` (nexus-wc4jj.9): an `ask:` mail whose body matches an answer record in T2 project `asks` (one GET, capped at 2.0 s) prints as a matched frame: an unverified claim with Sam's words in a nonce fence and no row header; anything else stays peer-framed with a fixed reason line.
 - `conexus/skills/mailbox/SKILL.md` (nexus-wc4jj.9): the trust paragraph names the matched ask answer as its one exception, acted on alone only for `reversible: yes` with words that clearly choose the option.
+- `conexus/skills/asks/SKILL.md` (nexus-wc4jj.8): new `asks` skill: the mediator flow and contract for working the user's structured asks through `nx ask list`, `show`, `answer` and `digest`.
+- `conexus/skills/orchestration/reference.md` (nexus-wc4jj.8): the skill routing line gains `/conexus:asks` for asks waiting on the threads board.
 
 ## Deferred to the next client release

@@ -333,7 +333,7 @@ here are the ones each pass found on a named page or table.
   non-alphanumeric character replaced by `-`; the primary is the parent of the
   git common directory, found by reading `.git` (a directory, or a `gitdir:`
   file and its `commondir`), and by `git rev-parse --git-common-dir` only when
-  `GIT_DIR` or `GIT_COMMON_DIR` is set or the layout is unrecognised. A missing
+  `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_CEILING_DIRECTORIES` is set or the layout is unrecognised. A missing
   directory, a non-repository or a failed fallback git call gives nothing. Near-duplicates (S-7) are file pairs whose
   frontmatter name and description tokens overlap at Jaccard 0.5 or more; files
   with fewer than 4 tokens are skipped. The `--t2` census reads "phase closed" as
@@ -351,6 +351,11 @@ here are the ones each pass found on a named page or table.
   `nexus._hook_runtime.memory_scan.scan`, and the SessionStart check
   (nexus-qo7ie.16, not yet built) is to call the same function. Technical
   Design 3's "Indexed" sentence was amended to match.
+- **2026-11-06, the report title of a partial run (nexus-qo7ie.30).** As
+  built, a run that selects fewer than all three of `--files`, `--t2` and
+  `--agents` (a `--cold`-only run included) stores its report as `<repo>/curation-report-<date>-<sections>`, so it never
+  replaces that day's full report. `docs/cli-reference.md`, the command's help
+  and `report_title` said so; TD4 item 4 is amended to match.
 
 ### Critical Assumptions
 
@@ -454,7 +459,10 @@ them.
    we choose, plus the checks Claude Code does not make.
 4. **Curation report.** `nx memory curate [--files] [--t2] [--agents]
    [--cold] [--days N]`, printed to stdout and stored in T2 as
-   `<repo>/curation-report-<date>` with a 90-day TTL. `--days N` (default 30)
+   `<repo>/curation-report-<date>` with a 90-day TTL; a run that selects fewer
+   than all three of `--files`, `--t2` and `--agents` stores
+   `<repo>/curation-report-<date>-<sections>` (for example `-files`), so a
+   partial run never replaces the day's full report. `--days N` (default 30)
    sets the window for `--files` and `--cold`; for counts read from
    transcripts, which are kept about 30 days (inferred from file dates,
    research 9), N is capped at that span and the report prints the span it
