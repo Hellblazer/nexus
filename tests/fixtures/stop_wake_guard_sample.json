@@ -76,7 +76,7 @@
    "id": "sel1-9",
    "label": "SAM-ACTOR",
    "armed": false,
-   "text": "default and the contradicted-facet change (jypmj.3.13). I moved them back under Unreleased, and the 7.88.0 section now matches the tag word for word. The plugin pending-release list keeps only the two Docling-removal entries, which ship next release. The halt rehearsal on the released binaries (nexus-bivz3.21) still needs you.",
+   "text": "default and the contradicted-facet change (jypmj.3.13). I moved them back under Unreleased, and the 7.88.0 section now matches the tag word for word. The plugin pending-release list keeps only the two the old PDF extractor-removal entries, which ship next release. The halt rehearsal on the released binaries (nexus-bivz3.21) still needs you.",
    "holdout": false
   },
   {
@@ -342,7 +342,7 @@
    "id": "sel1-47",
    "label": "SAM-ACTOR",
    "armed": false,
-   "text": "I also updated the project memory, which said Docling-first is settled by RDR-044, so later sessions treat MinerU-as-default as your direction. Decision for you, needed before anyone implements nexus-kh7zj: a global switch to MinerU, or a setting that pins MinerU per collection?",
+   "text": "I also updated the project memory, which said the old PDF extractor-first is settled by RDR-044, so later sessions treat MinerU-as-default as your direction. Decision for you, needed before anyone implements nexus-kh7zj: a global switch to MinerU, or a setting that pins MinerU per collection?",
    "holdout": false
   },
   {
@@ -973,7 +973,7 @@
    "id": "sel4-8",
    "label": "PAST-TENSE",
    "armed": false,
-   "text": "removal, so nobody works its Docling fixes. Its heartbeat ask lives on in nexus-lqaq1, which also covers long MinerU runs that send no heartbeat. Nothing is implemented, and the develop push hold for the engine deploy doesn't affect any of this.",
+   "text": "removal, so nobody works its the old PDF extractor fixes. Its heartbeat ask lives on in nexus-lqaq1, which also covers long MinerU runs that send no heartbeat. Nothing is implemented, and the develop push hold for the engine deploy doesn't affect any of this.",
    "holdout": true
   },
   {

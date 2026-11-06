@@ -409,7 +409,7 @@ def test_internal_error_fails_open(tmp_path: Path) -> None:
         "sys.exit(m.main())\n"
     )
     env = scrubbed_env(NEXUS_CONFIG_DIR=str(tmp_path), PATH=os.environ.get("PATH", ""))
-    proc = subprocess.run([sys.executable, "-I", "-c", code], input=json.dumps(_payload()), capture_output=True, text=True, env=env, timeout=60)
+    proc = subprocess.run([sys.executable, "-I", "-c", code], input=json.dumps(_payload()), capture_output=True, text=True, encoding="utf-8", env=env, timeout=60)
     assert (proc.returncode, proc.stdout) == (0, "")
     assert "allow reason=error error=RuntimeError" in _log(tmp_path)
 
