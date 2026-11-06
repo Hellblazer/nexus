@@ -33,12 +33,16 @@ THE MAPPING, :func:`memory_dir`. Given a working directory *cwd*:
      ``commondir`` (a ``--separate-git-dir`` or submodule layout) is its own common directory,
      the answer ``git rev-parse --git-common-dir`` gives. A spawn costs about 55 ms here (it
      loads structlog and ~230 modules) against 0.1 ms for the read.
-     FALLBACK: only when ``GIT_DIR`` or ``GIT_COMMON_DIR`` is set (they redirect git away from
-     the layout on disk) or the layout is unrecognised (a ``.git`` directory without ``HEAD``, a
-     ``gitdir:`` line that is malformed or points nowhere, a ``commondir`` that points nowhere)
+     FALLBACK: only when ``GIT_DIR``, ``GIT_COMMON_DIR`` or ``GIT_CEILING_DIRECTORIES`` is set
+     (they redirect or stop git's search away from the layout on disk) or the layout is
+     unrecognised (a ``.git`` directory or a ``gitdir:`` target without ``HEAD``, a ``gitdir:``
+     line that is malformed or points nowhere, a ``commondir`` that points nowhere)
      does it run ``git rev-parse --path-format=absolute --git-common-dir`` through
      ``run_bounded`` (deferred import; 5 s limit). Not matched to git by the read:
-     ``GIT_CEILING_DIRECTORIES``, filesystem-boundary stops and ``safe.directory``.
+     filesystem-boundary stops and ``safe.directory``. In a ``--separate-git-dir``, submodule or
+     bare-repository worktree layout the primary is the git directory's parent, as git reports
+     it, which is not the directory Claude Code keyed its memory by; the result there is
+     ``None`` (step 3).
 3. :func:`memory_dir` returns ``None`` when *cwd* is not inside a git repository (no ``.git``
    above it), git is unavailable or slow on the fallback path, or the resulting directory does
    not exist. The caller stays silent; this module never raises.
@@ -97,6 +101,8 @@ def _common_dir_from_gitfile(dot_git: Path) -> Path:
     gitdir = Path(os.path.join(dot_git.parent, target))  # an absolute target wins the join
     if not gitdir.is_dir():
         raise _Unrecognised(f"{gitdir} is not a directory")
+    if not (gitdir / "HEAD").is_file():
+        raise _Unrecognised(f"{gitdir} has no HEAD")
     commondir_file = gitdir / "commondir"
     if not commondir_file.is_file():
         return _real(gitdir)  # a separate-git-dir or submodule gitdir is its own common directory
@@ -136,7 +142,7 @@ def primary_checkout_root(cwd: Path, env: Mapping[str, str] | None = None) -> Pa
     ``GIT_COMMON_DIR`` is set in *env* or the layout is unrecognised. See the module docstring.
     """
     e = os.environ if env is None else env
-    if not (e.get("GIT_DIR") or e.get("GIT_COMMON_DIR")):
+    if not (e.get("GIT_DIR") or e.get("GIT_COMMON_DIR") or e.get("GIT_CEILING_DIRECTORIES")):
         try:
             common = _common_dir_by_reading(cwd)
         except _Unrecognised:
