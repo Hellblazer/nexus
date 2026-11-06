@@ -844,7 +844,7 @@ def _load_blocks(raws: list[str], work: Path, target: Path) -> list[Obj]:
                         "write get_document's reply as it came back")
         if not _same_file(url, target):
             raise _user(f"--blocks-file: the app shows {url}{at}, not this run's file {target} (url); open the file, wait "
-                        "until app_state's url is the file's and modalWindow is empty, then read the document again")
+                        "until get_document's url is the file's, then read the document again")
         if not items:
             raise _user(f"--blocks-file: the reply{at} holds no blocks")
         for b in items:

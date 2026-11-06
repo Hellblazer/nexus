@@ -59,6 +59,7 @@ def test_notes_answer_each_question_the_plan_asked() -> None:
                   "h. **The changed-on-disk dialog"):
         assert label in notes
     dialog = notes[notes.index("h. **The changed-on-disk dialog"):]
-    for needle in ("Reload from Disk", "Keep My Changes", "Resource temporarily unavailable", "`modalWindow`", "BEFORE the real apply"):
+    for needle in ("Reload from Disk", "Keep My Changes", "answered normally", "Don't Save", "BEFORE the real apply"):
         assert needle in dialog, needle
+    assert "Resource temporarily unavailable" in notes and "only open_document stayed listed" in notes
     assert "saves a large reply to a file" in notes and "not a block count" in notes

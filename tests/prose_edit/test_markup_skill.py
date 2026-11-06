@@ -44,7 +44,7 @@ def test_no_word_of_the_viewer_or_the_marked_up_copy_is_left() -> None:
 def test_the_markupeditor_tools_are_named_by_role_and_never_by_a_full_tool_name() -> None:
     assert not re.search(r"mcp__\w*markupeditor", TEXT, re.IGNORECASE)
     assert "mcp__" not in TEXT
-    for role in ("open_document", "app_state", "get_document", "propose_edits", "list_suggestions", "undo"):
+    for role in ("open_document", "get_document", "propose_edits", "list_suggestions", "undo"):
         assert re.search(rf"MarkupEditor {role}\b|the {role} tool|{role} tool", TEXT), role
 
 
@@ -83,9 +83,9 @@ def test_a_path_runs_header_is_nine_lines_and_the_paths_have_names() -> None:
 def test_the_document_is_opened_and_confirmed_before_the_editor_is_dispatched() -> None:
     s6 = step(6)
     assert "6b." in s6 and TEXT.index("6b.") < TEXT.index("\n7. Dispatch")
-    for needle in ("open_document", "app_state", "`url`", "`modalWindow`", "is empty", "symbolic link"):
+    for needle in ("open_document", "get_document", "`url`", "symbolic link"):
         assert needle in s6, needle
-    before(s6, "open_document", "app_state", "`modalWindow`", "Go on to step 7")
+    before(s6, "open_document", "get_document", "`url`", "Go on to step 7")
     # a missing tool or a silent app stops the run before the editor, with how to start the app
     assert "propose_edits tool is missing" in s6 and "rmtmp" in s6
     assert "Assistants" in s6 and "allow this program" in s6 and "start the app" in s6
@@ -170,19 +170,19 @@ def test_step_12_uses_the_apply_args_cleans_the_app_buffer_then_applies_then_reo
     before(first, "--dry-run", "Apply these changes?", 'When the author picks "Apply"', "Before the real apply",
            "without `--dry-run`")
     before(s12, "Before the real apply", "MarkupEditor undo tool", "`hasChanges` is false", "Only then run the same command",
-           "open_document tool on the document again", "Don't Save")
+           "Don't Save", "open_document tool on the document again")
     cb = clean_buffer()
-    before(cb, "decisions are already read", "app_state", "MarkupEditor undo tool", "`hasChanges` is false",
+    before(cb, "decisions are already read", "get_document tool with `limit` 1", "MarkupEditor undo tool", "`hasChanges` is false",
            "Only then run the same command without `--dry-run`")
     assert "accepted + rejected + 3" in cb and "accepted and rejected in the app" in cb
-    assert "app_state tool as in step 6b" in s12
+    assert "get_document tool with `limit` 1 as in step 6b" in s12
     assert "after a successful apply, after \"Cancel\"" in s12
 
 
 def test_the_clean_buffer_paragraph_says_why_and_keeps_the_dry_run_gate() -> None:
     cb = clean_buffer()
-    for needle in ("changed on disk", "Reload from Disk", "Keep My Changes", "unsaved changes", "stalls",
-                   "does not report", "dry run still holds", "does not touch the file", "that sent suggestions", ONE_SERVER):
+    for needle in ("changed on disk", "Reload from Disk", "Keep My Changes", "unsaved changes", "still answers",
+                   "cannot see the dialog", "dry run still holds", "does not touch the file", "that sent suggestions", ONE_SERVER):
         assert needle in cb, needle
 
 
@@ -195,13 +195,16 @@ def test_a_buffer_that_does_not_clear_still_goes_on_to_the_apply_and_names_the_d
     assert warn.index("tell the author first") < warn.index("Only then run")
 
 
-def test_the_fallback_sends_the_author_to_reload_from_disk_never_keep_my_changes() -> None:
+def test_the_author_hears_both_answers_before_the_reopen_and_a_dead_call_repeats_them() -> None:
+    """The skill cannot see the app's dialogs, so a dirty buffer after apply is announced before open_document."""
     cp = closing()
-    fallback = cp[cp.index("Resource temporarily unavailable"):]
-    for needle in ("connection", "changed-on-disk dialog", "does not report", '"Reload from Disk"', 'never "Keep My Changes"',
-                   "holds every applied edit"):
-        assert needle in fallback, needle
-    assert cp.index("open_document tool on the document again") < cp.index("Resource temporarily unavailable")
+    tell = cp[cp.index("Otherwise, when `hasChanges` is true"):cp.index("Then call the open_document tool on the document again")]
+    for needle in ('"Reload from Disk"', 'never "Keep My Changes"', "holds every applied edit", '"Don\'t Save"', 'never "Save"'):
+        assert needle in tell, needle
+    assert "cannot see" in tell
+    fallback = cp[cp.index("If a call fails or does not answer"):]
+    assert "waiting on one of those dialogs" in fallback and "answer it as above" in fallback
+    assert cp.index("open_document tool on the document again") < cp.index("If a call fails or does not answer")
 
 
 def test_the_answer_route_does_not_read_the_app_again() -> None:
@@ -262,24 +265,40 @@ def closing() -> str:
     return s12[s12.index("    A path run returns the app to the file"):]
 
 
-def test_the_save_prompt_branch_says_dont_save_never_save() -> None:
-    """F1: a leftover accepted-suggestion buffer is what raises the prompt, and Save rewrites the whole file."""
-    modal = s6b()[s6b().index("When `modalWindow` is not empty"):s6b().index("If `hasChanges` is true")]
-    assert "Don't Save" in modal and 'never "Save"' in modal, modal
-    assert "earlier prose-edit review" in modal and "rewrites the whole file" in modal
-    assert "the author's own" in modal  # the other possible owner of those changes decides first
+def test_the_save_prompt_is_announced_before_the_open_when_the_buffer_is_dirty() -> None:
+    """F1: a leftover accepted-suggestion buffer is what raises the prompt, and Save rewrites the whole file.
+
+    Steve's released app has no app_state, and get_document does not answer while the prompt is up, so the skill reads
+    hasChanges with get_document before open_document and tells the author then.
+    """
+    text = s6b()
+    pre = text[text.index("Before opening, call the get_document tool"):text.index("Call the open_document tool")]
+    before(pre, "`limit` 1", "`url` and `hasChanges`", "`hasChanges` true", "do not open the file", "Don't Save",
+           'never "Save"', "the author's own work", "the author's to decide first", "run again; stop.")
+    assert "earlier prose-edit review" in pre and "rewrites the whole file" in pre
+    assert "rewrites the file's layout" in pre  # saving the author's own changes is a choice with a cost, named
+    before(text, "Before opening, call the get_document tool", "Call the open_document tool")
 
 
-def test_a_save_prompt_is_answered_before_the_retry_offer_when_the_polls_run_out() -> None:
-    """G2c gap 1: a waiting save prompt is the case where 30 polls run out, so Don't Save comes before the retry."""
-    before(s6b(), "When `modalWindow` is not empty", "also when the polls end", "Don't Save",
-           "If the polls end with the state not reached and `modalWindow` empty", "offer to retry")
+def test_a_call_that_dies_after_the_open_names_both_causes_and_the_prompt_answer_before_the_retry_offer() -> None:
+    """The prompt hangs get_document (measured 2026-11-06), so a failed poll means: not listening, or a dialog."""
+    text = s6b()
+    before(text, "Call the open_document tool", "up to 30 times", "If a call fails in any other way, or does not answer",
+           "not listening", "waiting on a dialog", "Don't Save", "start the app", "and stop",
+           "If the polls end with `url` still another file", "offer to retry")
+
+
+def test_app_state_is_not_called_and_no_modal_window_is_read() -> None:
+    """The released app does not serve app_state: one sentence says so, and nothing else names it."""
+    assert TEXT.count("app_state") == 1 and "Do not call the app_state tool" in TEXT
+    assert "modalWindow" not in TEXT
+    assert "app_state" not in REVIEW.read_text(encoding="utf-8") and "modalWindow" not in REVIEW.read_text(encoding="utf-8")
 
 
 def test_the_closing_url_check_treats_private_and_symlinks_as_the_same_file() -> None:
     """G2c gap 2: without 6b's rule a /var or symlinked path skips undo and tells the author a false thing."""
     check = clean_buffer()
-    check = check[check.index("First call the app_state tool."):check.index("do not call the undo tool")]
+    check = check[check.index("First call the get_document tool"):check.index("do not call the undo tool")]
     assert "`/private` prefix or a symbolic link is the same file" in check, check
 
 
@@ -321,14 +340,28 @@ def test_the_read_write_requirement_is_told_to_the_author_everywhere_the_app_is(
 
 def test_6b_polls_up_to_30_times_and_reports_the_last_state() -> None:
     assert "up to 30 times" in s6b() and "ten times" not in TEXT
-    assert "last state" in s6b() and "retry" in s6b().lower()
+    assert "the last `url` get_document reported" in s6b()  # a slow load that outlasts the polls is reported with the last url
+    assert "retry" in s6b().lower()
 
 
-def test_6b_says_the_authors_own_unsaved_changes_are_theirs_to_keep_or_discard() -> None:
-    """S2a: after a fresh open the only hasChanges is the author's own work on this file."""
-    branch = s6b()[s6b().index("If `hasChanges` is true"):s6b().index("Go on to step 7")]
-    for needle in ("the author's own", "Don't Save", "lost", "save them first", "rewrites the file's layout"):
-        assert needle in branch, needle
+def test_6b_says_the_authors_own_unsaved_changes_are_lost_by_dont_save() -> None:
+    """S2a: the only dirty buffer may be the author's own work on this file, and the author hears so before the open."""
+    pre = s6b()[s6b().index("Before opening, call the get_document tool"):s6b().index("Call the open_document tool")]
+    for needle in ("the author's own", "Don't Save", "loses them"):
+        assert needle in pre, needle
+
+
+def test_a_resource_unavailable_error_means_a_dialog_and_the_document_tools_may_be_gone() -> None:
+    """Measured 2026-11-06: the hung call ends with "read: Resource temporarily unavailable" once the dialog is answered,
+    and the app's document tools then drop out of the session; only open_document stays listed."""
+    text = s6b()
+    err = text[text.index('A call that ends with the error "read: Resource temporarily unavailable"'):text.index("If a call fails in any other way")]
+    before(err, "waiting on a dialog", "closed its connection", "only open_document left", "Tell the author to answer the dialog",
+           "Don't Save", "ToolSearch", "call the open_document tool on the document again", "poll as above")
+    cp = closing()
+    fallback = cp[cp.index("If a call fails or does not answer"):]
+    before(fallback, "Resource temporarily unavailable", "waiting on one of those dialogs", "answer it as above",
+           "drop out of the session", "call the open_document tool on the document again", "before the next get_document call")
 
 
 def test_6b_tells_the_author_not_to_type_in_the_app_until_the_review_ends() -> None:
@@ -342,23 +375,23 @@ def test_6b_refuses_html_before_it_opens_anything() -> None:
     before(text, ".html", ".htm", "not supported", "rmtmp", "Call the open_document tool")
 
 
-def test_the_closing_paragraph_reads_app_state_first_and_skips_undo_for_another_file() -> None:
+def test_the_closing_paragraph_reads_the_url_first_and_skips_undo_for_another_file() -> None:
     """S2c and S3: undo also undoes the author's own changes, and in another document."""
     cb = clean_buffer()
-    before(cb, "app_state", "`url`", "not the document", "do not call the undo tool", "undo tool")
+    before(cb, "get_document tool with `limit` 1", "`url`", "not the document", "do not call the undo tool", "undo tool")
     assert "accepted + rejected + 3" in cb
     assert "at most as many times as the author accepted in the app plus 3" not in cb
     assert "when `hasChanges` is already false" in cb or "`hasChanges` is already false" in cb
     cp = closing()
-    before(cp, "app_state", "`url`", "not the document", "do not call the open_document tool", "open_document tool on")
-    assert "undo tool" not in cp.split("Resource temporarily unavailable")[0].split("After any real apply")[1]  # the reopen only
+    before(cp, "get_document tool with `limit` 1", "`url`", "not the document", "do not call the open_document tool", "open_document tool on")
+    assert "undo tool" not in cp.split("After any real apply")[1]  # the reopen only
 
 
-def test_the_closing_paragraph_says_dont_save_at_the_reopen_where_the_prompt_appears() -> None:
-    """S3: the prompt appears when open_document reloads the file, so that is where Don't Save is said."""
+def test_the_closing_paragraph_says_the_answers_before_the_reopen_where_the_dialog_appears() -> None:
+    """S3: the dialog appears when open_document reloads the file, so the answers come first, then the call, then the polls."""
     cp = closing()
-    assert cp.index("call the open_document tool on the document again") < cp.index("Don't Save") \
-        < cp.index("app_state tool as in step 6b")
+    before(cp, "tell the author before the reopen", "Don't Save", "Then call the open_document tool on the document again",
+           "get_document tool with `limit` 1 as in step 6b")
     assert 'never "Save"' in cp
     assert ONE_SERVER in cp
 

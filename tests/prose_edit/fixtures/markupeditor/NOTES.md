@@ -21,7 +21,9 @@ a. **Key names.**
      `{index, status: "refused", reason}`.
    - list_suggestions: `suggestions[]` of `{id, status, block, find, replace, note}`. It has
      no `reason` key and no document key.
-   - app_state: `url`, `hasChanges`, `modalWindow`.
+   - app_state: not used. The released app does not serve it; Steve's MarkupEditorApp offers it in Debug builds only
+     (ControlDispatcher.swift). `get_document` with `limit` 1 returns one block plus `url`, `hasChanges` and `view`, which
+     is the state read the skill uses (Release build of c7d812c, 2026-11-06).
 b. **Locating edits.**
    - Block Markdown is the paragraph on one line. Repo docs wrap at about 80 columns, so an
      `old` that spans a line break in the file is not a substring of the block. Collapse
@@ -62,19 +64,31 @@ g. **What the serializer writes** (`serializer-source.md` gives `get_document_se
 f. **open_document reports too early.** It replied "Opened" while the app was still showing
    its save prompt for the previous document, which had unsaved changes. The load also happens
    after the reply even with no prompt: a get_document sent straight after "Opened" returned
-   the previous document. Before calling get_document, poll app_state until `url` is the
-   target and `modalWindow` is empty.
+   the previous document. Before reading the document, poll get_document with `limit` 1 until
+   `url` is the target. While the unsaved-changes prompt (raised by open_document over a dirty
+   document) is up, get_document does not answer: it was still running after 120 s (Release
+   build of c7d812c, 2026-11-06). Once the author answered Don't Save, the hung call ended
+   with the error "read: Resource temporarily unavailable", and the app's document tools then
+   dropped out of the session (the connection closed; only open_document stayed listed). So a
+   call that hangs or ends with that error means the app was waiting on a dialog, and the skill
+   calls open_document again, after the author says the dialog is answered, before it reads
+   again. Any other failure means the app is not listening or is waiting on a dialog. The skill
+   tells the author before the open, when a read of `hasChanges` shows a dirty buffer, that the
+   answer is "Don't Save".
 h. **The changed-on-disk dialog.** When the file changes under a buffer with unsaved changes,
    the app raises its own dialog, "<file> changed on disk. This document has unsaved changes.
    Reloading will discard them.", with "Reload from Disk" and "Keep My Changes" (hand trial
-   2026-10-31). The accepted suggestions are those unsaved changes. While the dialog is up the
-   Assistants connection stalls (app_state errors "Resource temporarily unavailable", then the
-   connection closes) and app_state does not report it as `modalWindow`. With a clean buffer the
-   app reloaded without a dialog. **Consequence:** the skill undoes in the app until `hasChanges`
-   is false BEFORE the real apply writes the file (the dry run hashes the file, which undo does
-   not touch), then reopens it; if app_state fails after apply, the author chooses "Reload from
-   Disk", never "Keep My Changes".
+   2026-10-31). The accepted suggestions are those unsaved changes. While the dialog is up,
+   get_document answered normally and did not reload (Release build of c7d812c, 2026-11-06),
+   so a read cannot show that the dialog is up; the earlier trial note that the connection
+   stalls is superseded. With a clean buffer the app reloaded without a dialog.
+   **Consequence:** the skill undoes in the app until `hasChanges` is false BEFORE the real apply
+   writes the file (the dry run hashes the file, which undo does not touch), then reopens it. After the apply, when the app still shows the document with `hasChanges` true,
+   the skill tells the author before the reopen which answer to give: "Reload from Disk",
+   never "Keep My Changes", for the changed-on-disk dialog, and "Don't Save", never "Save",
+   for the unsaved-changes prompt.
    **Live run 3 of the same trial:** after Accept All, two undos restored the text, a third said
    "There is nothing to undo", and `hasChanges` stayed true, so the dialog came up anyway. Undo
-   does not clear the app's unsaved mark after an accept; the skill tells the author before the
-   apply that the dialog is coming and that the answer is "Reload from Disk".
+   does not clear the app's unsaved mark after an accept (upstream finding 6); the buffer stays
+   dirty until it is discarded or reloaded. The skill tells the author before the apply that
+   the dialog is coming and that the answer is "Reload from Disk".
