@@ -462,7 +462,9 @@ the script, so recall alone does not make the answer better than the script's.
 
 ### Approach
 
-Three changes. Only the first two are on the path to the MVV.
+Three changes. Only the first two are on the path to the MVV, together with
+the routing template of Step 4 branch (c), which sends these questions to a plan
+with a coverage boundary (147-research-15, 147-research-16).
 
 1. **A `resolve` step (Gap 2).** A runner-native plan step that takes a list of
    key strings and returns the documents whose catalog title equals each one,
@@ -635,8 +637,8 @@ entity-ref}`. It is withdrawn. The inline planner cannot emit `filter`; the
 runner hands `filter` text items only, so tumblers do not carry through it;
 `plan_save` takes no free dimensions; and `answer_shape` already names RDR-232's
 terminal-text classifier. Step 0 also shows the filter is not needed on the issue
-lookups (hop-1 precision 0.967). A curated template is a contingency only
-(Step 4, branch c).
+lookups (hop-1 precision 0.967). The one curated template built is for routing
+(Step 4, branch c): it carries `hybrid-factual-lookup`'s steps, not June's chain.
 
 ### Existing Infrastructure Audit
 
@@ -645,6 +647,7 @@ lookups (hop-1 precision 0.967). A curated template is a contingency only
 | `resolve` step | `HttpCatalogClient.find_by_title_exact`, `resolve_many`; runner `_NON_EMBEDDING_TOOLS` | Add: a thin runner-native step over the existing exact lookup. New code (about 120 lines plus tests). |
 | Resolution repair | `CoverageBoundary.run`, `coverage_repair`, `repair_stream` | Extend: an exact-key branch inside the existing one repair, and option 1's generation rule (`coverage_outcome.decide_outcome`, the notice in `mcp/core.py`). New code (about 300 lines plus tests). |
 | Entity-key patterns and `entity_key` | `config.py` `_DEFAULTS`, `.nexus.yml`; catalog document meta | Add: config key, stamp on store_put, `classify_entity` helper (about 150 lines). |
+| Routing for a `discovery/listing` reading (Step 4 branch c) | builtin plan YAMLs; `matcher.py` category route | Add: `entity-resolution.yml` with `hybrid-factual-lookup`'s steps (105 lines), and a `cosine-only` tag the category route skips (19 lines in `matcher.py`). |
 | Graph expansion over `mentions` | `traverse` step | Reuse unchanged; it already runs as a `$ref`-seeded step. June's "extend the runner" was wrong. |
 | `mentions` links | `link_if_absent`, `upsertLink` | Reuse, conditional on Step 2. |
 | Key → artifact token match for the linker | none | Not FTS (there is no exhaustive token route). Forward pass reads the artifact's own text; reverse pass is a post-hoc generator. |
@@ -759,7 +762,11 @@ where evidence is seen.
   `document-discovery` answered with no coverage boundary and the MVV run lost a
   question. **Mitigation**: Step 4 branch (c), a curated `discovery/listing`
   template with the coverage-bearing body, so either reading reaches a coverage
-  boundary.
+  boundary. Tagged `cosine-only`, it wins only on cosine at or above the 0.40
+  floor. Accepted residual (Sam, 2026-11-06, 147-research-16): "Which documents
+  mention the customers affected?" and two borderline wordings, read as
+  `discovery/listing` or in the shadow regime, now get this template, a
+  synthesized answer instead of a document list.
 - **R5, answering from every held id may cost precision.** The evidence holds
   more customer ids than the script reads (on the issue questions, 4 to 10
   against 4 to 6). Measured with the joined items, precision was 0.9667 on the
@@ -795,7 +802,9 @@ where evidence is seen.
   sees only live documents, so stale links cannot reach either; `links_from` and
   `links_to` can still show them (R8). Hard delete cascades.
 - **Recovery**: the resolution repair and the linker are each behind a switch;
-  off is today's behavior.
+  off is today's behavior. The branch (c) template has no switch: `nx plan
+  disable <id>` keeps it off on one install until a release edits its
+  description (147-research-16).
 
 ## Implementation Plan
 
@@ -805,7 +814,8 @@ where evidence is seen.
 - [ ] This revision gated (`/conexus:rdr-gate 147`) and accepted. No
   implementation bead starts before that.
 - [x] Critical Assumption #5 measured (Step 4 sub-step 1, 2026-11-03,
-  147-research-7): the repair enters; Step 4 takes branch (a).
+  147-research-7): the repair enters; Step 4 takes branch (a). Branch (c) was
+  added after the 2026-11-06 MVV (147-research-15).
 
 ### Minimum Viable Validation
 
@@ -844,7 +854,7 @@ questions are reported (recall, precision, F1) and not gated. A run that clears
 the bar only through the semantic repair, with the resolution branch not
 entering, does not satisfy the MVV: the run summary must show the resolution
 branch entered on the questions that pass. The bar as revised on 2026-11-05
-applies to a fresh run on code that carries option 1, not to the 2026-11-05
+applies to a fresh run on code that carries option 1 and branch (c), not to the 2026-11-05
 rows: the first two runs predate the bar revision, and all four predate option
 1's code.
 
@@ -866,7 +876,9 @@ gate thresholds, not exactly (plan T2 `nexus/plan-rdr147-2026-11-03`).
 | E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | ≥ 4 of 5 issue questions in the domain, every resolved company named, at most one miss per run; per-run mean precision ≥ 0.95 over the questions whose answer names a company |
 | Aggregation (reported) | company recall / precision / F1 on agg2 | HERB ground truth | script 0.0, `nx_answer` 0.0 | reported, not gated |
 
-**Jointness, as measured.** On HERB the MVV needs: the resolution repair enters
+**Jointness, as measured.** On HERB the MVV needs: the question reaches a plan
+with a coverage boundary under either request-kind reading (Step 4 branch c,
+147-research-15) AND the resolution repair enters
 (Assumption #5) AND `resolve` returns the right records (P2) AND the joined
 items reach generation (since option 1 whether or not the re-check covers them;
 it covered 11 of 15, 147-research-13) AND the generated answer names the
@@ -930,15 +942,21 @@ a `$ref` step") is dropped: it already works.
      `discovery/listing`, and the only eligible plans for that kind were the
      single-query templates, which never reach the coverage boundary. Ship one
      curated builtin, `conexus/plans/builtin/entity-resolution.yml`
-     (`strategy: entity-resolution`, `verb: research`, `scope: global`, tag
-     `builtin-template`), declaring `answer_kind: discovery/listing`, with the
+     (`strategy: entity-resolution`, `verb: research`, `scope: global`, tags
+     `builtin-template` and `cosine-only`), declaring `answer_kind: discovery/listing`, with the
      step body of `hybrid-factual-lookup.yml` (search, traverse, fetch, rank,
      generate), so a `discovery/listing` reading of these questions gets a plan
      with a coverage boundary and a `lookup` reading still gets
-     `hybrid-factual-lookup`. Its match text names entity-listing requests ("which
-     customers were affected", "name the companies"); measured offline it scores
-     0.535 to 0.643 on the 7 questions against at most 0.303 for
-     `document-discovery`, and no golden discovery request changes plan.
+     `hybrid-factual-lookup`. Its match text names entity-listing requests ("Names
+     of companies that were affected by issues in the product, and the clients
+     hit by the outage. Name of the company with the most resolved bugs."); with
+     the bundled MiniLM it scores 0.474 to 0.542 on the 7 questions, above the
+     0.40 floor (147-research-16; the first draft's wording scored 0.535 to
+     0.643, 147-research-15). The
+     `cosine-only` tag keeps it out of the below-floor category route
+     (`matcher.py` `_is_cosine_only_plan`), where it stole requests that are not
+     entity listings. No golden discovery request changes plan; the accepted
+     residual is in R4.
      Deterministic tests over the real matcher and the YAML on disk pin: for each
      request kind (`lookup`, `discovery/listing`, `unknown`, `synthesis`, and the
      shadow regime) the HERB questions and paraphrases reach a plan that is not a
@@ -996,6 +1014,8 @@ No new external packages. New components:
 - Resolution repair branch in the coverage boundary, with option 1's generation
   rule and notice: about 300 lines plus tests.
 - Entity-key config, `entity_key` stamp and `classify_entity`: about 150 lines.
+- Step 4 branch (c): the `entity-resolution` builtin (105 lines of YAML) and
+  the `cosine-only` tag in `matcher.py` (19 lines), plus tests.
 - Entity linker, conditional: about 300 lines (forward hook, reverse generator,
   dry run).
 
@@ -1039,9 +1059,9 @@ since option 1 the MVV no longer needs it.
 
 The Minimum Viable Validation is in scope and is the Step 4 exit test: on the
 Step 0 sandbox and conditions, with grown plans disabled and two runs per
-question, the answer names every company its retrieved customer ids resolve to,
-with at least 4 of the 5 issue questions in the domain and at most one miss per
-run, at precision ≥ 0.95 over those of the 5 issue
+question, on every issue question whose coverage anchors hold an entity key the
+answer names every company those keys resolve to (Sam, 2026-11-06), with at
+least 4 of the 5 issue questions in that domain and at most one miss per run, at precision ≥ 0.95 over those of the 5 issue
 questions whose answer names a company (Sam, 2026-11-05); recall and F1 are reported beside
 the script's 0.7642857142857142. The 2 aggregation questions are reported, not gated (Sam,
 2026-11-03).
@@ -1054,7 +1074,9 @@ the script's 0.7642857142857142. The 2 aggregation questions are reported, not g
   batch by-titles route is later needed (more than 300 tokens per call).
 - **Incremental adoption**: the resolution repair is gated on an unsupported
   facet plus recognised key tokens, so other questions take today's path; the
-  linker is off by default.
+  linker is off by default. The branch (c) template is not behind a switch:
+  entity-listing questions that clear its cosine floor take the multi-step
+  plan on every install after upgrade.
 - **Memory management**: `resolve` holds one call's tokens and their manifests;
   bounded by the plan step's input.
 - Build tool compatibility, Licensing, IDE compatibility, Secret/credential
@@ -1065,8 +1087,8 @@ the script's 0.7642857142857142. The 2 aggregation questions are reported, not g
 Right-sized for a redesign of three mechanisms and the validation bar. The
 document is long because it carries measured numbers with their conditions and
 the anchors an implementer needs; the implementation itself is about 570 lines
-plus tests on the MVV path (resolve, the repair branch, entity keys), with the
-linker conditional.
+plus tests on the MVV path (resolve, the repair branch, entity keys), and about
+125 more for the branch (c) routing template, with the linker conditional.
 
 ## Revision History
 
@@ -1083,3 +1105,4 @@ linker conditional.
 - 2026-11-05: text brought into line with the option 1 code (69cc82790) and fix check b60dab40e: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
 - 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
 - 2026-11-06: the join-completeness domain is the questions whose anchors hold a key (Sam, T2 `nexus/rdr147-domain-decision-2026-11-06`); branch (c) rewritten as the routing fix the 2026-11-06 MVV needs (Sam "proceed.", 147-research-15); R4 updated with the measured request kinds.
+- 2026-11-06: wording follows the reviewed branch (c) code (22f3285f7, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted, the anchor domain in Scope Verification.
