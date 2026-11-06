@@ -99,6 +99,29 @@ class NexusServicePciStatusWiringTest {
         assertThat(holder.at("/this_engine/building").asInt()).as("read per request, not captured at binding")
             .isEqualTo(1);
         assertThat(holder.at("/this_engine/last_ddl_pass_at").asText()).isEqualTo("2026-10-10T07:30:00Z");
+        assertThat(holder.get("this_engine").has("maintenance"))
+            .as("nexus-4lnn1.1.5: a source that carries no maintenance object: the key is absent, not null or zeros")
+            .isFalse();
+
+        // nexus-4lnn1.1.5 (RDR-230 Technical Design 7), [additive]: this_engine.maintenance reaches the wire through the
+        // real route once the bound source carries it, and is read per request like the rest.
+        var maintenance = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.vectors.PciMaintenanceStatus>();
+        service.perCollectionIndexes(() -> StatusHandler.PerCollectionIndexes.of(sweep, state.get(), maintenance.get()));
+        assertThat(status().at("/per_collection_indexes/this_engine").has("maintenance")).isFalse();
+
+        maintenance.set(dev.nexus.service.vectors.PciMaintenanceStatus.phase1(java.util.List.of()));
+        JsonNode empty = status().at("/per_collection_indexes/this_engine/maintenance");
+        assertThat(empty.get("reindex").asText()).isEqualTo("off");
+        assertThat(empty.at("/canary/indexes").isArray()).isTrue();
+        assertThat(empty.at("/canary/indexes")).isEmpty();
+        assertThat(empty.at("/canary/green").asInt()).isZero();
+
+        maintenance.set(dev.nexus.service.vectors.PciMaintenanceStatus.phase1(java.util.List.of(
+            new dev.nexus.service.vectors.PciMaintenanceStatus.Entry("pci_" + "0".repeat(24), "unmeasured",
+                "no_queries", 2, null, null, 0, "stale", Instant.parse("2026-10-10T08:00:00Z"), null, null, null))));
+        JsonNode one = status().at("/per_collection_indexes/this_engine/maintenance/canary");
+        assertThat(one.get("unmeasured").asInt()).as("read per request, not captured at binding").isEqualTo(1);
+        assertThat(one.at("/indexes/0/queries").asInt()).isEqualTo(2);
     }
 
     /**

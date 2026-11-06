@@ -339,22 +339,40 @@ public final class StatusHandler implements HttpHandler {
          *                      non-holder)
          * @param passInProgress whether a lock-holding pass is in flight, so a long first pass is visible while
          *                      {@code lastDdlPassAt} is still null
+         * @param maintenance   nexus-4lnn1.1.5 ([additive], RDR-230 Technical Design 7): the {@code maintenance}
+         *                      object, the canary's latest results and the reindex half (off in Phase 1). Null omits
+         *                      the key: an engine, or a wiring, with no canary source. Entries carry the opaque
+         *                      {@code pci_} name and no collection or tenant name, because this route is
+         *                      unauthenticated.
          */
         public record ThisEngine(String builderState, Integer building, Integer failing,
                                  java.time.Instant lastDdlPassAt, java.time.Instant passStartedAt,
-                                 boolean passInProgress) {
+                                 boolean passInProgress,
+                                 dev.nexus.service.vectors.PciMaintenanceStatus maintenance) {
+            public ThisEngine(String builderState, Integer building, Integer failing, java.time.Instant lastDdlPassAt,
+                              java.time.Instant passStartedAt, boolean passInProgress) {
+                this(builderState, building, failing, lastDdlPassAt, passStartedAt, passInProgress, null);
+            }
+
             public ThisEngine(String builderState, Integer building, Integer failing, java.time.Instant lastDdlPassAt) {
                 this(builderState, building, failing, lastDdlPassAt, null, false);
             }
         }
 
-        /** The object as the sweep's last read and the reconciler's status say it. */
+        /** The object as the sweep's last read and the reconciler's status say it, with no maintenance object. */
         public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
                                               dev.nexus.service.vectors.PciReconciler.DdlStatus ddl) {
+            return of(sweep, ddl, null);
+        }
+
+        /** As above with the {@code maintenance} object; a null one omits the key. */
+        public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
+                                              dev.nexus.service.vectors.PciReconciler.DdlStatus ddl,
+                                              dev.nexus.service.vectors.PciMaintenanceStatus maintenance) {
             return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(),
                 sweep.reindexLeftover(), sweep.lastReadAt(), sweep.expired(),
                 new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt(),
-                    ddl.passStartedAt(), ddl.passInProgress()),
+                    ddl.passStartedAt(), ddl.passInProgress(), maintenance),
                 ddl.sweepSeconds());
         }
     }
@@ -644,7 +662,65 @@ public final class StatusHandler implements HttpHandler {
         body.append(",\"pass_started_at\":");
         appendSeconds(body, p.thisEngine().passStartedAt());
         body.append(",\"pass_in_progress\":").append(p.thisEngine().passInProgress());
+        if (p.thisEngine().maintenance() != null) {
+            appendMaintenance(body, p.thisEngine().maintenance());
+        }
         body.append("}}");
+    }
+
+    /**
+     * nexus-4lnn1.1.5 ([additive]): {@code this_engine.maintenance}. Recall to three places, the size ratio to two and
+     * the delete fraction to three, as plain decimals (never an exponent); a value that is not finite is null.
+     */
+    private static void appendMaintenance(StringBuilder body, dev.nexus.service.vectors.PciMaintenanceStatus m) {
+        body.append(",\"maintenance\":{\"reindex\":").append(HttpUtil.jsonString(m.reindex()))
+            .append(",\"reindexing\":").append(m.reindexing() == null ? "null" : HttpUtil.jsonString(m.reindexing()))
+            .append(",\"last_reindex_at\":");
+        appendSeconds(body, m.lastReindexAt());
+        var c = m.canary();
+        body.append(",\"reindexes\":").append(m.reindexes())
+            .append(",\"canary\":{\"green\":").append(c.green())
+            .append(",\"red\":").append(c.red())
+            .append(",\"unmeasured\":").append(c.unmeasured())
+            .append(",\"last_run_at\":");
+        appendSeconds(body, c.lastRunAt());
+        body.append(",\"indexes\":[");
+        boolean first = true;
+        for (var e : c.indexes()) {
+            if (!first) {
+                body.append(',');
+            }
+            first = false;
+            body.append("{\"index\":").append(HttpUtil.jsonString(e.index()))
+                .append(",\"state\":").append(HttpUtil.jsonString(e.state()))
+                .append(",\"reason\":").append(e.reason() == null ? "null" : HttpUtil.jsonString(e.reason()))
+                .append(",\"queries\":").append(e.queries())
+                .append(",\"min_recall\":");
+            appendDecimal(body, e.minRecall(), 3);
+            body.append(",\"mean_recall\":");
+            appendDecimal(body, e.meanRecall(), 3);
+            body.append(",\"top1_misses\":").append(e.top1Misses())
+                .append(",\"trigger\":").append(e.trigger() == null ? "null" : HttpUtil.jsonString(e.trigger()))
+                .append(",\"measured_at\":");
+            appendSeconds(body, e.measuredAt());
+            body.append(",\"anchor\":").append(e.anchor() == null ? "null" : HttpUtil.jsonString(e.anchor()))
+                .append(",\"size_ratio\":");
+            appendDecimal(body, e.sizeRatio(), 2);
+            body.append(",\"deletes_since_build\":");
+            appendDecimal(body, e.deletesSinceBuild(), 3);
+            body.append('}');
+        }
+        body.append("]}}");
+    }
+
+    /** A number as a plain decimal at {@code scale} places, or JSON null for null, NaN or an infinity. */
+    private static void appendDecimal(StringBuilder body, Double value, int scale) {
+        if (value == null || value.isNaN() || value.isInfinite()) {
+            body.append("null");
+        } else {
+            body.append(java.math.BigDecimal.valueOf(value).setScale(scale, java.math.RoundingMode.HALF_UP)
+                .toPlainString());
+        }
     }
 
     private static void appendChunksLeafBloat(StringBuilder body, ChunksLeafBloat b) {

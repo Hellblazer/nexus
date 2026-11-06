@@ -2610,4 +2610,106 @@ class PciReconcilerIntegrationTest {
             }
         }, "the vacuum to reach pg_stat_user_tables");
     }
+
+    // -- RDR-230 Technical Design 7: the maintenance status object (nexus-4lnn1.1.5) ---------------------------
+
+    @Test
+    void maintenance_isNullWhenNoCanaryIsWired_andZerosOnAnEngineThatNeverHeldTheLock() throws Exception {
+        PciSettings s = settings(16);
+        assertThat(reconciler(s, sweep(s)).maintenance()).as("no canary: the status omits the key").isNull();
+
+        MutableClock clock = new MutableClock();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciMaintenanceStatus never = canaryReconciler(s, sweep(s), clock, schedule).maintenance();
+
+        assertThat(never.reindex()).isEqualTo("off");
+        assertThat(never.reindexes()).isZero();
+        assertThat(never.canary().green() + never.canary().red() + never.canary().unmeasured()).isZero();
+        assertThat(never.canary().lastRunAt()).isNull();
+        assertThat(never.canary().indexes()).isEmpty();
+    }
+
+    @Test
+    void maintenance_afterABuild_reportsTheBuiltIndexWithItsAnchorOriginAndNoGrowthOrDeletes_andKeepsItAfterStandby()
+            throws Exception {
+        String tenant = newTenant("mnt-built");
+        collection(tenant, name("big"), B + 50);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        String index = PciCatalog.indexName(M384, tenant, name("big"));
+
+        r.reconcileOnce();
+
+        PciMaintenanceStatus m = r.maintenance();
+        assertThat(m.canary().green()).isEqualTo(1);
+        assertThat(m.canary().lastRunAt()).isEqualTo(clock.instant());
+        assertThat(m.canary().indexes()).hasSize(1);
+        PciMaintenanceStatus.Entry e = m.canary().indexes().get(0);
+        assertThat(e.index()).isEqualTo(index);
+        assertThat(e.state()).isEqualTo("green");
+        assertThat(e.trigger()).isEqualTo("after_build");
+        assertThat(e.anchor()).isEqualTo("built");
+        assertThat(e.sizeRatio()).as("measured against its own anchor right after the build")
+            .isCloseTo(1.0, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(e.deletesSinceBuild()).isCloseTo(0.0, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(e.toString()).as("no tenant or collection name in an entry").doesNotContain(tenant)
+            .doesNotContain(name("big"));
+
+        // Another engine holds the builder lock: this engine's pass is inactive, and its own history stays.
+        clock.advance(Duration.ofHours(30));
+        try (PciBuilderSession.Pass holder = builderSession(s).open()) {
+            assertThat(holder.live()).isTrue();
+            assertThat(r.reconcileOnce().ranToEnd()).isFalse();
+            assertThat(r.maintenance().canary().indexes()).extracting(PciMaintenanceStatus.Entry::index)
+                .as("results are this engine's own history and stay after it becomes a standby")
+                .containsExactly(index);
+        }
+    }
+
+    @Test
+    void maintenance_anAdoptedIndexReportsItsOriginAndNoSizeRatio() throws Exception {
+        String tenant = newTenant("mnt-adopt");
+        collection(tenant, name("old"), 300);
+        String index = unanchoredIndex(tenant, name("old"));
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+
+        r.reconcileOnce();
+
+        PciMaintenanceStatus.Entry e = r.maintenance().canary().indexes().get(0);
+        assertThat(e.index()).isEqualTo(index);
+        assertThat(e.trigger()).as("an adopted index has no last run on this engine").isEqualTo("stale");
+        assertThat(e.anchor()).isEqualTo("adopted");
+        assertThat(e.sizeRatio()).as("judged against the install reference, a Phase 2 figure").isNull();
+    }
+
+    @Test
+    void maintenance_deletesSinceBuild_followsTheRecountAfterDeletesAndAVacuum() throws Exception {
+        String tenant = newTenant("mnt-del");
+        List<String> hex = collection(tenant, name("c"), 300);
+        PciSettings s = settings(16);
+        // The system clock: the anchor's built_at must be later than the rows' last_written_at (the rows exist before
+        // the build), or written_since would count them all as written since the build.
+        Clock clock = Clock.systemUTC();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        r.reconcileOnce();                      // builds, anchors at 300 rows
+        r.reconcileOnce();                      // the first look at the leaf's statistics: a baseline
+        assertThat(r.maintenance().canary().indexes().get(0).deletesSinceBuild())
+            .isCloseTo(0.0, org.assertj.core.data.Offset.offset(1e-9));
+
+        deleteAndVacuum(leaf(tenant), tenant, name("c"), hex.subList(0, 20));
+        r.reconcileOnce();                      // deletes moved: the recount reads 280 rows, none written since
+
+        assertThat(r.maintenance().canary().indexes().get(0).deletesSinceBuild())
+            .as("(300 + 0 - 280) / 280").isCloseTo(20.0 / 280.0, org.assertj.core.data.Offset.offset(1e-9));
+    }
 }

@@ -573,8 +573,10 @@ public final class Main {
         // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
         // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the
         // route is registered in NexusService's constructor, before either half exists; the key is omitted until now.
+        // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): this_engine.maintenance, the recall canary's latest results from
+        // the reconciler's memory (the reindex half reads off until Phase 2). Same rule: no query per request.
         service.perCollectionIndexes(() -> dev.nexus.service.http.StatusHandler.PerCollectionIndexes.of(
-                pciSweep.status(), pciReconciler.status()));
+                pciSweep.status(), pciReconciler.status(), pciReconciler.maintenance()));
 
         // nexus-dxsjc (nexus-4lnn1 R4): the per-leaf bloat view of nexus.chunks, read on a task of its own (a statistics
         // read that fails or hangs must not touch the router's index set) and served from its cache by GET /v1/status.

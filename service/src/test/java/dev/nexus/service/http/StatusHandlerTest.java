@@ -9,6 +9,7 @@ import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PciBuilderSession;
 import dev.nexus.service.vectors.PciIndexSweep;
+import dev.nexus.service.vectors.PciMaintenanceStatus;
 import dev.nexus.service.vectors.PciReconciler;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -539,6 +540,134 @@ class StatusHandlerTest {
         assertThat(o.get("this_engine").has("expired")).as("a global fact, not a per-engine one").isFalse();
     }
 
+    // ── nexus-4lnn1.1.5 (RDR-230 Technical Design 7), [additive]: this_engine.maintenance ───────────────────────
+
+    private static final java.time.Instant MEASURED_AT = java.time.Instant.parse("2026-10-20T08:01:10.456Z");
+
+    private static PciMaintenanceStatus.Entry entry(String index, String state, String reason, int queries,
+                                                    Double min, Double mean, int top1, String trigger, String anchor,
+                                                    Double sizeRatio, Double deletes) {
+        return new PciMaintenanceStatus.Entry(index, state, reason, queries, min, mean, top1, trigger, MEASURED_AT,
+            anchor, sizeRatio, deletes);
+    }
+
+    /** A green, a red and an unmeasured entry (two queries in its ring), given in the order the engine does not use. */
+    private static PciMaintenanceStatus canaryHistory() {
+        return PciMaintenanceStatus.phase1(List.of(
+            entry("pci_3f9c0a1b2c3d4e5f6a7b8c9d", "green", null, 10, 0.9834, 0.9981, 0, "after_build", "built",
+                1.0712, 0.0312),
+            entry("pci_bbbbbbbbbbbbbbbbbbbbbbbb", "unmeasured", "no_queries", 2, null, null, 0, "stale", null, null,
+                null),
+            entry("pci_aaaaaaaaaaaaaaaaaaaaaaaa", "red", null, 10, 0.82, 0.9, 2, "vacuum", "adopted", null, 0.25)));
+    }
+
+    private static StatusHandler.PerCollectionIndexes pciWith(PciIndexSweep.Status sweep, PciReconciler.DdlStatus ddl,
+                                                              PciMaintenanceStatus maintenance) {
+        return StatusHandler.PerCollectionIndexes.of(sweep, ddl, maintenance);
+    }
+
+    @Test
+    void maintenance_isAbsentUnlessASourceIsWired_andTheOtherKeysAreUnchangedByItsPresence() throws Exception {
+        var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
+        start(withPci(() -> pci(read(1, 0, 0, false), ddl)));
+        JsonNode without = get().get("per_collection_indexes");
+        assertThat(without.get("this_engine").has("maintenance")).isFalse();
+        stop();
+
+        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, null)));
+        assertThat(get().get("per_collection_indexes").get("this_engine").has("maintenance"))
+            .as("a null maintenance is the same as none: the key is omitted, never rendered as null").isFalse();
+        stop();
+
+        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, canaryHistory())));
+        JsonNode with = get().get("per_collection_indexes");
+        assertThat(with.get("this_engine").has("maintenance")).isTrue();
+        var withoutIt = with.deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) withoutIt.get("this_engine")).remove("maintenance");
+        assertThat(withoutIt).isEqualTo(without);
+    }
+
+    @Test
+    void maintenance_hasExactlyTheDocumentedKeysInOrder_andReindexIsOffInPhase1() throws Exception {
+        var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
+        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, canaryHistory())));
+
+        JsonNode m = get().at("/per_collection_indexes/this_engine/maintenance");
+
+        assertThat(keys(m)).containsExactly("reindex", "reindexing", "last_reindex_at", "reindexes", "canary");
+        assertThat(m.get("reindex").asText()).isEqualTo("off");
+        assertThat(m.get("reindexing").isNull()).isTrue();
+        assertThat(m.get("last_reindex_at").isNull()).isTrue();
+        assertThat(m.get("reindexes").asInt()).isZero();
+        assertThat(keys(m.get("canary"))).containsExactly("green", "red", "unmeasured", "last_run_at", "indexes");
+        assertThat(m.at("/canary/green").asInt()).isEqualTo(1);
+        assertThat(m.at("/canary/red").asInt()).isEqualTo(1);
+        assertThat(m.at("/canary/unmeasured").asInt()).isEqualTo(1);
+        assertThat(m.at("/canary/last_run_at").asText()).as("whole seconds, like the other times")
+            .isEqualTo("2026-10-20T08:01:10Z");
+    }
+
+    @Test
+    void maintenance_entryHasExactlyTheTwelveDocumentedKeys_keyedByAnOpaqueName_inTheEnginesOrder() throws Exception {
+        var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
+        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, canaryHistory())));
+
+        JsonNode indexes = get().at("/per_collection_indexes/this_engine/maintenance/canary/indexes");
+
+        assertThat(indexes).hasSize(3);
+        assertThat(indexes.get(0).get("state").asText()).as("red first").isEqualTo("red");
+        assertThat(indexes.get(1).get("state").asText()).isEqualTo("unmeasured");
+        assertThat(indexes.get(2).get("state").asText()).isEqualTo("green");
+        for (JsonNode e : indexes) {
+            assertThat(keys(e)).containsExactly("index", "state", "reason", "queries", "min_recall", "mean_recall",
+                "top1_misses", "trigger", "measured_at", "anchor", "size_ratio", "deletes_since_build");
+            assertThat(e.get("index").asText()).matches("^pci_[0-9a-f]{24}$");
+        }
+    }
+
+    @Test
+    void maintenance_anUnmeasuredEntryCarriesItsQueries_andNoRecall() throws Exception {
+        var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
+        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, canaryHistory())));
+
+        JsonNode unmeasured = get().at("/per_collection_indexes/this_engine/maintenance/canary/indexes/1");
+
+        assertThat(unmeasured.get("reason").asText()).isEqualTo("no_queries");
+        assertThat(unmeasured.get("queries").asInt()).as("the ring's count, not zero").isEqualTo(2);
+        assertThat(unmeasured.get("min_recall").isNull()).isTrue();
+        assertThat(unmeasured.get("mean_recall").isNull()).isTrue();
+        assertThat(unmeasured.get("anchor").isNull()).isTrue();
+    }
+
+    @Test
+    void maintenance_rendersTheListAsCappedAndOrderedByTheStatusObject_noTenantOrCollectionNameAnywhereInTheBody()
+            throws Exception {
+        var all = new java.util.ArrayList<PciMaintenanceStatus.Entry>();
+        for (int n = 0; n < 80; n++) {
+            all.add(entry(String.format("pci_%024x", n), n % 10 == 0 ? "red" : "green", null, 10, 0.99, 0.99,
+                n % 10 == 0 ? 1 : 0, "stale", "built", 1.0, 0.0));
+        }
+        var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
+        var status = PciMaintenanceStatus.phase1(all);
+        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, status)));
+
+        JsonNode canary = get().at("/per_collection_indexes/this_engine/maintenance/canary");
+
+        assertThat(canary.get("indexes")).hasSize(64);
+        assertThat(canary.get("red").asInt()).isEqualTo(8);
+        assertThat(canary.get("green").asInt()).isEqualTo(72);
+        for (int i = 0; i < 8; i++) {
+            assertThat(canary.at("/indexes/" + i + "/state").asText()).isEqualTo("red");
+        }
+        assertThat(canary.at("/indexes/8/state").asText()).isEqualTo("green");
+    }
+
+    private static List<String> keys(JsonNode o) {
+        var names = new java.util.ArrayList<String>();
+        o.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
     @Test
     void perCollectionIndexes_hasExactlyTheDocumentedKeysInOrder() throws Exception {
         var holder = pci(read(1, 0, 0, false),
@@ -559,7 +688,8 @@ class StatusHandlerTest {
     /**
      * The golden fixture the Python doctor row also reads ({@code tests/fixtures/pci_status_bodies.json}): the bodies
      * the engine emits for a holder, a first pass in flight, a standby, an auth failure, a privilege failure, an
-     * expired router set and a switched-off engine, rendered here through the real handler. A field renamed or
+     * expired router set and a switched-off engine, plus (nexus-4lnn1.1.5) a holder with canary results, a standby that
+     * kept them and an engine that never held the lock, rendered here through the real handler. A field renamed or
      * retyped on this side fails this test until the fixture is updated, and the doctor row's test then reads the
      * updated bodies, so the two halves cannot drift apart unseen.
      */
@@ -584,6 +714,17 @@ class StatusHandlerTest {
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null)));
         cases.put("off", pci(new PciIndexSweep.Status(false, 0, 0, 0, 0, null, null, 0, false),
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OFF, null, null, null)));
+        // nexus-4lnn1.1.5: the same bodies with this_engine.maintenance. A holder with one result of each state, a
+        // standby that kept the results of its time as the holder, and an engine that never held the lock.
+        cases.put("holder_with_canary", pciWith(read(4, 1, 2, 1, false), new PciReconciler.DdlStatus(
+            PciBuilderSession.BuilderState.OK, 1, 0, DDL_AT, java.time.Instant.parse("2026-10-10T07:58:30.250Z"), true),
+            canaryHistory()));
+        cases.put("standby_with_canary_history", pciWith(read(4, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, DDL_AT),
+            canaryHistory()));
+        cases.put("never_held_lock", pciWith(read(4, 0, 0, false),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null),
+            PciMaintenanceStatus.phase1(List.of())));
 
         var goldenNames = new java.util.ArrayList<String>();
         golden.fieldNames().forEachRemaining(goldenNames::add);

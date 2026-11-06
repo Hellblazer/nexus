@@ -226,7 +226,8 @@ class MainPciWiringTest {
     /**
      * nexus-43ulx.23: {@code per_collection_indexes} on {@code /v1/status} is bound in Main from the SAME sweep and
      * reconciler that run (not a copy, not {@code PciIndexSet.NONE}), after both exist. Without the call the route
-     * silently omits the key and every client reads "cannot tell"; no other test would notice.
+     * silently omits the key and every client reads "cannot tell"; no other test would notice. nexus-4lnn1.1.5: the
+     * maintenance object is read from the same reconciler, per request, in the same call.
      */
     @Test
     void theStatusObjectIsBoundFromTheRunningSweepAndReconciler_afterBothExist() throws Exception {
@@ -239,7 +240,7 @@ class MainPciWiringTest {
         assertThat(bind).as("before the service is declared ready").isLessThan(ready);
         assertThat(src).as("built from the running sweep's and reconciler's own status, nothing re-read")
             .containsPattern("StatusHandler\\.PerCollectionIndexes\\.of\\(\\s*pciSweep\\.status\\(\\),\\s*"
-                + "pciReconciler\\.status\\(\\)\\)");
+                + "pciReconciler\\.status\\(\\),\\s*pciReconciler\\.maintenance\\(\\)\\)");
         assertThat(src.indexOf("service.perCollectionIndexes(", bind + 1)).as("bound once").isNegative();
     }
 

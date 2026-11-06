@@ -376,6 +376,29 @@ public final class PciReconciler {
 
     // -- status ----------------------------------------------------------------------------------------------
 
+    /**
+     * The {@code maintenance} object of the status (RDR-230 Technical Design 7, nexus-4lnn1.1.5), from values this
+     * engine holds in memory: the canary's latest result per index and what the last counting look read of it. No query
+     * runs. The canary's results are this engine's own history and stay after it becomes a standby, like
+     * {@code last_ddl_pass_at}; an engine that never held the lock has none and reports zeros and an empty list.
+     *
+     * @return null when no canary is wired (a reconciler built without one): the status then omits the key
+     */
+    public PciMaintenanceStatus maintenance() {
+        if (canary == null) {
+            return null;
+        }
+        var entries = new java.util.ArrayList<PciMaintenanceStatus.Entry>();
+        for (PciCanary.Result r : canary.results().values()) {
+            PciCanary.Target t = r.target();
+            IndexReading reading = readings.get(new LeafKey(t.leaf(), t.index()));
+            java.util.Optional<String> sweepOrigin = reading != null ? java.util.Optional.empty()
+                : sweep.anchor(t.model(), t.tenant(), t.collection()).map(PciCatalog.Anchor::origin);
+            entries.add(PciMaintenanceStatus.entry(r, reading, sweepOrigin));
+        }
+        return PciMaintenanceStatus.phase1(entries);
+    }
+
     /** The DDL half's status; see the class comment for who reports what. */
     public DdlStatus status() {
         Instant lastPass = lastDdlPassAt;
