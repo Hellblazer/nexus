@@ -16,7 +16,9 @@ import pytest
 
 from nexus.console.threads import (
     STALE_AFTER,
+    Ask,
     Bead,
+    answer_title,
     ask_version,
     build_board,
     classify,
@@ -56,7 +58,7 @@ _DEFAULTS: dict[str, object] = {
 }
 
 
-def ask_text(ask_id: str = "a1", **over: object) -> str:
+def ask_text(ask_id: str = "a1", /, **over: object) -> str:
     """One ask block. A keyword set to None drops that field; ``option`` takes a list."""
     fields = {**_DEFAULTS, **over}
     lines = [f"ask: {ask_id}"]
@@ -413,10 +415,18 @@ def test_lint_flags_fewer_than_two_options(options: list[str]) -> None:
     assert pairs(found) == {("few-options", "a1")}
 
 
-@pytest.mark.parametrize("rec", ["0", "3", "-1", "two"])
+@pytest.mark.parametrize("rec", ["0", "3", "999"])
 def test_lint_flags_rec_out_of_range(rec: str) -> None:
     found = findings(row("e", entry_text(ask_text(rec=rec))))
     assert pairs(found) == {("rec-range", "a1")}
+
+
+@pytest.mark.parametrize("rec", ["two", "-1", "1.5", "1000", "+1", "\u0661", "9" * 5000])
+def test_a_rec_that_is_not_one_to_three_ascii_digits_is_a_bad_value_never_an_exception(rec: str) -> None:
+    content = entry_text(ask_text(rec=rec))
+    (a,) = parse_session("e", content).threads[0].asks
+    assert a.rec is None and a.rec_raw == rec
+    assert pairs(findings(row("e", content))) == {("bad-value", "a1")}
 
 
 def test_lint_flags_a_yes_no_field_that_is_neither() -> None:
@@ -453,9 +463,24 @@ def test_session_ids_are_compared_case_insensitively() -> None:
 
 
 def test_every_finding_names_the_entry_and_the_ask() -> None:
-    found = findings(row("e", entry_text(ask_text("Bad_Id", option=["only"], rec=None, why=None))))
-    assert found and all(f.entry == "e" for f in found)
-    assert {f.ask for f in found} == {"Bad_Id"}
+    found = findings(row("e", entry_text(ask_text("a1", option=["only"], rec="7", question=None, blocking="maybe"))))
+    assert {f.rule for f in found} == {"few-options", "rec-range", "missing-field", "bad-value"}
+    assert all(f.entry == "e" and f.ask == "a1" for f in found)
+
+
+def test_a_bad_id_still_names_the_entry_and_the_ask_it_failed_to_open() -> None:
+    (f,) = findings(row("e", entry_text(ask_text("Bad_Id"))))
+    assert (f.entry, f.ask, f.rule) == ("e", "Bad_Id", "bad-id")
+
+
+def test_prose_after_ask_colon_in_a_legacy_thread_is_not_a_bad_id_finding() -> None:
+    assert findings(row("old", "## T\nask: Sam please pick the port\n")) == ()
+
+
+def test_lint_flags_an_option_whose_text_is_empty() -> None:
+    found = findings(row("e", entry_text(ask_text(option=["Ship", "", "[irreversible]"]))))
+    assert [(f.rule, f.ask) for f in found if f.rule == "empty-option"] == [("empty-option", "a1")] * 2
+    assert all(f.rule in {"empty-option", "reversible-conflict"} for f in found)
 
 
 # --- classification -----------------------------------------------------------------
@@ -583,13 +608,29 @@ def test_an_unparseable_by_sorts_last() -> None:
     assert ids(classify([row("e", entry_text(*blocks))], NOW, ()).interrupt) == ["dated", "junk"]
 
 
-def test_classify_skips_an_unreadable_entry() -> None:
-    class Boom:
-        def get(self, *_args: object) -> str:
-            raise RuntimeError("unreadable")
+class _Unreadable:
+    """A row whose content cannot be read; the title is fine."""
 
-    c = classify([Boom(), row("e", entry_text(ask_text("a1")))], NOW, ())
+    def get(self, key: str, default: object = "") -> object:
+        if key == "content":
+            raise RuntimeError("unreadable")
+        return {"title": "bad", "timestamp": FRESH}.get(key, default)
+
+
+def test_classify_reports_the_entry_it_could_not_read_and_still_classifies_the_rest() -> None:
+    c = classify([_Unreadable(), row("e", entry_text(ask_text("a1")))], NOW, ())
+    assert c.unreadable == ("bad",)
     assert ids(c.batch) == ["a1"]
+
+
+def test_classify_names_nothing_unreadable_when_every_entry_reads() -> None:
+    assert classify([row("e", entry_text(ask_text("a1")))], NOW, ()).unreadable == ()
+
+
+def test_lint_flags_an_entry_it_could_not_read() -> None:
+    found = findings(_Unreadable(), row("e", entry_text(ask_text("a1", option=["only"], rec=None, why=None))))
+    assert ("unreadable-entry", "bad") in {(f.rule, f.entry) for f in found}
+    assert ("few-options", "e") in {(f.rule, f.entry) for f in found}  # the rest was still linted
 
 
 def test_every_parsed_ask_lands_in_exactly_one_group() -> None:
@@ -662,3 +703,158 @@ def test_merge_asks_without_structured_input_is_as_before() -> None:
     board = build_board([row("halcyon", fixture("halcyon.txt"))], NOW)
     asks = merge_asks(board.needs_you, (Bead("nexus-k9kr9", "Keying"),))
     assert asks.beads[0].ask_pointers == () and asks.beads[0].raised_by == ()
+
+
+# --- legacy ask: prose (a line that is not an id never opens a block) ---------------------
+
+
+@pytest.mark.parametrize("prose", ["Sam please pick the port", "pick the port", "Foo_Bar", "UPPER", "x" * 41, ""])
+def test_ask_colon_prose_is_not_a_block_and_parses_as_before(prose: str) -> None:
+    content = f"## T\nask: {prose}\nstate: x\n"
+    (t,) = parse_session("e", content).threads
+    assert t.asks == ()
+    if "Sam" in prose:
+        assert t.needs_sam == f"ask: {prose}" and t.notes == ()
+    else:
+        assert t.needs_sam == "" and t.notes == (f"ask: {prose}".strip(),)
+
+
+def test_ask_colon_prose_naming_sam_is_still_a_legacy_ask_on_the_board() -> None:
+    board = build_board([row("e", "## T\nask: Sam please pick the port\n")], NOW)
+    assert [i.thread.needs_sam for i in board.needs_you] == ["ask: Sam please pick the port"]
+    assert board.structured == ()
+
+
+def test_needs_sam_with_its_value_on_the_next_line_still_takes_an_ask_colon_line_as_that_value() -> None:
+    (t,) = parse_session("e", "## T\nneeds_sam:\nask: foo\nstate: s\n").threads
+    assert t.needs_sam == "ask: foo"
+    assert t.asks == ()
+
+
+def test_an_ask_line_that_is_not_an_id_inside_a_block_is_a_note_and_not_part_of_the_version() -> None:
+    plain = only_ask(entry_text(ask_text("a1"))).version
+    content = entry_text(ask_text("a1") + "\nask: Sam please pick the port")
+    (t,) = parse_session("e", content).threads
+    assert t.asks[0].version == plain
+    assert t.notes == ("ask: Sam please pick the port",)
+
+
+# --- conditional property -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(("after", "expected"), [
+    ("engine 0.1.180 deploys", True), ("none", False), ("None", False), ("", False), ("-", False), (None, False),
+])
+def test_conditional_means_after_has_a_value(after: str | None, expected: bool) -> None:
+    a = only_ask(entry_text(ask_text(after=after)))
+    assert a.conditional is expected
+
+
+def test_an_ask_with_after_none_is_classified_by_its_other_fields() -> None:
+    c = classify([row("e", entry_text(ask_text("a1", after="none", blocking="yes")))], NOW, ())
+    assert ids(c.interrupt) == ["a1"] and c.conditional == ()
+
+
+# --- repeated single-valued keys fail safe ------------------------------------------
+
+
+def test_a_repeated_reversible_resolves_to_no_whatever_comes_first() -> None:
+    for first, second in (("yes", "no"), ("no", "yes"), ("yes", "yes")):
+        content = entry_text(ask_text(reversible=first) + f"\nreversible: {second}")
+        a = only_ask(content)
+        assert a.reversible is False, (first, second)
+        assert "repeated-field" in {f.rule for f in lint([row("e", content)])}
+
+
+def test_a_repeated_blocking_resolves_to_yes_whatever_comes_first() -> None:
+    for first, second in (("yes", "no"), ("no", "yes"), ("no", "no")):
+        content = entry_text(ask_text(blocking=first) + f"\nblocking: {second}")
+        a = only_ask(content)
+        assert a.blocking is True, (first, second)
+        assert ("repeated-field", "a1") in {(f.rule, f.ask) for f in lint([row("e", content)])}
+
+
+def test_a_repeated_field_that_is_not_safety_relevant_keeps_the_first_value() -> None:
+    a = only_ask(entry_text(ask_text() + "\nquestion: second thoughts"))
+    assert a.question == "Ship it?"
+
+
+# --- the [irreversible] marker -------------------------------------------------------
+
+
+def test_toggling_the_irreversible_marker_changes_the_version() -> None:
+    plain = only_ask(entry_text(ask_text(option=["Ship", "Wait"], reversible="no"))).version
+    marked = only_ask(entry_text(ask_text(option=["Ship", "Wait [irreversible]"], reversible="no"))).version
+    assert plain != marked
+
+
+def test_a_marker_in_the_middle_of_an_option_is_not_a_marker() -> None:
+    a = only_ask(entry_text(ask_text(option=["Ship [irreversible] later", "Wait"])))
+    assert a.options[0].irreversible is False
+    assert a.options[0].text == "Ship [irreversible] later"
+
+
+@pytest.mark.parametrize("text", ["Ship [IRREVERSIBLE]", "Ship [Irreversible]  ", "Ship[irreversible]"])
+def test_the_marker_is_case_insensitive_and_needs_no_space_before_it(text: str) -> None:
+    # Pinned: missing an irreversible option is the costlier mistake, so more spellings count.
+    (o, _) = only_ask(entry_text(ask_text(option=[text, "Wait"]))).options
+    assert o.irreversible is True and o.text == "Ship"
+
+
+# --- answer_title ---------------------------------------------------------------------
+
+
+def test_answer_title_is_session_ask_version() -> None:
+    a = only_ask(fixture("halcyon.txt"))
+    assert answer_title(a) == f"{HALCYON_SESSION}/d1105-k9kr9-keying/{HALCYON_VERSION}"
+
+
+def test_answer_title_lower_cases_an_upper_case_session_line_to_the_record_title() -> None:
+    upper = fixture("halcyon.txt").replace(HALCYON_SESSION, HALCYON_SESSION.upper())
+    a = only_ask(upper)
+    assert a.session_id == HALCYON_SESSION.upper()
+    assert answer_title(a) == f"{HALCYON_SESSION}/d1105-k9kr9-keying/{HALCYON_VERSION}"
+    c = classify([row("halcyon", upper)], NOW, {answer_title(a): {"status": "sent"}})
+    assert ids(c.answered) == ["d1105-k9kr9-keying"]
+
+
+def test_answer_title_is_empty_for_an_ask_with_no_session_line_so_no_record_can_match() -> None:
+    a = only_ask(entry_text(ask_text("a1"), session=None))
+    assert answer_title(a) == ""
+    c = classify([row("e", entry_text(ask_text("a1"), session=None))], NOW, {"/a1/" + a.version: {"status": "sent"}})
+    assert ids(c.answered) == [] and ids(c.batch) == ["a1"]
+
+
+def test_answer_title_takes_a_bare_ask() -> None:
+    assert answer_title(Ask(id="x", version="0123456789abcdef", session_id="S")) == "s/x/0123456789abcdef"
+
+
+# --- version vectors --------------------------------------------------------------------
+
+
+def _vectors() -> list[dict]:
+    return json.loads(fixture("version_vectors.json"))
+
+
+@pytest.mark.parametrize("vector", _vectors(), ids=lambda v: v["name"])
+def test_version_vectors(vector: dict) -> None:
+    if vector["via"] == "ask_version":
+        assert ask_version(vector["input"]) == vector["expected"]
+        return
+    content = "session: s\n## T\n" + "\n".join(vector["input"]) + "\n"
+    assert only_ask(content).version == vector["expected"]
+
+
+def test_the_vectors_cover_the_normalization_cases() -> None:
+    names = {v["name"] for v in _vectors()}
+    assert {
+        "by_spaced_key", "by_upper_key", "upper_case_key_is_hashed_verbatim", "interior_spacing_is_verbatim",
+        "non_ascii_value", "stray_non_ask_line_inside_a_block", "updated_line_inside_a_block",
+        "empty_after_is_hashed",
+    } <= names
+    # distinct inputs that must not collide
+    by_name = {v["name"]: v["expected"] for v in _vectors()}
+    assert by_name["plain"] == by_name["by_spaced_key"] == by_name["by_upper_key"] == by_name["by_in_the_middle"]
+    assert by_name["plain"] == by_name["stray_non_ask_line_inside_a_block"] == by_name["updated_line_inside_a_block"]
+    assert by_name["plain"] == by_name["indent_and_trailing_space"]
+    assert len({by_name[n] for n in ("plain", "upper_case_key_is_hashed_verbatim", "interior_spacing_is_verbatim", "non_ascii_value", "empty_after_is_hashed")}) == 5

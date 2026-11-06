@@ -1,0 +1,20 @@
+{
+  "answer_id": "1122334455667788",
+  "question": "Retry-safe keying for quarantine restore: accept the gap, or build option B?",
+  "options": [
+    "Accept the gap and close the bead",
+    "Build option B at P3 (one transaction per keyed call, engine change plus one client line) [irreversible]"
+  ],
+  "choice": 1,
+  "note": "",
+  "sam_words": "accept the gap on k9kr9",
+  "batch_title": null,
+  "via": "mediator:8b0e1d42-6c3a-4f19-a2d7-5e9f0c1b3a64",
+  "asked": "2026-11-05T10:15Z",
+  "blocking": false,
+  "tty": null,
+  "time": "2026-11-05T20:20:00Z",
+  "status": "sending",
+  "tuple_id": null,
+  "error": null
+}

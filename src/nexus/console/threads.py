@@ -34,7 +34,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -58,7 +58,10 @@ ASK_KEYS = frozenset({
     "ask", "asked", "question", "context", "option", "rec", "why", "reversible", "blocking", "after", "by",
 })
 _ID = re.compile(r"[a-z0-9-]{1,40}")
+#: Trailing marker, any case, with or without a space before it: missing an irreversible option costs more
+#: than flagging one too many.
 _IRREVERSIBLE = re.compile(r"\s*\[irreversible\]\s*$", re.IGNORECASE)
+_REC = re.compile(r"[0-9]{1,3}")
 _POINTER = re.compile(r"ask\s+(\S+)", re.IGNORECASE)
 
 
@@ -99,7 +102,15 @@ class Ask:
     rec_raw: str = ""
     missing: tuple[str, ...] = ()
     repeated: tuple[str, ...] = ()  #: single-valued keys given more than once (the first wins)
-    bad_values: tuple[str, ...] = ()  #: yes/no keys holding something else
+    bad_values: tuple[str, ...] = ()  #: yes/no keys holding something else, and a ``rec:`` that is not 1-3 digits
+
+    @property
+    def conditional(self) -> bool:
+        """True when ``after:`` holds a value: the ask is never answerable until the asker deletes the line.
+
+        An empty ``after:``, or one reading "none", is not a condition (``has_value``).
+        """
+        return has_value(self.after)
 
 
 @dataclass(frozen=True)
@@ -228,7 +239,22 @@ def _mentions_sam(line: str) -> bool:
 
 
 def ask_version(lines: Iterable[str]) -> str:
-    """First 16 hex of SHA-256 over the ask lines except ``by:``, each stripped, in order, joined by newlines."""
+    """The version of an ask: the first 16 hex characters of a SHA-256 over its lines.
+
+    Algorithm, exactly:
+
+    1. ``lines`` are the block's ask-key lines in file order, the ``ask:`` line first. The parser passes only
+       those: a non-ask line inside the block (a note) and an ``updated:`` or ``session:`` line are not in it.
+    2. Strip leading and trailing whitespace from each line. Nothing else is normalized: the case of a key,
+       the spaces inside a line and the value are hashed as typed, so ``Question:`` and ``question:`` differ and
+       so do ``question:   q`` and ``question: q``.
+    3. Drop every line whose key is ``by``. The key is compared the way the parser reads keys: text before the
+       first colon, stripped, lower-cased, runs of space, ``_`` and ``-`` read as one ``_``. So ``by :`` and
+       ``By:`` are dropped too.
+    4. Join what is left with ``"\\n"``, encode as UTF-8, SHA-256, take the first 16 hex characters.
+
+    An empty ``after:`` line is an ask line and is hashed. Pinned by ``tests/fixtures/asks/version_vectors.json``.
+    """
     kept = []
     for line in lines:
         text = line.strip()
@@ -253,10 +279,9 @@ def _build_ask(
     options: list[Option] = []
     for key, value, _line in block:
         if key == "option":
-            if value:
-                marked = _IRREVERSIBLE.search(value)
-                text = value[: marked.start()].strip() if marked else value
-                options.append(Option(len(options) + 1, text, marked is not None))
+            marked = _IRREVERSIBLE.search(value)
+            text = value[: marked.start()].strip() if marked else value
+            options.append(Option(len(options) + 1, text, marked is not None))
             continue
         if key in seen:
             if key not in repeated:
@@ -266,6 +291,8 @@ def _build_ask(
         first[key] = value
     rec_raw = first.get("rec", "")
     bad = [k for k in ("reversible", "blocking") if first.get(k) and first[k].strip().lower() not in ("yes", "no")]
+    if rec_raw and not _REC.fullmatch(rec_raw):
+        bad.append("rec")
     required = ["asked", "question", "context", "reversible", "blocking"]
     if rec_raw:
         required.append("why")
@@ -275,10 +302,11 @@ def _build_ask(
         question=first.get("question", ""),
         context=first.get("context", ""),
         options=tuple(options),
-        rec=int(rec_raw) if re.fullmatch(r"[0-9]+", rec_raw) else None,
+        rec=int(rec_raw) if _REC.fullmatch(rec_raw) else None,
         why=first.get("why", ""),
-        reversible=_yes_no(first.get("reversible", "")),
-        blocking=_yes_no(first.get("blocking", "")),
+        # a repeated key fails safe: reversible reads no, blocking reads yes (the lint also flags it)
+        reversible=_yes_no(first.get("reversible", "")) and "reversible" not in repeated,
+        blocking=_yes_no(first.get("blocking", "")) or "blocking" in repeated,
         after=first.get("after", ""),
         by=first.get("by", ""),
         version=ask_version(line for _k, _v, line in block),
@@ -350,7 +378,14 @@ def parse_session(name: str, content: str) -> Session:
         known = field is not None and field[0] in _THREAD_FIELDS
         if known and cur is not None:
             close_block()
-        if field is not None and field[0] == "ask":
+        # Only `ask: <id>` opens a block; `ask: Sam please pick the port` is prose and parses as it always did,
+        # as does an `ask:` line that is the value of a `needs_sam:` left empty on the line above.
+        if (
+            field is not None
+            and field[0] == "ask"
+            and _ID.fullmatch(field[1])
+            and not (cur is not None and cur["ask_next"])
+        ):
             if cur is None:
                 cur = _new_thread(name or "(unnamed session)")
             close_block()
@@ -359,7 +394,7 @@ def parse_session(name: str, content: str) -> Session:
             continue
         if cur is not None and cur["block"] is not None:
             # inside an ask block the Sam-mention backstop is off
-            if field is not None and field[0] in ASK_KEYS:
+            if field is not None and field[0] in ASK_KEYS and field[0] != "ask":
                 cur["block"].append((field[0], field[1], line))
             else:
                 cur["notes"].append(line)
@@ -508,15 +543,27 @@ class BeadAsk:
 
 
 @dataclass(frozen=True)
+class OpenAsk:
+    """A structured ask that no listed bead absorbed, with who asked and how long ago the entry was written."""
+
+    ask: Ask
+    session: str
+    age: str
+
+
+@dataclass(frozen=True)
 class Asks:
     """Everything waiting on Sam, each decision once."""
 
     threads: tuple[NeedsItem, ...]
     beads: tuple[BeadAsk, ...]
+    #: Structured asks not folded into a bead and not conditional. Answered asks are not removed here: the
+    #: board has no answer records; ``classify`` does.
+    structured: tuple[OpenAsk, ...] = ()
 
     @property
     def count(self) -> int:
-        return len(self.threads) + len(self.beads)
+        return len(self.threads) + len(self.beads) + len(self.structured)
 
 
 def merge_asks(
@@ -526,12 +573,14 @@ def merge_asks(
 
     ``structured`` (``Board.structured``) folds the same way by the same rule: the thread joins the
     bead's ``raised_by`` once and each of its asks adds an ``ask_pointers`` entry. A structured ask
-    that matches no bead is not listed here; ``classify`` lists it.
+    that matches no bead is returned in ``Asks.structured`` (and counted) unless it is conditional;
+    ``classify`` gives the full classes.
     """
     bead_list = tuple(beads)
     by_id = {b.id.lower(): [] for b in bead_list}
     pointers: dict[str, list[str]] = {b.id.lower(): [] for b in bead_list}
     lone: list[NeedsItem] = []
+    open_asks: list[OpenAsk] = []
     for item in needs_you:
         hits = [r.lower() for r in item.thread.refs if r.lower() in by_id]
         if hits:
@@ -541,6 +590,7 @@ def merge_asks(
     for item in structured:
         hits = [r.lower() for r in item.thread.refs if r.lower() in by_id]
         if not hits:
+            open_asks.extend(OpenAsk(a, item.session, item.age) for a in item.thread.asks if not a.conditional)
             continue
         if not any(prior.thread is item.thread for prior in by_id[hits[0]]):
             by_id[hits[0]].append(item)
@@ -550,6 +600,7 @@ def merge_asks(
         beads=tuple(
             BeadAsk(b, tuple(by_id[b.id.lower()]), tuple(pointers[b.id.lower()])) for b in bead_list
         ),
+        structured=tuple(open_asks),
     )
 
 
@@ -611,6 +662,8 @@ class Classification:
     quiet: tuple[ClassedAsk, ...] = ()
     conditional: tuple[ClassedAsk, ...] = ()
     answered: tuple[ClassedAsk, ...] = ()
+    #: Titles of entries that could not be read; their asks are in no group, so a caller must say so.
+    unreadable: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -624,7 +677,13 @@ class Finding:
 
 
 def answer_title(ask: Ask) -> str:
-    """T2 title of the answer record for this ask at this version."""
+    """T2 title of the answer record for this ask at this version: ``<asker session id>/<ask id>/<version>``.
+
+    The session id is lower-cased, the canonical form records are written under. An ask in an entry with no
+    ``session:`` line has no title (empty): no record can exist for it.
+    """
+    if not ask.session_id:
+        return ""
     return f"{ask.session_id.lower()}/{ask.id}/{ask.version}"
 
 
@@ -650,15 +709,21 @@ def _record_statuses(records: Mapping[str, Any] | Iterable[Mapping[str, Any]]) -
     return {str(title): _record_status(rec) for title, rec in pairs}
 
 
-def _read_entries(entries: Iterable[Mapping[str, Any]]) -> list[tuple[str, Session, datetime | None]]:
+def _read_entries(
+    entries: Iterable[Mapping[str, Any]],
+) -> tuple[list[tuple[str, Session, datetime | None]], list[str]]:
+    """Parsed entries, and the titles of those that could not be read at all (never silently dropped)."""
     out: list[tuple[str, Session, datetime | None]] = []
+    unreadable: list[str] = []
     for e in entries:
         try:
             title = str(e.get("title", ""))
-            out.append((title, parse_session(title, str(e.get("content", ""))), parse_timestamp(str(e.get("timestamp", "") or ""))))
+            content = str(e.get("content", ""))
+            stamp = parse_timestamp(str(e.get("timestamp", "") or ""))
+            out.append((title, parse_session(title, content), stamp))
         except Exception:  # noqa: BLE001 -- one bad entry must not take the listing down
-            continue
-    return out
+            unreadable.append(_safe_title(e))
+    return out, unreadable
 
 
 def _by_key(ask: Ask) -> tuple[int, datetime]:
@@ -679,13 +744,14 @@ def classify(
     """
     statuses = _record_statuses(records)
     groups: dict[str, list[ClassedAsk]] = {g: [] for g in ("interrupt", "batch", "quiet", "conditional", "answered")}
-    for _title, session, stamp in _read_entries(entries):
+    read, unreadable = _read_entries(entries)
+    for _title, session, stamp in read:
         delta = None if stamp is None else now - stamp
         greyed = delta is None or delta > STALE_AFTER
         for thread in session.threads:
             for ask in thread.asks:
                 mark = ""
-                if has_value(ask.after):
+                if ask.conditional:
                     group = "conditional"
                 elif ask.session_id and statuses.get(answer_title(ask)) == "sent":
                     group = "answered"
@@ -698,13 +764,35 @@ def classify(
                 else:
                     group = "batch"
                 groups[group].append(ClassedAsk(ask, group, mark))
-    return Classification(**{g: tuple(sorted(items, key=lambda c: _by_key(c.ask))) for g, items in groups.items()})
+    return Classification(
+        **{g: tuple(sorted(items, key=lambda c: _by_key(c.ask))) for g, items in groups.items()},
+        unreadable=tuple(unreadable),
+    )
+
+
+def _unopened_asks(entry: str, thread: Thread) -> list[Finding]:
+    """An ``ask:`` line that opened no block (its value is not an id) in a thread that otherwise holds ask lines.
+
+    Prose such as ``ask: Sam please pick the port`` in a legacy thread is left alone; a thread with ask blocks,
+    or with other ask-key lines among its notes, shows the writer meant a structured ask.
+    """
+    keys = [f for f in (_split_field(n) for n in thread.notes) if f is not None]
+    structured = bool(thread.asks) or any(k in ASK_KEYS and k != "ask" for k, _v, _r in keys)
+    if not structured:
+        return []
+    return [
+        Finding(entry, v, "bad-id", f"id {v!r} is not [a-z0-9-]{{1,40}}, so the ask: block was not opened")
+        for k, v, _r in keys
+        if k == "ask"
+    ]
 
 
 def lint(entries: Iterable[Mapping[str, Any]]) -> tuple[Finding, ...]:
     """Problems with structured asks, each naming its entry and ask (entry-level findings carry an empty ask)."""
     found: list[Finding] = []
-    read = _read_entries(entries)
+    read, unreadable = _read_entries(entries)
+    for title in unreadable:
+        found.append(Finding(title, "", "unreadable-entry", "the entry could not be read, so its asks are not checked"))
     by_session: dict[str, list[str]] = {}
     has_asks: dict[str, bool] = {}
     for title, session, _stamp in read:
@@ -714,14 +802,14 @@ def lint(entries: Iterable[Mapping[str, Any]]) -> tuple[Finding, ...]:
         has_asks[title] = has_asks.get(title, False) or bool(asks)
         if asks and not session.session_id:
             found.append(Finding(title, "", "no-session", "no session: line, so answers cannot be routed"))
+        for t in session.threads:
+            found.extend(_unopened_asks(title, t))
         seen: set[str] = set()
         reported: set[str] = set()
         for a in asks:
             def add(rule: str, message: str, a: Ask = a) -> None:
                 found.append(Finding(title, a.id, rule, message))
 
-            if not _ID.fullmatch(a.id):
-                add("bad-id", f"id {a.id!r} is not [a-z0-9-]{{1,40}}")
             if a.id in seen and a.id not in reported:
                 reported.add(a.id)
                 add("duplicate-id", f"id {a.id!r} is used more than once in this entry")
@@ -730,12 +818,16 @@ def lint(entries: Iterable[Mapping[str, Any]]) -> tuple[Finding, ...]:
                 add("missing-field", f"missing required field: {field}")
             if len(a.options) < 2:
                 add("few-options", f"{len(a.options)} option line(s); an ask needs at least two")
-            if a.rec_raw and not (a.rec is not None and 1 <= a.rec <= len(a.options)):
+            if a.rec is not None and not 1 <= a.rec <= len(a.options):
                 add("rec-range", f"rec: {a.rec_raw} is outside 1..{len(a.options)}")
+            if any(not o.text for o in a.options):
+                for o in a.options:
+                    if not o.text:
+                        add("empty-option", f"option {o.n} has no text")
             if a.reversible and any(o.irreversible for o in a.options):
                 add("reversible-conflict", "reversible: yes but an option is marked [irreversible]")
             for field in a.bad_values:
-                add("bad-value", f"{field}: must be yes or no")
+                add("bad-value", "rec: must be a number of one to three digits" if field == "rec" else f"{field}: must be yes or no")
             for field in a.repeated:
                 add("repeated-field", f"{field}: given more than once; the first one counts")
     for sid, titles in by_session.items():

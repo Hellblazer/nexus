@@ -8,6 +8,7 @@ test in ``tests/test_console_app.py``, so this module provisions no tenant.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -386,3 +387,54 @@ def test_implicit_thread_and_key_spelling_reach_the_page() -> None:
     rows = [{"title": "terse", "timestamp": _iso(now), "content": "Needs-Sam: pick one\n"}]
     html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows).get("/threads").text
     assert "1 thing needs you." in html and "pick one" in html and "asked by terse" in html
+
+
+# ── structured asks (RDR-245) ────────────────────────────────────────────────
+
+_ASK_FIXTURE = Path(__file__).parent / "fixtures" / "asks" / "halcyon.txt"
+_QUESTION = "Retry-safe keying for quarantine restore: accept the gap, or build option B?"
+
+
+def _halcyon_rows(content: str | None = None) -> list[dict[str, str]]:
+    text = _ASK_FIXTURE.read_text(encoding="utf-8") if content is None else content
+    return [{"title": "halcyon", "timestamp": _iso(datetime.now(timezone.utc)), "content": text}]
+
+
+def test_an_unfolded_structured_ask_is_counted_and_shown() -> None:
+    html = _client(bd_runner=NO_BEADS, threads_reader=_halcyon_rows).get("/threads").text
+    assert "1 thing needs you." in html
+    assert "Nothing needs you" not in html
+    assert _QUESTION in html
+    assert "asked by halcyon" in html
+
+
+def test_a_structured_ask_folded_into_a_bead_is_one_item_and_shows_its_question() -> None:
+    beads = BeadsResult((Bead("nexus-k9kr9", "Keying decision", 2),))
+    html = _client(bd_runner=lambda: beads, threads_reader=_halcyon_rows).get("/threads").text
+    assert "1 thing needs you." in html
+    assert "Keying decision" in html
+    assert f"raised by halcyon on &ldquo;Quarantine restore keying (RDR-222)&rdquo;: {_QUESTION}" in html
+    assert html.count(_QUESTION) == 1  # not also listed as its own item
+
+
+def test_a_conditional_structured_ask_is_not_counted() -> None:
+    content = _ASK_FIXTURE.read_text(encoding="utf-8") + "after: engine 0.1.180 deploys\n"
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: _halcyon_rows(content)).get("/threads").text
+    assert "Nothing needs you." in html
+    assert _QUESTION not in html
+
+
+def test_structured_ask_text_renders_escaped() -> None:
+    content = _ASK_FIXTURE.read_text(encoding="utf-8").replace(
+        "Retry-safe keying", "<script>alert(1)</script> keying"
+    )
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: _halcyon_rows(content)).get("/threads").text
+    assert "<script>alert(1)" not in html
+    assert "&lt;script&gt;alert(1)" in html
+
+
+def test_an_entry_with_no_ask_block_renders_as_before() -> None:
+    rows = [{"title": "s", "timestamp": _iso(datetime.now(timezone.utc)),
+             "content": "## A\nstate: live\nneeds_sam: pick the port\n"}]
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows).get("/threads").text
+    assert "1 thing needs you." in html and "pick the port" in html
