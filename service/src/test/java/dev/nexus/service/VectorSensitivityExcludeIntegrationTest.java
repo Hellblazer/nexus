@@ -1011,11 +1011,18 @@ class VectorSensitivityExcludeIntegrationTest {
     @Test
     void exclude_fillsKFromNonSensitiveRows_whenSensitiveRowsCrowdTheNearNeighbourhood() throws Exception {
         String crowd = "knowledge__rfvyy73-crowd__minilm-l6-v2-384__v1";
+        // An empty second collection of the same model in the searched set. A search over ONE collection with no
+        // per-collection index walks at the widest ef_search (1000), whose first batch covers all 440 rows, so no
+        // iteration happens and the crowd proves nothing; two collections use the serving ef_search (the floor, 40
+        // here), so the walk has to iterate past the 400 sensitive rows (review fix F3).
+        String crowdOther = "knowledge__rfvyy73-crowd2__minilm-l6-v2-384__v1";
+        List<String> searched = List.of(crowd, crowdOther);
         int sensitiveRows = 400;
         int plainRows = 40;
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, crowd);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, crowdOther);
         }
         List<String> sensitiveIds = new ArrayList<>();
         List<String> sensitiveTexts = new ArrayList<>();
@@ -1061,13 +1068,20 @@ class VectorSensitivityExcludeIntegrationTest {
             PgSession.overrideSearchExactMaxRowsForTests(0);
             var walkRepo = new PgVectorRepository(new TenantScope(walkDs), embedder, embedder);
             embedder.register("crowd query", 1f, 0f);
-            var plain = walkRepo.searchWithTokens(TENANT, "crowd query", List.of(crowd), 10, null, false, null, false)
+            var plain = walkRepo.searchWithTokens(TENANT, "crowd query", searched, 10, null, false, null, false)
                 .value();
             assertThat(plain.stream().map(r -> (String) r.get("id")).toList())
                 .as("baseline: the ten nearest are all sensitive").allMatch(sensitiveIds::contains).hasSize(10);
 
-            var excluded = walkRepo.searchWithTokens(TENANT, "crowd query", List.of(crowd), 10, null, false, null, true)
+            // The page must come from the HNSW walk itself. exactOnUnderReturn repairs a short or empty walk with an
+            // exact re-run, and an exact re-run also returns ten plain rows, so without this counter a walk that
+            // stopped early in the sensitive crowd would pass the assertions below (review fix F3).
+            long fallbacksBefore = PgVectorRepository.exactFallbackCount();
+            var excluded = walkRepo.searchWithTokens(TENANT, "crowd query", searched, 10, null, false, null, true)
                 .value();
+            assertThat(PgVectorRepository.exactFallbackCount())
+                .as("the excluded page was filled by the walk, not repaired by the exact fallback")
+                .isEqualTo(fallbacksBefore);
             assertThat(excluded.stream().map(r -> (String) r.get("id")).toList())
                 .as("k rows from the non-sensitive far rows, nearest first")
                 .containsExactlyElementsOf(plainIds.subList(0, 10));
