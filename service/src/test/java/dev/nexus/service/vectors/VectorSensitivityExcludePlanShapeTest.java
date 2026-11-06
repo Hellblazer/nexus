@@ -51,18 +51,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code search_metadata_scoped}, on a collection that walks the shared leaf index and on a collection with its own
  * per-collection (PCI) index, plus a folding check of {@code exclude = false} over every function.
  *
- * <p><b>What a pass means (exclude = true).</b> In the main plan (outside any SubPlan) the only scan of a chunks leaf
- * is one HNSW index scan carrying an {@code Order By} on the distance; no plain Sort sits above it; the sensitive-owner
- * relations are never scanned by the main plan; and exactly one SubPlan that names {@code sensitive} is a Filter of
- * that scan, so the test runs on candidate rows. For {@code plain_search} and {@code manifest_search} the node skeleton
- * of the main plan equals the {@code exclude = false} plan's: the predicate adds a filter and nothing else.
+ * <p><b>What a pass means (exclude = true).</b> In the main plan the only scan of a chunks leaf is one HNSW index scan
+ * carrying an {@code Order By} on the distance, and no plain Sort sits above it. The sensitive test is an anti join
+ * ABOVE that scan (the NOT EXISTS pulled up, vectors-055 as amended by nexus-rfvyy.7.16): the HNSW scan is its outer
+ * side and its inner side probes the manifest by an index on {@code chash} (an Index Scan on
+ * {@code catalog_document_chunks sm}), once per candidate row. No Seq Scan or Bitmap scan reads the manifest for that
+ * test, so the cost does not grow with the tenant's manifest size. Without the anti join the main plan's node
+ * skeleton equals the {@code exclude = false} plan's: the predicate adds a probe and nothing else.
  *
- * <p><b>What the filter's SubPlan is.</b> The test accepts both forms the planner produces for the NOT EXISTS: a
- * correlated probe per candidate row, and a HASHED SubPlan, which reads the tenant's whole sensitive-owner set once
- * per statement (at the fixture's size a Seq Scan of the tenant's manifest joined to the sensitive documents). The
- * form is named in every failure message and in the T2 record nexus_rdr/243-plan-evidence-2026-11-06; which one the
- * planner picks at production sizes is what the live measurement (scripts/spikes/rdr243_plan) is for. This class does
- * not decide that the hashed form is acceptable.
+ * <p><b>What this replaces.</b> The first form of the predicate, {@code NOT p_exclude_sensitive OR NOT EXISTS (...)},
+ * kept the SubLink inside an OR, so the planner could not pull it up and built a HASHED SubPlan: a Seq Scan of the
+ * tenant's whole manifest joined to the sensitive documents, once per statement (+46 ms at 128k manifest rows, linear
+ * in manifest size; the T2 record nexus_rdr/243-plan-evidence-2026-11-06). The flag now sits inside the sublink, which
+ * makes the sublink unconditional, so it is an anti join; with the flag false the inner qual is a constant false and the
+ * test folds away (the folding check below covers all 30 functions).
  *
  * <p><b>The metadata family is read under reachability.</b> At 6000 rows per collection the natural plan of
  * {@code search_metadata_scoped} is a Seq or Bitmap scan of the chunks leaf joined to the manifest, with or without
@@ -334,12 +336,12 @@ class VectorSensitivityExcludePlanShapeTest {
         return new Parsed(nodes, blocks, plan);
     }
 
-    /** What the plan says about the sensitive test: the form of its SubPlan. */
+    /** What the plan says about the sensitive test. */
     enum Form {
-        /** A hashed SubPlan: the tenant's sensitive-owner set is built once per statement. */
-        HASHED_SUBPLAN,
-        /** A correlated SubPlan probed per candidate row. */
-        CORRELATED_SUBPLAN,
+        /** An anti join above the scan, its inner side probing the manifest per candidate row. */
+        ANTI_JOIN,
+        /** A SubPlan (hashed or correlated): the first design, which this class now rejects. */
+        SUBPLAN,
         NONE
     }
 
@@ -347,17 +349,75 @@ class VectorSensitivityExcludePlanShapeTest {
         return p.blocks().stream().filter(SubPlanBlock::namesSensitive).toList();
     }
 
-    static Form form(Parsed p) {
-        List<SubPlanBlock> sens = sensitiveBlocks(p);
-        if (sens.isEmpty()) return Form.NONE;
-        String n = sens.get(0).name().replace("SubPlan ", "");
-        return p.plan().contains("hashed SubPlan " + n) ? Form.HASHED_SUBPLAN : Form.CORRELATED_SUBPLAN;
+    private static boolean isSensitiveProbe(Node n) {
+        return n.text().contains(" on catalog_document_chunks sm ") || n.text().contains(" on catalog_documents sd ");
     }
 
-    /** The main-plan node types in order, with no costs: the skeleton two plans are compared on. */
+    /** True when the plan reads the sensitive owners at all: a probe node or a SubPlan that names them. */
+    static boolean carriesSensitiveTest(Parsed p) {
+        return !sensitiveBlocks(p).isEmpty() || p.nodes().stream().anyMatch(VectorSensitivityExcludePlanShapeTest::isSensitiveProbe);
+    }
+
+    static Form form(Parsed p) {
+        if (!sensitiveBlocks(p).isEmpty()) return Form.SUBPLAN;
+        return carriesSensitiveTest(p) && antiJoinIndex(p) >= 0 ? Form.ANTI_JOIN : Form.NONE;
+    }
+
+    /**
+     * With the flag false the NOT EXISTS keeps a constant-false inner qual. The planner has already pulled the SubLink
+     * up by then, so the plan keeps a Nested Loop Anti Join node with {@code Join Filter: false} whose inner side is a
+     * Result with a false One-Time Filter: no relation is read, but the node is there. True when every main-plan anti
+     * join is of that kind.
+     */
+    static boolean antiJoinsAreFoldedToNothing(Parsed p) {
+        for (int i = 0; i < p.nodes().size(); i++) {
+            Node n = p.nodes().get(i);
+            if (n.mainPlan() && n.type().contains("Anti Join") && !n.props().contains("Join Filter: false")) return false;
+        }
+        return true;
+    }
+
+    /** Index of the main-plan node that is the anti join of the sensitive test, or -1. */
+    private static int antiJoinIndex(Parsed p) {
+        for (int i = 0; i < p.nodes().size(); i++) {
+            Node n = p.nodes().get(i);
+            if (n.mainPlan() && n.type().contains("Anti Join")) return i;
+        }
+        return -1;
+    }
+
+    /** The node indexes of the anti join's inner (second child) subtree. */
+    private static List<Integer> innerSubtree(Parsed p, int a) {
+        List<Node> nodes = p.nodes();
+        int base = nodes.get(a).indent();
+        int childIndent = Integer.MAX_VALUE;
+        for (int i = a + 1; i < nodes.size() && nodes.get(i).indent() > base; i++) {
+            childIndent = Math.min(childIndent, nodes.get(i).indent());
+        }
+        List<Integer> inner = new ArrayList<>();
+        int seen = 0;
+        for (int i = a + 1; i < nodes.size() && nodes.get(i).indent() > base; i++) {
+            if (nodes.get(i).indent() == childIndent && nodes.get(i).mainPlan()) seen++;
+            if (seen >= 2) inner.add(i);
+        }
+        return inner;
+    }
+
+    /** The main-plan node types in order, with no costs and without the sensitive test's anti join and its probe. */
     static List<String> skeleton(Parsed p) {
-        return p.nodes().stream().filter(Node::mainPlan).map(n -> n.type()
-            + (n.scansChunksLeaf() ? " [" + (n.indexName().contains("pci_") ? "pci" : "leaf") + "]" : "")).toList();
+        int a = antiJoinIndex(p);
+        java.util.Set<Integer> drop = new java.util.HashSet<>();
+        if (a >= 0) {
+            drop.add(a);
+            drop.addAll(innerSubtree(p, a));
+        }
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < p.nodes().size(); i++) {
+            Node n = p.nodes().get(i);
+            if (!n.mainPlan() || drop.contains(i)) continue;
+            out.add(n.type() + (n.scansChunksLeaf() ? " [" + (n.indexName().contains("pci_") ? "pci" : "leaf") + "]" : ""));
+        }
+        return out;
     }
 
     /**
@@ -382,19 +442,37 @@ class VectorSensitivityExcludePlanShapeTest {
         if (forbidPlainSort && p.nodes().stream().filter(Node::mainPlan).anyMatch(n -> n.type().equals("Sort"))) {
             bad.add("a plain Sort sits in the main plan");
         }
-        if (p.nodes().stream().filter(Node::mainPlan).anyMatch(n -> n.text().contains(" on catalog_document_chunks sm ")
-                || n.text().contains(" on catalog_documents sd "))) {
-            bad.add("the sensitive-owner relations are scanned by the main plan, not by a filter on the candidates");
+        if (!sensitiveBlocks(p).isEmpty()) {
+            bad.add("the sensitive test is a SubPlan; it must be an anti join (the NOT EXISTS pulled up)");
         }
-        List<SubPlanBlock> sens = sensitiveBlocks(p);
-        if (sens.size() != 1) {
-            bad.add("exactly one SubPlan must name the sensitive test, found " + sens.size());
+        List<Node> probes = p.nodes().stream().filter(VectorSensitivityExcludePlanShapeTest::isSensitiveProbe).toList();
+        if (probes.stream().anyMatch(n -> n.type().contains("Seq Scan") || n.type().contains("Bitmap"))) {
+            bad.add("the sensitive test reads the manifest or the documents with a Seq or Bitmap scan; it must probe "
+                + "per candidate by an index");
+        }
+        Node sm = probes.stream().filter(n -> n.text().contains(" on catalog_document_chunks sm ")).findFirst().orElse(null);
+        if (sm == null) {
+            bad.add("no probe of catalog_document_chunks sm: the sensitive test is missing");
+        } else if (!sm.type().equals("Index Scan") || !sm.text().contains("chash")) {
+            bad.add("the manifest probe must be an Index Scan on an index over chash, it is " + sm.type() + " "
+                + sm.text());
+        }
+        int a = antiJoinIndex(p);
+        if (a < 0) {
+            bad.add("the sensitive test must be an anti join in the main plan");
         } else {
-            String n = sens.get(0).name();
-            boolean onScan = scan.props().stream().anyMatch(l -> l.startsWith("Filter:") && l.contains(n));
-            if (!onScan) {
-                bad.add(n + " (the sensitive test) must be a Filter of the HNSW scan");
-            }
+            List<Integer> inner = innerSubtree(p, a);
+            boolean probeInner = inner.stream().anyMatch(i -> p.nodes().get(i).text().contains(" on catalog_document_chunks sm "));
+            if (!probeInner) bad.add("the manifest probe must be the anti join's inner side");
+            boolean scanOuter = a + 1 < p.nodes().size() && !inner.contains(p.nodes().indexOf(scan));
+            if (!scanOuter) bad.add("the HNSW scan must be the anti join's outer side, not its inner one");
+        }
+        // plain and manifest search: nothing in the whole plan reads the manifest sequentially. (The metadata family
+        // joins the manifest to the chunks in its own right and is read under reachability; its sm probe is checked
+        // above.)
+        if (forbidPlainSort && p.nodes().stream().anyMatch(n -> n.type().equals("Seq Scan")
+                && n.text().contains(" on catalog_document_chunks"))) {
+            bad.add("a Seq Scan reads catalog_document_chunks");
         }
         return bad;
     }
@@ -404,6 +482,7 @@ class VectorSensitivityExcludePlanShapeTest {
         Parsed p = parse(on);
         List<String> bad = excludeShapeFailures(p, expectedIndex, fn != Fn.METADATA);
         assertThat(bad).as("%s on %s, exclude=true, sensitive form %s%n%s", fn, collection, form(p), on).isEmpty();
+        assertThat(form(p)).isEqualTo(Form.ANTI_JOIN);
         if (fn != Fn.METADATA) {
             Parsed off = parse(plan(fn, collection, false));
             assertThat(skeleton(p)).as("%s on %s: exclude=true adds a filter, not a node%n--- true%n%s", fn,
@@ -415,13 +494,13 @@ class VectorSensitivityExcludePlanShapeTest {
 
     @ParameterizedTest(name = "{0} walks the shared leaf index")
     @EnumSource(Fn.class)
-    void excludeTrue_sharedLeafIndex_drivesTheScan_andTheSensitiveTestIsAFilterOnIt(Fn fn) {
+    void excludeTrue_sharedLeafIndex_drivesTheScan_andTheSensitiveTestIsAnAntiJoinAboveIt(Fn fn) {
         assertExcludeShape(fn, SHARED, "embedding_384");
     }
 
     @ParameterizedTest(name = "{0} walks the per-collection index")
     @EnumSource(Fn.class)
-    void excludeTrue_perCollectionIndex_drivesTheScan_andTheSensitiveTestIsAFilterOnIt(Fn fn) {
+    void excludeTrue_perCollectionIndex_drivesTheScan_andTheSensitiveTestIsAnAntiJoinAboveIt(Fn fn) {
         assertExcludeShape(fn, PCI, PCI_INDEX);
     }
 
@@ -513,11 +592,14 @@ class VectorSensitivityExcludePlanShapeTest {
     void excludeFalse_foldsTheSensitiveTestAway_andExcludeTrueCarriesIt(String fn, int dim) {
         String off = explain(familyCall(fn, dim, false), false, false);
         String on = explain(familyCall(fn, dim, true), false, false);
-        assertThat(sensitiveBlocks(parse(on)))
+        assertThat(carriesSensitiveTest(parse(on)))
             .as("%s_%d, exclude=true: the positive control, a plan that carries the sensitive test%n%s", fn, dim, on)
-            .isNotEmpty();
-        assertThat(sensitiveBlocks(parse(off)))
-            .as("%s_%d, exclude=false: no SubPlan names the sensitive test%n%s", fn, dim, off).isEmpty();
+            .isTrue();
+        assertThat(carriesSensitiveTest(parse(off)))
+            .as("%s_%d, exclude=false: nothing in the plan carries the sensitive test%n%s", fn, dim, off).isFalse();
+        assertThat(antiJoinsAreFoldedToNothing(parse(off)))
+            .as("%s_%d, exclude=false: an anti join, if any, has a constant-false join filter%n%s", fn, dim, off)
+            .isTrue();
         assertThat(off).as("%s_%d, exclude=false: nothing of the sensitive owner test reaches the plan", fn, dim)
             .doesNotContain("sensitive").doesNotContain(" sm ").doesNotContain(" sd ");
     }
@@ -544,8 +626,22 @@ class VectorSensitivityExcludePlanShapeTest {
                 Filter: (embedding_384 IS NOT NULL)
         """;
 
-    /** The sensitive owners read first by the main plan: a join above the chunks scan. */
-    private static final String SENSITIVE_FIRST_PLAN = """
+    /** The first design: the sensitive test as a hashed SubPlan, a Seq Scan of the whole manifest per statement. */
+    private static final String HASHED_SUBPLAN_PLAN = """
+        Limit  (cost=1.00..2.00 rows=10 width=102)
+          ->  Index Scan using chunks_x_embedding_384_idx on chunks_mad318272_t_af8b38277810aea6 c  (cost=4564.40..118624.00 rows=3000 width=1639)
+                Order By: (embedding_384 OPERATOR(nexus.<=>) '[1]'::nexus.vector)
+                Filter: ((NOT false) OR (NOT (ANY ((tenant_id = (hashed SubPlan 1).col1) AND (collection = (hashed SubPlan 1).col2)))))
+                SubPlan 1
+                  ->  Hash Join  (cost=71.61..431.00 rows=600 width=100)
+                        ->  Seq Scan on catalog_document_chunks sm  (cost=0.00..431.00 rows=12000 width=100)
+                        ->  Hash  (cost=71.61..71.61 rows=240 width=20)
+                              ->  Seq Scan on catalog_documents sd  (cost=0.00..71.61 rows=240 width=20)
+                                    Filter: sensitive
+        """;
+
+    /** An anti join whose inner side reads the whole manifest sequentially, once: right shape, wrong probe. */
+    private static final String SEQ_PROBE_PLAN = """
         Limit  (cost=1.00..2.00 rows=10 width=102)
           ->  Hash Anti Join  (cost=1.00..9.00 rows=10 width=102)
                 Hash Cond: (c.chash = sm.chash)
@@ -555,30 +651,46 @@ class VectorSensitivityExcludePlanShapeTest {
                       ->  Seq Scan on catalog_document_chunks sm  (cost=0.00..431.00 rows=12000 width=100)
         """;
 
+    /** The shape the fix produces: an anti join, the HNSW scan outside, an index probe on chash inside. */
+    private static final String ANTI_JOIN_PLAN = """
+        Limit  (cost=1.00..2.00 rows=10 width=102)
+          ->  Nested Loop Anti Join  (cost=4923.29..229189.51 rows=2850 width=1639)
+                ->  Index Scan using chunks_x_embedding_384_idx on chunks_mad318272_t_af8b38277810aea6 c  (cost=4922.59..225259.00 rows=3000 width=1653)
+                      Order By: (embedding_384 OPERATOR(nexus.<=>) '[1]'::nexus.vector)
+                ->  Nested Loop  (cost=0.70..1.30 rows=1 width=94)
+                      ->  Index Scan using idx_catalog_chunks_chash on catalog_document_chunks sm  (cost=0.41..0.96 rows=1 width=100)
+                            Index Cond: ((tenant_id = 't'::text) AND (chash = c.chash))
+                      ->  Index Scan using catalog_documents_pk on catalog_documents sd  (cost=0.28..0.33 rows=1 width=20)
+                            Filter: ((deleted_at IS NULL) AND sensitive)
+        """;
+
     @Test
-    void theShapeAssertions_rejectAPlanWithoutTheHnswScan_withoutTheFilter_andWithTheOwnersReadFirst() {
+    void theShapeAssertions_rejectAPlanWithoutTheHnswScan_withoutTheTest_andWithTheFirstDesignOrASeqProbe() {
         assertThat(excludeShapeFailures(parse(SEQ_SCAN_PLAN), "embedding_384", true))
             .anyMatch(s -> s.contains("must be an Index Scan")).anyMatch(s -> s.contains("Order By"))
             .anyMatch(s -> s.contains("plain Sort"));
         assertThat(excludeShapeFailures(parse(NO_FILTER_PLAN), "embedding_384", true))
-            .anyMatch(s -> s.contains("exactly one SubPlan"));
-        assertThat(excludeShapeFailures(parse(SENSITIVE_FIRST_PLAN), "embedding_384", true))
-            .anyMatch(s -> s.contains("not by a filter on the candidates"))
-            .anyMatch(s -> s.contains("exactly one SubPlan"));
-        assertThat(form(parse(SEQ_SCAN_PLAN))).isEqualTo(Form.HASHED_SUBPLAN);
+            .anyMatch(s -> s.contains("anti join")).anyMatch(s -> s.contains("missing"));
+        assertThat(excludeShapeFailures(parse(HASHED_SUBPLAN_PLAN), "embedding_384", true))
+            .anyMatch(s -> s.contains("is a SubPlan")).anyMatch(s -> s.contains("Seq or Bitmap scan"));
+        assertThat(excludeShapeFailures(parse(SEQ_PROBE_PLAN), "embedding_384", true))
+            .anyMatch(s -> s.contains("Seq or Bitmap scan")).anyMatch(s -> s.contains("Seq Scan reads catalog_document_chunks"));
+        assertThat(excludeShapeFailures(parse(ANTI_JOIN_PLAN), "embedding_384", true)).isEmpty();
+        assertThat(form(parse(SEQ_SCAN_PLAN))).isEqualTo(Form.SUBPLAN);
+        assertThat(form(parse(ANTI_JOIN_PLAN))).isEqualTo(Form.ANTI_JOIN);
+        assertThat(skeleton(parse(ANTI_JOIN_PLAN))).containsExactly("Limit", "Index Scan [leaf]");
     }
 
     @Test
-    void theParser_readsTheSubPlansOfARealPlan_andNamesTheirForm() {
+    void theParser_readsTheAntiJoinOfARealPlan_andNamesItsForm() {
         String plan = plan(Fn.PLAIN, SHARED, true);
         Parsed p = parse(plan);
         assertThat(p.nodes().stream().filter(Node::mainPlan).map(Node::type))
             .as("the main plan of plain_search%n%s", plan).contains("Limit", "Index Scan");
-        assertThat(p.blocks()).as("plain_search carries the live-owner SubPlan and the sensitive one")
-            .hasSizeGreaterThanOrEqualTo(2);
-        assertThat(sensitiveBlocks(p)).hasSize(1);
-        assertThat(form(p)).isIn(Form.HASHED_SUBPLAN, Form.CORRELATED_SUBPLAN);
-        assertThat(form(parse(plan(Fn.PLAIN, SHARED, false)))).isEqualTo(Form.NONE);
+        assertThat(sensitiveBlocks(p)).as("no SubPlan names the sensitive test%n%s", plan).isEmpty();
+        assertThat(form(p)).isEqualTo(Form.ANTI_JOIN);
+        String off = plan(Fn.PLAIN, SHARED, false);
+        assertThat(form(parse(off))).as("exclude=false%n%s", off).isEqualTo(Form.NONE);
     }
 
     @Test

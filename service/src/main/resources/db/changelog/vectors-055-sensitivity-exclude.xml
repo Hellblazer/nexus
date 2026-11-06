@@ -6,11 +6,18 @@
     WHAT CHANGES. Each of the 31 functions below takes one more, trailing argument, p_exclude_sensitive boolean DEFAULT
     false. When it is true the statement carries a NOT EXISTS over the chunk's live sensitive owners INSIDE the search
     predicate (beside the chunk_live_owners test, or beside d.deleted_at IS NULL in the document-level families):
-        AND (NOT p_exclude_sensitive OR NOT EXISTS (
+        AND NOT EXISTS (
                 SELECT 1 FROM nexus.catalog_document_chunks sm JOIN nexus.catalog_documents sd ON ...
-                 WHERE sm.tenant_id = c.tenant_id AND sm.collection = c.collection AND sm.chash = c.chash
-                   AND sd.deleted_at IS NULL AND sd.sensitive))
+                 WHERE p_exclude_sensitive AND sm.tenant_id = c.tenant_id AND sm.collection = c.collection
+                   AND sm.chash = c.chash AND sd.deleted_at IS NULL AND sd.sensitive)
     so the HNSW iterative scan fills k from rows that are not sensitive; a post-filter would return a short page. The
+    flag sits INSIDE the sublink (nexus-rfvyy.7.16): written as NOT p_exclude_sensitive OR NOT EXISTS (...) the sublink
+    stays inside an OR, the planner cannot pull it up, and it builds a hashed SubPlan, a Seq Scan of the tenant's whole
+    manifest once per statement (+46 ms at 128k manifest rows, linear in manifest size). Unconditional, the NOT EXISTS
+    is pulled up to an anti join that probes the manifest per candidate row by idx_catalog_chunks_chash (tenant_id,
+    chash), an index that already exists; with the flag false the inner qual is a constant false, the inner side is a
+    Result with a false One-Time Filter that reads no relation, and the plan keeps one Nested Loop Anti Join node with
+    Join Filter: false above the scan (VectorSensitivityExcludePlanShapeTest pins both shapes). The
     join is the one nexus.chunk_sensitive (catalog-047-3) runs: a chunk is sensitive when ANY LIVE owner is, so a chunk
     shared by a sensitive live document and a non-sensitive one is excluded, and comes back once the sensitive owner is
     tombstoned. It is written out here rather than calling chunk_sensitive because the planner cannot inline a scalar
@@ -20,7 +27,7 @@
     relaxed_order.) VectorSensitivityExcludeIntegrationTest pins the two definitions equal: the pages it excludes are
     exactly the chunks chunk_sensitive_many flags on the unfiltered page.
     The engine sets a custom plan per search statement (PgSession.setSearchPlanCacheMode), so with the argument false
-    the term folds away and the statement is the one it was (the same test reads the plan).
+    the term reads no relation (the same test reads the plan).
 
     THE 31 FUNCTIONS (re-derived from pg_proc after the full migration, the newest body of each): plain_search,
     hybrid_search, manifest_search, text_gated_search_allowed, text_gated_search_by_chash, text_gated_search_hnsw_first,
@@ -78,16 +85,17 @@ AS $function$
        AND c.collection = ANY(p_collections)
        AND c.embedding_384 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
      ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
@@ -115,16 +123,17 @@ AS $function$
        AND c.collection = ANY(p_collections)
        AND c.embedding_768 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
      ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
@@ -152,16 +161,17 @@ AS $function$
        AND c.collection = ANY(p_collections)
        AND c.embedding_1024 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
      ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
@@ -190,16 +200,17 @@ AS $function$
            AND (p_where IS NULL OR c.metadata @> p_where)
            AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
            AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-           AND (NOT p_exclude_sensitive OR NOT EXISTS (
+           AND NOT EXISTS (
                    SELECT 1
                      FROM nexus.catalog_document_chunks sm
                      JOIN nexus.catalog_documents sd
                        ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                    WHERE sm.tenant_id  = c.tenant_id
+                    WHERE p_exclude_sensitive
+                      AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
                       AND sm.chash      = c.chash
                       AND sd.deleted_at IS NULL
-                      AND sd.sensitive))
+                      AND sd.sensitive)
     )
     SELECT g.id,
            g.chunk_text,
@@ -232,16 +243,17 @@ AS $function$
            AND (p_where IS NULL OR c.metadata @> p_where)
            AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
            AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-           AND (NOT p_exclude_sensitive OR NOT EXISTS (
+           AND NOT EXISTS (
                    SELECT 1
                      FROM nexus.catalog_document_chunks sm
                      JOIN nexus.catalog_documents sd
                        ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                    WHERE sm.tenant_id  = c.tenant_id
+                    WHERE p_exclude_sensitive
+                      AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
                       AND sm.chash      = c.chash
                       AND sd.deleted_at IS NULL
-                      AND sd.sensitive))
+                      AND sd.sensitive)
     )
     SELECT g.id,
            g.chunk_text,
@@ -274,16 +286,17 @@ AS $function$
            AND (p_where IS NULL OR c.metadata @> p_where)
            AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
            AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-           AND (NOT p_exclude_sensitive OR NOT EXISTS (
+           AND NOT EXISTS (
                    SELECT 1
                      FROM nexus.catalog_document_chunks sm
                      JOIN nexus.catalog_documents sd
                        ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                    WHERE sm.tenant_id  = c.tenant_id
+                    WHERE p_exclude_sensitive
+                      AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
                       AND sm.chash      = c.chash
                       AND sd.deleted_at IS NULL
-                      AND sd.sensitive))
+                      AND sd.sensitive)
     )
     SELECT g.id,
            g.chunk_text,
@@ -316,16 +329,17 @@ AS $function$
        AND c.embedding_384 IS NOT NULL
        AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (p_query_text IS NULL
@@ -462,16 +476,17 @@ AS $function$
        AND c.embedding_768 IS NOT NULL
        AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (p_query_text IS NULL
@@ -608,16 +623,17 @@ AS $function$
        AND c.embedding_1024 IS NOT NULL
        AND (p_chashes IS NULL OR c.chash = ANY(p_chashes))
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (p_query_text IS NULL
@@ -754,16 +770,17 @@ AS $function$
        AND c.embedding_384 IS NOT NULL
        AND c.chash = ANY(p_chashes)
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
@@ -793,16 +810,17 @@ AS $function$
        AND c.embedding_768 IS NOT NULL
        AND c.chash = ANY(p_chashes)
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
@@ -832,16 +850,17 @@ AS $function$
        AND c.embedding_1024 IS NOT NULL
        AND c.chash = ANY(p_chashes)
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
@@ -871,16 +890,17 @@ AS $function$
        AND c.embedding_384 IS NOT NULL
        AND c.chash = ANY(p_chashes)
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
      ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
@@ -909,16 +929,17 @@ AS $function$
        AND c.embedding_768 IS NOT NULL
        AND c.chash = ANY(p_chashes)
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
      ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
@@ -947,16 +968,17 @@ AS $function$
        AND c.embedding_1024 IS NOT NULL
        AND c.chash = ANY(p_chashes)
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
      ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
@@ -984,16 +1006,17 @@ AS $function$
        AND c.collection = ANY(p_collections)
        AND c.embedding_384 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
@@ -1022,16 +1045,17 @@ AS $function$
        AND c.collection = ANY(p_collections)
        AND c.embedding_768 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
@@ -1060,16 +1084,17 @@ AS $function$
        AND c.collection = ANY(p_collections)
        AND c.embedding_1024 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
@@ -1197,16 +1222,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_content_type IS NULL OR d.content_type = p_content_type)
        AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
        AND (p_year         IS NULL OR d.year         = p_year)
@@ -1341,16 +1367,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_content_type IS NULL OR d.content_type = p_content_type)
        AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
        AND (p_year         IS NULL OR d.year         = p_year)
@@ -1485,16 +1512,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_content_type IS NULL OR d.content_type = p_content_type)
        AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
        AND (p_year         IS NULL OR d.year         = p_year)
@@ -1631,16 +1659,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND d.alias_of = ''
        AND c.embedding_384 IS NOT NULL
        AND (p_where IS NULL OR c.metadata @> p_where)
@@ -1780,16 +1809,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND d.alias_of = ''
        AND c.embedding_768 IS NOT NULL
        AND (p_where IS NULL OR c.metadata @> p_where)
@@ -1929,16 +1959,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND d.alias_of = ''
        AND c.embedding_1024 IS NOT NULL
        AND (p_where IS NULL OR c.metadata @> p_where)
@@ -2094,16 +2125,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
        AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
@@ -2250,16 +2282,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
        AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
@@ -2406,16 +2439,17 @@ AS $function$
        AND c.tenant_id = p_tenant
        AND c.collection = ANY(p_collections)
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_manifest_where IS NULL OR e.eff @> p_manifest_where)
        AND (p_manifest_path IS NULL OR e.eff @@ p_manifest_path::jsonpath)
@@ -2450,16 +2484,17 @@ AS $function$
        AND t.label = p_topic_label
        AND c.embedding_384 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
      ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query
      LIMIT p_n
 $function$;
@@ -2490,16 +2525,17 @@ AS $function$
        AND t.label = p_topic_label
        AND c.embedding_768 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
      ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query
      LIMIT p_n
 $function$;
@@ -2530,16 +2566,17 @@ AS $function$
        AND t.label = p_topic_label
        AND c.embedding_1024 IS NOT NULL
        AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
      ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query
      LIMIT p_n
 $function$;
@@ -2656,16 +2693,17 @@ AS $function$
        AND m.collection       = ANY(p_collections)
        AND c.embedding_model  = p_embedding_model
        AND d.deleted_at IS NULL
-       AND (NOT p_exclude_sensitive OR NOT EXISTS (
+       AND NOT EXISTS (
                SELECT 1
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE sm.tenant_id  = c.tenant_id
+                WHERE p_exclude_sensitive
+                  AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
-                  AND sd.sensitive))
+                  AND sd.sensitive)
        AND (p_where IS NULL OR c.metadata @> p_where)
        AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
        AND (p_query_text IS NULL

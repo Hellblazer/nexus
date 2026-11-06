@@ -9,6 +9,7 @@ import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -46,6 +47,12 @@ import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
  * test: it asserts nothing about speed. It is run once on a lab host (scripts/spikes/rdr243_plan/run.sh) and its
  * numbers go to T2 nexus_rdr/243-plan-evidence-2026-11-06. It does nothing unless {@code NX_RDR243_PLAN_MEASURE} is set,
  * and its name does not match surefire's default includes, so a suite run never reaches it.
+ *
+ * <p><b>Fix round (nexus-rfvyy.7.16, exclude-plan fix).</b> The exact-route collection is read with fewer queries per
+ * cell (QUERIES_C) and at one k, so that all four fractions fit the budget; its cells are repeated with JIT off to read
+ * the JIT share directly. After the four fractions, BALLAST embedding-less chunks grow the tenant's manifest from 128k
+ * to about 512k rows and the 10 percent cells of A and B are measured again (the last CSV column is the tenant's
+ * manifest row count).
  *
  * <p><b>What is measured</b> (all warm, one fixed seed, serving session settings, as {@code nexus_svc} under RLS):
  * <ul>
@@ -87,8 +94,13 @@ class VectorSensitivityExcludePlanMeasure {
     static final int ROWS_B = intEnv("NX_RDR243_PLAN_ROWS_B", 30_000);
     static final int ROWS_C = intEnv("NX_RDR243_PLAN_ROWS_C", 18_000);
     static final int QUERIES = intEnv("NX_RDR243_PLAN_QUERIES", 100);
+    /** Queries per cell on the exact route (every query reads the whole 18,000-row collection, 0.2 to 0.5 s each). */
+    static final int QUERIES_C = intEnv("NX_RDR243_PLAN_QUERIES_C", 30);
+    /** Chunks with no embedding added to the tenant's manifest for the flatness sweep (0 skips the sweep). */
+    static final int BALLAST = intEnv("NX_RDR243_PLAN_BALLAST", 384_000);
+    static final String COLL_D = "knowledge__rfvyy716-d__voyage-context-3__v1";
     /** No new cell starts after this many minutes; the output then says TRUNCATED. */
-    static final int BUDGET_MINUTES = intEnv("NX_RDR243_PLAN_BUDGET_MIN", 24);
+    static final int BUDGET_MINUTES = intEnv("NX_RDR243_PLAN_BUDGET_MIN", 26);
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -100,6 +112,8 @@ class VectorSensitivityExcludePlanMeasure {
     final StringBuilder plans = new StringBuilder();
     long startedNanos;
     boolean truncated;
+    /** The tenant's manifest row count at this phase, the last CSV column. */
+    long manifestRows;
     volatile long hookNanos;
 
     private static int intEnv(String name, int dflt) {
@@ -249,6 +263,76 @@ class VectorSensitivityExcludePlanMeasure {
         return out;
     }
 
+    private long manifestRows(Connection su) {
+        return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT));
+    }
+
+    /**
+     * Rows for the flatness sweep, written server side into the 1024-dimension leaf of the same tenant, a leaf no
+     * search of this class reads. Their vectors are one constant, so storage is small, and the leaf's HNSW indexes are
+     * dropped first so the load does not build a graph over identical points. The rows are real manifest rows of the
+     * tenant (5 per document, 10 percent of the documents sensitive at the fraction the caller sets), so the tenant's
+     * {@code catalog_document_chunks} and its {@code (tenant_id, chash)} index grow by {@code rows}; the searched
+     * collections, their leaf and their HNSW index stay as they were.
+     */
+    private void addBallast(Connection su, int rows) throws Exception {
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        String model = "voyage-context-3";
+        PgContainerHelper.insertCollection(ctx, TENANT, COLL_D);
+        String leaf1024 = PciCatalogIntegrationTest.leafName(model, TENANT);
+        int docs = (rows + CHUNKS_PER_DOC - 1) / CHUNKS_PER_DOC;
+        // a leaf's index is a partition of its model partition's index, itself a partition of the parent's: only
+        // the root can be dropped. This container is this class's alone; nothing else uses the 1024 leaves.
+        var indexName = DSL.field(DSL.name("indexname"), String.class);
+        java.util.Set<String> roots = new java.util.LinkedHashSet<>();
+        for (String ix : ctx.select(indexName).from(DSL.table(DSL.name("pg_catalog", "pg_indexes")))
+                .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("tablename"), String.class).eq(leaf1024))
+                .and(DSL.field(DSL.name("indexdef"), String.class).like("%hnsw%"))
+                .fetch(indexName)) {
+            roots.add(ctx.select(DSL.function("pg_partition_root", SQLDataType.VARCHAR, DSL.inline("nexus." + ix)))
+                .fetchOne(0, String.class));
+        }
+        ctx.setSchema("nexus").execute(); // jOOQ renders the drop unqualified; resolve it in the nexus schema
+        for (String root : roots) {
+            String[] parts = root.split("\\.");
+            ctx.dropIndex(DSL.name(parts[parts.length - 1])).execute();
+        }
+        LOG.info("event=rdr243_measure_ballast_indexes dropped={}", roots);
+
+        var g = DSL.generateSeries(0, rows - 1).as("g", "i");
+        Field<Integer> i = g.field("i", Integer.class);
+        Field<byte[]> chash = DSL.function("sha256", SQLDataType.VARBINARY,
+            DSL.function("convert_to", SQLDataType.VARBINARY, DSL.inline("ballast|").concat(i.cast(SQLDataType.VARCHAR)),
+                DSL.inline("UTF8")));
+        float[] constant = new float[1024];
+        Arrays.fill(constant, 0.03125f);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+            .select(ctx.select(DSL.inline(TENANT), DSL.inline(COLL_D), chash, DSL.inline(model),
+                DSL.inline("t").concat(i.cast(SQLDataType.VARCHAR)), DSL.val(Vector.of(constant), CHUNKS.EMBEDDING_1024)).from(g))
+            .execute();
+        var d = DSL.generateSeries(0, docs - 1).as("gd", "d");
+        Field<Integer> di = d.field("d", Integer.class);
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                CATALOG_DOCUMENTS.SENSITIVE)
+            .select(ctx.select(DSL.inline(TENANT), DSL.inline("d-").concat(di.cast(SQLDataType.VARCHAR)),
+                DSL.inline("doc ").concat(di.cast(SQLDataType.VARCHAR)), DSL.inline("paper"), DSL.inline(COLL_D),
+                DSL.inline(false)).from(d))
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .select(ctx.select(DSL.inline(TENANT),
+                DSL.inline("d-").concat(DSL.floor(i.div(CHUNKS_PER_DOC)).cast(SQLDataType.INTEGER).cast(SQLDataType.VARCHAR)),
+                i.mod(CHUNKS_PER_DOC), chash, DSL.inline(COLL_D), DSL.inline(model)).from(g))
+            .execute();
+        PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
+        PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
+    }
+
     // -- measurement -----------------------------------------------------------------------------------
 
     private boolean overBudget() {
@@ -280,8 +364,13 @@ class VectorSensitivityExcludePlanMeasure {
     }
 
     private List<String> runFn(String collection, Vector q, int k, boolean exclude) {
+        return runFn(collection, q, k, exclude, false);
+    }
+
+    private List<String> runFn(String collection, Vector q, int k, boolean exclude, boolean jitOff) {
         return scope.withTenant(TENANT, ctx -> {
             serving(ctx, collection, k);
+            if (jitOff) PgSession.disableJit(ctx);
             Table<?> t = fn(collection, q, k, exclude);
             return ctx.select(t.field("id", String.class)).from(t).fetch(t.field("id", String.class));
         });
@@ -309,9 +398,9 @@ class VectorSensitivityExcludePlanMeasure {
         VectorSensitivityExcludePlanShapeTest.Parsed parsedOn = VectorSensitivityExcludePlanShapeTest.parse(explainOn);
         String explainOff = explain(collection, qs[0], k, false);
         VectorSensitivityExcludePlanShapeTest.Parsed parsedOff = VectorSensitivityExcludePlanShapeTest.parse(explainOff);
-        plans.append("=== pct=").append(pct).append(' ').append(name).append(" k=").append(k)
+        plans.append("=== manifest_rows=").append(manifestRows).append(" pct=").append(pct).append(' ').append(name).append(" k=").append(k)
             .append(" exclude=true form=").append(VectorSensitivityExcludePlanShapeTest.form(parsedOn)).append('\n')
-            .append(strip(explainOn)).append("\n=== pct=").append(pct).append(' ').append(name).append(" k=")
+            .append(strip(explainOn)).append("\n=== manifest_rows=").append(manifestRows).append(" pct=").append(pct).append(' ').append(name).append(" k=")
             .append(k).append(" exclude=false\n").append(strip(explainOff)).append("\n\n");
         String chunkScanOn = parsedOn.nodes().stream().filter(VectorSensitivityExcludePlanShapeTest.Node::mainPlan)
             .filter(VectorSensitivityExcludePlanShapeTest.Node::scansChunksLeaf).map(n -> n.type() + ":"
@@ -321,27 +410,37 @@ class VectorSensitivityExcludePlanMeasure {
             .filter(VectorSensitivityExcludePlanShapeTest.Node::scansChunksLeaf).map(n -> n.type() + ":"
                 + (n.indexName().contains("pci_") ? "pci" : n.indexName().isEmpty() ? "-" : "leaf"))
             .findFirst().orElse("none");
-        for (boolean exclude : new boolean[] {false, true}) {
-            for (int i = 0; i < qs.length; i++) runFn(collection, qs[i], k, exclude); // warm
-            long[] t = new long[qs.length];
+        boolean exact = COLL_C.equals(collection);
+        // the exact route: two more variants with JIT off, to read the JIT share of the exclude cost directly
+        boolean[][] variants = exact
+            ? new boolean[][] {{false, false}, {true, false}, {false, true}, {true, true}}
+            : new boolean[][] {{false, false}, {true, false}};
+        int nq = exact ? Math.min(QUERIES_C, qs.length) : qs.length;
+        for (boolean[] v : variants) {
+            boolean exclude = v[0];
+            boolean jitOff = v[1];
+            for (int i = 0; i < Math.min(nq, 10); i++) runFn(collection, qs[i], k, exclude, jitOff); // warm
+            long[] t = new long[nq];
             long rows = 0;
             int minRows = Integer.MAX_VALUE;
             int leaks = 0;
-            for (int i = 0; i < qs.length; i++) {
+            for (int i = 0; i < nq; i++) {
                 long s = System.nanoTime();
-                List<String> ids = runFn(collection, qs[i], k, exclude);
+                List<String> ids = runFn(collection, qs[i], k, exclude, jitOff);
                 t[i] = System.nanoTime() - s;
                 rows += ids.size();
                 minRows = Math.min(minRows, ids.size());
                 if (exclude) for (String id : ids) if (sensitive.contains(id)) leaks++;
             }
             Arrays.sort(t);
-            csv.append(String.join(",", String.valueOf(pct), name, String.valueOf(k), "fn", String.valueOf(exclude),
+            csv.append(String.join(",", String.valueOf(pct), name, String.valueOf(k), jitOff ? "fn_jitoff" : "fn",
+                String.valueOf(exclude),
                 fmt(pct(t, 0.5)), fmt(pct(t, 0.95)), fmt(ms(Arrays.stream(t).sum() / t.length)),
-                fmt(rows / (double) qs.length), String.valueOf(minRows), String.valueOf(leaks), "", "", "",
+                fmt(rows / (double) nq), String.valueOf(minRows), String.valueOf(leaks), "", "", "",
                 exclude ? VectorSensitivityExcludePlanShapeTest.form(parsedOn).name() : "NONE",
-                exclude ? chunkScanOn : chunkScanOff)).append('\n');
+                exclude ? chunkScanOn : chunkScanOff, String.valueOf(manifestRows))).append('\n');
         }
+        if (exact) return;
         if (COLL_B.equals(collection)) return;
         for (boolean exclude : new boolean[] {false, true}) {
             String[] texts = new String[qs.length];
@@ -370,7 +469,7 @@ class VectorSensitivityExcludePlanMeasure {
             csv.append(String.join(",", String.valueOf(pct), name, String.valueOf(k), "repo", String.valueOf(exclude),
                 fmt(pct(total, 0.5)), fmt(pct(total, 0.95)), fmt(ms(Arrays.stream(total).sum() / total.length)),
                 fmt(rows / (double) qs.length), String.valueOf(minRows), "", String.valueOf(fallbacks),
-                fmt(pct(lookup, 0.5)), fmt(pct(lookup, 0.95)), "", "")).append('\n');
+                fmt(pct(lookup, 0.5)), fmt(pct(lookup, 0.95)), "", "", String.valueOf(manifestRows))).append('\n');
         }
     }
 
@@ -393,7 +492,7 @@ class VectorSensitivityExcludePlanMeasure {
             queries.byText.put("q" + i, q);
         }
         csv.append("pct_sensitive,collection,k,path,exclude,p50_ms,p95_ms,mean_ms,rows_avg,rows_min,leaks,"
-            + "exact_fallbacks,lookup_p50_ms,lookup_p95_ms,sub_plan_form,chunk_scan\n");
+            + "exact_fallbacks,lookup_p50_ms,lookup_p95_ms,sub_plan_form,chunk_scan,manifest_rows\n");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
@@ -421,15 +520,35 @@ class VectorSensitivityExcludePlanMeasure {
             csv.append(String.join(",", "-", "-", "-", "empty_tx", "-", fmt(pct(empty, 0.5)), fmt(pct(empty, 0.95)),
                 "", "", "", "", "", "", "", "", "")).append('\n');
 
+            manifestRows = manifestRows(su);
+            // phase 1: the base fixture, every fraction
             for (int p : PCTS) {
                 setFraction(su, p);
                 Set<String> sensitive = sensitiveChashes(su);
-                LOG.info("event=rdr243_measure_fraction pct={} sensitive_chunks={} elapsed_s={}", p, sensitive.size(),
-                    (System.nanoTime() - startedNanos) / 1_000_000_000L);
+                LOG.info("event=rdr243_measure_fraction pct={} sensitive_chunks={} manifest_rows={} elapsed_s={}", p,
+                    sensitive.size(), manifestRows, (System.nanoTime() - startedNanos) / 1_000_000_000L);
                 for (String[] c : new String[][] {{"A_shared", COLL_A}, {"B_pci", COLL_B}, {"C_exact", COLL_C}}) {
-                    for (int k : KS) {
+                    int[] ks = COLL_C.equals(c[1]) ? new int[] {10} : KS; // k does not change the exact route
+                    for (int k : ks) {
                         if (overBudget()) break;
                         cell(p, c[0], c[1], k, sensitive);
+                    }
+                }
+            }
+            // phase 2: the flatness sweep. BALLAST chunks with no embedding (invisible to the HNSW index and to every
+            // search) and their documents and manifest rows are added to the same tenant and leaf, so the tenant's
+            // manifest grows from about 128k to about 512k rows while the searched collections stay as they were.
+            if (BALLAST > 0 && !overBudget()) {
+                addBallast(su, BALLAST);
+                manifestRows = manifestRows(su);
+                setFraction(su, 10);
+                Set<String> sensitive = sensitiveChashes(su);
+                LOG.info("event=rdr243_measure_ballast manifest_rows={} sensitive_chunks={} elapsed_s={}", manifestRows,
+                    sensitive.size(), (System.nanoTime() - startedNanos) / 1_000_000_000L);
+                for (String[] c : new String[][] {{"A_shared", COLL_A}, {"B_pci", COLL_B}}) {
+                    for (int k : KS) {
+                        if (overBudget()) break;
+                        cell(10, c[0], c[1], k, sensitive);
                     }
                 }
             }
