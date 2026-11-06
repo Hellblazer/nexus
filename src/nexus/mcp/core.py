@@ -14803,7 +14803,7 @@ async def nx_answer(
             primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
             dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
             confinement=_document_confinement,
-            # RDR-147 Step 4 (nexus-qpimy): the exact-key resolution branch of the one repair; off unless set to an on value.
+            # RDR-147 Step 4 (nexus-qpimy): the exact-key resolution branch of the one repair; on unless set to an off value (Phase 2, nexus-bwct4.2).
             resolution_repair=_resolution_repair_enabled(_os.environ),
         )
     if deadline is not None:

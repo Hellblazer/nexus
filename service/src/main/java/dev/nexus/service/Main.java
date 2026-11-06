@@ -559,14 +559,24 @@ public final class Main {
         // the read half so its first refresh() has a set to replace; stopped in the hook right after the listener and
         // before the builder reaper, so a pass cannot open a new builder connection after the reaper ended the old one.
         String pciBootNonce = dev.nexus.service.db.BackendReaper.bootNonce(applicationName);
+        // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Every engine runs a writer; only the builder-lock
+        // holder's pass runs the 30-day delete (tenants: the reaper's, request_ledger_tenants and the pass's leaf tenants). nexus-4lnn1.1.4: the
+        // same pass runs the recall canary through pgVectorRepo's serving statement path, on that ring.
+        var pciQueryRing = new dev.nexus.service.vectors.PciQueryRing(tenantScope, pciSweep);
+        var pciQueryRingExpiry = new dev.nexus.service.vectors.PciQueryRingExpiry(tenantScope, service::ringTenants);
+        service.queryRing(pciQueryRing);
+        pciQueryRing.start();
         var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
-                dev.nexus.service.db.PgSession.startupPciSettings());
+                dev.nexus.service.db.PgSession.startupPciSettings(), pciQueryRingExpiry::expireAll, pgVectorRepo,
+                tenantScope);
         pciReconciler.start();
         // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
         // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the
         // route is registered in NexusService's constructor, before either half exists; the key is omitted until now.
+        // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): this_engine.maintenance, the recall canary's latest results from
+        // the reconciler's memory (the reindex half reads off until Phase 2). Same rule: no query per request.
         service.perCollectionIndexes(() -> dev.nexus.service.http.StatusHandler.PerCollectionIndexes.of(
-                pciSweep.status(), pciReconciler.status()));
+                pciSweep.status(), pciReconciler.status(), pciReconciler.maintenance()));
 
         // nexus-dxsjc (nexus-4lnn1 R4): the per-leaf bloat view of nexus.chunks, read on a task of its own (a statistics
         // read that fails or hangs must not touch the router's index set) and served from its cache by GET /v1/status.
@@ -575,7 +585,8 @@ public final class Main {
         service.chunksLeafBloat(() -> dev.nexus.service.http.StatusHandler.ChunksLeafBloat.of(
                 leafBloatSweep.status(), leafBloatSweep.periodSeconds()));
         // nexus-i827c: the same cache, named, on the operator-only GET /v1/admin/chunks-leaves.
-        service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds);
+        // RDR-230 Phase 1 (Sam, 2026-11-06): plus the recall canary's per-index list, which GET /v1/status does not carry.
+        service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds, pciReconciler::maintenance);
         // nexus-6pfgb.43: the chunk CHECK add/validate routes run DDL on the admin connection; nothing calls them.
         service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
         // nexus-hbnml: a retired aspect_extraction_queue table that still holds rows (aspects-005-2 keeps it) is
@@ -660,6 +671,7 @@ public final class Main {
             // keep; closing the pool below aborts that socket.
             pciSweep.stop();
             leafBloatSweep.stop();
+            pciQueryRing.stop();   // nexus-4lnn1.1.3: no flush; what is still queued is lost, as designed
         };
         OrtInitGate.process().onBoundExpired(stopAllButEmbedders);
 

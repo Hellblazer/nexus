@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.TreeSet;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
@@ -347,6 +349,74 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 assertThatThrownBy(() -> countAs(diag, "nexus", "catalog_sensitivity_changes"))
                     .as("nexus_diag must hold no SELECT on nexus.catalog_sensitivity_changes (view era)")
                     .hasMessageContaining("permission denied for table catalog_sensitivity_changes");
+            }
+        }
+    }
+
+    /**
+     * nexus-4lnn1.1.2 (RDR-230, vectors-054-1): after a full production-shaped walk, nexus_svc holds SELECT, INSERT,
+     * UPDATE and DELETE on {@code nexus.canary_query_ring} (the grants-nexus-svc-1 loop and its default privileges,
+     * with no per-table edit; no sequence), and nexus_diag holds NOTHING on it: the ring holds query embeddings,
+     * and nexus_diag bypasses RLS, so a grant would show every tenant's recent queries.
+     *
+     * <p><b>Grant era covered: the VIEW era only</b>, for the reason {@link
+     * #catalogSensitivityChanges_svcHasDml_diagIsDenied} gives. In the LEGACY era (no counts view)
+     * grants-nexus-diag-1 grants nexus_diag SELECT on every table, this one included, by design.
+     *
+     * <p>{@code NEXUS_DIAG_READABLE_TABLES} not containing the table is asserted first, and is NOT the pin: no grant
+     * change could fail a Java constant. The pin is the last block, a real nexus_diag connection refused with
+     * {@code permission denied}.
+     */
+    @Test
+    void canaryQueryRing_svcHasDml_diagIsDenied() throws Exception {
+        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
+            .as("the query ring is deliberately not diag-readable (nexus-4lnn1.1.2)")
+            .doesNotContain("canary_query_ring");
+
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+            String tenant = "ring-grants";
+            String coll = "knowledge__ring-grants__minilm-l6-v2-384__v1";
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, coll);
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(pg.getJdbcUrl());
+            cfg.setUsername("nexus_svc");
+            cfg.setPassword("nexus_svc_pass");
+            cfg.setMaximumPoolSize(2);
+            cfg.setAutoCommit(true);
+            try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                TenantScope scope = new TenantScope(svcDs);
+                String model = scope.withTenant(tenant, ctx -> PgContainerHelper.collectionModel(ctx, tenant, coll));
+                float[] floats = new float[384];
+                java.util.Arrays.fill(floats, 0.5f);
+                byte[] digest = new byte[32];
+                scope.withTenant(tenant, ctx -> ctx.insertInto(CANARY_QUERY_RING)
+                    .set(CANARY_QUERY_RING.TENANT_ID, tenant)
+                    .set(CANARY_QUERY_RING.COLLECTION, coll)
+                    .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
+                    .set(CANARY_QUERY_RING.EMBEDDING_384, Vector.of(floats))
+                    .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest)
+                    .set(CANARY_QUERY_RING.ADDED_AT, OffsetDateTime.now())
+                    .execute());
+                int updated = scope.withTenant(tenant, ctx -> ctx.update(CANARY_QUERY_RING)
+                    .set(CANARY_QUERY_RING.ADDED_AT, OffsetDateTime.now().plusSeconds(1))
+                    .where(CANARY_QUERY_RING.COLLECTION.eq(coll))
+                    .execute());
+                assertThat(updated).as("nexus_svc UPDATE on canary_query_ring").isEqualTo(1);
+                int seen = scope.withTenant(tenant, ctx -> ctx.fetchCount(CANARY_QUERY_RING));
+                assertThat(seen).as("nexus_svc SELECT on canary_query_ring").isEqualTo(1);
+                int deleted = scope.withTenant(tenant, ctx -> ctx.deleteFrom(CANARY_QUERY_RING)
+                    .where(CANARY_QUERY_RING.COLLECTION.eq(coll)).execute());
+                assertThat(deleted).as("nexus_svc DELETE on canary_query_ring").isEqualTo(1);
+            }
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> countAs(diag, "nexus", "canary_query_ring"))
+                    .as("nexus_diag must hold no SELECT on nexus.canary_query_ring (view era)")
+                    .hasMessageContaining("permission denied for table canary_query_ring");
             }
         }
     }

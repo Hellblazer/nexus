@@ -923,7 +923,7 @@ class CoverageBoundary:
     max_concurrent_calls: int = MAX_CONCURRENT_ASSESSMENT_CALLS
     call_cost_prior_usd: float = ASSESSMENT_CALL_COST_PRIOR_USD
     max_anchors_per_call: int = MAX_ANCHORS_PER_ASSESSMENT_CALL
-    #: RDR-147 Step 4 (nexus-qpimy): the repair may take the exact-key resolution branch. Off by default; the runner
+    #: RDR-147 Step 4 (nexus-qpimy): the repair may take the exact-key resolution branch. False on a bare boundary; the runner
     #: caller sets it from ``NX_ANSWER_RESOLUTION_REPAIR`` (:func:`nexus.plans.switches.resolution_repair_enabled`).
     resolution_repair: bool = False
 
@@ -1264,10 +1264,16 @@ class CoverageBoundary:
         and anchors that name no key. A caller-scoped run enters, and a record outside the scope is dropped like a
         repair hit outside it (``_hit_in_scope``). A resolve or fetch failure is an entered branch with ``failure``
         set: the first ledger stands.
+
+        An install with no ``entity.collections`` at all is not considered: the fields stay empty, so the repair and its
+        wire are exactly what they were before RDR-147 (Phase 2 turned the switch on by default, nexus-bwct4.2).
         """
-        if self.confinement is not None:
-            return _Resolution({"resolution_reason": "confined_run"})
-        from nexus.entity_keys import EntityConfigError, find_key_tokens, pattern_for_collection  # noqa: PLC0415 — deferred: the ledger stays light at import
+        from nexus.entity_keys import (  # noqa: PLC0415 — deferred: the ledger stays light at import
+            EntityConfigError,
+            find_key_tokens,
+            has_entity_patterns,
+            pattern_for_collection,
+        )
 
         pairs: list[tuple[EvidenceAnchor, str]] = []
         scanned = without_pattern = 0
@@ -1275,6 +1281,10 @@ class CoverageBoundary:
             from nexus.config import load_config  # noqa: PLC0415 — deferred, as above
 
             config = load_config()  # once per repair: pattern_for_collection would otherwise reload it per call
+            if not has_entity_patterns(config):
+                return _Resolution({})
+            if self.confinement is not None:
+                return _Resolution({"resolution_reason": "confined_run"})
             has_pattern: dict[str, bool] = {}
             for a in first.ledger.anchors:
                 scanned += 1

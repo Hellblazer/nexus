@@ -4282,6 +4282,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # one row per agent dispatch with its T1 put count; tier_writes RLS shape.
     "nexus.agent_dispatches",
     "nexus.aspect_promotion_log",
+    # nexus.canary_query_ring: RDR-230 P1.2a (nexus-4lnn1.1.2, vectors-054-
+    # canary-query-ring.xml), the recall canary's persisted query ring; ENABLE
+    # + FORCE + tenant_isolation.
+    "nexus.canary_query_ring",
     # nexus.capability_census: nexus-gjv9b PART 1 (telemetry-010-capability-
     # census.xml), replacing capability_census.jsonl. Per-session UPSERT
     # (tenant_id, session_id) with the usual ENABLE + FORCE + tenant_isolation
@@ -6414,7 +6418,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
         detail=(
             f"the bundled cluster at {pg_data} was created by PostgreSQL {text}, and a cluster keeps the version "
             f"that created it; the engine refuses below PostgreSQL {PG_VERSION_FLOOR} "
-            "(event=pg_version_below_floor in the service log, or, started cold, nx refuses before pg_ctl runs)"
+            "(event=pg_version_below_floor in the service log, or, started cold, a refusal before pg_ctl runs)"
         ),
         fix_suggestions=[
             f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "

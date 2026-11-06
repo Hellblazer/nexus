@@ -25,6 +25,7 @@ import javax.sql.DataSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -39,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 import java.util.random.RandomGenerator;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -107,6 +109,20 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * ends (a migration, a lost connection, a privilege error) the remaining actions are not sent, and a build that never
  * started, or whose backend was terminated, is not charged to backoff.
  *
+ * <p><b>The anchor</b> (RDR-230 Technical Design 1 and 2, nexus-4lnn1.1.1). An index's anchor is its PostgreSQL
+ * comment ({@link PciCatalog.Anchor}). After each successful BUILD the pass counts the collection's rows (uncapped, in
+ * a counting transaction of its own) and writes {@code origin=built}; a failed count or comment leaves the index
+ * unanchored and the next pass adopts it. Every pass, inside the leaf's counting transaction, reads each valid parsed
+ * index's comment and {@code pg_relation_size} and the leaf's {@code pg_stat_user_tables} row. An index with no
+ * parseable anchor is adopted once ({@code origin=adopted}, the current rows and bytes, the adoption time as
+ * {@code built_at}; {@code event=pci_anchor_adopted reason=missing|unparsable}); an anchored one is not written
+ * again. The uncapped row count and {@code written_since} are taken only when the leaf's deletes or non-HOT updates
+ * advanced since this engine last looked, a statistics reset moved them backward, the index's last count is older
+ * than {@link #RECOUNT_AFTER}, or the anchor is not the one the last count was taken against. What was read is kept
+ * in memory ({@link IndexReading}) and, like the retry state, is lost on restart: the first look after a boot counts.
+ * A leaf whose pass is skipped keeps its previous readings, and a leaf's baseline moves only when its transaction
+ * commits.
+ *
  * <p><b>Retry state is in memory, per engine, and is lost on restart.</b> After a failed build of
  * (leaf, collection) the first retry comes no sooner than {@link #FIRST_RETRY} later, doubling to
  * {@link #MAX_RETRY}; the collection is handed to the planner as backed off until then. After
@@ -153,6 +169,12 @@ public final class PciReconciler {
 
     /** Consecutive failed builds after which a collection counts as failing. */
     static final int FAILING_AFTER = 3;
+
+    /** How long an index's row count and {@code written_since} stand with no delete or update to move them. */
+    static final Duration RECOUNT_AFTER = Duration.ofHours(24);
+
+    /** How long the counting transaction waits for a lock on an index it sizes; a longer wait skips the leaf. */
+    private static final String SIZE_LOCK_TIMEOUT = "5s";
 
     /** SQLSTATE: query_canceled (a statement timeout). */
     private static final String QUERY_CANCELED = "57014";
@@ -212,6 +234,26 @@ public final class PciReconciler {
 
     private record LeafKey(String leaf, String collection) { }
 
+    /**
+     * What the DDL half last read of one valid parsed index (RDR-230 Technical Design 2).
+     *
+     * @param anchor       the anchor on the index when read (adopted or written since)
+     * @param bytes        {@code pg_relation_size} when read
+     * @param rows         the collection's uncapped row count at {@code countedAt}
+     * @param writtenSince rows whose {@code last_written_at} is later than {@code anchor.builtAt()}, at {@code countedAt}
+     * @param countedAt    when {@code rows} and {@code writtenSince} were taken, on this engine's clock
+     */
+    record IndexReading(PciCatalog.Anchor anchor, long bytes, long rows, long writtenSince, Instant countedAt) { }
+
+    /** An index with no parseable anchor, and what to write on it. */
+    private record Adoption(Index index, String reason, long rows, long bytes) { }
+
+    /** What the counting transaction read for anchors; applied only once the transaction has committed. */
+    private record AnchorReads(PciAnchorReads.LeafStats stats, Map<String, IndexReading> readings,
+                               List<Adoption> adoptions) {
+        static final AnchorReads NONE = new AnchorReads(null, Map.of(), List.of());
+    }
+
     private record Failure(int consecutive, Instant nextRetryAt) { }
 
     private final Supplier<PciCatalog.Snapshot> catalog;
@@ -223,8 +265,15 @@ public final class PciReconciler {
     private final Duration countTimeout;
     private final Duration period;
     private final RandomGenerator random;
+    /** nexus-4lnn1.1.3: deletes the recall canary's query-ring rows older than 30 days; returns the row count. */
+    private final ToIntFunction<Collection<String>> ringExpiry;
+    /** nexus-4lnn1.1.4: when the recall canary runs and what it last found; {@code null} means no canary (tests). */
+    private final PciCanarySchedule canary;
 
     private final Map<LeafKey, Failure> failures = new ConcurrentHashMap<>();
+    /** Per leaf id, the statistics at the last committed look; per (leaf, index name), what that look read. */
+    private final Map<String, PciAnchorReads.LeafStats> lastStats = new ConcurrentHashMap<>();
+    private final Map<LeafKey, IndexReading> readings = new ConcurrentHashMap<>();
     private final AtomicReference<String> building = new AtomicReference<>();
     private final AtomicInteger passes = new AtomicInteger();
     private volatile boolean holder;
@@ -250,6 +299,32 @@ public final class PciReconciler {
     PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
                   Duration period, RandomGenerator random) {
+        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, leafTenants -> 0);
+    }
+
+    /**
+     * As above with the query-ring age bound (nexus-4lnn1.1.3): {@code ringExpiry} runs at the start of every pass
+     * this engine runs as the builder-lock holder, whatever the pass then plans, and returns the rows it deleted. It is
+     * handed the distinct tenants of the pass's catalog snapshot (every tenant leaf of {@code nexus.chunks}, with or
+     * without indexes; empty when the read failed), so a tenant that holds ring rows is visited whether or not it still
+     * has a token or a ledger row.
+     */
+    PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
+                  PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
+                  Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry) {
+        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, ringExpiry, null);
+    }
+
+    /**
+     * As above with the recall canary's schedule (nexus-4lnn1.1.4): on each pass this engine runs as the builder-lock
+     * holder, after the drops and builds, the schedule runs what is due, within its pass budget. {@code null} runs none.
+     */
+    PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
+                  PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
+                  Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
+                  PciCanarySchedule canary) {
+        this.canary = canary;
+        this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.builder = Objects.requireNonNull(builder, "builder");
@@ -270,11 +345,65 @@ public final class PciReconciler {
      */
     public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
                                        PciSettings settings) {
-        return new PciReconciler(new PciCatalog(ds),
-            new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings);
+        return create(ds, admin, bootNonce, sweep, settings, leafTenants -> 0);
+    }
+
+    /** As above, with the query ring's age bound run at the start of each pass this engine holds the lock for. */
+    public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
+                                       PciSettings settings, ToIntFunction<Collection<String>> ringExpiry) {
+        return new PciReconciler(new PciCatalog(ds)::read,
+            new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
+            Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
+            Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
+            RandomGenerator.getDefault(), ringExpiry);
+    }
+
+    /**
+     * As above, with the recall canary (nexus-4lnn1.1.4, RDR-230): its statements go through {@code repository}'s
+     * serving path, its queries come from the ring in {@code scope}'s database.
+     */
+    public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
+                                       PciSettings settings, ToIntFunction<Collection<String>> ringExpiry,
+                                       PgVectorRepository repository,
+                                       dev.nexus.service.db.TenantScope scope) {
+        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"));
+        var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements());
+        return new PciReconciler(new PciCatalog(ds)::read,
+            new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
+            Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
+            Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
+            RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner));
+    }
+
+    /** The canary's latest result for every index it has run on, by index name (empty without a canary). */
+    Map<String, PciCanary.Result> canaryResults() {
+        return canary == null ? Map.of() : canary.results();
     }
 
     // -- status ----------------------------------------------------------------------------------------------
+
+    /**
+     * The {@code maintenance} object of the status (RDR-230 Technical Design 7, nexus-4lnn1.1.5), from values this
+     * engine holds in memory: the canary's latest result per index and what the last counting look read of it. No query
+     * runs. The canary's results are this engine's own history and stay after it becomes a standby, like
+     * {@code last_ddl_pass_at}; an engine that never held the lock has none and reports zeros and an empty list.
+     *
+     * @return null when no canary is wired (a reconciler built without one): the status then omits the key
+     */
+    public PciMaintenanceStatus maintenance() {
+        if (canary == null) {
+            return null;
+        }
+        var entries = new java.util.ArrayList<PciMaintenanceStatus.Entry>();
+        for (PciCanary.Result r : canary.results().values()) {
+            PciCanary.Target t = r.target();
+            IndexReading reading = readings.get(new LeafKey(t.leaf(), t.index()));
+            java.util.Optional<String> sweepOrigin = reading != null ? java.util.Optional.empty()
+                : sweep.anchor(t.model(), t.tenant(), t.collection()).map(PciCatalog.Anchor::origin);
+            entries.add(PciMaintenanceStatus.entry(r, reading, sweepOrigin));
+        }
+        return PciMaintenanceStatus.phase1(entries);
+    }
 
     /** The DDL half's status; see the class comment for who reports what. */
     public DdlStatus status() {
@@ -301,6 +430,11 @@ public final class PciReconciler {
     /** Passes started since boot, for tests. */
     int passes() {
         return passes.get();
+    }
+
+    /** What the last committed look read of {@code indexName} on {@code leaf}, or {@code null}; for tests. */
+    IndexReading reading(Leaf leaf, String indexName) {
+        return readings.get(new LeafKey(leafId(leaf), indexName));
     }
 
     /** Collections with a failure entry (any count), for tests; {@link #status()} reports only the failing ones. */
@@ -411,11 +545,16 @@ public final class PciReconciler {
                 return PassReport.inactive(state);
             }
             passStartedAt = clock.instant();
-            PciCatalog.Snapshot snapshot;
+            PciCatalog.Snapshot snapshot = null;
             try {
                 snapshot = catalog.get();
             } catch (RuntimeException e) {
                 log.warn("event=pci_reconcile_pass_failed reason=catalog_read cause=\"{}\"", e.getMessage());
+            }
+            // After the read, so the ring's age bound can visit the snapshot's tenants; before any build, so it still
+            // runs on a pass that then fails or plans nothing.
+            expireRings(snapshot == null ? List.of() : leafTenants(snapshot));
+            if (snapshot == null) {
                 return PassReport.inactive(state);
             }
             if (snapshot.leaves().isEmpty()) {
@@ -444,12 +583,95 @@ public final class PciReconciler {
                 + "failing={}", ranToEnd, tally.leaves, tally.processedLeaves, tally.drops, tally.builds,
                 tally.failedBuilds, tally.skippedLeaves, (System.nanoTime() - startedNanos) / 1_000_000,
                 tally.sumCountMillis, tally.maxCountMillis, builder.state().wire(), failingCount());
+            if (ranToEnd) {
+                runCanaries(snapshot, tally);
+            }
             return new PassReport(builder.state(), ranToEnd, tally.leaves, tally.drops, tally.builds,
                 tally.failedBuilds, tally.skippedLeaves);
         } finally {
             building.set(null);
             passStartedAt = null;
         }
+    }
+
+    /**
+     * The recall canary (nexus-4lnn1.1.4), after the pass's drops and builds: every valid parsed index the snapshot
+     * lists that the pass did not drop, and every index it built. It runs on the lock holder only, never fails the pass,
+     * and acts on nothing: a result is recorded and logged (RDR-230 Phase 1 has no REINDEX).
+     */
+    private void runCanaries(PciCatalog.Snapshot snapshot, Tally tally) {
+        if (canary == null) {
+            return;
+        }
+        try {
+            Map<String, PciCanary.Target> targets = new java.util.LinkedHashMap<>();
+            for (Leaf leaf : snapshot.leaves()) {
+                if (leaf.model() == null || leaf.tenant() == null) {
+                    continue;
+                }
+                for (Index index : leaf.indexes()) {
+                    if (index.parsed() && index.valid() && !tally.droppedIndexes.contains(index.name())) {
+                        targets.put(index.name(), new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
+                            index.collection(), index.name()));
+                    }
+                }
+            }
+            for (PciCanary.Target built : tally.builtTargets) {
+                targets.put(built.index(), built);
+            }
+            canary.runPass(List.copyOf(targets.values()));
+        } catch (RuntimeException e) {
+            log.warn("event=pci_canary_pass_failed error=\"{}\"", PciQueryRing.sanitize(e));
+        }
+    }
+
+    /**
+     * The leaf's statistics, just committed, to the canary's vacuum trigger: the leaf's valid indexes the plan is not
+     * dropping.
+     */
+    private void observeForCanary(Leaf leaf, Planned planned) {
+        PciAnchorReads.LeafStats stats = planned.anchors().stats();
+        if (canary == null || stats == null) {
+            return;
+        }
+        Set<String> dropping = new HashSet<>();
+        for (Action action : planned.actions()) {
+            if (action instanceof Drop d) {
+                dropping.add(d.name());
+            }
+        }
+        List<String> names = leaf.indexes().stream()
+            .filter(i -> i.parsed() && i.valid() && !dropping.contains(i.name())).map(Index::name).toList();
+        canary.observeLeaf(leafId(leaf), names, stats);
+    }
+
+    /**
+     * The query ring's 30-day age bound (nexus-4lnn1.1.3). It is not part of the pass's account: a failure here must
+     * not stop the builds, and the expiry logs its own counts.
+     */
+    private void expireRings(Collection<String> leafTenants) {
+        try {
+            ringExpiry.applyAsInt(leafTenants);
+        } catch (RuntimeException e) {
+            log.warn("event=pci_ring_expire_failed reason=hook error_class={}", e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * The distinct tenants of the snapshot's leaves, in leaf order; a leaf whose tenant bound did not parse names none.
+     * A ring row needs a registry row, and admission needs a valid per-collection index, which lives on a leaf, so a
+     * tenant that holds ring rows has a leaf. The exception is a tenant whose leaf was dropped while its registry rows
+     * stayed (the rows then go with the collection, not with the 30-day bound), or whose leaf bound this engine cannot
+     * parse.
+     */
+    static List<String> leafTenants(PciCatalog.Snapshot snapshot) {
+        var out = new java.util.LinkedHashSet<String>();
+        for (Leaf leaf : snapshot.leaves()) {
+            if (leaf.tenant() != null && !leaf.tenant().isBlank()) {
+                out.add(leaf.tenant());
+            }
+        }
+        return List.copyOf(out);
     }
 
     private static final class Tally {
@@ -463,6 +685,9 @@ public final class PciReconciler {
         /** The counting transactions' wall time over the leaves processed: their sum and their longest. */
         long sumCountMillis;
         long maxCountMillis;
+        /** Indexes this pass dropped, and those it built (for the canary, which runs after both). */
+        final Set<String> droppedIndexes = new HashSet<>();
+        final List<PciCanary.Target> builtTargets = new java.util.ArrayList<>();
     }
 
     private static String leafId(Leaf leaf) {
@@ -508,19 +733,22 @@ public final class PciReconciler {
         tally.processedLeaves++;
         tally.sumCountMillis += planned.countMillis();
         tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
-        execute(pass, leaf, planned.dimension(), planned.actions(), tally);
+        applyReadings(leaf, planned.anchors());
+        observeForCanary(leaf, planned);
+        execute(pass, leaf, planned.dimension(), planned.anchors().adoptions(), planned.actions(), tally);
         return true;
     }
 
     // -- counting and planning, inside the transaction ---------------------------------------------------------
 
-    private record Planned(List<Action> actions, int dimension, long countMillis) { }
+    private record Planned(List<Action> actions, int dimension, long countMillis, AnchorReads anchors) { }
 
-    /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
-    private Planned countAndPlan(DSLContext tx, Leaf leaf) {
-        long startedNanos = System.nanoTime();
+    /**
+     * The first statements of every counting transaction: the per-statement timeout, a custom plan, the leaf's tenant,
+     * and a read-back of it. False (and logged) when the tenant did not take, and the transaction must do nothing more.
+     */
+    private boolean beginCounting(DSLContext tx, Leaf leaf) {
         String tenant = leaf.tenant();
-        String model = leaf.model();
         // setLocal binds the matching network timeout with the statement timeout (nexus-u9zkn); the pass puts the
         // connection's own, longer one back when the transaction ends.
         PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
@@ -533,6 +761,17 @@ public final class PciReconciler {
             log.error("event=pci_count_tenant_mismatch leaf={} expected_tenant={} actual_tenant={} "
                 + "detail=\"counts under the wrong tenant read other rows or none; the leaf is skipped\"",
                 leafId(leaf), tenant, bound);
+            return false;
+        }
+        return true;
+    }
+
+    /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
+    private Planned countAndPlan(DSLContext tx, Leaf leaf) {
+        long startedNanos = System.nanoTime();
+        String tenant = leaf.tenant();
+        String model = leaf.model();
+        if (!beginCounting(tx, leaf)) {
             return null;
         }
 
@@ -605,12 +844,79 @@ public final class PciReconciler {
             }
         }
         List<Action> actions = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, settings);
+        AnchorReads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
         // line stays DEBUG (one per leaf per pass is a lot of lines at 20,000 collections); the pass line is INFO.
         long tookMs = (System.nanoTime() - startedNanos) / 1_000_000;
         log.debug("event=pci_count_done leaf={} counted={} recounted={} actions={} took_ms={}", leafId(leaf),
             counts.size(), recounted ? candidates.size() : 0, actions.size(), tookMs);
-        return new Planned(actions, dimension, tookMs);
+        return new Planned(actions, dimension, tookMs, anchors);
+    }
+
+    /**
+     * RDR-230 Technical Design 2, inside the counting transaction: for each valid parsed index the plan does not drop,
+     * its comment and size now; for the leaf, its statistics row. The counts are taken only when the class comment's
+     * conditions say so. Nothing here changes the engine's memory: the result is applied once the transaction commits
+     * ({@link #applyReadings}), so a rolled-back or timed-out transaction cannot move a baseline past deletes it never
+     * counted.
+     */
+    private AnchorReads readAnchors(DSLContext tx, Leaf leaf, int dim, List<Action> actions, Instant now) {
+        Set<String> dropping = new HashSet<>();
+        for (Action action : actions) {
+            if (action instanceof Drop d) {
+                dropping.add(d.name());
+            }
+        }
+        List<Index> subjects = leaf.indexes().stream()
+            .filter(i -> i.parsed() && i.valid() && !dropping.contains(i.name())).toList();
+        if (subjects.isEmpty()) {
+            return AnchorReads.NONE;
+        }
+        // A lock held on an index (a non-concurrent REINDEX or DROP) must not stall the leaf to its statement bound.
+        PgSession.setLocal(tx, "lock_timeout", SIZE_LOCK_TIMEOUT);
+        String id = leafId(leaf);
+        PciAnchorReads.LeafStats stats = PciAnchorReads.leafStats(tx, leaf.schema(), leaf.name());
+        PciAnchorReads.LeafStats before = lastStats.get(id);
+        boolean moved = before == null || stats.deleted() != before.deleted()
+            || stats.nonHotUpdated() != before.nonHotUpdated();
+        Map<String, IndexReading> read = new java.util.LinkedHashMap<>();
+        List<Adoption> adoptions = new java.util.ArrayList<>();
+        for (Index index : subjects) {
+            PciAnchorReads.IndexFacts facts = PciAnchorReads.indexFacts(tx, leaf.schema(), index.name());
+            if (facts == null) {
+                continue;   // dropped since the snapshot
+            }
+            java.util.Optional<PciCatalog.Anchor> anchor = PciCatalog.parseAnchor(facts.comment());
+            if (anchor.isEmpty()) {
+                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
+                adoptions.add(new Adoption(index, facts.comment() == null ? "missing" : "unparsable", rows,
+                    facts.bytes()));
+                continue;
+            }
+            IndexReading last = readings.get(new LeafKey(id, index.name()));
+            boolean count = moved || last == null || !last.anchor().equals(anchor.get())
+                || Duration.between(last.countedAt(), now).compareTo(RECOUNT_AFTER) > 0;
+            if (count) {
+                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
+                long written = PciAnchorReads.writtenSince(tx, dim, leaf.model(), leaf.tenant(),
+                    index.collection(), anchor.get().builtAt());
+                read.put(index.name(), new IndexReading(anchor.get(), facts.bytes(), rows, written, now));
+            } else {
+                read.put(index.name(), new IndexReading(anchor.get(), facts.bytes(), last.rows(),
+                    last.writtenSince(), last.countedAt()));
+            }
+        }
+        return new AnchorReads(stats, read, adoptions);
+    }
+
+    /** Make a committed transaction's reads the engine's last look at the leaf. */
+    private void applyReadings(Leaf leaf, AnchorReads reads) {
+        String id = leafId(leaf);
+        if (reads.stats() != null) {
+            lastStats.put(id, reads.stats());
+        }
+        readings.keySet().removeIf(k -> k.leaf().equals(id) && !reads.readings().containsKey(k.collection()));
+        reads.readings().forEach((name, reading) -> readings.put(new LeafKey(id, name), reading));
     }
 
     /**
@@ -627,7 +933,15 @@ public final class PciReconciler {
 
     // -- execution, in autocommit ------------------------------------------------------------------------------
 
-    private void execute(PciBuilderSession.Pass pass, Leaf leaf, int dim, List<Action> actions, Tally tally) {
+    private void execute(PciBuilderSession.Pass pass, Leaf leaf, int dim, List<Adoption> adoptions,
+                         List<Action> actions, Tally tally) {
+        // Adoptions are quick and independent of the plan; a build can hold the pass for half an hour.
+        for (Adoption adoption : adoptions) {
+            if (!pass.live() || Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            adopt(pass, leaf, adoption);
+        }
         for (Action action : actions) {
             if (!pass.live() || Thread.currentThread().isInterrupted()) {
                 return;
@@ -642,6 +956,71 @@ public final class PciReconciler {
         }
     }
 
+    private void adopt(PciBuilderSession.Pass pass, Leaf leaf, Adoption adoption) {
+        Index index = adoption.index();
+        var anchor = new PciCatalog.Anchor(clock.instant(), adoption.rows(), adoption.bytes(),
+            PciCatalog.ORIGIN_ADOPTED);
+        DdlOutcome outcome = pass.comment(leaf, index, anchor);
+        if (outcome == DdlOutcome.DONE) {
+            readings.put(new LeafKey(leafId(leaf), index.name()),
+                new IndexReading(anchor, adoption.bytes(), adoption.rows(), 0, anchor.builtAt()));
+            log.info("event=pci_anchor_adopted reason={} index={} leaf={} rows={} bytes={}", adoption.reason(),
+                index.name(), leafId(leaf), adoption.rows(), adoption.bytes());
+        } else {
+            log.info("event=pci_anchor_not_written origin=adopted index={} leaf={} outcome={} detail=\"the next pass "
+                + "adopts it again\"", index.name(), leafId(leaf), outcome);
+        }
+    }
+
+    /**
+     * After a successful build: count the collection's rows (uncapped) and the index's size in a counting transaction
+     * and write {@code origin=built}. {@code built_at} is taken before the count, so a row written during it counts in
+     * {@code written_since} as well as in {@code rows}: the figure errs toward more work. Anything that goes wrong
+     * leaves the index unanchored, which the next pass adopts; the build itself stands.
+     */
+    private void anchorAfterBuild(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build) {
+        Instant builtAt = clock.instant();
+        Index index = new Index(build.name(), true, build.collection());
+        long[] figures;
+        try {
+            figures = pass.transaction(tx -> {
+                if (!beginCounting(tx, leaf)) {
+                    return null;
+                }
+                PgSession.setLocal(tx, "lock_timeout", SIZE_LOCK_TIMEOUT);
+                PciAnchorReads.IndexFacts facts = PciAnchorReads.indexFacts(tx, leaf.schema(), build.name());
+                if (facts == null) {
+                    return null;
+                }
+                return new long[] {
+                    PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), build.collection()),
+                    facts.bytes()};
+            });
+        } catch (DataAccessException e) {
+            log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_failed sqlstate={} "
+                + "detail=\"the index stands; the next pass adopts it\"", build.name(), leafId(leaf), e.sqlState());
+            return;
+        }
+        if (figures == null) {
+            log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_skipped "
+                + "detail=\"the tenant did not bind or the index is gone; the next pass adopts it if it exists\"",
+                build.name(), leafId(leaf));
+            return;
+        }
+        var anchor = new PciCatalog.Anchor(builtAt, figures[0], figures[1], PciCatalog.ORIGIN_BUILT);
+        DdlOutcome outcome = pass.comment(leaf, index, anchor);
+        if (outcome == DdlOutcome.DONE) {
+            readings.put(new LeafKey(leafId(leaf), build.name()),
+                new IndexReading(anchor, figures[1], figures[0], 0, builtAt));
+            log.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", build.name(),
+                leafId(leaf), figures[0], figures[1]);
+            refreshSweep("anchor", false);
+        } else {
+            log.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"the next pass "
+                + "adopts it\"", build.name(), leafId(leaf), outcome);
+        }
+    }
+
     private void drop(PciBuilderSession.Pass pass, Leaf leaf, Drop drop, Tally tally) {
         Index index = leaf.indexes().stream().filter(i -> i.name().equals(drop.name())).findFirst().orElse(null);
         if (index == null) {
@@ -650,6 +1029,10 @@ public final class PciReconciler {
         DdlOutcome outcome = pass.drop(leaf, index);
         if (outcome == DdlOutcome.DONE) {
             tally.drops++;
+            tally.droppedIndexes.add(drop.name());
+            if (canary != null) {
+                canary.dropped(drop.name());
+            }
             log.info("event=pci_index_dropped leaf={} index={} collection={} reason={}", leafId(leaf), drop.name(),
                 drop.collection(), drop.reason().label());
             // A router set that still lists the dropped index sends its collection to the serving ef_search with no
@@ -679,9 +1062,17 @@ public final class PciReconciler {
             case DONE -> {
                 tally.builds++;
                 failures.remove(key);
+                if (canary != null) {
+                    canary.built(build.name());
+                    tally.builtTargets.add(new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
+                        build.collection(), build.name()));
+                }
                 log.info("event=pci_index_built leaf={} index={} collection={}", leafId(leaf), build.name(),
                     build.collection());
                 refreshSweep("build", false);
+                if (pass.live()) {
+                    anchorAfterBuild(pass, leaf, dim, build);
+                }
             }
             case FAILED, REJECTED -> {
                 tally.failedBuilds++;

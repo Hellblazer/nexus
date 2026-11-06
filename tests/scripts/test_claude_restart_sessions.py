@@ -15,9 +15,11 @@ import json
 import re
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -458,7 +460,7 @@ def test_restart_logs_and_types_the_plugin_channel_form_for_a_dev_channel_sessio
     """restart() of a dev-channel session with a handoff: the typed launch line is the dialog-free form, said in the log."""
     _installed(monkeypatch, crs, tmp_path, {"conexus@nexus-plugins": [{}]})
     (tmp_path / "sessions").mkdir()
-    monkeypatch.setattr(crs, "SESSIONS", tmp_path / "sessions")  # nothing registers: the WARN path ends the run
+    monkeypatch.setattr(crs, "SESSIONS", tmp_path / "sessions")  # nothing registers: the relaunch stalls (nexus-8rh0u)
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
     handoff = tmp_path / "h.md"
     handoff.write_text("# a\n# b\n", encoding="utf-8")
@@ -468,7 +470,8 @@ def test_restart_logs_and_types_the_plugin_channel_form_for_a_dev_channel_sessio
     monkeypatch.setattr(crs, "alive", lambda _pid: False)  # the old pid is already gone
     setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
     s = {"sessionId": "old-sid", "name": "tamsin", "pid": 111, "pane": "%1", "cwd": "/w", "argv": DEV_ARGV}
-    assert crs.restart(s, str(handoff)) is False
+    with pytest.raises(crs.RelaunchStalled):
+        crs.restart(s, str(handoff))
     launch = [a[-1] for a in typed if "-l" in a]
     assert len(launch) == 1 and "--channels plugin:conexus@nexus-plugins" in launch[0]
     assert "development-channels" not in launch[0]
@@ -2608,3 +2611,762 @@ def test_a_round_file_that_cannot_be_written_withdraws_its_asks(crs, rd, monkeyp
     crs.ready_round(a, _found(crs), _found(crs))
     assert calls == ["t-a"]
     assert "the round file was not written (disk full)" in _log(rd)
+
+
+# --- nexus-8rh0u: a pane whose process is claude itself ------------------------------------------------
+#
+# 2026-11-06, the 7.96.0 restart: six sessions ran claude as the pane process (parent the tmux server,
+# no shell). Exiting claude closed the pane, the relaunch keystrokes went nowhere, and the run WARNed
+# and went on to the next session. These tests model that pane with a fake tmux that sits under
+# subprocess.run, so the old code and the new code meet the same pane.
+
+NEW_PID = 999
+
+
+class _Pane:
+    """One tmux pane. ``direct``: claude is the pane's only process. Otherwise a shell is under it; with
+    ``wrapper_dies_after=N`` that shell is a ``sh -c '<claude>; ...'`` wrapper that lives N more looks
+    after claude exits, then dies with the pane (it is not at a prompt until then)."""
+
+    def __init__(self, pane: str, claude_pid: int, *, direct: bool, name: str = "wren", registers: bool = True,
+                 ignores_ctrl_c: bool = False, ignores_sigterm: bool = False,
+                 wrapper_dies_after: int | None = None, wrapper_args: str = "sh -c 'claude; sleep 3'") -> None:
+        self.id, self.claude_pid, self.direct, self.name, self.registers = pane, claude_pid, direct, name, registers
+        self.ignores_ctrl_c, self.ignores_sigterm = ignores_ctrl_c, ignores_sigterm
+        self.pid = claude_pid if direct else claude_pid - 1  # a shell's pid, when there is one
+        self.wrapper_polls, self.wrapper_args = wrapper_dies_after, wrapper_args
+        self.wrapper_alive = False
+        self.state = "live"  # live | dead (kept by remain-on-exit) | gone
+        self.opts = {"-p": "", "-w": ""}  # remain-on-exit as each scope holds it ("" = not set there)
+        self.ctrl_c = 0
+        self.typed: list[str] = []  # lines that reached a live pane
+        self.lost: list[str] = []  # lines typed into a pane that was not there, was dead, or was a dying wrapper
+
+    @property
+    def remain(self) -> bool:
+        return "on" in self.opts.values()
+
+
+class FakeTmux:
+    """Just enough tmux for restart(): send-keys, display-message, set-option, show-options, respawn-pane,
+    kill-pane, new-window and ps. The ``*_ok`` / ``refuse_p`` switches make one command fail."""
+
+    def __init__(self, sessions_dir: Path, panes: list[_Pane], *, set_option_ok: bool = True,
+                 refuse_p: bool = False, honors_remain: bool = True, respawn_ok: bool = True,
+                 new_window_ok: bool = True) -> None:
+        self.dir, self.panes = sessions_dir, {p.id: p for p in panes}
+        self.set_option_ok, self.refuse_p, self.honors_remain = set_option_ok, refuse_p, honors_remain
+        self.respawn_ok, self.new_window_ok = respawn_ok, new_window_ok
+        self.alive_pids = {p.claude_pid for p in panes}
+        self.calls: list[list[str]] = []
+        self.kills: list[tuple[int, int]] = []
+        self.next_new = 9
+
+    def alive(self, pid: int) -> bool:
+        return pid in self.alive_pids
+
+    def kill(self, pid: int, sig: int) -> None:
+        """os.kill: SIGTERM ends a claude that does not ignore it; signal 0 is not routed here."""
+        self.kills.append((pid, sig))
+        for pane in self.panes.values():
+            if pane.claude_pid == pid and not pane.ignores_sigterm:
+                self._claude_exits(pane)
+
+    def verbs(self, verb: str) -> list[list[str]]:
+        return [c for c in self.calls if c[1] == verb]
+
+    def _claude_exits(self, pane: _Pane) -> None:
+        self.alive_pids.discard(pane.claude_pid)
+        if pane.direct:  # nothing is left in the pane
+            pane.state = "dead" if pane.remain and self.honors_remain else "gone"
+        elif pane.wrapper_polls is not None:
+            pane.wrapper_alive = True
+
+    def _wrapper_ends(self, pane: _Pane) -> None:
+        pane.wrapper_alive = False
+        pane.state = "dead" if pane.remain and self.honors_remain else "gone"
+
+    def __call__(self, cmd, **_kw):
+        if cmd[0] == "ps":  # the pane process's argv, for shell_at_prompt
+            pid = int(cmd[-1])
+            for pane in self.panes.values():
+                if pane.pid == pid and pane.state == "live" and not pane.direct:
+                    wrapped = pane.wrapper_args if pane.wrapper_alive else "-bash"
+                    return subprocess.CompletedProcess(cmd, 0, stdout=wrapped + "\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[0] != "tmux":
+            return _REAL_RUN(cmd, **_kw)
+        self.calls.append(list(cmd))
+        verb, rest = cmd[1], list(cmd[2:])
+        target = rest[rest.index("-t") + 1] if "-t" in rest else ""
+        pane = self.panes.get(target)
+        ok = lambda out="": subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")  # noqa: E731
+        no = lambda: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="can't find pane")  # noqa: E731
+        if verb == "send-keys":
+            if pane is None or pane.state == "gone":
+                if pane is not None and "-l" in rest:
+                    pane.lost.append(rest[-1])
+                return no()
+            if rest[-1] == "C-c":
+                pane.ctrl_c += 1
+                if pane.ctrl_c >= 2 and pane.claude_pid in self.alive_pids and not pane.ignores_ctrl_c:
+                    self._claude_exits(pane)
+            elif "-l" in rest:
+                if pane.state != "live" or pane.wrapper_alive:  # a dead pane or a dying wrapper takes no keys
+                    pane.lost.append(rest[-1])
+                    return no() if pane.state != "live" else ok()
+                pane.typed.append(rest[-1])
+                if "--resume" in rest[-1] and pane.registers:
+                    sid = rest[-1].split("--resume ", 1)[1].split()[0]
+                    self.alive_pids.add(NEW_PID)
+                    (self.dir / f"{pane.name}-new.json").write_text(json.dumps(
+                        {"kind": "interactive", "pid": NEW_PID, "sessionId": sid, "name": pane.name,
+                         "tmux": f"rs:@1.{pane.id}"}), encoding="utf-8")
+            return ok()
+        if verb == "display-message" and "-d" in rest:  # a notice for the operator, not a state query
+            return ok()
+        if verb == "display-message":
+            if pane is None or pane.state == "gone":
+                return no()
+            if pane.wrapper_alive:
+                pane.wrapper_polls -= 1
+                if pane.wrapper_polls <= 0:
+                    self._wrapper_ends(pane)
+            return ok(f"{pane.pid} {1 if pane.state == 'dead' else 0} $1\n")
+        scope = "-p" if "-p" in rest else "-w"
+        if verb == "show-options":
+            if pane is None or pane.state == "gone":
+                return no()
+            return ok(f"remain-on-exit {pane.opts[scope]}\n" if pane.opts[scope] else "")
+        if verb == "set-option":
+            if pane is None or not self.set_option_ok or (scope == "-p" and self.refuse_p):
+                return no()
+            pane.opts[scope] = "" if "-u" in rest else rest[-1]
+            return ok()
+        if verb == "respawn-pane":
+            if pane is None or not self.respawn_ok:
+                return no()
+            pane.state, pane.direct, pane.pid, pane.wrapper_alive = "live", False, pane.claude_pid - 1, False
+            pane.wrapper_polls = None
+            return ok()
+        if verb == "kill-pane":
+            if pane is None:
+                return no()
+            pane.state = "gone"
+            return ok()
+        if verb == "new-window":
+            if not self.new_window_ok:
+                return no()
+            new = _Pane(f"%{self.next_new}", 10_000 + self.next_new, direct=False,
+                        name=self.panes[next(iter(self.panes))].name)
+            self.panes[new.id] = new
+            self.next_new += 1
+            return ok(new.id + "\n")
+        return ok()
+
+
+_REAL_RUN = subprocess.run
+
+
+@pytest.fixture(autouse=True)
+def _no_real_tmux(crs, monkeypatch):
+    """No test here reaches the tmux server of the machine it runs on: every tmux command answers 'no
+    such pane' unless the test installs its own fake (a later setattr_in wins)."""
+    def run(cmd, **kw):
+        if cmd and cmd[0] == "tmux":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no server")
+        return _REAL_RUN(cmd, **kw)
+
+    setattr_in(monkeypatch, crs, "subprocess.run", run)
+
+
+def _fake_tmux(crs, monkeypatch, tmp_path: Path, panes: list[_Pane], **kw) -> FakeTmux:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(exist_ok=True)
+    fake = FakeTmux(sessions, panes, **kw)
+    monkeypatch.setattr(crs, "SESSIONS", sessions)
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
+    monkeypatch.setattr(crs, "alive", fake.alive)
+    monkeypatch.setattr(crs, "RESULTS", {})
+    setattr_in(monkeypatch, crs, "subprocess.run", fake)
+    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    setattr_in(monkeypatch, crs, "os.kill", fake.kill)
+    return fake
+
+
+def _sess(pane: _Pane, cwd: str = "/w") -> dict:
+    return {"sessionId": f"sid-{pane.name}", "name": pane.name, "pid": pane.claude_pid, "pane": pane.id, "cwd": cwd,
+            "argv": f"claude -n {pane.name}", "file": Path("/nonexistent")}
+
+
+def _log_text(tmp_path: Path) -> str:
+    return (tmp_path / "restart.log").read_text(encoding="utf-8")
+
+
+def test_a_pane_whose_process_is_claude_survives_the_restart(crs, monkeypatch, tmp_path) -> None:
+    """The incident: claude is the pane process. The pane must outlive the exit and take the relaunch line."""
+    pane = _Pane("%1", 111, direct=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane, "/w x")) is True
+    assert pane.lost == [], "the relaunch line was typed into a pane that was gone"
+    assert len(pane.typed) == 1 and "--resume sid-wren" in pane.typed[0]
+    assert pane.remain is False, "remain-on-exit is left on for the pane"
+    respawn = fake.verbs("respawn-pane")
+    assert len(respawn) == 1 and respawn[0][2:7] == ["-k", "-c", "/w x", "-t", "%1"], respawn
+    assert respawn[0][-1].startswith("exec ") and respawn[0][-1].endswith(" -l") and "cd " not in respawn[0][-1], \
+        "the cwd goes through -c, not through a quoted `cd` in the shell command (nexus-8rh0u r1)"
+    assert "claude is the process of pane %1" in _log_text(tmp_path)
+    assert fake.verbs("new-window") == [], "the pane id stays: no new window when the pane can be kept"
+
+
+def test_a_pane_that_already_has_a_shell_is_left_as_it_was(crs, monkeypatch, tmp_path) -> None:
+    pane = _Pane("%1", 111, direct=False)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is True
+    assert fake.verbs("respawn-pane") == [] and fake.verbs("new-window") == []
+    assert len(pane.typed) == 1 and pane.remain is False
+    assert "claude is the process of pane" not in _log_text(tmp_path)
+
+
+@pytest.mark.parametrize("fake_kw", [{"set_option_ok": False}, {"honors_remain": False}],
+                         ids=["remain-on-exit-refused", "remain-on-exit-not-honored"])
+def test_a_pane_that_cannot_be_kept_is_replaced_by_a_window_with_a_shell(crs, monkeypatch, tmp_path, fake_kw) -> None:
+    """Old tmux, or an option that does nothing: a new window in the same session, and the match follows its pane."""
+    pane = _Pane("%1", 111, direct=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane], **fake_kw)
+    assert crs.restart(_sess(pane)) is True
+    new = fake.verbs("new-window")
+    assert len(new) == 1 and "-d" in new[0] and "-c" in new[0] and "/w" in new[0]
+    assert new[0][new[0].index("-t") + 1] == "$1", "in the session the pane was in"
+    spare = fake.panes["%9"]
+    assert len(spare.typed) == 1 and "--resume sid-wren" in spare.typed[0]
+    assert pane.typed == []
+    assert "OK wren: resumed" in _log_text(tmp_path)
+
+
+def _roll_args(**over) -> argparse.Namespace:
+    """The Namespace _roll and stop_report read, every field the real parser would give."""
+    base = dict(fresh=False, nx="", fallback_resume=False, wait=5, handoff_timeout=1, repo="", endpoint="",
+                caller_pane="", only=[], skip=[], keep_dev_channel=False, force=False, no_ready_check=False,
+                skip_sandbox_check=None)
+    return argparse.Namespace(**{**base, **over})
+
+
+def _three(crs, monkeypatch, tmp_path, first: _Pane, nx: str = "", caller_pane: str = "",
+           **fake_kw) -> tuple[FakeTmux, list[_Pane], list[dict], int]:
+    panes = [first, _Pane("%2", 222, direct=False, name="linda"), _Pane("%3", 333, direct=False, name="halcyon")]
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, panes, **fake_kw)
+    found = [_sess(p) for p in panes]
+    for s in found:
+        f = tmp_path / f"{s['name']}-live.json"
+        f.write_text(json.dumps({"status": "idle"}), encoding="utf-8")
+        s["file"] = f
+    args = _roll_args(nx=nx, caller_pane=caller_pane)
+    code = crs._roll(args, found, list(found), [], {"idle"}, None)
+    return fake, panes, found, code
+
+
+@pytest.mark.parametrize("why", ["no-pane-to-relaunch-into", "claude-never-registers"])
+def test_a_relaunch_that_produces_no_session_stops_the_run(crs, monkeypatch, tmp_path, why) -> None:
+    """The 7.96.0 run WARNed and moved on, so six sessions were exited one after another. Now it stops:
+    nonzero, the sessions not yet restarted named, and none of them touched."""
+    if why == "no-pane-to-relaunch-into":
+        first = _Pane("%1", 111, direct=True)
+        kw = {"honors_remain": False, "new_window_ok": False}  # tmux closes the pane anyway and nothing can replace it
+    else:
+        first, kw = _Pane("%1", 111, direct=False, registers=False), {}
+    fake, panes, _found, code = _three(crs, monkeypatch, tmp_path, first, **kw)
+    assert code == crs.EXIT_STALLED == 5, "a stop has an exit code of its own"
+    assert [p.ctrl_c for p in panes] == [2, 0, 0], "the second and third sessions must not be exited"
+    log = _log_text(tmp_path)
+    stop = [ln for ln in log.splitlines() if "STOP" in ln]
+    assert len(stop) == 1, log
+    assert "wren" in stop[0] and "not yet restarted: linda, halcyon" in stop[0], stop[0]
+
+
+def test_a_stop_hands_the_operator_what_they_need_to_recover(crs, monkeypatch, tmp_path) -> None:
+    """The run is detached and its exit status goes nowhere: the log carries the lost session's id and the
+    line that brings it back, the rerun, and whether the install already ran; the caller's pane is told."""
+    first = _Pane("%1", 111, direct=False, registers=False)
+    fake, panes, found, code = _three(crs, monkeypatch, tmp_path, first, nx="7.97.0", caller_pane="%2")
+    assert code == crs.EXIT_STALLED
+    log = _log_text(tmp_path)
+    assert "stalled session: wren, id sid-wren, pane %1; bring it back by hand with: cd /w && " in log
+    assert "--resume sid-wren" in log.split("bring it back by hand with: ", 1)[1].splitlines()[0]
+    rerun = next(ln for ln in log.splitlines() if "rerun the rest" in ln)
+    assert "claude-restart-sessions --resume --no-update --wait 5 --skip wren" in rerun
+    assert "the --nx 7.97.0 install already ran in this run" in log
+    notices = [c for c in fake.calls if c[1] == "display-message" and "-d" in c]
+    assert len(notices) == 1 and notices[0][notices[0].index("-t") + 1] == "%2" and "STOPPED at wren" in notices[0][-1]
+
+
+def test_a_stop_names_the_sessions_already_restarted_in_the_rerun(crs, monkeypatch, tmp_path) -> None:
+    """Rerunning would restart every live session again: the ones that came back are --skip'd too."""
+    panes = [_Pane("%1", 111, direct=False, name="wren"), _Pane("%2", 222, direct=False, name="linda", registers=False)]
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, panes)
+    found = [_sess(p) for p in panes]
+    for s in found:
+        f = tmp_path / f"{s['name']}-live.json"
+        f.write_text(json.dumps({"status": "idle"}), encoding="utf-8")
+        s["file"] = f
+    assert crs._roll(_roll_args(), found, list(found), [], {"idle"}, None) == crs.EXIT_STALLED
+    rerun = next(ln for ln in _log_text(tmp_path).splitlines() if "rerun the rest" in ln)
+    assert rerun.endswith("--skip wren --skip linda"), rerun
+    assert "--nx" not in _log_text(tmp_path).split("rerun the rest", 1)[1]
+
+
+def test_the_window_scope_fallback_leaves_the_users_own_remain_on_exit_as_it_was(crs, monkeypatch, tmp_path) -> None:
+    """-p refused, -w taken: the pane is kept through the exit and the window's own value comes back."""
+    for prior in ("", "failed"):
+        pane = _Pane("%1", 111, direct=True)
+        pane.opts["-w"] = prior
+        fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane], refuse_p=True)
+        assert crs.restart(_sess(pane)) is True
+        scopes = [c[2] for c in fake.verbs("set-option")]
+        assert scopes[0] == "-p" and "-w" in scopes[1:], scopes  # -p tried first, then -w
+        assert pane.opts == {"-p": "", "-w": prior}, f"window value {prior!r} not restored: {pane.opts}"
+        assert pane.typed and pane.lost == []
+        (tmp_path / "restart.log").unlink()
+
+
+def test_a_pane_scope_remain_on_exit_the_user_set_survives_the_restart(crs, monkeypatch, tmp_path) -> None:
+    pane = _Pane("%1", 111, direct=False)
+    pane.opts["-p"] = "failed"
+    _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is True
+    assert pane.opts["-p"] == "failed"
+
+
+def test_remain_on_exit_is_released_when_the_pid_will_not_exit(crs, monkeypatch, tmp_path) -> None:
+    """The FAIL path returns from inside the try: the pane must still get its option back."""
+    pane = _Pane("%1", 111, direct=True, ignores_ctrl_c=True, ignores_sigterm=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is False
+    assert "FAIL wren: pid 111 did not exit" in _log_text(tmp_path)
+    assert fake.kills == [(111, signal.SIGTERM)] and pane.typed == []
+    assert pane.opts == {"-p": "", "-w": ""} and pane.state == "live"
+
+
+def test_remain_on_exit_is_released_when_no_pane_is_left_to_relaunch_in(crs, monkeypatch, tmp_path) -> None:
+    """The RelaunchStalled path raises from inside the try: the release still goes out (to a pane tmux closed anyway)."""
+    pane = _Pane("%1", 111, direct=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane], honors_remain=False, new_window_ok=False)
+    with pytest.raises(crs.RelaunchStalled) as stalled:
+        crs.restart(_sess(pane))
+    assert stalled.value.session["sessionId"] == "sid-wren" and stalled.value.pane == "%1"
+    assert ["tmux", "set-option", "-p", "-u", "-t", "%1", "remain-on-exit"] in fake.calls
+
+
+def test_a_respawn_that_fails_falls_back_to_a_new_window_and_closes_the_dead_pane(crs, monkeypatch, tmp_path) -> None:
+    pane = _Pane("%1", 111, direct=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane], respawn_ok=False)
+    assert crs.restart(_sess(pane)) is True
+    assert len(fake.verbs("new-window")) == 1 and len(fake.panes["%9"].typed) == 1
+    assert ["tmux", "kill-pane", "-t", "%1"] in fake.calls and pane.state == "gone", "the dead pane was left behind"
+    assert pane.typed == [] and "respawn-pane of %1 failed" in _log_text(tmp_path)
+
+
+@pytest.mark.parametrize("dies_after", [3, 99], ids=["wrapper-ends-soon", "wrapper-outlasts-the-wait"])
+def test_a_wrapper_shell_that_exits_after_claude_does_not_take_the_relaunch_line(crs, monkeypatch, tmp_path, dies_after) -> None:
+    """`sh -c '<claude>; sleep 3'`: claude is not the pane process, yet the pane dies a moment after it. The
+    line typed at the first look would go to a shell about to exit."""
+    pane = _Pane("%1", 111, direct=False, wrapper_dies_after=dies_after)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is True
+    assert pane.lost == [] and len(pane.typed) == 1, "the relaunch line went to a wrapper that was ending"
+    assert len(fake.verbs("respawn-pane")) == 1 and fake.verbs("new-window") == []
+
+
+def test_claude_that_ignores_ctrl_c_is_ended_by_sigterm_and_its_pane_survives(crs, monkeypatch, tmp_path) -> None:
+    """The ladder (Ctrl-C twice, 30 s, SIGTERM) on a claude that is the pane process: the kill ends the pane's
+    only process, and the pane still takes the relaunch."""
+    pane = _Pane("%1", 111, direct=True, ignores_ctrl_c=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is True
+    assert fake.kills == [(111, signal.SIGTERM)] and pane.ctrl_c == 2
+    assert "still running after Ctrl-C, sending SIGTERM" in _log_text(tmp_path)
+    assert len(pane.typed) == 1 and pane.lost == [] and pane.remain is False
+    assert len(fake.verbs("respawn-pane")) == 1
+
+
+def test_the_header_names_the_tmux_versions_the_pane_path_needs(crs) -> None:
+    doc = crs.__doc__
+    assert "tmux 3.0" in doc and "respawn-pane -c" in doc and "2.6" in doc and "3.6a" in doc
+
+
+def _ps(monkeypatch, crs, argv: str) -> None:
+    def run(cmd, **kw):
+        if cmd[0] == "ps":
+            return subprocess.CompletedProcess(cmd, 0, stdout=argv + "\n", stderr="")
+        return _REAL_RUN(cmd, **kw)
+
+    setattr_in(monkeypatch, crs, "subprocess.run", run)
+
+
+@pytest.mark.parametrize(("argv", "prompt"), [
+    ("-zsh", True), ("-bash", True), ("/bin/bash --noprofile --norc", True), ("zsh -l", True), ("/bin/sh", True),
+    ("sleep 3", False), ("/usr/bin/python3", False), ("sh -c claude; sleep 3", False), ("bash -lc claude", False),
+    ("claude --resume x", False), ("", False),
+], ids=lambda v: str(v))
+def test_shell_at_prompt_needs_a_known_shell_at_its_prompt(crs, monkeypatch, tmp_path, argv, prompt) -> None:
+    """A process with no -c is not thereby a shell: under zsh `sh -c '<claude>; sleep 3'` becomes `sleep 3`."""
+    monkeypatch.setattr(crs, "SHELLS_FILE", tmp_path / "no-shells-file")  # the built-in list
+    _ps(monkeypatch, crs, argv)
+    assert crs.shell_at_prompt(1234) is prompt
+
+
+def test_the_shells_come_from_etc_shells_else_the_built_in_list(crs, monkeypatch, tmp_path) -> None:
+    shells = tmp_path / "shells"
+    shells.write_text("# comment\n/bin/bash\n/opt/homebrew/bin/nu\n", encoding="utf-8")
+    monkeypatch.setattr(crs, "SHELLS_FILE", shells)
+    _ps(monkeypatch, crs, "-nu")
+    assert crs.shell_at_prompt(1) is True
+    _ps(monkeypatch, crs, "-zsh")
+    assert crs.shell_at_prompt(1) is False, "a shell the file does not list is not one"
+    monkeypatch.setattr(crs, "SHELLS_FILE", tmp_path / "missing")
+    assert {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"} <= crs.known_shells()
+    _ps(monkeypatch, crs, "-fish")
+    assert crs.shell_at_prompt(1) is True
+
+
+def test_a_wrapper_whose_last_command_replaces_it_is_waited_out(crs, monkeypatch, tmp_path) -> None:
+    """zsh's `-c '<claude>; sleep 3'`: the pane's process is `sleep 3`, no -c in its argv. Not a prompt."""
+    pane = _Pane("%1", 111, direct=False, wrapper_dies_after=3, wrapper_args="sleep 3")
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is True
+    assert pane.lost == [] and len(pane.typed) == 1 and len(fake.verbs("respawn-pane")) == 1
+
+
+def test_an_ordinary_shell_pane_settles_without_sleeping(crs, monkeypatch, tmp_path) -> None:
+    """The common case must not pay the 10 s wait: a shell at its prompt is used at once."""
+    pane = _Pane("%1", 111, direct=False)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    sleeps: list[float] = []
+    setattr_in(monkeypatch, crs, "time.sleep", sleeps.append)
+    assert crs.settle_pane("%1", "wren", "$1", "/w") == "%1"
+    assert sleeps == [] and fake.verbs("respawn-pane") == [] and fake.verbs("new-window") == []
+
+
+def test_an_ordinary_shell_pane_settles_without_sleeping_on_a_real_tmux(crs, monkeypatch, tmp_path, private_tmux_shell) -> None:
+    tm = private_tmux_shell
+    pane = tm.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "rs", "-n", "plain", "-c", str(tmp_path))
+    time.sleep(0.5)  # the shell is up
+    setattr_in(monkeypatch, crs, "subprocess.run", _REAL_RUN)
+    sleeps: list[float] = []
+    setattr_in(monkeypatch, crs, "time.sleep", sleeps.append)
+    assert crs.settle_pane(pane, "plain", tm.run("display-message", "-p", "-t", pane, "#{session_id}"), str(tmp_path)) == pane
+    assert sleeps == [], f"settle_pane waited on a plain shell: {sleeps}"
+
+
+def test_the_window_scope_is_released_before_the_dead_pane_is_closed(crs, monkeypatch, tmp_path) -> None:
+    """Respawn failed, a spare window took over: a window-scope remain-on-exit must not stay on for the
+    window's other panes while (or after) the dead pane goes."""
+    pane = _Pane("%1", 111, direct=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane], refuse_p=True, respawn_ok=False)
+    assert crs.restart(_sess(pane)) is True
+    release = ["tmux", "set-option", "-w", "-u", "-t", "%1", "remain-on-exit"]
+    kill = ["tmux", "kill-pane", "-t", "%1"]
+    assert release in fake.calls and kill in fake.calls
+    assert fake.calls.index(release) < fake.calls.index(kill), "the option must go back before the pane is killed"
+
+
+def test_a_pound_sign_in_a_name_is_escaped_in_the_notice(crs, monkeypatch, tmp_path) -> None:
+    """display-message text is a format: a session called w#ren must not turn into a format expansion."""
+    first = _Pane("%1", 111, direct=False, name="w#ren", registers=False)
+    fake, _panes, _found, code = _three(crs, monkeypatch, tmp_path, first, caller_pane="%2")
+    assert code == crs.EXIT_STALLED
+    (notice,) = [c for c in fake.calls if c[1] == "display-message" and "-d" in c]
+    assert "STOPPED at w##ren:" in notice[-1] and "w#ren" not in notice[-1].replace("w##ren", "")
+
+
+def _stalled_run(crs, monkeypatch, tmp_path, a, back: list[dict], stalled: dict) -> list[str]:
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "RESULTS", {s["sessionId"]: "resumed" for s in back})
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=""))
+    crs.stop_report(a, [*back, stalled], crs.RelaunchStalled("x", stalled, stalled["pane"]))
+    return _log_text(tmp_path).splitlines()
+
+
+def test_the_rerun_keeps_the_runs_own_scope(crs, monkeypatch, tmp_path) -> None:
+    """The hint restarts the rest the way the run was asked to: its --only, its --skip, how it restarts, and a
+    --skip for each session already back (an unnamed one by id prefix, and listed by full id); every value
+    shell-quoted so the line round-trips."""
+    wren = {"sessionId": "1111aaaa-0000", "name": "wren", "pane": "%1", "cwd": "/w", "argv": "claude"}
+    bare = {"sessionId": "abcdef12-3456-7890", "pane": "%2", "cwd": "/w", "argv": "claude"}  # no name
+    stuck = {"sessionId": "2222bbbb-0000", "name": "hal cyon", "pane": "%3", "cwd": "/w", "argv": "claude"}
+    a = _roll_args(only=["wren", "hal cyon", "it's"], skip=["old one", "labrun"], keep_dev_channel=True,
+                   fallback_resume=True, wait=77, nx="7.97.0", force=True)
+    lines = _stalled_run(crs, monkeypatch, tmp_path, a, [wren, bare], stuck)
+    rerun = next(ln for ln in lines if "rerun the rest" in ln).split("): ", 1)[1]
+    argv = shlex.split(rerun)
+    assert argv[:3] == ["claude-restart-sessions", "--resume", "--no-update"] and "--nx" not in argv
+    assert argv[argv.index("--wait") + 1] == "77"
+    assert {"--keep-dev-channel", "--fallback-resume", "--force"} <= set(argv)
+    values = lambda flag: [argv[i + 1] for i, x in enumerate(argv) if x == flag]  # noqa: E731
+    assert values("--only") == ["wren", "hal cyon", "it's"]
+    assert values("--skip") == ["old one", "labrun", "wren", "abcdef12", "hal cyon"]
+    unnamed = next(ln for ln in lines if "no name" in ln)
+    assert "abcdef12-3456-7890" in unnamed and "by hand" not in unnamed  # a resume keeps its id: --skip by prefix works
+    assert any("the --nx 7.97.0 install already ran" in ln for ln in lines)
+
+
+def test_a_fresh_rerun_says_an_unnamed_session_must_be_excluded_by_hand(crs, monkeypatch, tmp_path) -> None:
+    bare = {"sessionId": "abcdef12-3456-7890", "pane": "%2", "cwd": "/w", "argv": "claude"}
+    stuck = {"sessionId": "2222bbbb-0000", "name": "halcyon", "pane": "%3", "cwd": "/w", "argv": "claude"}
+    lines = _stalled_run(crs, monkeypatch, tmp_path, _roll_args(fresh=True), [bare], stuck)
+    assert any("no name" in ln and "exclude those by hand" in ln and "abcdef12-3456-7890" in ln for ln in lines)
+    assert "--fresh" in next(ln for ln in lines if "rerun the rest" in ln)
+
+
+def test_skip_matches_a_session_id_prefix_of_eight_or_more_characters(crs) -> None:
+    sid = "abcdef12-3456-7890"
+    assert crs.skipped(None, sid, ["abcdef12"]) is True
+    assert crs.skipped("wren", sid, ["abcdef12-3456"]) is True
+    assert crs.skipped("wren", sid, ["wren"]) is True
+    assert crs.skipped("wren", sid, ["abcdef1"]) is False, "seven characters are too few to name a session"
+    assert crs.skipped(None, sid, ["abcdef13"]) is False and crs.skipped(None, sid, []) is False
+
+
+def test_an_unnamed_session_is_left_out_of_a_round_by_its_id_prefix(crs, monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(crs, "SESSIONS", tmp_path)
+    listed = [{"sessionId": "abcdef12-3456-7890", "pane": "%2"}, {"sessionId": "99999999-0000", "name": "wren", "pane": "%1"}]
+    a = _roll_args(skip=["abcdef12"])
+    out = crs.excluded_sessions(listed, [listed[1]], a)
+    assert [(x["name"], x["why"]) for x in out] == [("abcdef12", "--skip")]
+
+
+def test_a_run_whose_relaunches_all_register_restarts_every_session(crs, monkeypatch, tmp_path) -> None:
+    """The control: with every relaunch registering, the run goes through all three and exits 0."""
+    fake, panes, _found, code = _three(crs, monkeypatch, tmp_path, _Pane("%1", 111, direct=False))
+    assert code == 0 and [p.ctrl_c for p in panes] == [2, 2, 2]
+    assert "STOP" not in _log_text(tmp_path)
+
+
+def test_a_claude_pane_that_cannot_be_kept_or_replaced_is_left_running(crs, monkeypatch, tmp_path) -> None:
+    """Exiting it would lose the session for good: nothing is exited, and it is a skip, not a stop."""
+    pane = _Pane("%1", 111, direct=True)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane], set_option_ok=False, new_window_ok=False)
+    assert crs.restart(_sess(pane)) is False
+    assert pane.ctrl_c == 0 and pane.state == "live"
+    assert "SKIP wren" in _log_text(tmp_path) and "left running" in _log_text(tmp_path)
+
+
+def test_revive_launches_through_a_shell_that_outlives_claude(crs, monkeypatch, tmp_path) -> None:
+    """--revive: the new window runs `claude ...; exec $SHELL -l`, so the pane keeps a shell when claude exits."""
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "SESSIONS", tmp_path / "sessions")
+    (tmp_path / "sessions").mkdir()
+    monkeypatch.setattr(crs, "boot_time", lambda: 1000.0)
+    monkeypatch.setattr(crs, "revivable", lambda *_a: [
+        {"name": "wren", "sessionId": "sid-1", "cwd": str(tmp_path), "mtime": 900.0}])
+    calls: list[tuple] = []
+    monkeypatch.setattr(crs, "tmux", lambda *a: calls.append(a))
+    a = argparse.Namespace(since=60, only=[], skip=[], flags="", dry_run=False, tmux_session="claude",
+                           verify_timeout=0)
+    crs.revive(a)
+    window = [c for c in calls if c[0] == "new-window"]
+    assert len(window) == 1
+    line = window[0][-1]
+    assert line.startswith(shlex.quote(crs.CLAUDE)) and line.endswith("; exec $SHELL -l")
+    assert "--resume sid-1" in line
+
+
+# The same pane, on a real tmux server of its own (a private TMUX_TMPDIR, no TMUX in the environment, so
+# nothing reaches the server of the machine the test runs on). The stand-in for claude registers a session
+# file like the real one, puts the terminal in raw mode as claude does (a Ctrl-C arrives as a byte, not a
+# SIGINT, so a `sh -c` wrapper around it is not killed with it), and exits on its second Ctrl-C.
+
+FAKE_CLAUDE = """#!{python}
+import json, os, sys, time
+args = sys.argv[1:]
+sid = args[args.index("--resume") + 1] if "--resume" in args else "fresh"
+path = os.path.join(os.environ["FAKE_CLAUDE_SESSIONS"], f"{{os.getpid()}}.json")
+with open(path, "w") as fh:
+    json.dump({{"kind": "interactive", "pid": os.getpid(), "sessionId": sid, "name": "wren",
+               "cwd": os.getcwd(), "status": "idle", "tmux": "rs:@1." + os.environ.get("TMUX_PANE", "")}}, fh)
+import termios, tty
+fd = 0
+saved = termios.tcgetattr(fd) if os.isatty(fd) else None
+try:
+    if saved:
+        tty.setraw(fd)
+    presses = 0
+    while presses < 2:
+        b = os.read(fd, 1) if saved else (time.sleep(600) or b"")
+        if not b:
+            break
+        presses += b == b"\\x03"
+finally:
+    if saved:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+"""
+
+
+class _PrivateTmux:
+    def __init__(self, root: Path, env: dict[str, str]) -> None:
+        self.root, self.env = root, env
+
+    def run(self, *args: str) -> str:
+        r = _REAL_RUN(["tmux", *args], capture_output=True, text=True, env=self.env, timeout=30)
+        return r.stdout.strip()
+
+    def panes(self) -> dict[str, str]:
+        out = self.run("list-panes", "-a", "-F", "#{pane_id} #{pane_dead}")
+        return dict(line.split() for line in out.splitlines())
+
+
+def _make_private_tmux(monkeypatch, tmp_path: Path, shell: str):
+    """A tmux server of its own whose panes (and the respawned shells) run *shell*; yields the _PrivateTmux."""
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux is not installed")
+    if not os.access(shell, os.X_OK):
+        pytest.skip(f"{shell} is not installed")
+    root = Path(tempfile.mkdtemp(prefix="nxt", dir="/tmp"))  # a unix socket path must stay under ~100 bytes
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    (home / ".zshrc").write_text("", encoding="utf-8")  # no zsh-newuser-install menu in the respawned shell
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(exist_ok=True)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    for k, v in {"TMUX_TMPDIR": str(root), "HOME": str(home), "SHELL": shell,
+                 "FAKE_CLAUDE_SESSIONS": str(sessions)}.items():
+        monkeypatch.setenv(k, v)
+    fake = tmp_path / "claude"
+    fake.write_text(FAKE_CLAUDE.format(python=sys.executable), encoding="utf-8")
+    fake.chmod(0o755)
+    tm = _PrivateTmux(root, dict(os.environ))
+    tm.run("-f", "/dev/null", "new-session", "-d", "-s", "rs", "-x", "120", "-y", "30", "-n", "ctl", "sleep 600")
+    tm.fake, tm.sessions = fake, sessions
+    try:
+        yield tm
+    finally:
+        _REAL_RUN(["tmux", "kill-server"], env=tm.env, capture_output=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture
+def private_tmux(monkeypatch, tmp_path):
+    yield from _make_private_tmux(monkeypatch, tmp_path, "/bin/sh")
+
+
+@pytest.fixture(params=["/bin/sh", "/bin/zsh"])
+def private_tmux_shell(request, monkeypatch, tmp_path):
+    """The same server under each shell tmux runs a command string with: zsh execs the last command of a
+    `-c` string, so a `sh -c '<claude>; sleep 3'` wrapper becomes `sleep 3` there."""
+    yield from _make_private_tmux(monkeypatch, tmp_path, request.param)
+
+
+def _wait_for(predicate, seconds: float = 20.0):
+    end = time.time() + seconds
+    while time.time() < end:
+        if (got := predicate()):
+            return got
+        time.sleep(0.1)
+    return None
+
+
+def _real_claude_pane(crs, monkeypatch, tmp_path: Path, tm: _PrivateTmux, command: str, cwd: Path) -> tuple[str, dict, int]:
+    """Start *command* (the stand-in, possibly wrapped) as a new window of the private tmux, wait for it to
+    register, and point the script at that tmux. Returns (pane id, the session dict restart() takes, pane pid)."""
+    pane = tm.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "rs", "-n", "wren", "-c", str(cwd), command)
+    first = _wait_for(lambda: next(iter(tm.sessions.glob("*.json")), None))
+    assert first is not None, "the stand-in for claude never registered"
+    old = json.loads(first.read_text(encoding="utf-8"))
+    monkeypatch.setattr(crs, "CLAUDE", str(tm.fake))
+    monkeypatch.setattr(crs, "SESSIONS", tm.sessions)
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
+    real_sleep = time.sleep
+    setattr_in(monkeypatch, crs, "time.sleep", lambda s: real_sleep(s / 4))  # the waits are polls of a real process
+    setattr_in(monkeypatch, crs, "subprocess.run", _REAL_RUN)
+    s = {"sessionId": "sid-old", "name": "wren", "pid": old["pid"], "pane": pane, "cwd": str(cwd),
+         "argv": "claude -n wren", "file": first}
+    return pane, s, int(tm.run("display-message", "-p", "-t", pane, "#{pane_pid}"))
+
+
+def _assert_pane_kept_and_relaunched(tm: _PrivateTmux, pane: str, old_pid: int) -> None:
+    assert pane in tm.panes(), "the pane was closed with claude"
+    assert tm.panes()[pane] == "0", "the pane is dead, not respawned"
+    assert tm.run("show-options", "-p", "-t", pane, "remain-on-exit") == "", "remain-on-exit left set"
+    new = [json.loads(p.read_text(encoding="utf-8")) for p in tm.sessions.glob("*.json")]
+    assert {d["pid"] for d in new} - {old_pid} and all(d["tmux"].endswith("." + pane) for d in new)
+
+
+def test_restart_keeps_the_pane_of_a_claude_that_is_the_pane_process_on_a_real_tmux(crs, monkeypatch, tmp_path, private_tmux) -> None:
+    """The 7.96.0 shape end to end on a real tmux: claude as the pane's only process (new-window with one
+    command). The exit used to close the pane, and the relaunch line went nowhere. tmux runs the window's
+    command through ``sh -c``; dash (Linux /bin/sh) forks a lone command where bash execs it, so the ``exec``
+    is what makes the stand-in the pane process on every host, as the harness's pane scenario does."""
+    tm = private_tmux
+    pane, s, pane_pid = _real_claude_pane(crs, monkeypatch, tmp_path, tm, f"exec {tm.fake} --resume sid-old", tmp_path)
+    assert pane_pid == s["pid"], "claude must be the pane process"
+    assert crs.restart(s) is True, _log_text(tmp_path)
+    _assert_pane_kept_and_relaunched(tm, pane, s["pid"])
+
+
+def test_a_wrapper_shell_that_outlives_claude_is_waited_out_on_a_real_tmux(crs, monkeypatch, tmp_path, private_tmux_shell) -> None:
+    """`<claude>; sleep 3` run by the shell as `-c`: claude is not the pane process, and the pane dies 3 s after
+    it. Under sh the pane process is the wrapper (`sh -c ...`); under zsh, which execs the last command, it is
+    `sleep 3` itself, which has no -c and is not a shell. The relaunch line typed at the first look went to the
+    dying pane (r1 predicted the sh case; r2 found the zsh one)."""
+    tm = private_tmux_shell
+    pane, s, pane_pid = _real_claude_pane(crs, monkeypatch, tmp_path, tm, f"{tm.fake} --resume sid-old; sleep 3", tmp_path)
+    assert pane_pid != s["pid"], "the wrapper must stand between the pane and claude"
+    assert crs.restart(s) is True, _log_text(tmp_path)
+    _assert_pane_kept_and_relaunched(tm, pane, s["pid"])
+
+
+def test_the_respawned_shell_starts_in_the_cwd_even_with_a_space_and_a_quote_in_it(crs, monkeypatch, tmp_path, private_tmux) -> None:
+    """respawn-pane -c takes the cwd as an argument: no quoting of a path into a shell command."""
+    tm = private_tmux
+    cwd = tmp_path / "it's a dir"
+    cwd.mkdir()
+    pane, s, _pid = _real_claude_pane(crs, monkeypatch, tmp_path, tm, f"{tm.fake} --resume sid-old", cwd)
+    scope = crs.keep_pane(pane)
+    assert scope is not None
+    tm.run("send-keys", "-t", pane, "C-c", "C-c")
+    session = tm.run("display-message", "-p", "-t", pane, "#{session_id}")
+    assert crs.settle_pane(pane, "wren", session, str(cwd)) == pane
+    assert tm.panes()[pane] == "0"
+    here = tm.run("display-message", "-p", "-t", pane, "#{pane_current_path}")
+    assert os.path.realpath(here) == os.path.realpath(cwd), here
+    crs.release_pane(pane, *scope)
+    assert tm.run("show-options", "-p", "-t", pane, "remain-on-exit") == ""
+
+
+@pytest.mark.parametrize("prior", ["", "failed"], ids=["window-had-none", "window-had-failed"])
+def test_the_window_scope_keeps_and_gives_back_the_users_value_on_a_real_tmux(crs, monkeypatch, tmp_path, private_tmux, prior) -> None:
+    """The -w fallback on the real tmux (3.6a takes -p, so it is asked for -w alone): set on, restored exactly."""
+    tm = private_tmux
+    pane, _s, _pid = _real_claude_pane(crs, monkeypatch, tmp_path, tm, f"{tm.fake} --resume sid-old", tmp_path)
+    if prior:
+        tm.run("set-option", "-w", "-t", pane, "remain-on-exit", prior)
+    kept = crs.keep_pane(pane, scopes=("-w",))
+    assert kept == ("-w", prior)
+    assert tm.run("show-options", "-w", "-t", pane, "remain-on-exit") == "remain-on-exit on"
+    crs.release_pane(pane, *kept)
+    assert tm.run("show-options", "-w", "-t", pane, "remain-on-exit") == (f"remain-on-exit {prior}" if prior else "")
+
+
+def test_the_revive_window_keeps_a_shell_when_claude_exits_on_a_real_tmux(crs, monkeypatch, tmp_path, private_tmux) -> None:
+    """The line revive() hands new-window (`<claude ...>; exec $SHELL -l`): when claude ends, the pane is a
+    live shell, not a closed window. Taken from revive() itself, run against a stand-in that exits at once."""
+    tm = private_tmux
+    quick = tmp_path / "quick-claude"
+    quick.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    quick.chmod(0o755)
+    monkeypatch.setattr(crs, "CLAUDE", str(quick))
+    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
+    monkeypatch.setattr(crs, "boot_time", lambda: 1000.0)
+    monkeypatch.setattr(crs, "revivable", lambda *_a: [
+        {"name": "wren", "sessionId": "sid-1", "cwd": str(tmp_path), "mtime": 900.0}])
+    launched: list[tuple] = []
+    monkeypatch.setattr(crs, "tmux", lambda *a: launched.append(a))
+    crs.revive(argparse.Namespace(since=60, only=[], skip=[], flags="", dry_run=False, tmux_session="rs", verify_timeout=0))
+    (window,) = [c for c in launched if c[0] == "new-window"]
+    pane = tm.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "rs", "-n", "wren", "-c", str(tmp_path), window[-1])
+    time.sleep(1.5)  # the stand-in has exited by now
+    assert tm.panes().get(pane) == "0", "the window closed with claude"
+    assert tm.run("display-message", "-p", "-t", pane, "#{pane_current_command}") in {"sh", "bash", "zsh"}

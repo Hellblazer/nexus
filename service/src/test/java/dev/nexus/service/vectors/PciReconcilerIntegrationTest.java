@@ -133,7 +133,7 @@ class PciReconcilerIntegrationTest {
     void captureLogs() {
         appender = new ListAppender<>();
         appender.start();
-        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class)) {
+        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class, PciQueryRingExpiry.class)) {
             var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(c);
             logger.setLevel(Level.DEBUG);
             logger.addAppender(appender);
@@ -142,7 +142,7 @@ class PciReconcilerIntegrationTest {
 
     @AfterEach
     void removeTenants() throws Exception {
-        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class)) {
+        for (Class<?> c : List.of(PciReconciler.class, PciBuilderSession.class, PciQueryRingExpiry.class)) {
             ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger(c)).detachAppender(appender);
         }
         try (Connection owner = adminDs.getConnection()) {
@@ -463,6 +463,155 @@ class PciReconcilerIntegrationTest {
         PassReport second = reconciler(s, sweep).reconcileOnce();
         assertThat(second.builds()).isEqualTo(1);
         assertThat(validIndexed(tenant)).contains(name("b-1")).hasSize(3);
+    }
+
+    // -- nexus-4lnn1.1.3: the query ring's 30-day age bound runs in the lock holder's pass ---------------------------
+
+    PciReconciler reconcilerWithRingExpiry(PciSettings s, PciIndexSweep sweep,
+                                           java.util.function.ToIntFunction<java.util.Collection<String>> expiry) {
+        return new PciReconciler(catalog::read, builderSession(s), sweep, s, Clock.systemUTC(),
+            PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60),
+            java.util.random.RandomGenerator.getDefault(), expiry);
+    }
+
+    @Test
+    void theHoldersPassDeletesAnIdleRingsRowsOlderThan30Days_andKeepsTheYoung() throws Exception {
+        String tenant = newTenant("ringexp");
+        String coll = name("ringexp");
+        collection(tenant, coll, 3);
+        for (int i = 0; i < 2; i++) {
+            final int seed = i;
+            float[] v = new float[384];
+            java.util.Arrays.fill(v, 0.1f * (seed + 1));
+            asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.ADDED_AT,
+                    java.time.OffsetDateTime.now().minusDays(seed == 0 ? 31 : 2))
+                .execute());
+        }
+        PciSettings s = settings(16);
+        var expiry = new PciQueryRingExpiry(new TenantScope(svcDs), () -> List.of(tenant));
+
+        PassReport report = reconcilerWithRingExpiry(s, sweep(s), expiry::expireAll).reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.OK);
+        int left = asSuperuser(su -> su.fetchCount(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING,
+            dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION.eq(coll)));
+        assertThat(left).as("the 31-day row went, the 2-day row stayed").isEqualTo(1);
+        assertThat(logs().stream().filter(l -> l.matches(".*event=pci_ring_expire tenants=\\d+ deleted=1 failed=0.*")).count())
+            .as("the leaves of every tenant in the database are visited too").isEqualTo(1);
+    }
+
+    /**
+     * RDR-230 P1.7 fix round: the tenant source of the 30-day delete includes the snapshot's leaf tenants. The supplier
+     * here is empty, which stands for a tenant with no {@code service_tokens} row and no ledger row (the production
+     * supplier is the union of those two sources); the tenant has a leaf, as every tenant that holds ring rows does,
+     * because admission needs a valid per-collection index and an index lives on a leaf.
+     */
+    @Test
+    void aTenantWithRingRowsButNoTokenAndNoLedgerRow_isVisitedThroughItsLeaf() throws Exception {
+        String tenant = newTenant("ringleaf");
+        String coll = name("ringleaf");
+        collection(tenant, coll, 3);
+        for (int i = 0; i < 2; i++) {
+            final int seed = i;
+            float[] v = new float[384];
+            java.util.Arrays.fill(v, 0.1f * (seed + 1));
+            asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.ADDED_AT,
+                    java.time.OffsetDateTime.now().minusDays(seed == 0 ? 31 : 2))
+                .execute());
+        }
+        int tokenRows = asSuperuser(su -> su.fetchCount(dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS,
+            dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS.TENANT_ID.eq(tenant)));
+        assertThat(tokenRows).as("the fixture tenant has no token row").isZero();
+        PciSettings s = settings(16);
+        var expiry = new PciQueryRingExpiry(new TenantScope(svcDs), () -> List.of());
+
+        PassReport report = reconcilerWithRingExpiry(s, sweep(s), expiry::expireAll).reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.OK);
+        int left = asSuperuser(su -> su.fetchCount(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING,
+            dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION.eq(coll)));
+        assertThat(left).as("the 31-day row went, the 2-day row stayed").isEqualTo(1);
+    }
+
+    @Test
+    void theSnapshotsLeafTenants_areDistinct_andSkipALeafWhoseBoundDidNotParse() throws Exception {
+        String a = newTenant("leafa");
+        String b = newTenant("leafb");
+        var tenants = PciReconciler.leafTenants(catalog.read());
+        assertThat(tenants).contains(a, b).doesNotHaveDuplicates().doesNotContainNull().doesNotContain("");
+
+        // The skip itself: a leaf whose tenant bound did not parse carries a null tenant (PciCatalog.Leaf), and a blank
+        // tenant is no tenant. A second leaf of the same tenant under another model must not repeat it.
+        var synthetic = new PciCatalog.Snapshot(List.of(
+            new PciCatalog.Leaf("nexus", "chunks_unparsed", M384, null, List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_blank", M384, " ", List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_x_384", M384, "tenant-x", List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_x_768", "other-model", "tenant-x", List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_y_384", M384, "tenant-y", List.of())));
+        assertThat(PciReconciler.leafTenants(synthetic))
+            .as("the unparsed and blank leaves name none; a tenant on two leaves is named once, in leaf order")
+            .containsExactly("tenant-x", "tenant-y");
+    }
+
+    /**
+     * "A tenant that holds ring rows has a leaf" rests on one fact that is testable: the ring admits only where the
+     * catalog snapshot (its valid-index source in production) reports a valid index, and a valid index exists only on a
+     * leaf. The other half, that rows outlive a dropped leaf, is real and is why the tenant source is the union of the
+     * token, ledger and leaf tenants.
+     */
+    @Test
+    void theSnapshotReportsNoValidIndexForATenantWithoutALeaf_soAdmissionCannotCreateRingRowsForOne() {
+        var snapshot = new PciCatalog.Snapshot(List.of(
+            new PciCatalog.Leaf("nexus", "chunks_x_384", M384, "tenant-x", List.of(
+                new PciCatalog.Index("pci_x", true, "coll-x", null, null)))));
+
+        assertThat(snapshot.hasValidIndex(M384, "tenant-x", "coll-x")).isTrue();
+        assertThat(snapshot.hasValidIndex(M384, "tenant-without-a-leaf", "coll-x")).isFalse();
+        assertThat(snapshot.hasValidIndex(M384, "tenant-x", "coll-without-an-index")).isFalse();
+    }
+
+    @Test
+    void theAgeBoundRunsOncePerHolderPass_andAFailingBoundDoesNotStopTheBuilds() throws Exception {
+        String tenant = newTenant("ringfail");
+        collection(tenant, name("b"), B);
+        PciSettings s = settings(16);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+
+        PassReport report = reconcilerWithRingExpiry(s, sweep(s), leafTenants -> {
+            calls.incrementAndGet();
+            throw new IllegalStateException("boom");
+        }).reconcileOnce();
+
+        assertThat(calls).hasValue(1);
+        assertThat(report.ranToEnd()).isTrue();
+        assertThat(report.builds()).as("the build still ran").isEqualTo(1);
+        assertThat(logged("event=pci_ring_expire_failed reason=hook")).isEqualTo(1);
+    }
+
+    @Test
+    void theAgeBoundDoesNotRunWhenTheReconcilerIsOff() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        PciSettings off = new PciSettings(false, B, 600, 16);
+
+        PassReport report = reconcilerWithRingExpiry(off, sweep(off), leafTenants -> {
+            calls.incrementAndGet();
+            return 0;
+        }).reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.OFF);
+        assertThat(calls).hasValue(0);
     }
 
     @Test
@@ -2052,5 +2201,593 @@ class PciReconcilerIntegrationTest {
         assertThat(r.isRunning()).isFalse();
         assertThat(validIndexed(tenant)).containsExactly(name("big"));
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, r::start);
+    }
+
+    // -- RDR-230 P1.1: the anchor (a COMMENT ON INDEX), adopted when missing ----------------------------------
+
+    /** {@code obj_description} of the index, read independently of the code under test. */
+    String commentOf(PciCatalog.Leaf leaf, String indexName) throws Exception {
+        return asSuperuser(su -> su.select(DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB,
+                DSL.field(DSL.name("c", "oid")), DSL.inline("pg_class")))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+            .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(leaf.schema()))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(indexName))
+            .fetchOne(0, String.class));
+    }
+
+    long relationSize(PciCatalog.Leaf leaf, String indexName) throws Exception {
+        return asSuperuser(su -> su.select(DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
+                DSL.field(DSL.name("c", "oid"))))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+            .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(leaf.schema()))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(indexName))
+            .fetchOne(0, Long.class));
+    }
+
+    long rowCount(String tenant, String collection) throws Exception {
+        return asSuperuser(su -> su.selectCount().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION.eq(collection)).fetchOne(0, Long.class));
+    }
+
+    /** Write {@code anchor} on the index through the builder's own comment path. */
+    void commentAnchor(PciCatalog.Leaf leaf, String collection, PciCatalog.Anchor anchor) {
+        try (PciBuilderSession.Pass pass = builderSession(settings(16)).open()) {
+            PciCatalog.Index index = new PciCatalog.Index(PciCatalog.indexName(M384, leaf.tenant(), collection), true,
+                collection);
+            assertThat(pass.comment(leaf, index, anchor)).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+        }
+    }
+
+    /** An index with the builder's name for the collection and no comment, as one built before the anchor existed. */
+    String unanchoredIndex(String tenant, String collection) throws Exception {
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String index = PciCatalog.indexName(M384, tenant, collection);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), index, "embedding_384", collection);
+        }
+        return index;
+    }
+
+    PciCatalog.Anchor anchorOf(String tenant, String index) {
+        return leaf(tenant).indexes().stream().filter(i -> index.equals(i.name())).findFirst().orElseThrow()
+            .anchor().orElseThrow();
+    }
+
+    /** Add {@code rows} rows to the collection without removing any. */
+    void addRows(String tenant, String collection, int rows) throws Exception {
+        int gen = ++generation;
+        asSuperuser(su -> {
+            var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
+                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
+            for (int i = 0; i < rows; i++) {
+                step = step.values(tenant, collection,
+                    Chash.fromHex(Chash.ofText(tenant + "/" + collection + "/add/" + gen + "/" + i).toHex()).toBytes(),
+                    M384, "added " + i, vector(i), JSONB.jsonb("{}"));
+            }
+            step.onConflictDoNothing().execute();
+            return null;
+        });
+    }
+
+    PciAnchorReads.LeafStats statsOf(PciCatalog.Leaf leaf) throws Exception {
+        return asSuperuser(su -> PciAnchorReads.leafStats(su, leaf.schema(), leaf.name()));
+    }
+
+    @Test
+    void aBuild_writesItsAnchor_rowsAndBytesAsTheDatabaseCountsThem_andTheRouterSetCarriesIt() throws Exception {
+        String tenant = newTenant("anc-built");
+        collection(tenant, name("big"), B + 50);
+        collection(tenant, name("small"), 10);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        Instant before = Instant.now();
+
+        PassReport report = reconciler(s, sweep).reconcileOnce();
+        Instant after = Instant.now();
+
+        assertThat(report.builds()).isEqualTo(1);
+        String index = PciCatalog.indexName(M384, tenant, name("big"));
+        PciCatalog.Leaf leaf = leaf(tenant);
+        assertThat(leaf.indexes()).extracting(PciCatalog.Index::name).containsExactly(index);
+        PciCatalog.Anchor anchor = anchorOf(tenant, index);
+        assertThat(anchor.origin()).isEqualTo("built");
+        assertThat(anchor.rows()).isEqualTo(B + 50).isEqualTo(rowCount(tenant, name("big")));
+        assertThat(anchor.bytes()).isPositive().isEqualTo(relationSize(leaf, index));
+        assertThat(anchor.builtAt()).isAfterOrEqualTo(before.truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+            .isBeforeOrEqualTo(after);
+        assertThat(logged("event=pci_anchor_written origin=built")).isEqualTo(1);
+        assertThat(logged("event=pci_anchor_adopted")).isZero();
+        // The sweep was never started: only the refresh after the comment can have put the anchor in its set.
+        assertThat(sweep.anchor(M384, tenant, name("big"))).hasValueSatisfying(a -> {
+            assertThat(a.origin()).isEqualTo("built");
+            assertThat(a.rows()).isEqualTo(B + 50);
+        });
+
+        String text = commentOf(leaf, index);
+        reconciler(s, sweep).reconcileOnce();
+        assertThat(commentOf(leaf, index)).as("an anchored index is left alone").isEqualTo(text);
+        assertThat(logged("event=pci_anchor_written")).isEqualTo(1);
+    }
+
+    @Test
+    void anUnanchoredIndex_isAdoptedOnce_theSecondPassWritesNothing() throws Exception {
+        String tenant = newTenant("anc-adopt");
+        collection(tenant, name("old"), 300);
+        String index = unanchoredIndex(tenant, name("old"));
+        PciCatalog.Leaf leaf = leaf(tenant);
+        assertThat(commentOf(leaf, index)).isNull();
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciReconciler r = reconciler(s, sweep(s), clock);
+
+        r.reconcileOnce();
+
+        PciCatalog.Anchor anchor = anchorOf(tenant, index);
+        assertThat(anchor.origin()).isEqualTo("adopted");
+        assertThat(anchor.builtAt()).as("the adoption time").isEqualTo(clock.instant());
+        assertThat(anchor.rows()).isEqualTo(300);
+        assertThat(anchor.bytes()).isEqualTo(relationSize(leaf, index));
+        assertThat(logged("event=pci_anchor_adopted reason=missing")).isEqualTo(1);
+        assertThat(r.reading(leaf, index).anchor()).isEqualTo(anchor);
+        String text = commentOf(leaf, index);
+
+        clock.advance(Duration.ofHours(1));
+        r.reconcileOnce();
+        r.reconcileOnce();
+
+        assertThat(commentOf(leaf, index)).as("same text, same built_at: nothing was written").isEqualTo(text);
+        assertThat(logged("event=pci_anchor_adopted")).isEqualTo(1);
+        assertThat(logged("event=pci_anchor_written")).isZero();
+    }
+
+    @Test
+    void aCommentThatIsNotAnAnchor_isAdoptedAgain_andLogsWhy() throws Exception {
+        String tenant = newTenant("anc-garbled");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciReconciler r = reconciler(s, sweep(s), clock);
+        r.reconcileOnce();
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String index = PciCatalog.indexName(M384, tenant, name("big"));
+        assertThat(anchorOf(tenant, index).origin()).isEqualTo("built");
+        assertThat(logged("event=pci_anchor_adopted")).isZero();
+
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.commentIndexNotAnAnchor(su, leaf.schema(), index);
+        }
+        clock.advance(Duration.ofMinutes(5));
+        r.reconcileOnce();
+        assertThat(logged("event=pci_anchor_adopted reason=unparsable")).isEqualTo(1);
+        PciCatalog.Anchor first = anchorOf(tenant, index);
+        assertThat(first.origin()).isEqualTo("adopted");
+        assertThat(first.builtAt()).isEqualTo(clock.instant());
+
+        // A well-formed anchor of a version this engine does not know is not an anchor either.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.commentIndexWrongVersion(su, leaf.schema(), index);
+        }
+        clock.advance(Duration.ofMinutes(5));
+        r.reconcileOnce();
+        assertThat(logged("event=pci_anchor_adopted reason=unparsable")).isEqualTo(2);
+        assertThat(anchorOf(tenant, index).builtAt()).isEqualTo(clock.instant());
+
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.clearIndexComment(su, leaf.schema(), index);
+        }
+        r.reconcileOnce();
+        assertThat(logged("event=pci_anchor_adopted reason=missing")).isEqualTo(1);
+        assertThat(anchorOf(tenant, index).origin()).isEqualTo("adopted");
+    }
+
+    @Test
+    void theComment_survivesAHandRunReindexConcurrently() throws Exception {
+        String tenant = newTenant("anc-reindex");
+        collection(tenant, name("big"), 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        reconciler(s, sweep).reconcileOnce();
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String index = PciCatalog.indexName(M384, tenant, name("big"));
+        String text = commentOf(leaf, index);
+        assertThat(PciCatalog.parseAnchor(text)).isPresent();
+
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.reindexIndexConcurrently(su, leaf.schema(), index);
+        }
+
+        assertThat(commentOf(leaf, index)).as("A5: the comment follows the index through the rebuild").isEqualTo(text);
+        assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).containsExactly(index);
+        assertThat(leaf(tenant).indexes().get(0).valid()).isTrue();
+        reconciler(s, sweep).reconcileOnce();
+        assertThat(commentOf(leaf, index)).isEqualTo(text);
+        assertThat(logged("event=pci_anchor_adopted")).isZero();
+    }
+
+    @Test
+    void writtenSince_countsOnlyRowsWrittenAfterBuiltAt_underTheTenantPredicate() throws Exception {
+        String tenantA = newTenant("anc-ws-a");
+        String tenantB = newTenant("anc-ws-b");
+        String shared = name("same");
+        List<String> aHex = collection(tenantA, shared, 300);
+        collection(tenantB, shared, 300);
+        PciSettings s = settings(16);
+        PciIndexSweep sweep = sweep(s);
+        PciReconciler r = reconciler(s, sweep);
+        r.reconcileOnce();
+        PciCatalog.Leaf leafA = leaf(tenantA);
+        PciCatalog.Leaf leafB = leaf(tenantB);
+        String indexA = PciCatalog.indexName(M384, tenantA, shared);
+        String indexB = PciCatalog.indexName(M384, tenantB, shared);
+        assertThat(validIndexed(tenantA)).containsExactly(shared);
+        assertThat(validIndexed(tenantB)).containsExactly(shared);
+
+        Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+        java.time.OffsetDateTime older = java.time.OffsetDateTime.ofInstant(t0.minusSeconds(3600), ZoneOffset.UTC);
+        java.time.OffsetDateTime newer = java.time.OffsetDateTime.ofInstant(t0.plusSeconds(3600), ZoneOffset.UTC);
+        List<byte[]> first100 = aHex.subList(0, 100).stream().map(h -> Chash.fromHex(h).toBytes()).toList();
+        asSuperuser(su -> {
+            // A: 100 rows before the anchor's built_at, 200 after. B: all 300 after A's built_at, so a count of A
+            // that forgot the tenant predicate would read 500.
+            su.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, newer).where(CHUNKS.TENANT_ID.eq(tenantA))
+                .and(CHUNKS.COLLECTION.eq(shared)).execute();
+            su.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, older).where(CHUNKS.TENANT_ID.eq(tenantA))
+                .and(CHUNKS.COLLECTION.eq(shared)).and(CHUNKS.CHASH.in(first100)).execute();
+            su.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, newer).where(CHUNKS.TENANT_ID.eq(tenantB))
+                .and(CHUNKS.COLLECTION.eq(shared)).execute();
+            return null;
+        });
+        commentAnchor(leafA, shared, new PciCatalog.Anchor(t0, 300, 1, "built"));
+
+        r.reconcileOnce();
+
+        PciReconciler.IndexReading a = r.reading(leafA, indexA);
+        assertThat(a.anchor().builtAt()).isEqualTo(t0);
+        assertThat(a.rows()).isEqualTo(300);
+        assertThat(a.writtenSince()).as("only A's rows written after built_at").isEqualTo(200);
+        PciReconciler.IndexReading b = r.reading(leafB, indexB);
+        assertThat(b.rows()).isEqualTo(300);
+        assertThat(b.writtenSince()).as("B's rows all predate B's own built_at").isZero();
+    }
+
+    @Test
+    void theCountsAreTaken_onlyWhenDeletesAdvanceOrStatsResetOrADayPasses() throws Exception {
+        String tenant = newTenant("anc-recount");
+        List<String> hex = collection(tenant, name("c"), 300);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciReconciler r = reconciler(s, sweep(s), clock);
+        Instant t0 = clock.instant();
+        r.reconcileOnce();                                   // builds; the build's own count
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String index = PciCatalog.indexName(M384, tenant, name("c"));
+        assertThat(r.reading(leaf, index).rows()).isEqualTo(300);
+
+        // This engine has no baseline for the leaf's statistics yet, so its first look counts.
+        addRows(tenant, name("c"), 50);
+        r.reconcileOnce();
+        assertThat(r.reading(leaf, index).rows()).as("first look").isEqualTo(350);
+        assertThat(r.reading(leaf, index).bytes()).isEqualTo(relationSize(leaf, index));
+
+        // Inserts alone move none of the figures that trigger a count.
+        clock.advance(Duration.ofHours(1));
+        addRows(tenant, name("c"), 50);
+        r.reconcileOnce();
+        assertThat(r.reading(leaf, index).rows()).as("nothing was deleted: no recount").isEqualTo(350);
+        assertThat(r.reading(leaf, index).countedAt()).isEqualTo(t0);
+
+        // Deletes advance n_tup_del (the statistics reach the shared view a moment after the commit).
+        long deletedBefore = statsOf(leaf).deleted();
+        asSuperuser(su -> su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION.eq(name("c")))
+            .and(CHUNKS.CHASH.in(hex.subList(0, 10).stream().map(h -> Chash.fromHex(h).toBytes()).toList()))
+            .execute());
+        await(() -> {
+            try {
+                return statsOf(leaf).deleted() > deletedBefore;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }, "the leaf's delete count to reach pg_stat_user_tables");
+        r.reconcileOnce();
+        assertThat(r.reading(leaf, index).rows()).as("deletes advanced").isEqualTo(390);
+        assertThat(r.reading(leaf, index).countedAt()).isEqualTo(t0.plus(Duration.ofHours(1)));
+
+        // A statistics reset moves the counters backward.
+        asSuperuser(su -> su.select(DSL.function("pg_stat_reset_single_table_counters", SQLDataType.OTHER,
+                DSL.field(DSL.name("c", "oid"))))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .where(DSL.field(DSL.name("c", "relname"), String.class).eq(leaf.name())).fetch());
+        assertThat(statsOf(leaf).deleted()).isZero();
+        addRows(tenant, name("c"), 5);
+        r.reconcileOnce();
+        assertThat(r.reading(leaf, index).rows()).as("stats moved backward").isEqualTo(395);
+
+        // Nothing moved; a day does.
+        addRows(tenant, name("c"), 5);
+        clock.advance(Duration.ofHours(23));
+        r.reconcileOnce();
+        assertThat(r.reading(leaf, index).rows()).as("23 hours: not yet").isEqualTo(395);
+        clock.advance(Duration.ofHours(2));
+        r.reconcileOnce();
+        assertThat(r.reading(leaf, index).rows()).as("past 24 hours").isEqualTo(400);
+    }
+
+    @Test
+    void anIndexThePlanDrops_isNotAdopted() throws Exception {
+        String tenant = newTenant("anc-dropped");
+        collection(tenant, name("shrunk"), B / 2 - 1);
+        String index = unanchoredIndex(tenant, name("shrunk"));
+        PciSettings s = settings(16);
+
+        PassReport report = reconciler(s, sweep(s)).reconcileOnce();
+
+        assertThat(report.drops()).isEqualTo(1);
+        assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).doesNotContain(index);
+        assertThat(logged("event=pci_anchor_adopted")).isZero();
+    }
+
+    // -- RDR-230 P1.3: the recall canary's schedule on the pass (nexus-4lnn1.1.4) ---------------------------------
+
+    /** A reconciler whose canary schedule runs {@code runner} (the canary's own tests are PciCanaryTest and the plan test). */
+    PciReconciler canaryReconciler(PciSettings s, PciIndexSweep sweep, Clock clock, PciCanarySchedule schedule) {
+        return new PciReconciler(catalog::read, builderSession(s), sweep, s, clock, PciReconciler.SET_LOCAL_TENANT,
+            PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), java.util.random.RandomGenerator.getDefault(),
+            leafTenants -> 0, schedule);
+    }
+
+    /** A runner that records (index, trigger, whether the index was valid when it was called) and reports green. */
+    PciCanarySchedule.Runner recordingCanary(List<String> runs, Clock clock) {
+        return (target, trigger) -> {
+            boolean valid = catalog.read().leaves().stream().flatMap(l -> l.indexes().stream())
+                .anyMatch(i -> i.name().equals(target.index()) && i.valid());
+            runs.add(target.index() + "/" + trigger + "/valid=" + valid + "/" + target.collection() + "/"
+                + target.tenant() + "/" + target.model());
+            return new PciCanary.Result(target, trigger, PciCanary.State.GREEN, null, 10, 1.0, 1.0, 0, clock.instant(),
+                null, null);
+        };
+    }
+
+    @Test
+    void theCanary_runsAfterTheBuildInThePass_onTheBuiltIndex_andNotAgainOnTheNextPass() throws Exception {
+        String tenant = newTenant("can-build");
+        collection(tenant, name("big"), B + 50);
+        collection(tenant, name("small"), 10);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        List<String> runs = new ArrayList<>();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(runs, clock), clock, System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        String index = PciCatalog.indexName(M384, tenant, name("big"));
+
+        PassReport first = r.reconcileOnce();
+
+        assertThat(first.builds()).isEqualTo(1);
+        assertThat(runs).as("one run, after the build, on the index the pass built (valid when the canary ran)")
+            .containsExactly(index + "/after_build/valid=true/" + name("big") + "/" + tenant + "/" + M384);
+        assertThat(r.canaryResults()).containsOnlyKeys(index);
+
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();
+        assertThat(runs).as("nothing is due ten minutes later").hasSize(1);
+    }
+
+    @Test
+    void theCanary_isNotRunOnAnEngineThatDoesNotHoldTheLock() throws Exception {
+        String tenant = newTenant("can-standby");
+        collection(tenant, name("big"), B + 50);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        List<String> runs = new ArrayList<>();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(runs, clock), clock, System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        r.reconcileOnce();
+        assertThat(runs).hasSize(1);
+        runs.clear();
+
+        // Another engine holds the builder lock: this pass is inactive and the canary does not run, even for a stale index.
+        clock.advance(Duration.ofHours(30));
+        try (PciBuilderSession.Pass holder = builderSession(s).open()) {
+            assertThat(holder.live()).isTrue();
+            PassReport standby = r.reconcileOnce();
+            assertThat(standby.ranToEnd()).isFalse();
+            assertThat(runs).isEmpty();
+        }
+        r.reconcileOnce();
+        assertThat(runs).as("the lock free again: the index is stale and runs").hasSize(1);
+    }
+
+    @Test
+    void theVacuumTrigger_ignoresAnInsertOnlyVacuum_andFiresOnADeleteVacuum_onceInSixHours() throws Exception {
+        String tenant = newTenant("can-vac");
+        List<String> hex = collection(tenant, name("c"), 300);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        List<String> runs = new ArrayList<>();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(runs, clock), clock, System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        r.reconcileOnce();                      // builds; the after_build run
+        assertThat(runs).hasSize(1);
+        runs.clear();
+        PciCatalog.Leaf leaf = leaf(tenant);
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();                      // the first look at the leaf's statistics: a baseline, no trigger
+        assertThat(runs).isEmpty();
+
+        // An insert-only vacuum: last_vacuum advances; no row was deleted or updated.
+        addRows(tenant, name("c"), 50);
+        java.time.OffsetDateTime vacuumedBefore = statsOf(leaf).lastVacuum();
+        vacuum(leaf);
+        awaitVacuumAfter(leaf, vacuumedBefore);
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();
+        assertThat(runs).as("an insert-only vacuum reaps nothing: no run").isEmpty();
+
+        // Deletes, then a vacuum.
+        deleteAndVacuum(leaf, tenant, name("c"), hex.subList(0, 20));
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();
+        String index = PciCatalog.indexName(M384, tenant, name("c"));
+        assertThat(runs).containsExactly(index + "/vacuum/valid=true/" + name("c") + "/" + tenant + "/" + M384);
+        runs.clear();
+
+        // Another delete and vacuum within six hours of that trigger: no second run.
+        deleteAndVacuum(leaf, tenant, name("c"), hex.subList(20, 40));
+        clock.advance(Duration.ofHours(5));
+        r.reconcileOnce();
+        assertThat(runs).as("at most once per index per six hours").isEmpty();
+
+        // And one after the six hours.
+        deleteAndVacuum(leaf, tenant, name("c"), hex.subList(40, 60));
+        clock.advance(Duration.ofHours(2));
+        r.reconcileOnce();
+        assertThat(runs).hasSize(1);
+        assertThat(runs.get(0)).contains("/vacuum/");
+    }
+
+    void vacuum(PciCatalog.Leaf leaf) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.vacuumTable(su, leaf.schema(), leaf.name());
+        }
+    }
+
+    /** Delete the rows, wait for the delete count to reach the statistics, then vacuum and wait for that too. */
+    void deleteAndVacuum(PciCatalog.Leaf leaf, String tenant, String collection, List<String> hex) throws Exception {
+        long deletedBefore = statsOf(leaf).deleted();
+        deleteRows(tenant, collection, hex);
+        await(() -> {
+            try {
+                return statsOf(leaf).deleted() > deletedBefore;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }, "the delete count to reach pg_stat_user_tables");
+        java.time.OffsetDateTime vacuumedBefore = statsOf(leaf).lastVacuum();
+        vacuum(leaf);
+        awaitVacuumAfter(leaf, vacuumedBefore);
+    }
+
+    void deleteRows(String tenant, String collection, List<String> hex) throws Exception {
+        asSuperuser(su -> su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION.eq(collection))
+            .and(CHUNKS.CHASH.in(hex.stream().map(h -> Chash.fromHex(h).toBytes()).toList())).execute());
+    }
+
+    /** Wait for the vacuum's statistics and for the deletes before it to reach pg_stat_user_tables. */
+    void awaitVacuumAfter(PciCatalog.Leaf leaf, java.time.OffsetDateTime before) throws Exception {
+        await(() -> {
+            try {
+                java.time.OffsetDateTime now = statsOf(leaf).lastVacuum();
+                return now != null && (before == null || now.isAfter(before));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }, "the vacuum to reach pg_stat_user_tables");
+    }
+
+    // -- RDR-230 Technical Design 7: the maintenance status object (nexus-4lnn1.1.5) ---------------------------
+
+    @Test
+    void maintenance_isNullWhenNoCanaryIsWired_andZerosOnAnEngineThatNeverHeldTheLock() throws Exception {
+        PciSettings s = settings(16);
+        assertThat(reconciler(s, sweep(s)).maintenance()).as("no canary: the status omits the key").isNull();
+
+        MutableClock clock = new MutableClock();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciMaintenanceStatus never = canaryReconciler(s, sweep(s), clock, schedule).maintenance();
+
+        assertThat(never.reindex()).isEqualTo("off");
+        assertThat(never.reindexes()).isZero();
+        assertThat(never.canary().green() + never.canary().red() + never.canary().unmeasured()).isZero();
+        assertThat(never.canary().lastRunAt()).isNull();
+        assertThat(never.canary().indexes()).isEmpty();
+    }
+
+    @Test
+    void maintenance_afterABuild_reportsTheBuiltIndexWithItsAnchorOriginAndNoGrowthOrDeletes_andKeepsItAfterStandby()
+            throws Exception {
+        String tenant = newTenant("mnt-built");
+        collection(tenant, name("big"), B + 50);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        String index = PciCatalog.indexName(M384, tenant, name("big"));
+
+        r.reconcileOnce();
+
+        PciMaintenanceStatus m = r.maintenance();
+        assertThat(m.canary().green()).isEqualTo(1);
+        assertThat(m.canary().lastRunAt()).isEqualTo(clock.instant());
+        assertThat(m.canary().indexes()).hasSize(1);
+        PciMaintenanceStatus.Entry e = m.canary().indexes().get(0);
+        assertThat(e.index()).isEqualTo(index);
+        assertThat(e.state()).isEqualTo("green");
+        assertThat(e.trigger()).isEqualTo("after_build");
+        assertThat(e.anchor()).isEqualTo("built");
+        assertThat(e.sizeRatio()).as("measured against its own anchor right after the build")
+            .isCloseTo(1.0, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(e.deletesSinceBuild()).isCloseTo(0.0, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(e.toString()).as("no tenant or collection name in an entry").doesNotContain(tenant)
+            .doesNotContain(name("big"));
+
+        // Another engine holds the builder lock: this engine's pass is inactive, and its own history stays.
+        clock.advance(Duration.ofHours(30));
+        try (PciBuilderSession.Pass holder = builderSession(s).open()) {
+            assertThat(holder.live()).isTrue();
+            assertThat(r.reconcileOnce().ranToEnd()).isFalse();
+            assertThat(r.maintenance().canary().indexes()).extracting(PciMaintenanceStatus.Entry::index)
+                .as("results are this engine's own history and stay after it becomes a standby")
+                .containsExactly(index);
+        }
+    }
+
+    @Test
+    void maintenance_anAdoptedIndexReportsItsOriginAndNoSizeRatio() throws Exception {
+        String tenant = newTenant("mnt-adopt");
+        collection(tenant, name("old"), 300);
+        String index = unanchoredIndex(tenant, name("old"));
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+
+        r.reconcileOnce();
+
+        PciMaintenanceStatus.Entry e = r.maintenance().canary().indexes().get(0);
+        assertThat(e.index()).isEqualTo(index);
+        assertThat(e.trigger()).as("an adopted index has no last run on this engine").isEqualTo("daily");
+        assertThat(e.anchor()).isEqualTo("adopted");
+        assertThat(e.sizeRatio()).as("judged against the install reference, a Phase 2 figure").isNull();
+    }
+
+    @Test
+    void maintenance_deletesSinceBuild_followsTheRecountAfterDeletesAndAVacuum() throws Exception {
+        String tenant = newTenant("mnt-del");
+        List<String> hex = collection(tenant, name("c"), 300);
+        PciSettings s = settings(16);
+        // The system clock: the anchor's built_at must be later than the rows' last_written_at (the rows exist before
+        // the build), or written_since would count them all as written since the build.
+        Clock clock = Clock.systemUTC();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(new ArrayList<>(), clock), clock,
+            System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        r.reconcileOnce();                      // builds, anchors at 300 rows
+        r.reconcileOnce();                      // the first look at the leaf's statistics: a baseline
+        assertThat(r.maintenance().canary().indexes().get(0).deletesSinceBuild())
+            .isCloseTo(0.0, org.assertj.core.data.Offset.offset(1e-9));
+
+        deleteAndVacuum(leaf(tenant), tenant, name("c"), hex.subList(0, 20));
+        r.reconcileOnce();                      // deletes moved: the recount reads 280 rows, none written since
+
+        assertThat(r.maintenance().canary().indexes().get(0).deletesSinceBuild())
+            .as("(300 + 0 - 280) / 280").isCloseTo(20.0 / 280.0, org.assertj.core.data.Offset.offset(1e-9));
     }
 }

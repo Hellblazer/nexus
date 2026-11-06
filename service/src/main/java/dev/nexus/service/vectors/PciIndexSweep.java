@@ -224,6 +224,20 @@ public final class PciIndexSweep implements PciIndexSet {
         return Optional.of(new ValidIndex(held.get().name(), since == null ? Instant.EPOCH : since));
     }
 
+    /**
+     * From memory: the anchor the last successful read saw on the valid index for this key, or empty (no such index,
+     * no parseable anchor, or the set has expired). The status object reads {@code anchor.origin()} from it.
+     */
+    @Override
+    public Optional<PciCatalog.Anchor> anchor(String model, String tenant, String collection) {
+        State s = state.get();
+        if (expired(s)) {
+            noteExpired(s);
+            return Optional.empty();
+        }
+        return s.set().anchor(model, tenant, collection);
+    }
+
     /** The counts and times of the last successful read, the failures since, and whether it has expired. */
     public Status status() {
         State s = state.get();

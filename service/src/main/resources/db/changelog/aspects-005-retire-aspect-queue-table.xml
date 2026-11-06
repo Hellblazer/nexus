@@ -107,7 +107,9 @@ BEGIN
             ON DELETE CASCADE ON UPDATE CASCADE
             NOT VALID;
         BEGIN
-            ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
+            IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'aspect_extraction_queue_collection_fk') THEN
+                ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
+            END IF;
         EXCEPTION WHEN OTHERS THEN
             RAISE WARNING 'aspect_extraction_queue_collection_fk left NOT VALID: %', SQLERRM;
         END;
@@ -128,7 +130,9 @@ BEGIN
             ON DELETE RESTRICT
             NOT VALID;
         BEGIN
-            ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
+            IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'aspect_extraction_queue_collection_fk') THEN
+                ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
+            END IF;
         EXCEPTION WHEN OTHERS THEN
             RAISE WARNING 'aspect_extraction_queue_collection_fk left NOT VALID: %', SQLERRM;
         END;

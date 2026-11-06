@@ -359,6 +359,29 @@ class NexusServiceLedgerRetentionTest {
         }
     }
 
+    /**
+     * nexus-4lnn1.1.3: the tenants the query ring's 30-day delete visits are the reaper's (the default tenant and every
+     * token tenant) together with every tenant in {@code request_ledger_tenants}, so a tenant that lost its last token
+     * is still visited if it ever held a ledger row.
+     */
+    @Test
+    void theQueryRingsTenantsAreTheReapersPlusTheLedgerTenants() throws Exception {
+        String tokenTenant = "ring-tenants-token";
+        String ledgerOnly = "ring-tenants-ledger-only";
+        new TokenStore(ds, Clock.systemUTC()).issueToken(tokenTenant, "ring", null);
+        var recording = new RecordingScheduler();
+        NexusService service = new NexusService(0, "ring-tenants-token-x", ds, null, null, null, null, null, recording);
+        try {
+            assertThat(service.requestLedgerForTests().claim(ledgerOnly, UUID.randomUUID(), ROUTE, new byte[32], 25_000L))
+                .isInstanceOf(RequestLedger.Claimed.class);
+            assertThat(service.reaperTenantsForTests()).doesNotContain(ledgerOnly);
+
+            assertThat(service.ringTenants()).contains("default", tokenTenant, ledgerOnly).doesNotHaveDuplicates();
+        } finally {
+            stopQuietly(service);
+        }
+    }
+
     private static void stopQuietly(NexusService s) {
         try {
             s.stop();

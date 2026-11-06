@@ -322,9 +322,71 @@ def test_the_golden_off_body_passes_with_the_switch_note() -> None:
     assert r.ok is True and not r.warn and "NX_SEARCH_PCI=0" in r.detail
 
 
+# nexus-4lnn1.1.5 (RDR-230 Technical Design 7): this_engine.maintenance. The row that reads it and warns on a red canary
+# is nexus-dxsjc's; here the new bodies must round-trip: the row reads the same verdict from a body with the object as
+# from the same body without it, and the object has the shape the engine renders (the Java test pins the same keys).
+# Sam's ruling of 2026-11-06 (ask pci-names-on-status): /v1/status is unauthenticated, so the canary there is counts
+# only; the per-index list is on the authenticated GET /v1/admin/chunks-leaves (key canary_indexes).
+
+_MAINTENANCE_KEYS = ["reindex", "reindexing", "last_reindex_at", "reindexes", "canary"]
+_CANARY_KEYS = ["green", "red", "unmeasured", "last_run_at"]
+_WITH_MAINTENANCE = ("holder_with_canary", "standby_with_canary_history", "never_held_lock")
+
+
+def _without_maintenance(name: str) -> dict:
+    body = _golden(name)
+    del body["per_collection_indexes"]["this_engine"]["maintenance"]
+    return body
+
+
+def test_the_golden_bodies_with_a_maintenance_object_read_the_same_verdict_as_without_it() -> None:
+    for name in _WITH_MAINTENANCE:
+        with_it, without_it = _row(_golden(name)), _row(_without_maintenance(name))
+        assert (with_it.ok, with_it.warn, with_it.fatal, with_it.detail) == (
+            without_it.ok, without_it.warn, without_it.fatal, without_it.detail), name
+
+
+def test_the_golden_holder_with_a_canary_reads_as_a_build_in_progress_and_the_standby_with_history_passes() -> None:
+    holder = _row(_golden("holder_with_canary"))
+    assert holder.ok is True and not holder.warn and "build in progress" in holder.detail
+    standby = _row(_golden("standby_with_canary_history"))
+    assert standby.ok is True and not standby.warn and "peer" in standby.detail
+    assert _row(_golden("never_held_lock")).ok is True
+
+
+def test_the_golden_maintenance_object_has_the_documented_shape() -> None:
+    for name in _WITH_MAINTENANCE:
+        m = _GOLDEN[name]["this_engine"]["maintenance"]
+        assert list(m) == _MAINTENANCE_KEYS, name
+        assert list(m["canary"]) == _CANARY_KEYS, name
+        # Phase 1: the reindex half is fixed.
+        assert (m["reindex"], m["reindexing"], m["last_reindex_at"], m["reindexes"]) == ("off", None, None, 0), name
+
+
+def test_no_golden_status_body_carries_a_pci_name_or_a_per_index_list() -> None:
+    """The route is unauthenticated: counts only, no index name anywhere (Sam, 2026-10-19 and 2026-11-06)."""
+    assert "pci_" not in json.dumps(_GOLDEN)
+    for name in _WITH_MAINTENANCE:
+        assert "indexes" not in _GOLDEN[name]["this_engine"]["maintenance"]["canary"], name
+
+
+def test_the_golden_canary_counts_and_the_empty_engine() -> None:
+    counts = _GOLDEN["holder_with_canary"]["this_engine"]["maintenance"]["canary"]
+    assert (counts["green"], counts["red"], counts["unmeasured"]) == (1, 1, 1)
+    empty = _GOLDEN["never_held_lock"]["this_engine"]["maintenance"]["canary"]
+    assert (empty["green"], empty["red"], empty["unmeasured"], empty["last_run_at"]) == (0, 0, 0, None)
+
+
+def test_the_older_golden_bodies_carry_no_maintenance_key_and_read_as_before() -> None:
+    """An engine that predates the key, or one with no source wired, omits it; the row must not need it."""
+    for name in set(_GOLDEN) - set(_WITH_MAINTENANCE):
+        assert "maintenance" not in _GOLDEN[name]["this_engine"], name
+
+
 def test_every_golden_case_has_an_expectation_here() -> None:
     """A case added to the fixture must be read by this file; otherwise the shared fixture guards nothing for it."""
-    covered = {"holder", "first_pass_in_flight", "standby", "auth_failed", "no_privilege", "expired", "off"}
+    covered = {"holder", "first_pass_in_flight", "standby", "auth_failed", "no_privilege", "expired", "off",
+               *_WITH_MAINTENANCE}
     assert set(_GOLDEN) == covered
 
 

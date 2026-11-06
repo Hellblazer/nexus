@@ -457,7 +457,8 @@ setting, same per-statement 30 s timeout):
 - for each `pci_` index, its anchor and `pg_relation_size`;
 - only when the leaf's deletes or non-HOT updates (`n_tup_upd - n_tup_hot_upd`)
   advanced since this engine last looked, or a stats reset moved them backward,
-  or the index's last check is older than 24 hours: the collection's uncapped
+  or the index's anchor changed, or the index's last check is older than 24
+  hours: the collection's uncapped
   row count and `written_since`, the count of its rows whose `last_written_at`
   is later than the anchor's `built_at`. `last_written_at` is set on insert and
   refreshed by every client re-write of a chunk, never by maintenance updates
@@ -467,7 +468,7 @@ setting, same per-statement 30 s timeout):
 Both counts carry the same explicit `tenant_id` predicate as the existing count,
 for the reason RDR-227 records (the admin role reads every tenant's chunks).
 Their cost is that of an exact scan of the collection's rows (0.3 to 0.6 s at
-60k), paid only when something was deleted or a day passed.
+60k), paid only when something was deleted, the anchor changed or a day passed.
 
 **3. REINDEX triggers (Phase 2).** For a parsed, valid `pci_` index on the
 holder's pass:
@@ -600,7 +601,12 @@ repair no graph; keying on the timestamp alone would run the canary on ingest,
 which this design holds perturbs nothing.
 The first observation of a leaf after a boot records the timestamp and does
 not trigger. A run that cannot happen yet (too few queries) is held as pending
-in memory and runs on the first pass that has the queries.
+in memory and runs on the first pass that has the queries. A run that fails
+with an error is not a run: it stamps no last-run time and keeps its trigger,
+and the index waits before its next try, 30 minutes after the first error,
+doubling per consecutive error to a cap of 24 hours. A measured result
+(green, red or `no_queries`) or a build of the index resets the wait
+(`PciCanaryPolicy.errorRetryAfter`, `PciCanarySchedule`).
 
 Cost and bounds: each statement takes one search permit, like an arm, so the
 canary yields to user load and its load is counted where search load is; the
@@ -629,7 +635,12 @@ row among the request's arms that share X's embedding model. The second
 condition is what "own-topic" means for a fan-out: RDR-227 measured that a far
 query reads 0.975 to 0.983 on a correct index (`code__1-20`, A2), so admitting
 every fan-out arm would turn ordinary approximation on far queries into red
-canaries.
+canaries. Seven routes admit. `/search`, `/search-per-collection` and
+`/hybrid-search` admit by both conditions. The metadata-, aspect-, graph-hop-
+and topic-scoped routes admit only a request that names a single collection:
+their nearest row is the nearest of a filtered set, which says nothing about
+how far the query is from the rest of the collection, so a fan-out on those
+routes admits nothing (`PgVectorRepository.scopedRingVector`).
 
 *The table.* `nexus.canary_query_ring`, created by one new changeset in the
 vectors family after today's tail, `vectors-051`
@@ -659,13 +670,17 @@ that ring's rows beyond the 32 newest by `added_at` and its rows older than
 the builder's pass also deletes every ring row older than 30 days, under each
 tenant's scope; while the lock holder's builder runs, no row outlives 30 days
 by more than one pass, and while it does not, rows on rings nobody writes are
-not aged (Failure Modes). The connection, statement and tenant list for that
-delete are not specified here: no existing path deletes across tenants for
-this table (the builder reaches tenants only through `nexus.chunks` leaves and
-only reads; ledger retention lists its own `request_ledger_tenants`;
-`nexus_rdr/230-research-31`), so implementation settles them.
-That statement is one Liquibase SQL function that jOOQ generates a routine
-for, so the Java side sends no SQL text. Rows are written only for collections
+not aged (Failure Modes). That delete is one typed jOOQ DELETE per tenant,
+one transaction per tenant under that tenant's scope as nexus_svc, so row-level
+security confines each to its own rows (`PciQueryRingExpiry`). Its tenants are
+the reaper's (the default tenant and every tenant with a `service_tokens`
+row), the `request_ledger_tenants`, and the distinct tenants of the
+reconciler's catalog-snapshot leaves; the leaves reach a tenant that holds ring
+rows but has neither a token row nor a ledger row (`nexus_rdr/230-research-31`
+found no existing cross-tenant path for this table). A tenant's failure is
+logged and the next tenant still runs.
+The write's upsert-and-trim statement is one Liquibase SQL function that jOOQ
+generates a routine for, so the Java side sends no SQL text. Rows are written only for collections
 in the valid-index set, so the table holds at most 32 rows per indexed
 collection: about 160 rows and under 1 MB for the cloud's five today
 (`nexus_rdr/230-research-26`).
@@ -700,7 +715,11 @@ exist (`nexus_rdr/230-research-23`):
   new name's index fresh. Its `CROSS_MODEL_DISPOSITIONS` line
   (`CatalogRepository.java:9886`) is `LEAVE`: a cross-model re-embed's target
   has another model and dimension, so the source's ring stays with the source
-  and goes when the source is deleted.
+  and goes when the source is deleted. A cross-model re-home of the name is
+  the exception: the foreign key names the model, so the ring rows cannot move
+  to a target of another model, and `rehomeCollection` deletes the source's
+  ring rows in the re-home's transaction rather than fail the re-home on the
+  foreign key. The ring is a cache that refills from live queries.
 - **Delete, drop-orphan-collections and the ghost sweep.** Each removes the
   collection's registry row. Census: four sites in `service/src/main` do,
   all in `CatalogRepository.java` (`:9361`, a quarantine sibling a delete
@@ -775,26 +794,37 @@ catalog query on the route, RDR-227's rule):
   "reindex": "on", "reindexing": null,
   "last_reindex_at": "2026-10-20T08:00:00Z", "reindexes": 2,
   "canary": {
-    "green": 4, "red": 0, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z",
-    "indexes": [
-      {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null,
-       "queries": 10, "min_recall": 0.983, "mean_recall": 0.998, "top1_misses": 0,
-       "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z",
-       "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.03}
-    ]
+    "green": 4, "red": 0, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z"
   }
 }
 ```
 
 `reindex` is `on` or `off`; `reindexing` is the index name in flight on the
-holder or null. Entries are keyed by the opaque `pci_` name and carry no
-collection or tenant name, because `/v1/status` is unauthenticated and its
-existing counts are global (RDR-227 Day 2 Operations); the log lines carry the
-names for operators. The list is capped at 64 entries, red first. Results are
+holder or null. `/v1/status` is unauthenticated, so it carries counts only and
+names no `pci_` index (Sam, 2026-10-19, `StatusHandler`; and 2026-11-06, ask
+`pci-names-on-status`, option b): a `pci_` name is an unsalted hash of tenant and
+collection, so a caller who guesses a pair could confirm it exists. The
+per-index list goes on the operator-only `GET /v1/admin/chunks-leaves` as
+`canary_indexes`, absent when no canary source is wired:
+
+```json
+"canary_indexes": [
+  {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null,
+   "queries": 10, "min_recall": 0.983, "mean_recall": 0.998, "top1_misses": 0,
+   "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z",
+   "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.03}
+]
+```
+
+Entries carry no collection or tenant name; the log lines carry the names for
+operators. The list is capped at 64 entries, red first, then unmeasured, then
+green. `size_ratio` is null for an adopted index (its anchor is not a build
+figure), and `deletes_since_build` counts from the anchor, so for an adopted
+index it counts since adoption. Results are
 this engine's own history and stay after it becomes a standby, like
 `last_ddl_pass_at`; an engine that has never held the lock reports zeros and an
 empty list. A client against an engine that predates the key finds none and
-reports not-applicable. The key goes in the wire ledger
+reports not-applicable. The two keys go in the wire ledger
 (`docs/wire-contract-pending.md`) and the client fixture
 (`tests/fixtures/pci_status_bodies.json`); the doctor row that reads it, and
 warns on a red canary, is nexus-dxsjc's.
@@ -1109,7 +1139,8 @@ is test-first: its failing test lands first in the same branch.
 - P1.2 The query ring: admission rule, digest dedupe, the 32-row bound, the
   write queue and background writer, reads under the tenant's scope, nothing
   logged but counts. Tests: a single-collection search admits; a fan-out
-  admits only the nearest arm of its model; a second tenant never sees the
+  admits only the nearest arm of its model; a fan-out on a filtered scoped
+  route admits nothing; a second tenant never sees the
   first's rows; the 33rd distinct vector deletes the oldest; a row older than
   30 days is deleted by the write's trim and, on a ring with no new write, by
   the builder's pass; a repeated
@@ -1122,8 +1153,10 @@ is test-first: its failing test lands first in the same branch.
   forced to a degraded walk by a test hook; `unmeasured` with too few queries and
   with the index unused; a canary statement takes a search permit.
 - P1.4 The `maintenance` status object (canary half, `reindex` reads `off`):
-  `StatusHandler`, the wire ledger, the client fixture. Test: the key is absent
-  when no source is wired, as RDR-227's is.
+  `StatusHandler` (counts only) and `canary_indexes` on
+  `GET /v1/admin/chunks-leaves`, the wire ledger, the client fixture. Tests:
+  each key is absent when no source is wired, as RDR-227's is; the
+  `/v1/status` body names no `pci_` index.
 - P1.5 Substrate measurement of A3: bytes per row under ingest to twice the
   built size, and under 25% and 50% churn, before and after `VACUUM`. Results in
   T2 and in the bead.
@@ -1172,10 +1205,10 @@ after P1.4.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Anchor comments | `obj_description` on `pci_` indexes | the status entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
+| Anchor comments | `obj_description` on `pci_` indexes | the `canary_indexes` entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
 | Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the doctor row (nexus-dxsjc) | logs |
 | REINDEX | status `reindexing`, `last_reindex_at` | `event=pci_ddl_done op=reindex took_ms=` | N/A | `reindex_leftover` returns to 0 | N/A |
-| Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the status entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
+| Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the `canary_indexes` entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
 
 To stop maintenance without stopping builds, set `NX_SEARCH_PCI_REINDEX=0` and
 restart the engine.
@@ -1389,3 +1422,5 @@ bulk delete, both on an existing session under an existing lock.
   tenant-table lists added to Phase 1, Open Question 6 added and answered
   (30 days; `-23` to `-28`).
 - 2026-11-03: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `95d6388ef`; critique `nexus_rdr/230-gate-critique-2026-11-03-r1`.
+- 2026-11-06: Wording brought to the reviewed Phase 1 code (nexus-4lnn1.1.7): the seven admitting routes and the single-collection rule for the filtered scoped routes; the 30-day delete's typed per-tenant statement and its tenant source, leaf tenants included; a cross-model re-home deletes the source's ring; the anchor-changed recount trigger; the canary error retry wait.
+- 2026-11-06: Technical Design 7 follows Sam's answer to ask `pci-names-on-status` (option b): `/v1/status` carries the canary counts only, and the per-index list is `canary_indexes` on `GET /v1/admin/chunks-leaves`; adopted-index `size_ratio` is null and `deletes_since_build` counts since adoption.

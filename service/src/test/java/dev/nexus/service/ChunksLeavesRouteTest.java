@@ -11,6 +11,7 @@ import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.StatusHandler;
 import dev.nexus.service.vectors.LeafBloatCatalog;
 import dev.nexus.service.vectors.LeafBloatSweep;
+import dev.nexus.service.vectors.PciMaintenanceStatus;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -235,6 +236,66 @@ class ChunksLeavesRouteTest {
         HttpResponse<String> r = get("/v1/admin/chunks-leaves", ROOT);
         assertThat(r.statusCode()).isEqualTo(503);
         assertNamesNoLeaf(r.body());
+    }
+
+    // ── the canary list (RDR-230 Phase 1, Sam 2026-11-06, ask pci-names-on-status option b) ───────────────
+
+    private static PciMaintenanceStatus canary() {
+        var at = Instant.parse("2026-10-20T08:01:10Z");
+        return PciMaintenanceStatus.phase1(List.of(
+            new PciMaintenanceStatus.Entry("pci_" + "a".repeat(24), "green", null, 10, 0.99, 0.995, 0, "daily", at,
+                "built", 1.01, 0.02),
+            new PciMaintenanceStatus.Entry("pci_" + "b".repeat(24), "red", null, 10, 0.80, 0.90, 3, "vacuum", at,
+                "adopted", null, 0.30)));
+    }
+
+    @Test
+    void theRootTokenReadsTheCanaryList_redFirst_andTheExistingKeysAreUnchanged() throws Exception {
+        service.chunksLeaves(ChunksLeavesRouteTest::view, () -> 300L, ChunksLeavesRouteTest::canary);
+        HttpResponse<String> r = get("/v1/admin/chunks-leaves", ROOT);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        JsonNode body = MAPPER.readTree(r.body());
+        JsonNode list = body.path("canary_indexes");
+        assertThat(list).hasSize(2);
+        assertThat(list.get(0).path("index").asText()).isEqualTo("pci_" + "b".repeat(24));
+        assertThat(list.get(0).path("state").asText()).isEqualTo("red");
+        assertThat(list.get(1).path("state").asText()).isEqualTo("green");
+        assertThat(body.path("leaves_total").asInt()).isEqualTo(4);
+        assertThat(body.path("needing_attention").asInt()).isEqualTo(2);
+    }
+
+    @Test
+    void theCanaryListIsAbsentWhenNoCanarySourceIsWired() throws Exception {
+        bind(ChunksLeavesRouteTest::view);
+        HttpResponse<String> r = get("/v1/admin/chunks-leaves", ROOT);
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(MAPPER.readTree(r.body()).has("canary_indexes")).isFalse();
+    }
+
+    @Test
+    void aTenantTokenAndNoCredentialAreRefused_andTheBodyNamesNoCanaryIndex() throws Exception {
+        service.chunksLeaves(ChunksLeavesRouteTest::view, () -> 300L, ChunksLeavesRouteTest::canary);
+        HttpResponse<String> none = get("/v1/admin/chunks-leaves", null);
+        HttpResponse<String> tenant = get("/v1/admin/chunks-leaves", TENANT_TOKEN);
+        assertThat(none.statusCode()).isEqualTo(401);
+        assertThat(tenant.statusCode()).isEqualTo(403);
+        assertThat(none.body()).doesNotContain("pci_").doesNotContain("canary_indexes");
+        assertThat(tenant.body()).doesNotContain("pci_").doesNotContain("canary_indexes");
+    }
+
+    @Test
+    void theUnauthenticatedStatusRouteNamesNoPciIndex_whileTheCanaryIsBound() throws Exception {
+        service.chunksLeaves(ChunksLeavesRouteTest::view, () -> 300L, ChunksLeavesRouteTest::canary);
+        var sweep = new dev.nexus.service.vectors.PciIndexSweep.Status(true, 2, 0, 0, 0, NOW, null, 0, false);
+        var ddl = new dev.nexus.service.vectors.PciReconciler.DdlStatus(
+            dev.nexus.service.vectors.PciBuilderSession.BuilderState.OK, 0, 0, NOW);
+        service.perCollectionIndexes(() -> StatusHandler.PerCollectionIndexes.of(sweep, ddl, canary()));
+        HttpResponse<String> r = get("/v1/status", null);
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(r.body()).doesNotContain("pci_");
+        JsonNode c = MAPPER.readTree(r.body()).at("/per_collection_indexes/this_engine/maintenance/canary");
+        assertThat(c.path("red").asInt()).isEqualTo(1);
+        assertThat(c.has("indexes")).isFalse();
     }
 
     // ── status stays aggregates-only ──────────────────────────────────────────

@@ -416,7 +416,13 @@ class RawSqlGateTest {
             "runBuild", Map.of(".execute(sql)", 1),
             // SANCTIONED RAW (RDR-227, nexus-43ulx.16): DROP INDEX CONCURRENTLY, same reasons as runBuild.
             // Single-homed: Pass#drop.
-            "runDrop", Map.of(".execute(sql)", 1))),
+            "runDrop", Map.of(".execute(sql)", 1),
+            // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.1): COMMENT ON INDEX has no typed jOOQ form. The index's anchor is
+            // its comment (RDR-230 Technical Design 1). Same rendering as runBuild: the text comes from PostgreSQL's
+            // format() with %I and %L (PciBuilderSession.Pass#render), so no identifier or JSON text is concatenated
+            // in Java, and Pass#comment refuses any index that is not a builder index of the leaf before it renders.
+            // Plain JDBC Statement.execute for the reason runBuild gives. Single-homed: Pass#comment.
+            "runComment", Map.of(".execute(sql)", 1))),
         Map.entry("ChunkConstraintAdmin.java", Map.of(
             // SANCTIONED RAW (RDR-236 Phase 4 Step 3, nexus-6pfgb.43): ALTER TABLE ... ADD CONSTRAINT ... NOT VALID and
             // VALIDATE CONSTRAINT take a rendered CHECK expression, which has no typed jOOQ form. The text is rendered
@@ -3072,6 +3078,8 @@ class RawSqlGateTest {
         "superuser-login-role", "create-policy", "drop-policy", "table-row-security",
         "hnsw-index-collection-concurrently", "hnsw-index-builder-concurrently", "reindex-index-concurrently",
         "vacuum-table", "auto-explain-reset",
+        // nexus-4lnn1.1.1 (RDR-230 P1.1): the anchor is an index comment; each text is fixed in its changelog
+        "index-comment-not-an-anchor", "index-comment-wrong-version", "index-comment-clear",
         // earlier batches, each behind a requireTestIdentifier helper (or taking no caller input) and named nowhere
         // else in code
         "role-planner-guc", "nologin-role", "schema-usage", "schema-default-select-acl", "table-owner",

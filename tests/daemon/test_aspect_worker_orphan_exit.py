@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -316,9 +317,23 @@ class _RealWorker:
         assert self.proc.poll() is None, f"the worker died at start:\n{self.output()}"
         return time.monotonic()
 
-    def output(self) -> str:
+    def full_output(self) -> str:
+        """The whole log. A marker is searched for here, never in output(): Windows run 42162135552 failed with the
+        worker exiting 0 inside the bound and the marker absent from a 2000-character tail that began inside a
+        traceback with long Windows paths, so the event was probably pushed out of the tail (nexus-reaia). The CI
+        log cannot rule out the event never being logged; missing_marker() says which on a recurrence."""
         self._out.flush()
-        return self.log.read_text(encoding="utf-8", errors="replace")[-2000:]
+        return self.log.read_text(encoding="utf-8", errors="replace")
+
+    def output(self) -> str:
+        """The log's last 2000 characters, for a failure message."""
+        return self.full_output()[-2000:]
+
+    def missing_marker(self, marker: str) -> str:
+        """A failure message for a marker absent from the whole log: every event the log holds, in order, then its
+        tail, so a recurrence shows what the worker did log instead."""
+        events = re.findall(r"event='([^']+)'", self.full_output())
+        return f"{marker!r} is not in the log; its events: {events}\n{self.output()}"
 
     def alive(self) -> bool:
         return self.proc.poll() is None
@@ -365,7 +380,7 @@ def test_a_real_worker_exits_when_its_config_dir_is_removed(workers: Callable[..
     assert rc == 0, w.output()
     assert time.monotonic() - t0 < _ORPHAN_EXIT_BOUND_S
     assert not w.cfg.exists(), "the exiting worker re-created the directory it was serving"
-    assert "config_dir_gone" in w.output()
+    assert "config_dir_gone" in w.full_output(), w.missing_marker("config_dir_gone")
 
 
 def test_a_real_worker_exits_once_its_engine_has_been_unreachable_for_the_bound(workers: Callable[..., _RealWorker]) -> None:
@@ -377,7 +392,7 @@ def test_a_real_worker_exits_once_its_engine_has_been_unreachable_for_the_bound(
     assert rc == 0, w.output()
     elapsed = time.monotonic() - t_ready
     assert elapsed >= bound - 1.0, f"exited after {elapsed:.1f}s, before the {bound}s bound:\n{w.output()}"
-    assert "engine_unreachable_exit" in w.output()
+    assert "engine_unreachable_exit" in w.full_output(), w.missing_marker("engine_unreachable_exit")
 
 
 def test_the_unreachable_exit_is_the_bound_and_not_something_else(workers: Callable[..., _RealWorker]) -> None:

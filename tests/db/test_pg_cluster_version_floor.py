@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
+import nexus.daemon.storage_service_daemon as ssd
 import nexus.db.pg_provision as pp
+from nexus.daemon import replace_quiesce
+from nexus.daemon.storage_service_daemon import StorageServiceStartError, StorageServiceSupervisor
 from nexus.db.pg_provision import (
     PgBinaries,
     PgClusterBelowFloorError,
@@ -87,7 +90,7 @@ def test_provision_refuses_before_binary_discovery_and_leaves_the_old_conf_alone
 ) -> None:
     # The code review's case: no extracted bundle, so discovery would fail first; and the conf rewrite
     # would change an old cluster the runbook then has the user start with its own PostgreSQL.
-    config_dir = tmp_path / "cfg"
+    config_dir = tmp_path / "cfg"  # no postmaster runs in these tests, so no cluster helper
     pgdata = config_dir / "postgres"
     pgdata.mkdir(parents=True)
     (pgdata / "PG_VERSION").write_text("16\n")
@@ -101,7 +104,7 @@ def test_provision_refuses_before_binary_discovery_and_leaves_the_old_conf_alone
     monkeypatch.setattr(pp, "refuse_smart_app_control", lambda: None)
     monkeypatch.setattr(pp, "discover_pg_binaries", no_discovery)
     with pytest.raises(PgClusterBelowFloorError, match="PostgreSQL 16"):
-        pp.provision(config_dir)
+        pp._provision_impl(config_dir)  # provision()'s body, without the superuser-auth scope it adds
     assert conf.read_text() == "port = 5432\n"
 
 
@@ -109,9 +112,6 @@ def test_provision_refuses_before_binary_discovery_and_leaves_the_old_conf_alone
 def test_the_supervisor_refuses_before_discovery_with_the_message_unwrapped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import nexus.daemon.storage_service_daemon as ssd
-    from nexus.daemon.storage_service_daemon import StorageServiceStartError, StorageServiceSupervisor
-
     pgdata = _pgdata(tmp_path, "16")
     monkeypatch.setattr(ssd, "_port_accepting", lambda host, port: False)
     monkeypatch.setattr(pp, "discover_pg_binaries", lambda: (_ for _ in ()).throw(AssertionError("discovery ran first")))
@@ -131,7 +131,7 @@ def test_a_running_old_cluster_takes_the_provision_fast_path_unrefused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The hoisted refusal sits after the fast path: a serving cluster is the engine's to refuse.
-    config_dir = tmp_path / "cfg"
+    config_dir = tmp_path / "cfg"  # no postmaster runs in these tests, so no cluster helper
     (config_dir / "postgres").mkdir(parents=True)
     (config_dir / "postgres" / "PG_VERSION").write_text("16\n")
     (config_dir / pp.CREDENTIALS_FILENAME).write_text(f"PG_PORT=5433\nNX_SERVICE_TOKEN={'t' * 64}\n")
@@ -143,12 +143,11 @@ def test_a_running_old_cluster_takes_the_provision_fast_path_unrefused(
     monkeypatch.setattr(pp, "refuse_smart_app_control", lambda: None)
     monkeypatch.setattr(pp, "_port_accepting", lambda host, port: True)
     monkeypatch.setattr(pp, "discover_pg_binaries", no_binaries)
-    assert pp.provision(config_dir).already_provisioned
+    # provision()'s body, without the superuser-auth scope it adds
+    assert pp._provision_impl(config_dir).already_provisioned
 
 
 def test_the_quiesce_restart_refuses_before_its_conf_rewrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus.daemon import replace_quiesce
-
     pgdata = _pgdata(tmp_path, "16")
     (tmp_path / pp.CREDENTIALS_FILENAME).write_text(f"PG_DATA={pgdata}\nPG_PORT=5433\n")
     rewrites: list[Path] = []

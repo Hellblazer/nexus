@@ -202,6 +202,29 @@ final class PciPlanCheck {
         return true;
     }
 
+    /**
+     * The plan of {@code statement} now, for the recall canary (nexus-4lnn1.1.4): the same EXPLAIN as {@link #sample},
+     * in the same savepoint, but forced (no sampling) and returning the plan text so the caller decides whether the
+     * index is named in it. Call it inside the statement's transaction, before the statement. {@code null} when the
+     * EXPLAIN failed (logged as {@code event=pci_plan_check_failed}); the transaction is then still usable.
+     */
+    String explainNow(DSLContext ctx, Select<?> statement, String indexName, String collection) {
+        Savepoint savepoint = null;
+        try {
+            Savepoint[] taken = new Savepoint[1];
+            ctx.connection(conn -> taken[0] = conn.setSavepoint());
+            savepoint = taken[0];
+            String plan = source.plan(ctx, statement);
+            release(ctx, savepoint);
+            return plan;
+        } catch (RuntimeException e) {
+            rollBack(ctx, savepoint);
+            log.warn("event=pci_plan_check_failed index={} collection={} error={}", indexName, collection,
+                describe(e));
+            return null;
+        }
+    }
+
     private static final Pattern TOP_NODE = Pattern.compile("^\\s*(?:->\\s*)?(.*?)\\s+\\(cost=");
     private static final Pattern SCAN = Pattern.compile(
         "(?:Bitmap )?(?:Index(?: Only)? Scan|Seq Scan|Bitmap Heap Scan)(?: Backward)?(?: using \\S+)?(?: on \\S+)?");

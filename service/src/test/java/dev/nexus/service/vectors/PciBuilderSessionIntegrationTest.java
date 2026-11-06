@@ -761,4 +761,88 @@ class PciBuilderSessionIntegrationTest {
         }
         assertThat(leaf(M1024, T1).indexes()).extracting(PciCatalog.Index::name).contains(operatorMade);
     }
+
+    // -- RDR-230 P1.1: the anchor, a COMMENT ON INDEX ------------------------------------------------------
+
+    /** {@code obj_description} of the index, read on a superuser connection independently of the catalog reader. */
+    String commentOf(PciCatalog.Leaf leaf, String indexName) throws Exception {
+        return asSuperuser(ctx -> ctx.select(DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB,
+                col("c", "oid"), DSL.inline("pg_class")))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n")).on(col("n", "oid").eq(col("c", "relnamespace")))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(leaf.schema()))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(indexName))
+            .fetchOne(0, String.class));
+    }
+
+    @Test
+    void comment_writesTheAnchorOfABuilderIndex_withinTheFiveSecondLockTimeout_andTheCatalogReadsItBack()
+            throws Exception {
+        String collection = collectionName("anchor");
+        String name = PciCatalog.indexName(M1024, T1, collection);
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-11-05T08:00:00Z"), 58588, 480116736,
+            PciCatalog.ORIGIN_BUILT);
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.build(leaf, 1024, collection)).isEqualTo(DdlOutcome.DONE);
+            PciCatalog.Index built = indexOn(M1024, T1, name).orElseThrow();
+            assertThat(built.comment()).as("a build alone writes no comment").isNull();
+            assertThat(pass.comment(leaf, built, anchor)).isEqualTo(DdlOutcome.DONE);
+            assertThat(pass.currentSetting("lock_timeout")).isEqualTo("5s");
+        }
+
+        assertThat(commentOf(leaf, name)).isEqualTo(
+            "{\"nexus_pci\":1,\"built_at\":\"2026-11-05T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
+                + "\"origin\":\"built\"}");
+        assertThat(indexOn(M1024, T1, name).orElseThrow().anchor()).contains(anchor);
+        assertThat(catalog.read().anchor(M1024, T1, collection)).contains(anchor);
+    }
+
+    @Test
+    void comment_refusesEveryIndexThatIsNotTheBuildersForThisLeaf_andSendsNothing() throws Exception {
+        String collection = collectionName("anchor-reject");
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        String operatorMade = "pci_foo_anchor";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), operatorMade, "embedding_1024", "x");
+        }
+        PciCatalog.Index unparsed = indexOn(M1024, T1, operatorMade).orElseThrow();
+        String ownName = PciCatalog.indexName(M1024, T1, collection);
+        String otherTenantsName = PciCatalog.indexName(M1024, T2, collection);
+        var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-11-05T08:00:00Z"), 1, 2, "built");
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.comment(leaf, unparsed, anchor)).as("an operator's index").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(leaf, new PciCatalog.Index("pci_" + "0".repeat(23) + "G", true, collection),
+                anchor)).as("a name the builder never makes").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(leaf, new PciCatalog.Index(otherTenantsName, true, collection), anchor))
+                .as("a builder-shaped name that is not this leaf's for the collection").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(leaf, new PciCatalog.Index(ownName, false, collection), anchor))
+                .as("an index that is not valid").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(leaf, new PciCatalog.Index(ownName + "_ccnew", false, null, collection), anchor))
+                .as("a leftover").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(new PciCatalog.Leaf(leaf.schema(), leaf.name(), null, leaf.tenant(), List.of()),
+                new PciCatalog.Index(ownName, true, collection), anchor)).as("a leaf whose model did not parse")
+                .isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(leaf, new PciCatalog.Index(ownName, true, collection),
+                new PciCatalog.Anchor(anchor.builtAt(), 1, 2, "not-an-origin-we-write")))
+                .as("an origin this engine never writes").isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.state()).as("a rejection is not a state change").isEqualTo(BuilderState.OK);
+        }
+        assertThat(commentOf(leaf, operatorMade)).isNull();
+    }
+
+    @Test
+    void comment_onAPassThatIsNotLive_returnsItsEndingOutcome_andSendsNothing() throws Exception {
+        String collection = collectionName("anchor-inactive");
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        var off = new PciBuilderSession(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword(), NONCE,
+            new PciSettings(false, 20_000, 600, 16));
+        try (PciBuilderSession.Pass pass = off.open()) {
+            assertThat(pass.comment(leaf, new PciCatalog.Index(PciCatalog.indexName(M1024, T1, collection), true,
+                collection), new PciCatalog.Anchor(java.time.Instant.EPOCH, 0, 0, "built")))
+                .isEqualTo(DdlOutcome.INACTIVE);
+        }
+    }
 }

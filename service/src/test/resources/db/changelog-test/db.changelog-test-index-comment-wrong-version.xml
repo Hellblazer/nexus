@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-4lnn1.1.1 (RDR-230 P1.1): COMMENT ON INDEX ${schema}.${index} with a well-formed anchor of a version this
+    engine does not know ("nexus_pci":2), in Liquibase XML instead of a Java SQL string (nexus-zrcj7). jOOQ has no
+    COMMENT ON INDEX.
+
+    A test shows such a comment is adopted again, not read. The text is fixed here; only the two names are parameters,
+    checked by PgContainerHelper#commentIndexWrongVersion. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="index-comment-wrong-version" author="nexus-4lnn1.1.1" runAlways="true">
+        <sql>COMMENT ON INDEX ${schema}.${index} IS '{"nexus_pci":2,"built_at":"2026-10-20T08:00:00Z","rows":1,"bytes":1,"origin":"built"}'</sql>
+    </changeSet>
+</databaseChangeLog>

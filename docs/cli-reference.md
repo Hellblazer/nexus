@@ -6488,9 +6488,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) is recorded as covered
   with the reason `conflicted_from_contradicted` when an unread anchor supports it, and the run stays `partial` with its notice;
   it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). With
-  `NX_ANSWER_RESOLUTION_REPAIR=1` (off by default; RDR-147 Step 4, nexus-qpimy) the repair may instead take an
-  exact-key branch, and `repair` then adds keys, only once the branch was considered (with the switch off the
-  wire is unchanged): `resolution_entered` (the branch resolved keys in place of the semantic queries) and
+  `NX_ANSWER_RESOLUTION_REPAIR` on (the default since RDR-147 Phase 2; `0` turns it off; nexus-qpimy) the repair may instead take an
+  exact-key branch, and `repair` then adds keys, only once the branch was considered (with the switch off, or with no
+  `entity.collections` configured, the wire is unchanged): `resolution_entered` (the branch resolved keys in place of the semantic queries) and
   `resolution_reason` (why a considered branch did not enter: `confined_run`, `entity_config_error`,
   `no_pattern_for_anchor_collections` when no anchor's collection has a key pattern, or `no_key_tokens` when the
   anchors of the collections that do name none), `anchors_scanned` and `anchors_without_pattern` (how many anchors the

@@ -938,4 +938,204 @@ class PciPlanAndRecallIntegrationTest {
             assertThat(sweep.refresh()).isTrue();
         }
     }
+
+    // -- 14+. the recall canary (RDR-230 P1.3, nexus-4lnn1.1.4) -------------------------------------------------
+
+    private PciCanary.Target canaryTarget(String collection, String index) {
+        return new PciCanary.Target("nexus." + leaf, TENANT, MODEL, collection, index);
+    }
+
+    /** The serving repository over the real sweep, with a real EXPLAIN source for the canary's forced plan check. */
+    private PgVectorRepository canaryRepo() {
+        return realRepo(new PciPlanCheck(Integer.MAX_VALUE, (ctx, q) -> ctx.explain(q).plan()));
+    }
+
+    private static List<PciQueryRingReader.RingEntry> ringOf(List<float[]> vectors) {
+        return vectors.stream()
+            .map(v -> new PciQueryRingReader.RingEntry(MODEL, v, java.time.OffsetDateTime.now())).toList();
+    }
+
+    private PciCanary canary(PgVectorRepository repo, List<float[]> ring) {
+        return new PciCanary((t, c) -> ringOf(ring), repo.canaryStatements());
+    }
+
+    private ListAppender<ILoggingEvent> captureCanaryLogs() {
+        Logger l = (Logger) LoggerFactory.getLogger(PciCanary.class);
+        var appender = new ListAppender<ILoggingEvent>();
+        appender.start();
+        l.addAppender(appender);
+        return appender;
+    }
+
+    private static void releaseCanaryLogs(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(PciCanary.class)).detachAppender(appender);
+        appender.stop();
+    }
+
+    /** Test 1: a fresh, correctly built index reads green, and the canary's figure is the one an independent count gives. */
+    @Test
+    @Order(14)
+    void canary_isGreenOnAFreshIndex_andItsMeanIsTheIndependentlyCountedRecall() throws Exception {
+        ensureTargetIndex();
+        PgVectorRepository repo = canaryRepo();
+        long hnswBefore = PgVectorRepository.routedHnswCount();
+        List<float[]> ring = queries.subList(0, 10);
+
+        PciCanary.Result r = canary(repo, ring).run(canaryTarget(TARGET, targetIndex), "after_build");
+
+        assertThat(r.state()).as(PciCanary.line(r)).isEqualTo(PciCanary.State.GREEN);
+        assertThat(r.queries()).isEqualTo(10);
+        assertThat(r.top1Misses()).isZero();
+        assertThat(r.minRecall()).isGreaterThanOrEqualTo(TARGET_RECALL);
+        assertThat(PgVectorRepository.routedHnswCount() - hnswBefore)
+            .as("fifty HNSW statements went through the serving path (the exact ones are counted apart)")
+            .isGreaterThanOrEqualTo(50);
+        // The same figure, counted from the fixture's own vectors through the existing search path.
+        double sum = 0;
+        for (int k : KS) {
+            for (int i = 0; i < 10; i++) {
+                sum += recall(repo, i, k);
+            }
+        }
+        assertThat(r.meanRecall()).isCloseTo(sum / (10 * KS.length), org.assertj.core.data.Offset.offset(0.002));
+        System.out.println("PCI-CANARY fresh-index " + PciCanary.line(r));
+    }
+
+    /** Test 2: the serving path forced to a degraded walk (the existing ef floor and scan budget seams) reads red. */
+    @Test
+    @Order(15)
+    void canary_isRed_whenTheServingPathIsForcedToADegradedWalk() throws Exception {
+        ensureTargetIndex();
+        PgVectorRepository repo = canaryRepo();
+        PciCanary canary = canary(repo, queries.subList(0, 10));
+        assertThat(canary.run(canaryTarget(TARGET, targetIndex), "daily").state())
+            .as("the same canary on the same index, undegraded, is green").isEqualTo(PciCanary.State.GREEN);
+        PciCanary.Result r;
+        PgSession.overrideEfSearchFloorForTests(1);
+        PgSession.overrideScanBudgetForTests(30, 1);
+        try {
+            r = canary.run(canaryTarget(TARGET, targetIndex), "vacuum");
+        } finally {
+            PgSession.resetScanBudgetForTests();
+            PgSession.resetEfSearchFloorForTests();
+        }
+
+        assertThat(r.state()).as(PciCanary.line(r)).isEqualTo(PciCanary.State.RED);
+        assertThat(r.meanRecall()).isLessThan(0.99);
+        assertThat(r.queries()).isEqualTo(10);
+        assertThat(r.redSample()).as("a red run keeps its queries").hasSize(10);
+        System.out.println("PCI-CANARY degraded " + PciCanary.line(r));
+    }
+
+    /** Test 3: two queries in the ring. */
+    @Test
+    @Order(16)
+    void canary_isUnmeasuredNoQueries_withTwoRingQueries_andRunsNoStatement() throws Exception {
+        ensureTargetIndex();
+        PgVectorRepository repo = canaryRepo();
+        long hnswBefore = PgVectorRepository.routedHnswCount();
+        long exactBefore = PgVectorRepository.routedExactCount();
+
+        PciCanary.Result r = canary(repo, queries.subList(0, 2)).run(canaryTarget(TARGET, targetIndex), "after_build");
+
+        assertThat(r.state()).isEqualTo(PciCanary.State.UNMEASURED);
+        assertThat(r.reason()).isEqualTo("no_queries");
+        assertThat(r.queries()).isEqualTo(2);
+        assertThat(PciCanary.line(r)).contains("queries=2");
+        assertThat(PgVectorRepository.routedHnswCount()).isEqualTo(hnswBefore);
+        assertThat(PgVectorRepository.routedExactCount()).isEqualTo(exactBefore);
+    }
+
+    /**
+     * Test 4: the planner does not use the index. The router set claims a valid index for the small collection and none
+     * exists, so the statement walks the leaf; the plan is the planner's own.
+     */
+    @Test
+    @Order(17)
+    void canary_isUnmeasuredIndexNotUsed_whenThePlannerDoesNotUseTheIndex_andWarnsWithTheTopNode() throws Exception {
+        assertThat(indexIsValid(smallIndex)).as("no index for the small collection: the planner has none to use").isNull();
+        PgVectorRepository claiming = new PgVectorRepository(scope, embedder, embedder, (m, t, c) -> true,
+            new PciPlanCheck(Integer.MAX_VALUE, (ctx, q) -> ctx.explain(q).plan()));
+        var logs = captureCanaryLogs();
+        PciCanary.Result r;
+        try {
+            r = canary(claiming, queries.subList(0, 5)).run(canaryTarget(SMALL, smallIndex), "daily");
+        } finally {
+            releaseCanaryLogs(logs);
+        }
+
+        assertThat(r.state()).isEqualTo(PciCanary.State.UNMEASURED);
+        assertThat(r.reason()).isEqualTo("index_not_used");
+        assertThat(r.queries()).isEqualTo(5);
+        assertThat(logs.list).anySatisfy(e -> {
+            assertThat(e.getLevel().toString()).isEqualTo("WARN");
+            assertThat(e.getFormattedMessage()).contains("event=pci_canary_index_not_used")
+                .contains("index=" + smallIndex).contains("top=\"").contains("scans=\"");
+        });
+        System.out.println("PCI-CANARY not-used " + logs.list.stream().map(ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.contains("index_not_used")).findFirst().orElse("?"));
+    }
+
+    /** Test 5: a canary statement takes a search permit. */
+    @Test
+    @Order(18)
+    void canary_statementsTakeASearchPermit_andGiveItBack() throws Exception {
+        ensureTargetIndex();
+        PgVectorRepository repo = canaryRepo();
+        int permits = PgVectorRepository.fanoutArmPermits(System.getenv(PgVectorRepository.FANOUT_ARM_PERMITS_ENV),
+            scope.poolSize());
+        scope.replaceFanoutArmGateForTests(1);
+        java.util.concurrent.Semaphore gate = scope.fanoutArmGate(1);
+        long hnswBefore = PgVectorRepository.routedHnswCount();
+        try {
+            gate.acquire();
+            PciCanary shortWait = new PciCanary((t, c) -> ringOf(queries.subList(0, 5)),
+                repo.canaryStatements(Duration.ofMillis(200)));
+
+            PciCanary.Result blocked = shortWait.run(canaryTarget(TARGET, targetIndex), "daily");
+
+            assertThat(blocked.state()).as("the only permit is held: the statement waits and gives up")
+                .isEqualTo(PciCanary.State.UNMEASURED);
+            assertThat(blocked.reason()).isEqualTo("error");
+            assertThat(PgVectorRepository.routedHnswCount()).as("no statement ran").isEqualTo(hnswBefore);
+            gate.release();
+
+            PciCanary.Result free = shortWait.run(canaryTarget(TARGET, targetIndex), "daily");
+
+            assertThat(free.state()).as(PciCanary.line(free)).isEqualTo(PciCanary.State.GREEN);
+            assertThat(gate.availablePermits()).as("every statement gave its permit back").isEqualTo(1);
+        } finally {
+            scope.replaceFanoutArmGateForTests(permits);
+        }
+    }
+
+    /**
+     * Test 6 (gate finding S4, the small-sample red rule): three queries, one of them far from the collection, on a
+     * fresh index. The rule stands as written (three queries minimum, red on mean below 0.99 or any top-1 miss); this
+     * test records what it does here, and the answer is that the verdict is NOT stable. Three builds of this one fixture
+     * (chas lab-l, 2026-11-05): green with mean 0.9988 and min 0.9900; red with mean 0.9856 and min 0.9417; red with
+     * mean 0.9843 and min 0.9333; no top-1 miss in any. The leaf's graph is one draw per build, and with two near queries and one far one, a single weak (query, k)
+     * cell moves a three-query mean across 0.99. So the test pins the RULE (red exactly when the mean is below 0.99 or
+     * a query missed its nearest row), prints the figures, and asserts a floor on the mean that a broken index would
+     * not meet; it does not pin a colour. The first cloud {@code queries=} readings decide whether one far query turns a
+     * healthy production index red.
+     */
+    @Test
+    @Order(19)
+    void canary_s4Pin_threeQueriesOneFar_freshIndex_verdictFollowsTheRule_greenAt0_9988_redAt0_9856_redAt0_9843() throws Exception {
+        ensureTargetIndex();
+        PgVectorRepository repo = canaryRepo();
+        Random far = new Random(4242);
+        float[] farQuery = toFloats(normalize(gauss(far)));
+        List<float[]> ring = List.of(queries.get(0), queries.get(1), farQuery);
+
+        PciCanary.Result r = canary(repo, ring).run(canaryTarget(TARGET, targetIndex), "after_build");
+
+        System.out.println("PCI-CANARY S4 " + PciCanary.line(r));
+        assertThat(r.queries()).isEqualTo(3);
+        assertThat(r.state()).as(PciCanary.line(r)).isIn(PciCanary.State.GREEN, PciCanary.State.RED);
+        boolean red = r.meanRecall() < 0.99 || r.top1Misses() > 0;
+        assertThat(r.state() == PciCanary.State.RED).as("the rule, applied to " + PciCanary.line(r)).isEqualTo(red);
+        assertThat(r.meanRecall()).as("a healthy index with one far query stays near 1").isGreaterThan(0.95);
+    }
 }

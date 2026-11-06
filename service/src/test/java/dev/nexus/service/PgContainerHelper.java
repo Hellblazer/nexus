@@ -478,6 +478,10 @@ public final class PgContainerHelper {
      *       ({@link #startDedicated(String, long)}): they outgrow, or come within a few percent of, the
      *       default {@link #TMPFS_SIZE} tmpfs, and a full tmpfs on the shared cluster also blocks the teardown
      *       connection, so every later class in the fork errors at acquire.</li>
+     *   <li>{@code PciIndexBytesPerRowChurnMeasurementTest} -- a hand-run measurement (tag {@code measurement}) that
+     *       loads 40k to 70k rows of 1024 dimensions under two HNSW indexes and churns them without VACUUM, which
+     *       outgrows the default {@link #TMPFS_SIZE} tmpfs; a sized container ({@link #startDedicated(String, long)}),
+     *       owner-migrated by the test as {@link #startMigratedByOwner()} does on its dedicated branch.</li>
      *   <li>{@code WalkLockPreflightIntegrationTest} -- starts a cluster with a lowered
      *       {@code max_locks_per_transaction} and {@code max_connections} ({@link #startDedicated(List)}), postmaster
      *       settings a running cluster cannot take, to walk the largest tenant count the lock preflight admits.</li>
@@ -2411,6 +2415,41 @@ public final class PgContainerHelper {
         requireTestIdentifier(index);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-reindex-index.xml",
             "databasechangelog_test_reindex_index", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code COMMENT ON INDEX schema.index IS 'see the wiki'} (nexus-4lnn1.1.1), through
+     * {@code db.changelog-test-index-comment-not-an-anchor.xml}: jOOQ has no COMMENT ON INDEX. The text is fixed in the
+     * changelog; both names go through {@link #requireTestIdentifier}.
+     */
+    public static void commentIndexNotAnAnchor(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-not-an-anchor.xml",
+            "databasechangelog_test_index_comment_not_an_anchor", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code COMMENT ON INDEX schema.index} with a well-formed PCI anchor of {@code "nexus_pci":2}
+     * (nexus-4lnn1.1.1), through {@code db.changelog-test-index-comment-wrong-version.xml}. The text is fixed in the
+     * changelog; both names go through {@link #requireTestIdentifier}.
+     */
+    public static void commentIndexWrongVersion(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-wrong-version.xml",
+            "databasechangelog_test_index_comment_wrong_version", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code COMMENT ON INDEX schema.index IS NULL} (nexus-4lnn1.1.1), through
+     * {@code db.changelog-test-index-comment-clear.xml}. Both names go through {@link #requireTestIdentifier}.
+     */
+    public static void clearIndexComment(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-clear.xml",
+            "databasechangelog_test_index_comment_clear", Map.of("schema", schema, "index", index));
     }
 
     /** Which text of a product changeset {@link #replayPart} runs. */

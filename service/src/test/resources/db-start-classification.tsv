@@ -52,6 +52,7 @@ TenantPartitionCreationTs1MeasurementIntegrationTest	startDedicated	CLUSTER_STAT
 ChashProbePlanShapeTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
 ChashVectorConcurrencyTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
 ChunkLiveOwnersRecallExtendedIntegrationTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 4g tmpfs and 6g container
+PciIndexBytesPerRowChurnMeasurementTest	startDedicated	SIZED	outgrows the default tmpfs; needs an 8g tmpfs and 12g container (70k rows of 1024 dimensions under two HNSW indexes)
 PgBouncerTenantIsolationTest	newContainer	NETWORK	attaches the Postgres container to a Docker network shared with a PgBouncer container
 PlpgsqlCheckGateTest	newContainer	IMAGE	builds its own container from a different image (plpgsql_check)
 DdlCountSwitchTest	newContainer	INFRA	tests the DDL counter's switch on the container factory's own output (tmpfs, server log, probe)
@@ -73,3 +74,4 @@ Catalog047DocumentSensitivitySchemaLiquibaseTest	startEmptyDatabase	WALK	migrate
 PartitionCopyAccessDiagExclusionIntegrationTest	startEmptyDatabase	OWNERSHIP	creates the nexus_diag role itself (declared exclusive) and reads the ACL of leaves and model partitions made after a full walk
 NoteUriBackfillMigrationTest	startEmptyDatabase	WALK	migrates to just before note-uri-001-1, seeds notes and planted twins, asserts the guard aborts changing nothing, then applies it and reads the rewrite back
 NoteUriMvvIntegrationTest	startEmptyDatabase	WALK	migrates to just before note-uri-001-1, seeds a legacy note, its aspect and highlight, an export row and a code residue row, applies the backfill, then drives the register, import and rename routes over HTTP; a control variant marks the backfill run without executing it
+CanaryQueryRingSchemaLiquibaseTest	startEmptyDatabase	WALK	migrates to just before vectors-054-1, asserts the ring table and the upsert function are absent, applies them, rolls both changesets back and reapplies

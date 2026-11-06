@@ -50,4 +50,12 @@ public interface PciIndexSet {
             ? Optional.of(new ValidIndex(PciCatalog.indexName(model, tenant, collection), Instant.EPOCH))
             : Optional.empty();
     }
+
+    /**
+     * The anchor (RDR-230) on the valid per-collection index for this key, or empty when the set holds none or the
+     * index has no parseable anchor yet. The default knows none, as a test double does.
+     */
+    default Optional<PciCatalog.Anchor> anchor(String model, String tenant, String collection) {
+        return Optional.empty();
+    }
 }

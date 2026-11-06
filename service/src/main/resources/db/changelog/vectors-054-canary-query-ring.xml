@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-4lnn1.1.2 (RDR-230 Phase 1 P1.2a: the recall canary's persisted query ring, schema half).
+
+    The canary replays recent real queries against a collection's index and compares the approximate answer with the
+    exact one. It needs the queries it replays to survive a restart, so each collection keeps a small ring of the
+    vectors that were searched against it. The vector is the whole key of an entry: the ring holds embeddings, not
+    query text (RDR-230 Technical Design 6). This changeset holds only the objects; the writer, the reads and the
+    delete after a clean pass are the next bead (nexus-4lnn1.1.3), and the Java side calls the function below through
+    the generated jOOQ routine and sends no SQL text.
+
+    vectors-054-1  nexus.canary_query_ring (tenant_id, collection, embedding_model, embedding_384/768/1024,
+                   vector_digest, added_at).
+                   - Exactly one of the three embedding columns is set (the nexus.chunks shape, exactly_one_embedding in
+                     vectors-030-model-tenant-partition-functions.xml); the typed columns are what refuse a vector of
+                     the wrong dimension.
+                   - PRIMARY KEY (tenant_id, collection, vector_digest): the digest is the SHA-256 of the vector's values
+                     in order, so the same query vector in one ring is one row, refreshed and not duplicated. The
+                     digest is 32 bytes (CHECK, as request_ledger.body_sha256).
+                   - FOREIGN KEY (tenant_id, collection, embedding_model) to catalog_collections (tenant_id, name,
+                     embedding_model) ON DELETE CASCADE: the ring is a derived cache of one collection, so it goes
+                     with the registry row (chunks_collection_fk is the same key with ON DELETE RESTRICT, because
+                     chunks are content; the ring is not). The model is in the key so a ring row cannot name a
+                     collection under a model the registry does not hold.
+                   - ENABLE and FORCE row-level security with the tenant_isolation policy (tuples-001-baseline.xml).
+                   - NO index on the vectors: the ring is at most 32 rows per collection (the function trims it) and is
+                     read whole for one (tenant, collection), which the primary key's prefix serves.
+                   - NO grant is written here: nexus_svc gets DML through the default privileges and the runAlways loop
+                     of grants-nexus-svc.xml. nexus_diag is granted nothing in the VIEW era (the ring holds query
+                     embeddings, and nexus_diag bypasses RLS); GrantsNexusDiagViewAccessIntegrationTest.
+                     canaryQueryRing_svcHasDml_diagIsDenied pins it by connecting as nexus_diag after a
+                     production-shaped walk. The LEGACY era (no diag_chash_conformance view) is not covered:
+                     grants-nexus-diag-1 grants nexus_diag SELECT on every table there, this one included.
+
+    vectors-054-2  nexus.canary_query_ring_upsert(tenant, collections[], models[], vectors[], digests[]) RETURNS integer.
+                   One call writes a batch: each entry is inserted, or has added_at refreshed when its digest is
+                   already in that ring; then, for every ring the call wrote to, the rows beyond the 32 newest by
+                   added_at and the rows older than 30 days are deleted, in the same call (one transaction). The bound
+                   lives here so that no writer can forget it.
+
+                   S6 (RDR-230 gate): an entry whose collection was deleted between enqueue and flush must not cost
+                   the other entries of its batch. CHOICE: the function takes the whole batch and SKIPS A FOREIGN-KEY
+                   FAILURE PER ENTRY (a plpgsql sub-block per entry, which is a savepoint), so the Java side stays at
+                   one routine call per flush. It is not one entry per call. The return value is the number of entries
+                   written (inserted or refreshed), so a caller sees a skipped entry as a shortfall against the batch
+                   size. An entry is also skipped, and not counted, when its vector is not 384, 768 or 1024 dimensional
+                   or carries a NULL collection, model or digest; a vector that does not parse is an error, and fails
+                   the call, because it is a defect in the caller and not a race with a delete.
+
+                   The vectors travel as pgvector text literals ('[0.1,0.2,...]'), because a jOOQ routine takes a text
+                   array and nothing else is needed: the function casts each one to nexus.vector. added_at is
+                   clock_timestamp() per entry, so entries of one batch have distinct, ordered times and a ring kept to
+                   its 32 newest drops the oldest of an over-long batch and not a random one (ties on added_at break on
+                   the digest). SECURITY INVOKER with a pinned search_path (the vectors-046 trigger function shape):
+                   row-level security applies to the caller's tenant, and a call under tenant B naming tenant A fails
+                   (the WITH CHECK refuses the row; the tenant argument must equal the session's).
+
+    A scalar-returning function generates no jOOQ Record class, so this changeset adds ONE Record type to
+    JooqRecordReflectionFeatureTest (the table's CanaryQueryRingRecord).
+
+    The table has a collection column, so it joins CatalogRepository.COLLECTION_SCOPED_TABLES (a rename and a re-home
+    carry its rows), CROSS_MODEL_DISPOSITIONS (LEAVE: the ring is not copied across a re-embed) and AUDIT_ONLY_TABLES
+    (rows in it alone do not make a collection non-empty, so the ghost sweep removes a registry row that only the
+    ring names). CREATE TABLE / CREATE POLICY / CREATE FUNCTION / GRANT EXECUTE, no DATA EFFECT. After
+    aspects-005-retire-aspect-queue-table.xml (current tail; vectors-053 is the last file of this family), before the
+    grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-054-1" author="nexus-4lnn1.1.2">
+        <comment>Creates nexus.canary_query_ring (RDR-230: the recall canary's persisted query ring, one row per distinct query vector per collection) with exactly-one-embedding and digest-length CHECKs, a primary key on (tenant_id, collection, vector_digest), an ON DELETE CASCADE foreign key to catalog_collections (tenant_id, name, embedding_model), and tenant RLS (ENABLE + FORCE + tenant_isolation). A new table, so no data mutation of existing rows.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.canary_query_ring (
+    tenant_id       TEXT                 NOT NULL,
+    collection      TEXT                 NOT NULL,
+    embedding_model TEXT                 NOT NULL,
+    embedding_384   nexus.vector(384),
+    embedding_768   nexus.vector(768),
+    embedding_1024  nexus.vector(1024),
+    vector_digest   BYTEA                NOT NULL,
+    added_at        TIMESTAMPTZ          NOT NULL,
+    CONSTRAINT canary_query_ring_pk PRIMARY KEY (tenant_id, collection, vector_digest),
+    CONSTRAINT canary_query_ring_exactly_one_embedding
+        CHECK (num_nonnulls(embedding_384, embedding_768, embedding_1024) = 1),
+    CONSTRAINT canary_query_ring_digest_len CHECK (octet_length(vector_digest) = 32),
+    CONSTRAINT canary_query_ring_collection_fk
+        FOREIGN KEY (tenant_id, collection, embedding_model)
+        REFERENCES nexus.catalog_collections (tenant_id, name, embedding_model)
+        ON DELETE CASCADE
+);
+
+ALTER TABLE nexus.canary_query_ring ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.canary_query_ring FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.canary_query_ring
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                DROP POLICY IF EXISTS tenant_isolation ON nexus.canary_query_ring;
+                DROP TABLE IF EXISTS nexus.canary_query_ring;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-054-2" author="nexus-4lnn1.1.2">
+        <comment>nexus.canary_query_ring_upsert(tenant, collections, models, vectors, digests) RETURNS integer (RDR-230): upserts each entry of a batch into its collection's ring (insert, or refresh added_at when the digest is already there), skipping an entry whose collection is gone (foreign-key failure per entry, S6) or whose vector has an unsupported dimension, then trims every ring it wrote to the 32 newest rows younger than 30 days. SECURITY INVOKER with a pinned search_path, so RLS applies. One new function and its GRANT EXECUTE; no data effect: a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.canary_query_ring_upsert(
+    p_tenant      text,
+    p_collections text[],
+    p_models      text[],
+    p_vectors     text[],
+    p_digests     bytea[]
+) RETURNS integer
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_n       integer := coalesce(cardinality(p_digests), 0);
+    v_written integer := 0;
+    v_vec     nexus.vector;
+    v_dims    integer;
+    v_rings   text[]  := ARRAY[]::text[];
+    v_ring    text;
+    i         integer;
+BEGIN
+    IF coalesce(cardinality(p_collections), 0) <> v_n
+       OR coalesce(cardinality(p_models), 0)  <> v_n
+       OR coalesce(cardinality(p_vectors), 0) <> v_n THEN
+        RAISE EXCEPTION 'canary_query_ring_upsert: the four arrays must have the same length'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    FOR i IN 1 .. v_n LOOP
+        CONTINUE WHEN p_collections[i] IS NULL OR p_models[i] IS NULL
+                      OR p_digests[i] IS NULL OR p_vectors[i] IS NULL;
+        v_vec  := p_vectors[i]::nexus.vector;
+        v_dims := nexus.vector_dims(v_vec);
+        CONTINUE WHEN v_dims NOT IN (384, 768, 1024);
+        BEGIN
+            IF v_dims = 384 THEN
+                INSERT INTO nexus.canary_query_ring
+                    (tenant_id, collection, embedding_model, embedding_384, vector_digest, added_at)
+                VALUES (p_tenant, p_collections[i], p_models[i], v_vec, p_digests[i], clock_timestamp())
+                ON CONFLICT (tenant_id, collection, vector_digest)
+                DO UPDATE SET added_at = EXCLUDED.added_at;
+            ELSIF v_dims = 768 THEN
+                INSERT INTO nexus.canary_query_ring
+                    (tenant_id, collection, embedding_model, embedding_768, vector_digest, added_at)
+                VALUES (p_tenant, p_collections[i], p_models[i], v_vec, p_digests[i], clock_timestamp())
+                ON CONFLICT (tenant_id, collection, vector_digest)
+                DO UPDATE SET added_at = EXCLUDED.added_at;
+            ELSE
+                INSERT INTO nexus.canary_query_ring
+                    (tenant_id, collection, embedding_model, embedding_1024, vector_digest, added_at)
+                VALUES (p_tenant, p_collections[i], p_models[i], v_vec, p_digests[i], clock_timestamp())
+                ON CONFLICT (tenant_id, collection, vector_digest)
+                DO UPDATE SET added_at = EXCLUDED.added_at;
+            END IF;
+            v_written := v_written + 1;
+            v_rings   := v_rings || p_collections[i];
+        EXCEPTION WHEN foreign_key_violation THEN
+            -- S6: the collection (or its model) is gone since the entry was enqueued. Skip this entry only.
+            NULL;
+        END;
+    END LOOP;
+
+    -- Trim each ring this call wrote to, in a fixed order (two concurrent calls take the same row locks in the
+    -- same order): keep the 32 newest by added_at (ties on the digest), and nothing older than 30 days.
+    FOR v_ring IN SELECT u.r FROM unnest(v_rings) AS u(r) GROUP BY u.r ORDER BY u.r LOOP
+        DELETE FROM nexus.canary_query_ring d
+         WHERE d.tenant_id = p_tenant
+           AND d.collection = v_ring
+           AND (d.added_at < clock_timestamp() - interval '30 days'
+                OR d.vector_digest NOT IN (
+                       SELECT k.vector_digest
+                         FROM nexus.canary_query_ring k
+                        WHERE k.tenant_id = p_tenant
+                          AND k.collection = v_ring
+                        ORDER BY k.added_at DESC, k.vector_digest
+                        LIMIT 32));
+    END LOOP;
+
+    RETURN v_written;
+END;
+$fn$;
+
+GRANT EXECUTE ON FUNCTION nexus.canary_query_ring_upsert(text, text[], text[], text[], bytea[]) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+                REVOKE EXECUTE ON FUNCTION nexus.canary_query_ring_upsert(text, text[], text[], text[], bytea[]) FROM nexus_svc;
+                DROP FUNCTION IF EXISTS nexus.canary_query_ring_upsert(text, text[], text[], text[], bytea[]);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

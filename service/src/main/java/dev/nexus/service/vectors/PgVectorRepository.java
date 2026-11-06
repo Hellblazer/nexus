@@ -348,10 +348,21 @@ public final class PgVectorRepository {
      * (VectorHandler, then the HTTP response) can see it too. The 2-arg constructor keeps
      * every existing {@code new Tokened<>(value, tokens)} call site (single-collection
      * routes, writes) compiling unchanged, with an empty list.
+     *
+     * <p>{@code queryVector} (nexus-4lnn1.1.3, RDR-230): the query vector the search computed with the collection it may
+     * enter the recall canary's query ring. Set by {@link #searchWithTokens}, {@link #hybridSearchWithTokens} and the four
+     * scoped searches ({@link #searchMetadataScopedWithTokens}, {@link #searchTopicScopedWithTokens}, {@link
+     * #searchGraphHopWithTokens}, {@link #searchAspectScopedWithTokens}); {@code null} everywhere else, and {@code null}
+     * on any of those routes that returned before it computed a vector. The handler passes it to {@link
+     * PciQueryRing#admit} after the response is sent.
      */
-    public record Tokened<T>(T value, long tokens, List<String> skippedCollections) {
+    public record Tokened<T>(T value, long tokens, List<String> skippedCollections, QueryVector queryVector) {
         public Tokened(T value, long tokens) {
-            this(value, tokens, List.of());
+            this(value, tokens, List.of(), null);
+        }
+
+        public Tokened(T value, long tokens, List<String> skippedCollections) {
+            this(value, tokens, skippedCollections, null);
         }
     }
 
@@ -1481,7 +1492,7 @@ public final class PgVectorRepository {
                                               ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri,
                                               true, ManifestPushdown.of(labelSplit.labels()), chashAllow);
         return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
-                             wide.tokens(), wide.skippedCollections());
+                             wide.tokens(), wide.skippedCollections(), wide.queryVector());
     }
 
     /** nexus-tko2w: stateless; answers the section_title / section_type / page_number where-keys from the manifest. */
@@ -1541,9 +1552,14 @@ public final class PgVectorRepository {
             chashAllow != null, chashAllow == null && wherePlan.manifest() != null ? wherePlan : null);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
+        // nexus-4lnn1.1.3: the vector for the recall canary's query ring. One collection: admitted to it. Several (one
+        // model, one statement): to the collection of the nearest row; none when the statement returned no row.
+        QueryVector ringVector = collectionNames.size() == 1
+            ? QueryVector.alone(model, embedResult.embeddings().get(0), collectionNames.get(0))
+            : new QueryVector(model, embedResult.embeddings().get(0), nearestCollection(result));
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
         enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows);
-        return new Tokened<>(rows, embedResult.tokens(), skippedCollections);
+        return new Tokened<>(rows, embedResult.tokens(), skippedCollections, ringVector);
     }
 
     /**
@@ -1674,6 +1690,26 @@ public final class PgVectorRepository {
                                                              ArmPhases phases,
                                                              boolean forceExact,
                                                              WherePlan manifestWhere) {
+        return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
+                                       rebindBeforeExactRerun, phases, forceExact, manifestWhere, null);
+    }
+
+    /**
+     * As above; {@code canary}, when not null, is the recall canary's HNSW statement (nexus-4lnn1.1.4, RDR-230): the
+     * statement, the settings batch and the router are the serving ones, and the canary's hook runs just before the
+     * statement (a forced EXPLAIN of this very statement under this transaction's settings).
+     * The plan check's sample is skipped, and the nexus-bq06h empty-page repair is not taken, so a walk that returns
+     * nothing is read as nothing rather than as the exact answer.
+     */
+    private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
+                                                             int dim, String[] colls,
+                                                             int nResults,
+                                                             java.util.function.IntSupplier statementTimeoutMs,
+                                                             boolean rebindBeforeExactRerun,
+                                                             ArmPhases phases,
+                                                             boolean forceExact,
+                                                             WherePlan manifestWhere,
+                                                             CanaryHook canary) {
         final long setupStartNanos = System.nanoTime();
         // RDR-227 Step 1: a statement over exactly one collection that has no valid per-collection index walks
         // the shared leaf index, filtered down to that collection, and stops at the first rows the filter
@@ -1749,7 +1785,7 @@ public final class PgVectorRepository {
                     result = ctx.selectFrom(fn).fetch();
                 } else {
                     ROUTED_HNSW.incrementAndGet();
-                    if (indexed) {
+                    if (indexed && canary == null) {
                         // RDR-227: a sampled arm (PciPlanCheck: the first arm of a new index, one per index per
                         // interval, one in DEFAULT_EVERY) asks the planner what it would do with this very
                         // statement, under this transaction's settings, and logs whether it chose the collection's
@@ -1766,11 +1802,16 @@ public final class PgVectorRepository {
                     // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
                     // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
                     // exactOnUnderReturn for the nexus-bq06h exact fallback.
-                    result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
-                                             manifestWhere != null, tenant, String.join(",", colls),
-                                             manifestWhere == null ? null
-                                                 : manifestQualifying(ctx, colls, manifestWhere, model, tenant,
-                                                                      true, null));
+                    if (canary != null) {
+                        canary.beforeStatement(ctx, () -> ctx.selectFrom(fn));
+                        result = ctx.selectFrom(fn).fetch();
+                    } else {
+                        result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
+                                                 manifestWhere != null, tenant, String.join(",", colls),
+                                                 manifestWhere == null ? null
+                                                     : manifestQualifying(ctx, colls, manifestWhere, model, tenant,
+                                                                          true, null));
+                    }
                 }
                 completed = true;
                 return result;
@@ -1847,6 +1888,103 @@ public final class PgVectorRepository {
                            .and(ch.collection().eq(DSL.any(colls)))
                            .limit(limit + 1)
                            .asTable("probe"));
+    }
+
+    // -- the recall canary's statements (nexus-4lnn1.1.4, RDR-230) ---------------------------------------------------
+
+    /**
+     * What the canary's HNSW statement does inside its transaction, just before it runs: when asked, an EXPLAIN of this
+     * very statement under the transaction's settings. The statement then runs on the same connection.
+     */
+    static final class CanaryHook {
+        private final boolean explain;
+        private final PciPlanCheck planCheck;
+        private final String index;
+        private final String collection;
+        volatile String plan;
+
+        CanaryHook(boolean explain, PciPlanCheck planCheck, String index, String collection) {
+            this.explain = explain;
+            this.planCheck = planCheck;
+            this.index = index;
+            this.collection = collection;
+        }
+
+        void beforeStatement(DSLContext ctx, java.util.function.Supplier<org.jooq.Select<?>> statement) {
+            if (explain) {
+                plan = planCheck.explainNow(ctx, statement.get(), index, collection);
+            }
+        }
+    }
+
+    /**
+     * The recall canary's statements: the serving search statement for one collection, through
+     * {@link #runPlainSearchStatement} (the settings batch, the router, the bound parameters, the tenant scope as
+     * {@code nexus_svc}), each statement holding one search permit like a fan-out arm. See {@link PciCanary}.
+     */
+    PciCanary.Statements canaryStatements() {
+        return canaryStatements(PciCanaryPolicy.PERMIT_WAIT);
+    }
+
+    /** As above with the permit wait given (a test shortens it). */
+    PciCanary.Statements canaryStatements(java.time.Duration permitWait) {
+        return new PciCanary.Statements() {
+            @Override
+            public PciCanary.Leg hnsw(PciCanary.Target target, float[] query, int k, boolean explain) {
+                return withCanaryPermit(permitWait, () -> {
+                    CanaryHook hook = new CanaryHook(explain, planCheck, target.index(), target.collection());
+                    ArmPhases phases = new ArmPhases();
+                    Result<? extends Record> result = canaryStatement(target, query, k, false, phases, hook);
+                    return new PciCanary.Leg(canaryHits(result), hook.plan, phases.exact);
+                });
+            }
+
+            @Override
+            public List<PciCanary.Hit> exact(PciCanary.Target target, float[] query, int k) {
+                return withCanaryPermit(permitWait, () ->
+                    canaryHits(canaryStatement(target, query, k, true, null, null)));
+            }
+        };
+    }
+
+    private Result<? extends Record> canaryStatement(PciCanary.Target target, float[] query, int k, boolean exact,
+                                                     ArmPhases phases, CanaryHook hook) {
+        dev.nexus.service.db.CollectionRow entry = CollectionRegistry.lookup(tenantScope, target.tenant(), target.collection());
+        if (!entry.embeddingModel().equals(target.model()) || entry.dimension() != query.length) {
+            throw new IllegalStateException("the collection is no longer the one the index was built for");
+        }
+        String[] colls = {target.collection()};
+        org.jooq.Table<?> fn = plainSearchFn(entry.dimension(), Vector.of(query), colls, planWhere(null), k,
+            entry.embeddingModel(), target.tenant());
+        return runPlainSearchStatement(target.tenant(), entry.embeddingModel(), fn, entry.dimension(), colls, k,
+            PgSession::startupSearchStatementTimeoutMs, false, phases, exact, null, hook);
+    }
+
+    private static List<PciCanary.Hit> canaryHits(Result<? extends Record> result) {
+        List<PciCanary.Hit> hits = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            hits.add(new PciCanary.Hit(rec.get("id", String.class), rec.get("distance", Double.class)));
+        }
+        return hits;
+    }
+
+    /** Run {@code work} holding one fan-out arm permit; refused when none frees within {@code wait}. */
+    private <T> T withCanaryPermit(java.time.Duration wait, java.util.function.Supplier<T> work) {
+        Semaphore gate = tenantScope.fanoutArmGate(
+            fanoutArmPermits(System.getenv(FANOUT_ARM_PERMITS_ENV), tenantScope.poolSize()));
+        try {
+            if (!gate.tryAcquire(wait.toNanos(), TimeUnit.NANOSECONDS)) {
+                throw new IllegalStateException("no search permit within " + wait.toMillis() + " ms");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted awaiting a search permit", e);
+        }
+        try {
+            return work.get();
+        } finally {
+            gate.release();
+        }
     }
 
     /** Statements routed exact / left on HNSW by the cardinality router (nexus-tu8wp.6). */
@@ -1963,6 +2101,23 @@ public final class PgVectorRepository {
         return row;
     }
 
+    /**
+     * The collection of the nearest row of a plain search statement, read from the jOOQ record (never from the row
+     * map, whose flattened metadata could shadow {@code distance} or {@code collection}); {@code null} for no rows.
+     */
+    private static String nearestCollection(Result<? extends Record> result) {
+        String nearest = null;
+        Double best = null;
+        for (Record rec : result) {
+            Double d = rec.get("distance", Double.class);
+            if (d != null && (best == null || d < best)) {
+                best = d;
+                nearest = rec.get("collection", String.class);
+            }
+        }
+        return nearest;
+    }
+
     private static List<Map<String, Object>> plainSearchRows(Result<? extends Record> result) {
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -2072,7 +2227,19 @@ public final class PgVectorRepository {
     public record PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
                                       long tokens, List<String> skippedCollections, int peakRetainedRows,
                                       int embeddingDim, List<Map<String, Object>> lexicalRows,
-                                      List<LexicalStat> lexical) {
+                                      List<LexicalStat> lexical, QueryVector queryVector) {
+        /**
+         * A result with no query-ring vector (nexus-4lnn1.1.3 adds {@code queryVector}: the query's vector with the
+         * one arm it may enter the recall canary's ring of, or {@code null}).
+         */
+        public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
+                                   long tokens, List<String> skippedCollections, int peakRetainedRows,
+                                   int embeddingDim, List<Map<String, Object>> lexicalRows,
+                                   List<LexicalStat> lexical) {
+            this(rows, perCollection, tokens, skippedCollections, peakRetainedRows, embeddingDim, lexicalRows,
+                 lexical, null);
+        }
+
         /** A result of a request that did not ask for the lexical leg. */
         public PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
                                    long tokens, List<String> skippedCollections, int peakRetainedRows,
@@ -2780,7 +2947,8 @@ public final class PgVectorRepository {
             lexicalStats = kept;
         }
         return new PerCollectionResult(rows, wide.perCollection(), wide.tokens(), wide.skippedCollections(),
-                                       wide.peakRetainedRows(), wide.embeddingDim(), lexicalRows, lexicalStats);
+                                       wide.peakRetainedRows(), wide.embeddingDim(), lexicalRows, lexicalStats,
+                                       wide.queryVector());
     }
 
     /** {@link #searchPerCollection} for a {@code where} that carries none of the manifest-answered label keys. */
@@ -3048,7 +3216,29 @@ public final class PgVectorRepository {
                      lexicalStats.stream().filter(s -> s.error() != null).count(), slowestLexicalMs, sumLexicalMs);
         }
         return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained(),
-                                       includeEmbeddings ? queryDim : 0, lexicalRows, lexicalStats);
+                                       includeEmbeddings ? queryDim : 0, lexicalRows, lexicalStats,
+                                       ringVector(model, qv, stats));
+    }
+
+    /**
+     * nexus-4lnn1.1.3 (RDR-230): the vector and the arm it may enter the recall canary's query ring of. A request
+     * that searched one collection admits to it if its arm answered (an arm that failed may have had a vector of
+     * the wrong width). A fan-out admits to the arm that returned the nearest row, by the arm's smallest RAW distance
+     * (before its threshold), so the choice does not move with a client's cut.
+     */
+    private static QueryVector ringVector(String model, float[] vector, List<PerCollectionStat> stats) {
+        if (stats.size() == 1) {
+            PerCollectionStat only = stats.get(0);
+            return only.errorKind() == null ? QueryVector.alone(model, vector, only.collection())
+                                            : new QueryVector(model, vector, null);
+        }
+        List<String> names = new ArrayList<>(stats.size());
+        List<Double> distances = new ArrayList<>(stats.size());
+        for (PerCollectionStat st : stats) {
+            names.add(st.collection());
+            distances.add(st.errorKind() == null ? st.minRawDistance() : null);
+        }
+        return QueryVector.nearestOf(model, vector, names, distances);
     }
 
     /** Row key of a survivor's stored vector: base64 of its little-endian float32 components. */
@@ -3472,11 +3662,12 @@ public final class PgVectorRepository {
         var labelSplit = ManifestLabelStage.split(where);
         long[] tokensOut = {0L};
         List<String> skippedOut = new ArrayList<>();
+        QueryVector[] ringOut = {null};
         List<Map<String, Object>> rows = hybridSearch(
             tenant, queryText, collectionNames,
             labelSplit.active() ? ManifestLabelStage.widen(nResults) : nResults,
             labelSplit.rest(), selectiveGateMax, tokensOut, skippedOut,
-            labelSplit.active() ? ManifestPushdown.of(labelSplit.labels()) : null, chashAllow);
+            labelSplit.active() ? ManifestPushdown.of(labelSplit.labels()) : null, chashAllow, ringOut);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in).
         // Enrichment runs BEFORE the label stage (nexus-tko2w): it resolves ONE owner's source_uri per
         // chash and writes it on every row of that chash, so a stage that had already expanded a shared
@@ -3487,7 +3678,7 @@ public final class PgVectorRepository {
         if (labelSplit.active()) {
             rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
         }
-        return new Tokened<>(rows, tokensOut[0], skippedOut);
+        return new Tokened<>(rows, tokensOut[0], skippedOut, ringOut[0]);
     }
 
     /**
@@ -3519,7 +3710,8 @@ public final class PgVectorRepository {
                                            int nResults,
                                            Map<String, Object> where,
                                            int selectiveGateMax) {
-        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null, null, null);
+        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null, null, null,
+                            null);
     }
 
     /**
@@ -3548,7 +3740,8 @@ public final class PgVectorRepository {
                                            long[] tokensOut,
                                            List<String> skippedOut,
                                            ManifestPushdown.Plan manifest,
-                                           byte[][] chashAllow) {
+                                           byte[][] chashAllow,
+                                           QueryVector[] ringOut) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -3595,6 +3788,13 @@ public final class PgVectorRepository {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx ->
             hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
                        model, tenant, PgSession::startupSearchStatementTimeoutMs, false, chashAllow));
+        if (ringOut != null) {
+            // nexus-4lnn1.1.7: the recall canary's query ring, by the rule /search follows. The rows are the text-gated
+            // ones, so on a fan-out the nearest gated row names the arm.
+            ringOut[0] = new java.util.LinkedHashSet<>(collectionNames).size() == 1
+                ? QueryVector.alone(model, hybridEmbed.embeddings().get(0), collectionNames.get(0))
+                : new QueryVector(model, hybridEmbed.embeddings().get(0), nearestCollection(result));
+        }
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -4465,8 +4665,25 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
-                             embed.tokens(), skippedCollections);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
+        return new Tokened<>(rows, embed.tokens(), skippedCollections,
+                             scopedRingVector(model, embed.embeddings().get(0), collectionNames));
+    }
+
+    /**
+     * nexus-4lnn1.1.7 (RDR-230, fix round 2): the vector of a metadata-, aspect- or graph-hop-scoped search and the
+     * collection it may enter the recall canary's query ring of. Exactly one distinct collection: admitted to it.
+     * Several: admitted to none ({@code null}). These routes rank only the rows that pass a metadata, aspect or link
+     * predicate, so the nearest <i>filtered</i> row can sit in a collection the query is far from, and a far query
+     * scores about 0.975 to 0.983 on a correct index (RDR-227): admitting by nearest row would make false reds. The
+     * unfiltered fan-outs ({@link #searchWithTokens}, {@link #hybridSearchWithTokens}) keep the nearest-arm rule, which
+     * sees every arm's own nearest row.
+     */
+    private static QueryVector scopedRingVector(String model, float[] vector, List<String> collections) {
+        var distinct = new java.util.LinkedHashSet<>(collections);
+        return distinct.size() == 1
+            ? QueryVector.alone(model, vector, distinct.iterator().next())
+            : new QueryVector(model, vector, null);
     }
 
     /**
@@ -4573,8 +4790,9 @@ public final class PgVectorRepository {
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         // countable = false: the aspect join can give one occurrence several rows (runCombinedQueryWithChash).
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false),
-                             embed.tokens(), skippedCollections);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false);
+        return new Tokened<>(rows, embed.tokens(), skippedCollections,
+                             scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
 
     /**
@@ -4615,7 +4833,8 @@ public final class PgVectorRepository {
             case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens());
+        return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens(), List.of(),
+                             QueryVector.alone(model, embed.embeddings().get(0), collection));
     }
 
     /**
@@ -4723,8 +4942,9 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
-                             embed.tokens(), skippedCollections);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
+        return new Tokened<>(rows, embed.tokens(), skippedCollections,
+                             scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
 
     /**

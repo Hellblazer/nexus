@@ -177,17 +177,19 @@ def _simple(n: int = 3, **kw: Any) -> ResolveDispatcher:
 # ── the switch ────────────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_the_switch_is_off_by_default_and_a_boundary_does_not_resolve_unless_told() -> None:
-    assert switches.ANSWER_RESOLUTION_REPAIR_ENABLED is False
-    assert switches.resolution_repair_enabled({}) is False
+def test_the_switch_is_on_by_default_and_a_bare_boundary_does_not_resolve_unless_told() -> None:
+    # RDR-147 Phase 2 (Sam, 2026-11-06, nexus-bwct4.2): the shipped default is on; the boundary's own field stays False
+    # so only the runner, reading the switch, turns the branch on.
+    assert switches.ANSWER_RESOLUTION_REPAIR_ENABLED is True
+    assert switches.resolution_repair_enabled({}) is True
     assert CoverageBoundary(request=None).resolution_repair is False
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
     ("1", True), ("true", True), ("YES", True), (" on ", True),
-    ("", False), ("0", False), ("off", False), ("garbage", False),
+    ("", True), ("  ", True), ("0", False), ("off", False), ("NO", False), ("garbage", False),
 ])
-def test_the_switch_reads_one_as_on_and_everything_else_as_off(raw: str, expected: bool) -> None:
+def test_the_switch_reads_unset_and_on_values_as_on_and_off_or_unrecognised_as_off(raw: str, expected: bool) -> None:
     switches.reset_warned()
     assert switches.resolution_repair_enabled({switches.ANSWER_RESOLUTION_REPAIR_ENV: raw}) is expected
 
@@ -425,6 +427,29 @@ async def test_a_malformed_entity_config_is_not_entered_and_never_escapes_the_bo
     assert d.resolve_calls() == [] and cov.repair.outcome == "completed" and len(d.repair_searches()) == 1
 
 
+@pytest.mark.parametrize("confined", [False, True])
+@pytest.mark.asyncio
+async def test_with_no_entity_config_at_all_the_switch_on_repair_is_the_switch_off_repair(
+    monkeypatch: pytest.MonkeyPatch, confined: bool,
+) -> None:
+    """RDR-147 Phase 2 turned the switch on by default (nexus-bwct4.2). An install with no ``entity.collections`` must
+    see the repair and its wire exactly as before RDR-147: no resolution keys, no reason (not even ``confined_run``),
+    no catalog call."""
+    real = _config.load_config
+    monkeypatch.setattr(_config, "load_config", lambda *a, **k: {x: v for x, v in real(*a, **k).items() if x != "entity"})
+    kw: dict[str, Any] = {}
+    if confined:
+        kw["confinement"] = SimpleNamespace(contains=lambda key: True, sends_filter=False, allow_list=lambda: [])
+    d_on, d_off = _simple(2), _simple(2)
+    cov_on = _cov(await _run(d_on, on(**kw)))
+    cov_off = _cov(await _run(d_off, CoverageBoundary(request=_request(3), resolution_repair=False, **kw)))
+    assert len(cov_on.ledger.anchors) >= 2, "the ledger has anchors to scan, so a scan would have reported them"
+    assert (cov_on.repair.resolution_entered, cov_on.repair.resolution_reason) == (False, "")
+    assert _wire(cov_on.repair) == _wire(cov_off.repair)
+    assert not any(k.startswith("resolution_") or k.startswith("anchors_") for k in cov_on.repair.to_wire())
+    assert d_on.resolve_calls() == []
+
+
 @pytest.mark.asyncio
 async def test_a_run_confined_to_one_document_does_not_enter_and_says_why() -> None:
     """A joined item carries another document's record text under a new chash, so it fails the confinement's own
@@ -576,7 +601,7 @@ async def test_the_envelope_coverage_object_carries_the_repair_fields_end_to_end
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("value", "expected"), [(None, False), ("", False), ("0", False), ("1", True), ("off", False)])
+@pytest.mark.parametrize(("value", "expected"), [(None, True), ("", True), ("0", False), ("1", True), ("off", False)])
 async def test_nx_answer_hands_the_boundary_the_switch_it_reads_from_the_environment(monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool) -> None:
 
     monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "1")

@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.LeafBloatCatalog;
 import dev.nexus.service.vectors.LeafBloatSweep;
+import dev.nexus.service.vectors.PciMaintenanceStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,6 +46,12 @@ import java.util.function.Supplier;
  * one of them kept its size from being read; unknown is never 0), {@code pci_index_count} how many.
  * A leaf that is merely {@code waiting} is not listed (a vacuum may be running); {@code leaves_total} says how many
  * the last read saw.
+ *
+ * <p><b>The recall canary's index list (RDR-230 Phase 1, Sam, 2026-11-06).</b> {@code canary_indexes} is the per-index
+ * list that {@code GET /v1/status} does not carry (it is unauthenticated and names no {@code pci_} index): at most 64
+ * entries of {@link PciMaintenanceStatus.Entry#wire()}, red first, then unmeasured, then green, from the reconciler's
+ * memory. The key is absent when no canary source is wired, and an empty array when one is wired and has measured
+ * nothing; it sits behind the same operator check as every other row here.
  */
 public final class ChunksLeavesHandler implements HttpHandler {
 
@@ -56,15 +63,20 @@ public final class ChunksLeavesHandler implements HttpHandler {
 
     private final Supplier<LeafBloatSweep.Status> sweep;
     private final Supplier<Long> sweepSeconds;
+    private final Supplier<PciMaintenanceStatus> canary;
 
     /**
      * @param sweep        the leaf bloat sweep's view, from memory; null (or a supplier answering null) before the
      *                     sweep exists, which the route answers as 503
      * @param sweepSeconds the sweep period, for the reader to judge how old a read may be
+     * @param canary       the recall canary's status, from the reconciler's memory; null (or a supplier answering
+     *                     null) when no canary is wired, which omits {@code canary_indexes}
      */
-    public ChunksLeavesHandler(Supplier<LeafBloatSweep.Status> sweep, Supplier<Long> sweepSeconds) {
+    public ChunksLeavesHandler(Supplier<LeafBloatSweep.Status> sweep, Supplier<Long> sweepSeconds,
+                               Supplier<PciMaintenanceStatus> canary) {
         this.sweep = sweep;
         this.sweepSeconds = sweepSeconds;
+        this.canary = canary;
     }
 
     @Override
@@ -83,11 +95,17 @@ public final class ChunksLeavesHandler implements HttpHandler {
             HttpUtil.send(ex, 503, "{\"error\":\"the chunks leaf bloat sweep is not running yet\"}");
             return;
         }
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(body(status, sweepSeconds == null ? null : sweepSeconds.get())));
+        PciMaintenanceStatus maintenance = canary == null ? null : canary.get();
+        HttpUtil.send(ex, 200,
+            MAPPER.writeValueAsString(body(status, sweepSeconds == null ? null : sweepSeconds.get(), maintenance)));
     }
 
-    /** The response body for {@code status}; package-visible so a test can read it without a server. */
-    static Map<String, Object> body(LeafBloatSweep.Status status, Long sweepSeconds) {
+    /**
+     * The response body for {@code status}; package-visible so a test can read it without a server.
+     *
+     * @param maintenance the canary's status, or null to omit {@code canary_indexes}
+     */
+    static Map<String, Object> body(LeafBloatSweep.Status status, Long sweepSeconds, PciMaintenanceStatus maintenance) {
         var rows = new ArrayList<Map<String, Object>>();
         for (LeafBloatSweep.LeafStatus l : status.leaves()) {
             List<String> problems = l.problems();
@@ -119,6 +137,10 @@ public final class ChunksLeavesHandler implements HttpHandler {
         body.put("leaves_total", status.leaves().size());
         body.put("needing_attention", rows.size());
         body.put("leaves", rows);
+        if (maintenance != null) {
+            body.put("canary_indexes",
+                maintenance.canary().indexes().stream().map(PciMaintenanceStatus.Entry::wire).toList());
+        }
         return body;
     }
 

@@ -339,22 +339,40 @@ public final class StatusHandler implements HttpHandler {
          *                      non-holder)
          * @param passInProgress whether a lock-holding pass is in flight, so a long first pass is visible while
          *                      {@code lastDdlPassAt} is still null
+         * @param maintenance   nexus-4lnn1.1.5 ([additive], RDR-230 Technical Design 7): the {@code maintenance}
+         *                      object, the canary's latest results and the reindex half (off in Phase 1). Null omits
+         *                      the key: an engine, or a wiring, with no canary source. Entries carry the opaque
+         *                      {@code pci_} name and no collection or tenant name, because this route is
+         *                      unauthenticated: it renders the canary's counts only, not its per-index entries.
          */
         public record ThisEngine(String builderState, Integer building, Integer failing,
                                  java.time.Instant lastDdlPassAt, java.time.Instant passStartedAt,
-                                 boolean passInProgress) {
+                                 boolean passInProgress,
+                                 dev.nexus.service.vectors.PciMaintenanceStatus maintenance) {
+            public ThisEngine(String builderState, Integer building, Integer failing, java.time.Instant lastDdlPassAt,
+                              java.time.Instant passStartedAt, boolean passInProgress) {
+                this(builderState, building, failing, lastDdlPassAt, passStartedAt, passInProgress, null);
+            }
+
             public ThisEngine(String builderState, Integer building, Integer failing, java.time.Instant lastDdlPassAt) {
                 this(builderState, building, failing, lastDdlPassAt, null, false);
             }
         }
 
-        /** The object as the sweep's last read and the reconciler's status say it. */
+        /** The object as the sweep's last read and the reconciler's status say it, with no maintenance object. */
         public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
                                               dev.nexus.service.vectors.PciReconciler.DdlStatus ddl) {
+            return of(sweep, ddl, null);
+        }
+
+        /** As above with the {@code maintenance} object; a null one omits the key. */
+        public static PerCollectionIndexes of(dev.nexus.service.vectors.PciIndexSweep.Status sweep,
+                                              dev.nexus.service.vectors.PciReconciler.DdlStatus ddl,
+                                              dev.nexus.service.vectors.PciMaintenanceStatus maintenance) {
             return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(),
                 sweep.reindexLeftover(), sweep.lastReadAt(), sweep.expired(),
                 new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt(),
-                    ddl.passStartedAt(), ddl.passInProgress()),
+                    ddl.passStartedAt(), ddl.passInProgress(), maintenance),
                 ddl.sweepSeconds());
         }
     }
@@ -644,6 +662,29 @@ public final class StatusHandler implements HttpHandler {
         body.append(",\"pass_started_at\":");
         appendSeconds(body, p.thisEngine().passStartedAt());
         body.append(",\"pass_in_progress\":").append(p.thisEngine().passInProgress());
+        if (p.thisEngine().maintenance() != null) {
+            appendMaintenance(body, p.thisEngine().maintenance());
+        }
+        body.append("}}");
+    }
+
+    /**
+     * nexus-4lnn1.1.5 ([additive]): {@code this_engine.maintenance}. Counts only: this route is unauthenticated, so the
+     * canary's per-index entries (the {@code pci_} names) are not rendered here; they are the {@code canary_indexes} key
+     * of the authenticated {@code GET /v1/admin/chunks-leaves} (Sam, 2026-11-06).
+     */
+    private static void appendMaintenance(StringBuilder body, dev.nexus.service.vectors.PciMaintenanceStatus m) {
+        body.append(",\"maintenance\":{\"reindex\":").append(HttpUtil.jsonString(m.reindex()))
+            .append(",\"reindexing\":").append(m.reindexing() == null ? "null" : HttpUtil.jsonString(m.reindexing()))
+            .append(",\"last_reindex_at\":");
+        appendSeconds(body, m.lastReindexAt());
+        var c = m.canary();
+        body.append(",\"reindexes\":").append(m.reindexes())
+            .append(",\"canary\":{\"green\":").append(c.green())
+            .append(",\"red\":").append(c.red())
+            .append(",\"unmeasured\":").append(c.unmeasured())
+            .append(",\"last_run_at\":");
+        appendSeconds(body, c.lastRunAt());
         body.append("}}");
     }
 

@@ -176,7 +176,11 @@ migration_wal_bytes_per_worker = 11038000
 # grants on the queue table and its BIGSERIAL sequence (-2). Measured: laptop, 2026-11-05, scoped substrate run of
 # tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2271. (The 2026-11-04 figure of +4 predates the
 # review fix round that added the foreign-key swap and the in-transaction recount.)
-migration_ddl_per_worker = 2271
+# 2271 -> 2278 (2026-11-06, after aspects-005 above): vectors-054-1..2 (nexus-4lnn1.1.2, RDR-230 the recall canary's persisted query ring) add 7 DDL statements to a fresh migration:
+# 1 CREATE TABLE (canary_query_ring), ENABLE and FORCE ROW LEVEL SECURITY and 1 CREATE POLICY; 1 CREATE FUNCTION (canary_query_ring_upsert) and its GRANT EXECUTE to nexus_svc. That is 6 statements in the
+# changeset; the measured 7 is those 6 plus 1 from the runAlways grants loop for the new table (the table grant; no sequence, so one and not catalog-047's two).
+# Measured: chas (lab-m via lab-remote), 2026-11-06, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2278.
+migration_ddl_per_worker = 2278
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
