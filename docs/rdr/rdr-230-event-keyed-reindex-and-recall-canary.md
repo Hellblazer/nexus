@@ -794,26 +794,37 @@ catalog query on the route, RDR-227's rule):
   "reindex": "on", "reindexing": null,
   "last_reindex_at": "2026-10-20T08:00:00Z", "reindexes": 2,
   "canary": {
-    "green": 4, "red": 0, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z",
-    "indexes": [
-      {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null,
-       "queries": 10, "min_recall": 0.983, "mean_recall": 0.998, "top1_misses": 0,
-       "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z",
-       "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.03}
-    ]
+    "green": 4, "red": 0, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z"
   }
 }
 ```
 
 `reindex` is `on` or `off`; `reindexing` is the index name in flight on the
-holder or null. Entries are keyed by the opaque `pci_` name and carry no
-collection or tenant name, because `/v1/status` is unauthenticated and its
-existing counts are global (RDR-227 Day 2 Operations); the log lines carry the
-names for operators. The list is capped at 64 entries, red first. Results are
+holder or null. `/v1/status` is unauthenticated, so it carries counts only and
+names no `pci_` index (Sam, 2026-10-19, `StatusHandler`; and 2026-11-06, ask
+`pci-names-on-status`, option b): a `pci_` name is an unsalted hash of tenant and
+collection, so a caller who guesses a pair could confirm it exists. The
+per-index list goes on the operator-only `GET /v1/admin/chunks-leaves` as
+`canary_indexes`, absent when no canary source is wired:
+
+```json
+"canary_indexes": [
+  {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null,
+   "queries": 10, "min_recall": 0.983, "mean_recall": 0.998, "top1_misses": 0,
+   "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z",
+   "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.03}
+]
+```
+
+Entries carry no collection or tenant name; the log lines carry the names for
+operators. The list is capped at 64 entries, red first, then unmeasured, then
+green. `size_ratio` is null for an adopted index (its anchor is not a build
+figure), and `deletes_since_build` counts from the anchor, so for an adopted
+index it counts since adoption. Results are
 this engine's own history and stay after it becomes a standby, like
 `last_ddl_pass_at`; an engine that has never held the lock reports zeros and an
 empty list. A client against an engine that predates the key finds none and
-reports not-applicable. The key goes in the wire ledger
+reports not-applicable. The two keys go in the wire ledger
 (`docs/wire-contract-pending.md`) and the client fixture
 (`tests/fixtures/pci_status_bodies.json`); the doctor row that reads it, and
 warns on a red canary, is nexus-dxsjc's.
@@ -1142,8 +1153,10 @@ is test-first: its failing test lands first in the same branch.
   forced to a degraded walk by a test hook; `unmeasured` with too few queries and
   with the index unused; a canary statement takes a search permit.
 - P1.4 The `maintenance` status object (canary half, `reindex` reads `off`):
-  `StatusHandler`, the wire ledger, the client fixture. Test: the key is absent
-  when no source is wired, as RDR-227's is.
+  `StatusHandler` (counts only) and `canary_indexes` on
+  `GET /v1/admin/chunks-leaves`, the wire ledger, the client fixture. Tests:
+  each key is absent when no source is wired, as RDR-227's is; the
+  `/v1/status` body names no `pci_` index.
 - P1.5 Substrate measurement of A3: bytes per row under ingest to twice the
   built size, and under 25% and 50% churn, before and after `VACUUM`. Results in
   T2 and in the bead.
@@ -1192,10 +1205,10 @@ after P1.4.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Anchor comments | `obj_description` on `pci_` indexes | the status entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
+| Anchor comments | `obj_description` on `pci_` indexes | the `canary_indexes` entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
 | Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the doctor row (nexus-dxsjc) | logs |
 | REINDEX | status `reindexing`, `last_reindex_at` | `event=pci_ddl_done op=reindex took_ms=` | N/A | `reindex_leftover` returns to 0 | N/A |
-| Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the status entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
+| Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the `canary_indexes` entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
 
 To stop maintenance without stopping builds, set `NX_SEARCH_PCI_REINDEX=0` and
 restart the engine.
@@ -1410,3 +1423,4 @@ bulk delete, both on an existing session under an existing lock.
   (30 days; `-23` to `-28`).
 - 2026-11-03: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `95d6388ef`; critique `nexus_rdr/230-gate-critique-2026-11-03-r1`.
 - 2026-11-06: Wording brought to the reviewed Phase 1 code (nexus-4lnn1.1.7): the seven admitting routes and the single-collection rule for the filtered scoped routes; the 30-day delete's typed per-tenant statement and its tenant source, leaf tenants included; a cross-model re-home deletes the source's ring; the anchor-changed recount trigger; the canary error retry wait.
+- 2026-11-06: Technical Design 7 follows Sam's answer to ask `pci-names-on-status` (option b): `/v1/status` carries the canary counts only, and the per-index list is `canary_indexes` on `GET /v1/admin/chunks-leaves`; adopted-index `size_ratio` is null and `deletes_since_build` counts since adoption.
