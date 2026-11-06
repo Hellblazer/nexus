@@ -848,28 +848,22 @@ def test_render_sets_cut_only_from_the_work_directory_when_the_proposal_lacks_th
     brief_ok(prose, "rmtmp", str(work))
 
 
-def test_a_cut_only_render_opens_no_viewer_while_an_ordinary_render_does(prose: Prose, tmp_path: Path) -> None:
-    """The copy has no reader in a prose-cut run, so a stored viewer is neither asked for nor started; an ordinary
-    run's Typora review is unchanged."""
-    prose.ok("viewer", "--set", "Typora")
-    opener = tmp_path / "opener.py"
-    log = tmp_path / "opened.json"
-    opener.write_text(f"import json, sys\nopen({str(log)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-    env = {**prose.env, "PROSE_EDIT_OPEN": f"{sys.executable} {opener}"}
+def test_a_cut_only_render_is_marked_cut_only_and_an_ordinary_render_is_not(prose: Prose, tmp_path: Path) -> None:
+    """Neither render writes a copy or opens a viewer (the review is in MarkupEditor, nexus-scmcs.2.11); the
+    cut-only one records cut_only in session.json, which turns on the extra html protections and the apply refusal."""
     (prose.cwd / "docs" / "cut.md").write_text(DOC, encoding="utf-8")
     work, _ = _session(prose, _card(tmp_path), [CUT1])
-    proc = run_review(prose, "render", "docs/cut.md", "--work", str(work), "--genre", "reference-doc", env=env)
+    proc = run_review(prose, "render", "docs/cut.md", "--work", str(work), "--genre", "reference-doc")
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
-    assert out["viewer"] is None and out["opened"] is False and not log.exists()
+    assert not {"viewer", "opened", "copy"} & set(out), out
     assert json.loads((work / "session.json").read_text(encoding="utf-8"))["cut_only"] is True
     brief_ok(prose, "rmtmp", str(work))
     plain = Path(brief_ok(prose, "tmpdir").strip())
     brief_ok(prose, "filter", "docs/cut.md", "--save", str(plain / "filtered.json"), stdin=fenced(proposal([CUT1])))
-    proc = run_review(prose, "render", "docs/cut.md", "--work", str(plain), "--genre", "reference-doc", env=env)
+    proc = run_review(prose, "render", "docs/cut.md", "--work", str(plain), "--genre", "reference-doc")
     assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    assert out["viewer"] == "Typora" and out["opened"] is True and json.loads(log.read_text()) == ["Typora", out["copy"]]
+    assert not {"viewer", "opened", "copy"} & set(json.loads(proc.stdout))
     assert "cut_only" not in json.loads((plain / "session.json").read_text(encoding="utf-8"))
     brief_ok(prose, "rmtmp", str(plain))
 
