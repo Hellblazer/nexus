@@ -8,7 +8,7 @@
 # automation token (RDR-219); nothing is written to the operator's ~/.claude, and no
 # token, env dump or config file is printed.
 #
-#   tests/e2e/restart-sessions/run.sh [--model sonnet] [--keep] [--scenario roll|variant|abort|gate ...]
+#   tests/e2e/restart-sessions/run.sh [--model sonnet] [--keep] [--scenario roll|variant|abort|gate|pane ...]
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
