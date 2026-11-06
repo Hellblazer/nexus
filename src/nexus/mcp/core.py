@@ -3014,8 +3014,13 @@ def _tidy_prefetch(topic: str, collection: str, *, sensitivity: ReadSensitivity)
         try:
             refused = set(flagged_owners_of_chashes([str(i) for i in ids]))
         except SensitivityUnknown as exc:
+            # RDR-243 review r1 F6: a catalog outage is not a finding that the entries are sensitive. Nothing is
+            # sent to the model (fail closed), and the caller is told the check could not run, as a failure.
             _log.warning("tidy_prefetch_sensitivity_unknown", matched=len(ids), error=exc.detail)
-            refused = {str(i) for i in ids}
+            return "", 0, (
+                f"the sensitivity check was unavailable ({exc.detail}); nothing was consolidated, "
+                "so the collection's contents for this topic are UNKNOWN"
+            ), False, 0
         if refused:
             _log.info("tidy_prefetch_sensitive_withheld", withheld=len(refused), matched=len(ids))
             per_id_cols = len(cols) == len(ids)
