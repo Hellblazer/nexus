@@ -133,7 +133,11 @@ step that checks whether the evidence supports each part of the question, called
 a *facet*, before the final answer is generated). Its one *repair* (a second,
 targeted retrieval for unsupported facets) runs semantic queries on the facet's
 text. For an exact-key join that repeats the embedding collision of Gap 2. The
-gap is that the repair has no exact-key path.
+gap is that the repair has no exact-key path. **As built:** the exact-key branch
+scans the coverage anchors only, not all retrieved evidence. On HERB the backend
+search-engine issue question holds 8 customer ids in its evidence and none in its
+anchors in every MVV run, so it is still declined (147-research-13, -14, -17);
+widening the scan was left out of this RDR (Sam, 2026-11-06, nexus-z938f closed).
 
 #### Gap 4: No gating; blanket iteration harms simple questions
 
@@ -413,7 +417,7 @@ the script, so recall alone does not make the answer better than the script's.
   its key, and a caller-set `entity_key` that differs from the title is read by
   nothing until the conditional linker or a meta-key filter exists
   (147-research-11).
-- [ ] **#2 A post-store batch hook can create catalog links** — **Status**: To
+- [deferred: nexus-81183] **#2 A post-store batch hook can create catalog links** — **Status**: To
   re-verify on the PG engine (Step 2, only if the linker is built). The June
   verification reasoned about the T2 daemon's `asyncio.Lock` and an `fcntl` lock
   that no longer exist. The current precedent is `fire_note_chains` firing with
@@ -471,8 +475,8 @@ with a coverage boundary (147-research-15, 147-research-16).
    exactly. Keys that match nothing and keys that match more than one document
    are reported, never dropped or guessed.
 2. **A resolution repair inside the coverage boundary (Gaps 3, 4).** When the
-   coverage boundary finds a facet unsupported and the evidence it holds
-   contains tokens that a configured *entity-key pattern* recognises (for
+   coverage boundary finds a facet unsupported and the coverage anchors it holds
+   (the evidence chunks it assessed) contain tokens that a configured *entity-key pattern* recognises (for
    example `CUST-\d{4}`), its one repair runs `resolve` on those tokens and adds
    each resolved record *joined* to the evidence item that named its key (the
    item's text, then the record's text, as one item) before the single re-check.
@@ -492,7 +496,7 @@ with a coverage boundary (147-research-15, 147-research-16).
    leads with a notice that it rests on an exact-key join, as the chosen option's text asks;
    when the final ledger was uncovered, the notice adds that the coverage check
    did not confirm it. The facet states stay as the re-check judged them. The gate is the signal
-   itself: an unsupported facet AND entity-key tokens in the evidence. A question
+   itself: an unsupported facet AND entity-key tokens in the coverage anchors. A question
    with no such tokens never reaches it, so simple questions are untouched
    (Beyond-Static guidance), and no second planning round, new plan dimension or
    planner prompt change is needed.
@@ -739,6 +743,8 @@ where evidence is seen.
   existing budgets.
 - (−) The coverage boundary gains a second repair path to maintain.
 - (−) Per-collection key patterns are configuration someone must write.
+- (−) The scan reads the coverage anchors only, so a question whose keys sit in
+  other retrieved chunks is still declined (the HERB backend question; Gap 3).
 - (−) If the linker is built: an extra write per mention and link maintenance on
   delete.
 
@@ -812,7 +818,7 @@ where evidence is seen.
 ### Prerequisites
 
 - [x] Step 0 measured and merged (nexus-3lu23; assetops-kg PR #3).
-- [ ] This revision gated (`/conexus:rdr-gate 147`) and accepted. No
+- [x] This revision gated (`/conexus:rdr-gate 147`) and accepted. No
   implementation bead starts before that.
 - [x] Critical Assumption #5 measured (Step 4 sub-step 1, 2026-11-03,
   147-research-7): the repair enters; Step 4 takes branch (a). Branch (c) was
@@ -845,8 +851,9 @@ controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 Reported, not gated: issue5 company recall and F1 beside the script's
 0.7642857142857142 (asserted exactly, as the diagnostic baseline), and precision
 split by `generated_on_join`. Hop-1
-retrieval recall, which sets the remaining gap (measured issue5 F1 0.7167), is
-separate later work.
+retrieval recall, which sets the remaining gap (issue5 F1 0.7167 on 2026-11-03;
+0.500 in both runs of the final MVV, 147-research-17), is separate later work
+(nexus-io7tw).
 
 The measured system is `nx_answer`, through the harness's product rung (company
 names read from `final_text` against the 10-name company universe). The script
@@ -862,7 +869,8 @@ rows: the first two runs predate the bar revision, and all four predate option
 ### Benchmark Ladder — per-phase observable metrics
 
 The harness (assetops-kg `benchmark/herb_ladder.py`) writes
-`results/herb/herb-scorecard.json`; a copy is checked into nexus as the
+`results/herb/herb-scorecard.json`; a copy is checked into nexus
+(`docs/rdr/evidence/rdr-147/herb-scorecard.json`, the final MVV's) as the
 regression baseline and updated per phase PR. Each number from a deterministic
 rung (P2, P3, the E2E script) is asserted exactly, so silent drift fails; the
 `nx_answer` rung's numbers come from model calls and are asserted against their
@@ -994,7 +1002,17 @@ endpoints as `traverse` does; this matters only if Step 2 ships.
 
 ### Phase 2: Operational Activation
 
-The resolution repair and the linker default off; enable on the HERB sandbox
+**Done 2026-11-06 for the resolution repair** (Sam, nexus-bwct4.2):
+`NX_ANSWER_RESOLUTION_REPAIR` is on by default; `0`, `false`, `off` or `no` turns
+it off, and an unrecognised value reads as off. An install with no
+`entity.collections` configured does not consider the branch at all, so its
+repair and wire are as before RDR-147. The preconditions, as measured
+(147-research-17): the MVV green, P2 29 of 29, the single-hop held-out set
+entered 0 of 20, and precision on `generated_on_join` answers reported with
+n = 0 in the final MVV (every answer passed the re-check; the only live option-1
+answers are 2 of 2 correct on 2026-11-06, 147-research-14). The linker stays off.
+
+As planned: the resolution repair and the linker default off; enable on the HERB sandbox
 first. Default-on for the resolution repair requires: the MVV green, P2 = 1.0
 through `resolve`, Step 4's single-hop non-firing and answered counts recorded,
 and the MVV's precision on `generated_on_join` answers reported (the switch now
@@ -1068,6 +1086,14 @@ questions whose answer names a company (Sam, 2026-11-05); recall and F1 are repo
 the script's 0.7642857142857142. The 2 aggregation questions are reported, not gated (Sam,
 2026-11-03).
 
+**Result (147-research-17):** passed on develop 1ecf3ca6d in the one invocation
+of two runs on the final code, at the floor: 4 of 5 issue questions in the
+anchor domain per run, every one complete, precision 1.00. This bar was revised
+after earlier failing runs (Revision History); it gates the join, not retrieval:
+issue5 F1 was 0.500 in both runs against the script's 0.764, and the backend
+question stays outside the domain and declined. The two earlier 2026-11-06 runs
+on code without branch (c) passed once and lost a question to routing once.
+
 ### Cross-Cutting Concerns
 
 - **Versioning**: no wire change for `resolve` (it calls the existing by-title
@@ -1075,8 +1101,9 @@ the script's 0.7642857142857142. The 2 aggregation questions are reported, not g
 - **Deployment model**: client-only steps; the engine is unchanged unless a
   batch by-titles route is later needed (more than 300 tokens per call).
 - **Incremental adoption**: the resolution repair is gated on an unsupported
-  facet plus recognised key tokens, so other questions take today's path; the
-  linker is off by default. The branch (c) template is not behind a switch:
+  facet plus recognised key tokens, so other questions take today's path; since
+  Phase 2 it is on by default, and an install with no `entity.collections`
+  configured does not consider it at all. The linker is off by default. The branch (c) template is not behind a switch:
   entity-listing questions it wins take the multi-step plan on every install
   that has not run `nx plan disable` on it.
 - **Memory management**: `resolve` holds one call's tokens and their manifests;
@@ -1108,3 +1135,4 @@ plus tests on the MVV path (resolve, the repair branch, entity keys), and about
 - 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
 - 2026-11-06: the join-completeness domain is the questions whose anchors hold a key (Sam, T2 `nexus/rdr147-domain-decision-2026-11-06`); branch (c) rewritten as the routing fix the 2026-11-06 MVV needs (Sam "proceed.", 147-research-15); R4 updated with the measured request kinds.
 - 2026-11-06: wording follows the reviewed branch (c) code (c764cc95f, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted; and the anchor domain (Sam's 2026-11-06 decision) in Scope Verification.
+- 2026-11-06: close-time critique (partial, 0 Critical, 3 Significant) answered in the text: the scan reads the coverage anchors, not all evidence, and the HERB backend question stays declined (Gap 3, Approach, Consequences); the final MVV result and its F1 (147-research-17) in Scope Verification and the ladder; the scorecard path; Phase 2 done (Sam, nexus-bwct4.2: on by default, silent with no entity config); prerequisite and Assumption #2 checkboxes dispositioned.
