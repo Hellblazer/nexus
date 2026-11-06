@@ -428,14 +428,25 @@ route returns `sensitive` per (chash, doc_id) row. The vector search
 routes accept `sensitivity=exclude` and return `sensitive` per hit,
 computed in one batched query over the result chashes after the search, so
 the `RETURNS TABLE` shapes of the search functions do not change. The
-get-by-id and store-get routes return `sensitive` per row the same way.
+get-by-id and store-get routes return the flag the same way, as
+`sensitives`, a list parallel to `ids` like the envelope's other parallel
+lists. `sensitive` is chunk-level: true when any live owner of the chunk
+is sensitive, not only the document the row came from. Because the flag
+is read in a statement after the search or read, a document flagged in
+between is seen only there; under `exclude` such a row is dropped, so a
+route never serves text with `sensitive=true` under `exclude`. The two
+catalog by-address reads, `GET /v1/catalog/resolve_span` and
+`/resolve_chash`, return chunk text too, so they take the same
+`sensitivity=exclude` query parameter and return `sensitive`.
 The engine advertises two capabilities as boolean keys on `GET /version`,
 the mechanism already in use (`nexus_rdr/243-research-22`):
 `catalog_sensitivity_supported`, added with the catalog changeset in
 phase 1, and `vector_sensitivity_exclude_supported`, added with the
-vectors changeset in phase 2. The client reads them through cached probes
-like `supports_chash_allow`, where a failed or absent answer reads as
-unsupported. A `--sensitive` write (`index pdf`, `index md`, `dt index`,
+vectors changeset in phase 2. The client reads them through probes that
+cache only a real `/version` answer, true or false; a failed or timed-out
+probe is not cached and is retried on the next read (Sam, 2026-11-04,
+nexus-rfvyy.3: fail closed, with no cached failure). A real false, an
+absent key, or a failed probe reads as unsupported. A `--sensitive` write (`index pdf`, `index md`, `dt index`,
 `dt capture`, `store put`, MCP `store_put`) refuses before the register
 call, and `nx catalog sensitive` before its route call, unless
 `catalog_sensitivity_supported` is true, because an engine without the
@@ -448,8 +459,24 @@ writes and `exclude` reads.
 **4. Read-side filter (phase 2).** Each search function family takes the
 parameter and, when it is `exclude`, adds `NOT EXISTS` over live sensitive
 owners inside the search predicate, so the HNSW iterative scan fills `k`
-from non-sensitive rows (A3). Get-by-id and get-many routes apply the same
-filter.
+from non-sensitive rows (A3). The `NOT EXISTS` is written inline in each
+function rather than as a call to `chunk_sensitive`, because a scalar SQL
+function that holds a subquery is not inlined by the planner and would run
+once per row; a test checks that the two flag the same chunks. Each
+function takes a trailing `p_exclude_sensitive boolean DEFAULT false` and
+the old signature is dropped in the same changeset, so there is one
+function per name. Get-by-id and get-many routes apply the same filter.
+Search and get only ever return chunks with a live owner; under `exclude`
+the by-address reads also require one, so a chunk whose only owner is a
+tombstoned sensitive document is not served before the reaper collects
+it, and `resolve_chash` falls through to another collection's copy only
+when that copy has a live, non-sensitive owner. Write paths, the reaper's
+labels (chunks with no live owner) and routes that return no chunk text
+are exempt; a route parity test derives the chunk-text routes and the
+text-returning functions from the route table and `pg_proc` and fails on
+one that lacks the parameter. Titles, metadata and embeddings served by
+`/get-all-metadata`, `/store-list` and `/get-embeddings` are not filtered;
+withholding them is output-side work (phase 3).
 
 **5. Python scope.** New module `src/nexus/sensitivity.py`:
 
@@ -1112,3 +1139,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-05: Implementation notes under Technical Design item 8 record how Phase 1 applies the catalog flag (index paths, repo and batch skips, re-embed hold-back, note re-put, dry runs, reindex). No design change.
 - 2026-11-05: Sam's ruling: Phase 1 ships alone in conexus 7.96.0 (paired with engine-service-v0.1.180), superseding the 2026-11-04 ship-together ruling; the release text claims phase 1 only.
 - 2026-11-06: census rows 1 and 2, item 10 and the Test Plan follow the aspect queue onto the tuple drain (nexus-hbnml, 3ff3041ad; follow-ups 04aa4afc5, e7bfef5e4, e47aa0e33): the one enqueue gate and the one drain gate, a dead task not counted by `sensitive_with_aspects`, and requeue-failed leaving a flagged task dead. Wording only; the behaviour is the reviewed code.
+- 2026-11-06: Technical Design items 3 and 4 follow the reviewed phase 2 engine (nexus-rfvyy.7.3, .7.4 and their review fixes): `sensitives` on get envelopes, chunk-level `sensitive`, the post-lookup drop under `exclude`, the gated catalog by-address reads with a live owner required, the inline `NOT EXISTS` and one function per name, the exempt routes, and the probes' no-cached-failure rule from Sam's nexus-rfvyy.3 ruling. Wording only.
