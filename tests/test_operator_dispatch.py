@@ -5401,6 +5401,29 @@ class TestIsolatedHermeticChild:
         ask, explicitly. That is now the exceptional case."""
         assert "--setting-sources" not in await self._argv_for(isolated=False)
 
+    @pytest.mark.asyncio
+    async def test_a_non_isolated_child_turns_the_stop_wake_guard_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-4cgop: a child that loads the caller's settings loads the conexus plugin and its
+        Stop hook; a scripted one-shot run must not be continued by it. An isolated child loads no
+        plugin, so it needs no switch."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.delenv("NX_STOP_WAKE_GUARD", raising=False)
+
+        async def env_for(isolated: bool) -> dict:
+            captured: list = []
+
+            async def intercept(*args, **kw):
+                captured.append(kw)
+                return _make_proc()
+
+            with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, isolated=isolated)
+            return captured[0]["env"]
+
+        assert (await env_for(False)).get("NX_STOP_WAKE_GUARD") == "0"
+        assert "NX_STOP_WAKE_GUARD" not in await env_for(True)  # isolated: the switch is not needed
+
     @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_isolation_does_not_break_the_t1_mint(self) -> None:
