@@ -41,7 +41,8 @@ THE MAPPING, :func:`memory_dir`. Given a working directory *cwd*:
      ``run_bounded`` (deferred import; 5 s limit). Not matched to git by the read:
      filesystem-boundary stops and ``safe.directory``. In a ``--separate-git-dir``, submodule or
      bare-repository worktree layout the primary is the git directory's parent, as git reports
-     it, which is not the directory Claude Code keyed its memory by; the result there is
+     it, which (inferred, not observed) is not the directory Claude Code keyed its memory by;
+     the result is that parent's memory directory when one exists, which is the wrong one, else
      ``None`` (step 3).
 3. :func:`memory_dir` returns ``None`` when *cwd* is not inside a git repository (no ``.git``
    above it), git is unavailable or slow on the fallback path, or the resulting directory does
@@ -138,8 +139,8 @@ def _common_dir_by_reading(cwd: Path) -> Path | None:
 def primary_checkout_root(cwd: Path, env: Mapping[str, str] | None = None) -> Path | None:
     """The primary checkout's root: the parent of the git common directory, or None.
 
-    Reads ``.git`` and spawns nothing; asks git (:func:`_primary_via_git`) only when ``GIT_DIR`` or
-    ``GIT_COMMON_DIR`` is set in *env* or the layout is unrecognised. See the module docstring.
+    Reads ``.git`` and spawns nothing; asks git (:func:`_primary_via_git`) only when ``GIT_DIR``,
+    ``GIT_COMMON_DIR`` or ``GIT_CEILING_DIRECTORIES`` is set in *env* or the layout is unrecognised. See the module docstring.
     """
     e = os.environ if env is None else env
     if not (e.get("GIT_DIR") or e.get("GIT_COMMON_DIR") or e.get("GIT_CEILING_DIRECTORIES")):
