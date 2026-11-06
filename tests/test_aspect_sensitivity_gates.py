@@ -264,6 +264,7 @@ def test_requeue_failed_leaves_a_dead_task_of_a_document_flagged_after_it_died_d
     result = CliRunner().invoke(aspects_group, ["requeue-failed"])
     assert result.exit_code == 0, result.output
     assert f"its document {flagged}" in result.output and "is flagged sensitive" in result.output, result.output
+    assert "/f.md" not in result.output and "/f.md" not in dry.output, "a flagged document's path (it can carry the title) is not printed"
     assert "Revived 1 dead task(s) to available; left 1 dead (sensitive document)." in result.output, result.output
     assert _states(db) == {flagged: "dead", clear: None}, "the clear task is available again (no claim state)"
     assert [e["tumbler"] for e in logs.named("aspect_enqueue_skipped_sensitive")] == [flagged, flagged]

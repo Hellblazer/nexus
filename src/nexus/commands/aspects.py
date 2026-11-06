@@ -427,7 +427,8 @@ def aspects_requeue_failed(
             click.echo(f"Would leave {len(flagged)} dead task(s): the document is flagged sensitive:")
             for task in flagged:
                 ident = _task_identity(task) or {}
-                click.echo(f"  {ident.get('collection', '?')}  {ident.get('source_path', '?')}  ({ident.get('doc_id', '?')})")
+                # The tumbler and collection only: a source path can carry the title.
+                click.echo(f"  {ident.get('collection', '?')}  {ident.get('doc_id', '?')}")
         click.echo("Re-run without --dry-run to revive.")
         return
 
@@ -435,7 +436,7 @@ def aspects_requeue_failed(
         ident = _task_identity(task) or {}
         click.echo(
             f"Left dead task {task.id} dead: its document {ident.get('doc_id', '?')} "
-            f"({ident.get('collection', '?')} {ident.get('source_path', '?')}) is flagged sensitive.",
+            f"in {ident.get('collection', '?')} is flagged sensitive.",
             err=True,
         )
     revived = 0
