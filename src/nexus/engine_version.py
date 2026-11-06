@@ -725,7 +725,7 @@ from __future__ import annotations
 #: table), the audited POST /v1/catalog/sensitivity, the sensitive field on
 #: document and chash_positions JSON, catalog_sensitivity_supported on GET
 #: /version, and the one-way write rules (upsert, import, register, merge and
-#: tombstone inheritance). It also carries the root-names-the-target retire-keys
+#: tombstone inheritance). It also carries the root-names-the-target chunk-key
 #: sweep with its gc_audit rows (nexus-6pfgb.43). The client refuses --sensitive
 #: against an older engine, so the pin rises with it.
 REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 180)

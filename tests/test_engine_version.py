@@ -610,7 +610,7 @@ class TestRequiredEngineVersion:
         # ->(0,1,180) 2026-11-05 for 7.96.0: pairs with engine-service-v0.1.180. It carries the engine
         # halves of RDR-243 Phase 1 (catalog-047 sensitive column and audit table, the audited
         # POST /v1/catalog/sensitivity, catalog_sensitivity_supported on /version, the one-way write
-        # rules) and the root-names-the-target retire-keys sweep (nexus-6pfgb.43). The client refuses
+        # rules) and the root-names-the-target chunk-key sweep (nexus-6pfgb.43). The client refuses
         # --sensitive against an older engine, so the floor rises with it.
         assert REQUIRED_ENGINE_VERSION == _floor_named_by_changelog(_CHANGELOG.read_text(encoding="utf-8"))
 
