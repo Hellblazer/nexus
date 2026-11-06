@@ -64,6 +64,26 @@ public final class ChunkSensitivity {
     }
 
     /**
+     * What an exclude read of a chunk by address may serve: it has a LIVE owner and none of its live owners is
+     * sensitive (nexus-rfvyy.7.4 review fix F1). {@link #notSensitive} alone passes a chunk with no live owner (its
+     * sensitive document tombstoned, the chunk not yet reaped), which search and get never serve because they require a
+     * live owner; the by-address reads select straight from the chunk table, so they add the live-owner term here.
+     *
+     * @param chash the chunk row's raw {@code bytea} chash column (not the hex-converted field)
+     */
+    public static Condition servableUnderExclude(Field<String> tenantId, Field<String> collection, Field<byte[]> chash) {
+        var m = CATALOG_DOCUMENT_CHUNKS;
+        var d = CATALOG_DOCUMENTS;
+        return DSL.exists(DSL.selectOne().from(m)
+                .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
+                .where(m.TENANT_ID.eq(tenantId))
+                .and(m.COLLECTION.eq(collection))
+                .and(m.CHASH.eq(chash))
+                .and(d.DELETED_AT.isNull()))
+            .and(notSensitive(tenantId, collection, chash));
+    }
+
+    /**
      * The chunks among {@code chashHexes} of {@code collection} that have a live sensitive owner, as lowercase hex:
      * ONE {@code nexus.chunk_sensitive_many} call, whatever the number of chashes, in the caller's tenant-scoped
      * transaction.

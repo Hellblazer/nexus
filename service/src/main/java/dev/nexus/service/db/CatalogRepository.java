@@ -8945,7 +8945,8 @@ public final class CatalogRepository {
     /**
      * {@link #resolveSpan(String, String, String)} under RDR-243's {@code sensitivity} (nexus-rfvyy.7.4): the result
      * carries {@code sensitive}, true when any LIVE owner of the chunk is sensitive, and with {@code excludeSensitive}
-     * such a chunk resolves to {@code null} (a miss), the way an excluded row is simply absent from a search page.
+     * such a chunk resolves to {@code null} (a miss), as does a chunk with no live owner at all, the way an excluded row is
+     * simply absent from a search page (which requires a live owner).
      * The flag comes from one {@code chunk_sensitive_many} call in the same transaction as the read.
      */
     public Map<String, Object> resolveSpan(String tenant, String collection, String chash,
@@ -8955,7 +8956,7 @@ public final class CatalogRepository {
                        .from(CHUNKS)
                        .where(CHUNKS.COLLECTION.eq(collection).and(CHUNKS_CHASH_HEX.eq(chash))
                            .and(excludeSensitive
-                               ? ChunkSensitivity.notSensitive(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                               ? ChunkSensitivity.servableUnderExclude(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
                                : DSL.trueCondition()))
                        .limit(1).fetchOne();
             if (r == null) return null;
@@ -8998,8 +8999,8 @@ public final class CatalogRepository {
     /**
      * {@link #resolveChash(String, String, String)} under RDR-243's {@code sensitivity} (nexus-rfvyy.7.4): the result
      * carries {@code sensitive} (any LIVE owner of the winning chunk is sensitive), and with {@code excludeSensitive}
-     * the candidate rows are those without a live sensitive owner, so the tie-break picks among them and a chash
-     * held only by sensitive chunks is a miss ({@code null}).
+     * the candidate rows are those with a live owner and no live sensitive owner, so the tie-break picks among them and
+     * a chash held only by sensitive or ownerless chunks is a miss ({@code null}).
      */
     public Map<String, Object> resolveChash(String tenant, String chash, String preferCollection,
                                             boolean excludeSensitive) {
@@ -9011,7 +9012,7 @@ public final class CatalogRepository {
                           .from(CHUNKS)
                           .where(CHUNKS_CHASH_HEX.eq(chash)
                               .and(excludeSensitive
-                                  ? ChunkSensitivity.notSensitive(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                                  ? ChunkSensitivity.servableUnderExclude(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
                                   : DSL.trueCondition()))
                           // Third key `collection ASC` matches the canonical _sort_key
                           // (preferred, newest created_at, deterministic name) so a chash in two

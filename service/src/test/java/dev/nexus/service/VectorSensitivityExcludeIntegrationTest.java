@@ -789,6 +789,93 @@ class VectorSensitivityExcludeIntegrationTest {
         }
     }
 
+    /** Tombstone every dimension's copy of the document stems, returning the tumblers so the caller can revive them. */
+    private List<String> tombstoneAll(String... stems) throws Exception {
+        List<String> docs = new ArrayList<>();
+        for (String stem : stems) for (int dim : DIMS) docs.add(tumbler(stem, dim));
+        for (String d : docs) setTombstone(d, true);
+        return docs;
+    }
+
+    private void revive(List<String> docs) throws Exception {
+        for (String d : docs) setTombstone(d, false);
+    }
+
+    /**
+     * Review fix F1 (critic S1, nexus-rfvyy.7.4): the by-address reads gate on "no live sensitive owner", which a chunk
+     * with NO live owner passes trivially, so a sensitive document's chunk that the reaper has not collected yet was
+     * served under exclude, while search and get (which require a live owner) hide it. Under exclude a chunk must
+     * also have a live owner.
+     */
+    @Test
+    void resolveSpan_excludeNeedsALiveOwner_aTombstonedSoleSensitiveOwnerIsAMiss() throws Exception {
+        String base = "/v1/catalog/resolve_span?collection=" + coll(384) + "&span_chash=";
+        String sole = tumbler("s1", 384);
+        setTombstone(sole, true);
+        try {
+            assertThat(getCatalog(base + hex(S1) + "&sensitivity=exclude").statusCode())
+                .as("sole owner tombstoned, chunk not yet reaped: not served under exclude").isEqualTo(404);
+            var plain = getCatalog(base + hex(S1));
+            assertThat(plain.statusCode()).as("without exclude the read is as it always was").isEqualTo(200);
+            assertThat(MAPPER.readTree(plain.body()).get("sensitive").asBoolean()).isFalse();
+        } finally {
+            setTombstone(sole, false);
+        }
+
+        // shared chunk x (owners sx sensitive, nx not): the live non-sensitive owner keeps it served once sx is gone,
+        // and with both owners gone it is a miss
+        String sx = tumbler("sx", 384), nx = tumbler("nx", 384);
+        setTombstone(sx, true);
+        try {
+            var kept = getCatalog(base + hex(X) + "&sensitivity=exclude");
+            assertThat(kept.statusCode()).as("a live non-sensitive owner remains").isEqualTo(200);
+            assertThat(MAPPER.readTree(kept.body()).get("sensitive").asBoolean()).isFalse();
+            setTombstone(nx, true);
+            assertThat(getCatalog(base + hex(X) + "&sensitivity=exclude").statusCode())
+                .as("both owners tombstoned: no live owner").isEqualTo(404);
+        } finally {
+            setTombstone(sx, false);
+            setTombstone(nx, false);
+        }
+        assertThat(getCatalog(base + hex(X) + "&sensitivity=exclude").statusCode())
+            .as("sx live again: sensitive").isEqualTo(404);
+        assertThat(getCatalog(base + hex("n1") + "&sensitivity=exclude").statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void resolveChash_excludeNeedsALiveOwner_aCopyWithNoLiveOwnerIsNotServed() throws Exception {
+        String base = "/v1/catalog/resolve_chash?chash=";
+        // s1 is sensitive-owned in all three collections; with every owner tombstoned no copy has a live owner
+        List<String> gone = tombstoneAll("s1");
+        try {
+            assertThat(getCatalog(base + hex(S1) + "&sensitivity=exclude").statusCode())
+                .as("no copy has a live owner: a miss under exclude").isEqualTo(404);
+            assertThat(getCatalog(base + hex(S1)).statusCode()).as("without exclude: as it always was").isEqualTo(200);
+        } finally {
+            revive(gone);
+        }
+
+        // x: sensitive owners sx in every collection; tombstone them all, and the non-sensitive owners nx in 768 and
+        // 1024, leaving only nx-384 live: the exclude read falls through to that copy, preferred or not
+        List<String> sx = tombstoneAll("sx");
+        List<String> nx = List.of(tumbler("nx", 768), tumbler("nx", 1024));
+        for (String d : nx) setTombstone(d, true);
+        try {
+            var r = getCatalog(base + hex(X) + "&prefer_collection=" + coll(1024) + "&sensitivity=exclude");
+            assertThat(r.statusCode()).isEqualTo(200);
+            var node = MAPPER.readTree(r.body());
+            assertThat(node.get("physical_collection").asText()).as("the only copy with a live owner").isEqualTo(coll(384));
+            assertThat(node.get("sensitive").asBoolean()).isFalse();
+            setTombstone(tumbler("nx", 384), true);
+            assertThat(getCatalog(base + hex(X) + "&sensitivity=exclude").statusCode())
+                .as("the last live owner gone").isEqualTo(404);
+        } finally {
+            revive(sx);
+            for (String d : nx) setTombstone(d, false);
+            setTombstone(tumbler("nx", 384), false);
+        }
+    }
+
     // ── every route the parity census derives has a behaviour recipe here ─────
 
     @Test
