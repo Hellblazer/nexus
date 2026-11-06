@@ -48,8 +48,9 @@
 # test_import_catalog_flag_gate 8, test_sensitivity_unreadable_catalog 8, test_enrich_delete_tumbler 7, test_doctor_sensitivity_rows 5, test_reindex_sensitive_gate 5,
 # test_sensitive_store_put_existing_voyage 5, test_doc_sensitivity_flagged 2, test_catalog_sensitivity_client 1 (219 in all), and the 4 dry-run tests above.
 # None of the new files can run over a stub catalog: a stub would carry the flag by construction and prove nothing about the row the engine keeps one-way.
-provisioned_tests = 5338
+provisioned_tests = 5344
 tolerance_tests = 0
+# 5338 -> 5344 (nexus-12ml0, 2026-11-06): +6, tests/test_catalog_indexer_hook.py 39 -> 45 (c933be23f, the rename link transfer: spans, two renamed entries, a swept orphan in both orders, and both directions of a link to an entry retired in an earlier run), which landed without its ceiling line. Each needs the real engine: three of the defects are its dangling-endpoint refusal (HTTP 400), which a stub catalog does not raise. develop CI at bf5bd04ea measured provisioned=5344 (run 42303516282); scripts/tenant_delta.py --base 79c87966e reads +6.
 # 5337 -> 5338 (nexus-x3bxj, 2026-11-06): +1, tests/test_catalog_indexer_hook.py 38 -> 39 (a6d779ed6 / b4b6f6a68, the rename link transfer pin), which landed without its ceiling line. develop CI at b4fbe72c2 measured provisioned=5338 (run 42257210541); scripts/tenant_delta.py --base 1ecf3ca6d (measured 5355) reads -17 = 5338.
 # 5355 -> 5337 (nexus-hbnml, merged onto develop 05d6215cd): develop's 5355 less the branch's 18 (scripts/tenant_delta.py: -18).
 # 5352 -> 5355 (nexus-irndi, 2026-11-06): +3. RDR-147 branch (c) adds three tests to tests/test_plan_seed_reconcile.py (14 -> 17,
