@@ -135,8 +135,9 @@ targeted retrieval for unsupported facets) runs semantic queries on the facet's
 text. For an exact-key join that repeats the embedding collision of Gap 2. The
 gap is that the repair has no exact-key path. **As built:** the exact-key branch
 scans the coverage anchors only, not all retrieved evidence. On HERB the backend
-search-engine issue question holds 8 customer ids in its evidence and none in its
-anchors in every MVV run, so it is still declined (147-research-13, -14, -17);
+search-engine issue question holds customer ids in its evidence and none in its
+anchors in every valid MVV run (147-research-13, -14, -17; 8 ids in each run of the
+final MVV, `docs/rdr/evidence/rdr-147/herb-scorecard.json`), so it names no company;
 widening the scan was left out of this RDR (Sam, 2026-11-06, nexus-z938f closed).
 
 #### Gap 4: No gating; blanket iteration harms simple questions
@@ -851,9 +852,9 @@ controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 Reported, not gated: issue5 company recall and F1 beside the script's
 0.7642857142857142 (asserted exactly, as the diagnostic baseline), and precision
 split by `generated_on_join`. Hop-1
-retrieval recall, which sets the remaining gap (issue5 F1 0.7167 on 2026-11-03;
-0.500 in both runs of the final MVV, 147-research-17), is separate later work
-(nexus-io7tw).
+retrieval recall, which with the declined backend question (Gap 3) sets the
+remaining gap (issue5 F1 0.7167 on 2026-11-03; 0.500 in both runs of the final
+MVV, 147-research-17), is separate later work (nexus-io7tw).
 
 The measured system is `nx_answer`, through the harness's product rung (company
 names read from `final_text` against the 10-name company universe). The script
@@ -1002,14 +1003,15 @@ endpoints as `traverse` does; this matters only if Step 2 ships.
 
 ### Phase 2: Operational Activation
 
-**Done 2026-11-06 for the resolution repair** (Sam, nexus-bwct4.2):
+**Turned on 2026-11-06 for the resolution repair** (Sam, nexus-bwct4.2; the bead
+closes on develop CI):
 `NX_ANSWER_RESOLUTION_REPAIR` is on by default; `0`, `false`, `off` or `no` turns
 it off, and an unrecognised value reads as off. An install with no
 `entity.collections` configured does not consider the branch at all, so its
 repair and wire are as before RDR-147. The preconditions, as measured
 (147-research-17): the MVV green, P2 29 of 29, the single-hop held-out set
 entered 0 of 20, and precision on `generated_on_join` answers reported with
-n = 0 in the final MVV (every answer passed the re-check; the only live option-1
+n = 0 in the final MVV (every entered join, 8 of 8, passed the re-check; the only live option-1
 answers are 2 of 2 correct on 2026-11-06, 147-research-14). The linker stays off.
 
 As planned: the resolution repair and the linker default off; enable on the HERB sandbox
