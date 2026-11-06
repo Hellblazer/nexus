@@ -136,8 +136,9 @@ text. For an exact-key join that repeats the embedding collision of Gap 2. The
 gap is that the repair has no exact-key path. **As built:** the exact-key branch
 scans the coverage anchors only, not all retrieved evidence. On HERB the backend
 search-engine issue question holds customer ids in its evidence and none in its
-anchors in every valid MVV run (147-research-13, -14, -17; 8 ids in each run of the
-final MVV, `docs/rdr/evidence/rdr-147/herb-scorecard.json`), so it names no company;
+anchors in all 8 MVV runs of 147-research-13, -14 and -17 (8 ids in each, by their
+row files and `docs/rdr/evidence/rdr-147/herb-scorecard.json`; the attempt with no
+`claude` on PATH retrieved nothing and is not counted), and named no company in any;
 widening the scan was left out of this RDR (Sam, 2026-11-06, nexus-z938f closed).
 
 #### Gap 4: No gating; blanket iteration harms simple questions
@@ -854,7 +855,8 @@ Reported, not gated: issue5 company recall and F1 beside the script's
 split by `generated_on_join`. Hop-1
 retrieval recall, which with the declined backend question (Gap 3) sets the
 remaining gap (issue5 F1 0.7167 on 2026-11-03; 0.500 in both runs of the final
-MVV, 147-research-17), is separate later work (nexus-io7tw).
+MVV, 147-research-17), is separate later work (nexus-io7tw, hop-1 recall; the
+backend question's scan is left out, Gap 3).
 
 The measured system is `nx_answer`, through the harness's product rung (company
 names read from `final_text` against the 10-name company universe). The script
@@ -1137,4 +1139,5 @@ plus tests on the MVV path (resolve, the repair branch, entity keys), and about
 - 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
 - 2026-11-06: the join-completeness domain is the questions whose anchors hold a key (Sam, T2 `nexus/rdr147-domain-decision-2026-11-06`); branch (c) rewritten as the routing fix the 2026-11-06 MVV needs (Sam "proceed.", 147-research-15); R4 updated with the measured request kinds.
 - 2026-11-06: wording follows the reviewed branch (c) code (c764cc95f, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted; and the anchor domain (Sam's 2026-11-06 decision) in Scope Verification.
-- 2026-11-06: close-time critique (partial, 0 Critical, 3 Significant) answered in the text: the scan reads the coverage anchors, not all evidence, and the HERB backend question stays declined (Gap 3, Approach, Consequences); the final MVV result and its F1 (147-research-17) in Scope Verification and the ladder; the scorecard path; Phase 2 done (Sam, nexus-bwct4.2: on by default, silent with no entity config); prerequisite and Assumption #2 checkboxes dispositioned.
+- 2026-11-06: close-time critique (partial, 0 Critical, 3 Significant) answered in the text: the scan reads the coverage anchors, not all evidence, and the HERB backend question stays declined (Gap 3, Approach, Consequences); the final MVV result and its F1 (147-research-17) in Scope Verification and the ladder; the scorecard path; Phase 2 turned on (Sam, nexus-bwct4.2: on by default, silent with no entity config; the bead closes on develop CI); prerequisite and Assumption #2 checkboxes dispositioned.
+- 2026-11-06: fix checks 728f11960 and 45b73ece9 (both PASS) observations applied: the backend question's 8 runs and id counts cited to their row files, the F1 gap's later-work bead scoped, Phase 2 recorded as turned on until its bead closes.
