@@ -340,6 +340,15 @@ here are the ones each pass found on a named page or table.
   the RDR's frontmatter `status: closed`, so a closed phase of a still-open RDR
   is not flagged; per-phase flagging is nexus-qo7ie.28. Technical Design 3's
   mapping sentence is read with this entry.
+- **2026-11-05, Sam's answer on hub-linked files (nexus-qo7ie.29).** A memory
+  file counts as indexed when either index file names it, or when a memory file
+  that an index names links it with a markdown link: one hub level, no deeper,
+  and a bare file name in a hub's prose does not count. On Sam's memory directory
+  the 27 files linked from `project_key_technical_facts.md` had read as
+  unindexed; with this rule the count is 0. Technical Design 3's "Indexed"
+  sentence is read with this entry, by `nx memory curate --files` and by the
+  SessionStart check (nexus-qo7ie.16) alike, since both use
+  `nexus._hook_runtime.memory_scan.scan`.
 
 ### Critical Assumptions
 

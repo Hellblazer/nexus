@@ -10,7 +10,9 @@ Definitions, applied by :func:`scan`:
 * The two index files are ``MEMORY.md`` and ``MEMORY-ondemand.md``. They are never reported
   as unindexed and are exempt from the size check.
 * A memory file is a ``*.md`` file directly in the directory (subdirectories are not read).
-* "Indexed" means its file name appears, as any ``*.md`` token, in either index file.
+* "Indexed" means its file name appears, as any ``*.md`` token, in either index file, or a
+  memory file that is itself indexed that way links it with a markdown link
+  ``[text](target.md)``. That is one hub level, no deeper (Sam, 2026-11-05, nexus-qo7ie.29).
 * "Oversized" means more than :data:`OVERSIZE_BYTES` (8192) bytes.
 * A "dangling" entry is a markdown link ``[text](target.md)`` in an index file whose target
   does not exist in the directory. Only links count: a bare file name in index prose (a
@@ -128,7 +130,12 @@ def scan(directory: Path) -> MemoryScan:
     for text in index_text.values():
         mentioned |= index_mentions(text)
 
-    unindexed = [n for n in files if n not in mentioned]
+    texts = {n: read_text(directory / n) for n in files}
+    hub_linked: set[str] = set()
+    for n in files:
+        if n in mentioned:
+            hub_linked |= {t.rsplit("/", 1)[-1] for t in index_link_targets(texts[n])}
+    unindexed = [n for n in files if n not in mentioned and n not in hub_linked]
     oversized = []
     for n in files:
         size = (directory / n).stat().st_size
@@ -141,7 +148,6 @@ def scan(directory: Path) -> MemoryScan:
         if not (directory / target).is_file()
     ]
 
-    texts = {n: read_text(directory / n) for n in files}
     names = {n: frontmatter_value(t, "name") for n, t in texts.items()}
     replaced: list[tuple[str, str, str]] = []
     for n in files:
