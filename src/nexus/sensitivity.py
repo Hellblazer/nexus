@@ -50,6 +50,11 @@ ReadSensitivity = Literal["exclude", "include"]
 #: Phase 2 reads exclude under ``llm_bound`` by the surface's own entry, never from this variable alone.
 POSTURE_ENV: Final = "NX_SENSITIVITY_POSTURE"
 
+#: The phrase every ``SensitivityExcludeUnavailable`` message carries (RDR-243 review r1 F2). A tool boundary renders
+#: the exception to text, so the plan runner recognises a refused read by this phrase and fails the plan instead of
+#: treating the error text as an empty result.
+EXCLUDE_REFUSED_MARKER: Final = "sensitivity='exclude' read refused"
+
 #: ``None`` means "never set on this context": the environment is then consulted.
 _POSTURE: ContextVar[Posture | None] = ContextVar("nexus_sensitivity_posture", default=None)
 _SURFACE: ContextVar[str | None] = ContextVar("nexus_sensitivity_surface", default=None)

@@ -6895,11 +6895,24 @@ def store_get_many(
     - Ids are chunk ids, so a note that `store_put` split comes back as its
       separate pieces; use `store_get` for the whole note.
     """
-    return _store_get_many_impl(
-        ids=ids, collections=collections, max_chars_per_doc=max_chars_per_doc, structured=structured,
-        limit_per_source=limit_per_source,
-        sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
-    )
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+    try:
+        return _store_get_many_impl(
+            ids=ids, collections=collections, max_chars_per_doc=max_chars_per_doc, structured=structured,
+            limit_per_source=limit_per_source,
+            sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
+        )
+    except SensitivityExcludeUnavailable as e:
+        # RDR-243 review r1 F2: the impl lets a refused read propagate to its in-process callers; this MCP
+        # boundary is where it becomes a tool error, and it says what was refused.
+        _log.error("mcp_store_get_many_sensitivity_refused", error=str(e))
+        if structured:
+            return _fail({
+                "contents": [], "missing": [], "sensitivity_refused": True,
+                "error": f"store_get_many refused (SensitivityExcludeUnavailable): {e}",
+            })
+        return _mcp_tool_error("store_get_many", e)
 
 
 def _store_get_many_impl(
@@ -6916,7 +6929,13 @@ def _store_get_many_impl(
     RDR-243 Phase 2 (nexus-rfvyy.7.9). The tool reads :func:`nexus.sensitivity.read_sensitivity` once on its
     own thread and calls this; an in-process caller that already holds the posture (the plan runner's
     hydration, ``nx_tidy``'s prefetch) calls it directly, so it never goes through the tool function and the
-    model-facing schema never grows a ``sensitivity`` parameter. ``sensitivity`` has no default."""
+    model-facing schema never grows a ``sensitivity`` parameter. ``sensitivity`` has no default.
+
+    A refused ``exclude`` read (:class:`~nexus.db.http_vector_client.SensitivityExcludeUnavailable`) PROPAGATES
+    (RDR-243 review r1 F2). Turning it into ``{"contents": [], "error": ...}`` made the plan runner treat a read it
+    was refused as zero evidence and answer "no evidence". The ``store_get_many`` tool is the boundary that renders it."""
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
     try:
         # Detect parallel-stream form: ids is a non-empty list of lists.
         parallel_form = (
@@ -7203,6 +7222,8 @@ def _store_get_many_impl(
         # other text-returning tool in this file instead of relying on the
         # MCP host's silent truncation.
         return _cap_text_result("\n".join(lines), "store_get_many")
+    except SensitivityExcludeUnavailable:
+        raise
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         if structured:
             # Structured callers (plan-runner hydration) get a dict, not a string —

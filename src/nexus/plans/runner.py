@@ -2297,6 +2297,21 @@ def _refuse_sensitive_tumblers(tumbler_ids: list[str], cat: Any) -> set[str]:
     return refused
 
 
+def _hydrate_chunks_or_refuse(*, tool: str, **kwargs: Any) -> Any:
+    """``store_get_many``'s body, with a refused ``exclude`` read turned into a failed plan (RDR-243 review r1 F2).
+
+    The engine could not be shown to filter sensitive chunks, so the read was refused. Handing the operator step an
+    empty result instead would read as "no evidence" for a corpus it was never allowed to read."""
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred; runner imports stay lazy
+
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (avoid circular import)
+
+    try:
+        return mcp_core._store_get_many_impl(**kwargs)
+    except SensitivityExcludeUnavailable as exc:
+        raise PlanRunRetrievalRefusedError(tool=tool, message=str(exc)) from exc
+
+
 def _hydrate_tumbler_ids(tumbler_ids: list[str], *, sensitivity: ReadSensitivity) -> dict[str, Any]:
     """Resolve document tumblers to T3 content via the catalog manifest
     (nexus-mm5tx / nexus-zekpl class).
@@ -2417,7 +2432,8 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str], *, sensitivity: ReadSensitivity
         _stack.enter_context(mcp_core.without_source_notes())
         if None not in flat_manifest_types:
             _stack.enter_context(mcp_core.without_owner_section_types())
-        hydrated = mcp_core._store_get_many_impl(
+        hydrated = _hydrate_chunks_or_refuse(
+            tool="store_get_many",
             ids=flat_ids, collections=flat_collections, structured=True, sensitivity=sensitivity,
         )
     chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
@@ -2995,7 +3011,8 @@ def _hydrate_operator_args(
             excluded_ids: set[str] = set()
         else:
             with mcp_core.capturing_owner_lookups() as owner_lookups:
-                hydrated = mcp_core._store_get_many_impl(
+                hydrated = _hydrate_chunks_or_refuse(
+                    tool=resolved_tool,
                     ids=ids, collections=collections, structured=True, sensitivity=sensitivity,
                 )
             # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
@@ -3607,7 +3624,15 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # (RDR-156 P4 search_metadata_scoped / search_topic_scoped, whose
     # structured output carries chunk text inline) degrade to an empty
     # summarize in local mode rather than raising PlanRunStepRefError.
+    if isinstance(result, dict) and result.get("sensitivity_refused") is True:
+        # RDR-243 review r1 F2: the ``store_get_many`` tool's structured refusal (the engine cannot be shown to
+        # filter sensitive chunks). The plan fails; it does not carry on with the empty ``contents``.
+        raise PlanRunRetrievalRefusedError(tool=tool, message=str(result.get("error") or _sensitivity.EXCLUDE_REFUSED_MARKER))
     if isinstance(result, str):
+        if tool in _RETRIEVAL_TOOLS and _sensitivity.EXCLUDE_REFUSED_MARKER in result:
+            # The same refusal rendered to text by a search/query tool boundary: not a plan-binding problem to
+            # synthesize an empty result past (F2; the search legs re-raise it, F5).
+            raise PlanRunRetrievalRefusedError(tool=tool, message=result)
         if tool in _RETRIEVAL_TOOLS:
             # nexus-vply6 fix round 2, SHIP-BLOCKER (critique T2 [26773]):
             # an embedding-profile-mismatch refusal is NOT a plan-binding
