@@ -116,7 +116,7 @@ def test_the_releaser_is_sam() -> None:
     flat = _flat(_section())
     assert "The releaser is Sam" in flat
     assert '"cut the release"' in flat
-    assert "one named tag" in flat
+    assert "go for the named release" in flat
 
 
 def test_engine_floor_check_precedes_the_pr_and_closes_the_lane() -> None:
