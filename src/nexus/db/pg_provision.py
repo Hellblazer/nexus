@@ -1536,6 +1536,39 @@ class PgStartError(RuntimeError):
     """
 
 
+class PgClusterBelowFloorError(RuntimeError):
+    """The data directory was created by a PostgreSQL major below the engine's floor (nexus-hck2c).
+
+    Raised by :func:`_start_cluster` before ``pg_ctl start``, so the user reads the version, the floor and
+    the upgrade instead of pg_ctl's "database files are incompatible with server".
+    """
+
+
+def refuse_cluster_below_floor(pgdata: Path) -> None:
+    """Raise :class:`PgClusterBelowFloorError` when ``pgdata/PG_VERSION`` names a major below the floor.
+
+    A missing or unreadable marker is not refused here: initdb has not run, or pg_ctl will report what is
+    wrong itself. The floor is the doctor's ``PG_VERSION_FLOOR`` (one constant, pinned to the engine's).
+    """
+    from nexus.health import PG_VERSION_FLOOR  # noqa: PLC0415 — deferred, heavy module; cold-start path only
+
+    try:
+        text = (pgdata / _PG_VERSION_MARKER).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return
+    head = text.split(".", 1)[0]
+    if not head.isdigit() or int(head) >= PG_VERSION_FLOOR:
+        return
+    raise PgClusterBelowFloorError(
+        f"the local cluster at {pgdata} was created by PostgreSQL {text}, and a cluster keeps the version "
+        f"that created it; nexus needs PostgreSQL {PG_VERSION_FLOOR} or newer, so it was not started. "
+        f"Upgrade it to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS), or, "
+        "if you do not need its data, move the directory aside and re-run nx init: "
+        "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md "
+        "(section 'A local cluster older than PostgreSQL 17')"
+    )
+
+
 class StartInterruptedError(Exception):
     """A caller's stop request ended :func:`_start_cluster`'s wait early.
 
@@ -1741,6 +1774,7 @@ def _start_cluster(
         _log.info("pg_cluster_already_running", pgdata=str(pgdata))
         return
 
+    refuse_cluster_below_floor(pgdata)
     pglog = str(pgdata / "pg.log")
     if _on_windows(platform):
         _pg_ctl_start_detached(

@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A local cluster whose data directory was made by PostgreSQL below 17 is refused before `pg_ctl start`, with its version, the floor and the upgrade section of the migration runbook, instead of pg_ctl's "database files are incompatible with server" (nexus-hck2c).
+
 ## [7.96.0] - 2026-11-05
 
 Pairs with engine-service-v0.1.180 (REQUIRED_ENGINE_VERSION rises from 0.1.179). The engine carries the catalog half of document sensitivity and the root-names-the-target `retire-keys` sweep. A local install picks the engine up through the pin; the managed service needs the 0.1.180 deploy before `--sensitive` works against it.
