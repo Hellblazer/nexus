@@ -40,8 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 5352
+provisioned_tests = 5355
 tolerance_tests = 0
+# 5352 -> 5355 (nexus-irndi, 2026-11-06): +3. RDR-147 branch (c) adds three tests to tests/test_plan_seed_reconcile.py (14 -> 17,
+# scripts/tenant_delta.py): a disabled builtin survives an unchanged reconcile and is re-enabled by a description edit. Each
+# reconciles the real plan library on the engine, so each needs its tenant.
 # 5129 -> 5352 (nexus-rfvyy.6.21, 2026-11-05): +223. RDR-243 Phase 1 adds 223 tenant-minting tests (the new gate, write-verb, import and engine-flag test files), each needing a real catalog,
 # because the subject is the sensitivity flag on a catalog row and every gate reads it from that row. Measured on chas (lab-l, `uv run pytest -n auto`, sweep on, report mode) at 2d9e932a1: 5348 of 43627,
 # plus the 4 tests of tests/test_doc_indexer.py (TestIndexPdfDryRunNeverTouchesCatalog and the incremental dry run) that the same run showed touching the catalog without a tenant (a dry run now reads the flag,
