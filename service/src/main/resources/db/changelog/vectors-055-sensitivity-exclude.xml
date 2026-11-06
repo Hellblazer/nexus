@@ -9,6 +9,7 @@
         AND NOT EXISTS (
                 SELECT 1 FROM nexus.catalog_document_chunks sm JOIN nexus.catalog_documents sd ON ...
                  WHERE p_exclude_sensitive AND sm.tenant_id = c.tenant_id AND sm.collection = c.collection
+                   AND sm.collection = ANY(p_collections)
                    AND sm.chash = c.chash AND sd.deleted_at IS NULL AND sd.sensitive)
     so the HNSW iterative scan fills k from rows that are not sensitive; a post-filter would return a short page. The
     flag sits INSIDE the sublink (nexus-rfvyy.7.16): written as NOT p_exclude_sensitive OR NOT EXISTS (...) the sublink
@@ -17,7 +18,14 @@
     is pulled up to an anti join that probes the manifest per candidate row by idx_catalog_chunks_chash (tenant_id,
     chash), an index that already exists; with the flag false the inner qual is a constant false, the inner side is a
     Result with a false One-Time Filter that reads no relation, and the plan keeps one Nested Loop Anti Join node with
-    Join Filter: false above the scan (VectorSensitivityExcludePlanShapeTest pins both shapes). The
+    Join Filter: false above the scan (VectorSensitivityExcludePlanShapeTest pins both shapes).
+    The sublink also repeats the function's collection restriction (sm.collection = ANY(p_collections); in
+    search_topic_scoped, = p_collection), which the correlation sm.collection = c.collection already implies and the
+    planner cannot derive (a = ANY(array) qual is not an equivalence class). On the exact route (a small collection,
+    index scans off, a Bitmap Heap Scan under a Sort) the planner has thousands of candidate rows, prefers a Hash Anti
+    Join to per-row probes, and without the restriction builds the hash from a Seq Scan of the tenant's whole manifest
+    (R2 of nexus-rfvyy.7.16: cost linear in manifest size). With it the build side reads the searched collections' manifest
+    through idx_catalog_chunks_collection (tenant_id, collection), so the cost follows the collection, not the tenant. The
     join is the one nexus.chunk_sensitive (catalog-047-3) runs: a chunk is sensitive when ANY LIVE owner is, so a chunk
     shared by a sensitive live document and a non-sensitive one is excluded, and comes back once the sensitive owner is
     tombstoned. It is written out here rather than calling chunk_sensitive because the planner cannot inline a scalar
@@ -93,6 +101,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -131,6 +140,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -169,6 +179,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -208,6 +219,7 @@ AS $function$
                     WHERE p_exclude_sensitive
                       AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
+                      AND sm.collection = ANY(p_collections)
                       AND sm.chash      = c.chash
                       AND sd.deleted_at IS NULL
                       AND sd.sensitive)
@@ -251,6 +263,7 @@ AS $function$
                     WHERE p_exclude_sensitive
                       AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
+                      AND sm.collection = ANY(p_collections)
                       AND sm.chash      = c.chash
                       AND sd.deleted_at IS NULL
                       AND sd.sensitive)
@@ -294,6 +307,7 @@ AS $function$
                     WHERE p_exclude_sensitive
                       AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
+                      AND sm.collection = ANY(p_collections)
                       AND sm.chash      = c.chash
                       AND sd.deleted_at IS NULL
                       AND sd.sensitive)
@@ -337,6 +351,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -484,6 +499,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -631,6 +647,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -778,6 +795,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -818,6 +836,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -858,6 +877,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -898,6 +918,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -937,6 +958,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -976,6 +998,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1014,6 +1037,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1053,6 +1077,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1092,6 +1117,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1230,6 +1256,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1375,6 +1402,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1520,6 +1548,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1667,6 +1696,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1817,6 +1847,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -1967,6 +1998,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -2133,6 +2165,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -2290,6 +2323,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -2447,6 +2481,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -2492,6 +2527,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = p_collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -2533,6 +2569,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = p_collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -2574,6 +2611,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = p_collection
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)
@@ -2701,6 +2739,7 @@ AS $function$
                 WHERE p_exclude_sensitive
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
+                  AND sm.collection = ANY(p_collections)
                   AND sm.chash      = c.chash
                   AND sd.deleted_at IS NULL
                   AND sd.sensitive)

@@ -54,6 +54,11 @@ import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
  * to about 512k rows and the 10 percent cells of A and B are measured again (the last CSV column is the tenant's
  * manifest row count).
  *
+ * <p><b>Fix round R2 (nexus-rfvyy.7.16, exact-route fix).</b> The exact-route collection C joins the ballast sweep (pct 10,
+ * k 10), so its exclude = true cost is read at about 128k and at about 512k manifest rows; the JIT-off variants are gone
+ * (JIT was ruled out in the first fix round), the ballast is written by
+ * {@link VectorSensitivityExcludePlanShapeTest#addManifestBallast}, and the default budget is 18 minutes.
+ *
  * <p><b>What is measured</b> (all warm, one fixed seed, serving session settings, as {@code nexus_svc} under RLS):
  * <ul>
  *   <li>collection A: ROWS_A chunks (384-d, clustered), one tenant, walking the shared leaf index at the widest
@@ -95,12 +100,12 @@ class VectorSensitivityExcludePlanMeasure {
     static final int ROWS_C = intEnv("NX_RDR243_PLAN_ROWS_C", 18_000);
     static final int QUERIES = intEnv("NX_RDR243_PLAN_QUERIES", 100);
     /** Queries per cell on the exact route (every query reads the whole 18,000-row collection, 0.2 to 0.5 s each). */
-    static final int QUERIES_C = intEnv("NX_RDR243_PLAN_QUERIES_C", 30);
+    static final int QUERIES_C = intEnv("NX_RDR243_PLAN_QUERIES_C", 60);
     /** Manifest rows (no chunk behind them) added to the tenant's manifest for the flatness sweep (0 skips the sweep). */
     static final int BALLAST = intEnv("NX_RDR243_PLAN_BALLAST", 384_000);
     static final String COLL_D = "knowledge__rfvyy716-d__minilm-l6-v2-384__v1";
     /** No new cell starts after this many minutes; the output then says TRUNCATED. */
-    static final int BUDGET_MINUTES = intEnv("NX_RDR243_PLAN_BUDGET_MIN", 26);
+    static final int BUDGET_MINUTES = intEnv("NX_RDR243_PLAN_BUDGET_MIN", 18);
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -279,40 +284,7 @@ class VectorSensitivityExcludePlanMeasure {
      * ballast documents are sensitive at the fraction the caller sets next.
      */
     private void addBallast(Connection su, int rows) throws Exception {
-        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-        String model = MODEL;
-        PgContainerHelper.insertCollection(ctx, TENANT, COLL_D);
-        int docs = (rows + CHUNKS_PER_DOC - 1) / CHUNKS_PER_DOC;
-        ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
-        try {
-            var g = DSL.generateSeries(0, rows - 1).as("g", "i");
-            Field<Integer> i = g.field("i", Integer.class);
-            Field<byte[]> chash = DSL.function("sha256", SQLDataType.VARBINARY,
-                DSL.function("convert_to", SQLDataType.VARBINARY,
-                    DSL.inline("ballast|").concat(i.cast(SQLDataType.VARCHAR)), DSL.inline("UTF8")));
-            var d = DSL.generateSeries(0, docs - 1).as("gd", "d");
-            Field<Integer> di = d.field("d", Integer.class);
-            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                    CATALOG_DOCUMENTS.SENSITIVE)
-                .select(ctx.select(DSL.inline(TENANT), DSL.inline("d-").concat(di.cast(SQLDataType.VARCHAR)),
-                    DSL.inline("doc ").concat(di.cast(SQLDataType.VARCHAR)), DSL.inline("paper"), DSL.inline(COLL_D),
-                    DSL.inline(false)).from(d))
-                .execute();
-            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX)
-                .select(ctx.select(DSL.inline(TENANT),
-                    DSL.inline("d-").concat(DSL.floor(i.div(CHUNKS_PER_DOC)).cast(SQLDataType.INTEGER)
-                        .cast(SQLDataType.VARCHAR)),
-                    i.mod(CHUNKS_PER_DOC), chash, DSL.inline(COLL_D), DSL.inline(model), i.mod(CHUNKS_PER_DOC)).from(g))
-                .execute();
-        } finally {
-            ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
-        }
-        PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
-        PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
+        VectorSensitivityExcludePlanShapeTest.addManifestBallast(su, TENANT, COLL_D, MODEL, "d-", rows, 0);
     }
 
     /** Write what has been measured so far, so a later failure does not lose it. */
@@ -402,10 +374,7 @@ class VectorSensitivityExcludePlanMeasure {
                 + (n.indexName().contains("pci_") ? "pci" : n.indexName().isEmpty() ? "-" : "leaf"))
             .findFirst().orElse("none");
         boolean exact = COLL_C.equals(collection);
-        // the exact route: two more variants with JIT off, to read the JIT share of the exclude cost directly
-        boolean[][] variants = exact
-            ? new boolean[][] {{false, false}, {true, false}, {false, true}, {true, true}}
-            : new boolean[][] {{false, false}, {true, false}};
+        boolean[][] variants = new boolean[][] {{false, false}, {true, false}};
         int nq = exact ? Math.min(QUERIES_C, qs.length) : qs.length;
         for (boolean[] v : variants) {
             boolean exclude = v[0];
@@ -537,8 +506,8 @@ class VectorSensitivityExcludePlanMeasure {
                 Set<String> sensitive = sensitiveChashes(su);
                 LOG.info("event=rdr243_measure_ballast manifest_rows={} sensitive_chunks={} elapsed_s={}", manifestRows,
                     sensitive.size(), (System.nanoTime() - startedNanos) / 1_000_000_000L);
-                for (String[] c : new String[][] {{"A_shared", COLL_A}, {"B_pci", COLL_B}}) {
-                    for (int k : KS) {
+                for (String[] c : new String[][] {{"A_shared", COLL_A}, {"B_pci", COLL_B}, {"C_exact", COLL_C}}) {
+                    for (int k : COLL_C.equals(c[1]) ? new int[] {10} : KS) {
                         if (overBudget()) break;
                         cell(10, c[0], c[1], k, sensitive);
                         flushOutput();

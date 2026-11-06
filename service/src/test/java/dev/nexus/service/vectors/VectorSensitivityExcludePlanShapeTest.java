@@ -90,7 +90,13 @@ class VectorSensitivityExcludePlanShapeTest {
     /** Empty collections that only give the 768 and 1024 leaves to exist, for the folding check. */
     static final String EMPTY_768 = "knowledge__rfvyy716-e768__bge-base-en-v15-768__v1";
     static final String EMPTY_1024 = "knowledge__rfvyy716-e1024__voyage-context-3__v1";
+    /** A small collection the router sends down the exact route (no HNSW); the tenant's manifest is mostly elsewhere. */
+    static final String EXACT = "knowledge__rfvyy716-exact__minilm-l6-v2-384__v1";
+    /** Holds only manifest rows (no chunks): the rest of the tenant's manifest, which the exact route must not read. */
+    static final String BALLAST = "knowledge__rfvyy716-ballast__minilm-l6-v2-384__v1";
     static final int ROWS = 6000;
+    static final int EXACT_ROWS = 3000;
+    static final int BALLAST_ROWS = 60_000;
     static final int CHUNKS_PER_DOC = 5;
     /** Every tenth document is sensitive. */
     static final int SENSITIVE_EVERY = 10;
@@ -160,8 +166,11 @@ class VectorSensitivityExcludePlanShapeTest {
             PgContainerHelper.insertCollection(ctx, TENANT, EMPTY_1024);
             for (String c : List.of(SHARED, PCI)) {
                 PgContainerHelper.insertCollection(ctx, TENANT, c);
-                seedCollection(ctx, c, rnd);
+                seedCollection(ctx, c, ROWS, rnd);
             }
+            PgContainerHelper.insertCollection(ctx, TENANT, EXACT);
+            seedCollection(ctx, EXACT, EXACT_ROWS, rnd);
+            addManifestBallast(su, TENANT, BALLAST, MODEL, "bal-", BALLAST_ROWS, SENSITIVE_EVERY);
             PgContainerHelper.createLeafHnswIndex(su, "nexus", leaf, PCI_INDEX, "embedding_384", PCI);
             PgContainerHelper.analyzeTable(su, DSL.table(DSL.name("nexus", leaf)));
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
@@ -169,10 +178,10 @@ class VectorSensitivityExcludePlanShapeTest {
         }
     }
 
-    private void seedCollection(DSLContext ctx, String collection, Random rnd) {
-        byte[][] chash = new byte[ROWS][];
-        for (int from = 0; from < ROWS; from += 250) {
-            int to = Math.min(ROWS, from + 250);
+    private void seedCollection(DSLContext ctx, String collection, int rows, Random rnd) {
+        byte[][] chash = new byte[rows][];
+        for (int from = 0; from < rows; from += 250) {
+            int to = Math.min(rows, from + 250);
             var step = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
                 CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384);
             for (int i = from; i < to; i++) {
@@ -181,7 +190,7 @@ class VectorSensitivityExcludePlanShapeTest {
             }
             step.execute();
         }
-        int docs = ROWS / CHUNKS_PER_DOC;
+        int docs = rows / CHUNKS_PER_DOC;
         for (int d = 0; d < docs; d++) {
             ctx.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc(collection, d))
@@ -190,8 +199,8 @@ class VectorSensitivityExcludePlanShapeTest {
                 .set(CATALOG_DOCUMENTS.SENSITIVE, d % SENSITIVE_EVERY == 0)
                 .execute();
         }
-        for (int from = 0; from < ROWS; from += 250) {
-            int to = Math.min(ROWS, from + 250);
+        for (int from = 0; from < rows; from += 250) {
+            int to = Math.min(rows, from + 250);
             var step = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                 CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
@@ -205,8 +214,55 @@ class VectorSensitivityExcludePlanShapeTest {
         }
     }
 
+    /**
+     * {@code rows} manifest rows of {@code tenant} in {@code collection}, in documents of 5, with no chunk behind them,
+     * written server side with the foreign keys to {@code nexus.chunks} off for the session
+     * ({@code session_replication_role = replica}, so {@code su} must be a superuser connection). What a caller needs
+     * from them is the growth of the tenant's {@code catalog_document_chunks}, its indexes and its statistics: a real
+     * chunk carries an embedding of 1.5 to 4 KB and a large ballast of them does not fit a test cluster's tmpfs.
+     * Documents are {@code <docPrefix><n>}; every {@code sensitiveEvery}th is sensitive (0: none). Analyzes both tables.
+     */
+    static void addManifestBallast(Connection su, String tenant, String collection, String model, String docPrefix,
+                                   int rows, int sensitiveEvery) throws Exception {
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        PgContainerHelper.insertCollection(ctx, tenant, collection);
+        int docs = (rows + CHUNKS_PER_DOC - 1) / CHUNKS_PER_DOC;
+        ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+        try {
+            var g = DSL.generateSeries(0, rows - 1).as("g", "i");
+            Field<Integer> i = g.field("i", Integer.class);
+            Field<byte[]> chash = DSL.function("sha256", SQLDataType.VARBINARY,
+                DSL.function("convert_to", SQLDataType.VARBINARY,
+                    DSL.inline(docPrefix + "chunk|").concat(i.cast(SQLDataType.VARCHAR)), DSL.inline("UTF8")));
+            var d = DSL.generateSeries(0, docs - 1).as("gd", "d");
+            Field<Integer> di = d.field("d", Integer.class);
+            Field<Boolean> sensitive = sensitiveEvery > 0 ? di.mod(sensitiveEvery).eq(0) : DSL.inline(false);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                    CATALOG_DOCUMENTS.SENSITIVE)
+                .select(ctx.select(DSL.inline(tenant), DSL.inline(docPrefix).concat(di.cast(SQLDataType.VARCHAR)),
+                    DSL.inline("doc ").concat(di.cast(SQLDataType.VARCHAR)), DSL.inline("paper"),
+                    DSL.inline(collection), sensitive).from(d))
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX)
+                .select(ctx.select(DSL.inline(tenant),
+                    DSL.inline(docPrefix).concat(DSL.floor(i.div(CHUNKS_PER_DOC)).cast(SQLDataType.INTEGER)
+                        .cast(SQLDataType.VARCHAR)),
+                    i.mod(CHUNKS_PER_DOC), chash, DSL.inline(collection), DSL.inline(model), i.mod(CHUNKS_PER_DOC))
+                    .from(g))
+                .execute();
+        } finally {
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+        }
+        PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
+        PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
+    }
+
     private static String doc(String collection, int d) {
-        return (collection.contains("shared") ? "s" : "p") + "-" + d;
+        return (collection.contains("shared") ? "s" : collection.contains("exact") ? "e" : "p") + "-" + d;
     }
 
     // -- the plans ---------------------------------------------------------------------------------------
@@ -504,6 +560,120 @@ class VectorSensitivityExcludePlanShapeTest {
         assertExcludeShape(fn, PCI, PCI_INDEX);
     }
 
+    // -- exclude = true on the exact route: the manifest read is bounded by the searched collection ----------
+
+    /** The scans of {@code catalog_document_chunks sm}, the sensitive test's manifest side, in the main plan. */
+    private static List<Node> smScans(Parsed p) {
+        return p.nodes().stream().filter(Node::mainPlan)
+            .filter(n -> n.text().contains(" on catalog_document_chunks sm ")).toList();
+    }
+
+    /**
+     * The assertions of an exclude = true plan on the exact route (a collection small enough that the router skips
+     * HNSW: index scans off, a Sort ranks the candidates). There the planner has thousands of candidate rows, so it
+     * prefers a hash anti join to probing per row, and its build side must not read the tenant's whole manifest: a Seq
+     * Scan of {@code catalog_document_chunks} filtered on the tenant alone grows with the tenant's manifest, not with
+     * the collection searched (R2 of nexus-rfvyy.7.16). The build side has to be bounded by the searched collection
+     * (an index condition on {@code collection}) or probe by {@code chash} per row. Returns the failures.
+     */
+    static List<String> exactRouteFailures(Parsed p) {
+        List<String> bad = new ArrayList<>();
+        if (p.nodes().stream().filter(Node::mainPlan).noneMatch(n -> n.type().equals("Sort"))) {
+            bad.add("not the exact route: the plan has no Sort over the candidates");
+        }
+        if (p.nodes().stream().filter(Node::mainPlan).filter(Node::scansChunksLeaf)
+                .anyMatch(n -> n.type().equals("Index Scan"))) {
+            bad.add("not the exact route: the chunks leaf is read by an Index Scan");
+        }
+        List<Node> sm = smScans(p);
+        if (sm.isEmpty()) {
+            bad.add("no scan of catalog_document_chunks sm: the sensitive test is missing");
+        }
+        for (Node n : sm) {
+            if (n.type().equals("Seq Scan")) {
+                bad.add("Seq Scan of catalog_document_chunks sm: the sensitive test reads the tenant's whole manifest ("
+                    + n.text() + ")");
+                continue;
+            }
+            boolean bounded = n.props().stream().anyMatch(l -> (l.startsWith("Index Cond:") || l.startsWith("Recheck Cond:"))
+                && (l.contains("collection") || l.contains("chash")));
+            if (!bounded) {
+                bad.add("the scan of catalog_document_chunks sm is bounded by neither the collection nor the chash ("
+                    + n.text() + " " + n.props() + ")");
+            }
+        }
+        return bad;
+    }
+
+    private String explainExact(Table<?> fn) {
+        return scope.withTenant(TENANT, ctx -> {
+            PgSession.disableIndexScanForExactFallback(ctx);
+            PgSession.setSearchPlanCacheMode(ctx);
+            return PgContainerHelper.explainPlan(ctx, ctx.select().from(fn));
+        });
+    }
+
+    @ParameterizedTest(name = "{0} on the exact route")
+    @EnumSource(Fn.class)
+    void excludeTrue_exactRoute_readsTheSearchedCollectionsManifestNotTheTenants(Fn fn) {
+        String on = explainExact(call(fn, EXACT, true));
+        Parsed p = parse(on);
+        assertThat(exactRouteFailures(p)).as("%s on %s, exclude=true%n%s", fn, EXACT, on).isEmpty();
+        assertThat(sensitiveBlocks(p)).as("no SubPlan names the sensitive test%n%s", on).isEmpty();
+        // exclude=false still folds the test away on this route
+        String off = explainExact(call(fn, EXACT, false));
+        assertThat(carriesSensitiveTest(parse(off))).as("exclude=false%n%s", off).isFalse();
+    }
+
+    /** The R2 plan: a hash anti join whose build side is a Seq Scan of the tenant's whole manifest. */
+    private static final String EXACT_SEQ_BUILD_PLAN = """
+        Limit  (cost=1.00..2.00 rows=10 width=102)
+          ->  Sort  (cost=1.00..2.00 rows=10 width=102)
+                Sort Key: ((c.embedding_384 OPERATOR(nexus.<=>) '[1]'::nexus.vector))
+                ->  Hash Anti Join  (cost=1.00..9.00 rows=9000 width=102)
+                      Hash Cond: ((c.collection = sm.collection) AND (c.chash = sm.chash))
+                      ->  Bitmap Heap Scan on chunks_x c  (cost=1.00..9.00 rows=9000 width=1648)
+                            Recheck Cond: (collection = 'k'::text)
+                      ->  Hash  (cost=1.00..9.00 rows=12000 width=100)
+                            ->  Hash Join  (cost=1.00..9.00 rows=12000 width=100)
+                                  Hash Cond: (sm.doc_id = sd.tumbler)
+                                  ->  Seq Scan on catalog_document_chunks sm  (cost=0.00..431.00 rows=128000 width=100)
+                                        Filter: (tenant_id = 't'::text)
+                                  ->  Hash  (cost=71.61..71.61 rows=240 width=20)
+                                        ->  Bitmap Heap Scan on catalog_documents sd  (cost=0.00..71.61 rows=240 width=20)
+                                              Filter: ((deleted_at IS NULL) AND sensitive)
+        """;
+
+    /** The shape the fix produces: the same hash anti join, its build side bounded by the searched collection. */
+    private static final String EXACT_BOUNDED_BUILD_PLAN = """
+        Limit  (cost=1.00..2.00 rows=10 width=102)
+          ->  Sort  (cost=1.00..2.00 rows=10 width=102)
+                Sort Key: ((c.embedding_384 OPERATOR(nexus.<=>) '[1]'::nexus.vector))
+                ->  Hash Anti Join  (cost=1.00..9.00 rows=9000 width=102)
+                      Hash Cond: ((c.collection = sm.collection) AND (c.chash = sm.chash))
+                      ->  Bitmap Heap Scan on chunks_x c  (cost=1.00..9.00 rows=9000 width=1648)
+                            Recheck Cond: (collection = 'k'::text)
+                      ->  Hash  (cost=1.00..9.00 rows=1800 width=100)
+                            ->  Hash Join  (cost=1.00..9.00 rows=1800 width=100)
+                                  Hash Cond: (sm.doc_id = sd.tumbler)
+                                  ->  Bitmap Heap Scan on catalog_document_chunks sm  (cost=1.00..9.00 rows=18000 width=100)
+                                        Recheck Cond: ((tenant_id = 't'::text) AND (collection = ANY ('{k}'::text[])))
+                                        ->  Bitmap Index Scan on idx_catalog_chunks_collection  (cost=0.00..9.00 rows=18000 width=0)
+                                              Index Cond: ((tenant_id = 't'::text) AND (collection = ANY ('{k}'::text[])))
+                                  ->  Hash  (cost=71.61..71.61 rows=240 width=20)
+                                        ->  Bitmap Heap Scan on catalog_documents sd  (cost=0.00..71.61 rows=240 width=20)
+                                              Filter: ((deleted_at IS NULL) AND sensitive)
+        """;
+
+    @Test
+    void theExactRouteAssertion_rejectsAWholeManifestBuildSide_andAcceptsABoundedOne() {
+        assertThat(exactRouteFailures(parse(EXACT_SEQ_BUILD_PLAN)))
+            .anyMatch(s -> s.contains("Seq Scan of catalog_document_chunks sm"));
+        assertThat(exactRouteFailures(parse(EXACT_BOUNDED_BUILD_PLAN))).isEmpty();
+        assertThat(exactRouteFailures(parse(NO_FILTER_PLAN))).anyMatch(s -> s.contains("not the exact route"))
+            .anyMatch(s -> s.contains("sensitive test is missing"));
+    }
+
     // -- exclude = false: the predicate folds away in every function --------------------------------------
 
     private static final List<String> FAMILIES = List.of("plain_search", "hybrid_search", "manifest_search",
@@ -697,9 +867,14 @@ class VectorSensitivityExcludePlanShapeTest {
     void theFixtureIsBigEnoughToMeanSomething() throws Exception {
         try (Connection su = pg.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT))).isEqualTo(2 * ROWS);
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT))).isEqualTo(2 * ROWS + EXACT_ROWS);
             assertThat(ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)
-                .and(CATALOG_DOCUMENTS.SENSITIVE))).isEqualTo(2 * ROWS / CHUNKS_PER_DOC / SENSITIVE_EVERY);
+                .and(CATALOG_DOCUMENTS.SENSITIVE)))
+                .isEqualTo((2 * ROWS + EXACT_ROWS + BALLAST_ROWS) / CHUNKS_PER_DOC / SENSITIVE_EVERY);
+            // the exact collection is a small part of the tenant's manifest: that is what gives the exact-route check meaning
+            long manifest = ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT));
+            assertThat(manifest).isEqualTo(2L * ROWS + EXACT_ROWS + BALLAST_ROWS);
+            assertThat(EXACT_ROWS * 20L).isLessThan(manifest);
         }
     }
 }
