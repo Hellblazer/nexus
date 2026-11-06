@@ -177,17 +177,19 @@ def _simple(n: int = 3, **kw: Any) -> ResolveDispatcher:
 # ── the switch ────────────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_the_switch_is_off_by_default_and_a_boundary_does_not_resolve_unless_told() -> None:
-    assert switches.ANSWER_RESOLUTION_REPAIR_ENABLED is False
-    assert switches.resolution_repair_enabled({}) is False
+def test_the_switch_is_on_by_default_and_a_bare_boundary_does_not_resolve_unless_told() -> None:
+    # RDR-147 Phase 2 (Sam, 2026-11-06, nexus-bwct4.2): the shipped default is on; the boundary's own field stays False
+    # so only the runner, reading the switch, turns the branch on.
+    assert switches.ANSWER_RESOLUTION_REPAIR_ENABLED is True
+    assert switches.resolution_repair_enabled({}) is True
     assert CoverageBoundary(request=None).resolution_repair is False
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
     ("1", True), ("true", True), ("YES", True), (" on ", True),
-    ("", False), ("0", False), ("off", False), ("garbage", False),
+    ("", True), ("  ", True), ("0", False), ("off", False), ("NO", False), ("garbage", False),
 ])
-def test_the_switch_reads_one_as_on_and_everything_else_as_off(raw: str, expected: bool) -> None:
+def test_the_switch_reads_unset_and_on_values_as_on_and_off_or_unrecognised_as_off(raw: str, expected: bool) -> None:
     switches.reset_warned()
     assert switches.resolution_repair_enabled({switches.ANSWER_RESOLUTION_REPAIR_ENV: raw}) is expected
 
@@ -576,7 +578,7 @@ async def test_the_envelope_coverage_object_carries_the_repair_fields_end_to_end
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("value", "expected"), [(None, False), ("", False), ("0", False), ("1", True), ("off", False)])
+@pytest.mark.parametrize(("value", "expected"), [(None, True), ("", True), ("0", False), ("1", True), ("off", False)])
 async def test_nx_answer_hands_the_boundary_the_switch_it_reads_from_the_environment(monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool) -> None:
 
     monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "1")

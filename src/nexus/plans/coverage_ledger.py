@@ -923,7 +923,7 @@ class CoverageBoundary:
     max_concurrent_calls: int = MAX_CONCURRENT_ASSESSMENT_CALLS
     call_cost_prior_usd: float = ASSESSMENT_CALL_COST_PRIOR_USD
     max_anchors_per_call: int = MAX_ANCHORS_PER_ASSESSMENT_CALL
-    #: RDR-147 Step 4 (nexus-qpimy): the repair may take the exact-key resolution branch. Off by default; the runner
+    #: RDR-147 Step 4 (nexus-qpimy): the repair may take the exact-key resolution branch. False on a bare boundary; the runner
     #: caller sets it from ``NX_ANSWER_RESOLUTION_REPAIR`` (:func:`nexus.plans.switches.resolution_repair_enabled`).
     resolution_repair: bool = False
 

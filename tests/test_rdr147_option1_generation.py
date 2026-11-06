@@ -463,7 +463,7 @@ async def test_nx_answer_text_mode_opens_with_the_notice(monkeypatch: pytest.Mon
 
 @pytest.mark.asyncio
 async def test_nx_answer_with_the_switch_off_is_the_uncovered_non_answer_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, raising=False)
+    monkeypatch.setenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, "0")  # off explicitly: unset is on since Phase 2
     d = _uncovered_simple(3, answer=PROSE)
     run = await _drive(plan_id=7, dispatcher=d, request=_request(3))
     assert run.out["answer_shape"] == "uncovered" and run.write["success"] is False
@@ -511,7 +511,7 @@ async def test_nx_answer_a_partial_answer_from_a_merged_join_opens_with_the_join
 async def test_nx_answer_a_run_with_no_merged_join_carries_no_notice(monkeypatch: pytest.MonkeyPatch, why: str) -> None:
     """The notice needs a MERGED join: a branch that did not enter, one that entered and merged nothing, and the switch off."""
     if why == "switch_off":
-        monkeypatch.delenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, raising=False)
+        monkeypatch.setenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, "0")  # off explicitly: unset is on since Phase 2
         d = _simple(3, answer=PROSE)
     else:
         _env_on(monkeypatch)
@@ -575,7 +575,7 @@ async def test_a_trace_false_option1_answer_is_recorded_as_an_answer_not_a_non_a
     assert run.summary["coverage_state"] == "unavailable" and run.summary["repair"]["resolution_generated_on_join"] is True
     row = {"final_text": run.write["final_text"], "question": "q", "step_count": 5, "run_summary": run.summary}
     assert heuristic_class(row) == "redacted"
-    monkeypatch.delenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, raising=False)
+    monkeypatch.setenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, "0")  # off explicitly: unset is on since Phase 2
     off = await _drive(plan_id=7, dispatcher=_uncovered_simple(3, answer=PROSE), request=_request(3), trace=False)
     assert heuristic_class({"final_text": "[redacted]", "question": "q", "step_count": 5, "run_summary": off.summary}) == "non_answer/uncovered"
 
@@ -609,6 +609,6 @@ async def test_the_run_summary_of_an_option1_run_records_skip_generation_false(m
     _env_on(monkeypatch)
     run = await _drive(plan_id=7, dispatcher=_uncovered_simple(3, answer=PROSE), request=_request(3))
     assert run.summary["coverage"]["skip_generation"] is False
-    monkeypatch.delenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, raising=False)
+    monkeypatch.setenv(switches.ANSWER_RESOLUTION_REPAIR_ENV, "0")  # off explicitly: unset is on since Phase 2
     off = await _drive(plan_id=7, dispatcher=_uncovered_simple(3, answer=PROSE), request=_request(3))
     assert off.summary["coverage"]["skip_generation"] is True, "control: the switch off skips"

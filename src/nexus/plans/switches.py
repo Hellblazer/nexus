@@ -14,9 +14,11 @@ is read as OFF and logs the same one warning. A typo of either intent therefore 
 behaviour, which changes no answer; only an explicit on value (``1``, ``true``, ``yes``, ``on``) or leaving the
 variable unset runs the assessment.
 
-``NX_ANSWER_RESOLUTION_REPAIR`` (RDR-147 Step 4, nexus-qpimy) is the opposite default: OFF unless set to an on
-value (``1``, ``true``, ``yes``, ``on``). Unset, blank, an off value and an unrecognised value (one warning) all
-read as off, so a typo never turns the exact-key resolution branch of the coverage repair on. With it on, a run whose
+``NX_ANSWER_RESOLUTION_REPAIR`` (RDR-147 Step 4, nexus-qpimy) is ON by default since RDR-147 Phase 2 (Sam,
+2026-11-06, nexus-bwct4.2): unset or blank reads as on, and ``0``/``false``/``off``/``no`` is the kill switch. As
+with ``NX_ANSWER_COVERAGE``, an unrecognised value reads as OFF (one warning), so a typo lands on the repair as it was
+before RDR-147. The branch acts only on anchors in a collection with an ``entity.collections`` key pattern, so an
+install with no pattern sees no change. With it on, a run whose
 re-check leaves every facet uncovered after a merged exact-key join is generated, leads with the ``[exact-key join: ...]``
 notice, counts as an answer when the generated text is one, and never grows a plan (``repair.generated_on_join``; ``coverage.state`` stays
 ``unavailable``), the one exception to ``NX_ANSWER_COVERAGE``'s "unavailable is a failure".
@@ -101,18 +103,18 @@ def coverage_enabled(environ: Mapping[str, str]) -> bool:
 
 #: The switch of the exact-key resolution branch inside the coverage repair (RDR-147 Step 4, nexus-qpimy).
 ANSWER_RESOLUTION_REPAIR_ENV = "NX_ANSWER_RESOLUTION_REPAIR"
-#: What an unset or blank :data:`ANSWER_RESOLUTION_REPAIR_ENV` means. Off until the MVV and the single-hop
-#: non-firing count are recorded (RDR-147 Phase 2); one source for the default, a test flips it. On, an uncovered re-check
+#: What an unset or blank :data:`ANSWER_RESOLUTION_REPAIR_ENV` means. On since RDR-147 Phase 2 (Sam, 2026-11-06,
+#: nexus-bwct4.2: the MVV passed, P2 = 1.0, the single-hop set entered 0 of 20); one source for the default. On, an uncovered re-check
 #: after a merged exact-key join is generated and, when the text is an answer, counts as one behind the ``[exact-key join: ...]`` notice
 #: (``repair.generated_on_join``; ``coverage.state`` stays ``unavailable``), the one exception to "unavailable is a failure".
-ANSWER_RESOLUTION_REPAIR_ENABLED: bool = False
+ANSWER_RESOLUTION_REPAIR_ENABLED: bool = True
 
 
 def resolution_repair_enabled(environ: Mapping[str, str]) -> bool:
     """Whether the coverage repair may take its exact-key resolution branch, decided now from *environ*.
 
     An on value (``1``, ``true``, ``yes``, ``on``): on. Unset or blank: :data:`ANSWER_RESOLUTION_REPAIR_ENABLED`
-    (``False``). An off value, or a value in neither vocabulary (one warning per process): off. Off is the repair
+    (``True``). An off value, or a value in neither vocabulary (one warning per process): off. Off is the repair
     exactly as it was before RDR-147: the semantic facet queries, no scan of the anchors, no ``resolve`` call.
     """
     raw = str(environ.get(ANSWER_RESOLUTION_REPAIR_ENV, "")).strip().lower()
