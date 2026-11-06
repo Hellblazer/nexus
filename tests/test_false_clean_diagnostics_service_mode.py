@@ -412,7 +412,7 @@ class TestRetiredQueueTableIsNeverACleanZero:
         }, monkeypatch)
         assert exit_code == 1, printed
         assert "3 row(s) are stranded" in printed and "body_over_cap=2" in printed
-        assert "nx enrich aspects" in printed and "docs/migration-runbook.md" in printed
+        assert "nx enrich aspects" in printed and "migration-runbook.md#the-retired-aspect-queue-tuples-rung-and-the-aspect-queue-table" in printed
         assert "0 pending, 0 failed" in printed, "premise: the tuple depth alone reads clean"
 
     def test_an_uncounted_table_warns_and_is_not_clean(self, service_mode: None, monkeypatch) -> None:

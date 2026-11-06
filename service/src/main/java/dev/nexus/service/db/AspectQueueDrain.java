@@ -194,8 +194,8 @@ public final class AspectQueueDrain {
             }
         }
         if (retained != 0) {
-            log.warn("event=aspect_queue_rows_retained rows={} reasons={} remedy=\"see docs/migration-runbook.md "
-                + "(aspect_extraction_queue rows); the table is dropped at the first boot after it is empty\"",
+            log.warn("event=aspect_queue_rows_retained rows={} reasons={} remedy=\"see https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#the-retired-aspect-queue-tuples-rung-and-the-aspect-queue-table; "
+                + "the table is dropped at the first boot after it is empty\"",
                 retained, tally.reasons);
         }
         return new Result(after == null || after.tablePresent(), retained, tally.moved, tally.deadLettered,

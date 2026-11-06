@@ -139,7 +139,7 @@ RETIRED_TABLE_REMEDY: str = (
     "rows the engine could not move to the aspects queue are stranded in nexus.aspect_extraction_queue: "
     "`nx enrich aspects <collection>` re-extracts documents that lack aspects, and deleting the rows "
     "(as the table owner) lets the next engine start drop the table; "
-    "docs/migration-runbook.md, 'aspect_extraction_queue rows'"
+    "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#the-retired-aspect-queue-tuples-rung-and-the-aspect-queue-table"
 )
 
 

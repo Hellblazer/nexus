@@ -127,7 +127,8 @@ rows in keeps the table. Shortly after boot the engine moves its rows onto the
 `in_progress` rows become tasks (a retrying row keeps its wait; the task names the
 document's current collection; a document that already has a live task keeps that
 task and the older row is deleted), `failed` rows become dead tasks that
-`nx aspects requeue-failed` revives. The log says `event=aspect_queue_rows_drained`
+`nx aspects requeue-failed` revives (unless the document is flagged sensitive:
+that task stays dead). The log says `event=aspect_queue_rows_drained`
 per tenant. The NEXT engine start finds the table empty and drops it, so the
 retirement finishes with two starts. Run `nx daemon service stop`, then
 `nx daemon service start` once after the first start has logged the drain.
