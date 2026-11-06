@@ -2855,7 +2855,7 @@ class _ServiceCollectionStub:
             return
         if self._sensitivity_gate is None:
             raise SensitivityExcludeUnavailable(
-                f"sensitivity='exclude' read of {self._name!r} refused: this collection handle has no client to "
+                f"sensitivity='exclude' read refused for {self._name!r}: this collection handle has no client to "
                 "read the engine's capability from, so it cannot be shown to filter sensitive chunks."
             )
         self._sensitivity_gate()

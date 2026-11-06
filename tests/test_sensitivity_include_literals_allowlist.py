@@ -32,8 +32,8 @@ _OPS = "operator maintenance verb (an explicit CLI command); never an LLM-bound 
 _DOCTOR = "doctor/health probe; counts or samples, output is not model input"
 _EXISTS = "existence/presence check; nothing is returned to a caller"
 _DELETE = "delete path: must find a sensitive chunk to remove it; nothing is returned to a model"
-_T1 = "T1 session scratch (the scratch collection), not T3 knowledge; a sensitive document is never in it"
-_TAXONOMY = "taxonomy compute reads vectors/embeddings, not chunk text; topics are labelled from embeddings"
+_T1 = "T1 session scratch (the scratch collection), not T3 knowledge: the catalog sensitivity flag does not apply to it"
+_TAXONOMY = "taxonomy compute (clustering and c-TF-IDF term scoring) reads no text for a model; the label and review surfaces that do carry their own gate (taxonomy_cmd.py)"
 _REEMBED = "re-embed/reindex copies chunk rows between collections for the operator; not LLM-bound"
 _MIGRATION = "upgrade-ladder rung / reconcile / recovery tooling; a one-shot operator migration"
 _T3FACADE = "T3Database facade method (injected test/dry-run client); callers pass their own posture elsewhere"
@@ -86,7 +86,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("db/t3.py", "_rewrite_collection_metadata"): _T3FACADE,
     ("db/t3.py", "T3Database.get_embeddings"): _T3FACADE,
     ("db/t3.py", "T3Database.expire"): _T3FACADE,
-    ("db/t3.py", "T3Database.list_store"): _T3FACADE,
+    ("db/t3.py", "T3Database.list_store"): "store_list returns titles and metadata unfiltered by design (RDR-243 Technical Design, /store-list)",
     ("db/t3.py", "T3Database.list_unique_source_paths"): _T3FACADE,
     ("db/t3.py", "T3Database.ids_for_source"): _T3FACADE,
     ("db/t3.py", "T3Database.ids_for_doc_id"): _T3FACADE,

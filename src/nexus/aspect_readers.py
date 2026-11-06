@@ -321,13 +321,21 @@ class TransportReadFailure(RuntimeError):
 def is_transport_failure(exc: BaseException) -> bool:
     """True if *exc* is a transient failure of the transport or the service: an
     httpx/urllib connectivity error, a timeout, or any HTTP 5xx or 429. A
-    ValueError, an assertion or a 4xx is a fact about the request and is not."""
+    ValueError, an assertion or a 4xx is a fact about the request and is not. A refused
+    ``sensitivity='exclude'`` read (``SensitivityExcludeUnavailable``) counts as transient."""
     from nexus.retry import (  # noqa: PLC0415 — deferred: retry pulls httpx and the Voyage predicates
         _extract_status_and_retry_after,
         _is_retryable_vector_error,
     )
 
+    from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred like the above
+
     if isinstance(exc, TransportReadFailure):
+        return True
+    if isinstance(exc, SensitivityExcludeUnavailable):
+        # RDR-243 (Sam's nexus-rfvyy.3 ruling): a refused exclude read is a fact about the engine at this moment
+        # (no vector_sensitivity_exclude_supported, or a failed /version probe that is never cached), so the task
+        # is retried on the ladder, never dropped as unreachable.
         return True
     try:
         if _is_retryable_vector_error(exc):

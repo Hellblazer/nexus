@@ -63,6 +63,8 @@ def test_a_refused_exclude_read_is_a_typed_read_failure_not_an_empty_document():
     assert isinstance(result, ReadFail)
     assert result.reason != "empty", "a refusal must not read as a document with no text"
     assert "refused" in result.detail
+    # The worker retries only transport and infra_unavailable; anything else is acked and the task is lost.
+    assert result.reason == "transport"
 
 
 def test_no_literal_include_remains_in_the_reader():
