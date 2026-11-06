@@ -350,8 +350,11 @@ public final class PgVectorRepository {
      * routes, writes) compiling unchanged, with an empty list.
      *
      * <p>{@code queryVector} (nexus-4lnn1.1.3, RDR-230): the query vector the search computed with the collection it may
-     * enter the recall canary's query ring, set only by {@link #searchWithTokens}; {@code null} everywhere else.
-     * The handler passes it to {@link PciQueryRing#admit} after the response is sent.
+     * enter the recall canary's query ring. Set by {@link #searchWithTokens}, {@link #hybridSearchWithTokens} and the four
+     * scoped searches ({@link #searchMetadataScopedWithTokens}, {@link #searchTopicScopedWithTokens}, {@link
+     * #searchGraphHopWithTokens}, {@link #searchAspectScopedWithTokens}); {@code null} everywhere else, and {@code null}
+     * on any of those routes that returned before it computed a vector. The handler passes it to {@link
+     * PciQueryRing#admit} after the response is sent.
      */
     public record Tokened<T>(T value, long tokens, List<String> skippedCollections, QueryVector queryVector) {
         public Tokened(T value, long tokens) {
@@ -3659,11 +3662,12 @@ public final class PgVectorRepository {
         var labelSplit = ManifestLabelStage.split(where);
         long[] tokensOut = {0L};
         List<String> skippedOut = new ArrayList<>();
+        QueryVector[] ringOut = {null};
         List<Map<String, Object>> rows = hybridSearch(
             tenant, queryText, collectionNames,
             labelSplit.active() ? ManifestLabelStage.widen(nResults) : nResults,
             labelSplit.rest(), selectiveGateMax, tokensOut, skippedOut,
-            labelSplit.active() ? ManifestPushdown.of(labelSplit.labels()) : null, chashAllow);
+            labelSplit.active() ? ManifestPushdown.of(labelSplit.labels()) : null, chashAllow, ringOut);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in).
         // Enrichment runs BEFORE the label stage (nexus-tko2w): it resolves ONE owner's source_uri per
         // chash and writes it on every row of that chash, so a stage that had already expanded a shared
@@ -3674,7 +3678,7 @@ public final class PgVectorRepository {
         if (labelSplit.active()) {
             rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
         }
-        return new Tokened<>(rows, tokensOut[0], skippedOut);
+        return new Tokened<>(rows, tokensOut[0], skippedOut, ringOut[0]);
     }
 
     /**
@@ -3706,7 +3710,8 @@ public final class PgVectorRepository {
                                            int nResults,
                                            Map<String, Object> where,
                                            int selectiveGateMax) {
-        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null, null, null);
+        return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null, null, null, null,
+                            null);
     }
 
     /**
@@ -3735,7 +3740,8 @@ public final class PgVectorRepository {
                                            long[] tokensOut,
                                            List<String> skippedOut,
                                            ManifestPushdown.Plan manifest,
-                                           byte[][] chashAllow) {
+                                           byte[][] chashAllow,
+                                           QueryVector[] ringOut) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
@@ -3782,6 +3788,13 @@ public final class PgVectorRepository {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx ->
             hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
                        model, tenant, PgSession::startupSearchStatementTimeoutMs, false, chashAllow));
+        if (ringOut != null) {
+            // nexus-4lnn1.1.7: the recall canary's query ring, by the rule /search follows. The rows are the text-gated
+            // ones, so on a fan-out the nearest gated row names the arm.
+            ringOut[0] = new java.util.LinkedHashSet<>(collectionNames).size() == 1
+                ? QueryVector.alone(model, hybridEmbed.embeddings().get(0), collectionNames.get(0))
+                : new QueryVector(model, hybridEmbed.embeddings().get(0), nearestCollection(result));
+        }
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -4652,8 +4665,34 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
-                             embed.tokens(), skippedCollections);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
+        return new Tokened<>(rows, embed.tokens(), skippedCollections,
+                             ringVectorOfRows(model, embed.embeddings().get(0), collectionNames, rows));
+    }
+
+    /**
+     * nexus-4lnn1.1.7 (RDR-230): the vector of a combined-query search and the collection it may enter the recall
+     * canary's query ring of, by the rule {@link #searchWithTokens} follows. One distinct collection: admitted to it.
+     * Several (one model): to the collection of the nearest row, {@code null} when no row came back. The rows are the
+     * route's own (filtered by its metadata, topic, link or aspect predicate), built from the jOOQ record, so a
+     * metadata key cannot shadow {@code distance} or {@code collection}.
+     */
+    private static QueryVector ringVectorOfRows(String model, float[] vector, List<String> collections,
+                                                List<Map<String, Object>> rows) {
+        var distinct = new java.util.LinkedHashSet<>(collections);
+        if (distinct.size() == 1) {
+            return QueryVector.alone(model, vector, distinct.iterator().next());
+        }
+        String nearest = null;
+        Double best = null;
+        for (Map<String, Object> row : rows) {
+            Double d = row.get("distance") instanceof Double dd ? dd : null;
+            if (d != null && (best == null || d < best)) {
+                best = d;
+                nearest = row.get("collection") instanceof String c ? c : null;
+            }
+        }
+        return new QueryVector(model, vector, nearest);
     }
 
     /**
@@ -4760,8 +4799,9 @@ public final class PgVectorRepository {
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         // countable = false: the aspect join can give one occurrence several rows (runCombinedQueryWithChash).
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false),
-                             embed.tokens(), skippedCollections);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false);
+        return new Tokened<>(rows, embed.tokens(), skippedCollections,
+                             ringVectorOfRows(model, embed.embeddings().get(0), collectionNames, rows));
     }
 
     /**
@@ -4802,7 +4842,8 @@ public final class PgVectorRepository {
             case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens());
+        return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens(), List.of(),
+                             QueryVector.alone(model, embed.embeddings().get(0), collection));
     }
 
     /**
@@ -4910,8 +4951,9 @@ public final class PgVectorRepository {
                 nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true),
-                             embed.tokens(), skippedCollections);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
+        return new Tokened<>(rows, embed.tokens(), skippedCollections,
+                             ringVectorOfRows(model, embed.embeddings().get(0), collectionNames, rows));
     }
 
     /**

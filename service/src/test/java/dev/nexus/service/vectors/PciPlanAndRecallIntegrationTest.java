@@ -1008,7 +1008,7 @@ class PciPlanAndRecallIntegrationTest {
         ensureTargetIndex();
         PgVectorRepository repo = canaryRepo();
         PciCanary canary = canary(repo, queries.subList(0, 10));
-        assertThat(canary.run(canaryTarget(TARGET, targetIndex), "stale").state())
+        assertThat(canary.run(canaryTarget(TARGET, targetIndex), "daily").state())
             .as("the same canary on the same index, undegraded, is green").isEqualTo(PciCanary.State.GREEN);
         PciCanary.Result r;
         PgSession.overrideEfSearchFloorForTests(1);
@@ -1059,7 +1059,7 @@ class PciPlanAndRecallIntegrationTest {
         var logs = captureCanaryLogs();
         PciCanary.Result r;
         try {
-            r = canary(claiming, queries.subList(0, 5)).run(canaryTarget(SMALL, smallIndex), "stale");
+            r = canary(claiming, queries.subList(0, 5)).run(canaryTarget(SMALL, smallIndex), "daily");
         } finally {
             releaseCanaryLogs(logs);
         }
@@ -1092,7 +1092,7 @@ class PciPlanAndRecallIntegrationTest {
             PciCanary shortWait = new PciCanary((t, c) -> ringOf(queries.subList(0, 5)),
                 repo.canaryStatements(Duration.ofMillis(200)));
 
-            PciCanary.Result blocked = shortWait.run(canaryTarget(TARGET, targetIndex), "stale");
+            PciCanary.Result blocked = shortWait.run(canaryTarget(TARGET, targetIndex), "daily");
 
             assertThat(blocked.state()).as("the only permit is held: the statement waits and gives up")
                 .isEqualTo(PciCanary.State.UNMEASURED);
@@ -1100,7 +1100,7 @@ class PciPlanAndRecallIntegrationTest {
             assertThat(PgVectorRepository.routedHnswCount()).as("no statement ran").isEqualTo(hnswBefore);
             gate.release();
 
-            PciCanary.Result free = shortWait.run(canaryTarget(TARGET, targetIndex), "stale");
+            PciCanary.Result free = shortWait.run(canaryTarget(TARGET, targetIndex), "daily");
 
             assertThat(free.state()).as(PciCanary.line(free)).isEqualTo(PciCanary.State.GREEN);
             assertThat(gate.availablePermits()).as("every statement gave its permit back").isEqualTo(1);

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -35,8 +36,8 @@ import java.util.regex.Pattern;
  * the function per tenant under that tenant's scope as nexus_svc. The digest (SHA-256 of the vector's values in order,
  * {@link #digest}) is computed there, not on the search path.
  *
- * <p><b>Best effort.</b> A failed write is logged once per batch ({@code event=pci_ring_write_failed tenant= entries=
- * error=}) and the batch is dropped; nothing retries it. An entry whose collection was deleted after it was enqueued is
+ * <p><b>Best effort.</b> A batch call is bounded by {@link #WRITE_STATEMENT_TIMEOUT}. A failed write is logged once
+ * per batch ({@code event=pci_ring_write_failed tenant= entries= error=}) and the batch is dropped; nothing retries it. An entry whose collection was deleted after it was enqueued is
  * skipped inside the function (gate S6) and costs the rest of its batch nothing; the flush line counts the shortfall as
  * {@code skipped}. Entries still queued when the engine stops are lost. Every engine runs a writer, not only the
  * builder-lock holder, so the holder's canary sees every engine's queries.
@@ -54,6 +55,12 @@ public final class PciQueryRing {
     public static final int FLUSH_AT = 64;
     /** The writer's longest sleep (provisional). */
     public static final Duration FLUSH_EVERY = Duration.ofSeconds(30);
+    /**
+     * Bound of one tenant's batch call (provisional). The writer is one thread and each call holds a pool connection, so
+     * a slow-but-alive database must end the call, not hold both until it answers; the batch is then dropped, as any
+     * failed batch is.
+     */
+    public static final Duration WRITE_STATEMENT_TIMEOUT = Duration.ofSeconds(10);
     /** Name of the writer thread; a thread dump and the stop test look for it. */
     static final String THREAD_NAME = "pci-ring-writer";
     private static final int MAX_ERROR_CHARS = 200;
@@ -67,6 +74,7 @@ public final class PciQueryRing {
     private final ArrayBlockingQueue<Entry> queue;
     private final int flushAt;
     private final long flushEveryNanos;
+    private final Duration writeTimeout;
     private final AtomicLong dropped = new AtomicLong();
     private final AtomicLong seen = new AtomicLong();
     private final Object flushLock = new Object();
@@ -80,6 +88,13 @@ public final class PciQueryRing {
 
     /** As above with the bounds injected (tests; a production engine takes the provisional defaults). */
     public PciQueryRing(TenantScope scope, PciIndexSet validIndexes, int capacity, int flushAt, Duration flushEvery) {
+        this(scope, validIndexes, capacity, flushAt, flushEvery, WRITE_STATEMENT_TIMEOUT);
+    }
+
+    /** As above with the batch call's statement timeout injected (a test makes it short). */
+    PciQueryRing(TenantScope scope, PciIndexSet validIndexes, int capacity, int flushAt, Duration flushEvery,
+                 Duration writeTimeout) {
+        this.writeTimeout = Objects.requireNonNull(writeTimeout, "writeTimeout");
         this.scope = Objects.requireNonNull(scope, "scope");
         this.validIndexes = Objects.requireNonNull(validIndexes, "validIndexes");
         this.queue = new ArrayBlockingQueue<>(capacity);
@@ -235,8 +250,10 @@ public final class PciQueryRing {
                 vectors[i] = Vector.of(e.vector()).toString();
                 digests[i] = digest(e.vector());
             }
-            Integer written = scope.withTenant(tenant, ctx ->
-                Routines.canaryQueryRingUpsert(ctx.configuration(), tenant, collections, models, vectors, digests));
+            Integer written = scope.withTenant(tenant, ctx -> {
+                PgSession.setLocal(ctx, "statement_timeout", Long.toString(writeTimeout.toMillis()));
+                return Routines.canaryQueryRingUpsert(ctx.configuration(), tenant, collections, models, vectors, digests);
+            });
             return written == null ? 0 : written;
         } catch (RuntimeException e) {
             log.warn("event=pci_ring_write_failed tenant={} entries={} error=\"{}\"", tenant, entries.size(),

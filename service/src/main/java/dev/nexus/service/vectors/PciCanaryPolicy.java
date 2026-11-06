@@ -42,6 +42,15 @@ final class PciCanaryPolicy {
     /** An index whose last run on this engine is older than this (or that has none) is run. */
     static final Duration STALE_AFTER = Duration.ofHours(24);
 
+    /**
+     * An index whose run ended unmeasured with reason {@code error} keeps its trigger and is not tried again before
+     * this has passed. The pass period defaults to ten minutes, so this is three passes: the causes seen in design (a
+     * permit wait that timed out under load, a ring read that blipped, a statement timeout just after a build) clear in
+     * minutes, and a persistent error costs at most 48 failing runs a day per index, each bounded by {@link #RUN_LIMIT}
+     * and the pass budget, instead of one on every pass.
+     */
+    static final Duration ERROR_RETRY_FLOOR = Duration.ofMinutes(30);
+
     /** The most canary time one pass spends before it carries the remaining indexes to the next pass (provisional). */
     static final Duration PASS_BUDGET = Duration.ofSeconds(60);
 

@@ -35,20 +35,26 @@ import java.util.function.LongSupplier;
  *       per index per {@link PciCanaryPolicy#VACUUM_MIN_INTERVAL}. An insert-only vacuum reaps nothing and repairs no
  *       graph (nexus-s9wav makes autovacuum run on inserts), so the timestamp alone would run the canary on ingest. The
  *       first look at a leaf after boot records the baseline and triggers nothing.</li>
- *   <li>{@code stale}: the index's last run on this engine is older than {@link PciCanaryPolicy#STALE_AFTER}, or it has
+ *   <li>{@code daily}: the index's last run on this engine is older than {@link PciCanaryPolicy#STALE_AFTER}, or it has
  *       none (a boot, a lock handed over, an index adopted rather than built).</li>
  * </ol>
- * A trigger is held until a run that is not {@code no_queries} consumes it, so a trigger that finds too few ring queries
- * stays <i>pending</i>, in memory, and the index runs on the first pass that has them. An unmeasured run for any other
- * reason ({@code index_not_used}, {@code error}) is a run: it consumes the trigger and stamps the last-run time, so a
- * broken index or a failing statement is tried again at the next trigger or in a day, not on every pass.
+ * A trigger is held until a run that is neither {@code no_queries} nor {@code error} consumes it. A trigger that finds
+ * too few ring queries stays <i>pending</i>, in memory, and the index runs on the first pass that has them. An
+ * {@code error} (a permit wait that timed out under load, a ring read that blipped, a statement timeout) also leaves
+ * the trigger pending and stamps no last-run time, but the index is not tried again for
+ * {@link PciCanaryPolicy#ERROR_RETRY_FLOOR}, so a failing statement costs one run per floor and not one per pass, and a
+ * transient error does not cost the after-build reading a day. {@code index_not_used} is a run: the planner will not
+ * change its mind by the next pass, so it consumes the trigger and stamps the last-run time, and the index is tried
+ * again at the next trigger or in a day.
  *
  * <p><b>Budget.</b> {@link #runPass} stops starting runs once the pass has spent {@link PciCanaryPolicy#PASS_BUDGET}
  * on them (the run in flight finishes) and carries the rest to the next pass: their triggers are kept, and the order is
- * after_build, then vacuum, then stale, oldest last run first, so a carried index is ahead of a fresh one next time.
+ * after_build, then vacuum, then daily, oldest last run first, so a carried index is ahead of a fresh one next time.
  *
- * <p><b>Memory.</b> Per index: the last run's time, the pending trigger, the vacuum trigger's time, and the latest
- * {@link Result} (a red result keeps its query sample). Per leaf: the vacuum baseline. All lost on restart.
+ * <p><b>Memory.</b> Per index: the last run's time, the pending trigger, the vacuum trigger's time, the earliest time
+ * an errored run may be retried, and the latest {@link Result} (a red result keeps its query sample). Per leaf: the
+ * vacuum baseline and whether deletes or non-HOT updates have been seen since the last vacuum looked at. All lost on
+ * restart.
  */
 final class PciCanarySchedule {
 
@@ -56,7 +62,7 @@ final class PciCanarySchedule {
 
     static final String AFTER_BUILD = "after_build";
     static final String VACUUM = "vacuum";
-    static final String STALE = "stale";
+    static final String DAILY = "daily";
 
     /** Runs the canary on one index; {@link PciCanary} is the production one. */
     @FunctionalInterface
@@ -72,11 +78,18 @@ final class PciCanarySchedule {
     private static final class IndexState {
         volatile Instant lastRun;
         volatile Instant lastVacuumTrigger;
+        /** After an errored run: no new attempt before this. Cleared by any other result and by a build. */
+        volatile Instant retryNotBefore;
         volatile String pending;
         volatile Result latest;
     }
 
-    private record Baseline(Instant vacuumedAt, long deleted, long nonHotUpdated) { }
+    /**
+     * What the engine remembers of one leaf. The counters are those of the last look. {@code reapable} is true when a
+     * look saw deletes or non-HOT updates advance and no vacuum has been seen since, so a vacuum that finishes a pass
+     * after the deletes still counts as having reaped them (a leaf vacuum takes minutes, a pass is ten).
+     */
+    private record Baseline(Instant vacuumedAt, long deleted, long nonHotUpdated, boolean reapable) { }
 
     private final Runner runner;
     private final Clock clock;
@@ -100,7 +113,9 @@ final class PciCanarySchedule {
 
     /** The index was just built: run it at the next opportunity, whatever else is pending. */
     void built(String index) {
-        state(index).pending = AFTER_BUILD;
+        IndexState s = state(index);
+        s.pending = AFTER_BUILD;
+        s.retryNotBefore = null;   // a new index owes nothing to the old one's error
     }
 
     /** The index was dropped: forget it. */
@@ -117,12 +132,17 @@ final class PciCanarySchedule {
     void observeLeaf(String leaf, Collection<String> indexes, LeafStats stats) {
         Instant vacuumedAt = latest(stats.lastVacuum() == null ? null : stats.lastVacuum().toInstant(),
             stats.lastAutovacuum() == null ? null : stats.lastAutovacuum().toInstant());
-        Baseline before = baselines.put(leaf, new Baseline(vacuumedAt, stats.deleted(), stats.nonHotUpdated()));
+        Baseline before = baselines.get(leaf);
         if (before == null) {
-            return;   // the first look after a boot records and does not trigger
+            // the first look after a boot records and does not trigger
+            baselines.put(leaf, new Baseline(vacuumedAt, stats.deleted(), stats.nonHotUpdated(), false));
+            return;
         }
         boolean vacuumed = vacuumedAt.isAfter(before.vacuumedAt());
-        boolean reaped = stats.deleted() > before.deleted() || stats.nonHotUpdated() > before.nonHotUpdated();
+        boolean advanced = stats.deleted() > before.deleted() || stats.nonHotUpdated() > before.nonHotUpdated();
+        boolean reaped = before.reapable() || advanced;
+        // The counters move to this look's; the carry survives until a vacuum is seen, then it is spent.
+        baselines.put(leaf, new Baseline(vacuumedAt, stats.deleted(), stats.nonHotUpdated(), reaped && !vacuumed));
         if (!vacuumed || !reaped) {
             return;
         }
@@ -134,7 +154,7 @@ final class PciCanarySchedule {
                 continue;
             }
             s.lastVacuumTrigger = now;
-            if (s.pending == null || STALE.equals(s.pending)) {
+            if (s.pending == null || DAILY.equals(s.pending)) {
                 s.pending = VACUUM;
             }
         }
@@ -164,10 +184,13 @@ final class PciCanarySchedule {
         List<Due> due = new ArrayList<>();
         for (Target t : targets) {
             IndexState s = state(t.index());
+            if (s.retryNotBefore != null && now.isBefore(s.retryNotBefore)) {
+                continue;   // an errored run: not again before the floor
+            }
             String trigger = s.pending;
             if (trigger == null && (s.lastRun == null
                 || now.isAfter(s.lastRun.plus(PciCanaryPolicy.STALE_AFTER)))) {
-                trigger = STALE;
+                trigger = DAILY;
             }
             if (trigger != null) {
                 due.add(new Due(t, trigger, s));
@@ -228,9 +251,18 @@ final class PciCanarySchedule {
             }
             return true;
         }
+        if (r.state() == State.UNMEASURED && PciCanary.ERROR.equals(r.reason())) {
+            // Not a run: the trigger stays, no last-run time is stamped, and the floor keeps a failing index from
+            // running on every pass.
+            s.pending = d.trigger;
+            s.retryNotBefore = clock.instant().plus(PciCanaryPolicy.ERROR_RETRY_FLOOR);
+            log.warn("{}", PciCanary.line(r));
+            return false;
+        }
         s.pending = null;
+        s.retryNotBefore = null;
         s.lastRun = clock.instant();
-        if (r.state() == State.RED || (r.state() == State.UNMEASURED && !PciCanary.INDEX_NOT_USED.equals(r.reason()))) {
+        if (r.state() == State.RED) {
             log.warn("{}", PciCanary.line(r));
         } else {
             log.info("{}", PciCanary.line(r));

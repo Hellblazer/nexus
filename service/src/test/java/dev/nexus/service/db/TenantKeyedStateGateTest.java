@@ -1005,6 +1005,7 @@ public class TenantKeyedStateGateTest {
             for (String f : List.of(
                 "PciCanarySchedule.IndexState.lastRun",
                 "PciCanarySchedule.IndexState.lastVacuumTrigger",
+                "PciCanarySchedule.IndexState.retryNotBefore",
                 "PciCanarySchedule.IndexState.latest",
                 "PciCanarySchedule.states",
                 "PciCanarySchedule.baselines",
@@ -1015,6 +1016,13 @@ public class TenantKeyedStateGateTest {
                 "PciReconciler.Tally.builtTargets")) {
                 notKeyed.put(f, PCI_OFF);
             }
+            // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the /v1/status maintenance snapshot. A per-read list of at
+            // most 64 entries keyed by the opaque pci_ index name, built from the reconciler's memory for one response
+            // and dropped with it; no field of an entry names a tenant or a collection.
+            notKeyed.put("PciMaintenanceStatus.Canary.indexes", PCI_OFF);
+            // nexus-4lnn1.1.7: the reconciler's hook for the ring's 30-day delete. A stateless function handed the pass's
+            // leaf tenants for one call; the reconciler keeps no copy of them.
+            notKeyed.put("PciReconciler.ringExpiry", PCI_OFF);
             notKeyed.put("PciIndexSet.NONE", PCI_OFF);
             notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
         }

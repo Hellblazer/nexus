@@ -560,7 +560,7 @@ public final class Main {
         // before the builder reaper, so a pass cannot open a new builder connection after the reaper ended the old one.
         String pciBootNonce = dev.nexus.service.db.BackendReaper.bootNonce(applicationName);
         // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Every engine runs a writer; only the builder-lock
-        // holder's pass runs the 30-day delete (tenants: the reaper's plus request_ledger_tenants). nexus-4lnn1.1.4: the
+        // holder's pass runs the 30-day delete (tenants: the reaper's, request_ledger_tenants and the pass's leaf tenants). nexus-4lnn1.1.4: the
         // same pass runs the recall canary through pgVectorRepo's serving statement path, on that ring.
         var pciQueryRing = new dev.nexus.service.vectors.PciQueryRing(tenantScope, pciSweep);
         var pciQueryRingExpiry = new dev.nexus.service.vectors.PciQueryRingExpiry(tenantScope, service::ringTenants);

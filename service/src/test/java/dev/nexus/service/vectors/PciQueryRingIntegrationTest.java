@@ -411,7 +411,7 @@ class PciQueryRingIntegrationTest {
     }
 
     @Test
-    void theBackgroundWriterFlushesAt64EntriesWithoutWaitingForThePeriod() throws Exception {
+    void theBackgroundWriterFlushesWhenFlushAtEntriesAreWaiting_withoutWaitingForThePeriod() throws Exception {
         String t = newTenant();
         String c = collectionOf(t, "a");
         register(t, c);
@@ -429,6 +429,42 @@ class PciQueryRingIntegrationTest {
         } finally {
             ring.stop();
         }
+    }
+
+    /**
+     * nexus-4lnn1.1.7: the batch call has a statement timeout. A lock on the ring row the batch must refresh stands in
+     * for a slow database: without the bound the flush waits for the lock, with it the call is cancelled and the batch
+     * dropped, the failure logged by the ring's own sanitised line.
+     */
+    @Test
+    void aBatchBlockedOnALockEndsAtTheStatementTimeout_andTheWriterMovesOn() throws Exception {
+        String t = newTenant();
+        String c = collectionOf(t, "a");
+        register(t, c);
+        insertOldRow(t, c, 1, OffsetDateTime.now().minusDays(1));
+        PciQueryRing ring = new PciQueryRing(scope, (m, tn, col) -> true, 1024, 64, Duration.ofMinutes(10),
+            Duration.ofMillis(700));
+        admit(ring, t, c, 1);   // the same vector: the batch updates the row the other session holds
+        var flusher = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).selectFrom(CANARY_QUERY_RING)
+                .where(CANARY_QUERY_RING.TENANT_ID.eq(t)).and(CANARY_QUERY_RING.COLLECTION.eq(c)).forUpdate().fetch();
+            var flush = flusher.submit(() -> ring.flushNow());
+            try {
+                flush.get(15, TimeUnit.SECONDS);
+            } catch (java.util.concurrent.TimeoutException blocked) {
+                throw new AssertionError("the flush waited on the lock: no statement timeout on the batch call", blocked);
+            } finally {
+                holder.rollback();
+            }
+        } finally {
+            flusher.shutdownNow();
+        }
+
+        assertThat(logLines()).anyMatch(l -> l.contains("event=pci_ring_write_failed") && l.contains(t));
+        admit(ring, t, c, 2);
+        assertThat(ring.flushNow()).as("the writer is free again").isEqualTo(1);
     }
 
     /** Test 10 (and the failure line of the design): a refusing database, an error that quotes the vector. */

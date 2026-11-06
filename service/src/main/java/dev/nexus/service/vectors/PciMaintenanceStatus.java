@@ -51,7 +51,7 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      * @param minRecall       null unless measured
      * @param meanRecall      null unless measured
      * @param top1Misses      queries with a top-1 miss; 0 unless measured
-     * @param trigger         {@code after_build}, {@code vacuum} or {@code stale}
+     * @param trigger         {@code after_build}, {@code vacuum} or {@code daily}
      * @param measuredAt      when the run ended
      * @param anchor          {@code built} or {@code adopted}, or null when the index carries no anchor this engine can
      *                        read

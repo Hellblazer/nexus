@@ -225,7 +225,7 @@ final class PciPlanCheck {
         }
     }
 
-    private static final Pattern TOP_NODE =Pattern.compile("^\\s*(?:->\\s*)?(.*?)\\s+\\(cost=");
+    private static final Pattern TOP_NODE = Pattern.compile("^\\s*(?:->\\s*)?(.*?)\\s+\\(cost=");
     private static final Pattern SCAN = Pattern.compile(
         "(?:Bitmap )?(?:Index(?: Only)? Scan|Seq Scan|Bitmap Heap Scan)(?: Backward)?(?: using \\S+)?(?: on \\S+)?");
     private static final int MAX_SCANS = 5;

@@ -149,7 +149,7 @@ class PciCanaryTest {
             return page;
         });
 
-        Result r = canary(3, script).run(TARGET, "stale");
+        Result r = canary(3, script).run(TARGET, "daily");
 
         assertThat(r.state()).isEqualTo(State.GREEN);
         assertThat(r.meanRecall()).isEqualTo(1.0);
@@ -163,7 +163,7 @@ class PciCanaryTest {
             return page;
         });
 
-        Result r = canary(3, script).run(TARGET, "stale");
+        Result r = canary(3, script).run(TARGET, "daily");
 
         // One miss in every page: recall (k-1)/k at k = 40, 60, 80, 100, 120.
         double expected = (39d / 40 + 59d / 60 + 79d / 80 + 99d / 100 + 119d / 120) / 5;
@@ -216,7 +216,7 @@ class PciCanaryTest {
     void aShortPage_countsAgainstRecall() {
         Script script = new Script((q, k) -> exactPage(k / 2));
 
-        Result r = canary(3, script).run(TARGET, "stale");
+        Result r = canary(3, script).run(TARGET, "daily");
 
         assertThat(r.meanRecall()).isCloseTo(0.5, org.assertj.core.data.Offset.offset(1e-9));
         assertThat(r.state()).isEqualTo(State.RED);
@@ -228,7 +228,7 @@ class PciCanaryTest {
         Script script = new Script((q, k) -> exactPage(Math.min(k, 50)));
         script.exactRows = 50;
 
-        Result r = canary(3, script).run(TARGET, "stale");
+        Result r = canary(3, script).run(TARGET, "daily");
 
         assertThat(r.state()).isEqualTo(State.GREEN);
         assertThat(r.meanRecall()).isEqualTo(1.0);
@@ -260,7 +260,7 @@ class PciCanaryTest {
         entries.add(new PciQueryRingReader.RingEntry("another-model", vec(3), OffsetDateTime.now()));
         entries.add(new PciQueryRingReader.RingEntry(MODEL, null, OffsetDateTime.now()));
 
-        Result r = canary((t, c) -> entries, new Script(PciCanaryTest::perfect)).run(TARGET, "stale");
+        Result r = canary((t, c) -> entries, new Script(PciCanaryTest::perfect)).run(TARGET, "daily");
 
         assertThat(r.reason()).isEqualTo("no_queries");
         assertThat(r.queries()).isEqualTo(2);
@@ -290,7 +290,7 @@ class PciCanaryTest {
         Script script = new Script(PciCanaryTest::perfect);
         script.routedExact = true;
 
-        Result r = canary(5, script).run(TARGET, "stale");
+        Result r = canary(5, script).run(TARGET, "daily");
 
         assertThat(r.reason()).isEqualTo("index_not_used");
         assertThat(r.detail()).isEqualTo("routed_exact");
@@ -301,7 +301,7 @@ class PciCanaryTest {
         Script script = new Script(PciCanaryTest::perfect);
         script.plan = null;
 
-        Result r = canary(5, script).run(TARGET, "stale");
+        Result r = canary(5, script).run(TARGET, "daily");
 
         assertThat(r.state()).isEqualTo(State.UNMEASURED);
         assertThat(r.reason()).isEqualTo("error");
@@ -313,7 +313,7 @@ class PciCanaryTest {
         Script script = new Script(PciCanaryTest::perfect);
         script.failAt = new IllegalStateException("no search permit within 10000 ms");
 
-        Result r = canary(5, script).run(TARGET, "stale");
+        Result r = canary(5, script).run(TARGET, "daily");
 
         assertThat(r.state()).isEqualTo(State.UNMEASURED);
         assertThat(r.reason()).isEqualTo("error");
@@ -321,11 +321,30 @@ class PciCanaryTest {
         assertThat(r.top1Misses()).isZero();
     }
 
+    /** A driver error can quote the value that failed, and in the canary's statements that value is a query vector. */
+    @Test
+    void anErrorLine_neverCarriesAVectorTheDriverQuoted() {
+        String quoted = "[0.1234567,0.2345678,0.3456789,0.4567891,0.5678912]";
+        Script script = new Script(PciCanaryTest::perfect);
+        script.failAt = new IllegalStateException("invalid input syntax for type vector: " + quoted);
+
+        canary(5, script).run(TARGET, "daily");
+        canary((t, c) -> {
+            throw new IllegalStateException("could not read ring near " + quoted);
+        }, new Script(PciCanaryTest::perfect)).run(TARGET, "daily");
+
+        var failed = logs.list.stream().map(ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.contains("event=pci_canary_failed")).toList();
+        assertThat(failed).as("both failures were logged").hasSize(2);
+        assertThat(failed).allSatisfy(m -> assertThat(m).doesNotContain("0.1234567").doesNotContain("0.5678912")
+            .contains("[vector]"));
+    }
+
     @Test
     void aFailingRingRead_isUnmeasuredError_withZeroQueries() {
         Result r = canary((t, c) -> {
             throw new IllegalStateException("db down");
-        }, new Script(PciCanaryTest::perfect)).run(TARGET, "stale");
+        }, new Script(PciCanaryTest::perfect)).run(TARGET, "daily");
 
         assertThat(r.state()).isEqualTo(State.UNMEASURED);
         assertThat(r.reason()).isEqualTo("error");
@@ -337,7 +356,7 @@ class PciCanaryTest {
         Script script = new Script((q, k) -> List.of());
         script.exactRows = 0;
 
-        Result r = canary(4, script).run(TARGET, "stale");
+        Result r = canary(4, script).run(TARGET, "daily");
 
         assertThat(r.reason()).isEqualTo("error");
         assertThat(r.detail()).isEqualTo("exact_empty");
@@ -351,7 +370,7 @@ class PciCanaryTest {
             return exactPage(k);
         });
 
-        Result r = new PciCanary((t, c) -> ring(5), script, java.time.Clock.systemUTC(), clock::get).run(TARGET, "stale");
+        Result r = new PciCanary((t, c) -> ring(5), script, java.time.Clock.systemUTC(), clock::get).run(TARGET, "daily");
 
         assertThat(r.reason()).isEqualTo("error");
         assertThat(r.detail()).isEqualTo("run_limit");

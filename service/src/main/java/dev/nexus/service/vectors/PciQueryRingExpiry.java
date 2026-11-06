@@ -27,11 +27,13 @@ import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
  * table: no admin session, no SQL text, nothing added to the admin statement set. The table is FORCE row-level
  * security, so each transaction sees and deletes only its own tenant's rows.
  *
- * <p><b>Tenant source</b> is the caller's supplier. In production it is the reaper's tenants (the default tenant and
- * every tenant with a {@code service_tokens} row) together with {@code request_ledger_tenants}. Residual gap: a tenant
- * that holds ring rows, has no token row (an idle JIT tenant loses its last one 7 days after it expires) and has no
- * ledger row (only the keyed sweep routes write the ledger; a search does not) is not visited. Its rings stay
- * bounded at 32 rows per collection and are trimmed by their next write.
+ * <p><b>Tenant source</b> is the caller's supplier together with the tenants the caller passes to
+ * {@link #expireAll(Collection)}. In production the supplier is the reaper's tenants (the default tenant and every
+ * tenant with a {@code service_tokens} row) together with {@code request_ledger_tenants}, and the reconciler passes the
+ * distinct tenants of its catalog snapshot's leaves. A search writes no ledger row and an idle JIT tenant loses its last
+ * token row 7 days after it expires, so the leaves are what reach a tenant that holds ring rows and neither: admission
+ * needs a valid per-collection index, an index lives on a leaf, and every leaf is in the snapshot with or without
+ * indexes. No statement is added: the same typed DELETE, the same tenant scope.
  *
  * <p>A tenant's failure is logged and the next tenant still runs. Counts only are logged.
  */
@@ -58,13 +60,24 @@ public final class PciQueryRingExpiry {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    /** One pass over the tenant source. Returns the rows deleted; never throws. */
+    /** One pass over the supplier's tenants. Returns the rows deleted; never throws. */
     public int expireAll() {
-        Collection<String> visit;
+        return expireAll(java.util.List.of());
+    }
+
+    /**
+     * One pass over the supplier's tenants and {@code extraTenants} (each visited once). A failing supplier costs its
+     * tenants this pass, not the extras. Returns the rows deleted; never throws.
+     */
+    public int expireAll(Collection<String> extraTenants) {
+        var visit = new java.util.LinkedHashSet<String>();
         try {
-            visit = tenants.get();
+            visit.addAll(tenants.get());
         } catch (RuntimeException e) {
             log.warn("event=pci_ring_expire_failed reason=tenant_list error_class={}", e.getClass().getSimpleName());
+        }
+        visit.addAll(extraTenants);
+        if (visit.isEmpty()) {
             return 0;
         }
         OffsetDateTime cutoff = OffsetDateTime.now(clock).minusDays(MAX_AGE_DAYS);

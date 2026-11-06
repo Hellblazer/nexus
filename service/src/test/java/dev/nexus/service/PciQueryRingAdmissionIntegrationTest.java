@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PciIndexSet;
 import dev.nexus.service.vectors.PciQueryRing;
@@ -38,6 +39,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -59,6 +62,10 @@ class PciQueryRingAdmissionIntegrationTest {
     private static final String NEAR_A = "ring adm query near a";
     /** Registered at angle 0.5: nearest to {@link #B}. */
     private static final String NEAR_B = "ring adm query near b";
+    /** Every seeded chunk carries both words, so the hybrid route's text gate passes all of them. */
+    private static final String HYB_NEAR_A = "ringprobe";
+    private static final String HYB_NEAR_B = "ringprobeb";
+    private static final String TOPIC_LABEL = "ring-adm-topic";
     private static final String A = "knowledge__ring-adm-a__minilm-l6-v2-384__v1";
     private static final String B = "knowledge__ring-adm-b__minilm-l6-v2-384__v1";
     private static final String ORPHAN = "knowledge__ring-adm-orphan__minilm-l6-v2-384__v1";
@@ -95,6 +102,8 @@ class PciQueryRingAdmissionIntegrationTest {
         embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         embedder.register(NEAR_A, 1f, 0f);
         embedder.register(NEAR_B, (float) Math.cos(0.5), (float) Math.sin(0.5));
+        embedder.register(HYB_NEAR_A, 1f, 0f);
+        embedder.register(HYB_NEAR_B, (float) Math.cos(0.5), (float) Math.sin(0.5));
         repo = new PgVectorRepository(scope, embedder, embedder);
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
@@ -102,9 +111,19 @@ class PciQueryRingAdmissionIntegrationTest {
                 PgContainerHelper.insertCollection(dsl, TENANT, c);
             }
         }
-        seed(A, "a", 4, 0.0);
+        List<String> chashesA = seed(A, "a", 4, 0.0);
         seed(B, "b", 4, 0.5);
         seed(ORPHAN, "orphan", 1, 0.3);
+        seedTopic(A, chashesA);
+        // The aspect route joins document_aspects: one row for each collection's owning document.
+        AspectRepository aspects = new AspectRepository(scope);
+        for (String c : List.of(A, B)) {
+            long id = aspects.upsertAspect(TENANT, Map.of(
+                "collection", c, "source_path", c + ".md", "extracted_at", "2026-01-01T00:00:00+00:00",
+                "model_version", "v1", "extractor_name", "test", "source_uri", "file:///" + c + ".md",
+                "confidence", 0.9, "doc_id", "own-" + c, "problem_formulation", "ring probe"));
+            assertThat(id).as("aspect seed for %s", c).isPositive();
+        }
         // The orphan's registered dimension (768) disagrees with the 384-wide vector its model produces: its arm
         // fails with dimension_mismatch, and a vector from a failed arm must not enter a ring.
         try (Connection su = pg.createConnection("")) {
@@ -142,13 +161,13 @@ class PciQueryRingAdmissionIntegrationTest {
         service.queryRing(ring);
     }
 
-    private void seed(String collection, String prefix, int count, double angle0) {
+    private List<String> seed(String collection, String prefix, int count, double angle0) {
         List<String> ids = new ArrayList<>();
         List<String> texts = new ArrayList<>();
         List<Map<String, Object>> metas = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             double theta = angle0 + i * 0.01;
-            String text = collection + "|" + prefix + "-" + i;
+            String text = "ringprobe ringprobeb " + collection + "|" + prefix + "-" + i;
             embedder.register(text, (float) Math.cos(theta), (float) Math.sin(theta));
             ids.add(chash(text));
             texts.add(text);
@@ -159,6 +178,27 @@ class PciQueryRingAdmissionIntegrationTest {
             PgContainerHelper.ownChunks(ctx, TENANT, collection, ids.toArray(new String[0]));
             return null;
         });
+        return ids;
+    }
+
+    /** One topic over {@code collection}, assigned to each of its chunks (the topic-scoped route joins on it). */
+    private void seedTopic(String collection, List<String> chashes) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var at = java.time.OffsetDateTime.parse("2026-01-01T00:00:00+00:00");
+            String model = PgContainerHelper.collectionModel(ctx, TENANT, collection);
+            long topic = ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+                .values(TENANT, TOPIC_LABEL, collection, at).returning(TOPICS.ID).fetchOne().getId();
+            for (String chash : chashes) {
+                ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    .values(TENANT, HexFormat.of().parseHex(chash), topic, collection, at, model)
+                    .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
+                    .doNothing().execute();
+            }
+        }
     }
 
     private static String chash(String text) {
@@ -315,6 +355,135 @@ class PciQueryRingAdmissionIntegrationTest {
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(r.body()).contains("dimension_mismatch");
         assertThat(ring.queued()).as("the only arm failed: its vector is not the right width").isZero();
+    }
+
+    // -- nexus-4lnn1.1.7: /hybrid-search and the four scoped routes admit by the same rule ----------------------------
+
+    private HttpResponse<String> hybrid(String query, String... collections) throws Exception {
+        return post("/hybrid-search", searchBody(query, collections));
+    }
+
+    private HttpResponse<String> metadataScoped(String query, String... collections) throws Exception {
+        return post("/search-metadata-scoped", searchBody(query, collections));
+    }
+
+    private HttpResponse<String> graphHop(String query, String... collections) throws Exception {
+        Map<String, Object> body = searchBody(query, collections);
+        List<String> seeds = new ArrayList<>();
+        for (String c : collections) seeds.add("own-" + c);
+        body.put("seeds", seeds);
+        return post("/search-graph-hop", body);
+    }
+
+    private HttpResponse<String> aspectScoped(String query, String... collections) throws Exception {
+        return post("/search-aspect-scoped", searchBody(query, collections));
+    }
+
+    private HttpResponse<String> topicScoped(String query, String collection) throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("query", query);
+        body.put("topic", TOPIC_LABEL);
+        body.put("collection", collection);
+        body.put("n_results", 5);
+        return post("/search-topic-scoped", body);
+    }
+
+    @Test
+    void hybridSearch_aSingleCollectionAdmitsItsVector_aFanOutOnlyTheNearestArm() throws Exception {
+        indexed.addAll(List.of(A, B));
+
+        var one = hybrid(HYB_NEAR_B, A);
+        assertThat(one.statusCode()).isEqualTo(200);
+        assertThat(ringSize(A)).as("a single collection: admitted to it, whatever the rows").isEqualTo(1);
+        assertThat(ringVector(A)).as("the embedding the search computed")
+            .containsExactly(embedder.embedOne(HYB_NEAR_B));
+        assertThat(ringSize(B)).isZero();
+
+        assertThat(hybrid(HYB_NEAR_B, A, B).statusCode()).isEqualTo(200);
+        assertThat(ringSize(B)).as("B's arm returned the nearest gated row").isEqualTo(1);
+        assertThat(ringSize(A)).as("A gains nothing from the fan-out").isEqualTo(1);
+
+        assertThat(hybrid(HYB_NEAR_A, A, B).statusCode()).isEqualTo(200);
+        assertThat(ringSize(A)).isEqualTo(2);
+        assertThat(ringSize(B)).isEqualTo(1);
+    }
+
+    @Test
+    void hybridSearch_aCollectionWithoutAValidIndexAdmitsNothing() throws Exception {
+        indexed.add(B);
+
+        hybrid(HYB_NEAR_A, A);
+        hybrid(HYB_NEAR_A, A, B);
+
+        assertThat(ring.queued()).isZero();
+        assertThat(ringSize(A)).isZero();
+        assertThat(ringSize(B)).as("a farther arm does not inherit the admission").isZero();
+    }
+
+    @Test
+    void metadataScopedSearch_admitsBySameRule() throws Exception {
+        indexed.addAll(List.of(A, B));
+
+        assertThat(metadataScoped(NEAR_B, A).statusCode()).isEqualTo(200);
+        assertThat(ringSize(A)).as("a single collection").isEqualTo(1);
+        assertThat(ringVector(A)).containsExactly(embedder.embedOne(NEAR_B));
+
+        assertThat(metadataScoped(NEAR_B, A, B).statusCode()).isEqualTo(200);
+        assertThat(ringSize(B)).as("the nearest arm").isEqualTo(1);
+        assertThat(ringSize(A)).isEqualTo(1);
+    }
+
+    @Test
+    void graphHopSearch_admitsBySameRule() throws Exception {
+        indexed.addAll(List.of(A, B));
+
+        assertThat(graphHop(NEAR_B, A).statusCode()).isEqualTo(200);
+        assertThat(ringSize(A)).as("a single collection").isEqualTo(1);
+        assertThat(ringVector(A)).containsExactly(embedder.embedOne(NEAR_B));
+
+        assertThat(graphHop(NEAR_B, A, B).statusCode()).isEqualTo(200);
+        assertThat(ringSize(B)).as("the nearest arm").isEqualTo(1);
+        assertThat(ringSize(A)).isEqualTo(1);
+    }
+
+    @Test
+    void aspectScopedSearch_admitsBySameRule() throws Exception {
+        indexed.addAll(List.of(A, B));
+
+        assertThat(aspectScoped(NEAR_B, A).statusCode()).isEqualTo(200);
+        assertThat(ringSize(A)).as("a single collection").isEqualTo(1);
+        assertThat(ringVector(A)).containsExactly(embedder.embedOne(NEAR_B));
+
+        assertThat(aspectScoped(NEAR_B, A, B).statusCode()).isEqualTo(200);
+        assertThat(ringSize(B)).as("the nearest arm").isEqualTo(1);
+        assertThat(ringSize(A)).isEqualTo(1);
+    }
+
+    @Test
+    void topicScopedSearch_admitsToItsOneCollection_onlyWithAValidIndex() throws Exception {
+        indexed.add(B);
+        assertThat(topicScoped(NEAR_A, A).statusCode()).isEqualTo(200);
+        assertThat(ring.queued()).as("A has no valid index").isZero();
+        assertThat(ringSize(A)).isZero();
+
+        indexed.add(A);
+        assertThat(topicScoped(NEAR_A, A).statusCode()).isEqualTo(200);
+        assertThat(ringSize(A)).isEqualTo(1);
+        assertThat(ringVector(A)).containsExactly(embedder.embedOne(NEAR_A));
+        assertThat(ringSize(B)).isZero();
+    }
+
+    @Test
+    void aScopedRouteThatReturnsNoRow_onAFanOut_admitsNothing() throws Exception {
+        indexed.addAll(List.of(A, B));
+        Map<String, Object> body = searchBody(NEAR_A, A, B);
+        body.put("seeds", List.of("no-such-document"));
+
+        var r = post("/search-graph-hop", body);
+
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(r.body()).isEqualTo("[]");
+        assertThat(ring.queued()).as("no row, no nearest arm").isZero();
     }
 
     // -- test 7 -----------------------------------------------------------------------------------------------

@@ -467,7 +467,8 @@ class PciReconcilerIntegrationTest {
 
     // -- nexus-4lnn1.1.3: the query ring's 30-day age bound runs in the lock holder's pass ---------------------------
 
-    PciReconciler reconcilerWithRingExpiry(PciSettings s, PciIndexSweep sweep, java.util.function.IntSupplier expiry) {
+    PciReconciler reconcilerWithRingExpiry(PciSettings s, PciIndexSweep sweep,
+                                           java.util.function.ToIntFunction<java.util.Collection<String>> expiry) {
         return new PciReconciler(catalog::read, builderSession(s), sweep, s, Clock.systemUTC(),
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60),
             java.util.random.RandomGenerator.getDefault(), expiry);
@@ -501,7 +502,55 @@ class PciReconcilerIntegrationTest {
         int left = asSuperuser(su -> su.fetchCount(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING,
             dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION.eq(coll)));
         assertThat(left).as("the 31-day row went, the 2-day row stayed").isEqualTo(1);
-        assertThat(logged("event=pci_ring_expire tenants=1 deleted=1 failed=0")).isEqualTo(1);
+        assertThat(logs().stream().filter(l -> l.matches(".*event=pci_ring_expire tenants=\\d+ deleted=1 failed=0.*")).count())
+            .as("the leaves of every tenant in the database are visited too").isEqualTo(1);
+    }
+
+    /**
+     * RDR-230 P1.7 fix round: the tenant source of the 30-day delete includes the snapshot's leaf tenants. The supplier
+     * here is empty, which stands for a tenant with no {@code service_tokens} row and no ledger row (the production
+     * supplier is the union of those two sources); the tenant has a leaf, as every tenant that holds ring rows does,
+     * because admission needs a valid per-collection index and an index lives on a leaf.
+     */
+    @Test
+    void aTenantWithRingRowsButNoTokenAndNoLedgerRow_isVisitedThroughItsLeaf() throws Exception {
+        String tenant = newTenant("ringleaf");
+        String coll = name("ringleaf");
+        collection(tenant, coll, 3);
+        for (int i = 0; i < 2; i++) {
+            final int seed = i;
+            float[] v = new float[384];
+            java.util.Arrays.fill(v, 0.1f * (seed + 1));
+            asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.ADDED_AT,
+                    java.time.OffsetDateTime.now().minusDays(seed == 0 ? 31 : 2))
+                .execute());
+        }
+        int tokenRows = asSuperuser(su -> su.fetchCount(dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS,
+            dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS.TENANT_ID.eq(tenant)));
+        assertThat(tokenRows).as("the fixture tenant has no token row").isZero();
+        PciSettings s = settings(16);
+        var expiry = new PciQueryRingExpiry(new TenantScope(svcDs), () -> List.of());
+
+        PassReport report = reconcilerWithRingExpiry(s, sweep(s), expiry::expireAll).reconcileOnce();
+
+        assertThat(report.state()).isEqualTo(BuilderState.OK);
+        int left = asSuperuser(su -> su.fetchCount(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING,
+            dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION.eq(coll)));
+        assertThat(left).as("the 31-day row went, the 2-day row stayed").isEqualTo(1);
+    }
+
+    @Test
+    void theSnapshotsLeafTenants_areDistinct_andSkipALeafWhoseBoundDidNotParse() throws Exception {
+        String a = newTenant("leafa");
+        String b = newTenant("leafb");
+        var tenants = PciReconciler.leafTenants(catalog.read());
+        assertThat(tenants).contains(a, b).doesNotHaveDuplicates().doesNotContainNull().doesNotContain("");
     }
 
     @Test
@@ -511,7 +560,7 @@ class PciReconcilerIntegrationTest {
         PciSettings s = settings(16);
         java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
 
-        PassReport report = reconcilerWithRingExpiry(s, sweep(s), () -> {
+        PassReport report = reconcilerWithRingExpiry(s, sweep(s), leafTenants -> {
             calls.incrementAndGet();
             throw new IllegalStateException("boom");
         }).reconcileOnce();
@@ -527,7 +576,7 @@ class PciReconcilerIntegrationTest {
         java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
         PciSettings off = new PciSettings(false, B, 600, 16);
 
-        PassReport report = reconcilerWithRingExpiry(off, sweep(off), () -> {
+        PassReport report = reconcilerWithRingExpiry(off, sweep(off), leafTenants -> {
             calls.incrementAndGet();
             return 0;
         }).reconcileOnce();
@@ -2458,8 +2507,8 @@ class PciReconcilerIntegrationTest {
     /** A reconciler whose canary schedule runs {@code runner} (the canary's own tests are PciCanaryTest and the plan test). */
     PciReconciler canaryReconciler(PciSettings s, PciIndexSweep sweep, Clock clock, PciCanarySchedule schedule) {
         return new PciReconciler(catalog::read, builderSession(s), sweep, s, clock, PciReconciler.SET_LOCAL_TENANT,
-            PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), java.util.random.RandomGenerator.getDefault(), () -> 0,
-            schedule);
+            PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), java.util.random.RandomGenerator.getDefault(),
+            leafTenants -> 0, schedule);
     }
 
     /** A runner that records (index, trigger, whether the index was valid when it was called) and reports green. */
@@ -2685,7 +2734,7 @@ class PciReconcilerIntegrationTest {
 
         PciMaintenanceStatus.Entry e = r.maintenance().canary().indexes().get(0);
         assertThat(e.index()).isEqualTo(index);
-        assertThat(e.trigger()).as("an adopted index has no last run on this engine").isEqualTo("stale");
+        assertThat(e.trigger()).as("an adopted index has no last run on this engine").isEqualTo("daily");
         assertThat(e.anchor()).isEqualTo("adopted");
         assertThat(e.sizeRatio()).as("judged against the install reference, a Phase 2 figure").isNull();
     }

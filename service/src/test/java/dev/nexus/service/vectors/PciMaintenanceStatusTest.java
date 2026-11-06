@@ -32,7 +32,7 @@ class PciMaintenanceStatusTest {
 
     private static Result result(int n, State state, Instant at) {
         boolean measured = state != State.UNMEASURED;
-        return new Result(target(n), "stale", state, measured ? null : "no_queries", measured ? 10 : 2,
+        return new Result(target(n), "daily", state, measured ? null : "no_queries", measured ? 10 : 2,
             measured ? 0.98 : null, measured ? 0.99 : null, state == State.RED ? 1 : 0, at, null, null);
     }
 
@@ -117,7 +117,7 @@ class PciMaintenanceStatusTest {
         assertThat(e.minRecall()).isNull();
         assertThat(e.meanRecall()).isNull();
         assertThat(e.top1Misses()).isZero();
-        assertThat(e.trigger()).isEqualTo("stale");
+        assertThat(e.trigger()).isEqualTo("daily");
     }
 
     @Test

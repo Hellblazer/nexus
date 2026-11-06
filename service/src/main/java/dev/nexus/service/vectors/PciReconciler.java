@@ -25,6 +25,7 @@ import javax.sql.DataSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -38,8 +39,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.IntSupplier;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 import java.util.random.RandomGenerator;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -265,7 +266,7 @@ public final class PciReconciler {
     private final Duration period;
     private final RandomGenerator random;
     /** nexus-4lnn1.1.3: deletes the recall canary's query-ring rows older than 30 days; returns the row count. */
-    private final IntSupplier ringExpiry;
+    private final ToIntFunction<Collection<String>> ringExpiry;
     /** nexus-4lnn1.1.4: when the recall canary runs and what it last found; {@code null} means no canary (tests). */
     private final PciCanarySchedule canary;
 
@@ -298,16 +299,19 @@ public final class PciReconciler {
     PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
                   Duration period, RandomGenerator random) {
-        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, () -> 0);
+        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, leafTenants -> 0);
     }
 
     /**
      * As above with the query-ring age bound (nexus-4lnn1.1.3): {@code ringExpiry} runs at the start of every pass
-     * this engine runs as the builder-lock holder, whatever the pass then plans, and returns the rows it deleted.
+     * this engine runs as the builder-lock holder, whatever the pass then plans, and returns the rows it deleted. It is
+     * handed the distinct tenants of the pass's catalog snapshot (every tenant leaf of {@code nexus.chunks}, with or
+     * without indexes; empty when the read failed), so a tenant that holds ring rows is visited whether or not it still
+     * has a token or a ledger row.
      */
     PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
-                  Duration period, RandomGenerator random, IntSupplier ringExpiry) {
+                  Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry) {
         this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, ringExpiry, null);
     }
 
@@ -317,7 +321,8 @@ public final class PciReconciler {
      */
     PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
-                  Duration period, RandomGenerator random, IntSupplier ringExpiry, PciCanarySchedule canary) {
+                  Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
+                  PciCanarySchedule canary) {
         this.canary = canary;
         this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
@@ -340,12 +345,12 @@ public final class PciReconciler {
      */
     public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
                                        PciSettings settings) {
-        return create(ds, admin, bootNonce, sweep, settings, () -> 0);
+        return create(ds, admin, bootNonce, sweep, settings, leafTenants -> 0);
     }
 
     /** As above, with the query ring's age bound run at the start of each pass this engine holds the lock for. */
     public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
-                                       PciSettings settings, IntSupplier ringExpiry) {
+                                       PciSettings settings, ToIntFunction<Collection<String>> ringExpiry) {
         return new PciReconciler(new PciCatalog(ds)::read,
             new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
             Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
@@ -358,7 +363,8 @@ public final class PciReconciler {
      * serving path, its queries come from the ring in {@code scope}'s database.
      */
     public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
-                                       PciSettings settings, IntSupplier ringExpiry, PgVectorRepository repository,
+                                       PciSettings settings, ToIntFunction<Collection<String>> ringExpiry,
+                                       PgVectorRepository repository,
                                        dev.nexus.service.db.TenantScope scope) {
         var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"));
         var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements());
@@ -539,12 +545,16 @@ public final class PciReconciler {
                 return PassReport.inactive(state);
             }
             passStartedAt = clock.instant();
-            expireRings();
-            PciCatalog.Snapshot snapshot;
+            PciCatalog.Snapshot snapshot = null;
             try {
                 snapshot = catalog.get();
             } catch (RuntimeException e) {
                 log.warn("event=pci_reconcile_pass_failed reason=catalog_read cause=\"{}\"", e.getMessage());
+            }
+            // After the read, so the ring's age bound can visit the snapshot's tenants; before any build, so it still
+            // runs on a pass that then fails or plans nothing.
+            expireRings(snapshot == null ? List.of() : leafTenants(snapshot));
+            if (snapshot == null) {
                 return PassReport.inactive(state);
             }
             if (snapshot.leaves().isEmpty()) {
@@ -611,8 +621,7 @@ public final class PciReconciler {
             }
             canary.runPass(List.copyOf(targets.values()));
         } catch (RuntimeException e) {
-            log.warn("event=pci_canary_pass_failed error_class={} error=\"{}\"", e.getClass().getSimpleName(),
-                e.getMessage() == null ? "" : e.getMessage().replace('\n', ' '));
+            log.warn("event=pci_canary_pass_failed error=\"{}\"", PciQueryRing.sanitize(e));
         }
     }
 
@@ -640,12 +649,29 @@ public final class PciReconciler {
      * The query ring's 30-day age bound (nexus-4lnn1.1.3). It is not part of the pass's account: a failure here must
      * not stop the builds, and the expiry logs its own counts.
      */
-    private void expireRings() {
+    private void expireRings(Collection<String> leafTenants) {
         try {
-            ringExpiry.getAsInt();
+            ringExpiry.applyAsInt(leafTenants);
         } catch (RuntimeException e) {
             log.warn("event=pci_ring_expire_failed reason=hook error_class={}", e.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * The distinct tenants of the snapshot's leaves, in leaf order; a leaf whose tenant bound did not parse names none.
+     * A ring row needs a registry row, and admission needs a valid per-collection index, which lives on a leaf, so a
+     * tenant that holds ring rows has a leaf. The exception is a tenant whose leaf was dropped while its registry rows
+     * stayed (the rows then go with the collection, not with the 30-day bound), or whose leaf bound this engine cannot
+     * parse.
+     */
+    static List<String> leafTenants(PciCatalog.Snapshot snapshot) {
+        var out = new java.util.LinkedHashSet<String>();
+        for (Leaf leaf : snapshot.leaves()) {
+            if (leaf.tenant() != null && !leaf.tenant().isBlank()) {
+                out.add(leaf.tenant());
+            }
+        }
+        return List.copyOf(out);
     }
 
     private static final class Tally {

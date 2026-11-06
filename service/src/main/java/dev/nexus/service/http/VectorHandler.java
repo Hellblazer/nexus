@@ -216,7 +216,10 @@ public final class VectorHandler implements HttpHandler {
         this.keyedSweep     = requestLedger == null ? null : new KeyedSweep(requestLedger);
     }
 
-    /** Bind the query ring that {@code /search} and {@code /search-per-collection} admit to. Idempotent. */
+    /**
+     * Bind the query ring that the search routes admit to ({@code /search}, {@code /search-per-collection},
+     * {@code /hybrid-search} and the four scoped routes). Idempotent.
+     */
     public void queryRing(PciQueryRing ring) {
         this.queryRing = ring;
     }
@@ -969,6 +972,7 @@ public final class VectorHandler implements HttpHandler {
         var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where,
                                                        includeSourceUri, chashAllow);
         sendSearchResult(ex, body, queryText, hybridResult);
+        admitToQueryRing(tenant, hybridResult.queryVector());
     }
 
     /**
@@ -1007,6 +1011,7 @@ public final class VectorHandler implements HttpHandler {
             tenant, queryText, collections, contentType, author, year, corpus,
             subtree, where, nResults);
         sendSearchResult(ex, body, queryText, metaResult);
+        admitToQueryRing(tenant, metaResult.queryVector());
     }
 
     /**
@@ -1029,6 +1034,7 @@ public final class VectorHandler implements HttpHandler {
 
         var topicResult = repo.searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults);
         sendSearchResult(ex, body, queryText, topicResult);
+        admitToQueryRing(tenant, topicResult.queryVector());
     }
 
     /**
@@ -1063,6 +1069,7 @@ public final class VectorHandler implements HttpHandler {
         var graphResult = repo.searchGraphHopWithTokens(
             tenant, queryText, seeds, collections, linkType, depth, direction, where, nResults);
         sendSearchResult(ex, body, queryText, graphResult);
+        admitToQueryRing(tenant, graphResult.queryVector());
     }
 
     /**
@@ -1104,6 +1111,7 @@ public final class VectorHandler implements HttpHandler {
         var aspectResult = repo.searchAspectScopedWithTokens(
             tenant, queryText, collections, field, pattern, minConfidence, where, nResults);
         sendSearchResult(ex, body, queryText, aspectResult);
+        admitToQueryRing(tenant, aspectResult.queryVector());
     }
 
     /**

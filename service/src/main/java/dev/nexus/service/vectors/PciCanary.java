@@ -49,8 +49,6 @@ final class PciCanary implements PciCanarySchedule.Runner {
 
     private static final Logger log = LoggerFactory.getLogger(PciCanary.class);
 
-    private static final int MAX_ERROR_CHARS = 300;
-
     /** The index a run measures. {@code index} is the name the router's set holds for it. */
     record Target(String leaf, String tenant, String model, String collection, String index) { }
 
@@ -103,7 +101,7 @@ final class PciCanary implements PciCanarySchedule.Runner {
     /**
      * One run's outcome; the engine keeps the latest per index.
      *
-     * @param trigger   why the run happened: {@code after_build}, {@code vacuum} or {@code stale}
+     * @param trigger   why the run happened: {@code after_build}, {@code vacuum} or {@code daily}
      * @param reason    for {@link State#UNMEASURED} only: {@link #NO_QUERIES}, {@link #INDEX_NOT_USED} or {@link #ERROR}
      * @param queries   the distinct queries the ring gave this run (every result carries it)
      * @param minRecall null unless measured
@@ -329,11 +327,8 @@ final class PciCanary implements PciCanarySchedule.Runner {
         return v == null ? "none" : String.format(java.util.Locale.ROOT, "%.4f", v);
     }
 
+    /** The exception's class and a bounded message with every bracketed run of numbers masked (see the ring's own). */
     private static String describe(RuntimeException e) {
-        String message = e.getMessage() == null ? "" : e.getMessage().replace('\n', ' ');
-        if (message.length() > MAX_ERROR_CHARS) {
-            message = message.substring(0, MAX_ERROR_CHARS) + "...";
-        }
-        return e.getClass().getSimpleName() + ": " + message;
+        return PciQueryRing.sanitize(e);
     }
 }

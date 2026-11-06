@@ -1071,7 +1071,8 @@ public final class NexusService {
      * The tenants the query ring's 30-day delete visits (nexus-4lnn1.1.3): {@link #reaperTenants()} together with
      * every tenant in {@code request_ledger_tenants}, the set ledger retention visits. If reading the registry
      * throws, the reaper's tenants are still returned. A tenant with ring rows, no {@code service_tokens} row and no
-     * ledger row is not visited (a search writes no ledger row; only the keyed sweep routes do).
+     * ledger row (a search writes no ledger row; only the keyed sweep routes do) is not in this list; the reconciler
+     * adds the tenants of its catalog snapshot's leaves, which reach it (nexus-4lnn1.1.7).
      */
     List<String> ringTenants() {
         var tenants = new java.util.LinkedHashSet<String>(reaperTenants());

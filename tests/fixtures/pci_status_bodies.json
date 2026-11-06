@@ -45,7 +45,7 @@
             {"index": "pci_aaaaaaaaaaaaaaaaaaaaaaaa", "state": "red", "reason": null, "queries": 10, "min_recall": 0.82, "mean_recall": 0.9,
              "top1_misses": 2, "trigger": "vacuum", "measured_at": "2026-10-20T08:01:10Z", "anchor": "adopted", "size_ratio": null, "deletes_since_build": 0.25},
             {"index": "pci_bbbbbbbbbbbbbbbbbbbbbbbb", "state": "unmeasured", "reason": "no_queries", "queries": 2, "min_recall": null, "mean_recall": null,
-             "top1_misses": 0, "trigger": "stale", "measured_at": "2026-10-20T08:01:10Z", "anchor": null, "size_ratio": null, "deletes_since_build": null},
+             "top1_misses": 0, "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z", "anchor": null, "size_ratio": null, "deletes_since_build": null},
             {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null, "queries": 10, "min_recall": 0.983, "mean_recall": 0.998,
              "top1_misses": 0, "trigger": "after_build", "measured_at": "2026-10-20T08:01:10Z", "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.031}]}}}
     },
@@ -58,7 +58,7 @@
             {"index": "pci_aaaaaaaaaaaaaaaaaaaaaaaa", "state": "red", "reason": null, "queries": 10, "min_recall": 0.82, "mean_recall": 0.9,
              "top1_misses": 2, "trigger": "vacuum", "measured_at": "2026-10-20T08:01:10Z", "anchor": "adopted", "size_ratio": null, "deletes_since_build": 0.25},
             {"index": "pci_bbbbbbbbbbbbbbbbbbbbbbbb", "state": "unmeasured", "reason": "no_queries", "queries": 2, "min_recall": null, "mean_recall": null,
-             "top1_misses": 0, "trigger": "stale", "measured_at": "2026-10-20T08:01:10Z", "anchor": null, "size_ratio": null, "deletes_since_build": null},
+             "top1_misses": 0, "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z", "anchor": null, "size_ratio": null, "deletes_since_build": null},
             {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null, "queries": 10, "min_recall": 0.983, "mean_recall": 0.998,
              "top1_misses": 0, "trigger": "after_build", "measured_at": "2026-10-20T08:01:10Z", "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.031}]}}}
     },

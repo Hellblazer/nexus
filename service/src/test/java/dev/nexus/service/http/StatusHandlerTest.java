@@ -556,7 +556,7 @@ class StatusHandlerTest {
         return PciMaintenanceStatus.phase1(List.of(
             entry("pci_3f9c0a1b2c3d4e5f6a7b8c9d", "green", null, 10, 0.9834, 0.9981, 0, "after_build", "built",
                 1.0712, 0.0312),
-            entry("pci_bbbbbbbbbbbbbbbbbbbbbbbb", "unmeasured", "no_queries", 2, null, null, 0, "stale", null, null,
+            entry("pci_bbbbbbbbbbbbbbbbbbbbbbbb", "unmeasured", "no_queries", 2, null, null, 0, "daily", null, null,
                 null),
             entry("pci_aaaaaaaaaaaaaaaaaaaaaaaa", "red", null, 10, 0.82, 0.9, 2, "vacuum", "adopted", null, 0.25)));
     }
@@ -640,12 +640,12 @@ class StatusHandlerTest {
     }
 
     @Test
-    void maintenance_rendersTheListAsCappedAndOrderedByTheStatusObject_noTenantOrCollectionNameAnywhereInTheBody()
+    void maintenance_rendersTheListAsCappedAndOrderedByTheStatusObject()
             throws Exception {
         var all = new java.util.ArrayList<PciMaintenanceStatus.Entry>();
         for (int n = 0; n < 80; n++) {
             all.add(entry(String.format("pci_%024x", n), n % 10 == 0 ? "red" : "green", null, 10, 0.99, 0.99,
-                n % 10 == 0 ? 1 : 0, "stale", "built", 1.0, 0.0));
+                n % 10 == 0 ? 1 : 0, "daily", "built", 1.0, 0.0));
         }
         var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
         var status = PciMaintenanceStatus.phase1(all);
