@@ -168,13 +168,15 @@ migration_wal_bytes_per_worker = 11038000
 # ROW LEVEL SECURITY and 1 CREATE POLICY; 2 CREATE FUNCTION (chunk_sensitive, chunk_sensitive_many) and 2 GRANT EXECUTE to nexus_svc. That is 11 statements in the changeset; the measured 13 is
 # those 11 plus 2 from the runAlways grants loop for the new table (the telemetry-018 accounting for a table with a BIGSERIAL id: the table grant and the sequence grant; counted as measured minus the 11).
 # Measured: chas (lab-m), 2026-11-05, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2262.
-# 2262 -> 2266 (nexus-hbnml, after catalog-047 above; first measured as 2249 -> 2253 on 2026-11-04): aspects-005-1/-2 (nexus-hbnml, the aspect_extraction_queue table's guarded drop) add 6 DDL statements to a fresh
-# migration and the dropped table takes 2 away: 1 CREATE FUNCTION (nexus.aspect_queue_rows_unscoped) and its REVOKE, the helper's two NESTED ALTER TABLE ... NO FORCE /
-# FORCE ROW LEVEL SECURITY (the event trigger counts DDL a function runs; the guard's sqlCheck calls it once on the fresh walk), 1 DROP TABLE and 1 DROP FUNCTION; and
-# the runAlways grants loop (grants-nexus-svc-1) no longer grants on the queue table and its BIGSERIAL id sequence, -2 (its GRANT per owned relation). Counted (+6 -2) and
-# measured: chas (lab-l), 2026-11-04, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker),
-# ddl: migration=2253.
-migration_ddl_per_worker = 2266
+# 2262 -> 2271 (nexus-hbnml, after catalog-047 above): aspects-005-1/-2 retire the aspect_extraction_queue table. Measured +9 against develop's 2262 by kind:
+# +7 ALTER TABLE, +1 CREATE FUNCTION, +1 REVOKE, +1 DROP TABLE, +1 DROP FUNCTION, -2 GRANT. The ALTERs: 005-1 swaps the queue table's collection foreign key to
+# ON DELETE/UPDATE CASCADE (DROP CONSTRAINT, ADD CONSTRAINT, VALIDATE CONSTRAINT: 3), and the counting helper nexus.aspect_queue_rows_unscoped runs twice on a
+# fresh walk (005-2's sqlCheck and the recount inside the dropping transaction), each run a nested NO FORCE / FORCE ROW LEVEL SECURITY pair (4; the event trigger
+# counts DDL a function runs). CREATE FUNCTION and REVOKE are the helper's, DROP TABLE and DROP FUNCTION are 005-2's, and the runAlways grants loop no longer
+# grants on the queue table and its BIGSERIAL sequence (-2). Measured: laptop, 2026-11-05, scoped substrate run of
+# tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2271. (The 2026-11-04 figure of +4 predates the
+# review fix round that added the foreign-key swap and the in-transaction recount.)
+migration_ddl_per_worker = 2271
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
