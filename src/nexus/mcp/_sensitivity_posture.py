@@ -21,14 +21,11 @@ from typing import Any
 
 import structlog
 
-from nexus.sensitivity import POSTURE_ENV, llm_bound
+from nexus.sensitivity import CHILD_SURFACE, POSTURE_ENV, child_scope
 
 __all__ = ["CHILD_SURFACE", "install_sensitivity_posture_hook"]
 
 _log = structlog.get_logger(__name__)
-
-#: The scope name a nested server's tool calls run under.
-CHILD_SURFACE = "nx_mcp_child"
 
 
 def install_sensitivity_posture_hook(server: object) -> bool:
@@ -45,7 +42,7 @@ def install_sensitivity_posture_hook(server: object) -> bool:
         async def _scoped(ctx: Any, call_next: Any) -> Any:
             if ctx.method != "tools/call":
                 return await call_next(ctx)
-            with llm_bound(CHILD_SURFACE):
+            with child_scope():
                 return await call_next(ctx)
 
         _scoped._nx_sensitivity_posture = True  # type: ignore[attr-defined]

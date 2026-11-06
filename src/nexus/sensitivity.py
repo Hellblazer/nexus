@@ -32,7 +32,7 @@ from typing import Any, Final, Literal, TypeVar
 
 __all__ = [
     "DispatchOutsideSensitivityScope", "POSTURE_ENV", "Posture", "ReadSensitivity", "SensitiveDocumentRefused",
-    "assert_llm_bound", "bound_to", "check_read_sensitivity", "current_posture", "current_surface", "llm_bound",
+    "CHILD_SURFACE", "assert_llm_bound", "bound_to", "child_scope", "check_read_sensitivity", "current_posture", "current_surface", "llm_bound",
     "read_sensitivity",
 ]
 
@@ -122,6 +122,19 @@ def llm_bound(surface: str) -> Iterator[None]:
     finally:
         _SURFACE.reset(surface_token)
         _POSTURE.reset(posture_token)
+
+
+#: The scope name a nested ``nx-mcp`` server enters when its parent dispatched it with
+#: ``NX_SENSITIVITY_POSTURE=llm_bound`` (RDR-243 Phase 2 Step 2.5). It is not a registry row: the child
+#: makes no LLM call of its own, it serves reads to a parent surface that does.
+CHILD_SURFACE: Final = "nx_mcp_child"
+
+
+@contextlib.contextmanager
+def child_scope() -> Iterator[None]:
+    """Enter :func:`llm_bound` as a scoped parent's child, under :data:`CHILD_SURFACE`."""
+    with llm_bound(CHILD_SURFACE):
+        yield
 
 
 def assert_llm_bound(root: str) -> None:
