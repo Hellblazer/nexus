@@ -954,7 +954,7 @@ a `$ref` step") is dropped: it already works.
      the bundled MiniLM it scores 0.474 to 0.542 on the 7 questions, above the
      0.40 floor (147-research-16; the offline estimate before the YAML existed was 0.535
      to 0.643, 147-research-15, and the first committed wording scored 0.414 to
-     0.545, review r1 of d55364dc4). The
+     0.545, review r1 of b61e0a1ef). The
      `cosine-only` tag keeps it out of the below-floor category route
      (`matcher.py` `_is_cosine_only_plan`), where it stole requests that are not
      entity listings. No golden discovery request changes plan; the accepted
@@ -1107,4 +1107,4 @@ plus tests on the MVV path (resolve, the repair branch, entity keys), and about
 - 2026-11-05: text brought into line with the option 1 code (69cc82790) and fix check b60dab40e: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
 - 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
 - 2026-11-06: the join-completeness domain is the questions whose anchors hold a key (Sam, T2 `nexus/rdr147-domain-decision-2026-11-06`); branch (c) rewritten as the routing fix the 2026-11-06 MVV needs (Sam "proceed.", 147-research-15); R4 updated with the measured request kinds.
-- 2026-11-06: wording follows the reviewed branch (c) code (22f3285f7, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted; and the anchor domain (Sam's 2026-11-06 decision) in Scope Verification.
+- 2026-11-06: wording follows the reviewed branch (c) code (608de8fdb, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted; and the anchor domain (Sam's 2026-11-06 decision) in Scope Verification.
