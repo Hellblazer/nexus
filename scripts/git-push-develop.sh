@@ -574,6 +574,13 @@ _range_show() {
     echo "PUSH_REFUSED_SCOPE $1"
     echo "n=${#_allowed_paths[@]} files touched by $remote/$branch..$source (digest $_range_have):"
     printf '    %s\n' "${_allowed_paths[@]}"
+    _merges="$(git rev-list --merges --count "$remote/$branch..$source" 2>/dev/null || echo 0)"
+    if [[ "$_merges" != "0" ]]; then
+      echo
+      echo "WARNING: $_merges merge commit(s) in the range: the list above does not show what a merge"
+      echo "itself changes (a conflict resolution or a file only the merge adds). Read those with"
+      echo "    git show --first-parent -m --stat <merge-sha>"
+    fi
     echo
     echo "Read the list. If it is exactly what you meant to push, confirm it:"
     echo

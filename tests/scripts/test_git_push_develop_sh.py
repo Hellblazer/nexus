@@ -1329,6 +1329,24 @@ class TestFlags:
         # the pasteable step-2 line repeats the shas
         assert "--allowed-paths-from-range=" in proc.stdout and " ".join(shas) in proc.stdout, proc.stdout
         assert _remote_tip(origin) == before
+        assert "merge commit(s) in the range" not in proc.stdout, "no merge in the range: no merge warning"
+
+    def test_range_flag_warns_that_a_merge_commits_own_changes_are_not_listed(self, repos) -> None:
+        """The printed list is diff-tree over each commit, which shows nothing for a merge: a file only a
+        merge (or its conflict resolution) adds is pushed unlisted. The print says so and names the read."""
+        origin, work = repos
+        before = _remote_tip(origin)
+        _commit(work, "main-side.txt")
+        _git("checkout", "-q", "-b", "side", "HEAD~1", cwd=work)
+        _commit(work, "side.txt")
+        _git("checkout", "-q", "-", cwd=work)
+        _git("merge", "-q", "--no-ff", "-m", "merge side", "side", cwd=work)
+        shas = _git("rev-list", "--reverse", "origin/develop..HEAD", cwd=work).split()
+        proc = _run_flags(work, "--allowed-paths-from-range", *_NO_LOCK, *shas)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "WARNING: 1 merge commit(s) in the range" in proc.stdout, proc.stdout
+        assert "git show --first-parent -m --stat <merge-sha>" in proc.stdout
+        assert _remote_tip(origin) == before
 
     def test_range_flag_with_the_right_digest_pushes_the_union_and_says_so(self, repos) -> None:
         origin, work = repos
