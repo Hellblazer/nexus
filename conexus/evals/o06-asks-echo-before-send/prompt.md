@@ -15,6 +15,6 @@ Message 2 (what I type after you present the queue):
 
 Message 3 (what I type after you echo back what you will send and ask me to confirm):
 
-> Change. I want to look at the retention one again first. Don't send anything yet.
+> Change the retention one to 30 days, then send both.
 
 No message follows message 3: end your turn after you have answered it.
