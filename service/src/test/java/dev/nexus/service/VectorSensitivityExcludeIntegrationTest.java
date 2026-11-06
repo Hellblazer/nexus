@@ -876,6 +876,81 @@ class VectorSensitivityExcludeIntegrationTest {
         }
     }
 
+    // ── review fix F2: a document flagged between the read and the flag lookup ─────
+
+    private void setSensitive(String doc, boolean sensitive) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.SENSITIVE, sensitive)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))
+                .execute();
+        }
+    }
+
+    /**
+     * Run {@code body} with the owners of {@code keys} (384 collection) flagged sensitive in the window between the
+     * read and the flag lookup, which is when the repository's seam fires; the flags are cleared afterwards. Fails if
+     * the seam never fired, so a refactor that moves the lookup cannot leave the race test vacuous.
+     */
+    private void withFlagAppearingBetweenReadAndLookup(List<String> keys, ThrowingRunnable body) throws Exception {
+        int[] fired = {0};
+        PgVectorRepository.setBeforeSensitiveLookupHookForTests(() -> {
+            fired[0]++;
+            try {
+                for (String k : keys) setSensitive(tumbler(k, 384), true);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        try {
+            body.run();
+            assertThat(fired[0]).as("the race seam fired: the test drove the window").isPositive();
+        } finally {
+            PgVectorRepository.setBeforeSensitiveLookupHookForTests(null);
+            for (String k : keys) setSensitive(tumbler(k, 384), false);
+        }
+    }
+
+    @FunctionalInterface
+    private interface ThrowingRunnable { void run() throws Exception; }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("routes")
+    void route_aDocumentFlaggedAfterTheSearchIsDroppedFromAnExcludedPage(Route route) throws Exception {
+        List<String> plainKeys = List.of("n1", "n2", "n3", "n4", "n5", "n6");
+        withFlagAppearingBetweenReadAndLookup(plainKeys, () -> {
+            // every row the search admits is flagged by the lookup: an excluded page serves none of them
+            assertThat(rows(post(route, "exclude", true))).as("no row the lookup flags is served").isEmpty();
+            // the same window without the exclusion: the rows are served, flagged
+            for (JsonNode row : rows(post(route, null, false))) {
+                if (plainKeys.stream().map(VectorSensitivityExcludeIntegrationTest::hex)
+                        .anyMatch(h -> h.equals(chashOf(row)))) {
+                    assertThat(row.get("sensitive").asBoolean()).isTrue();
+                }
+            }
+        });
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {GET, STORE_GET})
+    void getRoute_aDocumentFlaggedAfterTheReadIsDroppedFromEveryParallelListAndTheCount(String route) throws Exception {
+        withFlagAppearingBetweenReadAndLookup(List.of("n1"), () -> {
+            JsonNode ex = postJson(route, getBody(route, 384, "sensitivity", "exclude"), 200);
+            List<String> ids = texts(ex.get("ids"));
+            assertThat(ids).containsExactlyInAnyOrderElementsOf(hexes("n2", "n3", "n4", "n5", "n6"));
+            for (String list : new String[] {"documents", "metadatas", "sensitives", "chashes", "spans"}) {
+                assertThat(ex.get(list)).as(list + " stays parallel to ids").hasSameSizeAs(ex.get("ids"));
+            }
+            assertThat(flags(ex.get("sensitives"))).containsOnly(false);
+            assertThat(texts(ex.get("chashes"))).containsExactlyElementsOf(ids);
+            for (JsonNode d : ex.get("documents")) assertThat(d.asText()).doesNotContain("chunk n1 ");
+            if (route.equals(STORE_GET)) {
+                assertThat(ex.get("count").asLong()).as("the count follows the rows returned").isEqualTo(5);
+            }
+        });
+    }
+
     // ── every route the parity census derives has a behaviour recipe here ─────
 
     @Test

@@ -1577,7 +1577,7 @@ public final class PgVectorRepository {
             ? QueryVector.alone(model, embedResult.embeddings().get(0), collectionNames.get(0))
             : new QueryVector(model, embedResult.embeddings().get(0), nearestCollection(result));
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
-        enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows);
+        enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows, excludeSensitive);
         return new Tokened<>(rows, embedResult.tokens(), skippedCollections, ringVector);
     }
 
@@ -3198,7 +3198,12 @@ public final class PgVectorRepository {
             served.addAll(lexicalRows);
         }
         long enrichStartNanos = System.nanoTime();
-        enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows);
+        enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows, excludeSensitive);
+        if (excludeSensitive) {
+            // served is a copy when the lexical leg added rows: the rows the response carries are dropped too
+            dropSensitiveRows(rows);
+            dropSensitiveRows(lexicalRows);
+        }
         final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
         long fillStartNanos = System.nanoTime();
         if (includeEmbeddings) {
@@ -3768,7 +3773,7 @@ public final class PgVectorRepository {
         // chunk into one row per document would have each of them overwritten with the same URI. The
         // stage re-points source_uri on the rows it expands, as searchWithTokens and
         // searchPerCollection do.
-        enrichSearchRows(tenant, rows, includeSourceUri, labelSplit.active());
+        enrichSearchRows(tenant, rows, includeSourceUri, labelSplit.active(), excludeSensitive);
         if (labelSplit.active()) {
             rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
         }
@@ -4161,7 +4166,8 @@ public final class PgVectorRepository {
         // single-snapshot (see above) — never a race between two reads.
         envelope.put("count", matchedLive);
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
-        return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection, envelope, includeSourceUri));
+        return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection, envelope, includeSourceUri),
+                              excludeSensitive);
     }
 
     /** The exclusion predicate over a chunk-table row: no live owner of the chunk is sensitive. */
@@ -4175,14 +4181,30 @@ public final class PgVectorRepository {
      * RDR-243 Technical Design item 3). The existing keys are untouched.
      */
     @SuppressWarnings("unchecked")
-    private Map<String, Object> withSensitives(String tenant, String collection, Map<String, Object> envelope) {
+    private Map<String, Object> withSensitives(String tenant, String collection, Map<String, Object> envelope,
+                                               boolean excludeSensitive) {
         List<String> ids = (List<String>) envelope.get("ids");
+        if (!ids.isEmpty()) runBeforeSensitiveLookupHook();
         Set<String> sensitive = ids.isEmpty() ? Set.of()
             : tenantScope.withTenant(tenant, ctx -> ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, ids));
         List<Boolean> flags = new ArrayList<>(ids.size());
         for (String id : ids) flags.add(sensitive.contains(id));
         Map<String, Object> out = new LinkedHashMap<>(envelope);
         out.put("sensitives", flags);
+        if (excludeSensitive && flags.contains(Boolean.TRUE)) {
+            // A document flagged since the read: drop its rows from every list parallel to ids, and from the count.
+            // Under exclude no returned row is sensitive, so "sensitives" comes back all false.
+            int dropped = 0;
+            for (Boolean f : flags) if (f) dropped++;
+            for (var e : out.entrySet()) {
+                if (e.getValue() instanceof List<?> l && l.size() == ids.size()) {
+                    List<Object> kept = new ArrayList<>(ids.size() - dropped);
+                    for (int i = 0; i < l.size(); i++) if (!flags.get(i)) kept.add(l.get(i));
+                    e.setValue(kept);
+                }
+            }
+            if (out.get("count") instanceof Number n) out.put("count", Math.max(0L, n.longValue() - dropped));
+        }
         return out;
     }
 
@@ -4440,7 +4462,7 @@ public final class PgVectorRepository {
         // RDR-169 G5: surface address triple additively as parallel lists (source_uri opt-in)
         return withSensitives(tenant, collection, enrichGetEnvelope(tenant, collection,
             new LinkedHashMap<>(Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas)),
-            includeSourceUri));
+            includeSourceUri), excludeSensitive);
     }
 
     /**
@@ -5031,7 +5053,7 @@ public final class PgVectorRepository {
                 excludeSensitive);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens(), List.of(),
+        return new Tokened<>(runCombinedQuery(tenant, fn, nResults, excludeSensitive), embed.tokens(), List.of(),
                              QueryVector.alone(model, embed.embeddings().get(0), collection));
     }
 
@@ -5312,7 +5334,7 @@ public final class PgVectorRepository {
      * allowlist).
      */
     private List<Map<String, Object>> runCombinedQuery(
-            String tenant, org.jooq.Table<?> fn, int nResults) {
+            String tenant, org.jooq.Table<?> fn, int nResults, boolean excludeSensitive) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours. First, so the
@@ -5344,7 +5366,7 @@ public final class PgVectorRepository {
             row.put("retention",  rec.get("retention", String.class));
             rows.add(row);
         }
-        attachSensitive(tenant, rows);
+        attachSensitive(tenant, rows, excludeSensitive);
         return rows;
     }
 
@@ -5421,7 +5443,7 @@ public final class PgVectorRepository {
             row.put("retention",  rec.get("retention", String.class));
             rows.add(row);
         }
-        attachSensitive(tenant, rows);
+        attachSensitive(tenant, rows, excludeSensitive);
         return rows;
     }
 
@@ -9647,9 +9669,11 @@ FROM scope s
      * @param rows             the chunk-level search result rows to enrich (mutated in-place)
      * @param includeSourceUri when true, resolves source_uri via a catalog JOIN
      * @param labelStageFollows true when a label or document-key filter's stage runs over these rows next
+     * @param excludeSensitive  true when the request asked for {@code sensitivity=exclude}: a row the sensitive lookup
+     *                          then flags is dropped from {@code rows} ({@link #attachSensitive})
      */
     private void enrichSearchRows(String tenant, List<Map<String, Object>> rows,
-                                  boolean includeSourceUri, boolean labelStageFollows) {
+                                  boolean includeSourceUri, boolean labelStageFollows, boolean excludeSensitive) {
         if (rows.isEmpty()) return;
         // nexus-6pfgb.26: ONE lookup per window, whether or not source_uri was asked for: the owner's
         // doc_id, position and span come from the same row, so every chunk-level row needs it. Under a
@@ -9706,7 +9730,7 @@ FROM scope s
                 row.put("source_uri", owner != null ? owner.sourceUri() : null);
             }
         }
-        attachSensitive(tenant, rows);
+        attachSensitive(tenant, rows, excludeSensitive);
     }
 
     /**
@@ -9716,7 +9740,7 @@ FROM scope s
      * search; a row carries the chunk's chash as {@code chash} (document-level rows, whose {@code id} is a tumbler) or
      * as its {@code id}. A lookup that fails fails the search: a hit is never served with its flag unknown.
      */
-    private void attachSensitive(String tenant, List<Map<String, Object>> rows) {
+    private void attachSensitive(String tenant, List<Map<String, Object>> rows, boolean excludeSensitive) {
         if (rows.isEmpty()) return;
         Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
@@ -9729,6 +9753,7 @@ FROM scope s
             }
             chashesByCollection.computeIfAbsent(coll, k -> new LinkedHashSet<>()).add(hex);
         }
+        runBeforeSensitiveLookupHook();
         Set<String> sensitive = tenantScope.withTenant(tenant, ctx -> {
             Set<String> out = new HashSet<>();
             for (var e : chashesByCollection.entrySet()) {
@@ -9742,6 +9767,34 @@ FROM scope s
             String hex = row.get("chash") instanceof String c ? c : (String) row.get("id");
             row.put("sensitive", sensitive.contains(ManifestLabelStage.ownerKey((String) row.get("collection"), hex)));
         }
+        if (excludeSensitive) dropSensitiveRows(rows);
+    }
+
+    /**
+     * Drop the rows flagged {@code sensitive}. The search ran in one transaction and the flag lookup runs in another,
+     * so a document flagged in between yields a row the search admitted that the lookup then reports sensitive; under
+     * {@code sensitivity=exclude} such a row must not be served (review fix F2, nexus-rfvyy.7.4). A flag lookup never
+     * adds a row, so the page can only come back shorter than the search made it, never wrong.
+     */
+    private static void dropSensitiveRows(List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return;
+        rows.removeIf(r -> Boolean.TRUE.equals(r.get("sensitive")));
+    }
+
+    /**
+     * Test seam (review fix F2): runs between the search or read and the sensitive-flag lookup, the window in which a
+     * document can be flagged. Null in production.
+     */
+    private static volatile Runnable beforeSensitiveLookupHook;
+
+    /** Install (or, with null, clear) the {@link #beforeSensitiveLookupHook}; for tests only. */
+    public static void setBeforeSensitiveLookupHookForTests(Runnable hook) {
+        beforeSensitiveLookupHook = hook;
+    }
+
+    private static void runBeforeSensitiveLookupHook() {
+        Runnable h = beforeSensitiveLookupHook;
+        if (h != null) h.run();
     }
 
     /**
