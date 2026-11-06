@@ -321,6 +321,85 @@ class PciCanaryScheduleTest {
         assertThat(recorder.runs.size()).as("an hour of passes, a 30-minute floor").isEqualTo(2);
     }
 
+    // -- error backoff (RDR-230 fix round 2, residual 1) ---------------------------------------------------------
+
+    /** Runs a pass and reports whether the index was run in it. */
+    private boolean runs() {
+        int before = recorder.runs.size();
+        schedule.runPass(List.of(target("a")));
+        return recorder.runs.size() > before;
+    }
+
+    @Test
+    void eachConsecutiveError_doublesTheRetryFloor() {
+        recorder.unmeasuredReason = PciCanary.ERROR;
+        schedule.built("a");
+        assertThat(runs()).as("first run").isTrue();
+
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.minusMinutes(1));
+        assertThat(runs()).as("inside the first floor (30 min)").isFalse();
+        clock.advance(Duration.ofMinutes(2));
+        assertThat(runs()).as("past the first floor: the second error").isTrue();
+
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.multipliedBy(2).minusMinutes(1));
+        assertThat(runs()).as("inside the doubled floor (60 min)").isFalse();
+        clock.advance(Duration.ofMinutes(2));
+        assertThat(runs()).as("past the doubled floor: the third error").isTrue();
+
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.multipliedBy(4).minusMinutes(1));
+        assertThat(runs()).as("inside the quadrupled floor (120 min)").isFalse();
+        clock.advance(Duration.ofMinutes(2));
+        assertThat(runs()).as("past the quadrupled floor").isTrue();
+    }
+
+    @Test
+    void theErrorRetryFloor_isCappedAtADay() {
+        assertThat(PciCanaryPolicy.ERROR_RETRY_CAP).isEqualTo(Duration.ofHours(24));
+        recorder.unmeasuredReason = PciCanary.ERROR;
+        schedule.built("a");
+        for (int i = 0; i < 30; i++) {   // far more errors than the doubling needs to reach the cap
+            assertThat(runs()).as("error " + (i + 1)).isTrue();
+            clock.advance(PciCanaryPolicy.ERROR_RETRY_CAP.plusMinutes(1));
+        }
+        assertThat(runs()).as("the 31st error").isTrue();
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_CAP.minusMinutes(1));
+        assertThat(runs()).as("inside the cap").isFalse();
+        clock.advance(Duration.ofMinutes(2));
+        assertThat(runs()).as("past the cap: the wait never grows beyond a day").isTrue();
+    }
+
+    @Test
+    void aNonErrorResult_resetsTheBackoff() {
+        recorder.unmeasuredReason = PciCanary.ERROR;
+        schedule.built("a");
+        assertThat(runs()).isTrue();
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.plusMinutes(1));
+        assertThat(runs()).as("second error: the next floor is 60 min").isTrue();
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.multipliedBy(2).plusMinutes(1));
+        recorder.unmeasuredReason = null;
+        assertThat(runs()).as("a measured run").isTrue();
+
+        recorder.unmeasuredReason = PciCanary.ERROR;
+        clock.advance(PciCanaryPolicy.STALE_AFTER.plusMinutes(1));
+        assertThat(runs()).as("the daily run errors again").isTrue();
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.plusMinutes(1));
+        assertThat(runs()).as("back at the first floor, not the third").isTrue();
+    }
+
+    @Test
+    void aFreshBuild_resetsTheBackoff() {
+        recorder.unmeasuredReason = PciCanary.ERROR;
+        schedule.built("a");
+        assertThat(runs()).isTrue();
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.plusMinutes(1));
+        assertThat(runs()).as("second error: the next floor is 60 min").isTrue();
+
+        schedule.built("a");
+        assertThat(runs()).as("the new index runs at once, erroring again").isTrue();
+        clock.advance(PciCanaryPolicy.ERROR_RETRY_FLOOR.plusMinutes(1));
+        assertThat(runs()).as("the first floor again, not the third (120 min)").isTrue();
+    }
+
     @Test
     void aFreshBuild_clearsTheRetryFloorOfAnEarlierError() {
         recorder.unmeasuredReason = PciCanary.ERROR;

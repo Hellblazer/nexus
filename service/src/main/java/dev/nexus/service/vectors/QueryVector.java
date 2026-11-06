@@ -11,7 +11,11 @@ package dev.nexus.service.vectors;
  * <p>The rule: a query vector enters collection X's ring when the request searched X alone, or when X's arm returned
  * the nearest row among the request's arms (every arm of one request shares one embedding model, so "among the arms
  * that share X's model" is "among the arms"). Admitting every arm of a fan-out would turn a far query's ordinary
- * approximation error on a correct index into a red canary (RDR-227 measured 0.975 to 0.983 on one).
+ * approximation error on a correct index into a red canary (RDR-227 measured 0.975 to 0.983 on one). That is the rule of
+ * the unfiltered fan-outs ({@code /search}, {@code /search-per-collection}, {@code /hybrid-search}); the metadata-,
+ * aspect- and graph-hop-scoped routes admit a request that targets exactly one collection and no fan-out, because
+ * their nearest row is the nearest one that passes a predicate. The topic-scoped route takes one collection by
+ * construction.
  *
  * @param model      the embedding model of the request's collections
  * @param vector     the query embedding; treated as frozen

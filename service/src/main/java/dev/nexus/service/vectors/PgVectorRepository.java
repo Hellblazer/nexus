@@ -4667,32 +4667,23 @@ public final class PgVectorRepository {
         };
         var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
-                             ringVectorOfRows(model, embed.embeddings().get(0), collectionNames, rows));
+                             scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
 
     /**
-     * nexus-4lnn1.1.7 (RDR-230): the vector of a combined-query search and the collection it may enter the recall
-     * canary's query ring of, by the rule {@link #searchWithTokens} follows. One distinct collection: admitted to it.
-     * Several (one model): to the collection of the nearest row, {@code null} when no row came back. The rows are the
-     * route's own (filtered by its metadata, topic, link or aspect predicate), built from the jOOQ record, so a
-     * metadata key cannot shadow {@code distance} or {@code collection}.
+     * nexus-4lnn1.1.7 (RDR-230, fix round 2): the vector of a metadata-, aspect- or graph-hop-scoped search and the
+     * collection it may enter the recall canary's query ring of. Exactly one distinct collection: admitted to it.
+     * Several: admitted to none ({@code null}). These routes rank only the rows that pass a metadata, aspect or link
+     * predicate, so the nearest <i>filtered</i> row can sit in a collection the query is far from, and a far query
+     * scores about 0.975 to 0.983 on a correct index (RDR-227): admitting by nearest row would make false reds. The
+     * unfiltered fan-outs ({@link #searchWithTokens}, {@link #hybridSearchWithTokens}) keep the nearest-arm rule, which
+     * sees every arm's own nearest row.
      */
-    private static QueryVector ringVectorOfRows(String model, float[] vector, List<String> collections,
-                                                List<Map<String, Object>> rows) {
+    private static QueryVector scopedRingVector(String model, float[] vector, List<String> collections) {
         var distinct = new java.util.LinkedHashSet<>(collections);
-        if (distinct.size() == 1) {
-            return QueryVector.alone(model, vector, distinct.iterator().next());
-        }
-        String nearest = null;
-        Double best = null;
-        for (Map<String, Object> row : rows) {
-            Double d = row.get("distance") instanceof Double dd ? dd : null;
-            if (d != null && (best == null || d < best)) {
-                best = d;
-                nearest = row.get("collection") instanceof String c ? c : null;
-            }
-        }
-        return new QueryVector(model, vector, nearest);
+        return distinct.size() == 1
+            ? QueryVector.alone(model, vector, distinct.iterator().next())
+            : new QueryVector(model, vector, null);
     }
 
     /**
@@ -4801,7 +4792,7 @@ public final class PgVectorRepository {
         // countable = false: the aspect join can give one occurrence several rows (runCombinedQueryWithChash).
         var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
-                             ringVectorOfRows(model, embed.embeddings().get(0), collectionNames, rows));
+                             scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
 
     /**
@@ -4953,7 +4944,7 @@ public final class PgVectorRepository {
         };
         var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
-                             ringVectorOfRows(model, embed.embeddings().get(0), collectionNames, rows));
+                             scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
 
     /**

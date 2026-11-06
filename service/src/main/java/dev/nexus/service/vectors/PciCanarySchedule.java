@@ -42,8 +42,10 @@ import java.util.function.LongSupplier;
  * too few ring queries stays <i>pending</i>, in memory, and the index runs on the first pass that has them. An
  * {@code error} (a permit wait that timed out under load, a ring read that blipped, a statement timeout) also leaves
  * the trigger pending and stamps no last-run time, but the index is not tried again for
- * {@link PciCanaryPolicy#ERROR_RETRY_FLOOR}, so a failing statement costs one run per floor and not one per pass, and a
- * transient error does not cost the after-build reading a day. {@code index_not_used} is a run: the planner will not
+ * {@link PciCanaryPolicy#ERROR_RETRY_FLOOR}, doubled for each further consecutive error and capped at
+ * {@link PciCanaryPolicy#ERROR_RETRY_CAP} (reset by any other result and by a build), so a failing statement costs one
+ * run per wait and not one per pass, a deterministic error backs off to one run a day, and a transient error does not
+ * cost the after-build reading a day. {@code index_not_used} is a run: the planner will not
  * change its mind by the next pass, so it consumes the trigger and stamps the last-run time, and the index is tried
  * again at the next trigger or in a day.
  *
@@ -80,6 +82,8 @@ final class PciCanarySchedule {
         volatile Instant lastVacuumTrigger;
         /** After an errored run: no new attempt before this. Cleared by any other result and by a build. */
         volatile Instant retryNotBefore;
+        /** Consecutive errored runs; sets the length of the wait. Cleared by any other result and by a build. */
+        volatile int errorStreak;
         volatile String pending;
         volatile Result latest;
     }
@@ -116,6 +120,7 @@ final class PciCanarySchedule {
         IndexState s = state(index);
         s.pending = AFTER_BUILD;
         s.retryNotBefore = null;   // a new index owes nothing to the old one's error
+        s.errorStreak = 0;
     }
 
     /** The index was dropped: forget it. */
@@ -241,6 +246,8 @@ final class PciCanarySchedule {
         s.latest = r;
         boolean noQueries = r.state() == State.UNMEASURED && PciCanary.NO_QUERIES.equals(r.reason());
         if (noQueries) {
+            s.errorStreak = 0;
+            s.retryNotBefore = null;
             s.pending = d.trigger;
             boolean repeat = previous != null && previous.state() == State.UNMEASURED
                 && PciCanary.NO_QUERIES.equals(previous.reason());
@@ -252,15 +259,18 @@ final class PciCanarySchedule {
             return true;
         }
         if (r.state() == State.UNMEASURED && PciCanary.ERROR.equals(r.reason())) {
-            // Not a run: the trigger stays, no last-run time is stamped, and the floor keeps a failing index from
-            // running on every pass.
+            // Not a run: the trigger stays, no last-run time is stamped, and the wait (doubling per consecutive error,
+            // capped) keeps a failing index from running on every pass.
             s.pending = d.trigger;
-            s.retryNotBefore = clock.instant().plus(PciCanaryPolicy.ERROR_RETRY_FLOOR);
+            int streak = s.errorStreak + 1;
+            s.errorStreak = streak;
+            s.retryNotBefore = clock.instant().plus(PciCanaryPolicy.errorRetryAfter(streak));
             log.warn("{}", PciCanary.line(r));
             return false;
         }
         s.pending = null;
         s.retryNotBefore = null;
+        s.errorStreak = 0;
         s.lastRun = clock.instant();
         if (r.state() == State.RED) {
             log.warn("{}", PciCanary.line(r));

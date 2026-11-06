@@ -46,10 +46,24 @@ final class PciCanaryPolicy {
      * An index whose run ended unmeasured with reason {@code error} keeps its trigger and is not tried again before
      * this has passed. The pass period defaults to ten minutes, so this is three passes: the causes seen in design (a
      * permit wait that timed out under load, a ring read that blipped, a statement timeout just after a build) clear in
-     * minutes, and a persistent error costs at most 48 failing runs a day per index, each bounded by {@link #RUN_LIMIT}
-     * and the pass budget, instead of one on every pass.
+     * minutes. This is the wait after the first error; each further consecutive error doubles it, up to
+     * {@link #ERROR_RETRY_CAP}, because a deterministic error does not clear and a flat floor would re-run it 48 times
+     * a day per index. See {@link #errorRetryAfter}.
      */
     static final Duration ERROR_RETRY_FLOOR = Duration.ofMinutes(30);
+
+    /** The longest the wait after a run of consecutive errors grows to. */
+    static final Duration ERROR_RETRY_CAP = Duration.ofHours(24);
+
+    /**
+     * The wait after the {@code consecutiveErrors}-th consecutive errored run of one index (1 for the first):
+     * {@link #ERROR_RETRY_FLOOR} doubled once per earlier error, never more than {@link #ERROR_RETRY_CAP}.
+     */
+    static Duration errorRetryAfter(int consecutiveErrors) {
+        int doublings = Math.min(Math.max(consecutiveErrors, 1) - 1, 16);   // 30 min * 2^16 is past the cap; no overflow
+        Duration wait = ERROR_RETRY_FLOOR.multipliedBy(1L << doublings);
+        return wait.compareTo(ERROR_RETRY_CAP) > 0 ? ERROR_RETRY_CAP : wait;
+    }
 
     /** The most canary time one pass spends before it carries the remaining indexes to the next pass (provisional). */
     static final Duration PASS_BUDGET = Duration.ofSeconds(60);

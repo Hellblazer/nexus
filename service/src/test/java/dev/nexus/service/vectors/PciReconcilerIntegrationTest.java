@@ -551,6 +551,35 @@ class PciReconcilerIntegrationTest {
         String b = newTenant("leafb");
         var tenants = PciReconciler.leafTenants(catalog.read());
         assertThat(tenants).contains(a, b).doesNotHaveDuplicates().doesNotContainNull().doesNotContain("");
+
+        // The skip itself: a leaf whose tenant bound did not parse carries a null tenant (PciCatalog.Leaf), and a blank
+        // tenant is no tenant. A second leaf of the same tenant under another model must not repeat it.
+        var synthetic = new PciCatalog.Snapshot(List.of(
+            new PciCatalog.Leaf("nexus", "chunks_unparsed", M384, null, List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_blank", M384, " ", List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_x_384", M384, "tenant-x", List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_x_768", "other-model", "tenant-x", List.of()),
+            new PciCatalog.Leaf("nexus", "chunks_y_384", M384, "tenant-y", List.of())));
+        assertThat(PciReconciler.leafTenants(synthetic))
+            .as("the unparsed and blank leaves name none; a tenant on two leaves is named once, in leaf order")
+            .containsExactly("tenant-x", "tenant-y");
+    }
+
+    /**
+     * "A tenant that holds ring rows has a leaf" rests on one fact that is testable: the ring admits only where the
+     * catalog snapshot (its valid-index source in production) reports a valid index, and a valid index exists only on a
+     * leaf. The other half, that rows outlive a dropped leaf, is real and is why the tenant source is the union of the
+     * token, ledger and leaf tenants.
+     */
+    @Test
+    void theSnapshotReportsNoValidIndexForATenantWithoutALeaf_soAdmissionCannotCreateRingRowsForOne() {
+        var snapshot = new PciCatalog.Snapshot(List.of(
+            new PciCatalog.Leaf("nexus", "chunks_x_384", M384, "tenant-x", List.of(
+                new PciCatalog.Index("pci_x", true, "coll-x", null, null)))));
+
+        assertThat(snapshot.hasValidIndex(M384, "tenant-x", "coll-x")).isTrue();
+        assertThat(snapshot.hasValidIndex(M384, "tenant-without-a-leaf", "coll-x")).isFalse();
+        assertThat(snapshot.hasValidIndex(M384, "tenant-x", "coll-without-an-index")).isFalse();
     }
 
     @Test

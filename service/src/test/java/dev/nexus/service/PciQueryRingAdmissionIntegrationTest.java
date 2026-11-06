@@ -420,8 +420,12 @@ class PciQueryRingAdmissionIntegrationTest {
         assertThat(ringSize(B)).as("a farther arm does not inherit the admission").isZero();
     }
 
+    // The filtered scoped routes (metadata, graph-hop, aspect) admit only a request that targets exactly one collection
+    // (fix round 2): their rows are those passing a predicate, so the nearest filtered row can be in a collection the
+    // query is far from, and admitting there makes a false red (RDR-227: a far query scores 0.975 to 0.983).
+
     @Test
-    void metadataScopedSearch_admitsBySameRule() throws Exception {
+    void metadataScopedSearch_admitsASingleCollection_andNoFanOut() throws Exception {
         indexed.addAll(List.of(A, B));
 
         assertThat(metadataScoped(NEAR_B, A).statusCode()).isEqualTo(200);
@@ -429,12 +433,12 @@ class PciQueryRingAdmissionIntegrationTest {
         assertThat(ringVector(A)).containsExactly(embedder.embedOne(NEAR_B));
 
         assertThat(metadataScoped(NEAR_B, A, B).statusCode()).isEqualTo(200);
-        assertThat(ringSize(B)).as("the nearest arm").isEqualTo(1);
-        assertThat(ringSize(A)).isEqualTo(1);
+        assertThat(ringSize(B)).as("a fan-out admits to no arm, not even the nearest").isZero();
+        assertThat(ringSize(A)).as("A gains nothing from the fan-out").isEqualTo(1);
     }
 
     @Test
-    void graphHopSearch_admitsBySameRule() throws Exception {
+    void graphHopSearch_admitsASingleCollection_andNoFanOut() throws Exception {
         indexed.addAll(List.of(A, B));
 
         assertThat(graphHop(NEAR_B, A).statusCode()).isEqualTo(200);
@@ -442,12 +446,12 @@ class PciQueryRingAdmissionIntegrationTest {
         assertThat(ringVector(A)).containsExactly(embedder.embedOne(NEAR_B));
 
         assertThat(graphHop(NEAR_B, A, B).statusCode()).isEqualTo(200);
-        assertThat(ringSize(B)).as("the nearest arm").isEqualTo(1);
-        assertThat(ringSize(A)).isEqualTo(1);
+        assertThat(ringSize(B)).as("a fan-out admits to no arm, not even the nearest").isZero();
+        assertThat(ringSize(A)).as("A gains nothing from the fan-out").isEqualTo(1);
     }
 
     @Test
-    void aspectScopedSearch_admitsBySameRule() throws Exception {
+    void aspectScopedSearch_admitsASingleCollection_andNoFanOut() throws Exception {
         indexed.addAll(List.of(A, B));
 
         assertThat(aspectScoped(NEAR_B, A).statusCode()).isEqualTo(200);
@@ -455,8 +459,8 @@ class PciQueryRingAdmissionIntegrationTest {
         assertThat(ringVector(A)).containsExactly(embedder.embedOne(NEAR_B));
 
         assertThat(aspectScoped(NEAR_B, A, B).statusCode()).isEqualTo(200);
-        assertThat(ringSize(B)).as("the nearest arm").isEqualTo(1);
-        assertThat(ringSize(A)).isEqualTo(1);
+        assertThat(ringSize(B)).as("a fan-out admits to no arm, not even the nearest").isZero();
+        assertThat(ringSize(A)).as("A gains nothing from the fan-out").isEqualTo(1);
     }
 
     @Test
@@ -492,8 +496,34 @@ class PciQueryRingAdmissionIntegrationTest {
     void aWriterWhoseDatabaseRefusesLeavesTheSearchResponseUnchanged() throws Exception {
         indexed.addAll(List.of(A, B));
         service.queryRing(null);
-        String baselineSearch = postOnly("/search", searchBody(NEAR_A, A, B)).body();
-        String baselineFan = postOnly("/search-per-collection", fanOutBody(NEAR_A, A, B)).body();
+        // Every route that admits to the ring, each in a shape that reaches admission: the unfiltered fan-outs over
+        // two collections, the filtered scoped routes and the topic route over one. (Fix round 2: the pin once
+        // covered /search and /search-per-collection only.)
+        Map<String, Map<String, Object>> requests = new LinkedHashMap<>();
+        requests.put("/search", searchBody(NEAR_A, A, B));
+        requests.put("/search-per-collection", fanOutBody(NEAR_A, A, B));
+        requests.put("/hybrid-search", searchBody(HYB_NEAR_A, A, B));
+        requests.put("/search-metadata-scoped", searchBody(NEAR_A, A));
+        requests.put("/search-aspect-scoped", searchBody(NEAR_A, A));
+        Map<String, Object> hop = searchBody(NEAR_A, A);
+        hop.put("seeds", List.of("own-" + A));
+        requests.put("/search-graph-hop", hop);
+        Map<String, Object> topic = new LinkedHashMap<>();
+        topic.put("query", NEAR_A);
+        topic.put("topic", TOPIC_LABEL);
+        topic.put("collection", A);
+        topic.put("n_results", 5);
+        requests.put("/search-topic-scoped", topic);
+        Map<String, String> baselines = new LinkedHashMap<>();
+        requests.forEach((route, body) -> {
+            try {
+                var r = postOnly(route, body);
+                assertThat(r.statusCode()).as(route + " baseline").isEqualTo(200);
+                baselines.put(route, r.body());
+            } catch (Exception e) {
+                throw new AssertionError(route, e);
+            }
+        });
 
         CountDownLatch released = new CountDownLatch(1);
         CountDownLatch writerArrived = new CountDownLatch(1);
@@ -513,14 +543,18 @@ class PciQueryRingAdmissionIntegrationTest {
         hungRing.start();
         service.queryRing(hungRing);
         try {
-            var first = postOnly("/search", searchBody(NEAR_A, A, B));
+            var first = postOnly("/search", requests.get("/search"));
             assertThat(writerArrived.await(20, TimeUnit.SECONDS)).as("the writer is stuck in the database").isTrue();
-            var second = postOnly("/search-per-collection", fanOutBody(NEAR_A, A, B));
-
             assertThat(first.statusCode()).isEqualTo(200);
-            assertThat(first.body()).as("/search body identical with a stuck writer").isEqualTo(baselineSearch);
-            assertThat(second.statusCode()).isEqualTo(200);
-            assertThat(second.body()).as("/search-per-collection body identical").isEqualTo(baselineFan);
+            assertThat(first.body()).as("/search body identical with a stuck writer").isEqualTo(baselines.get("/search"));
+
+            for (var e : requests.entrySet()) {
+                if (e.getKey().equals("/search")) continue;
+                var r = postOnly(e.getKey(), e.getValue());
+                assertThat(r.statusCode()).as(e.getKey()).isEqualTo(200);
+                assertThat(r.body()).as(e.getKey() + " body identical with a stuck writer")
+                    .isEqualTo(baselines.get(e.getKey()));
+            }
         } finally {
             released.countDown();
             hungRing.stop();
