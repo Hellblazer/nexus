@@ -3296,9 +3296,11 @@ def _assert_pane_kept_and_relaunched(tm: _PrivateTmux, pane: str, old_pid: int) 
 
 def test_restart_keeps_the_pane_of_a_claude_that_is_the_pane_process_on_a_real_tmux(crs, monkeypatch, tmp_path, private_tmux) -> None:
     """The 7.96.0 shape end to end on a real tmux: claude as the pane's only process (new-window with one
-    command). The exit used to close the pane, and the relaunch line went nowhere."""
+    command). The exit used to close the pane, and the relaunch line went nowhere. tmux runs the window's
+    command through ``sh -c``; dash (Linux /bin/sh) forks a lone command where bash execs it, so the ``exec``
+    is what makes the stand-in the pane process on every host, as the harness's pane scenario does."""
     tm = private_tmux
-    pane, s, pane_pid = _real_claude_pane(crs, monkeypatch, tmp_path, tm, f"{tm.fake} --resume sid-old", tmp_path)
+    pane, s, pane_pid = _real_claude_pane(crs, monkeypatch, tmp_path, tm, f"exec {tm.fake} --resume sid-old", tmp_path)
     assert pane_pid == s["pid"], "claude must be the pane process"
     assert crs.restart(s) is True, _log_text(tmp_path)
     _assert_pane_kept_and_relaunched(tm, pane, s["pid"])
