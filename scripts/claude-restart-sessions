@@ -820,20 +820,39 @@ def release_pane(pane: str, scope: str, prior: str) -> None:
 _COMMAND_MODE = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
 
 
+SHELLS_FILE = Path("/etc/shells")
+#: Shells assumed when /etc/shells cannot be read.
+DEFAULT_SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"})
+
+
+def known_shells() -> frozenset[str]:
+    """Basenames of the shells in /etc/shells, or DEFAULT_SHELLS when that file is missing or lists none."""
+    try:
+        lines = SHELLS_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return DEFAULT_SHELLS
+    names = {Path(ln.strip()).name for ln in lines if ln.strip().startswith("/")}
+    return frozenset(names) or DEFAULT_SHELLS
+
+
 def shell_at_prompt(pid: int) -> bool:
-    """True when *pid* is a shell started interactively (it has an argv and no -c): what a pane shows once
-    claude has gone and nothing wraps it. A pid that is gone, or a `sh -c '<claude>; ...'` wrapper, is not."""
+    """True when *pid* is a known shell (argv0's basename, a login shell's leading '-' stripped) started
+    interactively (no -c): what a pane shows once claude has gone and nothing wraps it. A pid that is gone,
+    a `sh -c '<claude>; ...'` wrapper, and the command a wrapper execs last (zsh runs `sleep 3` in place
+    of `sh -c '<claude>; sleep 3'`) are not."""
     try:
         words = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
                                timeout=10).stdout.split()
     except (OSError, subprocess.SubprocessError):
+        return False
+    if not words or Path(words[0].lstrip("-")).name not in known_shells():
         return False
     for w in words[1:]:
         if not w.startswith("-"):
             break
         if _COMMAND_MODE.fullmatch(w):
             return False
-    return bool(words)
+    return True
 
 
 def login_shell() -> str:
@@ -850,7 +869,7 @@ def spare_window(name: str, session: str, cwd: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def settle_pane(pane: str, name: str, session: str, cwd: str) -> str:
+def settle_pane(pane: str, name: str, session: str, cwd: str, kept: tuple[str, str] | None = None) -> str:
     """After claude exited from a pane kept with remain-on-exit: the pane to type the relaunch into.
 
     Waits up to 10 s for the pane to be either dead or a shell at its prompt: a pane whose process was
@@ -858,7 +877,9 @@ def settle_pane(pane: str, name: str, session: str, cwd: str) -> str:
     so the line typed at the first look would go to a shell about to exit. A dead pane (or one still
     wrapped after the wait) is respawned (``respawn-pane -k -c <cwd>``: same pane id, same window) with
     the user's login shell. A pane tmux closed anyway is replaced by a new window; a pane with a shell
-    at its prompt is used as it is. "" when no pane can be had.
+    at its prompt is used as it is. "" when no pane can be had. *kept* is keep_pane's (scope, prior): when
+    the dead pane is closed after a respawn failure, the option goes back first, so a window-scope setting
+    does not stay on for the window's other panes.
     """
     st = None
     for i in range(10):
@@ -880,12 +901,20 @@ def settle_pane(pane: str, name: str, session: str, cwd: str) -> str:
     log(f"{name}: respawn-pane of {pane} failed ({r.stderr.strip() or r.returncode}); opening a new window in {session}")
     spare = spare_window(name, session, cwd)
     if spare:
+        if kept:
+            release_pane(pane, *kept)
         tmux_run("kill-pane", "-t", pane)  # the dead pane has no use now; with a spare, nothing is lost by closing it
     return spare
 
 
 def label(s: dict) -> str:
     return s.get("name") or s["sessionId"][:8]
+
+
+def skipped(name: str | None, sid: str, skip: list[str]) -> bool:
+    """--skip names a session by its name, or by its session id's first 8 or more characters (how an unnamed
+    session is shown in the log and the only way to --skip it)."""
+    return (name in skip if name else False) or any(len(x) >= 8 and sid.startswith(x) for x in skip)
 
 
 #: --fallback-resume, set once by main(): restart() runs where main's args are not in scope.
@@ -971,7 +1000,7 @@ def restart(s: dict, handoff: str = "") -> bool:
             return False
         time.sleep(1)
         if kept:
-            pane = settle_pane(s["pane"], name, session, s["cwd"])
+            pane = settle_pane(s["pane"], name, session, s["cwd"], kept)
             if not pane:
                 log(f"FAIL {name}: claude exited and pane {s['pane']} is gone; no pane or window to relaunch in")
                 raise RelaunchStalled(f"{name}: claude exited and there is no pane to relaunch in (was {s['pane']})",
@@ -1876,7 +1905,7 @@ def excluded_sessions(listed: list[dict], found: list[dict], a: argparse.Namespa
     for s in listed:
         if s["sessionId"] not in chosen:
             out.append({"name": label(s), "sessionId": s["sessionId"],
-                        "why": "--skip" if s.get("name") in a.skip else "not in --only"})
+                        "why": "--skip" if skipped(s.get("name"), s["sessionId"], a.skip) else "not in --only"})
     seen = {s["sessionId"] for s in listed}
     for path in sorted(SESSIONS.glob("*.json")):
         d = read(path) or {}
@@ -1887,7 +1916,7 @@ def excluded_sessions(listed: list[dict], found: list[dict], a: argparse.Namespa
             continue
         seen.add(sid)
         name = d.get("name") or sid[:8]
-        if (a.only and name not in a.only) or name in a.skip:
+        if (a.only and name not in a.only) or skipped(d.get("name"), sid, a.skip):
             continue
         out.append({"name": name, "sessionId": sid, "why": ("Desktop session" if d.get("entrypoint") == "claude-desktop"
                                                             else "no tmux pane") + ", cannot be restarted from here"})
@@ -2181,7 +2210,8 @@ def exit_on_stop_signals() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", action="append", default=[], help="restart only this session name (repeatable)")
-    ap.add_argument("--skip", action="append", default=[], help="leave this session name alone (repeatable)")
+    ap.add_argument("--skip", action="append", default=[],
+                    help="leave this session alone, by name or by the first 8+ characters of its session id (repeatable)")
     ap.add_argument("--no-update", action="store_true", help="do not update marketplaces and plugins first")
     ap.add_argument("--wait", type=int, default=600, help="seconds to wait for a busy session to go idle (default 600)")
     ap.add_argument("--force", action="store_true",
@@ -2255,7 +2285,7 @@ def main() -> int:
     if (a.ask_ready or a.status) and (a.nx or a.fresh or a.resume):
         ap.error("--ask-ready and --status restart nothing; give --nx, --fresh and --resume to the restart itself")
     listed = sessions()
-    found = [s for s in listed if (not a.only or s.get("name") in a.only) and s.get("name") not in a.skip]
+    found = [s for s in listed if (not a.only or s.get("name") in a.only) and not skipped(s.get("name"), s["sessionId"], a.skip)]
     if a.ask_ready or a.status:
         if not found:
             print("no interactive tmux Claude sessions found")
@@ -2447,25 +2477,48 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
     return 0 if ok == len(found) else 1
 
 
+def rerun_command(a: argparse.Namespace, skips: list[str]) -> str:
+    """The command that restarts the rest after a stop, with the stopped run's own scope: its --only and --skip
+    values, the flags that change how sessions are restarted, and a --skip for each session already back.
+    --nx is left out (its install ran); --no-update is added for the same reason. Every value is shell-quoted."""
+    q = shlex.quote
+    parts = ["claude-restart-sessions", "--fresh" if a.fresh else "--resume", "--no-update", "--wait", str(a.wait)]
+    if a.fresh:
+        parts += ["--handoff-timeout", str(a.handoff_timeout)]
+    for flag, on in (("--fallback-resume", a.fallback_resume), ("--keep-dev-channel", a.keep_dev_channel),
+                     ("--force", a.force), ("--no-ready-check", a.no_ready_check)):
+        if on:
+            parts.append(flag)
+    if a.skip_sandbox_check:
+        parts += ["--skip-sandbox-check", a.skip_sandbox_check]
+    parts += [x for name in a.only for x in ("--only", name)]
+    parts += [x for name in dict.fromkeys([*a.skip, *skips]) for x in ("--skip", name)]
+    return " ".join(q(p) for p in parts)
+
+
 def stop_report(a: argparse.Namespace, found: list[dict], e: RelaunchStalled) -> None:
     """What a stopped run leaves the operator: the lost session's id and the line that brings it back, the
-    rerun for the rest, whether the install already ran, and a message on the caller's pane. The run is
-    detached, its exit status goes nowhere, and the log is all anyone reads."""
+    rerun for the rest (with the run's own scope), whether the install already ran, and a message on the
+    caller's pane. The run is detached, its exit status goes nowhere, and the log is all anyone reads."""
     s = e.session
     if s:
         log(f"stalled session: {label(s)}, id {s.get('sessionId')}, pane {e.pane or s.get('pane')}; "
             f"bring it back by hand with: {relaunch_command(s)}")
-    done = [label(x) for x in found if x["sessionId"] in RESULTS]
-    skips = " ".join(f"--skip {shlex.quote(n)}" for n in [*done, *([label(s)] if s else [])])
-    mode = "--fresh" if a.fresh else "--resume"
-    log(f"rerun the rest after that (a ready round first, or add --force): claude-restart-sessions {mode} --no-update {skips}".rstrip())
+    back = [x for x in found if x["sessionId"] in RESULTS]
+    skips = [label(x) for x in [*back, *([s] if s else [])]]
+    log("rerun the rest after that (a ready round first, or add --force): " + rerun_command(a, skips))
+    unnamed = [x for x in [*back, *([s] if s else [])] if not x.get("name")]
+    if unnamed:
+        log("sessions with no name, skipped above by session id prefix: "
+            + ", ".join(str(x["sessionId"]) for x in unnamed)
+            + ("; a fresh start gives a session a new id, so exclude those by hand" if a.fresh else ""))
     if a.nx:
         log(f"the --nx {a.nx} install already ran in this run; the rerun does not repeat it (no --nx)")
     me = getattr(a, "caller_pane", "")
     if me:
         try:
-            tmux_run("display-message", "-d", "20000", "-t", me,
-                     f"claude-restart-sessions STOPPED at {label(s) if s else '?'}: relaunch produced no session; see {LOG}")
+            msg = f"claude-restart-sessions STOPPED at {label(s) if s else '?'}: relaunch produced no session; see {LOG}"
+            tmux_run("display-message", "-d", "20000", "-t", me, msg.replace("#", "##"))  # a message is a format
         except Exception:  # noqa: BLE001 -- a notice that cannot be shown must not hide the stop
             pass
 
