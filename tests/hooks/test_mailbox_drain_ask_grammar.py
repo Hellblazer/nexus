@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from nexus.console.threads import answer_title, ask_version, parse_session
+from tests._module_seam import setattr_in
 from tests.test_ask_record_contract import MAIL_LINES, MAILS, RECORDS, mail_problems
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
@@ -333,7 +334,7 @@ def _opener(monkeypatch, hook: ModuleType, behaviour) -> tuple[list[tuple[urllib
         handlers.extend(h)
         return Opener()
 
-    monkeypatch.setattr(hook.urllib.request, "build_opener", build)
+    setattr_in(monkeypatch, hook, "urllib.request.build_opener", build)
     return calls, handlers
 
 
@@ -399,7 +400,7 @@ def test_get_refuses_a_userinfo_url_before_building_a_request(hook: ModuleType, 
     def boom(*_a, **_k):
         raise AssertionError("a request was built for a userinfo URL")
 
-    monkeypatch.setattr(hook.urllib.request, "build_opener", boom)
+    setattr_in(monkeypatch, hook, "urllib.request.build_opener", boom)
     with pytest.raises(hook._Skip) as ei:
         hook._get("https://user:hunter2@h.example", "t", "/v1/memory/get", {}, is_local=False, budget_s=5.0)
     assert "hunter2" not in str(ei.value)
