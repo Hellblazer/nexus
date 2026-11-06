@@ -320,6 +320,9 @@ def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
         "resolution_entered": r.resolution_entered, "resolution_reason": r.resolution_reason,
         "resolution_resolved": len(r.resolved), "resolution_missing": len(r.missing),
         "resolution_ambiguous": len(r.ambiguous), "resolution_items_merged": r.joined_added,
+        # RDR-147 option 1 (nexus-irndi): the run generated on a ledger that covers no facet. ``coverage_state`` stays
+        # ``unavailable`` (the ledger is not rewritten), so a reader that counts answers reads this flag beside it.
+        "resolution_generated_on_join": r.generated_on_join,
     }
 
 

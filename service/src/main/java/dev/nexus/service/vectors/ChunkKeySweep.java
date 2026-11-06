@@ -118,6 +118,8 @@ public final class ChunkKeySweep {
     /** Statement and lock bounds for one batch transaction. */
     private static final int BATCH_STATEMENT_MS = 120_000;
     private static final int BATCH_LOCK_MS = 2_000;
+    /** The tenant-registry existence probe's statement bound: well under a managed edge's ~30 s. */
+    private static final int PROBE_STATEMENT_MS = 5_000;
     /** The census of one collection is a per-chunk lateral join; bound it, and read a trip as "not read". */
     static final Duration CENSUS_BOUND = Duration.ofSeconds(120);
     /** Collections sampled for the dry run's cost figure. */
@@ -657,6 +659,30 @@ public final class ChunkKeySweep {
      */
     public Applied apply(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, String only, int batchSize,
                          int maxBatches, Duration budget, Resume resume) {
+        return apply(tenant, plan, accepted, only, batchSize, maxBatches, budget, resume, new Progress());
+    }
+
+    /**
+     * What an {@link #apply} call has committed so far. Each batch is its own transaction, so a call that throws in
+     * batch N has already committed batches 1..N-1; the caller that must record the call (the root audit) reads these
+     * counts after the throw. Written by the thread that runs the call, read after it returns or throws.
+     */
+    public static final class Progress {
+        private volatile long rowsSwept;
+        private volatile int batches;
+
+        public long rowsSwept() {
+            return rowsSwept;
+        }
+
+        public int batches() {
+            return batches;
+        }
+    }
+
+    /** As above, reporting the rows committed and batches run to {@code progress} as each batch ends. */
+    public Applied apply(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, String only, int batchSize,
+                         int maxBatches, Duration budget, Resume resume, Progress progress) {
         int size = clampBatch(batchSize);
         long t00 = System.nanoTime();
         Set<String> sweepable;
@@ -723,6 +749,8 @@ public final class ChunkKeySweep {
                     b.rows(), b.selectMs(), b.updateMs());
             }
             swept += b.updated();
+            progress.rowsSwept = swept;
+            progress.batches = batches;
             if (b.rows() == 0) {
                 finished = true;
             } else {
@@ -832,6 +860,18 @@ public final class ChunkKeySweep {
         return scope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
             return (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant));
+        });
+    }
+
+    /**
+     * Whether {@code tenant} holds at least one chunk row, through the tenant-scoped session: an existence probe
+     * (stops at the first row, so a tenant with millions of rows costs the same as one with one) under a short
+     * statement bound, not a count. It reads no row's content and changes nothing.
+     */
+    public boolean hasChunkRows(String tenant) {
+        return scope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, PROBE_STATEMENT_MS, BATCH_LOCK_MS);
+            return ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant));
         });
     }
 

@@ -292,7 +292,10 @@ class JooqRecordReflectionFeatureTest {
     // TABLE function, one generated Record type (ManifestQualifyingHitsRecord), +1.
     // 126 -> 127: nexus-u9dc5, vectors-051-route-c-manifest-keys.xml added nexus.manifest_admits_chunk, a RETURNS TABLE
     // function (a one-row SQL function, so that it inlines), one generated Record type (ManifestAdmitsChunkRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 127;
+    // 127 -> 129: nexus-rfvyy.6.3 (RDR-243), catalog-047-document-sensitivity.xml added the table
+    // nexus.catalog_sensitivity_changes (CatalogSensitivityChangesRecord) and nexus.chunk_sensitive_many, a RETURNS TABLE
+    // function (ChunkSensitiveManyRecord); the scalar nexus.chunk_sensitive returns boolean and generates no Record, +2.
+    private static final int EXPECTED_RECORD_TYPES = 129;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

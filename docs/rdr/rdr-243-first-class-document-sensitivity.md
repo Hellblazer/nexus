@@ -183,7 +183,7 @@ count" below refers to it.
 | # | Surface | file:line | Sends what, where | Proposed behaviour |
 | --- | --- | --- | --- | --- |
 | 1 | Aspect enqueue hook | aspect_worker.py:1868 | full content (MCP path) into the T2 queue for later extraction | skip loudly (`aspect_enqueue_skipped_sensitive`); persist no content |
-| 2 | Aspect worker drain | aspect_worker.py:1140 `_process_row` | queued or on-disk content to the LLM | re-check at drain (the flag may be set after enqueue); mark the row `skipped_sensitive` |
+| 2 | Aspect worker drain | aspect_worker.py:1140 `_process_row` | queued or on-disk content to the LLM | re-check at drain (the flag may be set after enqueue); drop the queue row and log the tumbler and the surface |
 | 3 | Aspect extraction, CLI leg | aspect_extractor.py:2163 `_run_claude_isolated` | document text to `claude -p` (Anthropic) | `extract_aspects` (1517) refuses the document; the root asserts the scope |
 | 4 | Aspect extraction, API leg | aspect_extractor.py:2377 `_api_inner_text` | document text to the Anthropic API or an `openai_compat` endpoint | as row 3 |
 | 5 | `nx enrich aspects` | commands/enrich.py:1670; selection `_select_entries` 1875 | drives rows 3 and 4 | skip at selection; summary reports `N sensitive skipped` |
@@ -260,8 +260,10 @@ the registry names. The lint reads Python only. Engine egress (rows 19 and
 20, through `EgressProxy`) is already guarded by the engine's own source
 census, `EgressGuardCensus` and `EgressGuardCensusTest`, which pin every
 outbound construct per file (`nexus_rdr/243-research-24`); a new engine
-path fails that test. Row 22 is client egress from `HttpVectorClient`, so
-the Python registry covers it. The local cross-encoder reranker sends
+path fails that test. Row 22 is client egress from `HttpVectorClient`, but
+the lint exempts the engine-client modules (`HttpVectorClient` and the catalog
+clients) and the canary covers the `refuse` and `skip` rows only, so neither
+covers row 22; the cloud tenant disclosure test (Test Plan) does. The local cross-encoder reranker sends
 nothing off the machine (CrossEncoderReranker.java uses ONNX only,
 `nexus_rdr/243-research-15`); Q4 concerns the Voyage reranker only.
 
@@ -298,8 +300,10 @@ from indexing an excluded record.
 - **A1:** `nx catalog migrate-fallback` moves each document by rewriting
   `physical_collection` on the existing row and does not mint new tumblers.
   If it mints, it joins the carry list in Technical Design item 2.
-  **Status**: Unverified. **Method**: Source Search (the engine route behind
-  `migration.py`'s per-tumbler proposals).
+  **Status**: Verified 2026-11-05 (`nexus_rdr/243-research-9`): the
+  proposals post `/update`, and `CatalogRepository.updateDocument` updates the
+  existing row by tumbler (CatalogRepository.java:2181, 2277-2279); no
+  tumbler is minted. **Method**: Source Search.
 - **A2:** The only engine statements that insert or wholesale-replace a
   `catalog_documents` row are `registerDocument` (single and batch),
   `upsertDocument`, `importDocumentsBatch` and `doImportDocument`.
@@ -309,20 +313,28 @@ from indexing an excluded record.
 - **A3:** A `NOT EXISTS` over live sensitive owners inside each search
   function keeps `k` results under `hnsw.iterative_scan = strict_order` for
   a corpus where sensitive chunks are a small fraction, and adds latency
-  small enough not to matter. **Status**: Unverified. **Method**: Spike on
-  the engine substrate with a seeded corpus at 0%, 5% and 50% sensitive,
-  comparing result counts and p50/p95 against today.
+  small enough not to matter. **Status**: Verified 2026-11-05
+  (`nexus_rdr/243-research-10`): pgvector 0.8.7, 80k chunks at 768
+  dimensions, 200 queries per cell; every cell returned `k` under both
+  `strict_order` and `relaxed_order` at 0%, 5% and 50% sensitive (random and
+  clustered); added p50 under 0.5 ms at k=10 and about 3.7 ms at k=100 with
+  half the corpus sensitive. **Method**: Spike on a scratch database.
 - **A4:** Every LLM call in the package reaches one of the three dispatch
   roots. **Status**: Verified at 7e2146baf (21 call sites, 2 argv sites);
   the registry lint keeps it true. **Method**: Source Search.
 - **A5:** A child `claude -p` started with the environment from
   `_build_dispatch_env` passes that environment to the stdio nx MCP server
   it launches, so the child's server can read `NX_SENSITIVITY_POSTURE` at
-  startup. **Status**: Unverified. **Method**: Spike (start a child with a
-  marker variable and have its MCP server report it).
+  startup. **Status**: Verified 2026-11-05 on Claude Code 2.1.318
+  (`nexus_rdr/243-research-11`), with and without an env block in the server
+  spec; Step 2.5 keeps a test because a Claude Code upgrade could change it.
+  **Method**: Spike (a marker variable reported by a probe MCP server).
 - **A6:** DEVONthink 4 exposes record-level and database-level AI exclusion
-  as readable AppleScript properties. **Status**: Unverified. **Method**:
-  Spike against DEVONthink 4 (`get properties of record`). Phase 3 only;
+  as readable AppleScript properties. **Status**: Verified 2026-11-05 on
+  DEVONthink 4.4.2 (`nexus_rdr/243-research-12`): boolean `exclude from
+  chat` on both `record` and `database`; a database read true and a record
+  inherited from an excluded group were not observed. **Method**: Spike
+  (`get properties of record`, read-only). Phase 3 only;
   phase 1 does not depend on it.
 - **A7:** No code path that reads chunk text for an LLM surface runs on a
   thread that lacks the caller's context. **Status**: Refuted at 4cf8e820c
@@ -390,14 +402,21 @@ inferred, not read).
 - `registerDocument`, when it finds a live row with the same source URI
   and the request carries `sensitive = true`, raises the flag on that row
   (`UPDATE ... SET sensitive = true WHERE NOT sensitive`) and records the
-  change in the audit table. It never lowers it.
-- A new registration for a source URI whose most recent tombstoned row was
-  sensitive inherits the flag, with an audit row naming the predecessor.
+  change in the audit table. It never lowers it. A fresh registration that
+  carries `sensitive = true` writes a `register_set` audit row too (actor
+  `engine`, since the repository call has no caller principal). Every
+  flagged document gets a first audit row: an upsert or import that inserts
+  a fresh row carrying `sensitive = true` writes `upsert_set` or
+  `import_set`. A fresh row that is flagged by its request and also
+  inherits from a sensitive tombstone gets one audit row, the inheritance.
+- A new registration, and an upsert or import that inserts a fresh row, for
+  a source URI whose most recent tombstoned row was sensitive inherits the
+  flag, with an audit row naming the predecessor.
   Delete-then-re-index keeps the protection while the tombstone exists
   (`nx catalog purge-trash` removes it); the audited route can still clear
   it.
-- `nx catalog merge` leaves the canonical document sensitive when either
-  side was.
+- `nx catalog merge` raises both the canonical and the duplicate when
+  either side was sensitive, with an audit row for each row that changes.
 - `.nxexp` export and the recovery bundle write the column; import reads
   it.
 - Clearing: `POST /v1/catalog/sensitivity {tumblers, sensitive, reason}`.
@@ -515,7 +534,41 @@ without it goes to the bge collection of the same subject instead. MCP
 `store_put(sensitive=True)` has no way to acknowledge: in local mode it
 stores into the bge collection of the subject, and in cloud mode, where
 every collection embeds through Voyage, it refuses and says why (Sam,
-2026-11-04).
+2026-11-04). On a local install whose engine embeds with Voyage (no bge
+collection exists to route to) it refuses too, and the CLI with
+`--ack-external-embedder` is the way in (Sam, 2026-11-05). The bge collection of a subject is
+`<prefix>__<subject>__bge-base-en-v15-768__v1` for each of `knowledge__`,
+`docs__`, `rdr__` and `code__`. A `--sensitive` index of a document already
+registered in a Voyage collection is not re-routed, because registration
+writes none of a matching row's fields: without the acknowledgement it
+refuses, naming the tumbler and the collection, and with it the document is
+indexed in place. In cloud mode every collection embeds through Voyage, so
+`--sensitive` without `--ack-external-embedder` refuses on every verb; with
+it, the verb prints a one-line disclosure naming the endpoint, the managed
+tenant and Voyage (census row 22).
+
+*Implementation notes for item 8 (what Phase 1 shipped; not new design).*
+
+- The index paths key on the catalog flag as well as on `--sensitive`. `nx index pdf`, `nx index md`, `nx dt
+  index` and the PDF leg of `nx index repo` read the document's catalog row on every run and treat a flagged
+  document, or one whose flag cannot be read, as sensitive: MinerU runs as a local subprocess, `--enrich` is
+  refused, and a write into a Voyage collection is refused without `--ack-external-embedder`.
+- A repo run or a batch has no acknowledgement to ask for, so it skips a flagged document bound for a Voyage
+  collection, with a logged warning, where the single-document verbs refuse. A bge target is indexed as usual.
+- `nx collection re-embed` holds back the chunks of a flagged document in a Voyage collection.
+- A note put onto a note the catalog flags, into a Voyage collection, refuses before any write, so a plain
+  `nx store put` or `nx memory promote` cannot send a flagged note to Voyage. `nx store put --sensitive
+  --ack-external-embedder` and `nx catalog import --ack-external-embedder` accept Voyage; MCP `store_put` and
+  `nx memory promote` cannot.
+- `nx store import` and the recovery-bundle restore follow the import ruling: a flagged document into a
+  Voyage collection refuses without `--ack-external-embedder`. A document the catalog already flags (matched by
+  `source_uri`) counts as flagged though the file or bundle does not say so, and an unreadable catalog reads as
+  flagged.
+- A dry run reads the flag without writing. `nx index pdf --dry-run` looks the document up read-only (source
+  URI, the repo owner's row, collection and path); a flagged or unreadable result uses the local extractor and
+  refuses `--enrich`. It registers nothing.
+- `nx collection reindex` reads the flags before it deletes anything. A Voyage collection that holds a flagged
+  document, or whose flags cannot be read, refuses without `--ack-external-embedder`, naming the documents.
 
 **9. Carrying the flag to results.** `SearchResult.metadata["sensitive"]`
 comes from the engine, never from the chunk row. `sensitive_owners` comes
@@ -695,9 +748,11 @@ does not depend on callers telling the truth.
   root; the fix is to wrap the surface and add its registry row.
 - A sensitive document skipped: a structured log line names the tumbler
   and the surface; the command summary counts skips.
-- An old engine, or a `/version` probe that fails: `exclude` reads and
-  `--sensitive` writes raise, naming the engine version and the minimum
-  required when the probe answered, or the probe failure when it did not.
+- An old engine, or a `/version` probe that fails: the probe never raises
+  and reads a failed or absent answer as unsupported, so `exclude` reads and
+  `--sensitive` writes raise. The message names the engine version and the
+  minimum required when the engine answered without the key, and says it
+  could not confirm support when the probe got no answer.
 - A document that leaked before it was flagged: `nx catalog doctor` fails
   `sensitive_with_aspects` and prints the delete command.
 
@@ -718,9 +773,13 @@ runs against a corpus that includes it, with a capturing fake LLM backend
 and an `httpx` mock transport, and the string appears in no captured
 payload. Deleting any one gate turns its row red. This runs in phase 1.
 
-Phases 1 and 2 ship in one release: `--sensitive` is not released until
-the read filter is in, so no release describes protection it does not
-give (Sam, 2026-11-04). Phase 3 can ship later because each registry row
+Phase 1 ships alone in conexus 7.96.0 (Sam, 2026-11-05, superseding his
+2026-11-04 ruling that phases 1 and 2 ship together). The rule behind the
+earlier ruling still holds: no release describes protection it does not
+give. `RELEASE_ENFORCED_PHASE` is 1, so the privacy table and the
+`--sensitive` help list only phase-1 rows and name every pending surface
+that still reaches outward or the session model. Phase 2 raises the
+constant in the commit that lands its canary rows. Phase 3 can ship later because each registry row
 carries the phase that enforces it, and the privacy-policy table and the
 `--sensitive` help text are generated only from rows enforced in the
 release being built. The input-side external rules ship with phases 1 and
@@ -752,7 +811,12 @@ chash-positions rows; the `catalog_sensitivity_supported` key on
 `catalog_sensitivity_supported` probe and the write refusal (item 3); the
 MinerU rule (row 21: `--sensitive` takes the local subprocess path); the
 Q3 `--ack-external-embedder` flag and bge routing, and the MCP `store_put`
-cloud refusal (item 8).
+cloud refusal (item 8); the cloud tenant disclosure of row 22: in cloud mode
+`--sensitive` requires `--ack-external-embedder` and prints, once, before the
+write, one line saying the document's chunk text and Voyage embeddings are
+stored in the managed tenant at the named endpoint and sent to Voyage AI. The
+CLI verbs print it; MCP `store_put` has no acknowledgement, so its cloud
+refusal carries the same reason.
 
 #### Step 4: Scope and document gates
 
@@ -766,7 +830,10 @@ taxonomy sample names.
 `llm-surfaces.toml` and loader with every census row and the phase that
 enforces it; the doctor rows `sensitive_in_aspect_eligible` and
 `sensitive_with_aspects`; the privacy-policy §2 table, generated from the
-rows enforced in the release.
+rows enforced in the release, and the `--sensitive` help from the same rows,
+each with one generated line saying that search results are still shown to
+the session model until the output posture ships (accept residual S-E); a
+`docs/sensitivity.md` stub.
 
 Exit: the canary is green for every `refuse` or `skip` row, and each pin
 has been seen to fail with its gate removed.
@@ -792,7 +859,7 @@ posture (Q2); the reader instruction line; rerank exclusion (Q4);
 DEVONthink exclusion
 import (Q7, A6; this RDR adds no write to DEVONthink, Sam 2026-11-04); taxonomy discover
 without sensitive members; the `sensitive_in_external_embedder` doctor row;
-`docs/sensitivity.md`.
+complete `docs/sensitivity.md` (the Phase 1 stub grows).
 
 ### Day 2 Operations
 
@@ -861,14 +928,38 @@ None.
 - **Scenario**: MCP `store_put(sensitive=True)` (phase 1) — **Verify**: cloud mode
   refuses with the reason; local mode stores into the subject's bge
   collection.
+- **Scenario**: Cloud tenant disclosure (phase 1, row 22) — **Verify**: in
+  cloud mode each of `index pdf`, `index md`, `dt index`, `dt capture` and
+  `store put` refuses `--sensitive` without `--ack-external-embedder` before
+  any register call; with it, the one-line disclosure naming the endpoint,
+  the tenant and Voyage is printed before the write.
+- **Scenario**: `--ack-external-embedder` (phase 1) — **Verify**: with the
+  flag, a sensitive write into a Voyage collection keeps that collection and
+  prints the notice; without it, local mode takes the bge sibling and cloud
+  mode refuses.
+- **Scenario**: bge routing in local mode (phase 1) — **Verify**: a
+  `--sensitive` write without the acknowledgement lands in
+  `<prefix>__<subject>__bge-base-en-v15-768__v1`, parametrized over
+  `knowledge__`, `docs__`, `rdr__` and `code__`.
+- **Scenario**: A sensitive PDF and MinerU (phase 1, row 21) — **Verify**:
+  with an explicit non-loopback URL, with a loopback URL and with a pid-file
+  local server, no URL is resolved, probed or contacted and the extraction
+  runs as the local subprocess; with no subprocess the run refuses.
+- **Scenario**: `--sensitive` index of a document already registered in a
+  Voyage collection (phase 1) — **Verify**: matched by source URI and
+  matched by file path, it refuses without the acknowledgement, naming the
+  tumbler and the collection, and changes nothing (no chunk in the bge
+  sibling, `physical_collection` and `sensitive` as before); with the
+  acknowledgement it indexes in place; a document already in a bge
+  collection proceeds without it.
 - **Scenario**: MCP `search` under `withhold` (phase 3) — **Verify**: a
   sensitive hit appears as the stub line with no title and the withheld
   count; the canary string is absent from the response.
 - **Scenario**: Doctor rows on a tenant with no sensitive documents —
   **Verify**: not-applicable, not pass.
 - **Scenario**: Aspect drain after a late flag — **Verify**: a row queued
-  before the flag was set is marked `skipped_sensitive` and no content is
-  sent.
+  before the flag was set is dropped from the queue, the log names the
+  tumbler and the surface, and no content is sent.
 
 ## Validation
 
@@ -1008,3 +1099,8 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-04: fix round on the revision's fix check (`nexus_rdr/243-fix-check-bb08311f3`): two `GET /version` capability keys (catalog in phase 1, vectors in phase 2) with the conexus edge allowlist; the input-side external rules move into phase 1 and registry rows carry their enforcing phase; the stub `get` read path; engine egress under `EgressGuardCensus`; the stub's per-row field.
 - 2026-11-04: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `5d5d93d30`; critique `nexus_rdr/243-gate-critique-2026-11-04-r3`.
 - 2026-11-04: Accepted. Round-3 residual dispositions: S-A `nexus-rfvyy.1` (Phase 3); S-B `nexus-rfvyy.2` (Phase 1 Step 3); S-C `nexus-rfvyy.3` (Phase 2, needs Sam); S-D `nexus-rfvyy.4` (Phase 1 Step 3); S-E `nexus-rfvyy.5` (Phase 1 Step 5).
+- 2026-11-05: assumptions A1, A3, A5 and A6 verified (`nexus_rdr/243-research-9` to `-12`); Status lines updated.
+- 2026-11-05: Sam's rulings on the Phase 1 engine review: merge duplicate adopts the flag; fresh flagged registration is audited; upsert and import inherit from a sensitive tombstone.
+- 2026-11-05: Sam's rulings: the aspect drain drops a sensitive row (no skipped_sensitive status); a Voyage-profile local install refuses MCP store_put(sensitive); nx store import refuses a flagged document into a Voyage collection without --ack-external-embedder.
+- 2026-11-05: Implementation notes under Technical Design item 8 record how Phase 1 applies the catalog flag (index paths, repo and batch skips, re-embed hold-back, note re-put, dry runs, reindex). No design change.
+- 2026-11-05: Sam's ruling: Phase 1 ships alone in conexus 7.96.0 (paired with engine-service-v0.1.180), superseding the 2026-11-04 ship-together ruling; the release text claims phase 1 only.

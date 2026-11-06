@@ -157,6 +157,8 @@ class NoteUriRouteGateTest {
         exempt(CAT, "DOCUMENTS_LIVE_SOURCE_URI", Cls.PASS_THROUGH, "field: the name of the live-source_uri unique index, not a value"),
         exempt(CAT, "UPDATABLE_DOC_COLUMNS", Cls.PASS_THROUGH, "field: the column allowlist for update; the value is canonicalized in buildUpdateDocumentQuery"),
         exempt(CAT, "liveTumblerForSourceUri", Cls.PASS_THROUGH, "identity guard lookup: receives the already-canonical URI from the listed callers (guardDocumentIdentity)"),
+        exempt(CAT, "mostRecentTombstoned", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): reads the latest tombstoned row holding the URI; receives the already-canonical URI from register (deriveSourceUri), takes none from the caller"),
+        exempt(CAT, "mostRecentTombstonedMany", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): the batch form of mostRecentTombstoned; its URIs are the already-canonical ones register_many derived"),
         exempt(CAT, "documentFields", Cls.PASS_THROUGH, "column list of a document read; returns the stored value"),
         exempt(CAT, "docRowFromRecord", Cls.PASS_THROUGH, "renders a stored row; RDR-231 forbids response rewriting"),
         // ── PASS_THROUGH: AspectRepository ────────────────────────────────

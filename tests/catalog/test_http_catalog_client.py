@@ -223,6 +223,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_owners_by_type_body: dict[str, Any] = {}
     #: nexus-dkymw: last body POSTed to /restore.
     last_restore_body: dict[str, Any] = {}
+    #: RDR-243 (nexus-rfvyy.6.8): last body POSTed to /sensitivity.
+    last_sensitivity_body: dict[str, Any] = {}
     #: RDR-204 (nexus-ft04v.33): rows /embedding_profile serves (the Voyage
     #: shape by default) and the status it answers with (200, or 404/405 to
     #: play an engine below the Phase 2 route).
@@ -252,6 +254,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.last_owner_reactivate_body = {}
         cls.last_owners_by_type_body = {}
         cls.last_restore_body = {}
+        cls.last_sensitivity_body = {}
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
@@ -698,6 +701,22 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"updated": 1})
         elif op == "/delete":
             self._send_json({"deleted": 1})
+        elif op == "/sensitivity":
+            # RDR-243 (nexus-rfvyy.6.8): mirrors CatalogHandler.handleSensitivity -- a non-empty tumbler list and a
+            # JSON boolean, else 400; the reply is {"updated": [0|1, ...]}, positional with the request, and a
+            # repeat of an earlier tumbler in the same call reads 0. This fake keeps no flag state, so every
+            # first sight of a tumbler reads 1. The real route does NOT follow aliases (the client resolves them).
+            tumblers = body.get("tumblers")
+            if not isinstance(tumblers, list) or not tumblers or not isinstance(body.get("sensitive"), bool):
+                self._send_json({"error": "'tumblers' must be a non-empty list and 'sensitive' a boolean"}, 400)
+            else:
+                FakeCatalogHandler.last_sensitivity_body = body
+                seen: set[str] = set()
+                flags = []
+                for t in tumblers:
+                    flags.append(0 if t in seen else 1)
+                    seen.add(t)
+                self._send_json({"updated": flags})
         elif op == "/link":
             FakeCatalogHandler.last_link_body = body
             resp: dict = {"ok": True}
@@ -788,7 +807,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                  "section_title": row.get("section_title"),
                  "section_type": row.get("section_type"),
                  "page_number": row.get("page_number"),
-                 "labels_written": row.get("labels_written", False)}
+                 "labels_written": row.get("labels_written", False),
+                 # RDR-243 (nexus-rfvyy.6.8): whether any live owner of the chash is sensitive.
+                 "sensitive": row.get("sensitive", False)}
                 for doc_id, doc_rows in sorted(manifest.items())
                 for row in doc_rows if row["chash"] in wanted
             ]
@@ -1693,6 +1714,13 @@ class TestHttpCatalogClientRoundTrip:
 
         assert client.docs_for_chashes([]) == {}
 
+    def test_set_sensitivity_journey_follows_an_alias_and_sends_the_canonical(self, client: HttpCatalogClient) -> None:
+        """RDR-243 (nexus-rfvyy.6.8): the route does not follow aliases, so the client sends the canonical."""
+        FakeCatalogHandler.show_alias_map = {"1.1.5": "1.1.1"}
+        out = client.set_sensitivity(["1.1.5", "1.1.1", "1.1.2"], True, reason="r")
+        assert FakeCatalogHandler.last_sensitivity_body["tumblers"] == ["1.1.1", "1.1.2"]
+        assert out == {"updated": [1, 0, 1], "targets": ["1.1.1", "1.1.1", "1.1.2"]}
+
     def test_chash_positions_journey(self, client: HttpCatalogClient) -> None:
         """nexus-opxwd: the hits' (chash, doc_id, position, chunk_count),
         agreeing with the manifest /manifest/get_many serves for the same doc;
@@ -1704,6 +1732,8 @@ class TestHttpCatalogClientRoundTrip:
             "collection": "knowledge__fake__v1",
             "section_title": None, "section_type": None, "page_number": None,
             "labels_written": False,
+            # RDR-243 (nexus-rfvyy.6.8): the row passes the engine's per-row flag through untouched.
+            "sensitive": False,
         }]
         assert client.chash_positions([]) == []
 

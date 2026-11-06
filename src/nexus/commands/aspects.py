@@ -462,6 +462,34 @@ def aspects_requeue_failed(
             )
             skipped += 1
             continue
+        # RDR-243 census row 1: a failed row of a sensitive document is not re-queued. Its row
+        # (which may carry the document text) is deleted, the same terminal path the re-queue takes.
+        from nexus.aspect_worker import sensitive_enqueue_filter  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (aspect_worker)
+        from nexus.doc_sensitivity import SensitivityUnknown  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost
+
+        try:
+            queueable = sensitive_enqueue_filter(
+                [{"collection": row.collection, "source_path": row.source_path, "doc_id": row.doc_id}]
+            )
+        except SensitivityUnknown as exc:
+            click.echo(
+                f"Skipped failed row {row.collection}  {row.source_path}: the catalog could not say whether "
+                f"its document is sensitive ({exc.detail}). Run the command again once it answers.",
+                err=True,
+            )
+            skipped += 1
+            continue
+        if not queueable:
+            t2_index_write(
+                lambda db, _r=row: db.aspect_queue.mark_done(_r.collection, _r.source_path)
+            )
+            click.echo(
+                f"Dropped failed row {row.collection}  {row.source_path}: its document is sensitive "
+                "and is never queued for extraction.",
+                err=True,
+            )
+            skipped += 1
+            continue
         # Daemon-routed write (nexus-zir76). The enqueue writes an ``aspects`` TASK
         # and never touches the table, so the failed row is deleted afterwards
         # (nexus-5r2sc.3.10): left behind, the doctor counts it forever and every
@@ -496,7 +524,7 @@ def aspects_requeue_failed(
         )
         revived += 1
     if failed or not dead:
-        note = f" (skipped {skipped} with no doc_id)" if skipped else ""
+        note = f" (skipped {skipped}; the reasons are on stderr)" if skipped else ""
         click.echo(f"Re-enqueued {requeued} failed row(s){scope} to pending{note}.")
     if dead:
         click.echo(f"Revived {revived} dead task(s){scope} to available.")

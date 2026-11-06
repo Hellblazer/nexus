@@ -306,6 +306,12 @@ public final class NexusService {
     private volatile java.util.function.Supplier<Long> chunksLeavesSweepSeconds;
     /** nexus-6pfgb.43: the admin-connection DDL behind {@code /v1/admin/chunk-keys/add-constraints} and {@code validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
+    /**
+     * The sink a root credential's retire-keys sweep is recorded through ({@code gc_audit}); {@code null} makes the
+     * sweep route refuse a root credential with 503 {@code audit_unavailable}. Bound to the catalog repository at
+     * construction of the route; {@link #chunkKeysAudit} replaces it (a test seam: the routes read it per request).
+     */
+    private volatile dev.nexus.service.http.ChunkKeysAdminHandler.Audit chunkKeysAudit;
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
@@ -809,12 +815,14 @@ public final class NexusService {
         // add/validate of the chunk CHECKs. Registered always, so an engine without a pgvector repository answers 503
         // rather than a 404 that reads as an unknown route. Nothing in the engine calls these routes; the admin
         // connection the constraint routes run on is bound late, from Main (chunkConstraintAdmin).
+        this.chunkKeysAudit = catalogRepo::recordGcAudit;
         var chunkKeysCtx = server.createContext(dev.nexus.service.http.ChunkKeysAdminHandler.PATH,
                 new dev.nexus.service.http.ChunkKeysAdminHandler(
                         pgVectorRepository == null ? null
                             : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository),
                         () -> chunkConstraintAdmin,
-                        tokenStore::listKnownTenants));
+                        tokenStore::listKnownTenants,
+                        () -> chunkKeysAudit));
         chunkKeysCtx.getFilters().addAll(authFilter);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
@@ -1149,6 +1157,19 @@ public final class NexusService {
      */
     public void chunkConstraintAdmin(dev.nexus.service.vectors.ChunkConstraintAdmin admin) {
         this.chunkConstraintAdmin = admin;
+    }
+
+    /**
+     * Replace the sink behind the retire-keys sweep's root audit (nexus-6pfgb.43): tests use it to make the audit
+     * unavailable ({@code null}) or failing; production leaves the catalog repository's {@code recordGcAudit} bound.
+     */
+    public void chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit audit) {
+        this.chunkKeysAudit = audit;
+    }
+
+    /** The sink bound now (see {@link #chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit)}). */
+    public dev.nexus.service.http.ChunkKeysAdminHandler.Audit chunkKeysAudit() {
+        return chunkKeysAudit;
     }
 
     /** The bound object, or null before {@link #chunksLeafBloat(java.util.function.Supplier)} (key omitted). */

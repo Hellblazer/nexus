@@ -378,6 +378,42 @@ def _doc_id_for_path(file_path: Path) -> str:
         return ""
 
 
+def _flagged_for_dry_run(pdf_path: Path, collection: str, source_uri: str = "") -> bool:
+    """True when a DRY RUN must treat *pdf_path* as sensitive: its catalog row is flagged, or the catalog cannot say.
+
+    RDR-243 fix round 3 (nexus-rfvyy.6.20). A dry run registers nothing, so it holds no ``doc_id``, yet it still
+    extracts (a MinerU server) and, with ``--enrich``, looks the title up. This is the READ-ONLY identity probe
+    that finds the document without writing: the given *source_uri*, the ``file://<abspath>`` the engine derives,
+    the repo owner's row for the path, and the ``(collection, path)`` lookup. The flag is read through
+    :func:`nexus.doc_sensitivity.flagged`, which follows a merged duplicate to its canonical. A document the
+    catalog does not know cannot be flagged. Any failure reads as flagged: the external legs refuse rather than guess.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.doc_sensitivity import flagged  # noqa: PLC0415 — deferred: reads the catalog client
+
+        reader = make_catalog_reader()
+        if reader is None:
+            raise RuntimeError("no catalog reader")
+        resolved = Path(pdf_path).resolve()
+        tumblers: set[str] = set()
+        for uri in dict.fromkeys(u for u in (source_uri, f"file://{resolved}") if u):
+            entry = reader.by_source_uri(uri)
+            if entry is not None:
+                tumblers.add(str(entry.tumbler))
+        repo_entry = _repo_owner_document_for(reader, resolved)
+        if repo_entry is not None:
+            tumblers.add(str(repo_entry.tumbler))
+        by_path = reader.lookup_doc_id_by_collection_and_path(collection, str(resolved))
+        if by_path:
+            tumblers.add(str(by_path))
+        return bool(flagged(tumblers, cat=reader))
+    except Exception as exc:  # noqa: BLE001 — a read that fails reads as sensitive
+        _log.warning("sensitive_flag_unreadable_treated_as_sensitive", path=str(pdf_path), dry_run=True,
+                     detail=f"{type(exc).__name__}: {exc}"[:300])
+        return True
+
+
 def _index_fence_state(doc_id: str) -> tuple[str | None, str]:
     """Read-only lookup of the RUNFENCE fields for *doc_id* (nexus-5xn3k.3,
     design memo §3.4 as amended by T2 nexus/5xn3k-design-amendment-2026-10-26).
@@ -988,8 +1024,22 @@ def _register_or_lookup_doc_id(
     base_path: Path | None = None,
     source_uri: str = "",
     with_created: bool = False,
+    sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> str | tuple[str, bool]:
     """RDR-102 D1 pre-flight catalog registration for the doc_indexer family.
+
+    *ack_external_embedder* (RDR-243 Q3, nexus-rfvyy.2): a ``sensitive`` run that resolves a document
+    already registered in a Voyage collection refuses before any write unless this is set, because the
+    register call writes none of its fields on a match and a re-route to the bge sibling would split
+    the document. The refusal is :class:`~nexus.sensitive_write.ExternalEmbedderRefusedError`.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9) puts the flag on the document this call resolves, before
+    the caller writes any chunk and before the post-store chains fire: a fresh registration carries
+    it in its request; a document found by source URI, by file path or by the register's own
+    idempotency has it raised through the audited route. A failure raises
+    :class:`~nexus.sensitive_write.SensitiveFlagNotSetError` (never swallowed by the best-effort
+    catch below), and so does a registration that yields no document (the caller checks for ``""``).
 
     Pass *with_created=True* (nexus-uxg4u task 2) to additionally receive
     whether THIS call minted a brand-new Document — returns ``(doc_id,
@@ -1065,8 +1115,24 @@ def _register_or_lookup_doc_id(
         SourceUriNotFoundError,
     )
 
+    from nexus.sensitive_write import (  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        ExternalEmbedderRefusedError,
+        SensitiveFlagNotSetError,
+        raise_flag,
+        refuse_external_existing,
+    )
+
     reader = None
     writer = None
+
+    def _flag(tumbler: object) -> None:
+        if sensitive:
+            raise_flag(writer, str(tumbler), what="a --sensitive index")
+
+    def _refuse_voyage_existing(entry: object) -> None:
+        if sensitive:
+            refuse_external_existing(entry, ack=ack_external_embedder, what="a --sensitive index")
+
     try:
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
@@ -1150,6 +1216,8 @@ def _register_or_lookup_doc_id(
         # through to registration on a miss.
         if source_uri:
             existing_by_uri = reader.by_source_uri(source_uri)
+            if existing_by_uri is not None:
+                _refuse_voyage_existing(existing_by_uri)
             if existing_by_uri is None:
                 raise SourceUriNotFoundError(
                     f"--source-uri {source_uri!r} resolves to no live "
@@ -1174,6 +1242,7 @@ def _register_or_lookup_doc_id(
                     f"re-run this index; or drop --collection to target "
                     f"its current home."
                 )
+            _flag(existing_by_uri.tumbler)
             return (str(existing_by_uri.tumbler), False) if with_created else str(existing_by_uri.tumbler)
 
         existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri, writer)
@@ -1186,6 +1255,7 @@ def _register_or_lookup_doc_id(
             existing = _repo_owner_document_for(reader, file_path)
             from_repo_owner = existing is not None
         if existing is not None:
+            _refuse_voyage_existing(existing)
             if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
                 # nexus-njn1a: a document an earlier release registered without its source_uri
                 # (the same curator-owner case) gets it on the next run. Advisory, like the
@@ -1278,6 +1348,7 @@ def _register_or_lookup_doc_id(
                     from nexus.mcp_infra import _record_physical_collection_reconciled  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
                     _record_physical_collection_reconciled()
             _restamp_rdr_frontmatter(writer, existing, file_path, content_type)
+            _flag(existing.tumbler)
             return (str(existing.tumbler), False) if with_created else str(existing.tumbler)
 
         # nexus-u8n4r: refuse registration when the identity about to be
@@ -1357,6 +1428,8 @@ def _register_or_lookup_doc_id(
         _stamp = {**_rdr_frontmatter_stamp(file_path, content_type), **source_format_meta(content_type, fp)}
         if _stamp:
             _register_extra["meta"] = _stamp
+        if sensitive:
+            _register_extra["sensitive"] = True
         _write_result = writer.register(
             owner=owner,
             title=title or file_path.stem,
@@ -1401,10 +1474,12 @@ def _register_or_lookup_doc_id(
                 target_collection=physical_collection, file_path=fp,
                 owner=owner,
             )
+            # The engine raises the flag on a match by source URI only; this one may be a file-path match.
+            _flag(tumbler)
         if with_created:
             return str(tumbler), created
         return str(tumbler)
-    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError):
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError, SensitiveFlagNotSetError, ExternalEmbedderRefusedError):
         # nexus-y8qtj / nexus-3o4lt: fail-loud rules propagate — never
         # swallowed by the best-effort catch-all below.
         raise
@@ -1754,6 +1829,19 @@ def _write_chunks_with_owner_rows(
         return _DeferredOwnerWrite(w, raw_cat, result, doc_id)
     _release()
     return result
+
+
+def _raise_sensitive_unregistered(path: Path) -> None:
+    """A ``--sensitive`` run whose pre-flight registration yielded no document: refuse, write nothing.
+
+    The non-sensitive path goes on and lets a later fallback mint the document; those mints do not
+    carry the flag, so a document that could not be marked is not written at all."""
+    from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+
+    raise SensitiveFlagNotSetError(
+        f"a --sensitive index of {path} refused: the catalog gave the document no identity to mark "
+        f"(registration failed or the path is an ephemeral worktree or temp path). Nothing was written."
+    )
 
 
 def _raise_identity_missing(
@@ -2498,8 +2586,12 @@ def _pdf_chunks(
     extraction_stats: dict | None = None,
     title_override: str = "",
     collection_name: str = "",
+    sensitive: bool = False,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
+
+    *sensitive* (RDR-243 row 21, nexus-rfvyy.6.10): the extractor never resolves or contacts a
+    MinerU server; see :class:`~nexus.pdf_extractor.PDFExtractor`.
 
     *collection_name* decides the token window (the model token the engine
     embeds the collection with), not *target_model*: on a service-backed
@@ -2545,7 +2637,7 @@ def _pdf_chunks(
     # pipeline row (it extracts, then chunks and embeds in memory). The RDR's Progress section
     # says both callers pass one; the bead (nexus-tr1rj.2) records the decision that there is
     # nothing to stamp.
-    result = PDFExtractor().extract(
+    result = (PDFExtractor(sensitive=True) if sensitive else PDFExtractor()).extract(
         pdf_path, extractor=extractor,
         allow_degraded=allow_degraded_extraction,
     )
@@ -2590,7 +2682,7 @@ def _pdf_chunks(
     from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     source_title = title_override or resolve_pdf_title(result.metadata, pdf_path, result.text)
     bib: dict = {}
-    if bib_enrich_enabled:
+    if bib_enrich_enabled and not sensitive:  # RDR-243 rows 7 and 8: a sensitive document's title is never sent
         from nexus.bib_enricher import enrich as bib_enrich  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         bib = bib_enrich(source_title)
     if extraction_stats is not None and bib:
@@ -2738,8 +2830,15 @@ def index_pdf(
     dry_run: bool = False,
     title_override: str = "",
     on_extraction: Callable[[dict], None] | None = None,
+    sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9) marks the document sensitive in the pre-flight
+    registration below, before extraction, embedding or any chunk write. A registration that yields
+    no document refuses the run (:class:`~nexus.sensitive_write.SensitiveFlagNotSetError`) instead of
+    falling back to the later mints, which would not carry the flag.
 
     *on_extraction* (RDR-237) is called once, after a run that extracted and indexed this PDF,
     with ``{"extraction_method": str, "extraction_pages": {rung: [1-based pages]}}``: the pages
@@ -3014,11 +3113,14 @@ def index_pdf(
             physical_collection=col_name,
             source_uri=source_uri,
             with_created=True,
+            **({"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}),
         )
         if isinstance(_reg_result, tuple):
             doc_id, _doc_id_freshly_minted = _reg_result
         else:
             doc_id, _doc_id_freshly_minted = _reg_result, False
+        if sensitive and not doc_id:
+            _raise_sensitive_unregistered(pdf_path)
 
     # nexus-uxg4u round 2 (code-review-expert Finding B / substantive-critic
     # SIGNIFICANT): the pre-flight call above is not the ONLY place THIS
@@ -3126,6 +3228,37 @@ def index_pdf(
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
             return 0
 
+    # RDR-243 (fix round 1): the external legs key on the CATALOG row, not only on this run's
+    # --sensitive option. A document flagged earlier is handled as sensitive on this run too: local
+    # extraction (no MinerU server), no --enrich lookup, and no write into a Voyage collection
+    # without --ack-external-embedder. A flag the catalog cannot answer reads as sensitive. After the
+    # staleness skip, so an unchanged document costs no extra catalog read.
+    ext_sensitive = sensitive
+    if dry_run and not sensitive and _flagged_for_dry_run(pdf_path, col_name, source_uri):
+        # A dry run registers nothing, so it has no doc_id for the gate below; the read-only probe above
+        # stands in. It still reaches the MinerU server and, with --enrich, Semantic Scholar.
+        from nexus.sensitive_write import SensitiveEnrichRefusedError  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        if enrich:
+            raise SensitiveEnrichRefusedError(
+                f"nx index pdf --dry-run: --enrich sends the title and identifiers to Semantic Scholar or "
+                f"CrossRef, and {pdf_path} is sensitive in the catalog (or the catalog could not say). "
+                f"Nothing was written. Drop --enrich.")
+        ext_sensitive = True
+    if not dry_run:
+        from nexus.sensitive_write import external_legs_gate  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        try:
+            ext_sensitive = external_legs_gate(
+                doc_id, col_name, sensitive=sensitive, enrich=enrich, ack=ack_external_embedder,
+                what="nx index pdf", pdf=True)
+        except Exception as exc:
+            _rollback_if_freshly_minted(exc)
+            raise
+    if ext_sensitive and extractor == "mineru":
+        _log.warning(
+            "sensitive_mineru_server_skipped", pdf=str(pdf_path), doc_id=doc_id,
+            reason="flag" if sensitive else "catalog",
+            note="a sensitive document is extracted by a local MinerU subprocess; no MinerU server is contacted")
+
     # Streaming pipeline routing: check page count before full extraction.
     if streaming in ("auto", "always"):
         try:
@@ -3161,6 +3294,7 @@ def index_pdf(
                     on_write_started=_note_write_started,
                     extraction_stats=_extraction_stats,
                     enrich=enrich,
+                    **({"sensitive": True} if ext_sensitive else {}),
                 )
             except Exception as exc:
                 _rollback_if_freshly_minted(exc)
@@ -3383,6 +3517,7 @@ def index_pdf(
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
         extraction_stats=_extraction_stats, title_override=title_override,
         collection_name=col_name,
+        **({"sensitive": True} if ext_sensitive else {}),
     )
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
@@ -3507,6 +3642,7 @@ def index_pdf(
             physical_collection=col_name,
             source_uri=source_uri,
             with_created=True,
+            **({"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}),
         )
         if isinstance(_reg_result, tuple):
             _catalog_doc_id_for_batch, _batch_created = _reg_result
@@ -4008,8 +4144,12 @@ def index_markdown(
     extraction_source: str = "file",
     source_uri: str = "",
     on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
+    sensitive: bool = False,
+    ack_external_embedder: bool = False,
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9): see :func:`index_pdf`.
 
     By default the collection is ``docs__{corpus}``.  Pass *collection_name*
     to override (e.g. ``rdr__<repo>-<hash8>`` for RDR documents).
@@ -4140,11 +4280,25 @@ def index_markdown(
         base_path=base_path,
         source_uri=source_uri,
         with_created=True,
+        **({"sensitive": True, "ack_external_embedder": ack_external_embedder} if sensitive else {}),
     )
     if isinstance(_reg_result, tuple):
         doc_id, _doc_just_created = _reg_result
     else:
         doc_id, _doc_just_created = _reg_result, False
+    if sensitive and not doc_id:
+        _raise_sensitive_unregistered(md_path)
+    # RDR-243 (fix round 1): a document flagged earlier is not written to a Voyage collection on a run that
+    # does not pass --sensitive (see index_pdf). Markdown has no MinerU or --enrich leg.
+    from nexus.sensitive_write import external_legs_gate  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+    try:
+        external_legs_gate(
+            doc_id, col_name, sensitive=sensitive, enrich=False, ack=ack_external_embedder, what="nx index md")
+    except Exception as exc:
+        if _doc_just_created:
+            from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.store_hook)
+            rollback_minted_catalog_entry(doc_id, original_error=str(exc))
+        raise
     chunk_fn = partial(
         _markdown_chunks,
         base_path=base_path,
@@ -4262,6 +4416,44 @@ def batch_index_pdfs(
     return results
 
 
+def _sensitive_paths_for_external(
+    paths: list[Path], collection_name: str | None, base_path: Path | None,
+) -> set[Path]:
+    """The *paths* a batch run must not send to a Voyage collection: their catalog row is flagged sensitive.
+
+    Two batched reads for the whole batch, none when *collection_name* embeds locally (or is not named: the
+    per-file gate in :func:`index_markdown` is then the only check). The paths are looked up as the catalog
+    stores them (absolute, and relative to *base_path*); a path that names several documents is held back
+    when any of them is flagged. A catalog that cannot answer holds back every file.
+    """
+    if not collection_name or not paths:
+        return set()
+    from nexus.sensitive_write import is_external_embedder, sensitive_docs  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+
+    if not is_external_embedder(collection_name):
+        return set()
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+
+    forms: dict[Path, list[str]] = {}
+    for p in paths:
+        absolute = str(p.resolve())
+        rel = []
+        if base_path is not None:
+            try:
+                rel = [str(p.resolve().relative_to(base_path.resolve()))]
+            except ValueError:
+                pass
+        forms[p] = [absolute, *rel]
+    try:
+        found = make_catalog_reader().find_all_by_file_paths(sorted({f for fs in forms.values() for f in fs}))
+    except Exception as exc:  # noqa: BLE001 — a catalog that cannot answer reads as sensitive
+        _log.warning("sensitive_flag_unreadable_treated_as_sensitive", detail=f"{type(exc).__name__}: {exc}"[:300], batch=True)
+        return set(paths)
+    owners = {p: [str(e.tumbler) for f in fs for e in found.get(f, ())] for p, fs in forms.items()}
+    flagged = sensitive_docs(t for ts in owners.values() for t in ts)
+    return {p for p, ts in owners.items() if any(t in flagged for t in ts)}
+
+
 def batch_index_markdowns(
     paths: list[Path],
     corpus: str,
@@ -4276,8 +4468,13 @@ def batch_index_markdowns(
     embed_fn: EmbedFn | None = None,
     hooks: "HookRegistry | None" = None,
     on_error: "Callable[[Path, BaseException], None] | None" = None,
+    ack_external_embedder: bool = False,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
+
+    *ack_external_embedder* (RDR-243, nexus-rfvyy.6.20): a caller that already asked the operator (``nx collection
+    reindex --ack-external-embedder``) accepts that a document flagged sensitive in the catalog is written to a Voyage
+    collection. Without it such a document is skipped (a batch has no way to ask).
 
     Pass *collection_name* to override the default ``docs__{corpus}`` target
     (used for RDR collections).
@@ -4307,17 +4504,41 @@ def batch_index_markdowns(
     absolute path (nexus-njn1a, see :func:`_curator_identity`).
     """
     results: dict[str, str] = {}
+    held_back = set() if ack_external_embedder else _sensitive_paths_for_external(paths, collection_name, base_path)
     for path in paths:
         count: int = 0
         t0 = time.monotonic()
+        if path in held_back:
+            # RDR-243 (fix round 2): the catalog flags this document sensitive and the collection embeds with
+            # Voyage; a batch has no --ack-external-embedder, so it is skipped, not failed.
+            _log.warning(
+                "sensitive_md_skipped_external_embedder", path=str(path), collection=collection_name,
+                note="a sensitive document is not written to a Voyage collection from a batch run; "
+                     "index it with nx index md --sensitive --ack-external-embedder to accept Voyage")
+            results[str(path)] = "skipped"
+            if on_file:
+                on_file(path, 0, time.monotonic() - t0)
+            continue
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
                                  content_type=content_type, force=force,
                                  force_re_embed=force_re_embed,
-                                 base_path=base_path, embed_fn=embed_fn, hooks=hooks)
+                                 base_path=base_path, embed_fn=embed_fn, hooks=hooks,
+                                 **({"ack_external_embedder": True} if ack_external_embedder else {}))
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
+            from nexus.sensitive_write import ExternalEmbedderRefusedError  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+            if isinstance(e, ExternalEmbedderRefusedError):
+                # Backstop for what the batch read above could not see (no collection_name given, or a
+                # catalog path in another form): index_markdown's own gate refused it. Same outcome: a skip.
+                _log.warning(
+                    "sensitive_md_skipped_external_embedder", path=str(path), collection=collection_name,
+                    note=str(e)[:300])
+                results[str(path)] = "skipped"
+                if on_file:
+                    on_file(path, 0, time.monotonic() - t0)
+                continue
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
             if on_error is not None:

@@ -16,6 +16,12 @@ from tqdm import tqdm
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import EXTRACTOR_CHOICES
+from nexus.sensitive_write import (
+    ack_help,
+    route_for_index as _route_sensitive_index,
+    sensitive_help,
+    sensitive_write_kwargs as _sensitive_write_kwargs,
+)
 
 from nexus import pdf_stack
 
@@ -3160,7 +3166,9 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
         "run is marked loudly in the summary when this override is used."
     ),
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool) -> None:
+@click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -3184,6 +3192,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         CatalogIdentityMissingError,
     )
     from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+    from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero
@@ -3193,7 +3202,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             return _index_pdf_raw(*args, **kwargs)
         except CredentialsMissingError as e:
             raise click.ClickException(str(e)) from e
-        except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError) as e:
+        except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError, SensitiveFlagNotSetError) as e:
             raise click.ClickException(str(e)) from e
         except UnchunkableContentError as e:
             # nexus-1sd0f (round 3): a zero-byte PDF named explicitly on
@@ -3240,6 +3249,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             "skips never reaches the server, so there is nothing to "
             "re-embed."
         )
+    sens_kw = _sensitive_write_kwargs(
+        sensitive, "nx index pdf --sensitive", ack=ack_external_embedder, dry_run=dry_run, enrich=enrich)
 
     # nexus-2k66t.4.2: the PDF stack is the `pdf` extra. Make sure it is here
     # BEFORE any catalog or T3 write: installed now (and this command re-run in
@@ -3311,6 +3322,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # raises loud if local.embed_model is voyage-shaped with no
             # key configured, never silently mints a bge collection.
             collection = t3_collection_name(collection, for_write=True)
+        if sensitive:
+            collection = _route_sensitive_index(
+                collection, corpus, ack=ack_external_embedder, what="nx index pdf --dir --sensitive")
 
         total = len(pdfs)
         total_chunks = 0
@@ -3319,7 +3333,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # Check if MinerU server is available for batch performance. The probe can START a
         # server (PDFExtractor._mineru_server_available autostarts), so the text-only
         # ``pymupdf`` extractor (RDR-237) stays out of it: MinerU is never probed or started.
-        if extractor == "mineru":
+        if extractor == "mineru" and sens_kw:
+            # RDR-243 row 21: a sensitive batch never probes (or starts) a MinerU server.
+            click.echo("Sensitive run: MinerU runs as a local subprocess; no MinerU server is contacted.")
+        elif extractor == "mineru":
             from nexus.pdf_extractor import PDFExtractor  # noqa: PLC0415 — deliberate function-local import (heavy PDF-extractor dep deferred; rare branch)
             _extractor = PDFExtractor()
             server_up = _extractor._mineru_server_available()
@@ -3400,6 +3417,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                         streaming=streaming,
                         allow_degraded_extraction=allow_degraded_extraction,
                         on_extraction=file_extraction.append,
+                        **sens_kw,
                     )
                     elapsed = _time.monotonic() - t0
                     total_chunks += n
@@ -3516,6 +3534,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # loud if local.embed_model is voyage-shaped with no key configured.
     if collection is not None:
         collection = t3_collection_name(collection, for_write=True)
+    if sensitive and not dry_run:
+        # RDR-243 Q3: a Voyage target needs --ack-external-embedder; without it the bge sibling of the subject.
+        collection = _route_sensitive_index(
+            collection, corpus, ack=ack_external_embedder, what="nx index pdf --sensitive")
 
     path = path.resolve()
 
@@ -3573,7 +3595,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True)
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True, **sens_kw)
         except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
@@ -3647,6 +3669,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
+    if sens_kw and extractor == "mineru":
+        # RDR-243 row 21, as the --dir branch says it: the skip is stated, not silent. (A document the
+        # catalog flags without this option gets the same line from external_legs_gate and a warning.)
+        click.echo("Sensitive run: MinerU runs as a local subprocess; no MinerU server is contacted.")
     fork_holder: list[tuple[str, int]] = []
     extraction_holder: list[dict] = []  # RDR-237: what index_pdf's on_extraction reports
     if monitor or not sys.stdout.isatty():
@@ -3663,7 +3689,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                              return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, streaming=streaming,
                              source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
                              allow_degraded_extraction=allow_degraded_extraction,
-                             on_extraction=extraction_holder.append)
+                             on_extraction=extraction_holder.append, **sens_kw)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): this
             # is NOT an (ImportError, RuntimeError) — it fell through the
@@ -3695,7 +3721,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor, streaming=streaming,
                           source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
                           allow_degraded_extraction=allow_degraded_extraction,
-                          on_extraction=extraction_holder.append)
+                          on_extraction=extraction_holder.append, **sens_kw)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
@@ -3807,7 +3833,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         "document in a different --collection than this run targets."
     ),
 )
-def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, re_embed: bool, monitor: bool, source_uri: str | None) -> None:
+@click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
+@click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, re_embed: bool, monitor: bool, source_uri: str | None, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         EmbeddingProfileMismatchError,
@@ -3824,6 +3852,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         UnchunkableContentError,
         CatalogIdentityMissingError,
     )
+    from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
     if re_embed and not force:
         raise click.UsageError(
@@ -3831,6 +3860,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
             "skips never reaches the server, so there is nothing to "
             "re-embed."
         )
+    sens_kw = _sensitive_write_kwargs(sensitive, "nx index md --sensitive", ack=ack_external_embedder)
 
     # Normalize --collection through t3_collection_name() so bare names like
     # "mynotes" become "knowledge__mynotes__voyage-context-3__v1", matching
@@ -3844,6 +3874,10 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # No extractor warning for knowledge__ targets: aspect extraction
         # routes each document by shape (scholarly-paper-v1 for papers,
         # general-prose-v1 for prose; c79909c4b, nexus-kk4ut).
+    if sensitive:
+        # RDR-243 Q3: a Voyage target needs --ack-external-embedder; without it the bge sibling of the subject.
+        collection = _route_sensitive_index(
+            collection, corpus, ack=ack_external_embedder, what="nx index md --sensitive")
 
     path = path.resolve()
 
@@ -3871,7 +3905,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
             meta = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
                                   force_re_embed=re_embed,
                                   return_metadata=True, on_progress=on_chunk_progress,
-                                  source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+                                  source_uri=source_uri or "", on_fork_detected=fork_holder.extend, **sens_kw)
             chunk_bar.close()
             n = meta["chunks"]  # type: ignore[index]
             sections = meta.get("sections", 0)  # type: ignore[union-attr]
@@ -3879,7 +3913,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         else:
             n = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
                                force_re_embed=re_embed,
-                               source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
+                               source_uri=source_uri or "", on_fork_detected=fork_holder.extend, **sens_kw)
     except CredentialsMissingError as exc:
         # GH #336: surface the silent failure visibly. Click maps
         # ClickException to stderr + non-zero exit.
@@ -3891,7 +3925,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # as a raw traceback here. index_pdf_cmd already renders them through
         # its outer RuntimeError clause; this command had no such clause.
         raise click.ClickException(str(exc)) from exc
-    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError) as exc:
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError, SensitiveFlagNotSetError) as exc:
         # nexus-y8qtj / nexus-3o4lt: fail-loud identity errors surface the same way.
         raise click.ClickException(str(exc)) from exc
     except UnchunkableContentError as exc:

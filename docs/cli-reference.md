@@ -152,6 +152,8 @@ The cause after each name is `register_failed` (the per-file register raised), `
 |------|-------------|
 | `--corpus NAME` | Corpus name for the `docs__` collection (default: `default`) |
 | `--collection NAME` | T3 collection name, overriding `--corpus` when set. Bare names are normalized through `t3_collection_name()` (e.g. `delos` becomes the conformant `docs__delos__<model>__vN` shape); a fully-qualified name (e.g. `knowledge__delos`) is honoured as given |
+| `--sensitive` | Mark the document sensitive (RDR-243): kept from every model-bound surface; one-way, cleared only by `nx catalog sensitive --clear --reason`. Refuses before the register call unless the engine advertises `catalog_sensitivity_supported`. A `pdf` is never sent to any MinerU URL (loopback included; extraction runs as the local subprocess). Cannot be combined with `--enrich` |
+| `--ack-external-embedder` | With `--sensitive`: accept an external embedder. Without it, local mode writes a sensitive document to the bge collection of the same subject (`<prefix>__<subject>__bge-base-en-v15-768__v1` for `knowledge__`, `docs__`, `rdr__` and `code__`), cloud mode refuses (every cloud collection embeds through Voyage; with the flag a one-line disclosure names the endpoint and Voyage), and a document already registered in a Voyage collection refuses rather than moves |
 | `--source-uri URI` | Resolve catalog identity by URI (e.g. `x-devonthink-item://<UUID>`) INSTEAD of by file path (nexus-y8qtj). Use when re-indexing a document that was originally registered under an out-of-band identity — a plain path-based re-index misses it and forks a second catalog Document, leaving the original's chunks live and un-swept. **Fail-loud, no silent fallback:** a URI that resolves to no live document is an error (never registers a new document); a URI that resolves to a document in a *different* `--collection` than this run targets is also an error (a move, not a re-index — use `nx catalog update` to move it deliberately). `pdf --source-uri` is mutually exclusive with `--dir` |
 
 At the end of an index run, if the freshly-indexed document shares more than
@@ -583,6 +585,8 @@ nx dt capture --file ~/Downloads/notes.pdf
 | `--contact-email <addr>` | Caller email for Unpaywall PDF discovery on `--doi` (else `$OPENALEX_MAILTO`) |
 | `--collection` / `--corpus` | Index-step collection / corpus (as `nx dt index`) |
 | `--link-semantic` / `--writeback` / `--highlights` / `--enrich` / `--extractor` | Forwarded to the index step |
+| `--sensitive` | Mark the captured document sensitive (RDR-243); see `nx index md`. Refused before DEVONthink is touched when the engine cannot hold the flag; cannot be combined with `--enrich` |
+| `--ack-external-embedder` | With `--sensitive`: accept Voyage. In cloud mode this is required and a one-line disclosure of the managed tenant and Voyage is printed before the capture; in local mode a Voyage target takes the bge sibling without it |
 
 Exit codes:
 
@@ -847,9 +851,12 @@ Day 2 Ops: show the full aspect record for a single document. Takes no options �
 ```
 nx enrich delete COLLECTION SOURCE_PATH [--yes]
 nx enrich delete COLLECTION --all [--no-dry-run] [--yes]
+nx enrich delete --tumbler T [--yes]
 ```
 
 Day 2 Ops: remove aspect rows. Pass SOURCE_PATH to remove a single row — use when re-indexing a document with a content change that should drop the prior aspects rather than overwrite. `--yes` skips the confirmation prompt. Safe: the underlying chunks in T3 are untouched.
+
+`--tumbler T` (RDR-243, nexus-rfvyy.6.17) removes the aspect row of the document with catalog tumbler `T`, whatever its collection. It is the remedy `nx catalog doctor --sensitive-with-aspects` prints for each flagged document that already has an aspect row. It takes no COLLECTION, SOURCE_PATH or `--all`, and it does not remove a task still queued for the document.
 
 `--all` (nexus-3foc9) removes every aspect row in COLLECTION instead — the cleanup step after opting a collection out of `aspects.docs_collections` (opting out stops new extraction but leaves rows already written fully visible to aspect-scoped search and groupby). Exactly one of SOURCE_PATH or `--all` is required. `--all` is **dry-run by default**: it reports the row count and collection and writes nothing; pass `--no-dry-run --yes` (or answer the confirmation prompt) to actually delete. Refuses on a collection name the catalog does not know at all; a known collection with zero aspect rows is reported as a no-op.
 
@@ -995,8 +1002,10 @@ Find documents by title, author, corpus, or file path. Returns tumbler, content 
 
 ```
 nx catalog export FILE     # write the recovery bundle (run BEFORE a reinstall)
-nx catalog import FILE     # restore it (after reinstall + re-index)
+nx catalog import FILE [--ack-external-embedder]     # restore it (after reinstall + re-index)
 ```
+
+A note flagged sensitive (RDR-243), in the bundle or already in the catalog under the same `source_uri`, is refused when it would be restored into a Voyage collection (or one whose embedder cannot be told), unless `--ack-external-embedder` is given; a catalog that cannot answer reads as flagged. The refusal is that note's failure, counted and listed; the rest of the bundle restores.
 
 One paired recovery verb (GH #1419.9): a human-inspectable JSONL bundle
 carrying the catalog **link graph** and **store_put-origin knowledge
@@ -1380,6 +1389,24 @@ nx catalog footnotes docs/rdr/rdr-200.md --to-links   # reverse
 nx catalog footnotes docs/rdr/rdr-200.md --refresh    # bodies only, no new markers
 nx catalog footnotes docs/rdr/rdr-200.md --style short
 ```
+
+### nx catalog sensitive
+
+```
+nx catalog sensitive TUMBLER [--json]
+nx catalog sensitive --collection C [--json]
+nx catalog sensitive --path GLOB [--collection C] [--owner OWNER] [--json]
+nx catalog sensitive <target> --clear --reason TEXT
+nx catalog list --sensitive [--owner O] [--type T] [-n N] [--offset K] [--json]
+```
+
+RDR-243. Sets or clears the document sensitivity flag after the document was written. Setting needs no reason; clearing needs `--reason`, and every change writes a row (old, new, reason, actor, time) to the engine's `catalog_sensitivity_changes` table. There is no CLI view of that table yet, and no MCP tool clears the flag.
+
+`TUMBLER` is a dotted tumbler (never a title) and excludes the other options. `--collection C` takes every document in that physical collection. `--path GLOB` is an `fnmatch` pattern on the document's file path (`*` crosses `/`); the engine has no glob, so it reads the catalog, and `--collection` or `--owner` narrows that read first. `--owner` is accepted only with `--path`.
+
+The verb refuses, before it resolves a target or calls the engine, when the engine does not advertise `catalog_sensitivity_supported` (an engine without the column would drop the flag without an error). A target that matches nothing is an error. A large target is sent in batches of 500; a failure part-way names how many documents changed, and re-running the same command finishes the rest.
+
+`nx catalog list --sensitive` keeps only flagged documents. It scans the catalog like `--meta` does, and `-n`/`--offset` page the matches.
 
 ### nx catalog link-generate
 
@@ -1769,7 +1796,8 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 ```
 nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-text-dedup]
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity]
-                  [--link-coverage] [--visible-outside-manifest] [--json]
+                  [--link-coverage] [--visible-outside-manifest]
+                  [--sensitive-in-aspect-eligible] [--sensitive-with-aspects] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
@@ -1784,6 +1812,8 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--store-put-integrity`: store_put-origin integrity (nexus-b6enc, GH #1419 Issue 8) — for `content_type='knowledge'` documents with no `file_path`: FAIL on `chunk_count` != manifest-row count (drift) and on ghosts (catalog row with zero manifest rows AND zero T3 chunks), reporting title + tumbler so the content can be re-created while it is still remembered.
 - `--link-coverage` (7.16.4, nexus-glivh): per-content-type link coverage. FAILs only on a content type holding at least 10 documents with ZERO links — which means no generator has ever run for that type, not that its documents are unrelated. Percentages are reported and never flagged: a measured full generator pass over this corpus yields 133 links, so a low percentage is the natural ceiling of filepath extraction and no available remedy moves it. Index-time generation only links NEWLY registered tumblers, so a corpus can sit permanently unlinked with every other check green. Remediate with `nx catalog generate-links --dry-run` first.
 - `--visible-outside-manifest` (nexus-wbfpw.26, RDR-192 Step 14): a canary for a live(c) regression. Under live(c) a chunk with no manifest row in its own collection is hidden from search and get. For each `knowledge__` collection the check takes the manifest-less census's `superseded` bucket (chunks whose owning note is live and whose manifest names a different chash) and asks the normal `get` reader, never the stored-row one (no `include_non_live`), whether each is visible. A visible chunk is a finding naming the collection, the note's tumbler and title, and the chash, and fails the check (exit 1); the census and the probe are separate reads, so re-run to confirm a finding. A healthy engine finds none; a finding means live(c), or a predicate that drifted from it, stopped hiding the chunk. A split note legitimately has several live chunks, so the check does not count chunks per title; it flags only chunks the census classes as superseded. It probes `get` only, not search: a search probe needs the superseded chunk's text, and the engine never returns text for a stored row that live(c) hides. It reads at most 300 per call, probes each census page as it lands, probes at most 5,000 chunks and checks a 120-second budget between calls (one call can run to the 120-second HTTP timeout, so a run can take about 240 seconds), and prints `checked N of M` so a clean result says what it covered. A run cut short by either budget says so and still passes if it probed something and found nothing visible; a run cut short before it probed anything reads **INCONCLUSIVE** and exits 1. When the superseded bucket is empty in every collection (the steady state once the reaper has drained it) it reads **nothing to probe** (exit 0, no PASS word, `vacuous: true` in `--json`): that run could not have detected a regression. It reads **not applicable** (exit 0, no PASS line) on a box with no `knowledge__` collection and against an engine without the census route. Needs an engine that carries `POST /v1/vectors/manifest-less-census`.
+- `--sensitive-in-aspect-eligible` (RDR-243, nexus-rfvyy.6.17): WARN for each sensitive document whose collection has an aspect extractor (`select_config`, which includes an opted-in `docs__` collection) or already holds aspect rows. Does not change the exit status. Reads **not applicable**, never a pass, on a tenant with no sensitive documents, on an engine without `catalog_sensitivity_supported`, and when the catalog or the aspect store cannot be read.
+- `--sensitive-with-aspects` (RDR-243, nexus-rfvyy.6.17): FAIL (exit 1) for each sensitive document that already has an aspect row or a queued aspect task in either side of the queue, with `nx enrich delete --tumbler <t>` printed per document. Same not-applicable rule. Both rows read the catalog's documents once to find the sensitive ones.
 
 Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
 
@@ -2152,7 +2182,7 @@ Needs engine-service-v0.1.133 or later. Against an older engine the verb exits 4
 ### nx t3 retire-keys
 
 ```
-nx t3 retire-keys --tenant ID [--dry-run | --apply] [--accept NAME=N ...] [--collection NAME] [--batch-size N] [--max-rps R] [--json]
+nx t3 retire-keys --tenant ID [--dry-run | --apply] [--accept NAME=N ...] [--collection NAME] [--batch-size N] [--max-rps R] [--operator LABEL] [--json]
 nx t3 retire-keys --add-check [--replace] --apply [--max-rps R] [--json]
 nx t3 retire-keys --validate --apply [--max-rps R] [--json]
 ```
@@ -2161,7 +2191,7 @@ The sweep vehicle of RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): the operator'
 
 Order, per install: dry run for each tenant, `--apply` for each tenant, then `--add-check --apply` once, then `--validate --apply` once.
 
-**The sweep (`--tenant`).** Strips every metadata key the allow-list (the CHUNK and ROW keys) does not name from the chunk rows of the tenant the credential is bound to, in batches of up to 1000 rows. The verb reads the tenant back from the engine's answer and refuses (exit 2) when it is not `ID`: a token is bound to one tenant, so run it with that tenant's `NX_SERVICE_TOKEN`. The default is a dry run, which writes nothing, locks no row and runs no UPDATE (not even one that is rolled back); `--dry-run` spells that out and `--apply` writes. The dry run prints, per collection, the rows with a retired key, how many are swept and how many are left alone, then the preconditions and the time of the batch SELECT on up to three collections. That figure is the SELECT only, so the projected duration is a lower bound: the update half of a batch is not measured, and the first applied batch prints its real time. A `quarantine-` or `taxonomy` collection is never swept, a row whose chash is not 32 bytes is left alone (the width CHECK would refuse the update), a row whose metadata is not a JSON object is skipped and counted (`non_object_metadata_rows`), and a collection whose manifest-less census reads `legacy-unmanifested` above zero (or could not be read, `census_unread`) is skipped and reported as blocked. The sweep does not set `last_written_at`. It works in keyset order, so a row it could not take (locked by a writer) is not read again until the pass wraps; a run is done only when a pass from the start finds nothing, and rows still held by a lock are reported (`locked_skipped_rows`) with the run not done. The engine checks the preconditions and runs the census once per run, on the first apply call; the verb passes the continuation the engine returns to each later call, so a large tenant's 8-second budget is spent on batches.
+**The sweep (`--tenant`).** Strips every metadata key the allow-list (the CHUNK and ROW keys) does not name from the chunk rows of the tenant `ID`, in batches of up to 1000 rows. `--tenant` is sent to the engine. A tenant credential is bound to one tenant, so it sweeps only that one: run it with that tenant's `NX_SERVICE_TOKEN`. The ROOT credential may name any registered tenant, the default tenant, a tenant that holds a `service_tokens` row (a revoked or expired row still counts), or a tenant that holds chunk rows even with no token row (a tenant whose data-only tokens aged out); the wildcard and a name that differs by case, whitespace or a zero-width character from a real tenant are not registered. The engine then runs the dry run or the apply in that tenant's scope exactly as a tenant credential would (row-level security applies per batch). A tenant credential naming a different tenant is refused (403 `tenant_mismatch`, exit 2); a data or mint credential is refused by the scope guard (403 without a reason code, exit 1); a name the engine has not registered is 422 `unknown_tenant` (exit 2). **Every sweep the root credential makes is audited, whether or not it names a tenant, naming its own tenant included**, in the TARGET tenant's `gc_audit` (operation `retire_keys_sweep`): an *intent* row written before the sweep reads or changes any chunk row (only the check that the named tenant is registered runs before it; mode, target and caller tenant, accept map, batch size, whether the call resumed, the `--operator` label) and an *outcome* row after the work (the counts; on a refusal or a failure part-way, the phase `refused` or `failed` and the counts of the batches that did commit). The actor is a hash prefix of the credential, never the secret; one shared root token names no person, so pass `--operator LABEL` (at most 80 printable characters) and it is recorded in both rows. The answer carries the row ids and the actor and the verb prints them. The audit fails closed, dry run and apply alike: an engine with no audit sink refuses the call (503 `audit_unavailable`) and one that cannot write the intent row refuses it (500 `audit_intent_failed`), both before any chunk row is read or changed (exit 1, "No chunk row was read or changed"); an outcome row that cannot be written after the work is 500 `audit_write_failed` (the rows ARE changed; the verb prints the counts, says so, shows the resume hint and exits 6), and an error inside the work is 500 `sweep_failed` (partial counts of the confirmed batches; a batch in flight at the failure may also have committed; exit 6). A pool exhaustion or admission-queue timeout during a root sweep keeps the shared typed 503 (retryable), after the outcome row is written. Re-running the same command after either is safe: the sweep takes only the rows still there. A tenant credential's sweep is not audited. The resume object the apply loop passes back is bound to the tenant it was issued for. The verb checks that the engine's answer names `ID`, before any apply and on every apply call: an engine that predates the target field ignores it and answers for the credential's own tenant, and the verb then prints one line (`This engine cannot sweep another tenant ... upgrade the engine`) and exits 4, with nothing written. `--json` names the tenant at the top level. The default is a dry run, which writes nothing, locks no row and runs no UPDATE (not even one that is rolled back); `--dry-run` spells that out and `--apply` writes. The dry run prints, per collection, the rows with a retired key, how many are swept and how many are left alone, then the preconditions and the time of the batch SELECT on up to three collections. That figure is the SELECT only, so the projected duration is a lower bound: the update half of a batch is not measured, and the first applied batch prints its real time. A `quarantine-` or `taxonomy` collection is never swept, a row whose chash is not 32 bytes is left alone (the width CHECK would refuse the update), a row whose metadata is not a JSON object is skipped and counted (`non_object_metadata_rows`), and a collection whose manifest-less census reads `legacy-unmanifested` above zero (or could not be read, `census_unread`) is skipped and reported as blocked. The sweep does not set `last_written_at`. It works in keyset order, so a row it could not take (locked by a writer) is not read again until the pass wraps; a run is done only when a pass from the start finds nothing, and rows still held by a lock are reported (`locked_skipped_rows`) with the run not done. The engine checks the preconditions and runs the census once per run, on the first apply call; the verb passes the continuation the engine returns to each later call, so a large tenant's 8-second budget is spent on batches.
 
 *Preconditions.* The engine counts, per tenant: `legacy_label_rows`, `keyless_notes`, `keyless_ttl_rows`, `homeless_documents`, `null_span_rows` (per manifest span column that is NULL while the row holds the matching key) and `generated_nulls` (printed by content type and by which of `source_format`, `tags`, `category` is missing), the residues the sweep would leave without a home. An operator accepts each with `--accept NAME=N`: up to N rows. Apply is refused with exit 3 while a live count is above what was accepted, so a count that grows between the dry run and the apply blocks it. For the constraint steps the engine also counts `chunk_text_hash_mismatch`, `embedding_model_mismatch`, `wrong_width_rows`, `row_keys_on_live_rows` and `quarantine_implication_violations`. `--collection` limits an apply to one collection; `--batch-size` sets the rows per batch.
 
@@ -2175,12 +2205,22 @@ Exit codes:
 |------|---------|
 | 0 | Done (or a dry run reported). |
 | 1 | A call failed, or the engine refused a table-wide step and named the tenants. |
-| 2 | A usage error (a malformed `--accept`, `--add-check` or `--validate` without `--apply`), or the credential is bound to a tenant other than `--tenant`. |
+| 2 | A usage error (a malformed `--accept`, `--add-check` or `--validate` without `--apply`), or the engine refused the tenant named by `--tenant` (403 `tenant_mismatch`: a non-root credential naming another tenant; 422 `unknown_tenant`). |
 | 3 | A sweep precondition is non-zero and not accepted. |
-| 4 | The connected engine predates the routes. |
+| 4 | The connected engine predates the routes, or cannot sweep another tenant (it answered for the credential's own tenant, not `--tenant`). |
 | 5 | The apply stalled: three calls in a row swept nothing while rows remain. |
+| 6 | The engine ran the sweep but could not write its audit row (`audit_write_failed`: the rows were changed, the verb prints how many), or the sweep failed part-way (`sweep_failed`, partial counts printed). |
 
-Needs the engine release that carries nexus-6pfgb.43.
+Needs the engine release that carries nexus-6pfgb.43; naming a tenant other than the credential's own, and the audit of every root sweep, need the engine release that carries the root-names-the-target change, which is carried first by `engine-service-v0.1.180` (an older engine gives exit 4, as above). Both halves are required: the engine, and a client that carries `--tenant` and `--operator` (conexus 7.96.0 and later).
+
+**Managed service (Phase E), the operator procedure.** On a managed cloud client credentials are mint-locked, so a per-tenant token cannot be made: the root service token is the credential. Set it as `NX_SERVICE_TOKEN` (and the managed endpoint as `NX_SERVICE_URL`) for the command; never paste its value into a shell history, a ticket or a log. Requirements: an engine at or past the tag that carries the root-names-the-target change (before the first dry run, `nx t3 retire-keys --tenant ID` against an older engine prints the one-line exit-4 message and writes nothing) and a client that carries `--tenant` (conexus 7.96.0 and later). In order:
+
+1. A dry run for every tenant, one at a time, each with your name: `nx t3 retire-keys --tenant nexus --operator <you> --max-rps 2`, then the same for each other tenant (for example `gate-xr789`). Read the counts and the preconditions; the dry run writes no chunk row, but it is audited, so it leaves two rows.
+2. Accept only the residues you have judged (`--accept NAME=N`, N at least the live count).
+3. Apply, one tenant at a time, from the checkout: `NX_ALLOW_PROD_WRITE="<reason>" nx t3 retire-keys --tenant nexus --apply --accept NAME=N --operator <you> --max-rps 2` (one `--accept` for each residue you accepted in step 2; leave it out when the dry run showed none). A development checkout is refused a production write without that variable and a reason.
+4. Only after every tenant is swept: `--add-check --apply` once, then `--validate --apply` once (the table-wide steps check every tenant with chunk rows, token or not, and name the tenants they checked).
+
+Reading the audit afterwards: the verb prints, per call, the ids of the intent and outcome rows and the actor; those ids and the counts are always available. A dry run leaves two rows, and an apply leaves two rows per engine call plus the two of the preliminary dry run the verb makes first, so a large tenant leaves many (`nx catalog gc-audit list` shows 50 rows unless you pass `--limit`). The rows live in the TARGET tenant, and `nexus.gc_audit` has forced row-level security keyed on `nexus.tenant`. `nx catalog gc-audit list --operation retire_keys_sweep --json --limit N` reads the tenant of the credential it runs with, so it needs a credential bound to that tenant (a root token bound to the default tenant sees only the default tenant's rows). A tenant with no live tenant-bound credential (on a mint-locked cloud, `gate-xr789` may be one) is read through SQL on the database host: either a `BYPASSRLS` or superuser role, filtering `tenant_id` and `operation = 'retire_keys_sweep'`, or a role subject to row-level security after `SET nexus.tenant = '<tenant>'` (without that, such a role sees no rows). The shared root token is the same actor on every row, so the `--operator` label in `details` is what names the person.
 
 ---
 
@@ -2506,6 +2546,8 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 | `--tags TAG,TAG` | Comma-separated tags |
 | `--category LABEL` | Category label |
 | `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`; default: `permanent`) |
+| `--sensitive` | Mark the note sensitive (RDR-243); see `nx index md`. A re-put raises the flag on the existing note, in the collection the note is in. In local mode, if a live note with the same title is already in the Voyage collection, the put refuses (nothing is written) unless `--ack-external-embedder` is given, because routing it to the bge collection would leave the original note unflagged beside a new one; with the ack the existing note is flagged in place on Voyage |
+| `--ack-external-embedder` | With `--sensitive`: accept a Voyage collection. Without it, local mode stores into the bge collection of the same subject and cloud mode refuses |
 
 A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.
 
@@ -2598,6 +2640,7 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
 | `--skip-existing` | Do not send the text or vector of a record whose chunk the target collection already holds: the stored chunk and vector stay, and the record still gets its owner row. Without it every record is written with the file's vector, which replaces a stored one |
+| `--ack-external-embedder` | Accept that a document the file flags `sensitive` is written to a Voyage collection (RDR-243). Without it, an import of a flagged document into a Voyage collection, or into one whose embedder cannot be told, refuses before anything is written, naming the document; import into a bge collection with `--collection` instead, which needs no flag. With it the import runs and a one-line disclosure names Voyage (cloud mode: the managed tenant and Voyage). The flag is the file's, and also the catalog's: a document the catalog already flags under the same `source_uri` counts as flagged though the file does not say so, and a catalog that cannot answer reads as flagged (only a Voyage target asks) |
 
 Non-conformant legacy chunk ids (16- or 32-char pre-migration ids that fail
 the service backend's `chash` length constraint) are re-hashed to full 64-char
@@ -2926,6 +2969,7 @@ The hint: `nx config set` / `nx config unset` of `local.embed_model` or `voyage_
 | Flag | Description |
 |------|-------------|
 | `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
+| `--ack-external-embedder` | Accept that a document flagged sensitive (RDR-243) in a Voyage collection is rebuilt on Voyage, which sends its text off this machine. Without it, a collection that embeds with Voyage (or whose embedder cannot be told) and holds a flagged document, or whose flags cannot be read, refuses BEFORE anything is deleted, naming the documents. A bge collection needs no flag |
 
 The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. The delete step keeps the collection's rows in its `quarantine-` siblings (it sends `keep_quarantine` to the engine), because the same name is registered again straight away and the rows stay restorable with `nx t3 quarantine restore`; `nx collection delete` takes them. If the service does not confirm the delete (a read timeout makes one attempt, so it may or may not have committed), the command stops before it re-registers or re-indexes anything and exits non-zero. Its message says to run `nx collection info NAME`: if the collection still lists chunks, re-run `reindex`; if it reports not found, the delete committed, so re-index from the original sources (`nx index repo`, `nx index md` or `nx index pdf`) and run `nx collection delete NAME` to clear any pipeline rows the unconfirmed delete left. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
 
@@ -3587,8 +3631,8 @@ run `nx init`, or one using a managed Postgres.
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-`ghost-sweep`, `harness-grant`, `docs-aspects-config`
-(the last four have no `--check-ghost-sweep` / `--check-harness-grant` /
+`ghost-sweep`, `harness-grant`, `docs-aspects-config`, `sensitive-in-aspect-eligible`, `sensitive-with-aspects`
+(the last six have no `--check-ghost-sweep` / `--check-harness-grant` /
 `--check-docs-aspects-config` flag; they only run as part of this
 supplementary set).
 `docs-aspects-config` (nexus-l46pu round 2) warns when a local
@@ -3597,6 +3641,16 @@ whose engine `aspects_enabled` is not yet `True` — the engine is
 authoritative once it has an opinion (see [Aspects](configuration.md#aspects)),
 so an unsynced local match is silent cross-machine drift. N/A on a machine
 with an empty `docs_collections` list.
+`sensitive-in-aspect-eligible` and `sensitive-with-aspects` (RDR-243,
+nexus-rfvyy.6.17) are the same two rows `nx catalog doctor
+--sensitive-in-aspect-eligible` and `--sensitive-with-aspects` print: a sensitive document
+whose collection has an aspect extractor or already holds aspect rows (warn), and a sensitive
+document that already has an aspect row or a queued aspect task (fail; one `nx enrich delete
+--tumbler <t>` line each). Both read `[ ]` not applicable, never a pass, on a tenant with no
+sensitive documents, on an engine without the sensitivity column, and when the catalog or the
+aspect store cannot be read. The warn row prints and never changes the exit code; a `sensitive-with-aspects`
+fail is the one supplementary finding that gates: `nx doctor` (text mode) exits 1 on it, as
+`nx catalog doctor --sensitive-with-aspects` does.
 `ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
@@ -6450,8 +6504,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `out_of_scope` (the record lies outside the caller's scope), `held` (the input already holds that joined text, or an earlier anchor with the same text made that join in this run) or
   `self` (the anchor is the resolved record itself, which joins nothing)), `tokens_dropped` (the keys the item cap
   kept from being resolved) and `anchor_key_ids` (every distinct key the anchors named, less a key only its own record
-  names). Each of these six lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at
-  its first 3 chunks, and the cut is named in `detail`. The outcome stays one of the existing ones: `completed`,
+  names) and `joined_keys` (the distinct keys of the joined items that were merged). Each of these seven lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at
+  its first 3 chunks, and the cut is named in `detail`. Every answer from a run that merged a joined item opens with
+  `[exact-key join: <n> record(s) joined by exact key (<keys>)]` (`<n>` is the distinct records, ahead of the
+  insufficient-evidence notice on a partial answer). When the final ledger covers no facet (`unavailable` /
+  `uncovered`), the run still generates, the line ends `; the coverage check did not confirm this answer`, `repair`
+  adds `generated_on_join: true`; when the generated text is an answer it counts as one and is never grown (text that is not an answer takes the usual `no_usable_answer` downgrade); `coverage_state` stays
+  `unavailable`, and `repair.resolution_generated_on_join` in the run summary means generation was permitted on the join, not that the run answered: it stays true after a `no_usable_answer` downgrade. The outcome stays one of the existing ones: `completed`,
   `no_new_evidence` when no key yielded a joined item, `retrieval_failed` when the resolve or the record fetch failed. `assessment` also reports what each call came back as
   (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),

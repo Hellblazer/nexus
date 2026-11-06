@@ -492,6 +492,27 @@ public final class PgCatalogProbes {
             .fetchOne(prosecdef);
     }
 
+    /** Volatility letter, SECURITY DEFINER flag, language and return type name of one routine overload. */
+    public record RoutineTraits(String volatility, boolean securityDefiner, String language, String returnType) {
+    }
+
+    /** {@link RoutineTraits} of every overload of {@code name} in {@code schema}; empty when there is none. */
+    public static List<RoutineTraits> routineTraits(DSLContext ctx, String schema, String name) {
+        Field<String> provolatile = DSL.field(DSL.name("p", "provolatile")).cast(String.class);
+        Field<Boolean> prosecdef = DSL.field(DSL.name("p", "prosecdef"), Boolean.class);
+        Field<String> lanname = DSL.field(DSL.name("l", "lanname"), String.class);
+        Field<String> typname = DSL.field(DSL.name("t", "typname")).cast(String.class);
+        return ctx.select(provolatile, prosecdef, lanname, typname)
+            .from(pgProcJoined())
+            .join(DSL.table(DSL.name("pg_language")).as("l"))
+                .on(DSL.field(DSL.name("l", "oid")).eq(DSL.field(DSL.name("p", "prolang"))))
+            .join(DSL.table(DSL.name("pg_type")).as("t"))
+                .on(DSL.field(DSL.name("t", "oid")).eq(DSL.field(DSL.name("p", "prorettype"))))
+            .where(routineIn(schema))
+            .and(DSL.field(DSL.name("p", "proname"), String.class).eq(name))
+            .fetch(r -> new RoutineTraits(r.get(provolatile), r.get(prosecdef), r.get(lanname), r.get(typname)));
+    }
+
     /** {@code proconfig} (empty when the routine has no SET clause) and {@code prosrc} of one routine. */
     public record RoutineConfigAndSource(String[] proconfig, String prosrc) {
     }
@@ -726,6 +747,31 @@ public final class PgCatalogProbes {
         return ctx.fetchCount(DSL.table(DSL.name("pg_locks")),
             DSL.field(DSL.name("locktype"), String.class).eq("advisory")
                 .and(DSL.field(DSL.name("granted"), Boolean.class).isFalse()));
+    }
+
+    /** Number of ungranted transaction-id locks cluster-wide ({@code pg_locks}): writers queued behind an open insert. */
+    public static int transactionIdLockWaiters(DSLContext ctx) {
+        return ctx.fetchCount(DSL.table(DSL.name("pg_locks")),
+            DSL.field(DSL.name("locktype"), String.class).eq("transactionid")
+                .and(DSL.field(DSL.name("granted"), Boolean.class).isFalse()));
+    }
+
+    /** Backend pids waiting on a lock ({@code pg_stat_activity}), other than the probing backend, sorted by pid. */
+    public static List<Integer> lockWaiterPids(DSLContext ctx) {
+        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
+        return ctx.select(pid)
+            .from(DSL.table(DSL.name("pg_stat_activity")))
+            .where(DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock"))
+            .and(pid.ne(DSL.function("pg_backend_pid", Integer.class)))
+            .orderBy(pid)
+            .fetch(pid);
+    }
+
+    /** {@code pg_blocking_pids(pid)}: the backends that hold or queue ahead of the lock {@code pid} waits for. */
+    public static List<Integer> blockingPids(DSLContext ctx, int pid) {
+        Field<Integer[]> blockers = DSL.function("pg_blocking_pids", Integer[].class, DSL.val(pid));
+        Integer[] out = ctx.select(blockers).fetchOne(blockers);
+        return out == null ? List.of() : List.of(out);
     }
 
     /** {@code count(*) FROM pg_class WHERE relname = ?} -- a cheap, plan-cacheable probe. */

@@ -20,6 +20,7 @@ import pytest
 from tests._module_seam import patch_in
 
 from nexus.operators.dispatch import DispatchUsage, claude_dispatch
+from nexus.sensitivity import llm_bound
 
 _SCHEMA = {"type": "object", "properties": {"result": {"type": "string"}}}
 _FIXED_UUID = "00000000-0000-4000-8000-000000000001"
@@ -117,7 +118,10 @@ def run_case(kwargs: dict, extra_env: dict[str, str]) -> dict:
             side_effect=lambda sid, *, context: {"session_token": f"tok-{sid}"},
         ),
     ):
-        returned = asyncio.run(claude_dispatch("the prompt", _SCHEMA, usage_sink=sink, **kwargs))
+        # RDR-243: the env above is replaced wholesale, so the scope is entered here and not
+        # taken from NX_SENSITIVITY_POSTURE (the golden env stays byte-identical).
+        with llm_bound("nx_answer_operators"):
+            returned = asyncio.run(claude_dispatch("the prompt", _SCHEMA, usage_sink=sink, **kwargs))
     return {
         "argv": seen["argv"],
         "env": seen["env"],

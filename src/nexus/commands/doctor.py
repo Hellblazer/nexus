@@ -2754,8 +2754,9 @@ def _stale_mineru_server() -> str | None:
 #                                          | zero-hit telemetry has gone
 #                                          | quiet as a result.
 #
-# Non-gating by design: a supplementary check's failure is printed, never
-# folded into the default sweep's exit code. Two of the five (schema-
+# Non-gating by design (one exception, ``_GATING_SUPPLEMENTARY_CHECKS``:
+# RDR-243's sensitive-with-aspects FAIL does gate): a supplementary check's
+# failure is printed, never folded into the default sweep's exit code. Two of the five (schema-
 # adjacent reasoning aside) checks distinguish "service unreachable /
 # unknown" from "definite failure" with DIFFERENT exit codes that mean
 # different things per-check (``--check-resources``'s Exit(2) is a real
@@ -2764,6 +2765,11 @@ def _stale_mineru_server() -> str | None:
 # mapping from "supplementary check raised" to "the sweep should now fail".
 # Promoting these into the exit-code gate is a deliberate, separately-
 # reviewed decision, not a side effect of adding visibility.
+#: The supplementary rows whose FAIL fails the sweep (the exception to the non-gating rule above): RDR-243
+#: Technical Design item 10, ``sensitive_with_aspects``. A row listed here must return True from its runner
+#: when it reports a FAIL.
+_GATING_SUPPLEMENTARY_CHECKS: frozenset[str] = frozenset({"sensitive-with-aspects"})
+
 #: Names of the promoted checks, in run order. The actual callables are
 #: resolved lazily inside :func:`_run_supplementary_checks` (module-
 #: level binding is not possible here: ``_run_check_resources`` /
@@ -2772,8 +2778,34 @@ def _stale_mineru_server() -> str | None:
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
     "index-failures", "fanout-floor", "ghost-sweep", "harness-grant",
-    "docs-aspects-config",
+    "docs-aspects-config", "sensitive-in-aspect-eligible", "sensitive-with-aspects",
 )
+
+
+def _run_check_sensitive_in_aspect_eligible() -> None:
+    """RDR-243 (nexus-rfvyy.6.17): WARN for a sensitive document whose collection has an aspect extractor or
+    aspect rows. The verdicts and wording are :mod:`nexus.catalog.sensitivity_doctor`'s, shared with ``nx
+    catalog doctor --sensitive-in-aspect-eligible``. Not applicable, never a pass, on a tenant with no
+    sensitive document (nexus-7zhag); never gates (a supplementary row prints and does not raise Exit)."""
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    for line in sd.render_text(sd.check_sensitive_in_aspect_eligible()):
+        click.echo(line)
+
+
+def _run_check_sensitive_with_aspects() -> bool:
+    """RDR-243 (nexus-rfvyy.6.17): FAIL row for a sensitive document that already has an aspect row or a
+    queued task, with the ``nx enrich delete --tumbler`` remedy per document. This is the ONE supplementary
+    row that gates: RDR-243 Technical Design item 10 says the finding fails the sweep, so the row prints and
+    RETURNS True when it reports FAIL, and :func:`_run_supplementary_checks` hands that to ``nx doctor``,
+    which exits 1. Pass, not-applicable and an unreadable aspect state return False (a row that could not
+    look never fails the sweep). ``nx catalog doctor --sensitive-with-aspects`` gates the same way."""
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    report = sd.check_sensitive_with_aspects()
+    for line in sd.render_text(report):
+        click.echo(line)
+    return report["status"] == sd.FAIL
 
 
 def _run_check_docs_aspects_config() -> None:
@@ -2844,10 +2876,12 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
 )
 
 
-def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> None:
+def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> bool:
     """Run the cheap/read-only opt-in checks promoted into the default
-    sweep (see the classification table above). Purely additive output --
-    never affects the caller's exit code (see the non-gating note above).
+    sweep (see the classification table above). Additive output; it does
+    not gate (see the non-gating note above) EXCEPT for the rows named in
+    ``_GATING_SUPPLEMENTARY_CHECKS``: returns True when one of those
+    reports a FAIL, and ``nx doctor`` then exits non-zero.
 
     Each check is isolated: a check's ``click.exceptions.Exit`` or any
     other exception is caught and reported inline rather than aborting
@@ -2869,16 +2903,20 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
         "ghost-sweep": _run_check_ghost_sweep,
         "harness-grant": _run_check_harness_grant,
         "docs-aspects-config": _run_check_docs_aspects_config,
+        "sensitive-in-aspect-eligible": _run_check_sensitive_in_aspect_eligible,
+        "sensitive-with-aspects": _run_check_sensitive_with_aspects,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
         "--check-* diagnostics):"
     )
+    gating_failed = False
     for name in _SUPPLEMENTARY_CHECK_NAMES:
         runner = runners[name]
         click.echo(f"\n--- {name} ---")
         try:
-            runner()
+            if runner() is True and name in _GATING_SUPPLEMENTARY_CHECKS:
+                gating_failed = True
         except click.exceptions.Exit:
             # The check already printed its own failure/status detail;
             # nothing further to say here (see non-gating note above).
@@ -2896,6 +2934,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
         "\nRemaining opt-in-only checks (not run above; invoke explicitly): "
         + ", ".join(_OPT_IN_ONLY_CHECKS)
     )
+    return gating_failed
 
 
 @click.command("doctor", epilog=COLLECTIONS_RULES_EPILOG)
@@ -3742,13 +3781,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         git_hooks_scope=git_hooks_scope, engine_status=engine_status, verbose=verbose,
     )
     output, failed = format_health_for_cli(results, local_mode=is_local)
+    supplementary_failed = False
     if json_out:
         # nexus-0vycz: machine-parseable JSON on stdout only -- no human
         # prose mixed in, so the whole of stdout is one parseable document.
         click.echo(format_health_for_json(results, local_mode=is_local))
     else:
         click.echo(output)
-        _run_supplementary_checks(engine_status)
+        supplementary_failed = _run_supplementary_checks(engine_status) is True
 
     # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge notice is RETIRED
     # here. A pending Chroma→pgvector cutover is reported by the ladder's own
@@ -3767,6 +3807,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     from nexus.health import health_exit_code  # noqa: PLC0415 — deferred local import, same reason as above
 
     code = health_exit_code(results)
+    # RDR-243 item 10: a FAIL from a gating supplementary row (sensitive-with-aspects) is a hard red.
+    if supplementary_failed and not code:
+        code = 1
     if code:
         raise click.exceptions.Exit(code)
 

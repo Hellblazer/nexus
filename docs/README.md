@@ -32,6 +32,7 @@ Start on the site, then find your section below by what you're trying to do.
 - [Agent Lifecycle & Operations](operations/agent-lifecycle.md) — Install → provision → run → upgrade → uninstall: the state model, then each stage in turn
 - [Migration Runbook](migration-runbook.md) — Operator's manual order of operations, quiescence, rollback, and the deprecation window
 - [Privacy Policy](privacy-policy.md) — What data nexus stores and where
+- [Sensitive documents](sensitivity.md) — What `--sensitive` keeps from model-bound and outside-service surfaces in this release, and what it does not yet cover
 - [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md), [engine reaper](operations/engine-reaper.md), [ownerless-write cutover](operations/ownerless-write-cutover.md) (executed 2026-10-12; kept as the record), [Tuple space](operations/tuple-space.md) — the seven `nx doctor` tuple rows, dead-letter triage, sweep reading
 - [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md), [RDR-225 cloud deploy and abort runbook](runbooks/rdr-225-cloud-deploy.md) (executed 2026-10-07), [RDR-225 tenant removal](runbooks/rdr-225-tenant-removal.md)
 

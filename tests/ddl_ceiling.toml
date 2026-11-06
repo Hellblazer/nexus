@@ -163,7 +163,12 @@ migration_wal_bytes_per_worker = 11038000
 # statement to a fresh migration: 1 CREATE OR REPLACE FUNCTION, a replacement of an existing function with the same signature, so no GRANT EXECUTE follows; the post-condition DO block is not DDL.
 # Counted from the changeset's statements (1) and measured: chas (lab-m), 2026-11-03, scoped substrate run of
 # tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2249.
-migration_ddl_per_worker = 2249
+# 2249 -> 2262 (2026-11-05, after vectors-053 above): catalog-047-1..3 (nexus-rfvyy.6.3, RDR-243 document sensitivity) add 13 DDL statements to a fresh migration:
+# 1 ALTER TABLE (catalog_documents.sensitive) and 1 CREATE INDEX (the partial index on live sensitive documents); 1 CREATE TABLE (catalog_sensitivity_changes), 1 CREATE INDEX on it, ENABLE and FORCE
+# ROW LEVEL SECURITY and 1 CREATE POLICY; 2 CREATE FUNCTION (chunk_sensitive, chunk_sensitive_many) and 2 GRANT EXECUTE to nexus_svc. That is 11 statements in the changeset; the measured 13 is
+# those 11 plus 2 from the runAlways grants loop for the new table (the telemetry-018 accounting for a table with a BIGSERIAL id: the table grant and the sequence grant; counted as measured minus the 11).
+# Measured: chas (lab-m), 2026-11-05, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued (one worker), ddl: migration=2262.
+migration_ddl_per_worker = 2262
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

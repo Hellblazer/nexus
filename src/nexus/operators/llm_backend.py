@@ -39,6 +39,7 @@ from urllib.parse import urlsplit
 import structlog
 
 from nexus.operators.llm_types import DispatchUsage, OperatorError
+from nexus.sensitivity import assert_llm_bound
 
 _log = structlog.get_logger(__name__)
 
@@ -525,7 +526,12 @@ def run_text_sync(
     running, the call is made on a fresh loop in a helper thread."""
     import asyncio  # noqa: PLC0415 - only the sync entry needs it
     import concurrent.futures  # noqa: PLC0415 - as above
+    import contextvars  # noqa: PLC0415 - as above
 
+    # RDR-243: assert on the caller's thread, before a backend is built or a helper thread is
+    # started. The helper thread (thread hop 1) copies the caller's context so code under the
+    # backend sees the same posture; the assert above is what guards the call.
+    assert_llm_bound("run_text_sync")
     req = DispatchRequest(
         prompt=prompt, json_schema=None, timeout=timeout, model=model, operator=operator, transport_retries=0,
     )
@@ -539,4 +545,4 @@ def run_text_sync(
     except RuntimeError:
         return _run()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_run).result()
+        return pool.submit(contextvars.copy_context().run, _run).result()

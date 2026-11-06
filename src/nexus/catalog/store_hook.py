@@ -930,9 +930,14 @@ def catalog_store_hook_tracked(
     pre_call_doc_id_out: dict[str, Any] | None = None,
     error_out: dict[str, str] | None = None,
     tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
-    put_at: str | None = None, entity_key: str = "",
+    put_at: str | None = None, entity_key: str = "", sensitive: bool = False,
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
+
+    *sensitive* (RDR-243, nexus-rfvyy.6.9) rides the one ``writer.register`` this function makes
+    for a NEW document, so the row is born flagged. The reconcile branches resolve an existing
+    document and register nothing; the caller (:func:`nexus.catalog.note_write.put_note`) raises
+    the flag on those through the audited route before it writes a chunk.
 
     Returns ``(tumbler, created)`` — *tumbler* is the catalog
     ``Document.doc_id`` (Tumbler string) so the caller can pass it to
@@ -1300,6 +1305,7 @@ def catalog_store_hook_tracked(
             meta=stamp_for(None),
             source_uri=source_uri or "",
             with_created=True,
+            **({"sensitive": True} if sensitive else {}),
         )
         return str(tumbler), created
     except Exception as exc:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged + audited

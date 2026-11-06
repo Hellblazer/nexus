@@ -31,6 +31,7 @@ Contract with the runner:
 from __future__ import annotations
 
 from nexus.context_annotations import source_clause
+from nexus.sensitivity import bound_to
 
 import json
 from dataclasses import dataclass, field
@@ -880,6 +881,7 @@ def compose_bundle_prompt(bundle: OperatorBundle) -> tuple[str, dict[str, Any]]:
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 
+@bound_to("nx_answer_bundle")
 async def dispatch_bundle(
     bundle: OperatorBundle,
     *,

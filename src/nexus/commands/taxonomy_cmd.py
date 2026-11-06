@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import re
@@ -20,6 +21,7 @@ from nexus.commands._helpers import (
     t2_shared_client_from_context as _command_shared_t2_client,
 )
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.sensitivity import bound_to
 from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
 from nexus.db.t2.taxonomy_compute import (
     MIN_DISCOVER_CHUNKS,
@@ -1710,6 +1712,52 @@ _LABEL_SCHEMA: dict = {
 }
 
 
+def _topics_with_sensitive_members(taxonomy: Any, topics: list[dict[str, Any]]) -> set[int]:
+    """Ids of the *topics* that hold a chunk of a sensitive document (RDR-243 census rows 9 and 10).
+
+    Topic members are chunk chashes. The catalog is asked once per collection for its sensitive
+    documents' chunks (a handful), and only a collection that has any has its topics' members read.
+    A topic with a sensitive member is not sent to a model at all: its terms come from, and its
+    sample names point at, the sensitive document's text. Raises
+    :class:`~nexus.doc_sensitivity.SensitivityUnknown` when the catalog cannot say.
+
+    A topic also holds chunks PROJECTED in from other collections (cross-collection
+    ``project_against`` assignments). The taxonomy store names the collections that have projected
+    anything (``get_projection_counts_by_collection``); the sensitive chunks of each of those are
+    matched against a topic's members too, so a projected sensitive chunk keeps its topic off the
+    model. A chunk that exists in both collections counts (the shared row cannot be told apart). A
+    projection read that fails reads as unknown."""
+    from nexus import doc_sensitivity  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    ids_by_collection: dict[str, list[int]] = {}
+    for topic in topics:
+        ids_by_collection.setdefault(topic.get("collection", "") or "", []).append(topic["id"])
+    try:
+        projected_from = {c for c, n in taxonomy.get_projection_counts_by_collection().items() if c and n}
+    except Exception as exc:  # noqa: BLE001 - boundary: a projection read that fails is "unknown", never "none projected"
+        raise doc_sensitivity.SensitivityUnknown(f"projection sources: {type(exc).__name__}: {exc}"[:300]) from exc
+    sensitive_by_collection: dict[str, set[str]] = {}
+
+    def sensitive_chashes(collection: str) -> set[str]:
+        if collection not in sensitive_by_collection:
+            sensitive_by_collection[collection] = doc_sensitivity.sensitive_chashes(collection)
+        return sensitive_by_collection[collection]
+
+    flagged: set[int] = set()
+    for collection, topic_ids in ids_by_collection.items():
+        if not collection:
+            continue
+        chashes = set(sensitive_chashes(collection))
+        for source in sorted(projected_from - {collection}):
+            chashes |= sensitive_chashes(source)
+        if not chashes:
+            continue
+        for topic_id in topic_ids:
+            if chashes.intersection(taxonomy.get_all_topic_doc_ids(topic_id)):
+                flagged.add(topic_id)
+    return flagged
+
+
 async def _generate_labels_batch(
     items: list[tuple[list[str], list[str]]],
     glossary_text: str = "",
@@ -2089,6 +2137,7 @@ def _save_review_cache(collection: str, cache: dict[int, dict[str, Any]]) -> Non
     )
 
 
+@bound_to("taxonomy_review_auto")
 def _review_auto(
     db: Any,
     collection: str,
@@ -2151,6 +2200,38 @@ def _review_auto(
         return
 
     click.echo(f"Auto-reviewing {len(topics)} topic(s) in batches of {batch_size}...")
+
+    # RDR-243 census row 10: a topic with a sensitive member is not sent to the model and stays
+    # pending (as does every topic when the catalog cannot say).
+    from nexus.doc_sensitivity import SensitivityUnknown  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    try:
+        sensitive_topic_ids = _topics_with_sensitive_members(db.taxonomy, topics)
+    except SensitivityUnknown as exc:
+        _log.warning(
+            "taxonomy_review_sensitivity_unknown", surface="taxonomy_review_auto", collection=collection,
+            error=exc.detail,
+        )
+        click.echo(
+            "Review skipped: the catalog could not say which topics hold a sensitive document, "
+            "so no topic was sent to a model.",
+            err=True,
+        )
+        return
+    for t in topics:
+        if t["id"] in sensitive_topic_ids:
+            _log.info(
+                "taxonomy_review_skipped_sensitive",
+                topic_id=t["id"], surface="taxonomy_review_auto", collection=t.get("collection", ""),
+            )
+    if sensitive_topic_ids:
+        click.echo(
+            f"{len(sensitive_topic_ids)} skipped (sensitive member): topic id(s) "
+            f"{', '.join(str(i) for i in sorted(sensitive_topic_ids))} stay pending."
+        )
+        topics = [t for t in topics if t["id"] not in sensitive_topic_ids]
+        if not topics:
+            return
 
     cache = _load_review_cache(db, collection)
 
@@ -2452,6 +2533,7 @@ def _topic_has_auto_label(topic: dict[str, Any]) -> bool:
     return topic.get("label", "") == " ".join(terms[:3])
 
 
+@bound_to("taxonomy_label")
 def relabel_topics(
     taxonomy: "HttpTaxonomyStore",
     *,
@@ -2496,6 +2578,37 @@ def relabel_topics(
 
     if not topics:
         return 0
+
+    # RDR-243 census row 9: a topic with a sensitive member keeps its terms label and is never
+    # sent to the model. A catalog that cannot say sends nothing.
+    from nexus.doc_sensitivity import SensitivityUnknown  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    try:
+        sensitive_topic_ids = _topics_with_sensitive_members(taxonomy, topics)
+    except SensitivityUnknown as exc:
+        _log.warning(
+            "taxonomy_label_sensitivity_unknown", surface="taxonomy_label", collection=collection, error=exc.detail,
+        )
+        click.echo(
+            "Labeling skipped: the catalog could not say which topics hold a sensitive document, "
+            "so no topic was sent to a model.",
+            err=True,
+        )
+        return 0
+    for topic in topics:
+        if topic["id"] in sensitive_topic_ids:
+            _log.info(
+                "taxonomy_label_skipped_sensitive",
+                topic_id=topic["id"], surface="taxonomy_label", collection=topic.get("collection", ""),
+            )
+    if sensitive_topic_ids:
+        _progress(
+            f"    {len(sensitive_topic_ids)} topic(s) hold a sensitive document: "
+            "not sent to a model, terms label kept"
+        )
+        topics = [t for t in topics if t["id"] not in sensitive_topic_ids]
+        if not topics:
+            return 0
 
     # Prepare work items: (topic_id, terms, doc_ids)
     work: list[tuple[int, str, list[str], list[str]]] = []
@@ -2570,7 +2683,10 @@ def relabel_topics(
 
     with open_run_log("taxonomy-label") as run_log_path:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_label_batch, b): b for b in batches}
+            # RDR-243 thread hop 2: a pool worker starts with an empty context, so each batch is
+            # submitted through its own copy of this one (one Context cannot be entered by two
+            # threads at once, hence a fresh copy per submit).
+            futures = {pool.submit(contextvars.copy_context().run, _label_batch, b): b for b in batches}
             for future in as_completed(futures):
                 batches_done += 1
                 try:
