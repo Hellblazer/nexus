@@ -8,7 +8,8 @@
 # table as its source of truth: the privacy-policy section 2 table and each
 # `--sensitive` help text list the rows enforced in the release being built
 # (nexus-rfvyy.6.18), the canary (tests/test_sensitivity_canary.py) judges the
-# `refuse` and `skip` rows of the phase under test, and the registry lint
+# `refuse`, `skip` and `exclude` rows of the phase under test (exclude from phase 2,
+# nexus-rfvyy.7.13), and the registry lint
 # (tests/test_llm_surface_registry_lint.py) requires every LLM or outbound
 # site in src/nexus to sit in a function some row names.
 #

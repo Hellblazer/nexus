@@ -48,9 +48,9 @@
 # test_import_catalog_flag_gate 8, test_sensitivity_unreadable_catalog 8, test_enrich_delete_tumbler 7, test_doctor_sensitivity_rows 5, test_reindex_sensitive_gate 5,
 # test_sensitive_store_put_existing_voyage 5, test_doc_sensitivity_flagged 2, test_catalog_sensitivity_client 1 (219 in all), and the 4 dry-run tests above.
 # None of the new files can run over a stub catalog: a stub would carry the flag by construction and prove nothing about the row the engine keeps one-way.
-provisioned_tests = 5351
+provisioned_tests = 5352
 tolerance_tests = 0
-# 5338 -> 5351 (nexus-rfvyy.7.13, 2026-11-06): +13, tests/test_sensitivity_canary.py 14 -> 27 (scripts/tenant_delta.py: +13 for the file). RDR-243 Phase 2 puts the six exclude rows (census 12-17) under the canary:
+# 5338 -> 5352 (nexus-rfvyy.7.13, 2026-11-06): +14 by scripts/tenant_delta.py against origin/develop: tests/test_sensitivity_canary.py 14 -> 27 (+13) and tests/db/test_vector_read_sensitivity_argument.py 0 -> 1 (+1, the Step 2.3 pool test, nexus-rfvyy.7.8). RDR-243 Phase 2 puts the six exclude rows (census 12-17) under the canary:
 # 6 driver cases, 1 judge case for the exclude verdict, and 6 cases that make the search route send include and require each row to go red. Each reads the real engine and the real catalog (the subject is the
 # engine's exclude filter), so each needs its tenant. The Phase 2 branch's other tenant tests (tests/db/test_vector_read_sensitivity_argument.py, +1) are counted by whoever merges the branch.
 # 5337 -> 5338 (nexus-x3bxj, 2026-11-06): +1, tests/test_catalog_indexer_hook.py 38 -> 39 (a6d779ed6 / b4b6f6a68, the rename link transfer pin), which landed without its ceiling line. develop CI at b4fbe72c2 measured provisioned=5338 (run 42257210541); scripts/tenant_delta.py --base 1ecf3ca6d (measured 5355) reads -17 = 5338.
