@@ -18,20 +18,35 @@ THE RULE. Exit 0 and print nothing (allow the stop) when any of these holds:
   continuation per stop);
 - ``background_tasks`` or ``session_crons`` in the input is non-empty (something is armed:
   a running Agent, Monitor, background Bash, ScheduleWakeup or CronCreate);
+- either of those two fields is ABSENT or not a list. Unknown is not "nothing armed": a Claude Code
+  build that does not send them would otherwise have this guard fire while a subagent or Monitor is
+  running. Both fields were present on the build below, so this branch is a guard for older builds;
 - the closing text (``last_assistant_message``) is empty or not text.
 
-Otherwise the text is split into sentences and clauses. A clause is DROPPED when its actor is
-Sam (it addresses "you", asks a question, says "say go and I'll", is a ``!`` command) or when it
-names a peer, mailbox, notification or restart as the wake, or when it is a past-tense report.
-A block follows when any surviving clause is (a) a CI or run wait, (b) a promise to check or do
-something later, or (c) a timed step (clock time, date, "in N minutes"). The block is
+Otherwise only the TAIL of the text is read (the last ``_TAIL_CHARS`` characters, from a sentence
+boundary): the end of a turn is where a promise lives, and a status line near the top must not
+block a message that ends on a question to Sam. It is split into sentences and clauses (each
+capped at ``_CLAUSE_CAP`` characters, which also bounds the regex cost). A clause is DROPPED when
+its actor is Sam (it addresses "you", asks a question, says "say go and I'll", is a ``!`` command,
+names Sam, or names an approval: a go, go-ahead, approval, ack, sign-off, ruling, decision,
+authorization) or when it names a peer, mailbox, notification or restart as the wake, or when it is
+a past-tense report. If the LAST clause addresses Sam, the whole message is allowed: Sam's reply is
+the wake. A block follows when any surviving clause is (a) a CI or run wait, (b) a promise to check
+or do something later, or (c) a timed step (clock time, date, "in N minutes"). The block is
 ``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": ...}}``, which continues the
 turn like ``decision: block`` does but without the "Stop hook error occurred" notice Claude Code
-shows for a block (measured live, 2026-11-06); the text quotes the clause and tells the model to
-arm a wake now or state plainly who the wake is, then end the turn.
+shows for a block. Measured live on Claude Code 2.1.319, 2026-11-06; this behaviour has flipped
+between Claude Code versions before, so re-check it at each release. If a version stops honouring
+``additionalContext`` on a Stop the guard becomes a silent no-op (the safe direction). The text
+quotes the clause and tells the model to arm a wake now or state plainly who the wake is, then end
+the turn.
 
-A sentence that gates on Sam ("once you give it, I'll push the tag") also drops the "After X,
-..." / "Then ..." sentences that chain from it.
+A clause that gates on Sam ("once you give it, I'll push the tag", "pending the ack") also drops the
+follow-up clauses that hang from it ("After X, ...", "Then ...", "I'll proceed once that comes
+through").
+
+Scripted runs (``claude -p`` children that load the plugin) set ``NX_STOP_WAKE_GUARD=0``; nexus's own
+children pass ``--setting-sources ""`` and load no plugin, so they never reach this hook.
 
 Every decision is logged to ``<config>/logs/hook.log`` (allow reason, or block plus the matched
 class) for measurement. Any error fails open (exit 0). The avoidable-permission-stop class (a
@@ -52,6 +67,15 @@ from typing import NamedTuple
 KILL_SWITCH_ENV = "NX_STOP_WAKE_GUARD"
 _REASON_CLAUSE_CAP = 240
 _LOG_CLAUSE_CAP = 140
+#: Only the end of the message is read. 600 characters is two or three sentences: the closing
+#: promise, plus the line that tells whether Sam is being asked something.
+_TAIL_CHARS = 600
+#: A clause longer than this is cut to its last characters before matching. The lookaheads in
+#: ``_TIMED`` and ``_CI_WAIT`` are quadratic in clause length; at 400 characters that is milliseconds.
+_CLAUSE_CAP = 400
+#: Text prepared for the tail cut (fences and inline code are removed on this window).
+_PREP_WINDOW = 4000
+_BOUNDARY = re.compile(r"(?<=[.!?:])\s+|\n")
 
 # ---------------------------------------------------------------------------
 # Text preparation
@@ -72,10 +96,19 @@ def _prepare(text: str) -> str:
     return text.replace("**", "").replace("__", "")
 
 
+def _tail(text: str) -> str:
+    """The last ``_TAIL_CHARS`` characters, from the first sentence boundary inside them."""
+    if len(text) <= _TAIL_CHARS:
+        return text
+    cut = text[-_TAIL_CHARS:]
+    match = _BOUNDARY.search(cut)
+    return cut[match.end():] if match and match.end() < len(cut) else cut
+
+
 def clauses(text: str) -> list[str]:
-    """Sentences, then clauses, in order. Bullets and newlines end a sentence."""
+    """Sentences, then clauses, of the message tail, in order. Bullets and newlines end a sentence."""
     out: list[str] = []
-    for line in _prepare(text).splitlines():
+    for line in _tail(_prepare(text[-_PREP_WINDOW:])).splitlines():
         line = _LEAD_MARKUP.sub("", line).strip()
         if not line:
             continue
@@ -83,7 +116,7 @@ def clauses(text: str) -> list[str]:
             for clause in _CLAUSE_SPLIT.split(sentence):
                 clause = clause.strip()
                 if clause:
-                    out.append(clause)
+                    out.append(clause[-_CLAUSE_CAP:])
     return out
 
 
@@ -96,6 +129,34 @@ def clauses(text: str) -> list[str]:
 #: offer an override while the session carries on.
 #: "Sam's ruling" is an object, not an actor; a bare "Sam" is still Sam.
 _SAM_YOU = re.compile(r"\b(?:you|your|yours|you'd|you'll|you've|you're|yourself|sam)\b(?!')", re.I)
+#: Sam named in any form ("Sam's" included). A clause that only names him is not dropped (it may be
+#: about his work), but what hangs from it is his to unblock.
+_SAM_NAME = re.compile(r"\b(?:sam|hal)(?:'s)?\b", re.I)
+#: An approval is a gate that only Sam (the operator) opens, however the sentence is phrased: "once the
+#: release go arrives", "pending the ack", "it is approved", "after approval".
+_APPROVAL = re.compile(
+    r"\b(?:approv\w*|authori[sz]\w*|sign-?off|go-?ahead|green[- ]?light|say-?so|rulings?|decisions?|permission|"
+    r"acks?|acknowledg\w*|consent|blessing)\b"
+    r"|\b(?:the|a|his|her|their|sam's|operator's|owner's|release|ship|final) go\b"
+    r"|\b(?:sam|operator|owner)'s (?:call|word|nod|okay|ok|choice|pick|say)\b|\b(?:ok|okay) from\b|\bgreen signal\b",
+    re.I,
+)
+#: "I'll record Sam's ruling" acts ON an approval already given; it is a step, not a wait. Only when
+#: no gate word ("once", "pending", "needs") makes it a wait.
+_APPROVAL_OBJECT = re.compile(
+    r"\b(?:record|write|file|apply|implement|log|store|capture|document|note|save|enter|add)\b[^,.]{0,30}"
+    r"\b(?:rulings?|decisions?)\b",
+    re.I,
+)
+_GATE_WORD = re.compile(r"\b(?:once|when|after|until|before|pending|waiting|awaiting|needs?|gated|if|unless)\b", re.I)
+
+
+def _has_approval(clause: str) -> bool:
+    if not _APPROVAL.search(clause):
+        return False
+    return not (_APPROVAL_OBJECT.search(clause) and not _GATE_WORD.search(clause))
+
+
 _SAM_DEFAULT_PROCEED = re.compile(r"\bunless you(?:'d| would| want| prefer)\b", re.I)
 _SAM_IMPERATIVE = re.compile(
     r"^(?:please\b|say\b|tell me\b|let me know\b|want me\b|should i\b|shall i\b|do you\b|would you\b|"
@@ -112,6 +173,13 @@ _SAM_GATE = re.compile(
 )
 _WAIT_WORD = re.compile(r"\b(?:once|when|if|after|until|as soon as|waiting|waits?|holding)\b", re.I)
 _CHAIN_START = re.compile(r"^(?:after|then|next|once|when|and then|afterwards|finally)\b", re.I)
+#: A follow-up that hangs from the gate without starting on a chain word: "I'll proceed once that
+#: comes through", "I'll push when it is granted", "I'll check the publish after".
+_CHAIN_CONT = re.compile(
+    r"\b(?:once|when|after|as soon as|until)\s+(?:that|this|it|they|he|she|then)\b"
+    r"|\b(?:after|afterwards|then|later|pending)\s*[.!]?$|\bthen\b",
+    re.I,
+)
 
 #: A peer, mailbox, notification or restart is named as the wake.
 _PEER_NAMES = (
@@ -201,28 +269,46 @@ class Verdict(NamedTuple):
     sam_dropped: int
     peer_dropped: int
     past_dropped: int
+    final_sam: bool = False  # the last clause addresses Sam, so a would-be block was allowed
 
 
 def _is_sam(clause: str) -> bool:
-    if clause.endswith("?") or _SAM_IMPERATIVE.search(clause):
+    if clause.endswith("?") or _SAM_IMPERATIVE.search(clause) or _has_approval(clause):
         return True
     if _SAM_YOU.search(clause) and not _SAM_DEFAULT_PROCEED.search(clause):
         return True
     return False
 
 
+def _addresses_sam(clause: str) -> bool:
+    # "Sam's ruling" as an object ("I'll record Sam's ruling") does not address him; "Sam will decide" does.
+    return _is_sam(clause)
+
+
 def evaluate_text(text: str) -> Verdict:
     """Classify a closing text. Pure: no environment, no I/O."""
     sam = peer = past = 0
-    chain = False
-    for clause in clauses(text):
+    #: 0 none; 1 a gate on "you" (a follow-up that starts on a chain word hangs from it); 2 an approval or
+    #: Sam named (a follow-up that merely depends on "that" or "it" hangs from it too).
+    chain = 0
+    parts = clauses(text)
+    final_sam = bool(parts) and _addresses_sam(parts[-1])
+    for clause in parts:
+        names_sam = bool(_SAM_NAME.search(clause))
         if _is_sam(clause):
             sam += 1
-            chain = clause.endswith("?") or bool(_SAM_GATE.search(clause))
+            if names_sam or _has_approval(clause):
+                chain = 2
+            elif clause.endswith("?") or _SAM_GATE.search(clause):
+                chain = 1
+            else:
+                chain = 0
             continue
-        if chain and _CHAIN_START.search(clause):
+        if chain and (_CHAIN_START.search(clause) or (chain == 2 and _CHAIN_CONT.search(clause))):
             sam += 1
             continue
+        if names_sam:
+            chain = 2
         if _RESTRAINT.search(clause):
             past += 1
             continue
@@ -231,10 +317,13 @@ def evaluate_text(text: str) -> Verdict:
             continue
         if _PEER.search(clause):
             peer += 1
-            chain = bool(_WAIT_WORD.search(clause))
+            chain = 1 if _WAIT_WORD.search(clause) else 0
             continue
         for cls, pattern in _CLASS_ORDER:
             if pattern.search(clause) and not (cls == CLASS_CI_WAIT and _NEGATED_STATE.search(clause)):
+                if final_sam:
+                    # The message ends on Sam (a question, a hand-off, an approval to wait for): his reply is the wake.
+                    return Verdict(False, cls, clause, sam, peer, past, True)
                 return Verdict(True, cls, clause, sam, peer, past)
     return Verdict(False, "", "", sam, peer, past)
 
@@ -259,8 +348,10 @@ def decide(payload: object, env: dict[str, str]) -> Decision:
     if payload.get("stop_hook_active") is True:
         return Decision(False, "stop-hook-active", "", "")
     tasks, crons = payload.get("background_tasks"), payload.get("session_crons")
-    n_tasks = len(tasks) if isinstance(tasks, list) else 0
-    n_crons = len(crons) if isinstance(crons, list) else 0
+    if not isinstance(tasks, list) or not isinstance(crons, list):
+        # Unknown is not "nothing armed": a build that omits these fields would fire during a running subagent.
+        return Decision(False, "armed-state-unknown", "", "")
+    n_tasks, n_crons = len(tasks), len(crons)
     if n_tasks or n_crons:
         return Decision(False, "armed", "", f"tasks={n_tasks} crons={n_crons}")
     text = payload.get("last_assistant_message")
@@ -270,6 +361,8 @@ def decide(payload: object, env: dict[str, str]) -> Decision:
     detail = f"sam_dropped={verdict.sam_dropped} peer_dropped={verdict.peer_dropped} past_dropped={verdict.past_dropped}"
     if verdict.block:
         return Decision(True, verdict.cls, verdict.clause, detail)
+    if verdict.final_sam:
+        return Decision(False, "final-to-sam", "", f"{detail} would_block_class={verdict.cls}")
     return Decision(False, "no-match", "", detail)
 
 
@@ -282,11 +375,13 @@ def block_reason(cls: str, clause: str) -> str:
         CLASS_PROMISE: "a promise to check or do something later",
         CLASS_TIMED: "a timed step",
     }.get(cls, "an open step")
+    # A clause that names an approval is never told "do it now": the step may be gated on Sam.
+    do_now = "" if _has_approval(quoted) or _SAM_NAME.search(quoted) else "If the step can be done right now, do it. "
     return (
         f'Stop-hook wake guard: your last message closes on {what} ("{quoted}"), and nothing is armed to wake this '
         "session: no background task, Monitor or scheduled wakeup is running. Arm the wake now, then end the turn: "
         "a Monitor or a background Bash until-loop for a run or CI, ScheduleWakeup or CronCreate for a timed step. "
-        "If the step can be done right now, do it. If the wake is someone else (Sam, a peer, a notification), say "
+        f"{do_now}If the wake is someone else (Sam, a peer, a notification), say "
         "plainly in one sentence who it is, then end the turn."
     )
 

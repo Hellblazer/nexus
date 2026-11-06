@@ -1,5 +1,5 @@
 {
- "about": "Hand-labelled closing text of main-session turn ends (nexus transcripts, 2026-10-21..2026-11-05) with open-work phrasing and no background task, agent, monitor or cron running per the transcript. Each text is the last 250-330 characters of the closing message, from the first whole word, with local paths replaced by <path>; nothing else from the sessions is kept (bead nexus-4cgop).",
+ "about": "Hand-labelled closing text of main-session turn ends (nexus transcripts, 2026-10-21..2026-11-05) with open-work phrasing and no background task, agent, monitor or cron running per the transcript. Each text is the last 250-330 characters of the closing message, from the first whole word, with local paths replaced by <path>; nothing else from the sessions is kept (bead nexus-4cgop). Rows probe5-* are not transcript text: they are gate phrasings without 'you' that review round 1 of nexus-4cgop found blocking, kept as SAM-ACTOR rows.",
  "labels": {
   "TRUE": "machine-progressable step, no wake: the guard should block",
   "SAM-ACTOR": "the awaited step is Sam's: the guard must never block",
@@ -889,7 +889,8 @@
    "label": "TRUE",
    "armed": false,
    "text": "I haven't run. Your calls: the v0.1.165 cut after the freeze, the TD7 and \"ten constructs\" wording, and nexus-3va7p items 2, 7 and 9. Next, I'll rebase both branches and start the chas runs. Say if you want the `12fed672d` job looked at first.",
-   "holdout": false
+   "holdout": false,
+   "known_miss": "final-to-sam"
   },
   {
    "id": "sel3-29",
@@ -1184,6 +1185,125 @@
    "armed": false,
    "text": "shells remain, and no scratch engine or cluster is listening. The beads database is pushed and the board and continuation records are current. I will not upgrade or restart on my own; the restart is Sam's run after the cloud engine reaches 0.1.167.",
    "holdout": true
+  },
+  {
+   "id": "probe5-0",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "I'll push the tag once the release go arrives.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-1",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "I'll merge the PR once approved.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-2",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "I'll cut the tag after approval.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-3",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Pushing to develop is next, pending the ack.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-4",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "It is Sam's decision. I'll proceed once that comes through.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-5",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "This needs the operator's go, then I'll run the migration.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-6",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Once Sam's go lands, I'll push the tag.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-7",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "It needs the go from Sam. I'll check the publish after.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-8",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Sam will decide; I'll proceed after.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-9",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Once it's approved I'll merge.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-10",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "The approval is pending. I'll push when it is granted.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-11",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Tag push is gated on authorization; I'll push when it's recorded.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-12",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Cutting the tag is Sam's call. I'll check CI after it publishes.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-13",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Standing by for the green light; then I'll push.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-14",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "I'll pick this up when a decision comes.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-15",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "CI is still running on the branch. Say go and I'll tag.",
+   "holdout": false
+  },
+  {
+   "id": "probe5-16",
+   "label": "SAM-ACTOR",
+   "armed": false,
+   "text": "Shard 3 is still in progress. Sam, which option do you want?",
+   "holdout": false
   }
  ]
 }

@@ -1360,6 +1360,11 @@ class CliBackend:
         # the caller's settings, and expect to justify it.
         if isolated:
             argv += ["--setting-sources", ""]
+        else:
+            # nexus-4cgop: a child that loads the caller's settings loads the conexus plugin, so
+            # its Stop hook would fire at the end of this one-shot run and continue a turn nobody
+            # is waiting on. The scripted run turns the wake guard off for itself.
+            env["NX_STOP_WAKE_GUARD"] = "0"
         # RDR-196 .p2b (nexus-nyry9.15): ability only -- appended ONLY when the
         # caller passes an explicit model. Tier resolution to this string (if
         # any) happens in the CALLER, e.g. via

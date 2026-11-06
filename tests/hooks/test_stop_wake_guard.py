@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -95,6 +96,36 @@ def test_allow_branches(payload: object, env: dict[str, str], reason: str) -> No
     assert (decision.block, decision.reason) == (False, reason)
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"background_tasks": None, "session_crons": None},
+        {"background_tasks": "running", "session_crons": []},
+        {"background_tasks": {"id": "t"}, "session_crons": []},
+        {"background_tasks": [], "session_crons": 0},
+        "absent-both",
+        "absent-tasks",
+        "absent-crons",
+    ],
+    ids=["null-both", "tasks-string", "tasks-dict", "crons-int", "absent-both", "absent-tasks", "absent-crons"],
+)
+def test_an_absent_or_non_list_armed_field_is_unknown_and_allows(fields: object) -> None:
+    """Unknown is not 'nothing armed' (review r1, F4): a Claude Code build that omits the fields would
+    otherwise have the guard fire while a subagent or Monitor runs. Both fields were present on 2.1.319."""
+    payload = _payload()
+    if fields == "absent-both":
+        del payload["background_tasks"], payload["session_crons"]
+    elif fields == "absent-tasks":
+        del payload["background_tasks"]
+    elif fields == "absent-crons":
+        del payload["session_crons"]
+    else:
+        assert isinstance(fields, dict)
+        payload.update(fields)
+    decision = swg.decide(payload, {})
+    assert (decision.block, decision.reason) == (False, "armed-state-unknown")
+
+
 def test_kill_switch_only_for_a_literal_zero() -> None:
     """Any other value (including unset, empty, '1') leaves the guard on."""
     for value in ("", "1", "off", "false"):
@@ -154,6 +185,22 @@ def test_timed_class_has_its_own_match() -> None:
         "Name a bead and I'll take it.",
         "! run nx upgrade, then I'll check it.",
         "The tag needs Sam. Once Sam merges, I'll rebase.",
+        # Gates phrased without "you" (nexus-4cgop review r1, B1 and F1): an approval word is the gate.
+        "I'll push the tag once the release go arrives.",
+        "I'll merge the PR once approved.",
+        "I'll cut the tag after approval.",
+        "Pushing to develop is next, pending the ack.",
+        "It is Sam's decision. I'll proceed once that comes through.",
+        "This needs the operator's go, then I'll run the migration.",
+        "Once Sam's go lands, I'll push the tag.",
+        "It needs the go from Sam. I'll check the publish after.",
+        "Sam will decide; I'll proceed after.",
+        "Once it's approved I'll merge.",
+        "The approval is pending. I'll push when it is granted.",
+        "Tag push is gated on authorization; I'll push when it's recorded.",
+        "Cutting the tag is Sam's call. I'll check CI after it publishes.",
+        "Standing by for the green light; then I'll push.",
+        "I'll pick this up when a decision comes.",
     ],
 )
 def test_sam_actor_is_never_blocked(text: str) -> None:
@@ -179,8 +226,54 @@ def test_a_question_to_sam_gates_the_conditional_that_follows() -> None:
 
 
 def test_sam_clause_without_a_gate_does_not_hide_an_independent_step() -> None:
-    verdict = swg.evaluate_text("Your calls: the cut after the freeze. Next, I'll rebase both branches. Say if you want the job first.")
+    verdict = swg.evaluate_text("Your calls: the cut after the freeze. Next, I'll rebase both branches. Then CI runs the shards.")
     assert verdict.block is True and "rebase" in verdict.clause
+
+
+def test_a_message_that_ends_on_sam_is_allowed_whole() -> None:
+    """His reply is the wake, so an independent step earlier in the message does not block it."""
+    text = "Your calls: the cut after the freeze. Next, I'll rebase both branches. Say if you want the job first."
+    verdict = swg.evaluate_text(text)
+    assert (verdict.block, verdict.final_sam, verdict.cls) == (False, True, swg.CLASS_PROMISE)
+    decision = swg.decide(_payload(text), {})
+    assert (decision.block, decision.reason) == (False, "final-to-sam")
+    # The same step with the Sam sentence moved off the end blocks again: the rule reads the LAST clause.
+    assert swg.evaluate_text("Your calls: the cut after the freeze. Next, I'll rebase both branches.").block is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "CI is still running on the branch. Say go and I'll tag.",
+        "Shard 3 is still in progress. Sam, which option do you want?",
+        "The suite is still running. I'll read it when it finishes. Waiting on Sam for the tag.",
+        "Once the shards finish I'll read the result. The tag is Sam's call.",
+    ],
+)
+def test_a_status_line_before_a_hand_off_to_sam_does_not_block(text: str) -> None:
+    assert swg.evaluate_text(text).block is False, text
+
+
+def test_only_the_tail_of_a_long_message_is_read() -> None:
+    """An early status line cannot block when the message ends on a question to Sam (review r1, S1)."""
+    head = "The planner is still running. " + "Background detail that is neither a wait nor a promise. " * 40
+    assert swg.evaluate_text(head + "Which option do you want?").block is False
+    # And the reverse: a promise inside the tail still blocks, whatever precedes it.
+    assert swg.evaluate_text("Which option do you want? " + head + "I'll check the build later.").block is True
+    # The cut starts at a sentence boundary, so the tail never opens on half a sentence.
+    assert not swg.clauses("x" * 700 + ". " + "Next, I'll rebase.")[0].startswith("x")
+
+
+def test_a_fifty_kilobyte_single_line_returns_quickly() -> None:
+    """Review r1 S2/F2: unanchored lookaheads were quadratic, 8 KB took 1.3 to 2.2 s and 40 KB passed the hook's 10 s timeout."""
+    for line in ("alpha beta " * 4600, "at " * 17000, "| a | b | c " * 4200, "ci run, " * 6300):
+        assert len(line) >= 50_000
+        start = time.perf_counter()
+        swg.evaluate_text(line)
+        assert time.perf_counter() - start < 1.0, line[:20]
+    start = time.perf_counter()
+    assert swg.decide(_payload("alpha beta " * 4600 + "I'll check the build later."), {}).block is True
+    assert time.perf_counter() - start < 1.0
 
 
 @pytest.mark.parametrize(
@@ -248,6 +341,15 @@ def test_reason_quotes_the_clause_and_offers_the_ways_out() -> None:
     assert "a CI or run wait" in reason
 
 
+def test_reason_never_says_do_it_now_for_a_clause_that_names_an_approval() -> None:
+    plain = swg.block_reason(swg.CLASS_PROMISE, "I'll check the build later.")
+    assert "do it" in plain
+    for clause in ("I'll push once the ruling arrives.", "I'll push after Sam's note."):
+        gated = swg.block_reason(swg.CLASS_PROMISE, clause)
+        assert "do it" not in gated, clause
+        assert "who it is" in gated and "ScheduleWakeup" in gated
+
+
 def test_reason_caps_a_long_clause() -> None:
     reason = swg.block_reason(swg.CLASS_PROMISE, "I'll " + "check " * 200)
     assert len(reason) < 1200 and "..." in reason
@@ -312,10 +414,21 @@ def test_internal_error_fails_open(tmp_path: Path) -> None:
     assert "allow reason=error error=RuntimeError" in _log(tmp_path)
 
 
-def test_unicode_closing_text_round_trips_on_any_locale(tmp_path: Path) -> None:
-    proc = _run(_payload("The suite is still running — I’ll read it when it finishes ✓."), tmp_path)
-    assert proc.returncode == 0
-    json.loads(proc.stdout)  # ASCII-escaped JSON, so a cp1252 console cannot break it
+def test_unicode_closing_text_round_trips_on_a_cp1252_console(tmp_path: Path) -> None:
+    """The block is ASCII-escaped JSON, so a console that cannot encode the quoted clause still gets it.
+
+    PYTHONIOENCODING makes stdout cp1252 on any platform (``-I`` would ignore it, so the child runs
+    without it); with ``ensure_ascii=False`` the check mark is unencodable, the write raises, the guard
+    fails open and stdout is empty, so this test fails.
+    """
+    env = scrubbed_env(NEXUS_CONFIG_DIR=str(tmp_path), PATH=os.environ.get("PATH", ""), PYTHONIOENCODING="cp1252")
+    text = "The suite is still running \u2713 \u2014 I\u2019ll read it when it finishes."
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT)], input=json.dumps(_payload(text)), capture_output=True, text=True, encoding="utf-8", env=env, timeout=60
+    )
+    assert proc.returncode == 0, proc.stderr
+    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "\u2713" in context
 
 
 # --- structure ------------------------------------------------------------------------------------
@@ -398,13 +511,27 @@ def test_replay_blocks_no_sam_actor_row_and_no_armed_row() -> None:
     assert wrong == []
 
 
-def test_replay_flags_every_true_row() -> None:
+def test_replay_flags_every_true_row_but_the_known_misses() -> None:
+    """TRUE recall. A row may carry ``known_miss``: a TRUE row the design lets through on purpose (the
+    message ends on a question to Sam, so his reply is the wake). The set of misses must equal the set of
+    marked rows, so neither a new miss nor a silently fixed one passes."""
     true_rows = [r for r in _rows() if r["label"] == "TRUE"]
-    missed = [r["id"] for r in true_rows if not _blocked(r)]
-    assert missed == [], f"recall {len(true_rows) - len(missed)}/{len(true_rows)}"
+    missed = sorted(r["id"] for r in true_rows if not _blocked(r))
+    marked = sorted(r["id"] for r in true_rows if r.get("known_miss"))
+    assert missed == marked, f"recall {len(true_rows) - len(missed)}/{len(true_rows)}"
+    assert len(marked) <= 2
+
+
+def test_the_known_miss_is_the_final_to_sam_rule() -> None:
+    for row in (r for r in _rows() if r.get("known_miss")):
+        decision = swg.decide(_payload(row["text"]), {})
+        assert (decision.block, decision.reason) == (False, "final-to-sam"), row["id"]
+        assert row["known_miss"] == "final-to-sam"
 
 
 def test_replay_holdout_recall_and_false_blocks_stay_bounded() -> None:
+    """The holdout is SPENT: its three TRUE rows scored the rules once and then drove the final
+    "Moving on to" rule, so this pins the fit; a fresh transcript window is the next real holdout."""
     held = [r for r in _rows() if r.get("holdout")]
     hits = sum(1 for r in held if r["label"] == "TRUE" and _blocked(r))
     total = sum(1 for r in held if r["label"] == "TRUE")
@@ -416,4 +543,4 @@ def test_replay_holdout_recall_and_false_blocks_stay_bounded() -> None:
 def test_replay_false_block_rate_on_non_true_rows_is_small() -> None:
     non_true = [r for r in _rows() if r["label"] != "TRUE"]
     false_blocks = [r["id"] for r in non_true if _blocked(r)]
-    assert len(false_blocks) / len(non_true) <= 0.03, false_blocks
+    assert len(false_blocks) <= 2, false_blocks
