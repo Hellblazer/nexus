@@ -429,8 +429,11 @@ Remote Control is an option, not a dependency.
 
 A session can mediate only where `nx ask answer` resolves its own session id,
 the way `mailbox_send` resolves `from` (the tuple-watch session marker, then
-`NX_T1_SESSION_ID`). Terminal sessions and Desktop Code-tab sessions with a
-published T1 id can; the account-plugin server that Claude Desktop chat and
+`NX_T1_SESSION_ID`, then `NX_SESSION_ID`; whichever environment variable
+answers, the result must be a UUID; `resolve_default_from` and
+`resolve_env_session_id` in `tuple_directory.py`). Terminal sessions and
+Desktop Code-tab sessions with a published T1 id can; the account-plugin
+server that Claude Desktop chat and
 Cowork start cannot (the mailbox skill: "The account-plugin server (Claude
 Desktop, Cowork) cannot set it").
 
@@ -1090,3 +1093,4 @@ dependency, no new surface, no second parser.
 - 2026-11-05: Gate round 2 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `271f4614c`; critique `nexus_rdr/245-gate-critique-2026-11-05-r2`.
 - 2026-11-05: Gate round 3 — PASSED (1 Critical, 4 Significant, 0 ship-blocker(s)); commit `b5b14ac9e`; critique `nexus_rdr/245-gate-critique-2026-11-05-r3`.
 - 2026-11-05: Accept, round-3 residual dispositions: residual 1 fixed in `1ab2edf7a` (fix check `nexus_rdr/245-fix-check-f33454580`); residual S1 to `nexus-wc4jj.1`; S2 to `nexus-wc4jj.2`; S3 to `nexus-wc4jj.3`; S4 to `nexus-wc4jj.4` (Phase 1).
+- 2026-11-06: wording amendment to match reviewed code (`nexus-wc4jj.16`). The mediator's own-id resolution names all three tiers (marker, `NX_T1_SESSION_ID`, `NX_SESSION_ID`) and the UUID check on the environment tiers, as `resolve_default_from` and `resolve_env_session_id` do.

@@ -114,7 +114,7 @@ def live_tty() -> str | None:
 
 
 def live_session() -> str:
-    """This session's own id the way ``mailbox_send`` finds it (tuple-watch marker, then ``NX_T1_SESSION_ID``);
+    """This session's own id the way ``mailbox_send`` finds it (tuple-watch marker, then ``NX_T1_SESSION_ID``, then ``NX_SESSION_ID``);
     empty when nothing resolves."""
     from nexus.tuple_directory import resolve_default_from  # noqa: PLC0415 -- deferred: CLI startup cost
 
@@ -729,7 +729,7 @@ def answer_cmd(
             sender = str(uuid.UUID(s.session().strip()))
         except (ValueError, AttributeError):
             raise _refuse("--via mediator needs this session's own id, and it did not resolve to a UUID "
-                          "(tuple-watch marker, then NX_T1_SESSION_ID)") from None
+                          "(tuple-watch marker, then NX_T1_SESSION_ID, then NX_SESSION_ID)") from None
         via_value = f"mediator:{sender}"
         words = sam_words
 

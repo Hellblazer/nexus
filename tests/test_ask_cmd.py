@@ -168,6 +168,17 @@ def test_an_ask_with_after_is_refused(world: World) -> None:
     untouched(world)
 
 
+def test_an_ask_with_after_is_refused_on_the_cli_route_before_the_tty_check(world: World) -> None:
+    content = text("halcyon.txt").rstrip("\n") + "\nafter: engine 0.1.180 deploys\n"
+    world.t2.add("threads", "halcyon", content)
+    world.tty = None
+    version = parse_session("halcyon", content).threads[0].asks[0].version
+    r = world.run("answer", REF, "1", "--expect", version, "--via", "cli")
+    assert r.exit_code != 0 and "after:" in r.output and "engine 0.1.180 deploys" in r.output, r.output
+    assert "TTY" not in r.output, r.output
+    untouched(world)
+
+
 def test_a_sent_record_is_refused_without_replace_and_replaced_with_it(world: World) -> None:
     world.t2.add("asks", TITLE, text("answer_record_v1.json"))
     r = world.run(*mediator_args())
@@ -361,6 +372,8 @@ def test_via_mediator_without_an_own_session_is_refused(world: World) -> None:
     world.session = ""
     r = world.run(*mediator_args())
     assert r.exit_code != 0 and "session" in r.output
+    # The refusal names every tier of the resolution order (tuple_directory.resolve_default_from).
+    assert all(tier in r.output for tier in ("tuple-watch marker", "NX_T1_SESSION_ID", "NX_SESSION_ID")), r.output
     untouched(world)
 
 
