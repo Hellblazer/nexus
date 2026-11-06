@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A new builtin plan, `entity-resolution`, keeps entity-listing questions off the single-query path** (nexus-irndi, RDR-147 Step 4 branch (c); client-only). A question like "find the names of companies affected by issues in X" that the request-kind call read as a discovery/listing request was answered by `document-discovery`, one query with no coverage check, so the run could lose a customer the evidence held. The new template is declared `discovery/listing` and carries the steps of `hybrid-factual-lookup` (search, graph traversal, rank, generate), so either reading of the question reaches a plan with a coverage boundary; a lookup reading still goes to `hybrid-factual-lookup`. The library has 13 builtins; `nx plan reseed` inserts the new one. What changes for you: entity-listing questions now take the multi-step plan, which costs the ~80s synthesis floor instead of one query.
+
 ## [7.96.0] - 2026-11-05
 
 Pairs with engine-service-v0.1.180 (REQUIRED_ENGINE_VERSION rises from 0.1.179). The engine carries the catalog half of document sensitivity and the root-names-the-target `retire-keys` sweep. A local install picks the engine up through the pin; the managed service needs the 0.1.180 deploy before `--sensitive` works against it.

@@ -476,8 +476,8 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 - `nx doctor --check-plan-library` (RDR-092 Phase 0c) reports plan
   rows by bucket (authored vs backfilled vs non-dimensional) and
   flags a stale global tier. Run after any plugin install to
-  confirm `nx plan reseed` seeded the 12 builtins (see
-  [Plan-Centric Retrieval § The 12 builtin scenario templates](plan-centric-retrieval.md#the-12-builtin-scenario-templates)).
+  confirm `nx plan reseed` seeded the 13 builtins (see
+  [Plan-Centric Retrieval § The 13 builtin scenario templates](plan-centric-retrieval.md#the-13-builtin-scenario-templates)).
 - `nx plan repair` (RDR-092 Phase 0d) was removed in 7.0.0 with the local plan
   library; `nx plan` now has `delete`, `disable`, `enable`, `hygiene`, `list`,
   `reseed`, `set-scope` and `show`.

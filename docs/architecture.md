@@ -1328,7 +1328,7 @@ logged, not discarded.
 
 ### Builtin plan templates
 
-The plan-centric retrieval stack ships twelve builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
+The plan-centric retrieval stack ships thirteen builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
 
 Grouped by verb:
 
