@@ -2468,11 +2468,12 @@ def _run_housekeeping(
             # Transfer links from old entry to new entry. A link between the
             # two entries (a symlink ghost citing its own target, or the
             # target citing the ghost) would land as a self-link on the new
-            # entry, so it is dropped (nexus-x3bxj).
-            new_key = str(new_entry.tumbler)
+            # entry, and a self-link on the old entry would leave the new one
+            # linked to the deleted entry, so both are dropped (nexus-x3bxj).
+            pair = {str(new_entry.tumbler), str(entry.tumbler)}
             old_links = cat.links_from(entry.tumbler)
             for lnk in old_links:
-                if str(lnk.to_tumbler) == new_key:
+                if str(lnk.to_tumbler) in pair:
                     continue
                 w.link_if_absent(
                     new_entry.tumbler, lnk.to_tumbler, lnk.link_type,
@@ -2481,7 +2482,7 @@ def _run_housekeeping(
             # Also transfer incoming links
             incoming = cat.links_to(entry.tumbler)
             for lnk in incoming:
-                if str(lnk.from_tumbler) == new_key:
+                if str(lnk.from_tumbler) in pair:
                     continue
                 w.link_if_absent(
                     lnk.from_tumbler, new_entry.tumbler, lnk.link_type,

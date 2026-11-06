@@ -1056,14 +1056,22 @@ class TestRunHousekeeping:
         cat.link(ghost_t, target_t, "cites", created_by="test")
         cat.link(target_t, ghost_t, "relates", created_by="test")
         cat.link(ghost_t, other_t, "implements", created_by="test")
+        cat.link(other_t, ghost_t, "quotes", created_by="test")
+        cat.link(ghost_t, ghost_t, "supersedes", created_by="test")  # the ghost's own self-link
 
         _run_housekeeping(cat, owner_t, indexed_set={"docs/target.md", "docs/rdr/rdr-2.md"})
 
         assert cat.resolve(ghost_t) is None
         out = cat.links_from(target_t)
+        inc = cat.links_to(target_t)
         assert not [l for l in out if str(l.to_tumbler) == str(target_t)], out
-        assert not [l for l in cat.links_to(target_t) if str(l.from_tumbler) == str(target_t)]
+        assert not [l for l in inc if str(l.from_tumbler) == str(target_t)], inc
+        # the ghost's self-link is not copied into a target-to-ghost or ghost-to-target link to the deleted ghost
+        # (the target's own earlier link to the ghost, "relates", stays: a delete is a tombstone)
+        assert not [l for l in out + inc if l.link_type == "supersedes"], out + inc
+        # every other link moves, outgoing and incoming
         assert any(str(l.to_tumbler) == str(other_t) and l.link_type == "implements" for l in out)
+        assert any(str(l.from_tumbler) == str(other_t) and l.link_type == "quotes" for l in inc)
 
     def test_rename_carries_non_evidentiary_stamp_to_new_entry(self, tmp_path, monkeypatch):
         """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round
