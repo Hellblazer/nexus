@@ -6794,7 +6794,7 @@ nx ask show ENTRY/ID [--json]
 
 | Flag | Description |
 |------|-------------|
-| `--json` | The ask as one JSON object (every parsed field, `entry_age`, and `answer`: the answer record for this version or null) |
+| `--json` | The ask as one JSON object (every parsed field, `entry_age`, and `answer`: null when there is no record for this version, else only the closed-pattern fields `answer_id`, `choice`, `via`, `time`, `status` and `tuple_id`, or `{"unreadable": true}` when any of them does not match; Sam's words, notes and errors are never shown here) |
 
 ### nx ask digest
 

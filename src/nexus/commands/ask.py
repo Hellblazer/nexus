@@ -131,24 +131,34 @@ def live_beads() -> BeadsResult:
 
 
 def default_cli_sender() -> str:
-    """The ``from`` of a ``--via cli`` mail: a UUID minted once, kept in the nexus config dir."""
+    """The ``from`` of a ``--via cli`` mail: a UUID minted once, kept in the nexus config dir.
+
+    An empty or invalid file counts as absent and is replaced. The write goes to a temp file and
+    ``os.replace`` (atomic on Windows too), so a crash never leaves a half-written id.
+    """
     from nexus import config as _nx_config  # noqa: PLC0415 -- deferred: CLI startup cost
 
     path = _nx_config.nexus_config_dir() / "ask-cli-sender"
-    for _ in range(2):
+
+    def kept() -> str | None:
         try:
             value = path.read_text(encoding="utf-8").strip()
-            if _CANONICAL_UUID.fullmatch(value):
-                return value
-        except OSError:
-            pass
+        except (OSError, ValueError):
+            return None
+        return value if _CANONICAL_UUID.fullmatch(value) else None
+
+    if (value := kept()) is not None:
+        return value
+    fresh = str(uuid.uuid4())
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("x", encoding="utf-8") as fh:  # exclusive: two first runs agree on one id
-                fh.write(str(uuid.uuid4()) + "\n")
-        except FileExistsError:
-            continue
-    raise click.ClickException(f"cannot keep the cli sender id at {path}")
+        tmp.write_text(fresh + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise click.ClickException(f"cannot keep the cli sender id at {path}: {exc}") from exc
+    return kept() or fresh
 
 
 def _utcnow() -> datetime:
@@ -235,12 +245,12 @@ def _resolve(asks: list[tuple[Ask, datetime | None]], ref: str) -> tuple[Ask, da
     else:
         hits = [a for a in asks if a[0].id == ref]
     if not hits:
-        raise click.ClickException(f"no ask {ref!r} on the board (nx ask list names them)")
+        raise _refuse(f"no ask {ref!r} on the board (nx ask list names them)")
     if len(hits) > 1:
-        names = ", ".join(_ref(a) for a, _ in hits)
+        names = ", ".join(_c(_ref(a)) for a, _ in hits)
         if "/" in ref:
-            raise click.ClickException(f"{ref!r} names more than one ask in that entry: {names}")
-        raise click.ClickException(f"{ref!r} is held by more than one entry; name one of: {names}")
+            raise _refuse(f"{ref!r} names more than one ask in that entry: {names}")
+        raise _refuse(f"{ref!r} is held by more than one entry; name one of: {names}")
     return hits[0]
 
 
@@ -288,8 +298,27 @@ def _fit(line: str, width: int) -> str:
     return line if len(line) <= width else line[: max(width - 1, 1)] + "…"
 
 
+#: C0, DEL and C1 controls: an ESC sequence or a carriage return in a field can repaint a terminal.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_LINE_BREAKS = frozenset("\t\n\r\x0b\x0c\x1c\x1d\x1e\x85")
+
+
+def _c(value: Any) -> str:
+    """One display field: controls dropped, tabs and line breaks turned into a space."""
+    return _CONTROL.sub(lambda m: " " if m.group() in _LINE_BREAKS else "", str(value))
+
+
+def _out(value: str) -> str:
+    """Final pass over text output: every control character except newline and tab dropped."""
+    return _CONTROL.sub(lambda m: m.group() if m.group() in "\n\t" else "", value)
+
+
+def _say(value: str) -> None:
+    click.echo(_out(value))
+
+
 def _one_line(value: str) -> str:
-    return " ".join(value.split())
+    return " ".join(_c(value).split())
 
 
 # --- answer records and the digest ------------------------------------------------------------------
@@ -336,9 +365,12 @@ def _answer_entries(s: Seams, now: datetime, window: timedelta) -> list[dict[str
 def _digest_lines(entries: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for e in entries:
-        choice = "none" if e["choice"] is None else str(e["choice"])
-        head = f"  {e['time']}  {e['via']}  {e['ask']}@{e['version']}  choice {choice}"
-        tail = f"tuple {e['tuple_id']}" if e["status"] == "sent" else f"[{e['status']}{': ' + e['error'] if e['error'] else ''}]"
+        choice = "none" if e["choice"] is None else _c(e["choice"])
+        head = f"  {_c(e['time'])}  {_c(e['via'])}  {e['ask']}@{e['version']}  choice {choice}"
+        tail = (
+            f"tuple {_c(e['tuple_id'])}" if e["status"] == "sent"
+            else f"[{_c(e['status'])}{': ' + _c(e['error']) if e['error'] else ''}]"
+        )
         lines.append(f'{head}  "{_one_line(str(e["sam_words"]))}"  {tail}')
         if e["batch_words"]:
             lines.append(f'      batch: "{_one_line(str(e["batch_words"]))}"')
@@ -351,7 +383,7 @@ def _digest_lines(entries: list[dict[str, Any]]) -> list[str]:
 def _group_line(c: ClassedAsk, width: int) -> str:
     a = c.ask
     meta = "".join(f" [{m}]" for m in ((f"by {a.by}" if a.by else ""), c.mark) if m)
-    return _fit(f"  {_ref(a)}  {a.version}{meta}  {a.question}", width)
+    return _fit(_c(f"  {_ref(a)}  {a.version}{meta}  {a.question}"), width)
 
 
 def _records_for(s: Seams, asks: list[tuple[Ask, datetime | None]]) -> dict[str, Any]:
@@ -408,24 +440,24 @@ def list_cmd(ctx: click.Context, as_json: bool, show_all: bool) -> None:
     if merged.threads:
         out.append(f"Legacy asks ({len(merged.threads)})")
         out.extend(
-            _fit(f"  {i.session} / {i.thread.title}: {i.thread.needs_sam} ({i.age})", width) for i in merged.threads
+            _fit(_c(f"  {i.session} / {i.thread.title}: {i.thread.needs_sam} ({i.age})"), width) for i in merged.threads
         )
     if merged.beads or beads.error:
         out.append(f"Needs-sam beads ({len(merged.beads)})")
         if beads.error:
-            out.append(f"  could not be read: {beads.error}")
+            out.append(_c(f"  could not be read: {beads.error}"))
         for b in merged.beads:
             pointer = f"  -> {', '.join(b.ask_pointers)}" if b.ask_pointers else ""
             prio = f"  P{b.bead.priority}" if b.bead.priority is not None else ""
-            out.append(_fit(f"  {b.bead.id}{prio}{pointer}  {b.bead.title}", width))
+            out.append(_fit(_c(f"  {b.bead.id}{prio}{pointer}  {b.bead.title}"), width))
     if findings:
         out.append(f"Lint ({len(findings)})")
-        out.extend(_fit(f"  {f.entry}{'/' + f.ask if f.ask else ''}: {f.rule}: {f.message}", width) for f in findings)
+        out.extend(_fit(_c(f"  {f.entry}{'/' + f.ask if f.ask else ''}: {f.rule}: {f.message}"), width) for f in findings)
     if classes.unreadable:
-        out.append("Unreadable entries (their asks are not listed): " + ", ".join(classes.unreadable))
+        out.append("Unreadable entries (their asks are not listed): " + ", ".join(_c(t) for t in classes.unreadable))
     out.append(f"Digest, last 48 hours ({len(digest)})")
     out.extend(_digest_lines(digest))
-    click.echo("\n".join(out))
+    _say("\n".join(out))
 
 
 def _list_json(classes: Any, merged: Any, beads: BeadsResult, findings: Any, digest: list[dict[str, Any]],
@@ -456,6 +488,36 @@ def _list_json(classes: Any, merged: Any, beads: BeadsResult, findings: Any, dig
     return data
 
 
+_ANSWER_STATUS = frozenset({"sending", "sent", "failed"})
+_VIA = re.compile(rf"cli|mediator:{_UUID}")
+_ISO_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})")
+_HEX16 = re.compile(r"[0-9a-f]{16}")
+_TUPLE_ID = re.compile(r"[0-9a-f-]{1,64}")
+
+
+def _closed_answer(rec: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The answer record's fields that match a closed pattern, or None when any of them does not.
+
+    ``show`` is what an asker runs to check an answer is fresh, so nothing a writer typed freely
+    (``sam_words``, ``note``, ``tty``, ``error``, the question and options) is passed on (RDR-245 Decision 10).
+    """
+    if rec is None:
+        return None
+    status, via, when, choice = rec.get("status"), rec.get("via"), rec.get("time"), rec.get("choice")
+    answer_id, tuple_id = rec.get("answer_id"), rec.get("tuple_id")
+    ok = (
+        isinstance(status, str) and status in _ANSWER_STATUS
+        and isinstance(via, str) and _VIA.fullmatch(via) is not None
+        and isinstance(when, str) and _ISO_TIME.fullmatch(when) is not None
+        and (choice is None or (type(choice) is int and 1 <= choice <= 999))
+        and isinstance(answer_id, str) and _HEX16.fullmatch(answer_id) is not None
+        and (tuple_id is None or (isinstance(tuple_id, str) and _TUPLE_ID.fullmatch(tuple_id) is not None))
+    )
+    if not ok:
+        return None
+    return {"answer_id": answer_id, "choice": choice, "via": via, "time": when, "status": status, "tuple_id": tuple_id}
+
+
 # --- show -------------------------------------------------------------------------------------------
 
 
@@ -471,42 +533,43 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
     age = "unknown" if stamp is None else format_age(now - stamp)
     title = answer_title(ask)
     row = s.t2.get(project=ASKS_PROJECT, title=title) if title else None
-    answer = _json_obj(row) if row is not None else None
+    # The asker reads this for its freshness check, so only closed-pattern values of the record leave here.
+    answer = None if row is None else (_closed_answer(_json_obj(row)) or {"unreadable": True})
     if as_json:
         click.echo(json.dumps({**_ask_json(ask), "entry_age": age, "answer": answer}, indent=2))
         return
     out = [
-        _ref(ask),
-        f"version: {ask.version}",
-        f"asker session: {ask.session_id or '(none: the entry has no session: line)'}",
-        f"entry: {ask.entry} (updated {age})",
-        f"thread: {ask.thread}",
+        _c(_ref(ask)),
+        f"version: {_c(ask.version)}",
+        f"asker session: {_c(ask.session_id) or '(none: the entry has no session: line)'}",
+        f"entry: {_c(ask.entry)} (updated {age})",
+        f"thread: {_c(ask.thread)}",
     ]
     if ask.refs:
-        out.append(f"refs: {', '.join(ask.refs)}")
+        out.append(f"refs: {_c(', '.join(ask.refs))}")
     out += [
-        f"asked: {ask.asked}",
-        f"question: {ask.question}",
-        f"context: {ask.context}",
+        f"asked: {_c(ask.asked)}",
+        f"question: {_c(ask.question)}",
+        f"context: {_c(ask.context)}",
         "options:",
     ]
     for o in ask.options:
         mark = " (recommended)" if ask.rec == o.n else ""
-        out.append(f"  {o.n}. {o.text}{' [irreversible]' if o.irreversible else ''}{mark}")
-    out.append(f"rec: {ask.rec_raw or '-'}")
-    out.append(f"why: {ask.why or '-'}")
+        out.append(f"  {o.n}. {_c(o.text)}{' [irreversible]' if o.irreversible else ''}{mark}")
+    out.append(f"rec: {_c(ask.rec_raw) or '-'}")
+    out.append(f"why: {_c(ask.why) or '-'}")
     out.append(f"reversible: {'yes' if ask.reversible else 'no'}")
     out.append(f"blocking: {'yes' if ask.blocking else 'no'}")
-    out.append(f"after: {ask.after or '-'}{' (conditional: not answerable until the asker deletes it)' if ask.conditional else ''}")
-    out.append(f"by: {ask.by or '-'}")
+    out.append(f"after: {_c(ask.after) or '-'}{' (conditional: not answerable until the asker deletes it)' if ask.conditional else ''}")
+    out.append(f"by: {_c(ask.by) or '-'}")
     if ask.missing:
         out.append(f"missing: {', '.join(ask.missing)}")
-    if answer is not None:
-        out.append(
-            f"answer: {answer.get('status', '?')} at {answer.get('time', '?')} via {answer.get('via', '?')}"
-            f" (choice {answer.get('choice') if answer.get('choice') is not None else 'none'})"
-        )
-    click.echo("\n".join(out))
+    if answer == {"unreadable": True}:
+        out.append("answer record present, unreadable")
+    elif answer is not None:
+        choice = "none" if answer["choice"] is None else answer["choice"]
+        out.append(f"answer: {answer['status']} at {answer['time']} via {answer['via']} (choice {choice})")
+    _say("\n".join(out))
 
 
 # --- digest -----------------------------------------------------------------------------------------
@@ -521,19 +584,19 @@ def digest_cmd(ctx: click.Context) -> None:
     if not entries:
         click.echo("no answers in the last 7 days")
         return
-    click.echo("\n".join(_digest_lines(entries)))
+    _say("\n".join(_digest_lines(entries)))
 
 
 # --- answer -----------------------------------------------------------------------------------------
 
 
 def _refuse(message: str) -> click.ClickException:
-    return click.ClickException(message)
+    return click.ClickException(_out(message))
 
 
 def _current_text(ask: Ask) -> str:
-    lines = [f"  question: {ask.question}", f"  context: {ask.context}"]
-    lines += [f"  {o.n}. {_option_text(ask, o.n)}" for o in ask.options]
+    lines = [f"  question: {_c(ask.question)}", f"  context: {_c(ask.context)}"]
+    lines += [f"  {o.n}. {_c(_option_text(ask, o.n))}" for o in ask.options]
     return "\n".join(lines)
 
 
@@ -545,7 +608,7 @@ def _gate_existing(row: dict[str, Any] | None, now: datetime, replace: bool, tit
     status = rec.get("status") if rec else None
     if status == "sent":
         if not replace:
-            raise _refuse(f"already answered at {rec.get('time', '?')} via {rec.get('via', '?')}; --replace supersedes it")
+            raise _refuse(f"already answered at {_c(rec.get('time', '?'))} via {_c(rec.get('via', '?'))}; --replace supersedes it")
         return
     if status == "sending":
         sent = parse_timestamp(str(rec.get("time", "")))
@@ -571,7 +634,9 @@ def _batch_title_for(s: Seams, mediator: str, words: str, now: datetime) -> tupl
     best: tuple[datetime, str] | None = None
     for title, rec in taken.items():
         when = parse_timestamp(str(rec.get("time", "")))
-        if rec.get("batch_words") == words and when is not None and abs(now - when) <= BATCH_WINDOW:
+        titles = rec.get("answer_titles")
+        reusable = isinstance(titles, list) and all(isinstance(t, str) for t in titles)  # a malformed record is never joined
+        if reusable and rec.get("batch_words") == words and when is not None and abs(now - when) <= BATCH_WINDOW:
             if best is None or when > best[0]:
                 best = (when, title)
     if best is not None:
@@ -609,6 +674,9 @@ def answer_cmd(
     sam_words: str | None, batch_words: str | None, replace: bool,
 ) -> None:
     """Answer one ask. REPLY is an option number, or free text for a note-only answer that authorizes no option."""
+    stripped = reply.strip()
+    if not stripped:
+        raise click.UsageError("the reply is empty: give an option number, or the text of a note-only answer")
     s = _seams(ctx)
     now = s.now()
     ask, _stamp = _resolve(_all_asks(rows := _read_rows(s)), ref)
@@ -617,18 +685,21 @@ def answer_cmd(
             f"--expect {expect.strip()} is not the current version {ask.version}; the ask now reads:\n{_current_text(ask)}"
         )
     if ask.conditional:
-        raise _refuse(f"{_ref(ask)} has after: {ask.after!r}: it is not answerable until the asker deletes that line")
+        raise _refuse(f"{_c(_ref(ask))} has after: {ask.after!r}: it is not answerable until the asker deletes that line")
     if not ask.session_id:
         raise _refuse(f"the entry {ask.entry!r} has no session: line, so the answer cannot be routed")
     if not _CANONICAL_UUID.fullmatch(ask.session_id):
         raise _refuse(f"session: {ask.session_id!r} is not a lower-case canonical UUID, so the answer cannot be routed")
     carrying = sorted({str(r.get("title", "")) for r in rows if _session_of(r) == ask.session_id})
     if len(carrying) > 1:
-        raise _refuse(f"session {ask.session_id} is carried by more than one entry ({', '.join(carrying)}); no answer is routed")
+        raise _refuse(f"session {ask.session_id} is carried by more than one entry ({', '.join(_c(t) for t in carrying)}); no answer is routed")
 
     choice: int | None = None
-    if _NUMBER.fullmatch(reply.strip()):
-        choice = int(reply.strip())
+    if _NUMBER.fullmatch(stripped):
+        try:
+            choice = int(stripped)
+        except ValueError:  # a numeric string past Python's int digit limit
+            raise click.UsageError("the reply is a number too large to be an option") from None
         if not 1 <= choice <= len(ask.options):
             raise _refuse(f"choice {choice} is outside 1..{len(ask.options)}: the ask has {len(ask.options)} options")
         recorded_note = note or ""
@@ -694,9 +765,16 @@ def answer_cmd(
         winner = back_rec.get("answer_id", "?") if back_rec else "unreadable"
         raise _refuse(f"another answer was recorded first (answer {winner}); nothing was sent")
 
-    def settle(status: str, tuple_id: str | None, error: str | None) -> None:
+    def settle(status: str, tuple_id: str | None, error: str | None) -> bool:
+        """Write the final record; one retry. False when both writes failed."""
         final = {**record, "status": status, "tuple_id": tuple_id, "error": error}
-        s.t2.put(project=ASKS_PROJECT, title=title, content=json.dumps(final, ensure_ascii=False), tags="ask-answer")
+        for _attempt in range(2):
+            try:
+                s.t2.put(project=ASKS_PROJECT, title=title, content=json.dumps(final, ensure_ascii=False), tags="ask-answer")
+                return True
+            except Exception:  # noqa: BLE001 -- reported by the caller, which knows what was already sent
+                continue
+        return False
 
     try:
         if batch_title:
@@ -724,9 +802,13 @@ def answer_cmd(
         )
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: the failure is recorded on the answer and printed
         error = f"{type(exc).__name__}: {exc}" if not str(exc) else str(exc)
-        settle("failed", None, error)
-        click.echo(f"failed: {error}", err=True)
+        note = "" if settle("failed", None, error) else "; the answer record was not updated and is left at sending"
+        click.echo(_out(f"failed: {error}{note}"), err=True)
         ctx.exit(1)
-    settle("sent", str(tuple_id), None)
+    if not settle("sent", str(tuple_id), None):
+        click.echo(
+            _out(f"mail sent (tuple {tuple_id}); answer record left at sending; do not re-run"), err=True,
+        )
+        ctx.exit(1)
     shown = "none" if choice is None else str(choice)
-    click.echo(f"sent: {_ref(ask)}@{ask.version} choice {shown} via {via_value}; tuple {tuple_id}")
+    _say(f"sent: {_c(_ref(ask))}@{ask.version} choice {shown} via {via_value}; tuple {tuple_id}")
