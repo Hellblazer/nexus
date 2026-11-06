@@ -29,6 +29,8 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -2288,6 +2290,268 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, null, List.of(mine), ACTOR, false);
 
         assertThat(verdictOf(out, mine)).isEqualTo("attach");
+    }
+
+    // ── the keyed form: one transaction, one marker (nexus-k9kr9, RDR-222) ──────────────────────────────────────
+
+    /** Counts marker calls and keeps what the last one saw; {@code inside} runs in the marker, in the call's transaction. */
+    private static final class Mark {
+        final AtomicInteger calls = new AtomicInteger();
+        final AtomicReference<QuarantineRestoreOutcome> seen = new AtomicReference<>();
+        final java.util.function.Consumer<DSLContext> inside;
+
+        Mark() { this(ctx -> { }); }
+
+        Mark(java.util.function.Consumer<DSLContext> inside) { this.inside = inside; }
+
+        PgVectorRepository.LedgerMarker<QuarantineRestoreOutcome> marker() {
+            return (ctx, outcome) -> {
+                calls.incrementAndGet();
+                seen.set(outcome);
+                inside.accept(ctx);
+            };
+        }
+    }
+
+    private static PgVectorRepository.KeyedRestore keyed(Mark mark) {
+        return PgVectorRepository.KeyedRestore.begin(mark.marker(), 25_000);
+    }
+
+    /** Two siblings, one chunk in each: {@code first} in the reaper's, {@code second} in a client-named one. */
+    private record TwoSiblings(String t, String c, String clientSibling, String first, String second) {}
+
+    private TwoSiblings twoSiblings(int docBase) throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String first = quarantinedWith(t, c, Map.of("first-sibling", Map.<String, Object>of(
+            "catalog_doc_id", "1." + docBase + ".1", "chunk_index", 0))).get(0);
+        String clientSibling = rowDerivedSibling(c, "old-owner");
+        String second = clientSiblingChunk(t, c, clientSibling, "second-sibling",
+            Map.of("catalog_doc_id", "1." + docBase + ".2", "chunk_index", 0));
+        liveDoc(t, c, "1." + docBase + ".1", "Free document", 1, "f.md", Map.of());
+        liveDoc(t, c, "1." + docBase + ".2", "Locked document", 1, "l.md", Map.of());
+        setOwner(t, c, "curator-9");
+        assertThat(vectors.resolveQuarantineSiblings(t, c)).containsExactly(quarantineOf(c), clientSibling);
+        return new TwoSiblings(t, c, clientSibling, first, second);
+    }
+
+    @Test
+    void aKeyedRestoreRunsEverySiblingInOneTransaction_theMarkerRunsOnceInsideIt() throws Exception {
+        var f = twoSiblings(50);
+        // What a second connection sees while the marker runs: the call has not committed, so neither sibling's move
+        // is visible to it. Per-sibling transactions would show the first one's chunk in the origin by then.
+        var seenByOthers = new AtomicReference<Boolean>();
+        var seenInside = new AtomicReference<Integer>();
+        Mark mark = new Mark(ctx -> {
+            try {
+                seenByOthers.set(inCollection(f.t(), f.c(), f.first()) || inCollection(f.t(), f.c(), f.second()));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            seenInside.set(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(f.t()).and(CHUNKS.COLLECTION.eq(f.c()))));
+        });
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestoreKeyed(f.t(), f.c(), List.of(f.first(), f.second()),
+            ACTOR, true, keyed(mark));
+
+        assertThat(mark.calls).as("one marker call for the whole call").hasValue(1);
+        assertThat(mark.seen.get()).as("it saw the final outcome").isSameAs(out);
+        assertThat(seenInside.get()).as("inside the transaction both moves are there").isEqualTo(2);
+        assertThat(seenByOthers.get()).as("and none of it is committed yet").isFalse();
+        assertThat(out.restored()).containsExactlyInAnyOrder(f.first(), f.second());
+        assertThat(out.auditIds()).as("one audit row per sibling, as unkeyed").hasSize(2);
+        assertThat(out.quarantineCollections()).containsExactly(quarantineOf(f.c()), f.clientSibling());
+        assertThat(inCollection(f.t(), f.c(), f.first())).isTrue();
+        assertThat(inCollection(f.t(), f.c(), f.second())).isTrue();
+        assertThat(audit(f.t(), "quarantine_restore")).hasSize(2);
+    }
+
+    @Test
+    void aBusyTripOnTheSecondSiblingOfAKeyedRestoreRollsTheFirstBack_nothingMoved_noMarker() throws Exception {
+        var f = twoSiblings(51);
+        Mark mark = new Mark();
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", SQLDataType.OTHER,
+                DSL.function("hashtext", SQLDataType.INTEGER, DSL.val("indexrun:" + f.t() + ":1.51.2")))).execute();
+
+            assertThatThrownBy(() -> vectors.quarantineRestoreKeyed(f.t(), f.c(), List.of(f.first(), f.second()),
+                    ACTOR, true, keyed(mark)))
+                .isInstanceOfSatisfying(PgVectorRepository.QuarantineRestoreBusyException.class, busy -> {
+                    assertThat(busy.somethingMoved()).as("sibling one rolled back with the rest").isFalse();
+                    assertThat(busy.auditIds()).isEmpty();
+                    assertThat(busy.movedChashes()).isEmpty();
+                    assertThat(busy.getMessage()).contains("nothing was moved");
+                });
+            holder.rollback();
+        }
+
+        assertThat(mark.calls).as("no marker: nothing committed").hasValue(0);
+        assertThat(inCollection(f.t(), quarantineOf(f.c()), f.first())).as("sibling one's chunk never left").isTrue();
+        assertThat(inCollection(f.t(), f.c(), f.first())).isFalse();
+        assertThat(manifest(f.t(), "1.51.1")).as("and was not attached").isEmpty();
+        assertThat(audit(f.t(), "quarantine_restore")).as("no audit row survived").isEmpty();
+        assertThat(inCollection(f.t(), f.clientSibling(), f.second())).isTrue();
+
+        // The same keyed call, sent again with the lock gone, finishes the whole thing.
+        Mark again = new Mark();
+        QuarantineRestoreOutcome out = vectors.quarantineRestoreKeyed(f.t(), f.c(), List.of(f.first(), f.second()),
+            ACTOR, true, keyed(again));
+        assertThat(out.restored()).containsExactlyInAnyOrder(f.first(), f.second());
+        assertThat(again.calls).hasValue(1);
+    }
+
+    @Test
+    void aKeyedRestoreWhoseMarkerFailsMovesNothing_theLostLeaseCase() throws Exception {
+        var f = twoSiblings(52);
+        var lost = new Mark(ctx -> { throw new IllegalStateException("lease lost"); });
+
+        assertThatThrownBy(() -> vectors.quarantineRestoreKeyed(f.t(), f.c(), List.of(f.first(), f.second()), ACTOR,
+                true, keyed(lost)))
+            .isInstanceOf(IllegalStateException.class).hasMessage("lease lost");
+
+        assertThat(lost.calls).hasValue(1);
+        assertThat(inCollection(f.t(), quarantineOf(f.c()), f.first())).as("both siblings rolled back").isTrue();
+        assertThat(inCollection(f.t(), f.clientSibling(), f.second())).isTrue();
+        assertThat(manifest(f.t(), "1.52.1")).isEmpty();
+        assertThat(audit(f.t(), "quarantine_restore")).isEmpty();
+    }
+
+    @Test
+    void aKeyedRestoreSpendsOneBudgetAcrossItsSiblings_aSpentOneIsBusyWithNothingMoved() throws Exception {
+        var f = twoSiblings(53);
+        Mark mark = new Mark();
+        // 400 ms for the whole call; the hook uses it up between sibling one and sibling two.
+        vectors.setKeyedRestoreSiblingHookForTests((ctx, index) -> {
+            if (index == 2) {
+                try { Thread.sleep(600); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+        });
+        try {
+            assertThatThrownBy(() -> vectors.quarantineRestoreKeyed(f.t(), f.c(), List.of(f.first(), f.second()),
+                    ACTOR, true, PgVectorRepository.KeyedRestore.begin(mark.marker(), 400)))
+                .isInstanceOfSatisfying(PgVectorRepository.QuarantineRestoreBusyException.class, busy -> {
+                    assertThat(busy.getMessage()).contains("time budget");
+                    assertThat(busy.somethingMoved()).isFalse();
+                    assertThat(busy.auditIds()).isEmpty();
+                });
+        } finally {
+            vectors.setKeyedRestoreSiblingHookForTests(null);
+        }
+
+        assertThat(mark.calls).hasValue(0);
+        assertThat(inCollection(f.t(), quarantineOf(f.c()), f.first())).as("sibling one rolled back").isTrue();
+        assertThat(audit(f.t(), "quarantine_restore")).isEmpty();
+    }
+
+    @Test
+    void eachSiblingOfAKeyedRestoreRunsUnderWhatIsLeftOfOneStatementBudget_lockTimeoutStaysTwoSeconds()
+            throws Exception {
+        var f = twoSiblings(54);
+        var afterSiblingOne = new AtomicReference<Integer>();
+        var inMarker = new AtomicReference<Integer>();
+        var lockInMarker = new AtomicReference<Integer>();
+        Mark mark = new Mark(ctx -> {
+            inMarker.set(settingMs(ctx, "statement_timeout"));
+            lockInMarker.set(settingMs(ctx, "lock_timeout"));
+        });
+        vectors.setKeyedRestoreSiblingHookForTests((ctx, index) -> {
+            if (index == 2) {
+                afterSiblingOne.set(settingMs(ctx, "statement_timeout"));   // what sibling one ran under
+                try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+        });
+        try {
+            vectors.quarantineRestoreKeyed(f.t(), f.c(), List.of(f.first(), f.second()), ACTOR, true,
+                PgVectorRepository.KeyedRestore.begin(mark.marker(), 20_000));
+        } finally {
+            vectors.setKeyedRestoreSiblingHookForTests(null);
+        }
+
+        assertThat(afterSiblingOne.get()).as("sibling one ran under about the whole budget")
+            .isBetween(15_000, 20_000);
+        assertThat(inMarker.get()).as("sibling two ran under the budget less the 500 ms the call had already spent")
+            .isLessThanOrEqualTo(afterSiblingOne.get() - 450).isGreaterThan(10_000);
+        assertThat(lockInMarker.get()).as("the row-lock bound stays 2 s").isEqualTo(2_000);
+    }
+
+    private static int settingMs(DSLContext ctx, String name) {
+        var setting = DSL.field(DSL.name("pg_catalog", "pg_settings", "setting"), String.class);
+        var settingName = DSL.field(DSL.name("pg_catalog", "pg_settings", "name"), String.class);
+        return Integer.parseInt(ctx.select(setting).from(DSL.table(DSL.name("pg_catalog", "pg_settings")))
+            .where(settingName.eq(name)).fetchOne(setting));
+    }
+
+    @Test
+    void aKeyedWindowHandsTheMarkerTheCursorOfItsPage() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "kw-1", "kw-2", "kw-3");
+        Mark mark = new Mark();
+
+        var page = vectors.quarantineRestoreSelectedKeyed(t, c, Instant.parse("2026-01-01T00:00:00Z"), null, null, 2,
+            ACTOR, true, keyed(mark));
+
+        assertThat(page.restored()).hasSize(2);
+        assertThat(page.nextAfter()).isNotNull();
+        assertThat(mark.seen.get().nextAfter()).as("the stored outcome names the cursor the caller gets")
+            .isEqualTo(page.nextAfter());
+        assertThat(mark.calls).hasValue(1);
+        var last = vectors.quarantineRestoreSelectedKeyed(t, c, Instant.parse("2026-01-01T00:00:00Z"), null,
+            page.nextAfter(), 2, ACTOR, true, keyed(new Mark()));
+        assertThat(last.restored()).hasSize(1);
+        assertThat(last.nextAfter()).isNull();
+        assertThat(java.util.stream.Stream.concat(page.restored().stream(), last.restored().stream()))
+            .containsExactlyInAnyOrderElementsOf(hs);
+    }
+
+    @Test
+    void aKeyedAuditRestoreHandsTheMarkerItsSource() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "ka-1", "ka-2", "ka-3");
+        long id = audit(t, "reaper_quarantine").get(0).id();
+        Mark mark = new Mark();
+
+        var page = vectors.quarantineRestoreFromAuditKeyed(t, c, id, 0, 2, ACTOR, true, keyed(mark));
+
+        assertThat(page.restored()).hasSize(2);
+        assertThat(mark.seen.get().source().auditId()).isEqualTo(id);
+        assertThat(mark.seen.get().source().nextOffset()).isEqualTo(2);
+        assertThat(hs).containsAll(page.restored());
+    }
+
+    @Test
+    void aKeyedCallWithNothingToRestoreStillSettlesItsKey() throws Exception {
+        // An empty selection, an audit slice past the end and an origin with no sibling all return before any sibling
+        // runs. The marker is what commits the ledger row, so each must still reach it, once, inside a transaction.
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "kn-1");
+        long id = audit(t, "reaper_quarantine").get(0).id();
+
+        Mark emptyWindow = new Mark();
+        var w = vectors.quarantineRestoreSelectedKeyed(t, c, Instant.parse("2999-01-01T00:00:00Z"), null, null, 10,
+            ACTOR, true, keyed(emptyWindow));
+        assertThat(w.rows()).isEmpty();
+        assertThat(emptyWindow.calls).hasValue(1);
+
+        Mark pastEnd = new Mark();
+        var a = vectors.quarantineRestoreFromAuditKeyed(t, c, id, 50, 10, ACTOR, true, keyed(pastEnd));
+        assertThat(a.rows()).isEmpty();
+        assertThat(a.source()).isNotNull();
+        assertThat(pastEnd.calls).hasValue(1);
+
+        String lonely = col("knowledge");
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t, lonely);
+        }
+        Mark noSibling = new Mark();
+        var n = vectors.quarantineRestoreKeyed(t, lonely, List.of(Chash.ofText("nowhere").toHex()), ACTOR, true,
+            keyed(noSibling));
+        assertThat(n.missing()).hasSize(1);
+        assertThat(noSibling.calls).hasValue(1);
+        assertThat(inCollection(t, quarantineOf(c), hs.get(0))).as("none of the three moved anything").isTrue();
     }
 
     /** Blocks until a backend is waiting on an advisory lock inside a quarantine_restore_chunks call. */

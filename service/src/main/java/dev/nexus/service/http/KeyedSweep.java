@@ -23,7 +23,10 @@ import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
- * RDR-222 Phase 1 (bead nexus-yye8l.5): the request-identity protocol of the three keyed sweep forms,
+ * RDR-222 Phase 1 (bead nexus-yye8l.5): the request-identity protocol of the keyed sweep forms (the three bounded
+ * sweeps and, from nexus-k9kr9, {@code quarantine-restore}, whose body is one row per chash and so is bounded by the
+ * chash count of the call and not cut here: see {@code VectorHandler#MAX_KEYED_QUARANTINE_RESTORE_CHASHES}; the handler
+ * refuses a body over the cap rather than let {@link #storedResponse} cut it, {@code VectorHandler#keyedQuarantineRestoreBody}),
  * shared by their handlers. A keyed request is {@link #run claimed} through {@link RequestLedger}, runs its
  * sweep with a {@link LedgerMarker} that stores the response inside the sweep's own transaction, and answers
  * from the ledger when the key has been seen.

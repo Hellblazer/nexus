@@ -6469,7 +6469,18 @@ FROM scope s
                                                        String quarantineCollection, List<String> chashes,
                                                        String actor, boolean dryRun, boolean reattach) {
         return quarantineRestore(tenant, originCollection, quarantineCollection, chashes, actor, dryRun, reattach,
-                                 null, null, null);
+                                 null, null, null, null);
+    }
+
+    /**
+     * The keyed form of {@link #quarantineRestore} (RDR-222, nexus-k9kr9): never a dry run; every sibling runs in
+     * ONE transaction that also commits the ledger marker (see {@link KeyedRestore}).
+     */
+    public QuarantineRestoreOutcome quarantineRestoreKeyed(String tenant, String originCollection,
+                                                            List<String> chashes, String actor, boolean reattach,
+                                                            KeyedRestore keyed) {
+        return quarantineRestore(tenant, originCollection, null, chashes, actor, false, reattach, null, null, null,
+                                 java.util.Objects.requireNonNull(keyed, "keyed"));
     }
 
     /**
@@ -6496,6 +6507,27 @@ FROM scope s
                                                                 String quarantineCollection, long auditId,
                                                                 int offset, int limit, String actor,
                                                                 boolean dryRun, boolean reattach) {
+        return quarantineRestoreFromAudit(tenant, originCollection, quarantineCollection, auditId, offset, limit,
+                                          actor, dryRun, reattach, null);
+    }
+
+    /**
+     * The keyed form of {@link #quarantineRestoreFromAudit} (RDR-222, nexus-k9kr9): never a dry run; every sibling
+     * runs in ONE transaction that also commits the ledger marker (see {@link KeyedRestore}).
+     */
+    public QuarantineRestoreOutcome quarantineRestoreFromAuditKeyed(String tenant, String originCollection,
+                                                                     long auditId, int offset, int limit,
+                                                                     String actor, boolean reattach,
+                                                                     KeyedRestore keyed) {
+        return quarantineRestoreFromAudit(tenant, originCollection, null, auditId, offset, limit, actor, false,
+                                          reattach, java.util.Objects.requireNonNull(keyed, "keyed"));
+    }
+
+    private QuarantineRestoreOutcome quarantineRestoreFromAudit(String tenant, String originCollection,
+                                                                 String quarantineCollection, long auditId,
+                                                                 int offset, int limit, String actor,
+                                                                 boolean dryRun, boolean reattach,
+                                                                 KeyedRestore keyed) {
         if (offset < 0 || limit <= 0) {
             throw new IllegalArgumentException("offset must be >= 0 and limit >= 1, got " + offset + "/" + limit);
         }
@@ -6552,12 +6584,13 @@ FROM scope s
         var source = new QuarantineRestoreOutcome.Source(auditId, operation, row.value3(), listed.size(),
                                                          offset, next);
         if (slice.isEmpty()) {
-            return new QuarantineRestoreOutcome(List.of(), null, dryRun, source, null);
+            return markedOnly(tenant, new QuarantineRestoreOutcome(List.of(), null, dryRun, source, null), keyed);
         }
         String[] hex = canonicalChashes(slice);
         List<String> siblings = resolveRestoreSiblings(tenant, originCollection,
             quarantineCollection != null ? quarantineCollection : movedInto);
-        return restoreAcross(tenant, originCollection, siblings, hex, actor, dryRun, reattach, auditId, source, null);
+        return restoreAcross(tenant, originCollection, siblings, hex, actor, dryRun, reattach, auditId, source, null,
+                             keyed);
     }
 
     /**
@@ -6587,6 +6620,29 @@ FROM scope s
                                                                java.time.Instant since, java.time.Instant before,
                                                                String afterChash, int limit, String actor,
                                                                boolean dryRun, boolean reattach) {
+        return quarantineRestoreSelected(tenant, originCollection, quarantineCollection, since, before, afterChash,
+                                         limit, actor, dryRun, reattach, null);
+    }
+
+    /**
+     * The keyed form of {@link #quarantineRestoreSelected} (RDR-222, nexus-k9kr9): never a dry run; every sibling
+     * runs in ONE transaction that also commits the ledger marker (see {@link KeyedRestore}). The selection read
+     * ahead of it is a snapshot in a transaction of its own, as in the unkeyed form.
+     */
+    public QuarantineRestoreOutcome quarantineRestoreSelectedKeyed(String tenant, String originCollection,
+                                                                    java.time.Instant since, java.time.Instant before,
+                                                                    String afterChash, int limit, String actor,
+                                                                    boolean reattach, KeyedRestore keyed) {
+        return quarantineRestoreSelected(tenant, originCollection, null, since, before, afterChash, limit, actor,
+                                         false, reattach, java.util.Objects.requireNonNull(keyed, "keyed"));
+    }
+
+    private QuarantineRestoreOutcome quarantineRestoreSelected(String tenant, String originCollection,
+                                                                String quarantineCollection,
+                                                                java.time.Instant since, java.time.Instant before,
+                                                                String afterChash, int limit, String actor,
+                                                                boolean dryRun, boolean reattach,
+                                                                KeyedRestore keyed) {
         if (since == null && before == null) {
             throw new IllegalArgumentException(
                 "name a quarantined_at window: quarantined_since and/or quarantined_before");
@@ -6618,7 +6674,8 @@ FROM scope s
         org.jooq.Condition past = after == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(after).toBytes());
         if (siblings.isEmpty()) {
-            return new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(), siblings);
+            return markedOnly(tenant, new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(),
+                                                                    siblings), keyed);
         }
         // Distinct chashes in order: the same chunk can sit in two siblings (the reaper's and a client's), and the
         // cursor pages by chash, so a chash is selected once however many siblings hold it.
@@ -6632,13 +6689,13 @@ FROM scope s
                .limit(limit)
                .fetch(r -> r.value1()));
         if (selected.isEmpty()) {
-            return new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(), siblings);
+            return markedOnly(tenant, new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(),
+                                                                    siblings), keyed);
         }
         String next = selected.size() == limit ? selected.get(selected.size() - 1) : null;
-        var out = restoreAcross(tenant, originCollection, siblings, canonicalChashes(selected), actor, dryRun,
-                                reattach, null, null, null);
-        return new QuarantineRestoreOutcome(out.rows(), out.auditId(), dryRun, null, next, out.auditIds(),
-                                            out.quarantineCollections());
+        // The cursor goes in with the call, so the outcome the keyed marker stores is the outcome the caller gets.
+        return restoreAcross(tenant, originCollection, siblings, canonicalChashes(selected), actor, dryRun,
+                             reattach, null, null, next, keyed);
     }
 
     /** The origin of a restore: a registered, live, non-quarantine collection, never a bare name. */
@@ -6811,11 +6868,12 @@ FROM scope s
                                                         String quarantineCollection, List<String> chashes,
                                                         String actor, boolean dryRun, boolean reattach,
                                                         Long sourceAuditId,
-                                                        QuarantineRestoreOutcome.Source source, String nextAfter) {
+                                                        QuarantineRestoreOutcome.Source source, String nextAfter,
+                                                        KeyedRestore keyed) {
         String[] hex = canonicalChashes(chashes);
         List<String> siblings = resolveRestoreSiblings(tenant, originCollection, quarantineCollection);
         return restoreAcross(tenant, originCollection, siblings, hex, actor, dryRun, reattach, sourceAuditId, source,
-                             nextAfter);
+                             nextAfter, keyed);
     }
 
     /**
@@ -6838,7 +6896,11 @@ FROM scope s
     private QuarantineRestoreOutcome restoreAcross(String tenant, String originCollection, List<String> siblings,
                                                     String[] hex, String actor, boolean dryRun, boolean reattach,
                                                     Long sourceAuditId, QuarantineRestoreOutcome.Source source,
-                                                    String nextAfter) {
+                                                    String nextAfter, KeyedRestore keyed) {
+        if (keyed != null) {
+            return restoreAcrossKeyed(tenant, originCollection, siblings, hex, actor, reattach, sourceAuditId, source,
+                                      nextAfter, keyed);
+        }
         var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
         for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
         var auditIds = new ArrayList<Long>();
@@ -6857,27 +6919,165 @@ FROM scope s
                     .filter(row -> "restored".equals(row.outcome()) || row.attached())
                     .map(QuarantineRestoreOutcome.Row::chash).toList());
             }
-            Long auditId = null;
-            for (var r : rows) {
-                var reapable = r.get(QUARANTINE_RESTORE_CHUNKS.R_REAPABLE_AFTER);
-                byChash.put(r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH), new QuarantineRestoreOutcome.Row(
-                    r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH),
-                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME), r.get(QUARANTINE_RESTORE_CHUNKS.R_NO_MANIFEST),
-                    reapable == null ? null : reapable.toInstant().toString(),
-                    r.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH),
-                    Boolean.TRUE.equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)),
-                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_TITLE),
-                    r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE),
-                    r.get(QUARANTINE_RESTORE_CHUNKS.R_REASON), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_ROWS),
-                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_CHUNKS)));
-                if (auditId == null) auditId = r.get(QUARANTINE_RESTORE_CHUNKS.R_AUDIT_ID);
-            }
+            Long auditId = foldSiblingRows(byChash, rows);
             if (auditId != null) auditIds.add(auditId);
             pending = byChash.values().stream().filter(row -> "missing".equals(row.outcome()))
                 .map(QuarantineRestoreOutcome.Row::chash).toList();
         }
         return new QuarantineRestoreOutcome(List.copyOf(byChash.values()), auditIds.isEmpty() ? null : auditIds.get(0),
                                             dryRun, source, nextAfter, List.copyOf(auditIds), List.copyOf(siblings));
+    }
+
+    /**
+     * Folds one sibling's verdict rows into {@code byChash} and returns the gc_audit id the sibling wrote (null when it
+     * wrote none). Shared by the per-sibling-transaction loop and the keyed single-transaction one.
+     */
+    private static Long foldSiblingRows(java.util.Map<String, QuarantineRestoreOutcome.Row> byChash,
+                                        org.jooq.Result<?> rows) {
+        Long auditId = null;
+        for (var r : rows) {
+            var reapable = r.get(QUARANTINE_RESTORE_CHUNKS.R_REAPABLE_AFTER);
+            byChash.put(r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH), new QuarantineRestoreOutcome.Row(
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME), r.get(QUARANTINE_RESTORE_CHUNKS.R_NO_MANIFEST),
+                reapable == null ? null : reapable.toInstant().toString(),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH),
+                Boolean.TRUE.equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_TITLE),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_REASON), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_ROWS),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_CHUNKS)));
+            if (auditId == null) auditId = r.get(QUARANTINE_RESTORE_CHUNKS.R_AUDIT_ID);
+        }
+        return auditId;
+    }
+
+    /**
+     * RDR-222 (bead nexus-k9kr9): what a keyed {@code /gc/quarantine-restore} call brings into the repository. The
+     * request-ledger protocol needs ONE transaction that holds the whole effect and the commit marker, which the
+     * per-sibling loop cannot give (each sibling commits on its own), so the keyed form runs every sibling inside a
+     * single {@code withTenant} and then calls {@link #marker} with the final outcome in that same transaction.
+     *
+     * <p>{@code budgetMs} is ONE statement budget for the whole call, measured from {@link #begin} (the sibling
+     * resolution and the source read ahead of the transaction count against it). Before each sibling the repository
+     * sets {@code statement_timeout} to what is left of it, so the call as a whole stays inside the budget the lease
+     * was sized for and not {@code n} times it. A budget that is gone before a sibling starts is the typed busy.
+     */
+    public record KeyedRestore(LedgerMarker<QuarantineRestoreOutcome> marker, long budgetMs, long startNanos) {
+        public KeyedRestore {
+            java.util.Objects.requireNonNull(marker, "marker");
+        }
+
+        /** A keyed call whose budget starts now. */
+        public static KeyedRestore begin(LedgerMarker<QuarantineRestoreOutcome> marker, long budgetMs) {
+            return new KeyedRestore(marker, budgetMs, System.nanoTime());
+        }
+
+        /** Milliseconds of the budget left (zero or negative when it is spent). */
+        long remainingMs() {
+            return budgetMs - java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+        }
+    }
+
+    /**
+     * An outcome with no sibling to restore from (an empty slice, no sibling, an empty selection) still has to settle
+     * a keyed call: the ledger row is committed by the marker, and without it the key would read {@code in_flight}
+     * until its lease lapsed and the caller would get no body. Unkeyed it is the outcome itself.
+     */
+    private QuarantineRestoreOutcome markedOnly(String tenant, QuarantineRestoreOutcome outcome, KeyedRestore keyed) {
+        if (keyed == null) return outcome;
+        try {
+            return tenantScope.withTenant(tenant, ctx -> {
+                runAfterSweepSqlHook();
+                keyed.marker().mark(ctx, outcome);
+                return outcome;
+            });
+        } catch (RuntimeException e) {
+            throw asRestoreBusy(e);
+        }
+    }
+
+    /**
+     * The keyed restore: every sibling inside ONE transaction, then the ledger marker. A busy trip (lock bound,
+     * statement bound, deadlock victim, or a spent budget) on ANY sibling rolls the whole transaction back, so
+     * nothing moved: the busy exception carries no progress, {@code nothing_moved} is true and {@code audit_ids} is
+     * empty, whichever sibling tripped. The same key may be sent again.
+     */
+    private QuarantineRestoreOutcome restoreAcrossKeyed(String tenant, String originCollection, List<String> siblings,
+                                                         String[] hex, String actor, boolean reattach,
+                                                         Long sourceAuditId, QuarantineRestoreOutcome.Source source,
+                                                         String nextAfter, KeyedRestore keyed) {
+        try {
+            return tenantScope.withTenant(tenant, ctx -> {
+                var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
+                for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
+                var auditIds = new ArrayList<Long>();
+                List<String> pending = new ArrayList<>(byChash.keySet());
+                int index = 0;
+                for (String sibling : siblings) {
+                    if (pending.isEmpty()) break;
+                    index++;
+                    var hook = keyedRestoreSiblingHookForTests;
+                    if (hook != null) hook.accept(ctx, index);
+                    long remaining = keyed.remainingMs();
+                    if (remaining <= 0) {
+                        throw new QuarantineRestoreBusyException("the restore used up its " + keyed.budgetMs()
+                            + " ms time budget before sibling " + index + " of " + siblings.size(), null);
+                    }
+                    PgSession.setStatementAndLockBounds(ctx, (int) Math.min(remaining, Integer.MAX_VALUE),
+                                                        PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+                    var rows = ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                            tenant, originCollection, sibling, pending.toArray(String[]::new), actor, sourceAuditId,
+                            false, reattach))
+                        .fetch();
+                    Long auditId = foldSiblingRows(byChash, rows);
+                    if (auditId != null) auditIds.add(auditId);
+                    pending = byChash.values().stream().filter(row -> "missing".equals(row.outcome()))
+                        .map(QuarantineRestoreOutcome.Row::chash).toList();
+                }
+                var outcome = new QuarantineRestoreOutcome(List.copyOf(byChash.values()),
+                    auditIds.isEmpty() ? null : auditIds.get(0), false, source, nextAfter, List.copyOf(auditIds),
+                    List.copyOf(siblings));
+                runAfterSweepSqlHook();
+                keyed.marker().mark(ctx, outcome);
+                return outcome;
+            });
+        } catch (RuntimeException e) {
+            throw asRestoreBusy(e);
+        }
+    }
+
+    /**
+     * Test-only seam (nexus-k9kr9): called at the top of each sibling's turn of a keyed restore, inside its one
+     * transaction, with the transaction's context and the 1-based sibling number, before the remaining budget is
+     * read. A test can sleep it past the budget or read what the transaction has set. Never set by production code.
+     */
+    private volatile java.util.function.ObjIntConsumer<DSLContext> keyedRestoreSiblingHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the keyed-restore per-sibling hook. */
+    public void setKeyedRestoreSiblingHookForTests(java.util.function.ObjIntConsumer<DSLContext> hook) {
+        this.keyedRestoreSiblingHookForTests = hook;
+    }
+
+    /**
+     * {@code e} as the typed busy when a database error in its cause chain is a lock bound, a statement bound or a
+     * deadlock victim; otherwise {@code e} itself (a busy already, a lost ledger marker, a real fault).
+     */
+    private static RuntimeException asRestoreBusy(RuntimeException e) {
+        String state = sqlState(e);
+        if (LOCK_NOT_AVAILABLE.equals(state) || QUERY_CANCELED.equals(state) || DEADLOCK_DETECTED.equals(state)) {
+            return new QuarantineRestoreBusyException(busyReason(state), e);
+        }
+        return e;
+    }
+
+    private static String busyReason(String state) {
+        return LOCK_NOT_AVAILABLE.equals(state)
+            ? "a manifest writer or an index run holds the collection's lock"
+            : DEADLOCK_DETECTED.equals(state)
+                ? "the restore deadlocked with another writer of the same rows (the reaper's expiry, "
+                  + "for one) and was chosen as the victim"
+                : "the restore ran past its statement time bound";
     }
 
     private static QuarantineRestoreOutcome.Row missingRow(String chash) {
@@ -6904,18 +7104,7 @@ FROM scope s
                    .fetch();
             });
         } catch (RuntimeException e) {
-            String state = sqlState(e);
-            if (LOCK_NOT_AVAILABLE.equals(state) || QUERY_CANCELED.equals(state)
-                    || DEADLOCK_DETECTED.equals(state)) {
-                throw new QuarantineRestoreBusyException(
-                    (LOCK_NOT_AVAILABLE.equals(state)
-                        ? "a manifest writer or an index run holds the collection's lock"
-                        : DEADLOCK_DETECTED.equals(state)
-                            ? "the restore deadlocked with another writer of the same rows (the reaper's expiry, "
-                              + "for one) and was chosen as the victim"
-                            : "the restore ran past its statement time bound"), e);
-            }
-            throw e;
+            throw asRestoreBusy(e);
         }
     }
 

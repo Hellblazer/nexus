@@ -708,6 +708,7 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.afterExistencePartitionHookForTests",
                 "PgVectorRepository.afterNeedEmbedResolvedHookForTests",
                 "PgVectorRepository.afterSweepSqlHookForTests",
+                "PgVectorRepository.keyedRestoreSiblingHookForTests",
                 "RequestLedger.claimPhaseHookForTests",
                 "TaxonomyRepository.betweenOwnAndCrossPassHookForTests",
                 "TaxonomyRepository.duringOwnPassHookForTests",

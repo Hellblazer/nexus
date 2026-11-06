@@ -18,8 +18,10 @@ owning what it can prove:
 from __future__ import annotations
 
 import hashlib
+import io
 import json as _json
 import re
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +34,7 @@ from nexus.db import gateway_backoff
 from nexus.db import http_vector_client as hv
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from tests._catalog_fixture_ops import register_real_doc_id
+from tests._module_seam import module_time
 
 
 def _chash(seed: str) -> str:
@@ -97,24 +100,64 @@ class TestWire:
                           "quarantined_since": "2026-09-01T00:00:00Z",
                           "quarantined_before": "2026-09-08T00:00:00Z", "after_chash": _chash("z")}
 
-    def test_a_busy_503_carries_the_engines_body_so_the_cli_can_say_what_an_earlier_sibling_committed(self) -> None:
-        import io
-        import urllib.error
-
+    def test_a_busy_503_that_says_something_moved_is_raised_at_once_with_the_engines_body_not_resent(
+        self, monkeypatch,
+    ) -> None:
         body = {"error": "held; an earlier quarantine sibling of this call had already committed",
                 "reason": "quarantine_restore_busy", "retry_after_seconds": 5, "nothing_moved": False,
                 "audit_ids": [91], "moved_chashes": [_chash("a")]}
-        err = urllib.error.HTTPError("http://engine/x", 503, "busy", {}, io.BytesIO(_json.dumps(body).encode()))
+        def err(*_a, **_kw):   # a fresh response per attempt: a body can be read once
+            raise urllib.error.HTTPError("http://engine/x", 503, "busy", {}, io.BytesIO(_json.dumps(body).encode()))
+
         client = HttpVectorClient.__new__(HttpVectorClient)
         client._tenant = "t"
+        # nexus-k9kr9 review r1: a real run is keyed, and the keyed client waits a busy answer out and resends the
+        # same key ONLY when the engine says nothing moved. This one says an earlier sibling committed (an engine
+        # that runs a keyed call one sibling at a time, or a body the client does not understand), so it is raised
+        # at once, with the body the CLI reads, and never resent: the wait is faked so a resend would show.
+        sleeps: list[float] = []
+        module_time(monkeypatch, hv).sleep = sleeps.append
         with patch("nexus.db.service_endpoint.guard_production_write"), \
              patch.object(hv, "_resolve_endpoint", return_value=("http://engine", None)), \
-             patch.object(hv, "_request", side_effect=err), \
+             patch.object(hv, "_request", side_effect=err) as request, \
              pytest.raises(VectorServiceError) as raised:
             client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")])
         assert raised.value.code == 503 and raised.value.reason == "quarantine_restore_busy"
         assert raised.value.engine_body["nothing_moved"] is False
         assert raised.value.engine_body["audit_ids"] == [91]
+        assert raised.value.engine_body["moved_chashes"] == [_chash("a")]
+        assert request.call_count == 1 and sleeps == [], "one POST, no wait, no resend"
+
+    def test_a_busy_503_with_no_nothing_moved_field_is_not_taken_for_nothing_ran(self, monkeypatch) -> None:
+        body = {"error": "held", "reason": "quarantine_restore_busy", "retry_after_seconds": 5}
+
+        def err(*_a, **_kw):
+            raise urllib.error.HTTPError("http://engine/x", 503, "busy", {}, io.BytesIO(_json.dumps(body).encode()))
+
+        client = HttpVectorClient.__new__(HttpVectorClient)
+        client._tenant = "t"
+        sleeps: list[float] = []
+        module_time(monkeypatch, hv).sleep = sleeps.append
+        with patch("nexus.db.service_endpoint.guard_production_write"), \
+             patch.object(hv, "_resolve_endpoint", return_value=("http://engine", None)), \
+             patch.object(hv, "_request", side_effect=err) as request, \
+             pytest.raises(VectorServiceError) as raised:
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")])
+        assert raised.value.reason == "quarantine_restore_busy"
+        assert request.call_count == 1 and sleeps == []
+
+    def test_a_dry_run_busy_503_is_raised_at_once_unkeyed(self) -> None:
+        body = {"error": "held", "reason": "quarantine_restore_busy", "nothing_moved": True,
+                "audit_ids": [], "moved_chashes": []}
+        err = urllib.error.HTTPError("http://engine/x", 503, "busy", {}, io.BytesIO(_json.dumps(body).encode()))
+        client = HttpVectorClient.__new__(HttpVectorClient)
+        client._tenant = "t"
+        with patch("nexus.db.service_endpoint.guard_production_write"), \
+             patch.object(hv, "_resolve_endpoint", return_value=("http://engine", None)), \
+             patch.object(hv, "_request", side_effect=err) as request, \
+             pytest.raises(VectorServiceError) as raised:
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")], dry_run=True)
+        assert raised.value.reason == "quarantine_restore_busy" and request.call_count == 1
 
     def test_the_route_is_a_write_and_is_never_auto_retried(self) -> None:
         path = "/v1/vectors/gc/quarantine-restore"
@@ -455,16 +498,45 @@ class TestCli:
         assert len(found) == 1, "the engine ceiling constant was renamed or duplicated; update this pin"
         assert t3_quarantine._BATCH == int(found[0])
 
-    def test_chashes_go_in_batches_of_a_thousand_and_are_deduplicated(self, runner) -> None:
+    def test_a_dry_run_sends_chashes_in_batches_of_a_thousand_and_deduplicates(self, runner) -> None:
+        # A dry run is unkeyed, so it keeps the route's own ceiling.
         hs = [_chash(str(i)) for i in range(2500)]
-        stub = _Stub([_page([_attached_row(h) for h in hs[i:i + 1000]], audit_id=i) for i in (0, 1000, 2000)])
+        stub = _Stub([_page([_attached_row(h) for h in hs[i:i + 1000]], audit_id=i, dry_run=True)
+                      for i in (0, 1000, 2000)])
+        args = ["--dry-run"]
+        for h in hs + hs[:5]:
+            args += ["--chash", h]
+        result = _run(runner, stub, *args)
+        assert [len(c["chashes"]) for c in stub.calls] == [1000, 1000, 500], result.output[-400:]
+
+    def test_a_real_run_sends_chashes_in_batches_of_the_keyed_ceiling_and_deduplicates(self, runner) -> None:
+        # nexus-k9kr9: a real run is a keyed engine call, which takes at most hv.QUARANTINE_RESTORE_KEYED_MAX_CHASHES.
+        k = hv.QUARANTINE_RESTORE_KEYED_MAX_CHASHES
+        hs = [_chash(str(i)) for i in range(2500)]
+        sizes = [min(k, 2500 - i) for i in range(0, 2500, k)]
+        stub = _Stub([_page([_attached_row(h) for h in hs[i:i + k]], audit_id=i) for i in range(0, 2500, k)])
         args = []
         for h in hs + hs[:5]:
             args += ["--chash", h]
         result = _run(runner, stub, *args)
         assert result.exit_code == 0, result.output[-400:]
-        assert [len(c["chashes"]) for c in stub.calls] == [1000, 1000, 500]
+        assert [len(c["chashes"]) for c in stub.calls] == sizes
         assert "restored 2500" in result.output
+
+    def test_a_real_run_pages_a_cursor_source_by_the_keyed_ceiling(self, runner) -> None:
+        k = hv.QUARANTINE_RESTORE_KEYED_MAX_CHASHES
+        a = _chash("a")
+        stub = _Stub([_page([_attached_row(a)], next_after=_chash("z")), _page([_attached_row(_chash("b"))])])
+        result = _run(runner, stub, "--quarantined-since", "2026-09-01T00:00:00Z")
+        assert result.exit_code == 0, result.output[-400:]
+        assert [c["limit"] for c in stub.calls] == [k, k]
+
+    def test_the_client_ceiling_is_the_engines_keyed_ceiling(self) -> None:
+        java = (Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "java" / "dev" / "nexus"
+                / "service" / "http" / "VectorHandler.java").read_text()
+        found = re.findall(r"static final int MAX_KEYED_QUARANTINE_RESTORE_CHASHES\s*=\s*(\d+)\s*;", java)
+        assert len(found) == 1, "the engine's keyed ceiling was renamed or duplicated; update this pin"
+        assert hv.QUARANTINE_RESTORE_KEYED_MAX_CHASHES == int(found[0])
 
     def test_a_window_pages_by_next_after_until_it_is_exhausted(self, runner) -> None:
         a, b = _chash("a"), _chash("b")
@@ -664,6 +736,62 @@ class TestCli:
         doc = _doc(result.stdout)
         assert doc["audit_ids"] == [78] and doc["totals"]["restored"] == 1000
         assert doc["error"]["exit_code"] == t3_quarantine.EXIT_BUSY and doc["error"]["pages_committed"] == 1
+
+    def test_a_page_the_ledger_reports_committed_with_no_answer_is_loud_exit_7_never_zero_restored(
+            self, runner) -> None:
+        # nexus-k9kr9 review r1: a keyed page committed, its response was lost and the ledger row carries no body, so
+        # the client returns CommittedWithUnknownCounts. Totalled as a page it reads restored 0 and exits 0.
+        k = hv.QUARANTINE_RESTORE_KEYED_MAX_CHASHES
+        hs = [_chash(str(i)) for i in range(2 * k + 5)]
+        first = _page([_attached_row(h) for h in hs[:k]], audit_id=77)
+        stub = _Stub([first, hv.CommittedWithUnknownCounts(committed_unknown_counts=True)])
+
+        result = _run(runner, stub, *[x for h in hs for x in ("--chash", h)])
+
+        assert result.exit_code == 7 == t3_quarantine.EXIT_COUNTS_UNKNOWN, \
+            "the documented literal\n" + result.output[-600:]
+        out = result.output
+        assert "UNKNOWN" in out and "COMMITTED" in out and "not zero" in out
+        assert "page 2" in out and "gc-audit list --operation quarantine_restore" in out
+        assert f"restored {k}" in out and "gc_audit 77" in out, "the page before it is still reported"
+        assert len(stub.calls) == 2, "later pages are not sent after a page whose counts are unknown"
+
+    def test_a_page_that_ran_unkeyed_after_the_body_cap_is_counted_and_named_on_stderr(self, runner) -> None:
+        # nexus-k9kr9: the client sent a page unkeyed after the engine's 422 keyed_restore_body_over_cap. The page is
+        # a full answer (counted like any other), and the run says which page lost its replay protection.
+        k = hv.QUARANTINE_RESTORE_KEYED_MAX_CHASHES
+        hs = [_chash(str(i)) for i in range(k + 3)]
+        first = {**_page([_attached_row(h) for h in hs[:k]], audit_id=77), "ran_unkeyed": "keyed_restore_body_over_cap"}
+        second = _page([_attached_row(h) for h in hs[k:]], audit_id=78)
+        stub = _Stub([first, second])
+
+        result = _run(runner, stub, *[x for h in hs for x in ("--chash", h)])
+
+        assert result.exit_code == 0, result.output[-600:]
+        assert "page 1 ran without an idempotency key" in result.output
+        assert "page 2 ran without" not in result.output
+        assert "gc_audit 77, 78" in result.output and f"restored {k + 3}" in result.output
+
+    def test_an_unknown_first_page_of_a_cursor_source_stops_there_and_the_json_says_so(self, runner) -> None:
+        # A cursor source pages on the answer's cursor, which the lost answer carried: without the stop it would
+        # simply end (no next_after) and exit 0 after restoring an unknown number of chunks.
+        for source_args in (["--quarantined-since", "2026-09-01T00:00:00Z"], ["--audit-id", "41"]):
+            stub = _Stub([hv.CommittedWithUnknownCounts(committed_unknown_counts=True)])
+            result = _run(runner, stub, *source_args, "--json")
+            assert result.exit_code == t3_quarantine.EXIT_COUNTS_UNKNOWN, result.output[-600:]
+            doc = _doc(result.stdout)
+            assert doc["error"]["exit_code"] == 7 and doc["error"]["counts_unknown"] is True
+            assert doc["error"]["pages_committed"] == 0 and doc["totals"]["restored"] == 0
+            assert len(stub.calls) == 1
+
+    def test_a_real_run_help_states_the_page_size_and_the_one_transaction_per_page(self, runner) -> None:
+        text = " ".join(runner.invoke(t3, ["quarantine", "restore", "--help"]).output.split())
+        assert f"at most {hv.QUARANTINE_RESTORE_KEYED_MAX_CHASHES} chashes" in text, \
+            "the help names the page size a real run uses, and it is the client's constant"
+        assert "one transaction across every quarantine collection" in text
+        assert "Each quarantine collection is restored in its own transaction, so" not in text, \
+            "that sentence describes only a dry run and an engine that predates keyed restore"
+        assert "7 a page was committed by the engine but its answer was lost" in text
 
     def test_a_failure_on_the_first_page_prints_no_empty_report(self, runner) -> None:
         result = _run(runner, _Stub(error=VectorServiceError("boom", code=500)), "--chash", _chash("a"))

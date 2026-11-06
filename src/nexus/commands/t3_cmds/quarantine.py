@@ -77,14 +77,20 @@ _BATCH = 1000
 #: which is the round-1 defect a script must be able to see. 1 wins when both hold. 4 and 5
 #: mirror ``nx t3 census-manifest-less``: the engine predates the route, or answered with an
 #: error. 6 is the engine's typed retryable ``quarantine_restore_busy``: a lock or statement bound
-#: tripped and the same command may be run again. Each quarantine sibling restores in its own
-#: transaction, so "nothing moved" holds only when the trip was on the first one: the engine says
-#: so (``nothing_moved``) and names the audit rows an earlier sibling had already written.
+#: tripped and the same command may be run again. A real run goes in pages of at most
+#: ``QUARANTINE_RESTORE_KEYED_MAX_CHASHES`` (74) chashes, and a page is ONE engine transaction across every quarantine
+#: collection it touches, so a busy page rolled back whole (``nothing_moved`` true) and only EARLIER pages are
+#: committed. Only an engine that predates keyed restore, and a dry run (which moves nothing), restore each
+#: quarantine sibling in its own transaction; there the engine says whether an earlier sibling had committed
+#: (``nothing_moved``) and names the audit rows it wrote. 7 is a page the engine committed but whose answer was lost
+#: and could not be read back from the request ledger: the restore ran, its counts are UNKNOWN (never zero), and the
+#: run stops there.
 EXIT_UNRESTORED = 1
 EXIT_HIDDEN = 3
 EXIT_NO_ROUTE = 4
 EXIT_ENGINE_ERROR = 5
 EXIT_BUSY = 6
+EXIT_COUNTS_UNKNOWN = 7
 
 #: Rows printed in the table before the rest are summarised (``--json`` carries every row).
 _TABLE_ROWS = 100
@@ -147,6 +153,11 @@ def _actor() -> str:
         return "nx-cli quarantine-restore"
 
 
+class _CommittedCountsUnknown(Exception):
+    """A page the request ledger reports committed but whose stored answer it could not give
+    (:class:`nexus.db.http_vector_client.CommittedWithUnknownCounts`): the restore ran and its counts are unknown."""
+
+
 def _fail(message: str, code: int) -> NoReturn:
     click.echo(message, err=True)
     sys.exit(code)
@@ -160,14 +171,19 @@ def _pages(client: Any, origin: str, *, chashes: list[str], audit_id: int | None
     origin's catalog row is not where the reaper put the chunks once catalog-044 rewrote the row's owner.
     """
     common = {"dry_run": dry_run, "reattach": reattach, "actor": actor}
+    # A real run is one keyed engine call (RDR-222, nexus-k9kr9), which takes at most the keyed ceiling; a dry run
+    # is unkeyed and takes the route's own.
+    from nexus.db.http_vector_client import QUARANTINE_RESTORE_KEYED_MAX_CHASHES  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.http_vector_client)
+
+    batch = _BATCH if dry_run else min(_BATCH, QUARANTINE_RESTORE_KEYED_MAX_CHASHES)
     if chashes:
-        for start in range(0, len(chashes), _BATCH):
-            yield client.gc_quarantine_restore(origin, chashes=chashes[start:start + _BATCH], **common)
+        for start in range(0, len(chashes), batch):
+            yield client.gc_quarantine_restore(origin, chashes=chashes[start:start + batch], **common)
     elif audit_id is not None:
         offset = 0
         while True:
             page = client.gc_quarantine_restore(
-                origin, audit_id=audit_id, offset=offset, limit=_BATCH, **common)
+                origin, audit_id=audit_id, offset=offset, limit=batch, **common)
             yield page
             nxt = (page.get("source") or {}).get("next_offset")
             if nxt is None:
@@ -178,7 +194,7 @@ def _pages(client: Any, origin: str, *, chashes: list[str], audit_id: int | None
         while True:
             page = client.gc_quarantine_restore(
                 origin, quarantined_since=since, quarantined_before=before,
-                after_chash=after, limit=_BATCH, **common)
+                after_chash=after, limit=batch, **common)
             yield page
             after = page.get("next_after")
             if not after:
@@ -502,6 +518,13 @@ def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
     after = (f" Pages before it are committed and are in the report above ({pages_done} page"
              f"{'s' if pages_done != 1 else ''}); run the same command again to continue."
              if pages_done else "")
+    if isinstance(exc, _CommittedCountsUnknown):
+        return (f"quarantine restore: page {pages_done + 1} was COMMITTED by the engine, but its answer was lost and the "
+                "request ledger could not give it back, so how many chunks it restored, attached or kept is UNKNOWN "
+                "(it is not zero) and it is not in the report above. The run stopped here; later pages were not sent. "
+                "Find what it did in `nx catalog gc-audit list --operation quarantine_restore`, then run the same "
+                "command again: a chunk already restored reads present, and the rest is restored."
+                f"{after}"), EXIT_COUNTS_UNKNOWN
     if not isinstance(exc, VectorServiceError):
         # Not an engine answer (a bug, a broken pipe, a decode error): still no traceback over the report of the
         # pages that did commit, and the type is named so the failure is not a mystery.
@@ -624,14 +647,24 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
          JSON document carries the count as "hidden".
       4  the connected engine predates the restore route; upgrade it.
       5  the engine refused the request or failed (the message says why).
-      6  the engine was busy (a manifest writer held a lock): the statement that
-         was busy rolled back; run the same command again. Each quarantine
-         collection is restored in its own transaction, so the message says whether
-         an earlier one had already committed (and its gc_audit ids); a chunk that
-         was restored reads present on the rerun, and a chunk kept in quarantine
-         (a rival, an owner mid index run or with a failed run) is kept again.
+      6  the engine was busy (a manifest writer held a lock): run the same
+         command again. A real run goes in pages of at most 74 chashes (the
+         engine's keyed ceiling), and a page is one transaction across every
+         quarantine collection it touches, so the busy page rolled back whole:
+         nothing of it moved, and only earlier pages are committed (their
+         gc_audit ids are in the report). Against an engine that predates keyed
+         restore, and for a dry run, each quarantine collection is restored in its
+         own transaction, and the message says whether an earlier one had already
+         committed (and its gc_audit ids). A chunk that was restored reads present
+         on the rerun, and a chunk kept in quarantine (a rival, an owner mid index
+         run or with a failed run) is kept again.
+      7  a page was committed by the engine but its answer was lost and could not
+         be read back, so that page's counts are UNKNOWN (not zero) and later pages
+         were not sent. Read `nx catalog gc-audit list --operation
+         quarantine_restore`, then run the same command again: what was restored
+         reads present.
       A failure after the first page still prints the report of the pages already
-      committed, with their audit ids, before exiting 4, 5 or 6.
+      committed, with their audit ids, before exiting 4, 5, 6 or 7.
 
     \b
     Examples:
@@ -662,11 +695,20 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     source: dict | None = None
     pages_done = 0
     failure: tuple[str, int] | None = None
-    busy_detail: dict[str, Any] = {}
+    failure_detail: dict[str, Any] = {}
     try:
         for page in _pages(client, collection, chashes=normalised, audit_id=audit_id,
                            since=since_iso, before=before_iso, dry_run=dry_run, reattach=reattach,
                            actor=_actor()):
+            if page.get("committed_unknown_counts"):
+                # RDR-222: committed, answer unavailable. Its counts are unknown, not zero, and a cursor source cannot
+                # page on (the cursor was in the lost answer), so stop and say so rather than total it as nothing.
+                raise _CommittedCountsUnknown
+            if page.get("ran_unkeyed"):
+                # RDR-222: the engine refused this page keyed (its body would not fit the ledger's stored-response
+                # cap, nothing ran) and the client sent it again without a key. Say so; it has no replay protection.
+                click.echo(f"note: page {pages_done + 1} ran without an idempotency key ({page['ran_unkeyed']}).",
+                           err=True)
             rows.extend(page.get("rows") or [])
             for outcome in _OUTCOMES:
                 totals[outcome] += int(page.get(outcome) or 0)
@@ -689,9 +731,11 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
         # what this run did, so the report carries them beside the pages that completed.
         audit_ids.extend(a for a in _audit_ids_of(exc) if a not in audit_ids)
         busy_body = getattr(exc, "engine_body", None)
+        if isinstance(exc, _CommittedCountsUnknown):
+            failure_detail = {"counts_unknown": True}
         if isinstance(busy_body, dict) and getattr(exc, "reason", None) == QUARANTINE_RESTORE_BUSY_REASON:
-            busy_detail = {"nothing_moved": busy_body.get("nothing_moved"),
-                           "moved_chashes": busy_body.get("moved_chashes") or []}
+            failure_detail = {"nothing_moved": busy_body.get("nothing_moved"),
+                              "moved_chashes": busy_body.get("moved_chashes") or []}
 
     reapable = sorted(((_parse_instant(r["reapable_after"]), r["reapable_after"]) for r in rows
                        if r.get("outcome") == "restored" and r.get("no_manifest") and r.get("reapable_after")),
@@ -720,7 +764,7 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
         }
         if failure:
             doc["error"] = {"message": failure[0], "exit_code": failure[1], "pages_committed": pages_done,
-                            **busy_detail}
+                            **failure_detail}
         click.echo(json.dumps(doc, indent=2))
     else:
         if rows or not failure:

@@ -366,6 +366,30 @@ against the registry row before Phase 3 is ever reopened.)
   bounds (Technical Design 2).
 - **Verified (source).** Custom request headers already cross the edge
   (`X-Nexus-Request-Deadline-Ms`, `X-Nexus-Tenant`).
+- **2026-11-05, quarantine-restore is keyed after close (nexus-k9kr9; Sam's go
+  to build).** The places in this RDR that say restore stays unkeyed and
+  "commits once per quarantine sibling" now describe only the unkeyed path:
+  the Problem Statement, the Technical Design 2-4 sweep inventory, As built
+  and §7.7. They are read with this entry. Under `Idempotency-Key`, a
+  restore runs §7.7's single-transaction form. All siblings run in one
+  `withTenant` under one 25 s budget: each sibling's `statement_timeout` is
+  whatever is left of it, and `lock_timeout` stays 2 s. The commit marker
+  runs in that same transaction, so a busy trip anywhere rolls back every
+  sibling and the call reads `rolled_back`. A keyed call takes at most 74
+  chashes. That K is measured: the worst-case row is 773 bytes as jsonb,
+  within the 64 KB stored-response cap with an 8 KB envelope reserve. A
+  keyed call over K gets 400 `too_many_chashes_for_keyed_restore`, and
+  the audit and window sources clamp `limit` to K and page by cursor. On
+  the keyed body only, owner and chunk titles are clipped to 160 JSON bytes,
+  and a body still over the cap fails inside the transaction rather than
+  being stored: 422 `keyed_restore_body_over_cap`, nothing moved, the ledger
+  row `rolled_back`. The client then resends that page once, unkeyed (the
+  unkeyed path stores no body, so no cap applies), only when the 422
+  answers the first attempt of the call, and reports the page as run
+  unkeyed. A replay equals the first response field for field. A
+  keyed dry run is refused, so the client sends dry runs unkeyed. The
+  unkeyed path is unchanged. The engine half rides `engine-service-v0.1.181`
+  (wire ledger entry `[additive]`).
 
 ## Proposed Solution
 
