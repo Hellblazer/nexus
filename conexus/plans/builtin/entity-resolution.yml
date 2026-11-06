@@ -15,7 +15,7 @@
 # generate), so either reading of the request reaches a plan with a
 # coverage boundary. The steps are a copy, kept identical on purpose: see
 # hybrid-factual-lookup.yml for the per-stream budget and threshold
-# rationale. tests/test_plan_match_entity_resolution_route.py pins the
+# rationale. The nexus repo's entity-resolution route tests pin the
 # match text, the request kinds and the golden discovery requests.
 #
 # Match text: the RDR-079 cache embeds it with the bundled MiniLM and the
