@@ -3327,6 +3327,12 @@ async def _dispatch_resolve(args: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _dispatchable_tool_names(mcp_core: Any) -> frozenset[str]:
+    """Names a plan step may dispatch: the registered MCP tools plus the operators, never a private name."""
+    registered = {t.name for t in mcp_core.mcp._tool_manager.list_tools()}
+    return frozenset(n for n in registered | _OPERATOR_RESOLVED_TOOLS if not n.startswith("_"))
+
+
 async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch *tool* against the live MCP tool registry.
 
@@ -3459,12 +3465,18 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
         args = dict(args)
         _chash_allow = list(args.pop("chash_allow") or ())
 
-    fn = getattr(mcp_core, resolved_tool, None)
+    # RDR-243 review r1 F1: dispatch ONLY a registered MCP tool or an operator. ``nexus.mcp.core`` also holds
+    # private helpers that take ``sensitivity=`` (``_store_get_many_impl``, ``_search_render``, ...); a plan step
+    # naming one could pass ``"include"``, and the posture is enforced only by the registered tools' schema
+    # having no such argument. A leading underscore is refused outright, then the name must be registered.
+    _dispatchable = _dispatchable_tool_names(mcp_core)
+    fn = (
+        getattr(mcp_core, resolved_tool, None)
+        if not resolved_tool.startswith("_") and resolved_tool in _dispatchable
+        else None
+    )
     if fn is None or not callable(fn):
-        available = sorted(
-            name for name in dir(mcp_core)
-            if not name.startswith("_") and callable(getattr(mcp_core, name, None))
-        )[:20]
+        available = sorted(_dispatchable)[:20]
         raise PlanRunToolNotFoundError(
             tool=tool,
             reason=(
