@@ -1000,6 +1000,21 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
             notKeyed.put("PciCatalog.Snapshot.anchors", PCI_OFF);
             notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);
+            // nexus-4lnn1.1.4 (RDR-230): the recall canary's schedule and results, per engine in memory, lost on restart;
+            // keyed by index name (which carries the tenant's hash) and written only by the builder-lock holder's pass.
+            for (String f : List.of(
+                "PciCanarySchedule.IndexState.lastRun",
+                "PciCanarySchedule.IndexState.lastVacuumTrigger",
+                "PciCanarySchedule.IndexState.latest",
+                "PciCanarySchedule.states",
+                "PciCanarySchedule.baselines",
+                "PciCanary.Target.tenant",
+                "PciCanary.Leg.hits",
+                "PciCanary.Result.redSample",
+                "PciReconciler.Tally.droppedIndexes",
+                "PciReconciler.Tally.builtTargets")) {
+                notKeyed.put(f, PCI_OFF);
+            }
             notKeyed.put("PciIndexSet.NONE", PCI_OFF);
             notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
         }

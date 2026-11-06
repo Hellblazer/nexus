@@ -2452,4 +2452,162 @@ class PciReconcilerIntegrationTest {
         assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).doesNotContain(index);
         assertThat(logged("event=pci_anchor_adopted")).isZero();
     }
+
+    // -- RDR-230 P1.3: the recall canary's schedule on the pass (nexus-4lnn1.1.4) ---------------------------------
+
+    /** A reconciler whose canary schedule runs {@code runner} (the canary's own tests are PciCanaryTest and the plan test). */
+    PciReconciler canaryReconciler(PciSettings s, PciIndexSweep sweep, Clock clock, PciCanarySchedule schedule) {
+        return new PciReconciler(catalog::read, builderSession(s), sweep, s, clock, PciReconciler.SET_LOCAL_TENANT,
+            PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), java.util.random.RandomGenerator.getDefault(), () -> 0,
+            schedule);
+    }
+
+    /** A runner that records (index, trigger, whether the index was valid when it was called) and reports green. */
+    PciCanarySchedule.Runner recordingCanary(List<String> runs, Clock clock) {
+        return (target, trigger) -> {
+            boolean valid = catalog.read().leaves().stream().flatMap(l -> l.indexes().stream())
+                .anyMatch(i -> i.name().equals(target.index()) && i.valid());
+            runs.add(target.index() + "/" + trigger + "/valid=" + valid + "/" + target.collection() + "/"
+                + target.tenant() + "/" + target.model());
+            return new PciCanary.Result(target, trigger, PciCanary.State.GREEN, null, 10, 1.0, 1.0, 0, clock.instant(),
+                null, null);
+        };
+    }
+
+    @Test
+    void theCanary_runsAfterTheBuildInThePass_onTheBuiltIndex_andNotAgainOnTheNextPass() throws Exception {
+        String tenant = newTenant("can-build");
+        collection(tenant, name("big"), B + 50);
+        collection(tenant, name("small"), 10);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        List<String> runs = new ArrayList<>();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(runs, clock), clock, System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        String index = PciCatalog.indexName(M384, tenant, name("big"));
+
+        PassReport first = r.reconcileOnce();
+
+        assertThat(first.builds()).isEqualTo(1);
+        assertThat(runs).as("one run, after the build, on the index the pass built (valid when the canary ran)")
+            .containsExactly(index + "/after_build/valid=true/" + name("big") + "/" + tenant + "/" + M384);
+        assertThat(r.canaryResults()).containsOnlyKeys(index);
+
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();
+        assertThat(runs).as("nothing is due ten minutes later").hasSize(1);
+    }
+
+    @Test
+    void theCanary_isNotRunOnAnEngineThatDoesNotHoldTheLock() throws Exception {
+        String tenant = newTenant("can-standby");
+        collection(tenant, name("big"), B + 50);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        List<String> runs = new ArrayList<>();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(runs, clock), clock, System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        r.reconcileOnce();
+        assertThat(runs).hasSize(1);
+        runs.clear();
+
+        // Another engine holds the builder lock: this pass is inactive and the canary does not run, even for a stale index.
+        clock.advance(Duration.ofHours(30));
+        try (PciBuilderSession.Pass holder = builderSession(s).open()) {
+            assertThat(holder.live()).isTrue();
+            PassReport standby = r.reconcileOnce();
+            assertThat(standby.ranToEnd()).isFalse();
+            assertThat(runs).isEmpty();
+        }
+        r.reconcileOnce();
+        assertThat(runs).as("the lock free again: the index is stale and runs").hasSize(1);
+    }
+
+    @Test
+    void theVacuumTrigger_ignoresAnInsertOnlyVacuum_andFiresOnADeleteVacuum_onceInSixHours() throws Exception {
+        String tenant = newTenant("can-vac");
+        List<String> hex = collection(tenant, name("c"), 300);
+        PciSettings s = settings(16);
+        MutableClock clock = new MutableClock();
+        List<String> runs = new ArrayList<>();
+        PciCanarySchedule schedule = new PciCanarySchedule(recordingCanary(runs, clock), clock, System::nanoTime);
+        PciReconciler r = canaryReconciler(s, sweep(s), clock, schedule);
+        r.reconcileOnce();                      // builds; the after_build run
+        assertThat(runs).hasSize(1);
+        runs.clear();
+        PciCatalog.Leaf leaf = leaf(tenant);
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();                      // the first look at the leaf's statistics: a baseline, no trigger
+        assertThat(runs).isEmpty();
+
+        // An insert-only vacuum: last_vacuum advances; no row was deleted or updated.
+        addRows(tenant, name("c"), 50);
+        java.time.OffsetDateTime vacuumedBefore = statsOf(leaf).lastVacuum();
+        vacuum(leaf);
+        awaitVacuumAfter(leaf, vacuumedBefore);
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();
+        assertThat(runs).as("an insert-only vacuum reaps nothing: no run").isEmpty();
+
+        // Deletes, then a vacuum.
+        deleteAndVacuum(leaf, tenant, name("c"), hex.subList(0, 20));
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();
+        String index = PciCatalog.indexName(M384, tenant, name("c"));
+        assertThat(runs).containsExactly(index + "/vacuum/valid=true/" + name("c") + "/" + tenant + "/" + M384);
+        runs.clear();
+
+        // Another delete and vacuum within six hours of that trigger: no second run.
+        deleteAndVacuum(leaf, tenant, name("c"), hex.subList(20, 40));
+        clock.advance(Duration.ofHours(5));
+        r.reconcileOnce();
+        assertThat(runs).as("at most once per index per six hours").isEmpty();
+
+        // And one after the six hours.
+        deleteAndVacuum(leaf, tenant, name("c"), hex.subList(40, 60));
+        clock.advance(Duration.ofHours(2));
+        r.reconcileOnce();
+        assertThat(runs).hasSize(1);
+        assertThat(runs.get(0)).contains("/vacuum/");
+    }
+
+    void vacuum(PciCatalog.Leaf leaf) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.vacuumTable(su, leaf.schema(), leaf.name());
+        }
+    }
+
+    /** Delete the rows, wait for the delete count to reach the statistics, then vacuum and wait for that too. */
+    void deleteAndVacuum(PciCatalog.Leaf leaf, String tenant, String collection, List<String> hex) throws Exception {
+        long deletedBefore = statsOf(leaf).deleted();
+        deleteRows(tenant, collection, hex);
+        await(() -> {
+            try {
+                return statsOf(leaf).deleted() > deletedBefore;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }, "the delete count to reach pg_stat_user_tables");
+        java.time.OffsetDateTime vacuumedBefore = statsOf(leaf).lastVacuum();
+        vacuum(leaf);
+        awaitVacuumAfter(leaf, vacuumedBefore);
+    }
+
+    void deleteRows(String tenant, String collection, List<String> hex) throws Exception {
+        asSuperuser(su -> su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION.eq(collection))
+            .and(CHUNKS.CHASH.in(hex.stream().map(h -> Chash.fromHex(h).toBytes()).toList())).execute());
+    }
+
+    /** Wait for the vacuum's statistics and for the deletes before it to reach pg_stat_user_tables. */
+    void awaitVacuumAfter(PciCatalog.Leaf leaf, java.time.OffsetDateTime before) throws Exception {
+        await(() -> {
+            try {
+                java.time.OffsetDateTime now = statsOf(leaf).lastVacuum();
+                return now != null && (before == null || now.isAfter(before));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }, "the vacuum to reach pg_stat_user_tables");
+    }
 }

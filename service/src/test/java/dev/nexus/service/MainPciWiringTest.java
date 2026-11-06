@@ -204,6 +204,26 @@ class MainPciWiringTest {
     }
 
     /**
+     * nexus-4lnn1.1.4 (RDR-230): the recall canary runs on the builder-lock holder's pass through the SAME repository
+     * the vector routes use (its serving statement path, not a copy) and reads the ring in the same scope. Without the
+     * two arguments {@code PciReconciler.create} would be the overload with no canary, and nothing else would notice.
+     */
+    @Test
+    void theReconcilerIsHandedTheServingRepositoryAndTheScopeForTheRecallCanary() throws Exception {
+        String src = code(main());
+        int create = src.indexOf("PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,");
+        int repo = src.indexOf("var pgVectorRepo = new PgVectorRepository(");
+        assertThat(create).isPositive();
+        String call = src.substring(create, src.indexOf(";", create));
+        assertThat(call).contains("pciQueryRingExpiry::expireAll").contains("pgVectorRepo").contains("tenantScope");
+        assertThat(call.indexOf("pgVectorRepo")).as("the repository, then the scope").isLessThan(call.indexOf("tenantScope"));
+        assertThat(repo).as("the repository the routes serve from exists before the reconciler is built")
+            .isPositive().isLessThan(create);
+        assertThat(src.indexOf("new PgVectorRepository(", repo + "var pgVectorRepo = ".length() + 1)).as("one repository, not a second for the canary")
+            .isNegative();
+    }
+
+    /**
      * nexus-43ulx.23: {@code per_collection_indexes} on {@code /v1/status} is bound in Main from the SAME sweep and
      * reconciler that run (not a copy, not {@code PciIndexSet.NONE}), after both exist. Without the call the route
      * silently omits the key and every client reads "cannot tell"; no other test would notice.

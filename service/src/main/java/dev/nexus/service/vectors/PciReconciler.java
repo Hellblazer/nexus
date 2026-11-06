@@ -266,6 +266,8 @@ public final class PciReconciler {
     private final RandomGenerator random;
     /** nexus-4lnn1.1.3: deletes the recall canary's query-ring rows older than 30 days; returns the row count. */
     private final IntSupplier ringExpiry;
+    /** nexus-4lnn1.1.4: when the recall canary runs and what it last found; {@code null} means no canary (tests). */
+    private final PciCanarySchedule canary;
 
     private final Map<LeafKey, Failure> failures = new ConcurrentHashMap<>();
     /** Per leaf id, the statistics at the last committed look; per (leaf, index name), what that look read. */
@@ -306,6 +308,17 @@ public final class PciReconciler {
     PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
                   Duration period, RandomGenerator random, IntSupplier ringExpiry) {
+        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, ringExpiry, null);
+    }
+
+    /**
+     * As above with the recall canary's schedule (nexus-4lnn1.1.4): on each pass this engine runs as the builder-lock
+     * holder, after the drops and builds, the schedule runs what is due, within its pass budget. {@code null} runs none.
+     */
+    PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
+                  PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
+                  Duration period, RandomGenerator random, IntSupplier ringExpiry, PciCanarySchedule canary) {
+        this.canary = canary;
         this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
@@ -338,6 +351,27 @@ public final class PciReconciler {
             Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
             Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
             RandomGenerator.getDefault(), ringExpiry);
+    }
+
+    /**
+     * As above, with the recall canary (nexus-4lnn1.1.4, RDR-230): its statements go through {@code repository}'s
+     * serving path, its queries come from the ring in {@code scope}'s database.
+     */
+    public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
+                                       PciSettings settings, IntSupplier ringExpiry, PgVectorRepository repository,
+                                       dev.nexus.service.db.TenantScope scope) {
+        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"));
+        var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements());
+        return new PciReconciler(new PciCatalog(ds)::read,
+            new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
+            Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
+            Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
+            RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner));
+    }
+
+    /** The canary's latest result for every index it has run on, by index name (empty without a canary). */
+    Map<String, PciCanary.Result> canaryResults() {
+        return canary == null ? Map.of() : canary.results();
     }
 
     // -- status ----------------------------------------------------------------------------------------------
@@ -516,12 +550,67 @@ public final class PciReconciler {
                 + "failing={}", ranToEnd, tally.leaves, tally.processedLeaves, tally.drops, tally.builds,
                 tally.failedBuilds, tally.skippedLeaves, (System.nanoTime() - startedNanos) / 1_000_000,
                 tally.sumCountMillis, tally.maxCountMillis, builder.state().wire(), failingCount());
+            if (ranToEnd) {
+                runCanaries(snapshot, tally);
+            }
             return new PassReport(builder.state(), ranToEnd, tally.leaves, tally.drops, tally.builds,
                 tally.failedBuilds, tally.skippedLeaves);
         } finally {
             building.set(null);
             passStartedAt = null;
         }
+    }
+
+    /**
+     * The recall canary (nexus-4lnn1.1.4), after the pass's drops and builds: every valid parsed index the snapshot
+     * lists that the pass did not drop, and every index it built. It runs on the lock holder only, never fails the pass,
+     * and acts on nothing: a result is recorded and logged (RDR-230 Phase 1 has no REINDEX).
+     */
+    private void runCanaries(PciCatalog.Snapshot snapshot, Tally tally) {
+        if (canary == null) {
+            return;
+        }
+        try {
+            Map<String, PciCanary.Target> targets = new java.util.LinkedHashMap<>();
+            for (Leaf leaf : snapshot.leaves()) {
+                if (leaf.model() == null || leaf.tenant() == null) {
+                    continue;
+                }
+                for (Index index : leaf.indexes()) {
+                    if (index.parsed() && index.valid() && !tally.droppedIndexes.contains(index.name())) {
+                        targets.put(index.name(), new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
+                            index.collection(), index.name()));
+                    }
+                }
+            }
+            for (PciCanary.Target built : tally.builtTargets) {
+                targets.put(built.index(), built);
+            }
+            canary.runPass(List.copyOf(targets.values()));
+        } catch (RuntimeException e) {
+            log.warn("event=pci_canary_pass_failed error_class={} error=\"{}\"", e.getClass().getSimpleName(),
+                e.getMessage() == null ? "" : e.getMessage().replace('\n', ' '));
+        }
+    }
+
+    /**
+     * The leaf's statistics, just committed, to the canary's vacuum trigger: the leaf's valid indexes the plan is not
+     * dropping.
+     */
+    private void observeForCanary(Leaf leaf, Planned planned) {
+        PciAnchorReads.LeafStats stats = planned.anchors().stats();
+        if (canary == null || stats == null) {
+            return;
+        }
+        Set<String> dropping = new HashSet<>();
+        for (Action action : planned.actions()) {
+            if (action instanceof Drop d) {
+                dropping.add(d.name());
+            }
+        }
+        List<String> names = leaf.indexes().stream()
+            .filter(i -> i.parsed() && i.valid() && !dropping.contains(i.name())).map(Index::name).toList();
+        canary.observeLeaf(leafId(leaf), names, stats);
     }
 
     /**
@@ -547,6 +636,9 @@ public final class PciReconciler {
         /** The counting transactions' wall time over the leaves processed: their sum and their longest. */
         long sumCountMillis;
         long maxCountMillis;
+        /** Indexes this pass dropped, and those it built (for the canary, which runs after both). */
+        final Set<String> droppedIndexes = new HashSet<>();
+        final List<PciCanary.Target> builtTargets = new java.util.ArrayList<>();
     }
 
     private static String leafId(Leaf leaf) {
@@ -593,6 +685,7 @@ public final class PciReconciler {
         tally.sumCountMillis += planned.countMillis();
         tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
         applyReadings(leaf, planned.anchors());
+        observeForCanary(leaf, planned);
         execute(pass, leaf, planned.dimension(), planned.anchors().adoptions(), planned.actions(), tally);
         return true;
     }
@@ -887,6 +980,10 @@ public final class PciReconciler {
         DdlOutcome outcome = pass.drop(leaf, index);
         if (outcome == DdlOutcome.DONE) {
             tally.drops++;
+            tally.droppedIndexes.add(drop.name());
+            if (canary != null) {
+                canary.dropped(drop.name());
+            }
             log.info("event=pci_index_dropped leaf={} index={} collection={} reason={}", leafId(leaf), drop.name(),
                 drop.collection(), drop.reason().label());
             // A router set that still lists the dropped index sends its collection to the serving ef_search with no
@@ -916,6 +1013,11 @@ public final class PciReconciler {
             case DONE -> {
                 tally.builds++;
                 failures.remove(key);
+                if (canary != null) {
+                    canary.built(build.name());
+                    tally.builtTargets.add(new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
+                        build.collection(), build.name()));
+                }
                 log.info("event=pci_index_built leaf={} index={} collection={}", leafId(leaf), build.name(),
                     build.collection());
                 refreshSweep("build", false);

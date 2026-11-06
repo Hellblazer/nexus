@@ -1687,6 +1687,26 @@ public final class PgVectorRepository {
                                                              ArmPhases phases,
                                                              boolean forceExact,
                                                              WherePlan manifestWhere) {
+        return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
+                                       rebindBeforeExactRerun, phases, forceExact, manifestWhere, null);
+    }
+
+    /**
+     * As above; {@code canary}, when not null, is the recall canary's HNSW statement (nexus-4lnn1.1.4, RDR-230): the
+     * statement, the settings batch and the router are the serving ones, and the canary's hook runs just before the
+     * statement (a forced EXPLAIN of this very statement under this transaction's settings).
+     * The plan check's sample is skipped, and the nexus-bq06h empty-page repair is not taken, so a walk that returns
+     * nothing is read as nothing rather than as the exact answer.
+     */
+    private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
+                                                             int dim, String[] colls,
+                                                             int nResults,
+                                                             java.util.function.IntSupplier statementTimeoutMs,
+                                                             boolean rebindBeforeExactRerun,
+                                                             ArmPhases phases,
+                                                             boolean forceExact,
+                                                             WherePlan manifestWhere,
+                                                             CanaryHook canary) {
         final long setupStartNanos = System.nanoTime();
         // RDR-227 Step 1: a statement over exactly one collection that has no valid per-collection index walks
         // the shared leaf index, filtered down to that collection, and stops at the first rows the filter
@@ -1762,7 +1782,7 @@ public final class PgVectorRepository {
                     result = ctx.selectFrom(fn).fetch();
                 } else {
                     ROUTED_HNSW.incrementAndGet();
-                    if (indexed) {
+                    if (indexed && canary == null) {
                         // RDR-227: a sampled arm (PciPlanCheck: the first arm of a new index, one per index per
                         // interval, one in DEFAULT_EVERY) asks the planner what it would do with this very
                         // statement, under this transaction's settings, and logs whether it chose the collection's
@@ -1779,11 +1799,16 @@ public final class PgVectorRepository {
                     // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
                     // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
                     // exactOnUnderReturn for the nexus-bq06h exact fallback.
-                    result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
-                                             manifestWhere != null, tenant, String.join(",", colls),
-                                             manifestWhere == null ? null
-                                                 : manifestQualifying(ctx, colls, manifestWhere, model, tenant,
-                                                                      true, null));
+                    if (canary != null) {
+                        canary.beforeStatement(ctx, () -> ctx.selectFrom(fn));
+                        result = ctx.selectFrom(fn).fetch();
+                    } else {
+                        result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
+                                                 manifestWhere != null, tenant, String.join(",", colls),
+                                                 manifestWhere == null ? null
+                                                     : manifestQualifying(ctx, colls, manifestWhere, model, tenant,
+                                                                          true, null));
+                    }
                 }
                 completed = true;
                 return result;
@@ -1860,6 +1885,103 @@ public final class PgVectorRepository {
                            .and(ch.collection().eq(DSL.any(colls)))
                            .limit(limit + 1)
                            .asTable("probe"));
+    }
+
+    // -- the recall canary's statements (nexus-4lnn1.1.4, RDR-230) ---------------------------------------------------
+
+    /**
+     * What the canary's HNSW statement does inside its transaction, just before it runs: when asked, an EXPLAIN of this
+     * very statement under the transaction's settings. The statement then runs on the same connection.
+     */
+    static final class CanaryHook {
+        private final boolean explain;
+        private final PciPlanCheck planCheck;
+        private final String index;
+        private final String collection;
+        volatile String plan;
+
+        CanaryHook(boolean explain, PciPlanCheck planCheck, String index, String collection) {
+            this.explain = explain;
+            this.planCheck = planCheck;
+            this.index = index;
+            this.collection = collection;
+        }
+
+        void beforeStatement(DSLContext ctx, java.util.function.Supplier<org.jooq.Select<?>> statement) {
+            if (explain) {
+                plan = planCheck.explainNow(ctx, statement.get(), index, collection);
+            }
+        }
+    }
+
+    /**
+     * The recall canary's statements: the serving search statement for one collection, through
+     * {@link #runPlainSearchStatement} (the settings batch, the router, the bound parameters, the tenant scope as
+     * {@code nexus_svc}), each statement holding one search permit like a fan-out arm. See {@link PciCanary}.
+     */
+    PciCanary.Statements canaryStatements() {
+        return canaryStatements(PciCanaryPolicy.PERMIT_WAIT);
+    }
+
+    /** As above with the permit wait given (a test shortens it). */
+    PciCanary.Statements canaryStatements(java.time.Duration permitWait) {
+        return new PciCanary.Statements() {
+            @Override
+            public PciCanary.Leg hnsw(PciCanary.Target target, float[] query, int k, boolean explain) {
+                return withCanaryPermit(permitWait, () -> {
+                    CanaryHook hook = new CanaryHook(explain, planCheck, target.index(), target.collection());
+                    ArmPhases phases = new ArmPhases();
+                    Result<? extends Record> result = canaryStatement(target, query, k, false, phases, hook);
+                    return new PciCanary.Leg(canaryHits(result), hook.plan, phases.exact);
+                });
+            }
+
+            @Override
+            public List<PciCanary.Hit> exact(PciCanary.Target target, float[] query, int k) {
+                return withCanaryPermit(permitWait, () ->
+                    canaryHits(canaryStatement(target, query, k, true, null, null)));
+            }
+        };
+    }
+
+    private Result<? extends Record> canaryStatement(PciCanary.Target target, float[] query, int k, boolean exact,
+                                                     ArmPhases phases, CanaryHook hook) {
+        dev.nexus.service.db.CollectionRow entry = CollectionRegistry.lookup(tenantScope, target.tenant(), target.collection());
+        if (!entry.embeddingModel().equals(target.model()) || entry.dimension() != query.length) {
+            throw new IllegalStateException("the collection is no longer the one the index was built for");
+        }
+        String[] colls = {target.collection()};
+        org.jooq.Table<?> fn = plainSearchFn(entry.dimension(), Vector.of(query), colls, planWhere(null), k,
+            entry.embeddingModel(), target.tenant());
+        return runPlainSearchStatement(target.tenant(), entry.embeddingModel(), fn, entry.dimension(), colls, k,
+            PgSession::startupSearchStatementTimeoutMs, false, phases, exact, null, hook);
+    }
+
+    private static List<PciCanary.Hit> canaryHits(Result<? extends Record> result) {
+        List<PciCanary.Hit> hits = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            hits.add(new PciCanary.Hit(rec.get("id", String.class), rec.get("distance", Double.class)));
+        }
+        return hits;
+    }
+
+    /** Run {@code work} holding one fan-out arm permit; refused when none frees within {@code wait}. */
+    private <T> T withCanaryPermit(java.time.Duration wait, java.util.function.Supplier<T> work) {
+        Semaphore gate = tenantScope.fanoutArmGate(
+            fanoutArmPermits(System.getenv(FANOUT_ARM_PERMITS_ENV), tenantScope.poolSize()));
+        try {
+            if (!gate.tryAcquire(wait.toNanos(), TimeUnit.NANOSECONDS)) {
+                throw new IllegalStateException("no search permit within " + wait.toMillis() + " ms");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted awaiting a search permit", e);
+        }
+        try {
+            return work.get();
+        } finally {
+            gate.release();
+        }
     }
 
     /** Statements routed exact / left on HNSW by the cardinality router (nexus-tu8wp.6). */
