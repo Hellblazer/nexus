@@ -3,10 +3,12 @@
 package dev.nexus.service;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TokenStore;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -534,6 +536,20 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
      */
     private record Pre(String tenant, String token, String live) {}
 
+    /** The label columns and {@code labels_written} of the manifest row that names {@code hex}. */
+    private void manifestLabels(String tenant, String collection, String hex, boolean written, String title,
+                                String type, Integer page) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, written)
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, title).set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, type)
+                .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, page)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes())).execute();
+        }
+    }
+
     private Pre preconditionTenant(String tenant) throws Exception {
         String token = tenantToken(tenant);
         String live = conformant(tenant);
@@ -566,6 +582,12 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         // The partial-NULL span (c10: every column but the char end) and its counter-example (c11: all four).
         manifestSpans(tenant, live, hexOf(tenant, live, "c10"), 1, 2, 3, null);
         manifestSpans(tenant, live, hexOf(tenant, live, "c11"), 1, 2, 3, 4);
+        // The manifest rows census (a) of RDR-236 Phase 4 Step 3 (nexus-6pfgb.42): labels_written false with a label
+        // set. c2 (a title) and c4 (a page number only) violate it; c10 is WRITTEN with a title (the constraint's
+        // own allowed shape) and c11 is unwritten with no label (every other legacy row looks like this).
+        manifestLabels(tenant, live, hexOf(tenant, live, "c2"), false, "Intro", null, null);
+        manifestLabels(tenant, live, hexOf(tenant, live, "c4"), false, null, null, 3);
+        manifestLabels(tenant, live, hexOf(tenant, live, "c10"), true, "Intro", "body", 1);
         // Counter-examples for the three document-level counts.
         document(tenant, "note.2", "knowledge", live, "{\"put_at\":\"2026-01-01T00:00:00Z\"}");
         document(tenant, "doc.full", "code", live, "{\"source_format\":\"py\",\"tags\":\"a\",\"category\":\"c\"}");
@@ -607,6 +629,9 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         assertThat(gen.path("missing_key").path("category").asLong()).isEqualTo(1);
         assertThat(pre.path("chunk_text_hash_mismatch").asLong()).isEqualTo(1);
         assertThat(pre.path("embedding_model_mismatch").asLong()).isEqualTo(1);
+        assertThat(pre.path("manifest_unwritten_label_rows").asLong())
+            .as("c2 (title) and c4 (page number) are unwritten with a label; c10 is written, c11 and the rest carry none")
+            .isEqualTo(2);
         assertThat(pre.path("quarantine_implication_violations").asLong()).isEqualTo(1);
         assertThat(pre.path("row_keys_on_live_rows").asLong()).as("c8 and c9").isEqualTo(2);
         assertThat(pre.path("wrong_width_rows").asLong()).isZero();
