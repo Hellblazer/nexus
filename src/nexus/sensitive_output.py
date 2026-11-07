@@ -31,8 +31,8 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 __all__ = [
-    "BADGE", "DocumentRows", "McpOutput", "first_sensitive_owner", "hit_is_sensitive", "mcp_output_posture",
-    "present_document_rows", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
+    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "first_sensitive_owner", "hit_is_sensitive",
+    "mcp_output_posture", "mcp_output_setting", "posture_of", "present_document_rows", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
 ]
 
 McpOutput = Literal["withhold", "flag"]
@@ -45,20 +45,45 @@ CONFIG_SECTION: Final = "sensitivity"
 CONFIG_KEY: Final = "mcp_output"
 
 
+def posture_of(value: object) -> McpOutput:
+    """The posture one configured *value* means: ``flag`` only for the string ``flag`` (case and surrounding space
+    ignored); anything else, an absent key and an unknown value included, is ``withhold``."""
+    if isinstance(value, str) and value.strip().lower() == "flag":
+        return "flag"
+    return "withhold"
+
+
+@dataclass(frozen=True)
+class McpOutputSetting:
+    """What the global config says about ``sensitivity.mcp_output`` and the posture that follows from it.
+
+    *raw* is the configured value (``None`` when the key is absent); *error* is the reason the config could not
+    be read (then *posture* is ``withhold`` and *raw* is ``None``)."""
+
+    posture: McpOutput
+    raw: object = None
+    error: str = ""
+
+
+def mcp_output_setting() -> McpOutputSetting:
+    """Read ``sensitivity.mcp_output`` from the GLOBAL config only (a cloned repo's ``.nexus.yml`` must not open
+    the gate) and return it with the posture it means. The one reader: the tools and ``nx doctor`` both go through
+    it, so they cannot disagree."""
+    try:
+        from nexus.config import get_global_config_section  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
+
+        raw = get_global_config_section(CONFIG_SECTION).get(CONFIG_KEY)
+    except Exception as exc:  # noqa: BLE001 - a broken config.yml must fail closed to withhold, never open
+        return McpOutputSetting("withhold", None, f"{type(exc).__name__}: {exc}")
+    return McpOutputSetting(posture_of(raw), raw)
+
+
 def mcp_output_posture() -> McpOutput:
     """``flag`` only when the global config says exactly that (case and surrounding space ignored); else ``withhold``.
 
     Read per call: the global config parse is cached on the file's mtime and size, so an edit takes effect at once
     and a read costs a ``stat``. A config that cannot be read is ``withhold``."""
-    try:
-        from nexus.config import get_global_config_section  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
-
-        value = get_global_config_section(CONFIG_SECTION).get(CONFIG_KEY)
-    except Exception:  # noqa: BLE001 - a broken config.yml must fail closed to withhold, never open
-        return "withhold"
-    if isinstance(value, str) and value.strip().lower() == "flag":
-        return "flag"
-    return "withhold"
+    return mcp_output_setting().posture
 
 
 def tumbler_order_key(tumbler: str) -> tuple[tuple[int, int, str], ...]:

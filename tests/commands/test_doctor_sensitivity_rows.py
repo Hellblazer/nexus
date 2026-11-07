@@ -447,3 +447,49 @@ def test_catalog_doctor_mcp_output_flag_warns_without_the_engine(monkeypatch, tm
     result = CliRunner().invoke(main, ["catalog", "doctor", "--sensitivity-mcp-output"])
     assert result.exit_code == 0, result.output
     assert "flag" in result.output and "WARN" in result.output
+
+
+# ── the row and the tools read one posture (nexus-rfvyy.8.7 / .8.2 cross-branch fix) ──
+
+
+def test_mcp_output_row_ignores_a_per_repo_flag_the_tools_ignore(monkeypatch, tmp_path) -> None:
+    """The tools read the GLOBAL config only (a cloned repo must not open the gate); the row said ``flag`` off a
+    repo's ``.nexus.yml`` while the tools withheld, so a clean-looking doctor hid the opposite."""
+    from nexus.sensitive_output import mcp_output_posture
+
+    cfg, repo = tmp_path / "cfg", tmp_path / "repo"
+    cfg.mkdir(), repo.mkdir()
+    (cfg / "config.yml").write_text("{}\n")
+    (repo / ".nexus.yml").write_text("sensitivity:\n  mcp_output: flag\n")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("NEXUS_REPO_ROOT", str(repo))
+    assert mcp_output_posture() == "withhold"
+    report = sd.check_sensitivity_mcp_output()
+    assert report["value"] == "withhold" and report["status"] == sd.PASS
+
+
+@pytest.mark.parametrize("text", [
+    "{}\n", "sensitivity:\n  mcp_output: flag\n", "sensitivity:\n  mcp_output: ' Flag '\n",
+    "sensitivity:\n  mcp_output: withhold\n", "sensitivity:\n  mcp_output: open\n", "sensitivity:\n  mcp_output: true\n",
+    "sensitivity: flag\n", "sensitivity:\n  mcp_output: [flag]\n",
+])
+def test_mcp_output_row_value_is_always_the_posture_the_tools_apply(monkeypatch, tmp_path, text) -> None:
+    from nexus.sensitive_output import mcp_output_posture
+
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text(text)
+    assert sd.check_sensitivity_mcp_output()["value"] == mcp_output_posture()
+
+
+def test_mcp_output_row_warns_and_reports_withhold_when_the_config_is_unreadable(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("sensitivity: [unclosed\n")
+    report = sd.check_sensitivity_mcp_output()
+    assert report["status"] == sd.WARN and report["value"] == "withhold" and report["reason"]
+
+
+def test_mcp_output_row_reports_an_unrecognised_value_as_the_withhold_the_tools_apply(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("sensitivity:\n  mcp_output: open\n")
+    report = sd.check_sensitivity_mcp_output()
+    assert report["status"] == sd.WARN and report["value"] == "withhold" and "open" in report["reason"]
