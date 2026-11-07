@@ -1133,7 +1133,7 @@ class VectorSensitivityRouteParityTest {
                     384, tenant, origin, quarantine, at, 20, 1)).fetchOne());
             sweeps.put("gc_quarantine_orphans_floored", dsl.select(GC_QUARANTINE_ORPHANS_FLOORED.MOVED,
                 GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE).from(GC_QUARANTINE_ORPHANS_FLOORED.call(
-                    384, tenant, origin, quarantine, at, 20, 1, null, null, false)).fetchOne());
+                    384, tenant, origin, quarantine, at, 20, 1, null, null, false, null)).fetchOne());
             sweeps.put("gc_quarantine_orphans", dsl.select(GC_QUARANTINE_ORPHANS.MOVED,
                 GC_QUARANTINE_ORPHANS.SAMPLE).from(GC_QUARANTINE_ORPHANS.call(
                     384, tenant, origin, quarantine, at, 20)).fetchOne());

@@ -187,7 +187,7 @@ migration_wal_bytes_per_worker = 11038000
 # 2368 -> 2372 (2026-11-07, after vectors-055 above): vectors-056-1..2 (nexus-alsq3, the client's quarantine retention stamped on the row at move time) add 4 DDL statements to a fresh migration: 1 DROP FUNCTION
 # (the ten-argument nexus.gc_quarantine_orphans_floored), 1 CREATE FUNCTION (the same function with a trailing p_quarantine_expires_at argument) and its GRANT EXECUTE to nexus_svc, and 1 CREATE OR REPLACE FUNCTION
 # (nexus.reaper_expire_client_quarantine, same signature, grant kept). No new table, so no runAlways grant is added.
-# Counted from the changeset's statements (4); NOT yet measured on a fresh migration (a scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued prints `ddl: migration=<n>`; expected 2372). Re-measure before the push and correct this line if it differs.
+# Counted from the changeset's statements (4) and measured: chas lab-m, 2026-11-07, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the tree rebased onto develop f254303d5, ddl: migration=2372.
 migration_ddl_per_worker = 2372
 migration_ddl_per_worker_tolerance = 0.0
 

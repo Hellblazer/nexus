@@ -248,12 +248,12 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
             throws Exception {
         // nexus-alsq3: quarantine_expires_at is not an allow-list key (neither CHUNK nor ROW), so the sweep would
         // strip it from a live row. It sits on a quarantine-* row, a bypass collection the sweep never reads.
-        String tenant = "sw-stamp";
+        String tenant = "sw-qexp"; // its own tenant: sw-stamp is the stamp test's fixture above, and a shared chash would collide
         String token = tenantToken(tenant);
         String live = conformant(tenant);
         String quarantine = "quarantine-" + live;
         String stamp = "2026-12-01T00:00:00Z";
-        assertThat((List<?>) plan().get("allowed_keys")).doesNotContain("quarantine_expires_at");
+        assertThat((List<String>) plan().get("allowed_keys")).doesNotContain("quarantine_expires_at");
         List<String> liveRow = seed(tenant, live, rows(
             "stray", legacy(keyed(tenant, live, "stray", "quarantine_expires_at", stamp))));
         List<String> quarantined = seed(tenant, quarantine, rows(

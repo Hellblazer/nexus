@@ -687,7 +687,7 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         // nexus-alsq3: quarantine_expires_at is in neither the CHUNK nor the ROW keys, so the allow-list does not
         // name it. It is safe on a quarantine-* row only because that collection prefix is exempt by name.
         String stamp = "2026-12-01T00:00:00Z";
-        assertThat((List<?>) plan().get("allowed_keys")).as("the plan's allow-list does not name the stamp")
+        assertThat((List<String>) plan().get("allowed_keys")).as("the plan's allow-list does not name the stamp")
             .doesNotContain("quarantine_expires_at");
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
