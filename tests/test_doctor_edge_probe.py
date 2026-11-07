@@ -179,6 +179,7 @@ def test_response_header_stripped_is_a_distinct_hop(engine_for) -> None:
     assert eng.gets == 1  # the ledger is read whatever the header said
     out = probe.render(result)
     assert "response path" in out and "reached the engine" in result.detail
+    assert "conexus-c4i2" in out  # a key-loss hop carries the origin-policy pointer
 
 
 def test_status_route_not_served_fails(engine_for) -> None:
