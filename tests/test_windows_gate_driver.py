@@ -223,11 +223,12 @@ def test_the_network_adapter_is_sampled_after_the_restore_and_added_when_missing
 
 
 def test_with_quieting_on_the_guest_boots_offline_and_connects_after_the_quiet_block() -> None:
-    """nexus-y3y8d (attribution 2026-11-07): 213 MiB left the switch in the 40 s restore boot, before the
-    quiet block ran (12 s after Start-VM, with the NIC already connected): Edge's self-update alone was
-    78 MiB. With quieting on, the adapter is added disconnected, the quiet block (which PowerShell Direct
-    runs with no network) applies first, Edge's own update policy included, and only then does the
-    adapter connect to the Default Switch. -Cache no keeps the old order."""
+    """nexus-y3y8d (attribution 2026-11-07): 213 MiB left the switch in the 40 s restore phase, whose first
+    seconds run with the NIC connected before the quiet block applies. With quieting on, the adapter is
+    added disconnected, the quiet block (which PowerShell Direct runs with no network) applies first,
+    Edge's own update policy included and read back, and only then does the adapter connect. Edge's
+    78 MiB was seen by a probe after the stduser restart, so the persisting policy, not the offline boot,
+    is what targets it. -Cache no keeps the old order."""
     restore = "\n".join(_code_lines(_read("restore.ps1")))
     after = restore[restore.index("Restore-VMSnapshot"):]
     offline = after.index("Disconnect-VMNetworkAdapter -VMName $vm")
@@ -240,7 +241,13 @@ def test_with_quieting_on_the_guest_boots_offline_and_connects_after_the_quiet_b
     assert "if ($offline) {" in after[:start] and "$offline = $Cache -eq 'yes'" in after[:start]
     block = restore[restore.index("$quietBlock = {"):restore.index("$quieted = $Cache")]
     assert "Policies\\Microsoft\\EdgeUpdate" in block
-    assert "Update{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}" in block  # Edge stable only: WebView2 keeps updating
+    assert "'Update{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' 0 -Type DWord -ErrorAction Stop" in block
+    assert "if ($edge -ne 0) { throw" in block  # the connect waits for the policy, read back
+    assert "UpdateDefault" not in block and "F3017226" not in block  # Edge stable only: WebView2 keeps updating
+    # the connect is gated on the quiet block returning, which -ErrorAction Stop makes a real gate
+    assert "Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop $quietBlock; $quieted = $true" in after
+    # an offline run that never connects says why, not just 'no network'
+    assert "quieted=$quieted connected=$connected; last error in the network wait:" in after
 
 
 # ---- the parse check comes before the installs -------------------------------
