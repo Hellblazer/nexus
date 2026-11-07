@@ -517,7 +517,7 @@ match = { surface = "cli_search" }
 
 [row.emit]
 census_row = 24
-label = "`nx search` and `nx query` output"
+label = "`nx search`, `nx store` and `nx catalog` output, and the SubagentStart links section"
 sends = "result text on stdout, often read by the Bash tool of Claude Code"
 targets = [
     "nexus.commands.search_cmd:search_cmd",

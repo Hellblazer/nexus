@@ -263,7 +263,8 @@ def hidden_endpoints(
     """The documents an edge must not describe: *hidden* (the withheld documents the caller already presented) and,
     under a withhold, every other endpoint in *tumblers* whose catalog row is sensitive. One rule for every
     surface that returns link edges (nexus-rfvyy.8 fix r1): an edge touching a withheld document loses its ``meta``
-    (:func:`withheld_edges`) and its span text, whichever side the withheld document is on.
+    (:func:`withheld_edges`), whichever side the withheld document is on. Only ``meta`` is withheld: the edge's
+    spans stay (they are positions and chunk hashes, not text).
 
     A flag read that fails hides every endpoint (fail closed). Nothing is read under ``flag``. *posture* ``None``
     reads the MCP tools' (``sensitivity.mcp_output``)."""
