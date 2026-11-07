@@ -50,6 +50,7 @@ import shlex
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -369,7 +370,7 @@ def policy() -> str:
 
 @dataclass(frozen=True)
 class InstallPlan:
-    kind: str  # generation | directory | legacy | mcpb | dev
+    kind: str  # generation | directory | legacy | mcpb | dev | other
     auto: bool  # whether ensure() may install without a person
     command: str  # what a person runs instead
     why: str = ""
@@ -429,9 +430,17 @@ def install_plan() -> InstallPlan:
                    "turn on its Include PDF support setting (Settings, Connectors, Desktop, Conexus) and "
                    "restart the extension, or install the CLI")
         return InstallPlan("mcpb", False, _cli_install_command(), why)
+    if _running_from_source_checkout(host):
+        return InstallPlan(
+            "dev", False, "uv sync",
+            "this is a source checkout; its dev group carries the PDF stack",
+        )
+    # nexus-nz8kl: pip, pipx or a system Python. `uv sync` does nothing here and `nx self install`
+    # refuses, so name the installer, which sets up a managed install with PDF support.
     return InstallPlan(
-        "dev", False, "uv sync",
-        "this is a source checkout; its dev group carries the PDF stack",
+        "other", False, _cli_install_command(),
+        "this install was made with pip, pipx or a system Python, which nx cannot add PDF support to; "
+        "the installer sets up a managed install that carries it",
     )
 
 
@@ -459,6 +468,19 @@ def _cli_install_command() -> str:
     if os.name == "nt":
         return "irm https://hellblazer.github.io/nexus/install.ps1 | iex"
     return "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"
+
+
+def _running_from_source_checkout(prefix: Path) -> bool:
+    """Whether *prefix* (the running venv root) is a conexus source checkout's ``.venv``: the
+    directory above it holds a ``pyproject.toml`` naming ``conexus``, as ``uv sync`` in a checkout
+    leaves it. Anything else (pip, pipx, a system Python) is not a checkout (nexus-nz8kl)."""
+    pyproject = prefix.parent / "pyproject.toml"
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    project = data.get("project")
+    return isinstance(project, dict) and project.get("name") == "conexus"
 
 
 def _running_from_mcpb_bundle(prefix: Path) -> bool:
