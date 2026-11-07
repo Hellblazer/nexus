@@ -347,10 +347,17 @@ def test_a_retried_plan_with_an_embedded_step_ref_fails_in_the_planner(monkeypat
 async def test_nx_answer_final_text_of_a_zero_evidence_terminal_is_the_no_evidence_text(tool) -> None:
     """nexus-iy2ep: nx_answer reads the terminal payload text-first, so a zero-evidence check or verify ends in its
     no-evidence text, never the JSON-encoded v1 payload."""
-    args = {"inputs": ["", ""], "check_instruction": "agree?"} if tool == "check" else {
-        "ids": [], "claim": "latency drops", "evidence": ""}
-    with patch(f"nexus.mcp.core.operator_{tool}") as op:
-        payload = await runner._default_dispatcher(tool, args)
+    if tool == "check":
+        with patch("nexus.mcp.core.operator_check") as op:
+            payload = await runner._default_dispatcher("check", {"inputs": ["", ""], "check_instruction": "agree?"})
+    else:  # the verify zero-evidence path, built as the test above builds it (no store is reached)
+        catalog = _CountingCatalog([_plain("1.1.1")], [_position(X, "1.1.1")])
+        with patch("nexus.mcp_infra.get_catalog", return_value=catalog), patch(
+            "nexus.mcp.core._get_catalog", return_value=catalog,
+        ), patch("nexus.mcp.core._get_t3", return_value=_t3({})), patch(
+            "nexus.mcp.core._read_scope", return_value=[COLL],
+        ), patch("nexus.mcp.core.operator_verify") as op:
+            payload = await runner._default_dispatcher("verify", {"ids": [X], "collections": COLL, "claim": "latency drops"})
     op.assert_not_called()
     plan = _cs_match({"steps": [{"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
                                 {"tool": tool, "args": {"ids": "$step1.ids", "claim": "x", "check_instruction": "x"}}]},
