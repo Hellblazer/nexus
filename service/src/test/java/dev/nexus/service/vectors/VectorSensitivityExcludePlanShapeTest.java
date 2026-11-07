@@ -172,6 +172,9 @@ class VectorSensitivityExcludePlanShapeTest {
             PgContainerHelper.insertCollection(ctx, TENANT, EXACT);
             seedCollection(ctx, EXACT, EXACT_ROWS, rnd);
             addManifestBallast(su, TENANT, BALLAST, MODEL, "bal-", BALLAST_ROWS, SENSITIVE_EVERY);
+            // Serial build (nexus-zpd9o): a parallel HNSW build holds the graph in dynamic shared memory, which
+            // does not fit a container's default 64 MB /dev/shm. Session-level, this connection only.
+            DSL.using(su, SQLDialect.POSTGRES).set(DSL.name("max_parallel_maintenance_workers"), DSL.inline(0)).execute();
             PgContainerHelper.createLeafHnswIndex(su, "nexus", leaf, PCI_INDEX, "embedding_384", PCI);
             PgContainerHelper.analyzeTable(su, DSL.table(DSL.name("nexus", leaf)));
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
