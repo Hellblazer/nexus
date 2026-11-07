@@ -894,25 +894,68 @@ rm -rf "$LOCKDIR"
 # and the suite floor in tests/scripts/test_shell_suite_wiring.py does not count
 # them.
 if _lock_flock_ok; then
+    # _start_flock_holder <lockdir> <ready-file> [VAR=value...]: start a background holder that
+    # takes <lockdir> with lock_acquire and then sleeps holding it (FLOCK_HOLDER is its pid), and wait
+    # until that lock_acquire has RETURNED, which the holder says by writing <ready-file> after it.
+    # Waiting for the lockdir to appear is not enough (nexus-fuz9t): the claiming mv makes the lockdir
+    # visible before lock_acquire's own pid readback, and a test that rewrites pid in that gap makes
+    # the holder read a pid that is not its own, drop its flock and retry, so the "live holder" the test
+    # then probes holds nothing (Test 10 red under load on CI). Returns 0 with the flock held, 2 when
+    # the acquire returned but holder.flock is not held (a pid-rule lockdir), 1 when the holder exited
+    # first or 60 s passed.
+    _start_flock_holder() {
+        local lockdir="$1" ready="$2" deadline
+        shift 2
+        rm -f "$ready"
+        env "$@" bash -c "source '$HERE/lock.sh'; lock_acquire '$lockdir' 0 || exit 9; : >'$ready'; exec sleep 30" &
+        FLOCK_HOLDER=$!
+        deadline=$((SECONDS + 60))
+        while [[ ! -e "$ready" ]]; do
+            kill -0 "$FLOCK_HOLDER" 2>/dev/null || return 1
+            ((SECONDS < deadline)) || return 1
+            sleep 0.05
+        done
+        [[ "$(_lock_flock_state "$lockdir")" == live ]] || return 2
+    }
+
+    # _wait_holder_asleep <pid>: wait (60 s at most) until <pid> has exec'd into `sleep 30`, i.e.
+    # its lock_acquire returned and it will not touch its lockdir again.
+    _wait_holder_asleep() {
+        local args deadline=$((SECONDS + 60))
+        while ((SECONDS < deadline)); do
+            if [[ -r "/proc/$1/cmdline" ]]; then
+                args="$(tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null)"
+            else
+                args="$(ps -o args= -p "$1" 2>/dev/null)"
+            fi
+            [[ "$args" == "sleep 30"* ]] && return 0
+            sleep 0.05
+        done
+        return 1
+    }
+
     echo "Test 10: a live holder whose recorded pid is invisible is not reclaimed"
     LOCKDIR="$WORKDIR/nsvisible.lock"
-    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
-    ns_holder=$!
-    for _ in $(seq 1 50); do
-        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
-        sleep 0.1
-    done
-    if [[ -f "$LOCKDIR/holder.flock" ]]; then
-        ok "a holder on this host keeps holder.flock in its lockdir"
-    else
-        bad "no holder.flock after a successful acquire -- the lockdir is a pid-rule lockdir"
-    fi
+    # Regression pin for the setup race (nexus-fuz9t). The holder is slowed between its claiming mv
+    # and its pid readback (the seam Test 5b uses), so a setup that rewrote pid as soon as the lockdir
+    # appeared would land in that gap on every run, and the checks below wait for the holder to be
+    # asleep, so the consequence (the holder reads a pid not its own, drops its flock and re-takes the
+    # lock, rewriting pid) is in place before they judge, on every run rather than on a loaded runner.
+    rc_holder=0
+    _start_flock_holder "$LOCKDIR" "$WORKDIR/nsvisible.ready" NX_LOCK_TEST_WIDEN_WINDOW=1 NX_LOCK_TEST_WIDEN_SECONDS=1 || rc_holder=$?
+    ns_holder=$FLOCK_HOLDER
+    case "$rc_holder" in
+        0) ok "a holder on this host keeps holder.flock in its lockdir, held once lock_acquire returns" ;;
+        2) bad "no held holder.flock after a successful acquire -- the lockdir is a pid-rule lockdir" ;;
+        *) bad "test setup: the holder's lock_acquire did not return within 60 s, or the holder exited" ;;
+    esac
     # What a sibling job sees: a pid that names nothing in its own namespace.
     bash -c 'exit 0' &
     gone_pid=$!
     wait "$gone_pid" 2>/dev/null
     printf '%s\n' "$gone_pid" >"$LOCKDIR/pid"
     echo unknown >"$LOCKDIR/start_token"
+    _wait_holder_asleep "$ns_holder" || bad "test setup: the holder never reached its sleep within 60 s"
     if _lock_is_stale "$LOCKDIR" >/dev/null; then
         bad "_lock_is_stale called a lock held by a live flock holder stale because its pid does not exist here"
     else
@@ -935,12 +978,9 @@ if _lock_flock_ok; then
 
     echo "Test 11: a dead holder's lock is reclaimed although its recorded pid names a live process"
     LOCKDIR="$WORKDIR/nsdead.lock"
-    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
-    dead_holder=$!
-    for _ in $(seq 1 50); do
-        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
-        sleep 0.1
-    done
+    _start_flock_holder "$LOCKDIR" "$WORKDIR/nsdead.ready" \
+        || bad "test setup: the holder's lock_acquire did not return holding holder.flock"
+    dead_holder=$FLOCK_HOLDER
     kill -9 "$dead_holder" 2>/dev/null || true
     wait "$dead_holder" 2>/dev/null
     # The pid rule alone would call this live: a running process with its own start token.
@@ -1088,12 +1128,9 @@ DRIVER_EOF
 
     echo "Test 16: a timeout on a lock held by a process this shell cannot see names who holds it"
     LOCKDIR="$WORKDIR/explain.lock"
-    bash -c "source '$HERE/lock.sh'; lock_acquire '$LOCKDIR' 0 || exit 9; exec sleep 30" &
-    explain_holder=$!
-    for _ in $(seq 1 50); do
-        [[ -f "$LOCKDIR/holder.flock" && -s "$LOCKDIR/pid" ]] && break
-        sleep 0.1
-    done
+    _start_flock_holder "$LOCKDIR" "$WORKDIR/explain.ready" \
+        || bad "test setup: the holder's lock_acquire did not return holding holder.flock"
+    explain_holder=$FLOCK_HOLDER
     bash -c 'exit 0' &
     explain_gone=$!
     wait "$explain_gone" 2>/dev/null
