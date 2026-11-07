@@ -9804,7 +9804,7 @@ FROM scope s
     }
 
     private static String rowKey(String collection, String id) {
-        return collection + ' ' + id;
+        return collection + "\u0000" + id;
     }
 
     /**
