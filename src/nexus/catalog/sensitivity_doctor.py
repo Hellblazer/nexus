@@ -50,7 +50,6 @@ WITH_ASPECTS = "sensitive_with_aspects"
 IN_EXTERNAL_EMBEDDER = "sensitive_in_external_embedder"
 MCP_OUTPUT = "sensitivity_mcp_output"
 
-MCP_OUTPUT_DEFAULT = "withhold"
 MCP_OUTPUT_VALUES = frozenset({"withhold", "flag"})
 
 
@@ -219,23 +218,21 @@ def check_sensitive_in_external_embedder(*, reader: Any = None) -> dict:
 
 
 def check_sensitivity_mcp_output(*, value: str | None = None) -> dict:
-    """The ``sensitivity.mcp_output`` row. *value* is injectable for tests; the default reads the merged
-    config (a key that is absent is ``withhold``, the RDR's default)."""
-    if value is None:
-        try:
-            from nexus.config import load_config  # noqa: PLC0415 — deferred, config load is CLI-startup cost
+    """The ``sensitivity.mcp_output`` row: the posture the MCP tools apply. *value* is injectable for tests; the
+    default goes through :func:`nexus.sensitive_output.mcp_output_setting`, the tools' own reader (global config
+    only; an absent key is ``withhold``, the RDR's default; an unknown or unreadable value is ``withhold``)."""
+    from nexus.sensitive_output import McpOutputSetting, mcp_output_setting, posture_of  # noqa: PLC0415 — deferred, CLI startup cost
 
-            section = load_config().get("sensitivity")
-            value = section.get("mcp_output") if isinstance(section, dict) else None
-        except Exception as exc:  # noqa: BLE001 — an unreadable config is reported, never a false pass
-            _log.warning("sensitivity_doctor_config_unreadable", error=str(exc))
-            return {**_report(MCP_OUTPUT, WARN, f"the config could not be read ({type(exc).__name__}: {exc})"),
-                    "value": None}
-    active = MCP_OUTPUT_DEFAULT if value is None else str(value).strip().lower()
-    if active not in MCP_OUTPUT_VALUES:
-        return {**_report(MCP_OUTPUT, WARN, f"unrecognised value {value!r}; expected withhold or flag"), "value": active}
-    status = WARN if active == "flag" else PASS
-    return {**_report(MCP_OUTPUT, status), "value": active}
+    setting = McpOutputSetting(posture_of(value), value) if value is not None else mcp_output_setting()
+    if setting.error:
+        _log.warning("sensitivity_doctor_config_unreadable", error=setting.error)
+        return {**_report(MCP_OUTPUT, WARN, f"the config could not be read ({setting.error}); the tools withhold"),
+                "value": setting.posture}
+    raw = setting.raw
+    if raw is not None and (not isinstance(raw, str) or raw.strip().lower() not in MCP_OUTPUT_VALUES):
+        return {**_report(MCP_OUTPUT, WARN, f"unrecognised value {raw!r}; expected withhold or flag; the tools withhold"),
+                "value": setting.posture}
+    return {**_report(MCP_OUTPUT, WARN if setting.posture == "flag" else PASS), "value": setting.posture}
 
 
 def remedy_lines(report: dict) -> list[str]:
