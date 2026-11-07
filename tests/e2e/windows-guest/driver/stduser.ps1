@@ -13,6 +13,11 @@
 #     Not with -AdminGit no: then the account installs PortableGit itself;
 #   - turns off the first-sign-in animation and the privacy-settings screen, so
 #     the new account reaches a desktop unattended;
+#   - sets machine policy that stops OneDrive, Widgets, Start menu content and
+#     Edge's background work, and removes the default user's OneDriveSetup Run
+#     entry, before the account exists (nexus-y3y8d: the first sign-in's
+#     unrequested downloads). The gate then no longer proves anything about those
+#     four on a stock machine; nothing it checks depends on them;
 #   - creates the account and sets it as the automatic sign-in, then restarts;
 #   - with -AppLocker yes, applies AppLocker's default rules, enforced, for
 #     executables, installers, scripts and packaged apps, and sets the
@@ -127,10 +132,13 @@ try {
         New-Item -Force -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' | Out-Null
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name DisablePrivacyExperience -Value 1 -Type DWord
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableFirstLogonAnimation -Value 0 -Type DWord
-        # nexus-y3y8d: the first sign-in fetched about 400 MiB the gate never asked for (OneDrive,
-        # Widgets, Start menu content, Edge's background work). Machine policy set before the account
-        # exists stops it, and the default user's OneDriveSetup Run entry, which every new profile
-        # inherits, is removed so the per-user OneDrive installer never starts.
+        # nexus-y3y8d: the first sign-in fetched about 400 MiB the gate never asked for (measured traffic
+        # named OneDrive, Widgets, Start menu content, WebView2 and svchost). Machine policy set before the
+        # account exists is expected to stop most of it; the saving is unmeasured until a host-poller run.
+        # The default user's OneDriveSetup Run entry, which every new profile inherits, is removed so the
+        # per-user OneDrive installer never starts. Two values (CloudContent's DisableWindowsConsumerFeatures
+        # and DisableCloudOptimizedContent) are documented for Enterprise and Education and may be ignored on
+        # Pro; svchost's Update and Store traffic is untouched.
         foreach ($k in 'OneDrive', 'CloudContent') { New-Item -Force -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\$k" | Out-Null }
         foreach ($k in 'Dsh', 'Edge') { New-Item -Force -Path "HKLM:\SOFTWARE\Policies\Microsoft\$k" | Out-Null }
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Name DisableFileSyncNGSC -Value 1 -Type DWord
@@ -139,14 +147,27 @@ try {
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name DisableCloudOptimizedContent -Value 1 -Type DWord
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name StartupBoostEnabled -Value 0 -Type DWord
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name BackgroundModeEnabled -Value 0 -Type DWord
+        $odRun = 'not checked'
         & reg.exe load 'HKU\NXG_DEFAULT' 'C:\Users\Default\NTUSER.DAT' | Out-Null
-        try {
-            & reg.exe delete 'HKU\NXG_DEFAULT\Software\Microsoft\Windows\CurrentVersion\Run' /v OneDriveSetup /f 2>&1 | Out-Null
-        } finally {
-            [gc]::Collect()
-            & reg.exe unload 'HKU\NXG_DEFAULT' | Out-Null
-        }
-        "quiet-guest policy set (OneDrive, Widgets, Start content, Edge background; default-user OneDriveSetup removed)"
+        if ($LASTEXITCODE -eq 0) {
+            try {
+                & reg.exe delete 'HKU\NXG_DEFAULT\Software\Microsoft\Windows\CurrentVersion\Run' /v OneDriveSetup /f 2>&1 | Out-Null
+                & reg.exe query 'HKU\NXG_DEFAULT\Software\Microsoft\Windows\CurrentVersion\Run' /v OneDriveSetup 2>&1 | Out-Null
+                $odRun = if ($LASTEXITCODE -eq 0) { 'STILL PRESENT' } else { 'absent' }
+            } finally {
+                [gc]::Collect()
+                & reg.exe unload 'HKU\NXG_DEFAULT' | Out-Null
+                if ($LASTEXITCODE -ne 0) { Start-Sleep 2; [gc]::Collect(); & reg.exe unload 'HKU\NXG_DEFAULT' | Out-Null }
+                if ($LASTEXITCODE -ne 0) { $odRun += '; the default hive did not unload' }
+            }
+        } else { $odRun = 'not checked: the default hive did not load' }
+        $pol = @(
+            (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive').DisableFileSyncNGSC,
+            (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh').AllowNewsAndInterests,
+            (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent').DisableWindowsConsumerFeatures,
+            (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge').BackgroundModeEnabled
+        ) -join ','
+        "quiet-guest policy read back: OneDrive,Widgets,ConsumerFeatures,EdgeBackground=$pol (want 1,0,1,0); default-user OneDriveSetup Run entry: $odRun"
         if ($appLocker -ne 'no') {
             # AppLocker's own default rules (the ones "Create Default Rules" makes), all four collections enforced.
             $everyone = 'UserOrGroupSid="S-1-1-0" Action="Allow"'; $admins = 'UserOrGroupSid="S-1-5-32-544" Action="Allow"'

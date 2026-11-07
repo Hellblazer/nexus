@@ -1045,8 +1045,14 @@ def test_the_quiet_guest_policies_are_set_before_the_account_exists() -> None:
         assert line in code, line
     made = code.index("Add-LocalGroupMember")
     assert all(code.index(line) < made for line in wanted), "each one must precede the account's creation"
-    # the default hive is loaded under one name and always unloaded
-    assert code.index("reg.exe load 'HKU\\NXG_DEFAULT'") < code.index("reg.exe unload 'HKU\\NXG_DEFAULT'") < made
+    # the default hive is loaded under one name and unloaded in a finally, with its exit checked
+    load, fin = code.index("reg.exe load 'HKU\\NXG_DEFAULT'"), code.index("} finally {", code.index("reg.exe load"))
+    assert load < fin < code.index("reg.exe unload 'HKU\\NXG_DEFAULT'", fin) < made
+    assert "the default hive did not unload" in code
+    # the step reports what it read back, not what it meant to do
+    assert "quiet-guest policy read back:" in code and "$odRun" in code
+    # the policy runs in every standard-user run, not only under one AppLocker or WDAC mode
+    assert code.index("DisableFileSyncNGSC") < code.index("if ($appLocker -ne 'no')")
 
 
 # ---- --no-admin-git ----------------------------------------------------------
