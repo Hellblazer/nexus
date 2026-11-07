@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 
 from nexus.daemon.service_registry import pid_alive, process_command
+from nexus.util.process_group import KILL_SIGNAL
 from tests._engine_substrate import (
     _LOW_PORT_RANGE,
     _MAX_CONCURRENT_PG_BOOTS,
@@ -110,6 +111,34 @@ def owned_children():
                 pass
 
 
+def _write_fake_initdb(bin_dir: Path, monkeypatch, body: str) -> None:
+    """Install ``bin_dir/initdb`` as a fake that runs the Python *body*.
+
+    POSIX execs it through a ``/bin/sh`` launcher. Windows cannot exec a script named
+    ``initdb`` (WinError 193), so there the substrate module's own ``subprocess.run``
+    (a module-local seam, never the global one) runs ``python <body>`` in its place for
+    exactly that path; argv, stderr and the exit code are the real child's (nexus-8g913).
+    """
+    script = bin_dir / "initdb_fake.py"
+    script.write_text(body)
+    fake = bin_dir / "initdb"
+    fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+    fake.chmod(0o755)
+    if os.name != "nt":
+        return
+    from tests import _engine_substrate as sub
+
+    real_run = sub.subprocess.run
+    target = str(fake)
+
+    def _run(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv and argv[0] == target:
+            argv = [sys.executable, str(script), *argv[1:]]
+        return real_run(argv, *args, **kwargs)
+
+    setattr_in(monkeypatch, sub, "subprocess.run", _run)
+
+
 class TestStaleSidecarClusterReaped:
     def test_reaped_pair_ordered_engine_then_postmaster(
         self, tmp_path, monkeypatch, owned_children,
@@ -128,8 +157,11 @@ class TestStaleSidecarClusterReaped:
             def _fn(pid, *_args, **_kwargs):
                 calls.append(label)
                 try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    # KILL_SIGNAL: SIGKILL, or SIGTERM (TerminateProcess) on Windows, which has
+                    # no SIGKILL; a dead pid is ProcessLookupError on POSIX and a bare OSError
+                    # there (nexus-8g913).
+                    os.kill(pid, KILL_SIGNAL)
+                except OSError:
                     pass
             return _fn
 
@@ -438,6 +470,16 @@ class TestKillEngineLegUsesProcessGroup:
     def test_signals_the_process_group_not_just_the_pid(
         self, owned_children, monkeypatch,
     ) -> None:
+        if not hasattr(os, "setsid"):
+            # Windows has no process groups: safe_killpg degrades to the one process (the
+            # owner's job object took the tree), so the leg must still end the engine pid
+            # (nexus-8g913).
+            proc = _spawn_sleeper()
+            owned_children.append(proc)
+            _kill_engine_leg(proc.pid, grace_s=1.0)
+            proc.wait(timeout=5)
+            assert proc.poll() is not None
+            return
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             preexec_fn=os.setsid,
@@ -575,7 +617,7 @@ class TestThrowawayClusterBootIsBounded:
             "a cluster dir was created before the boot slot was acquired"
         )
 
-    def test_failed_initdb_leaves_no_empty_cluster_dir(self, tmp_path) -> None:
+    def test_failed_initdb_leaves_no_empty_cluster_dir(self, tmp_path, monkeypatch) -> None:
         """A failed ``initdb`` strands NOTHING.
 
         ``initdb`` removes the CONTENTS of a data directory it failed to
@@ -588,16 +630,15 @@ class TestThrowawayClusterBootIsBounded:
         """
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        fake = bin_dir / "initdb"
-        fake.write_text(
-            "#!/bin/sh\n"
-            'shift; d="$1"\n'
-            'touch "$d/base"\n'          # initdb gets partway...
-            'rm -f "$d/base"\n'          # ...then removes the contents
-            'echo "FATAL: could not create shared memory segment" >&2\n'
-            "exit 1\n"
+        _write_fake_initdb(
+            bin_dir, monkeypatch,
+            "import pathlib, sys\n"
+            "d = pathlib.Path(sys.argv[sys.argv.index('-D') + 1])\n"
+            "(d / 'base').touch()\n"            # initdb gets partway...
+            "(d / 'base').unlink()\n"           # ...then removes the contents
+            "print('FATAL: could not create shared memory segment', file=sys.stderr)\n"
+            "sys.exit(1)\n",
         )
-        fake.chmod(0o755)
         cluster_root = tmp_path / "clusters"
         cluster_root.mkdir()
 
@@ -611,20 +652,20 @@ class TestThrowawayClusterBootIsBounded:
         )
 
     @staticmethod
-    def _fake_bin(tmp_path, *, message: str):
+    def _fake_bin(tmp_path, monkeypatch, *, message: str):
         """A ``bin/`` whose ``initdb`` always fails with *message*, recording
         one line per invocation so the retry count is directly countable."""
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         counter = tmp_path / "initdb_calls"
-        fake = bin_dir / "initdb"
-        fake.write_text(
-            "#!/bin/sh\n"
-            f'echo call >> "{counter}"\n'
-            f'echo "{message}" >&2\n'
-            "exit 1\n"
+        _write_fake_initdb(
+            bin_dir, monkeypatch,
+            "import sys\n"
+            f"with open({str(counter)!r}, 'a') as fh:\n"
+            "    fh.write('call\\n')\n"
+            f"print({message!r}, file=sys.stderr)\n"
+            "sys.exit(1)\n",
         )
-        fake.chmod(0o755)
         return bin_dir, counter
 
     def test_shm_exhaustion_is_retried_and_then_fails_loud(
@@ -640,7 +681,7 @@ class TestThrowawayClusterBootIsBounded:
         than the silent fallback the project bans.
         """
         bin_dir, counter = self._fake_bin(
-            tmp_path,
+            tmp_path, monkeypatch,
             message="FATAL: could not create shared memory segment: "
                     "No space left on device",
         )
@@ -669,7 +710,7 @@ class TestThrowawayClusterBootIsBounded:
         general -- a broken bundle or a bad pgdata must fail on the first
         attempt rather than costing the budget's full backoff."""
         bin_dir, counter = self._fake_bin(
-            tmp_path, message="initdb: error: invalid locale settings",
+            tmp_path, monkeypatch, message="initdb: error: invalid locale settings",
         )
         monkeypatch.setattr("tests._engine_substrate._pg_bin", lambda: bin_dir)
         cluster_root = tmp_path / "clusters"
