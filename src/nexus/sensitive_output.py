@@ -254,7 +254,16 @@ def present_entries(cat: Any, entries: Sequence[Any], *, posture: McpOutput | No
             extra = doc_sensitivity.flagged(aliases, cat=cat)
         except doc_sensitivity.SensitivityUnknown:
             extra = set(aliases)
-    return present_document_rows([e.to_dict() for e in entries], extra_sensitive=extra, posture=posture)
+    return present_document_rows([_entry_row(e) for e in entries], extra_sensitive=extra, posture=posture)
+
+
+def _entry_row(entry: Any) -> dict[str, Any]:
+    """A catalog entry as a row: its ``to_dict()`` when it has one, else its attributes (the presenter takes any
+    entry-shaped object, as the CLI verbs did before they routed through it)."""
+    to_dict = getattr(entry, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
+    return dict(vars(entry))
 
 
 def hidden_endpoints(
