@@ -83,7 +83,7 @@ RUNG_NOTE_TAGS_ARRAY = "note-tags-array"
 RUNG_MANIFEST_SECTION_LABELS = "manifest-section-labels"
 
 #: RDR-236 (nexus-l8o33): copy a chunk row's line and character span onto the manifest rows with a NULL span column
-#: whose chash has exactly one live manifest row in the tenant, before the retire-keys sweep deletes the chunk row's
+#: whose chash has exactly one live manifest row in the tenant, before the key-retirement sweep deletes the chunk row's
 #: span keys. Fill-only per column; the same hard edge as the label rung, for the same reason.
 RUNG_MANIFEST_SPAN_FILL = "manifest-span-fill"
 

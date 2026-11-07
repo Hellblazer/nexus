@@ -12,6 +12,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from nexus.catalog.types import ManifestRow
@@ -57,23 +58,23 @@ class World:
         self.restamp_on_append: str | None = None
 
     def doc(self, tumbler: str, *, indexed_at: str = DOC_STAMP, title: str = "", file_path: str = "",
-            meta: dict | None = None) -> str:
+            meta: dict | None = None, collection: str = COLL) -> str:
         self.docs[tumbler] = SimpleNamespace(
-            tumbler=tumbler, physical_collection=COLL, indexed_at=indexed_at, alias_of="",
+            tumbler=tumbler, physical_collection=collection, indexed_at=indexed_at, alias_of="",
             title=title, file_path=file_path, meta=meta or {})
         self.manifests.setdefault(tumbler, [])
         return tumbler
 
     def row(self, tumbler: str, position: int, chash: str, *, written: bool = False, title: str | None = None,
-            stype: str | None = None, page: int | None = None, **span: int | None) -> None:
+            stype: str | None = None, page: int | None = None, collection: str = COLL, **span: int | None) -> None:
         cols = {c: span.get(c) for c in COLUMNS}
         self.manifests[tumbler].append(ManifestRow(
-            position=position, chash=chash, chunk_index=position, collection=COLL,
+            position=position, chash=chash, chunk_index=position, collection=collection,
             section_title=title, section_type=stype, page_number=page, labels_written=written, **cols))
 
-    def chunk(self, chash: str, **meta) -> None:
+    def chunk(self, chash: str, collection: str = COLL, **meta) -> None:
         meta.setdefault("indexed_at", OLD)
-        self.chunks[(COLL, chash)] = {"chunk_text_hash": chash, **meta}
+        self.chunks[(collection, chash)] = {"chunk_text_hash": chash, **meta}
 
     def spans(self, tumbler: str) -> list[tuple]:
         return [(r.position, *(getattr(r, c) for c in COLUMNS)) for r in self.manifests[tumbler]]
@@ -197,18 +198,47 @@ def test_a_single_row_chash_takes_the_chunk_rows_span_on_every_null_column(world
     assert rung.verify() is True
 
 
-def test_only_the_null_columns_are_sent_and_a_stored_column_is_never_overwritten(world: World) -> None:
+def test_a_row_whose_stored_column_differs_from_the_chunk_row_is_not_filled_at_all(world: World) -> None:
+    """nexus-l8o33 (review r1, C1). The chunk row says line_start 3, the manifest holds 77: the chunk row describes
+    another position, so none of its values may join the row's lines (mixed provenance: lines of one writer, chars of
+    another). The row stays as it was, in its own bucket, with its recorded span reported as unused."""
     d = world.doc("1.1.1")
     world.row(d, 0, h(1), line_start=77, line_end=None, char_start=None, char_end=None)
-    world.chunk(h(1), **SPAN)  # the chunk row says line_start 3; the manifest holds 77
+    world.chunk(h(1), **SPAN)
+    rung = world.rung()
+    assert rung.detect().converged, "nothing here is fillable, so nothing is pending"
+    _, result = _fill(world, rung)
+    assert world.spans(d) == [(0, 77, None, None, None)]
+    assert world.appends == []
+    c = rung._partial
+    assert (c.span_disagrees, c.fillable, c.filled, c.counted) == (1, 0, 0, 1)
+    assert c.abandoned["span_disagrees"] == 1 and c.reconciles()
+    assert result.outcome is ConvergeOutcome.COMPLETED
+
+
+def test_a_partial_row_that_agrees_with_the_chunk_row_takes_only_its_null_columns(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1), line_start=3, line_end=9, char_start=None, char_end=None)
+    world.chunk(h(1), **SPAN)
     rung = world.rung()
     assert rung.detect().pending
     _fill(world, rung)
-    assert world.spans(d) == [(0, 77, 9, 40, 190)], "the stored column stays; the NULL ones are filled"
+    assert world.spans(d) == [(0, 3, 9, 40, 190)]
     (_, requests), = world.appends
     sent = requests[0][1][0]
-    assert "line_start" not in sent and sent["line_end"] == 9
-    assert rung._partial.span_disagrees == 1
+    assert "line_start" not in sent and "line_end" not in sent
+    assert (sent["char_start"], sent["char_end"]) == (40, 190)
+    assert rung._partial.span_disagrees == 0
+
+
+def test_a_stored_column_the_chunk_row_does_not_record_is_not_a_disagreement(world: World) -> None:
+    """The chunk row records 0 for line_start (not a span): nothing to contradict the stored 77, so the NULL columns fill."""
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1), line_start=77, line_end=None, char_start=None, char_end=None)
+    world.chunk(h(1), line_start=0, line_end=9, chunk_start_char=40, chunk_end_char=190)
+    rung, _ = _fill(world)
+    assert world.spans(d) == [(0, 77, 9, 40, 190)]
+    assert rung._partial.span_disagrees == 0
 
 
 def test_a_row_with_every_column_set_is_never_read_against_the_chunk_or_written(world: World) -> None:
@@ -541,3 +571,196 @@ def test_the_auto_time_limit_defers_between_batches_and_the_rest_resumes(world: 
     again = world.rung(doc_batch=1)
     assert again.converge(Report()).outcome is ConvergeOutcome.COMPLETED
     assert [world.spans(f"1.1.{i}")[0][1] for i in (1, 2, 3)] == [3, 3, 3]
+
+
+# ── the exactness conditions, each with a test that fails when its condition is removed (review r1) ────────────────────
+
+
+def _listing(rows: list[dict]):
+    """A ``chash_positions_with_tombstoned`` that answers *rows* whatever the chashes, with no deleted holder."""
+    return lambda chashes: ([dict(r, collection=COLL, chunk_count=1, labels_written=False) for r in rows], [])
+
+
+@pytest.mark.parametrize("held,case", [
+    ([{"chash": h(1), "doc_id": "9.9.9", "position": 0}], "the one live row the listing names is another document's"),
+    ([{"chash": h(1), "doc_id": "1.1.1", "position": 5}], "the one live row the listing names is another position"),
+    ([], "the listing names no live holder at all"),
+])
+def test_a_listing_that_does_not_name_this_row_as_the_one_holder_leaves_it_null(world: World, held, case) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    world.chash_positions_with_tombstoned = _listing(held)  # type: ignore[method-assign]
+    rung, _ = _fill(world)
+    assert world.appends == [], case
+    c = rung._partial
+    assert (c.stale_listing, c.fillable, c.counted) == (1, 0, 1), case
+    assert c.abandoned["stale_listing"] == 1 and c.reconciles()
+
+
+def test_a_document_without_indexed_at_cannot_attribute_the_chunk_row(world: World) -> None:
+    d = world.doc("1.1.1", indexed_at="")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    rung, _ = _fill(world)
+    assert world.appends == [] and rung._partial.chunk_without_indexed_at == 1
+
+
+def test_a_position_that_changed_chash_before_the_write_is_not_reverted_to_the_scanned_chash(world: World) -> None:
+    """The re-read sees another chash at the position (a concurrent re-index). The owners listing is held at the scanned
+    state so that only the row's own chash comparison can catch it; the upsert would put the old chash back."""
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    snapshot = world.chash_positions_with_tombstoned([h(1)])
+
+    def reindex(w: World) -> None:
+        w.manifests[d][0] = replace(w.manifests[d][0], chash=h(99))
+        w.chash_positions_with_tombstoned = lambda chashes: snapshot  # the listing still answers as at scan
+
+    world.before_second_manifest_read = reindex
+    rung, _ = _fill(world)
+    assert world.appends == [] and rung._partial.raced == 1
+    assert world.manifests[d][0].chash == h(99), "the new chash is not overwritten"
+
+
+def test_a_deleted_document_that_started_holding_the_chash_before_the_write_stops_the_fill(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+
+    def tombstone(w: World) -> None:
+        w.tombstoned.append({"chash": h(1), "doc_id": "1.1.9", "position": 0, "collection": COLL})
+
+    world.before_second_manifest_read = tombstone
+    rung, _ = _fill(world)
+    assert world.appends == [] and rung._partial.raced == 1
+
+
+def test_a_column_filled_by_another_writer_meanwhile_is_not_sent_while_the_others_are(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+
+    def fill_one(w: World) -> None:  # another writer's value, not the chunk row's
+        w.manifests[d][0] = replace(w.manifests[d][0], line_start=77)
+
+    world.before_second_manifest_read = fill_one
+    rung, _ = _fill(world)
+    (_, requests), = world.appends
+    sent = requests[0][1][0]
+    assert "line_start" not in sent and (sent["line_end"], sent["char_start"], sent["char_end"]) == (9, 40, 190)
+    assert world.spans(d) == [(0, 77, 9, 40, 190)], "the late value is kept, the rest filled"
+    assert rung._partial.raced == 0 and rung._partial.filled == 1
+
+
+# ── a request that raises ────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def _seven_rows(world: World) -> str:
+    d = world.doc("1.1.1")
+    for n in range(7):
+        world.row(d, n, h(n + 1))
+        world.chunk(h(n + 1), **SPAN)
+    return d
+
+
+def test_a_request_that_raises_after_an_earlier_one_wrote_still_restores_the_documents_stamp(world: World) -> None:
+    """The engine restamps a document's indexed_at on every manifest write; a later request that raises must not skip
+    the restore of the documents an earlier request wrote (review r1, S2)."""
+    d = _seven_rows(world)
+    world.restamp_on_append = "2026-11-06T00:00:00+00:00"
+    real, calls = world.append_manifest_many, []
+
+    def second_raises(request, *, collection, **kw):
+        calls.append(request)
+        if len(calls) == 2:
+            raise RuntimeError("engine unavailable")
+        return real(request, collection=collection, **kw)
+
+    world.append_manifest_many = second_raises  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="engine unavailable"):
+        _fill(world, world.rung(max_rows=3))
+    assert len(calls) == 2
+    assert world.docs[d].indexed_at == DOC_STAMP
+    assert (d, {"indexed_at": DOC_STAMP}) in world.updates
+
+
+def _conflict(status: int = 409) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://engine.invalid/manifest/append_many")
+    return httpx.HTTPStatusError("conflict", request=request, response=httpx.Response(status, request=request))
+
+
+def test_a_409_for_a_superseded_collection_defers_that_collection_and_the_run_goes_on(world: World) -> None:
+    OTHER = "code__art__bge-base-en-v15-768__v2"
+    a = world.doc("1.1.1", collection=OTHER)
+    b = world.doc("1.1.2")
+    world.row(a, 0, h(1), collection=OTHER)
+    world.row(b, 0, h(2))
+    world.chunk(h(1), collection=OTHER, **SPAN)
+    world.chunk(h(2), **SPAN)
+    real = world.append_manifest_many
+
+    def superseded(request, *, collection, **kw):
+        if collection == OTHER:
+            raise _conflict()
+        return real(request, collection=collection, **kw)
+
+    world.append_manifest_many = superseded  # type: ignore[method-assign]
+    rung, result = _fill(world)
+    assert world.spans(a) == [(0, None, None, None, None)] and world.spans(b) == [(0, 3, 9, 40, 190)]
+    c = rung._partial
+    assert (c.write_refused_409, c.filled, c.fillable) == (1, 1, 2)
+    assert result.outcome is ConvergeOutcome.DEFERRED and "409" in result.detail
+
+
+def test_a_status_other_than_409_still_aborts_the_run(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+
+    def boom(request, *, collection, **kw):
+        raise _conflict(500)
+
+    world.append_manifest_many = boom  # type: ignore[method-assign]
+    with pytest.raises(httpx.HTTPStatusError):
+        _fill(world)
+
+
+# ── what the summary accounts for ────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_rows_left_for_ownership_are_split_into_a_recorded_span_unused_and_nothing_recorded(world: World) -> None:
+    a, b, g = world.doc("1.1.1"), world.doc("1.1.2"), world.doc("1.1.3")
+    world.row(a, 0, h(1))                        # shared, chunk records a span: lossy
+    world.row(b, 0, h(1))
+    world.row(g, 0, h(2))                        # shared, chunk records 0s: lossless
+    world.row(b, 1, h(2))
+    world.row(g, 1, h(3))                        # chunk missing: not engine-counted
+    world.row(g, 2, h(4))                        # chunk without any span key: not engine-counted
+    world.chunk(h(1), **SPAN)
+    world.chunk(h(2), line_start=0, line_end=0, chunk_start_char=0, chunk_end_char=0)
+    world.chunk(h(4))
+    rung, _ = _fill(world)
+    c = rung._partial
+    assert c.multi_row_cross_document == 4 and c.abandoned["multi_row_cross_document"] == 2
+    assert (c.chunk_missing, c.chunk_without_span_keys) == (1, 1)
+    assert (c.null_rows, c.counted) == (6, 4) and c.reconciles()
+    text = c.summary()
+    assert "= 0 fillable" in text and "2 with a recorded span unused" in text
+    assert "Not counted by the engine: 1 chunk missing, 1 chunk with no key" in text and "DOES NOT RECONCILE" not in text
+
+
+def test_a_filled_row_whose_other_column_has_a_zero_key_stays_in_the_engine_count_and_the_summary_says_so(
+    world: World,
+) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.row(d, 1, h(2))
+    world.chunk(h(1), line_start=3, line_end=9, chunk_start_char=0, chunk_end_char=0)  # lines recorded, chars 0
+    world.chunk(h(2), **SPAN)
+    rung, _ = _fill(world)
+    c = rung._partial
+    assert world.spans(d) == [(0, 3, 9, None, None), (1, 3, 9, 40, 190)]
+    assert (c.counted, c.fillable, c.filled, c.fillable_still_counted) == (2, 2, 2, 1)
+    assert c.engine_count_after() == 1 and c.reconciles()

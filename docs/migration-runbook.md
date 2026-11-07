@@ -321,11 +321,18 @@ run a second pass), and shares its rule and guards:
   whichever wrote last, so every shared row stays NULL. Orphan-minted documents (`meta.backfill_from` is
   `t3_orphan`) are skipped. The chunk row's `indexed_at` and `title` must be attributable to the document, as for
   labels.
-- **Column by column, fill-only.** Only a column that is NULL on the manifest row is written. A column the manifest
-  already holds is never sent; a stored value that differs from the chunk row's is counted ("differ from the chunk
-  row on a column already set") and left. A chunk value of 0 is "not recorded" (`make_chunk_metadata` writes 0 for
-  it) and is not copied: the engine's `null_span_rows` still counts such a row because the key is present, so the
-  count can stay above zero with nothing left to copy. The summary names those rows as "chunk span not recorded".
+- **Column by column, fill-only, and only when the chunk row agrees.** Only a column that is NULL on the manifest row
+  is written. A column the manifest already holds is never sent. A row whose stored column DIFFERS from a value the
+  chunk row records is not filled at all and counted ("whose chunk row differs from a column the manifest already
+  holds"): the disagreement is the one piece of evidence that the chunk row describes another position, and filling
+  the row's other columns from it would join the lines of one writer to the characters of another. A partial row
+  whose stored columns agree with the chunk row, or that the chunk row does not record, is filled on its NULL
+  columns. A chunk value of 0 is "not recorded" (`make_chunk_metadata` writes 0 for it) and is not copied.
+- **The engine count does not reach zero for 0-valued keys.** The engine's `null_span_rows` counts a row with a NULL
+  manifest column and the chunk key PRESENT, whatever its value, so every chunk written without lines (the writer
+  puts 0) stays in the count however much the rung does; those rows are lossless, there is nothing to copy. The
+  engine predicate will test for a recorded value as the rung does (bead nexus-qmrfi); until then, accept the
+  residue by name.
 - **Labels are untouched.** The only write route (`append_manifest_many`) rewrites a row's labels from the request,
   so the rung sends the labels and `labels_written` it read just before the write, unchanged. A label written in
   the window between the scan and the write is carried, not reverted. The document's `indexed_at` is written back
@@ -333,11 +340,24 @@ run a second pass), and shares its rule and guards:
 - **Detect.** Converged from the recorded completion. Otherwise the dry run (a scan with no write). Unattended
   (`--auto`) against a managed service it reads nothing and is not applicable; the interactive `nx upgrade` scans,
   fills, verifies and records. Run it before `nx t3 retire-keys --apply`, then take the dry run's `null_span_rows`
-  and accept only what the summary accounts for (shared, deleted holder, orphan-minted, not recorded).
-- **Reading the result.** The recorded detail counts rows with a complete span, rows with a NULL column, rows
-  filled, and the rows left NULL with the reason (shared with another document, repeated inside the document,
-  also held by a deleted document, orphan-minted, chunk missing, chunk with no span key, chunk span not recorded,
-  chunk row not attributable, changed meanwhile, write failed).
+  and accept only what the summary accounts for.
+- **Run it on a quiet tenant.** Between its last re-read and the write, a concurrent re-index of the same position
+  can change the row's chash or labels, and the write puts the re-read values back (the engine's append has no
+  compare-and-set; bead nexus-tj0wu asks for one). Nothing else should index into the tenant while it runs.
+- **The managed path is interactive, and slow.** Against a managed service `--auto` reads nothing; the interactive
+  `nx upgrade` makes three walks of the whole catalog (the detect dry run, the fill, the verify dry run). Completion
+  is recorded once: a manifest row that gains a NULL span later (an orphan backfill, say) is not refilled, and shows
+  only in the retire-keys count.
+- **Reading the result.** The summary reconciles with the engine. "Engine-comparable" is the count of rows with a NULL
+  column and the chunk key present, which is what `null_span_rows` counts; it equals the fillable rows plus the left
+  rows, each left bucket named (shared with another document, repeated inside the document, also held by a deleted
+  document, orphan-minted, ownership listing named another row, chunk row newer than the document or without
+  `indexed_at` or titled for another document, chunk span not recorded, chunk row differs from a stored column), and
+  each bucket says how many of its rows have a recorded span that stays unused (lossy) as against nothing recorded
+  (lossless). It also prints the engine count to expect after the pass (rows still counted because another column's
+  key holds a 0 are in it), and, apart, the rows the engine never counts (chunk missing, chunk with no key for the
+  NULL columns). A 409 from the engine for a request (a superseded collection) defers those rows
+  (`write_refused_409`) and the run goes on; the rung ends deferred and retries on the next `nx upgrade`.
 
 ### Restoring chunks the reaper quarantined
 

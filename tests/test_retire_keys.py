@@ -281,6 +281,14 @@ class TestCli:
         assert "null_span_rows by column: line_start=1, line_end=0, chunk_start_char=0, chunk_end_char=1" \
             in result.output
 
+    def test_the_dry_run_points_a_nonzero_null_span_rows_at_the_span_fill_rung(self) -> None:
+        """nexus-l8o33 (review r1): the count is the rung's to lower, so the dry run says which rung and what stays."""
+        result = _run(FakeClient(_dry_report()), "--tenant", TENANT)
+        assert "manifest-span-fill" in result.output and "span keys hold 0" in result.output
+        zero = _dry_report()
+        zero["preconditions"] = {**zero["preconditions"], "null_span_rows": 0}
+        assert "manifest-span-fill" not in _run(FakeClient(zero), "--tenant", TENANT).output
+
     def test_dry_run_and_apply_together_are_a_usage_error(self) -> None:
         client = FakeClient(_dry_report())
         result = _run(client, "--tenant", TENANT, "--dry-run", "--apply")
@@ -664,6 +672,8 @@ class TestNoAutomaticTrigger:
         "service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java",
         "service/src/main/java/dev/nexus/service/http/ChunkKeysAdminHandler.java",
         "tests/test_retire_keys.py",
+        # reads the engine's null_span_rows through the dry run (nothing is written) to compare it with the span-fill rung's summary
+        "tests/upgrade/test_legacy_rows_walk_substrate.py",
         "service/src/test/java/dev/nexus/service/ChunkKeysTestBase.java",
         "service/src/test/java/dev/nexus/service/ChunkKeySweepIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/ChunkKeySweepRootTargetIntegrationTest.java",

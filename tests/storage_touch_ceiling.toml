@@ -42,7 +42,7 @@
 [python_unit]
 # 5344 -> 5345 (nexus-l8o33, 2026-11-06): +1 t2_service_env test, tests/upgrade/test_legacy_rows_walk_substrate.py::
 # test_the_walk_fills_exactly_the_manifest_spans_a_chunk_row_is_exact_for. It seeds chunk rows and manifest rows on the real engine and
-# compares the engine's own null_span_rows (the retire-keys dry run) before and after the production walk; a fake cannot prove the
+# compares the engine's own null_span_rows (the key-retirement dry run) before and after the production walk; a fake cannot prove the
 # engine's definition of the count or the append's span and label upsert. The 40 rung-level tests in test_manifest_span_fill_rung.py
 # mint no tenant.
 # 5129 -> 5352 (nexus-rfvyy.6.21, 2026-11-05): +223. RDR-243 Phase 1 adds 223 tenant-minting tests (the new gate, write-verb, import and engine-flag test files), each needing a real catalog,

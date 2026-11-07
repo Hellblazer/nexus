@@ -221,6 +221,12 @@ def _render_details(report: dict) -> None:
     span = (details.get("null_span_rows") or {}).get("by_field") or {}
     if pre.get("null_span_rows") and span:
         click.echo("    null_span_rows by column: " + ", ".join(f"{k}={v}" for k, v in span.items()))
+    if pre.get("null_span_rows"):
+        click.echo(
+            "    null_span_rows: run `nx upgrade` (the manifest-span-fill rung) to copy each chunk row's span onto the "
+            "manifest rows it is exact for; its summary names the rows that stay, and says which of them lose a "
+            "recorded span. A chunk whose span keys hold 0 stays in this count with nothing to copy."
+        )
 
 
 def _render_dry_run(report: dict, *, tenant: str) -> None:

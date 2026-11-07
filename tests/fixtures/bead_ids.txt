@@ -6610,6 +6610,7 @@ nexus-qlm2
 nexus-qlrj7
 nexus-qlveu
 nexus-qmg0
+nexus-qmrfi
 nexus-qmrr
 nexus-qnfk
 nexus-qnp5s
@@ -7493,6 +7494,7 @@ nexus-tidtd
 nexus-tidtd.1
 nexus-tih7j
 nexus-til1n
+nexus-tj0wu
 nexus-tjf7l
 nexus-tjgl2
 nexus-tji1x

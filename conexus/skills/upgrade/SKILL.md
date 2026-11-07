@@ -48,6 +48,10 @@ Nothing, today. The ladder's rungs (`manifest_section_labels`, `manifest_span_fi
 goes on to the rungs that do not, and it retries on a later run (`nx doctor`'s `Upgrade ladder` row says "REPEATEDLY DEFERRED:" once one keeps deferring).
 No rung rolls back, so there is no rollback to choose.
 
+`manifest_span_fill` has no engine count to ask, so unattended (`--auto`) against a managed tenant it reads nothing and
+reports not applicable. A managed tenant needs one interactive `nx upgrade` (three walks of the catalog) before
+`nx t3 retire-keys --apply`; run it with the tenant quiet, since a concurrent re-index can be reverted by the write.
+
 If a rung ever asks a question (a billed re-embed, a choice the walk cannot derive), surface it to the user and let
 them choose; never answer on their behalf.
 
