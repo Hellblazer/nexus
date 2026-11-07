@@ -6,6 +6,8 @@ Test-suite conventions for AI coding agents. The project-root `AGENTS.md` covers
 
 Default local dev loop: `uv run pytest -n auto`. `pytest-xdist` is a `dev`-group dependency, opt-in via `-n`: it is deliberately NOT baked into `addopts`, so CI's `pytest-split` duration-balanced sharding (`.github/workflows/ci.yml`) is untouched. CI passes `-n 4` itself on the self-hosted pool shards and on the lint job, and nothing on hosted shards. Serial (`uv run pytest`, no `-n`) stays available for debugging output interleaving or fixture-isolation issues that parallel workers can mask.
 
+**Path arguments are regrouped by directory** (`tests/_arg_grouping.py`, applied in `pytest_configure`). pytest 9.1.1 drops a directory's `conftest.py` fixtures for tests collected from it again after a whole file from another directory (`tests/daemon/a.py tests/b.py tests/daemon/c.py` runs `c.py` without `tests/daemon/conftest.py`), so a hand run over a list of changed files is sorted stably by directory first. `NX_TEST_KEEP_ARG_ORDER=1` keeps the typed order; `tests/test_arg_grouping.py` holds both and goes red the day pytest fixes it.
+
 **`-n auto` is capped twice** (`tests/_xdist_cap.py`; `NX_XDIST_NO_CAP=1` opts out of both):
 
 - *Shared memory* (nexus-6qp25). Every worker boots its own Postgres cluster, each holding one SysV segment against `kern.sysv.shmmni`, a budget shared with every other cluster on the box (a gate, a peer's suite, a cluster orphaned by a killed battery). When it runs out, `initdb` dies with `shmget: No space left on device` and EVERY substrate-backed test errors at setup: thousands of errors that look like a catastrophic regression and are contention. Diagnose with `ipcs -m` before suspecting the code. The cap does nothing on a quiet machine.

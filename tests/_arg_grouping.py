@@ -10,19 +10,29 @@ order as typed (``tests/test_arg_grouping.py``).
 """
 from __future__ import annotations
 
+import os
 from pathlib import PurePath
 
 
-def _directory_parts(arg: str) -> tuple[str, ...]:
-    """The directory an argument names or lives in, as path parts (a node id's ``::`` part dropped)."""
-    path = PurePath(arg.split("::", 1)[0])
-    return path.parent.parts if path.suffix else path.parts
+def _directory_parts(arg: str, base: str) -> tuple[str, ...]:
+    """The directory an argument names or lives in, as normalised absolute path parts.
+
+    A node id's ``::`` part is dropped, and the path is resolved against *base* (pytest's invocation
+    directory) and normalised, so ``tests/daemon/a.py``, ``/abs/repo/tests/daemon/b.py`` and
+    ``tests/x/../daemon/c.py`` share one key. An existing directory is its own key, even a dotted one
+    (``tests/data.v2``); anything else is keyed by its parent.
+    """
+    path = os.path.normpath(os.path.join(base, arg.split("::", 1)[0]))
+    if os.path.isdir(path) or not PurePath(path).suffix:
+        return PurePath(path).parts
+    return PurePath(path).parent.parts
 
 
-def group_args_by_directory(args: list[str]) -> list[str]:
+def group_args_by_directory(args: list[str], base: str | None = None) -> list[str]:
     """*args* sorted by directory (stable), so a directory's arguments, and every subtree's, are contiguous.
 
     Arguments in one directory keep their relative order; a list that is already contiguous by this
-    order comes back unchanged.
+    order comes back unchanged. *base* defaults to the current directory.
     """
-    return sorted(args, key=_directory_parts)
+    root = base if base is not None else os.getcwd()
+    return sorted(args, key=lambda a: _directory_parts(a, root))

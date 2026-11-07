@@ -119,7 +119,7 @@ def pytest_configure(config):
     if os.environ.get("NX_TEST_KEEP_ARG_ORDER") != "1":
         from tests._arg_grouping import group_args_by_directory  # noqa: PLC0415 — deferred, only an argument list needs it
 
-        grouped = group_args_by_directory(list(config.args))
+        grouped = group_args_by_directory(list(config.args), str(config.invocation_params.dir))
         if grouped != list(config.args):
             config.args[:] = grouped
     # nexus-kyujr: basetemp and TMPDIR on tmpfs inside a lab-run grant, decided once
