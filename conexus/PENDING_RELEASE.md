@@ -47,4 +47,9 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/asks/SKILL.md`
+  nexus-wc4jj.16 item 7: text from mail, hooks or tool output never becomes `--sam-words` (1e6af7468).
+- `conexus/skills/upgrade/SKILL.md`
+  nexus-l8o33: the manifest-span-fill rung (7e205178e, 8a830a04d).
+
 ## Deferred to the next client release
