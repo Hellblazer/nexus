@@ -168,14 +168,46 @@ _WORKTREE_PREFLIGHT = (
 _WORKTREE_PREFLIGHT_SCRIPT: str = "scripts/agent-worktree-preflight.sh"
 
 
-def _worktree_preflight_row(repo_root: str) -> str:
+def _carries_preflight_script(start: str) -> bool:
+    """True when ``start`` or a directory above it holds the preflight script."""
+    if not start:
+        return False
+    try:
+        here = os.path.realpath(start)
+    except Exception:  # noqa: BLE001 — carried: an unresolvable path holds no script
+        return False
+    while True:
+        if os.path.isfile(os.path.join(here, _WORKTREE_PREFLIGHT_SCRIPT)):
+            return True
+        parent = os.path.dirname(here)
+        if parent == here:
+            return False
+        here = parent
+
+
+def _process_cwd() -> str:
+    try:
+        return os.getcwd()
+    except OSError:  # a deleted cwd: no checkout to find
+        return ""
+
+
+def _worktree_preflight_row(repo_root: str, cwd: str = "") -> str:
     """The Preflight row, only for a project that has the script.
 
     nexus-z7ddd: the row used to go into every dispatch in every project, so a
     worktree agent outside the nexus repo was told to run, as its first action, a
     script its project does not have.
+
+    nexus-13mbx: the main repo root alone withheld the row whenever git could not
+    resolve it (a bare repo with worktrees, a git timeout, a hook started outside
+    the checkout). The row is also given when ``cwd`` (the payload's, else the
+    hook process's) lies in a checkout that carries the script, which keys it on
+    the agent's own worktree as well.
     """
     if repo_root and os.path.isfile(os.path.join(repo_root, _WORKTREE_PREFLIGHT_SCRIPT)):
+        return _WORKTREE_PREFLIGHT
+    if _carries_preflight_script(cwd):
         return _WORKTREE_PREFLIGHT
     return ""
 
@@ -587,7 +619,7 @@ def run(payload: dict | None) -> HookResult:
 
     parts.append(_RELAY)
     parts.append(_ORCH)
-    parts.append(_worktree_preflight_row(repo_root))
+    parts.append(_worktree_preflight_row(repo_root, str(data.get("cwd") or "") or _process_cwd()))
 
     skip_storage_docs, skip_operators = _classify(agent_type, task_text)
 

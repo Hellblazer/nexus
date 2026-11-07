@@ -36,6 +36,23 @@ def test_the_row_is_withheld_when_no_repo_root_was_found() -> None:
     assert subagent_start._worktree_preflight_row("") == ""
 
 
+def test_nexus_13mbx_cwd_inside_a_checkout_gives_the_row_when_git_found_no_root(tmp_path: Path) -> None:
+    script = tmp_path / subagent_start._WORKTREE_PREFLIGHT_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    deep = tmp_path / "src" / "pkg"
+    deep.mkdir(parents=True)
+    assert subagent_start._worktree_preflight_row("", str(deep)) == subagent_start._WORKTREE_PREFLIGHT
+    assert subagent_start._worktree_preflight_row(str(tmp_path / "elsewhere"), str(deep)) \
+        == subagent_start._WORKTREE_PREFLIGHT
+
+
+def test_nexus_13mbx_cwd_with_no_script_above_it_gives_no_row(tmp_path: Path) -> None:
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    assert subagent_start._worktree_preflight_row("", str(tmp_path / "a" / "b")) == ""
+    assert subagent_start._worktree_preflight_row("", str(tmp_path / "missing")) == ""
+
+
 def test_the_nexus_repo_itself_still_gets_the_row() -> None:
     repo = Path(__file__).resolve().parents[2]
     assert (repo / subagent_start._WORKTREE_PREFLIGHT_SCRIPT).is_file()
@@ -71,3 +88,24 @@ def test_a_dispatch_in_a_project_with_the_script_gets_the_row(tmp_path: Path) ->
     ctx = _injected(_repo(tmp_path / "nexus-like", with_script=True))
     assert "| Preflight |" in ctx
     assert "agent-worktree-preflight.sh" in ctx
+
+
+@pytest.mark.t2_tenant
+def test_nexus_13mbx_payload_cwd_gives_the_row_outside_any_git_repo(tmp_path: Path) -> None:
+    """The hook runs outside any repo, so git finds no root, and the payload's cwd is a
+    checkout that carries the script (the bare-repo-plus-worktrees and started-above-the-repo
+    shapes). Before nexus-13mbx the row was withheld here."""
+    checkout = tmp_path / "checkout"
+    script = checkout / subagent_start._WORKTREE_PREFLIGHT_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    payload = json.dumps({"session_id": "test-session", "hook_event_name": "SubagentStart",
+                          "task": "general research task", "prompt": "look into something",
+                          "cwd": str(checkout)})
+    result = _run_hook(cwd=str(outside), stdin=payload,
+                       env_overrides={"GIT_CEILING_DIRECTORIES": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+    ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "| Preflight |" in ctx
