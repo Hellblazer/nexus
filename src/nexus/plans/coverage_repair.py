@@ -301,7 +301,9 @@ def unresolved_note(unresolved: Sequence[tuple[Facet, str]]) -> str:
     operator's evidence and reads as one item. The generator is told to report each unresolved point as
     unresolved and not to answer it from general knowledge: the RDR's "an explicit list of unresolved facets"
     (section 4, step 4); and to answer a conflicted point from the supporting evidence while saying that other
-    evidence contradicts it."""
+    evidence contradicts it. A facet in state ``conflicted_from_contradicted`` (it was contradicted on the items read
+    and supported only in unread ones, nexus-se11w) is listed with the unresolved points, as the user notice lists it
+    (nexus-2hx2u)."""
     shown = list(unresolved)[:_MAX_NOTE_FACETS]
     unsettled = [(f, s) for f, s in shown if s != "conflicted"]
     conflicted = [f for f, s in shown if s == "conflicted"]
@@ -312,7 +314,11 @@ def unresolved_note(unresolved: Sequence[tuple[Facet, str]]) -> str:
             "State each one as unresolved. Do not answer it from general knowledge and do not infer it."
         )
         for facet, state in unsettled:
-            why = "the evidence contradicts it" if state == "contradicted" else "no evidence found"
+            why = (
+                "the evidence contradicts it" if state == "contradicted"
+                else "the evidence conflicts: the items read contradict it, unread items support it"
+                if state == "conflicted_from_contradicted" else "no evidence found"
+            )
             lines.append(f"- {facet.id}: {_WS.sub(' ', facet.text).strip()[:_MAX_NOTE_FACET_CHARS]} ({why})")
     if conflicted:
         lines.append(

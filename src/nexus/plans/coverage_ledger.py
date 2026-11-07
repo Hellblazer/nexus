@@ -1169,8 +1169,15 @@ class CoverageBoundary:
             return result
         by_id = {f.id: f for f in self.request.facets}
         state_of = {f.facet_id: f.state for f in result.ledger.findings}
+        reason_of = {f.facet_id: f.reason for f in result.ledger.findings}
         listed = [(by_id[fid], state_of[fid]) for fid in ids if fid in by_id]
-        listed += [(by_id[fid], CONFLICTED_REASON) for fid in conflicted if fid in by_id]
+        # nexus-2hx2u: a facet that started contradicted (Sam's option b) is listed as unresolved in the user notice,
+        # so the generator is told the same: state it as unresolved, not answer it from the supporting evidence.
+        listed += [
+            (by_id[fid], CONFLICTED_FROM_CONTRADICTED_REASON if reason_of.get(fid) == CONFLICTED_FROM_CONTRADICTED_REASON
+             else CONFLICTED_REASON)
+            for fid in conflicted if fid in by_id
+        ]
         if not listed:
             return result
         note = unresolved_note(listed)
