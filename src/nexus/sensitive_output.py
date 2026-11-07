@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 __all__ = [
-    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "chunk_row_facts", "cli_output_posture", "first_sensitive_owner", "hit_is_sensitive",
+    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "chunk_row_facts", "cli_output_posture", "first_sensitive_owner", "hidden_endpoints", "hit_is_sensitive",
     "mcp_output_posture", "mcp_output_setting", "posture_of", "present_document_rows", "present_entries", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
 ]
 
@@ -252,6 +252,28 @@ def present_entries(cat: Any, entries: Sequence[Any], *, posture: McpOutput | No
         except doc_sensitivity.SensitivityUnknown:
             extra = set(aliases)
     return present_document_rows([e.to_dict() for e in entries], extra_sensitive=extra, posture=posture)
+
+
+def hidden_endpoints(
+    cat: Any, hidden: Iterable[str], tumblers: Iterable[str], *, posture: McpOutput | None = None,
+) -> frozenset[str]:
+    """The documents an edge must not describe: *hidden* (the withheld documents the caller already presented) and,
+    under a withhold, every other endpoint in *tumblers* whose catalog row is sensitive. One rule for every
+    surface that returns link edges (nexus-rfvyy.8 fix r1): an edge touching a withheld document loses its ``meta``
+    (:func:`withheld_edges`) and its span text, whichever side the withheld document is on.
+
+    A flag read that fails hides every endpoint (fail closed). Nothing is read under ``flag``. *posture* ``None``
+    reads the MCP tools' (``sensitivity.mcp_output``)."""
+    out = set(hidden)
+    ends = {str(t) for t in tumblers if t}
+    if ends and (posture or mcp_output_posture()) == "withhold":
+        from nexus import doc_sensitivity  # noqa: PLC0415 - deferred: the module reaches the catalog factory
+
+        try:
+            out |= doc_sensitivity.flagged(ends, cat=cat)
+        except doc_sensitivity.SensitivityUnknown:
+            out |= ends
+    return frozenset(out)
 
 
 def withheld_edges(edges: Iterable[Mapping[str, object]], hidden: frozenset[str]) -> list[dict]:

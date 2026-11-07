@@ -187,17 +187,27 @@ def links_cmd(
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
+    from nexus.sensitive_output import cli_output_posture, hidden_endpoints, present_entries, withheld_edges  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
     cat = _cat_cmd._get_catalog()
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): Q2's posture. Under Claude Code a sensitive node is its stub, an edge
+    # touching a withheld document loses its `meta`, and `--resolve` prints no title for one; in a terminal nothing
+    # is hidden.
+    posture = cli_output_posture()
+    hidden: frozenset[str] = frozenset()
 
     def _render_edge(edge: Any) -> str:
         if resolve_labels:
-            src = _endpoint_label(cat, edge.from_tumbler)
-            dst = _endpoint_label(cat, edge.to_tumbler)
+            src = str(edge.from_tumbler) if str(edge.from_tumbler) in hidden else _endpoint_label(cat, edge.from_tumbler)
+            dst = str(edge.to_tumbler) if str(edge.to_tumbler) in hidden else _endpoint_label(cat, edge.to_tumbler)
             return f"{src} → {dst} ({edge.link_type}) by {edge.created_by}"
         return (
             f"{edge.from_tumbler} → {edge.to_tumbler} "
             f"({edge.link_type}) by {edge.created_by}"
         )
+
+    def _ends(edges: list) -> set[str]:
+        return {str(e.from_tumbler) for e in edges} | {str(e.to_tumbler) for e in edges}
 
     # If a positional tumbler is given, use graph traversal (the common case)
     if tumbler:
@@ -206,10 +216,13 @@ def links_cmd(
         edges = result["edges"]
         if unique_targets:
             edges = _unique_edges_by_target(cat, edges)
+        presented = present_entries(cat, list(result["nodes"]), posture=posture)
+        hidden = hidden_endpoints(cat, presented.hidden, _ends(edges), posture=posture)
         if as_json:
             click.echo(json.dumps({
-                "nodes": [n.to_dict() for n in result["nodes"]],
-                "edges": [e.to_dict() for e in edges],
+                "nodes": presented.rows,
+                "edges": withheld_edges([e.to_dict() for e in edges], hidden),
+                **presented.keys(),
             }, indent=2))
         else:
             if not edges:
@@ -231,8 +244,9 @@ def links_cmd(
     links = links[:limit]
     if unique_targets:
         links = _unique_edges_by_target(cat, links)
+    hidden = hidden_endpoints(cat, (), _ends(links), posture=posture)
     if as_json:
-        click.echo(json.dumps([lnk.to_dict() for lnk in links], indent=2))
+        click.echo(json.dumps(withheld_edges([lnk.to_dict() for lnk in links], hidden), indent=2))
     else:
         if not links:
             click.echo("No links found.")
