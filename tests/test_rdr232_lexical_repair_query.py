@@ -8,7 +8,10 @@ repair's facet-text query finds nothing new although the chunk is indexed. A fac
 alone as the text, the same target and filters. The twins run after every vector query and only in the query slots
 the vector queries leave (the repair spends its existing budget), and their hits join after every vector hit.
 These tests pin the extraction, the query construction, the runner path, the time share, the failure rules, the
-scope, and, against the real engine, why a twin carries the key terms and not the facet's whole text.
+scope. Why a twin carries the key terms and not the facet's whole text is the engine's: its lexical route matches
+``chunk_tsv @@ plainto_tsquery('english', query)``, which ANDs every word (service/src/main/resources/db/changelog/
+vectors-049-route-b-exact-keys.xml), and the RDR-217 journey (tests/test_rdr217_hybrid_search_journey.py) pins that
+route against the real engine. A test here would mint a tenant to re-pin it.
 
 Every example is synthetic and none comes from an evaluation set, held out or not: the extractor is not tuned to
 one. (Review r1 of 4023af8d7 found three H29 answer tokens among the first version's examples, and a
@@ -26,7 +29,6 @@ from unittest.mock import patch
 import pytest
 from structlog.testing import capture_logs
 
-import nexus.db.http_vector_client as hvc
 from nexus.plans.coverage_ledger import CoverageBoundary
 from nexus.plans.coverage_repair import (
     MAX_LEXICAL_REPAIR_QUERIES,
@@ -39,18 +41,13 @@ from nexus.plans.coverage_repair import (
 from nexus.plans.evidence import ScopeConstraint
 from nexus.plans.request_coverage import Facet, RequestCoverage
 from nexus.plans.runner import PlanRunRetrievalRefusedError
-from tests._catalog_fixture_ops import give_chunks_a_live_owner
-from tests._chunk_seed import seed_chunks_direct
 from tests.test_rdr232_coverage_ledger import CODE_COLL, RDR_COLL, _cov, _structured, _tag_lines
 from tests.test_rdr232_coverage_repair import FACET_TEXT, RepairDispatcher, _run, by_topic
 
 @pytest.fixture(autouse=True)
-def _no_catalog_lookup(request):
+def _no_catalog_lookup():
     """As in the repair tests: the runner's non-evidentiary hygiene asks the catalog, and these runner tests are
-    tenant-free, so the lookup answers 'nothing excluded'. The engine test below seeds its own tenant and is left as is."""
-    if "t2_service_env" in request.fixturenames:
-        yield
-        return
+    tenant-free, so the lookup answers 'nothing excluded'."""
     with patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
         yield
 
@@ -339,29 +336,3 @@ async def test_a_confined_runs_twin_carries_the_document_filter_and_its_outside_
     twins = d.lexical_searches()
     assert len(twins) == 1 and twins[0]["chash_allow"] == sorted(allowed)
     assert all(a.content != LEXICAL_HIT for a in cov.ledger.anchors), "a hit outside the document never enters"
-
-
-# ── the real engine: why the twin carries the key terms ──────────────────────────────────────────────────────
-
-_COLLECTION = "docs__0ihqj-owner__bge-base-en-v15-768__v1"
-_LONG_CHUNK = (
-    "Operations notes. The nightly job rotates the logs and compresses them. The cache warms on boot and the "
-    "dashboard refreshes every minute. The retry_budget is forty-two attempts before the client gives up, and the "
-    "backoff doubles each time. The alert channel pages the on-call engineer. Disk usage is reported hourly."
-)
-_FACET = "how many attempts does the retry_budget permit"
-
-
-def test_against_the_engine_the_key_terms_match_where_the_whole_facet_does_not(t2_service_env) -> None:
-    chash = hashlib.sha256(_LONG_CHUNK.encode("utf-8")).hexdigest()
-    seed_chunks_direct(_COLLECTION, ids=[chash], documents=[_LONG_CHUNK], embed=True,
-                       metadatas=[{"chunk_text_hash": chash, "title": "ops-notes.md:1-5"}])
-    give_chunks_a_live_owner(_COLLECTION, [chash], content_type="docs")
-    db = hvc.HttpVectorClient(tenant=t2_service_env)
-
-    terms = " ".join(key_terms(_FACET))
-    assert terms == "retry_budget"
-    by_terms = db.hybrid_search(terms, [_COLLECTION], n_results=5, sensitivity="include")
-    by_facet = db.hybrid_search(_FACET, [_COLLECTION], n_results=5, sensitivity="include")
-    assert [r["id"] for r in by_terms] == [chash], "the key terms reach the chunk on the lexical route"
-    assert by_facet == [], "the whole facet ANDs words the chunk lacks ('permit'), so it matches nothing"
