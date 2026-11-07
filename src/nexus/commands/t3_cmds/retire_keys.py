@@ -319,6 +319,11 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
         _old_engine_tenant(tenant, report.get("tenant"))
     if isinstance(report.get("audit"), dict):
         audits.append(("dry run", report["audit"]))
+    # The engine's job hands out a signed continuation when nothing blocks (nexus-v75nw): the apply's first call
+    # carries it and goes straight to the batches. It is a token for this run, not part of the report: keep it out of
+    # what is printed. An engine without the job, or a blocked dry run, has none, and the apply counts for itself.
+    dry_run_resume = report.get("resume") if isinstance(report.get("resume"), dict) else None
+    report = {k: v for k, v in report.items() if k != "resume"}
     out: dict[str, Any] = {"tenant": tenant, "dry_run": not apply, "report": report}
     if not as_json:
         _render_dry_run(report, tenant=tenant)
@@ -346,7 +351,7 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
     calls = 0
     stalled = 0
     last: dict[str, Any] = {}
-    resume: dict[str, Any] | None = None
+    resume: dict[str, Any] | None = dry_run_resume
     while True:
         try:
             last = client.chunk_keys_sweep(

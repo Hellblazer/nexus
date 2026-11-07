@@ -241,7 +241,7 @@ class TestDryRunJob:
                 _client().chunk_keys_sweep(tenant="nexus")
             assert direct.value.code == 504, "positive control: the synchronous call does not fit the edge"
 
-        result, events, clock = self._run(post, lambda path, **kw: next(polls), poll_interval_s=10.0)
+        result, events, clock = self._run(post, lambda path, **kw: next(polls), poll_schedule=(10.0,))
 
         assert result == report, "the job's answer is the synchronous answer"
         assert clock.sleeps == [10.0, 10.0, 10.0], "polled every interval until the job ended"
@@ -278,7 +278,7 @@ class TestDryRunJob:
 
         clock = self.Clock()
         with pytest.raises(hv.ChunkKeysDryRunTimeout) as err:
-            self._run(lambda p, b, **kw: self._started(), get, clock=clock, max_wait_s=30.0, poll_interval_s=10.0)
+            self._run(lambda p, b, **kw: self._started(), get, clock=clock, max_wait_s=30.0, poll_schedule=(10.0,))
 
         assert err.value.job_id == self.JOB and err.value.reason == "sweep_job_still_running"
         assert isinstance(err.value, VectorServiceError)
@@ -355,6 +355,57 @@ class TestDryRunJob:
 
         assert result == report and posts["n"] == 2
         assert [e["event"] for e in events if e["event"] in ("started", "restarted")] == ["started", "restarted"]
+
+    def test_the_poll_backs_off_2_4_8_16_then_30_seconds_capped(self) -> None:
+        """bob, 2026-11-07: the edge logs every root-credential request and pages security at 20 in 5 minutes."""
+        ended = self._ended(200, _dry_report(tenant="nexus"))
+        seq = iter([self._running("precondition:keyless_notes", 1_000)] * 12 + [ended])
+
+        _, _, clock = self._run(lambda p, b, **kw: self._started(), lambda path, **kw: next(seq))
+
+        assert clock.sleeps == [2.0, 4.0, 8.0, 16.0] + [30.0] * 8, "the schedule, exactly, the last entry repeated"
+
+    def test_at_steady_state_a_long_dry_run_sends_at_most_ten_polls_in_any_five_minutes(self) -> None:
+        clock = self.Clock()
+        poll_times: list[float] = []
+
+        def get(path, **kw):
+            poll_times.append(clock.now)
+            if clock.now < 20 * 60:
+                return self._running("precondition:wrong_width_rows", int(clock.now * 1000))
+            return self._ended(200, _dry_report(tenant="nexus"))
+
+        self._run(lambda p, b, **kw: self._started(), get, clock=clock)
+
+        assert poll_times[:6] == [0.0, 2.0, 6.0, 14.0, 30.0, 60.0]
+        steady = [t for t in poll_times if t >= 60.0]
+        assert len(steady) >= 30, "the window below is not empty"
+        worst = max(sum(1 for u in steady if t <= u < t + 300.0) for t in steady)
+        assert worst <= 10, f"{worst} polls in a five-minute window at steady state"
+        assert sum(1 for t in poll_times if t < 300.0) <= 14, "the first five minutes, with the back-off ramp"
+
+    def test_a_429_on_a_poll_counts_toward_the_failure_allowance_it_does_not_abort_at_once(self) -> None:
+        report = _dry_report(tenant="nexus")
+        seq = iter([VectorServiceError("429", code=429), self._ended(200, report)])
+
+        def get(path, **kw):
+            item = next(seq)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        result, _, _ = self._run(lambda p, b, **kw: self._started(), get)
+        assert result == report, "one 429 is a bad poll, not the job's failure"
+
+        calls = {"n": 0}
+
+        def always_429(path, **kw):
+            calls["n"] += 1
+            raise VectorServiceError("429", code=429)
+
+        with pytest.raises(VectorServiceError) as err:
+            self._run(lambda p, b, **kw: self._started(), always_429)
+        assert err.value.code == 429 and calls["n"] == 5, "five in a row end the wait, as for a 5xx"
 
     def test_a_job_lost_twice_is_an_error_not_a_loop(self) -> None:
         def get(path, **kw):
@@ -514,6 +565,32 @@ class TestCli:
         assert "dry run running: precondition:keyless_notes (9 s)" in result.output
         assert "dry run done: done (11 s)" in result.output
         assert "5 to sweep" in result.output, "the counts are printed as before"
+
+    def test_an_apply_passes_the_dry_run_jobs_continuation_on_its_first_call_and_never_prints_it(self) -> None:
+        token = {"cursor": None, "collections": ["knowledge__a__m__v1"], "blocked": [], "remaining": 5, "sig": "ab" * 32,
+                 "origin": {"job_id": "j-1", "plan": "p", "accepted": {}, "preconditions": {}, "rows": {}}}
+        client = FakeClient({**_dry_report(), "resume": token}, applies=[_apply(5, done=True)])
+
+        result = _run(client, "--tenant", TENANT, "--apply", "--json")
+
+        assert result.exit_code == 0, result.output
+        applies = [kw for _, kw in client.calls if not kw.get("dry_run", True)]
+        assert applies[0]["resume"] == token, "call 1 goes straight to the batches"
+        assert '"sig"' not in result.output and '"origin"' not in result.output, "the token is not part of the report"
+
+    def test_an_apply_without_a_continuation_counts_for_itself_as_before(self) -> None:
+        """An engine without the job, or a dry run that blocked: no resume on call 1."""
+        client = FakeClient(_dry_report(), applies=[_apply(5, done=True)])
+        result = _run(client, "--tenant", TENANT, "--apply")
+        assert result.exit_code == 0, result.output
+        applies = [kw for _, kw in client.calls if not kw.get("dry_run", True)]
+        assert applies[0]["resume"] is None
+
+    def test_a_dry_run_alone_does_not_print_the_continuation(self) -> None:
+        token = {"cursor": None, "collections": [], "blocked": [], "remaining": 0, "sig": "cd" * 32}
+        result = _run(FakeClient({**_dry_report(), "resume": token}), "--tenant", TENANT, "--json")
+        assert result.exit_code == 0, result.output
+        assert "cd" * 32 not in result.output
 
     def test_an_engine_without_the_job_falls_back_to_the_synchronous_count_and_says_so(self) -> None:
         client = FakeClient(_dry_report())

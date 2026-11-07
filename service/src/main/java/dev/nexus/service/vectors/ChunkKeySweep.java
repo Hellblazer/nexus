@@ -43,6 +43,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Consumer;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -87,6 +88,14 @@ import javax.crypto.spec.SecretKeySpec;
  * (nexus-gy3vq: accepted, by design): a replay re-sweeps from its cursor, and a row already swept no longer matches
  * the retired-key predicate, so it repeats nothing; but a collection whose census would block it now and did not at
  * the first call is still swept by the replay, until a call without a token runs the census again.
+ *
+ * <p><b>A dry run's continuation (nexus-v75nw).</b> {@link #issueDryRunResume} makes a token from a finished dry run
+ * whose {@code blocking} is empty, so the apply's FIRST call can skip the count too (on a large tenant the count alone
+ * outlasts the public edge). Its {@link Origin} puts the plan fingerprint, the accept map, the precondition counts, the
+ * per-collection sweepable rows and the dry-run job's id under the same signature. {@link #apply} refuses ({@link
+ * ResumeMismatch}) a verifying token whose plan or accept map is not the request's, and the caller ends the token when
+ * the job it names is gone (the handler checks that: 30 minutes, a tenant reset, an apply that changed rows). What
+ * the token skips is the recount: a residue that grew since the dry run is not seen by that apply.
  *
  * <p><b>By tenant, explicitly.</b> Every statement carries {@code tenant_id = ?} beside the RLS stamp: the owner role
  * sees every tenant's rows (RF-16), and a sweep run as that role must not depend on the stamp.
@@ -187,14 +196,39 @@ public final class ChunkKeySweep {
     public Resume issueResume(String tenant, Cursor cursor, List<String> collections, List<Blocked> blocked,
                               long remaining) {
         return new Resume(cursor, List.copyOf(collections), List.copyOf(blocked), remaining,
-            sign(tenant, cursor, collections, blocked, remaining));
+            sign(tenant, cursor, collections, blocked, remaining, null), null);
+    }
+
+    /**
+     * The continuation a finished dry run hands out (nexus-v75nw): the apply's first call carries it and goes straight
+     * to the batches, without the census and the precondition counts the dry run already ran (which outlast the edge on
+     * a large tenant). The sweep deletes for good, so the token signs what the apply may rely on: the tenant, the
+     * plan, the accept map, the precondition counts and the sweepable and blocked collections the dry run saw, and the
+     * job it came from (the caller keeps it valid only while the engine holds that job). The caller issues one only for
+     * a dry run whose {@code blocking} is empty.
+     */
+    public Resume issueDryRunResume(String tenant, String jobId, ChunkKeyPlan plan, DryRun report) {
+        Map<String, Long> rows = new TreeMap<>();
+        for (CollectionCount c : report.collections()) {
+            if (c.sweepableRows() > 0) {
+                rows.put(c.collection(), c.sweepableRows());
+            }
+        }
+        List<Blocked> blocked = report.collections().stream().filter(CollectionCount::blocked)
+            .map(c -> new Blocked(c.collection(), c.blockedReason(), c.retiredRows() - c.wrongWidthRows())).toList();
+        Origin origin = new Origin(jobId, plan.fingerprint(), new TreeMap<>(report.accepted()),
+            new TreeMap<>(report.preconditions()), rows);
+        List<String> collections = List.copyOf(rows.keySet());
+        long remaining = rows.values().stream().mapToLong(Long::longValue).sum();
+        return new Resume(null, collections, List.copyOf(blocked), remaining,
+            sign(tenant, null, collections, blocked, remaining, origin), origin);
     }
 
     private boolean verified(String tenant, Resume r) {
         if (r.sig() == null || r.collections() == null || r.blocked() == null) {
             return false;
         }
-        String expected = sign(tenant, r.cursor(), r.collections(), r.blocked(), r.remaining());
+        String expected = sign(tenant, r.cursor(), r.collections(), r.blocked(), r.remaining(), r.origin());
         return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), r.sig().getBytes(StandardCharsets.UTF_8));
     }
 
@@ -213,8 +247,19 @@ public final class ChunkKeySweep {
         out.write(b);
     }
 
+    /** A map in key order: its size, then each key and value. A null map reads as an empty one. */
+    private static void writeLongMap(DataOutputStream out, Map<String, Long> m) throws IOException {
+        Map<String, Long> sorted = m == null ? Map.of() : new TreeMap<>(m);
+        out.writeInt(sorted.size());
+        for (Map.Entry<String, Long> e : sorted.entrySet()) {
+            writeString(out, e.getKey());
+            out.writeLong(e.getValue() == null ? 0L : e.getValue());
+        }
+    }
+
     /** HMAC-SHA256 over a length-framed encoding of every field, hex. */
-    private String sign(String tenant, Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining) {
+    private String sign(String tenant, Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining,
+                        Origin origin) {
         try {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             DataOutputStream out = new DataOutputStream(bytes);
@@ -235,6 +280,14 @@ public final class ChunkKeySweep {
                 out.writeLong(b.retiredRows());
             }
             out.writeLong(remaining);
+            out.writeBoolean(origin != null);
+            if (origin != null) {
+                writeString(out, origin.jobId());
+                writeString(out, origin.plan());
+                writeLongMap(out, origin.accepted());
+                writeLongMap(out, origin.preconditions());
+                writeLongMap(out, origin.rows());
+            }
             out.flush();
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(resumeKey, "HmacSHA256"));
@@ -302,7 +355,33 @@ public final class ChunkKeySweep {
      * what was swept since. {@code sig} signs every field (and the tenant) with this instance's key, so a token is a
      * continuation only if this instance issued it ({@link #issueResume}); a call without a verifying one does the checks.
      */
-    public record Resume(Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining, String sig) {}
+    public record Resume(Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining, String sig,
+                         Origin origin) {
+        /** A continuation made in the middle of a run: no origin. */
+        public Resume(Cursor cursor, List<String> collections, List<Blocked> blocked, long remaining, String sig) {
+            this(cursor, collections, blocked, remaining, sig, null);
+        }
+    }
+
+    /**
+     * Where a dry-run continuation came from (nexus-v75nw), all of it under the signature: the job that counted, the
+     * plan fingerprint and accept map the dry run was made under, the precondition counts it saw, and the sweepable
+     * rows per collection. An apply that carries one must name the same plan and accept map ({@link ResumeMismatch}).
+     */
+    public record Origin(String jobId, String plan, Map<String, Long> accepted, Map<String, Long> preconditions,
+                         Map<String, Long> rows) {}
+
+    /**
+     * A continuation that verifies but was made for another request: the plan or the accept map of the apply is not
+     * the one the dry run was made under. Not a forgery, so the call is refused (400, {@code resume_mismatch}) and not
+     * quietly re-counted: the operator changed the request between the two steps and should know.
+     */
+    public static final class ResumeMismatch extends RuntimeException {
+        ResumeMismatch(String what) {
+            super("the continuation from the dry run was made for another " + what + "; run the dry run again with "
+                + "the same " + what + " as the apply, or drop the continuation");
+        }
+    }
 
     /**
      * The result of one apply call. {@code resume} is null once the run is done. {@code resumeIgnored} is true when the
@@ -758,6 +837,19 @@ public final class ChunkKeySweep {
             resume = null;
             ignored = true;
         }
+        if (resume != null && resume.origin() != null) {
+            // A dry run's continuation: signed, so it is the engine's own word on what the dry run saw, but only for
+            // the request it was made under.
+            Origin o = resume.origin();
+            if (!plan.fingerprint().equals(o.plan())) {
+                throw new ResumeMismatch("plan");
+            }
+            if (!new TreeMap<>(accepted).equals(new TreeMap<>(o.accepted()))) {
+                throw new ResumeMismatch("accept map");
+            }
+            log.info("event=retire_keys_apply_from_dry_run tenant={} job={} preconditions={}", tenant, o.jobId(),
+                o.preconditions());
+        }
         if (resume == null) {
             DryRun report = dryRun(tenant, plan, accepted, size, false);
             if (!report.blocking().isEmpty()) {
@@ -781,7 +873,9 @@ public final class ChunkKeySweep {
                 sweepable.retainAll(Set.of(only));
             }
             blocked = resume.blocked();
-            remaining = resume.remaining();
+            Resume token = resume;
+            remaining = token.origin() == null ? token.remaining()
+                : sweepable.stream().mapToLong(c -> token.origin().rows().getOrDefault(c, 0L)).sum();
             cursor = resume.cursor();
         }
 
