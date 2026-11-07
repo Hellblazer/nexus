@@ -463,6 +463,10 @@ from nexus.commands.service_pg_upgrade import pg_upgrade_cmd as _pg_upgrade_cmd 
 
 service_group.add_command(_pg_upgrade_cmd, "pg-upgrade")
 
+from nexus.commands.service_note_uri_pairs import note_uri_pairs_cmd as _note_uri_pairs_cmd  # noqa: E402 — needs service_group above
+
+service_group.add_command(_note_uri_pairs_cmd, "note-uri-pairs")
+
 
 @service_group.command("install")
 @click.option(

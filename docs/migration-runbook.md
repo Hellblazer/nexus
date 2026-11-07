@@ -832,49 +832,42 @@ rewrote none. (Changesets of the same engine tag that sit before
 `note-uri-001-1` did commit. The previous engine starts over that schema and is
 used only to merge, then stopped.)
 
-**1. List the pairs.** Run this as a role that bypasses row-level security: the
-superuser of the nx-managed cluster locally, the operator's diagnostic role in
-the cloud. It is the guard's own test, one row per pair.
+**1. List the pairs.** The query runs as a role that bypasses row-level security: the
+superuser of the nx-managed cluster locally, the operator's diagnostic role in the
+cloud. It is the guard's own test, one row per pair.
 
-Locally the cluster listens only on TCP at `127.0.0.1` (no Unix socket) and
-every `pg_hba.conf` line is `scram-sha-256`. The superuser role is named for the
-OS login that provisioned the cluster (`$USER`), not `postgres`. Its password is
-`PG_SUPERUSER_PASS` and the port is `PG_PORT`, both in `<config>/pg_credentials`
-(`~/.config/nexus` unless `NEXUS_CONFIG_DIR` says otherwise). Use the PostgreSQL
-client nx extracted under `<config>/pg-bundle`; nx never falls back to a host
-`psql`. The cluster keeps running when the service stops, so this works while the
-engine is halted. This opens a session without printing the password or putting
-it on a command line. **It is for Linux and macOS.**
+Locally, run the verb. It works on Linux, macOS and Windows, and while the engine
+is halted (the cluster keeps running when the service stops).
 
 ```bash
-CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
-PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")" \
-  "$CFG/pg-bundle/bundle/bin/psql" -h 127.0.0.1 \
-  -p "$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")" -U "$USER" -d nexus
+nx daemon service note-uri-pairs
 ```
 
-Three ways this can differ on your machine:
+It prints the number of pairs, one line per pair (`tenant_id`, `chroma_row`,
+`nx_note_row`, `source_uri`), and whether changeset `note-uri-001-1` has run. It
+finds the cluster's port, the bundled `psql` (nx never falls back to a host
+`psql`), the superuser's name and its password itself. The name is the login name
+(`$USER`) on Linux and macOS, or `postgres` for a cluster provisioned from a
+process with neither `USER` nor `LOGNAME`; on Windows it is `nx_` plus the first
+16 hex digits of the SHA-256 of the service account's SID (`windows_superuser_name`
+in `src/nexus/db/pg_provision.py`). The password is `PG_SUPERUSER_PASS` in
+`<config>/pg_credentials` (`~/.config/nexus` unless `NEXUS_CONFIG_DIR` says
+otherwise). It goes to `psql` only in that child's environment, never on a command
+line and never to the screen. On a managed or cloud install there is no local
+cluster: the verb says so and exits 1, and the cloud steps below apply.
 
-- **Windows.** The command above does not apply. The superuser role there is
-  `nx_` plus the first 16 hex digits of the SHA-256 of the service account's SID
-  (`windows_superuser_name` in `src/nexus/db/pg_provision.py`), not your login
-  name, and the shell syntax is POSIX. A verb that runs this for you is planned
-  (nexus-bivz3.28); until then there is no copy-and-paste command for Windows.
-- **`role "<you>" does not exist`.** The cluster was provisioned from a process
-  with neither `USER` nor `LOGNAME` set (a service manager, `cron`), and
-  `bootstrap_superuser` falls back to `postgres` for the role. Use `-U postgres`
-  with the same password.
-- **A password prompt nobody can answer.** A cluster that predates
-  `PG_SUPERUSER_PASS` was `trust` with no password. The supervisor converts it to
-  `scram-sha-256`, with a generated password written to `pg_credentials`
-  (`harden_cluster_auth`), the first time it provisions the cluster, and it does
-  that before it starts the engine, so by the time you see this halt the key is
-  there. If `pg_credentials` still has no `PG_SUPERUSER_PASS` line, nx refuses to
-  loosen `pg_hba.conf` (`PgAuthLockedError`); its message says to restore the key
-  from a backup of `pg_credentials`, or to reset the role's password in
-  single-user mode and record it there.
+A cluster that predates `PG_SUPERUSER_PASS` was `trust` with no password. The
+supervisor converts it to `scram-sha-256`, with a generated password written to
+`pg_credentials` (`harden_cluster_auth`), the first time it provisions the cluster,
+and it does that before it starts the engine, so by the time you see this halt the
+key is there. If `pg_credentials` still has no `PG_SUPERUSER_PASS` line, nx refuses
+to loosen `pg_hba.conf` (`PgAuthLockedError`), and the verb reports that the role
+was refused. Restore the key from a backup of `pg_credentials`, or reset the role's
+password in single-user mode and record it there (the exception's message has the
+steps).
 
-Paste the query below at the psql prompt.
+In the cloud, run the query below as the operator's diagnostic role, or paste it
+into any session that bypasses row-level security. It is the query the verb runs.
 
 ```sql
 WITH o AS (
@@ -944,10 +937,11 @@ did:
 
 - `nx daemon service status` lists `service_release_version` as the new engine's
   version (the `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`).
-- In psql (step 1), `SELECT id, exectype FROM public.databasechangelog WHERE id =
-  'note-uri-001-1'` returns the row with `EXECUTED`. Liquibase's own tables are in
-  the `public` schema, not `nexus` (`nexus.databasechangelog` does not exist). The
-  query returns no row while the backfill has not run.
+- `nx daemon service note-uri-pairs` (step 1) ends with `Changeset note-uri-001-1:
+  EXECUTED`, and its count of pairs is 0. It prints `not run` while the backfill has
+  not run. (It reads `public.databasechangelog`: Liquibase's own tables are in the
+  `public` schema, not `nexus`. In the cloud, `SELECT id, exectype FROM
+  public.databasechangelog WHERE id = 'note-uri-001-1'` returns the same row.)
 - `nx catalog show <the canonical>` prints `URI:` with an `nx-note://` spelling.
 
 ### Cloud
@@ -974,7 +968,7 @@ the client release before RDR-231).
 nx daemon service stop                                   # normally prints "already stopped": the supervisor exited with the halted engine. Harmless, and it makes sure nothing is retrying
 nx daemon service install-binary engine-service-v0.1.165 --no-pg-bundle   # the PREVIOUS engine tag, binary only
 nx daemon service start                                  # previous engine, same database
-# step 1: list the pairs (psql over TCP as the superuser, see step 1 above)
+nx daemon service note-uri-pairs                         # step 1: list the pairs
 nx catalog merge <duplicate> <canonical>                 # step 2, once per pair
 nx daemon service stop
 nx daemon service install-binary <the new engine tag>    # the tag in the new client release's changelog entry

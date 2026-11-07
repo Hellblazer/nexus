@@ -84,6 +84,11 @@ _ALLOWED: dict[str, tuple[str, int]] = {
         "(nexus-bivz3.15); the hint mints nothing and the filter still compares schemes by plain equality",
         1,
     ),
+    "src/nexus/db/note_uri_pairs.py": (
+        "`nx daemon service note-uri-pairs` runs the RDR-231 guard's own SQL (PAIR_SQL) to LIST live notes stored "
+        "under both spellings; the literals are the predicate that finds the pairs, never an identity it stores",
+        1,
+    ),
     "src/nexus/catalog/recovery_bundle.py": (
         "the residue counter counts bundle rows still carrying the legacy chroma:// spelling under a "
         "file-routed collection; it recognises the spelling and mints nothing",

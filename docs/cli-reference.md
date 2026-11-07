@@ -4610,6 +4610,33 @@ shows `scram-sha-256`).
 | `--apply` | Do the upgrade; rolls back on any failure after the move. |
 | `--config-dir PATH` | Config directory override. |
 
+### nx daemon service note-uri-pairs
+
+```
+nx daemon service note-uri-pairs
+```
+
+Lists the notes the RDR-231 note-URI backfill (changeset `note-uri-001-1`) halts on: one note stored under
+both `chroma://` and `nx-note://` as two live catalog documents. It runs the guard's own query in the local
+cluster as the cluster's superuser, so it works while the engine is halted, and it is the same on Linux, macOS
+and Windows: the command finds the port, the bundled `psql`, the superuser's name (the login name on Linux
+and macOS; `nx_` plus 16 hex digits of the SHA-256 of the service SID on Windows) and its password
+(`PG_SUPERUSER_PASS` in `pg_credentials`) itself. The password reaches `psql` only as `PGPASSWORD` in that
+child's environment, never on a command line, in the output or in an error message.
+
+Output: a first line with the number of pairs, a tab-separated table (`tenant_id`, `chroma_row`,
+`nx_note_row`, `source_uri`) when there are any, and a last line saying whether the changeset has run
+(`EXECUTED`, `not run`, or that `public.databasechangelog` could not be read). Merge each pair with
+`nx catalog merge <duplicate> <canonical>`. Exit 0 when the query ran, with or without pairs; exit 1 with a
+message when it could not: a managed or cloud install (it has no local cluster; the cloud steps of the
+runbook run the same query as the operator's diagnostic role), no `pg_credentials`, no bundled `psql`, a
+cluster that is not accepting connections, or a refused role. Steps: `docs/migration-runbook.md`, "If the
+RDR-231 note-URI backfill halts startup".
+
+| Flag | Description |
+|------|-------------|
+| `--config-dir PATH` | Config directory override. |
+
 ### nx daemon service install-binary
 
 ```
