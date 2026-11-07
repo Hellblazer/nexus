@@ -2783,6 +2783,7 @@ _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
     "index-failures", "fanout-floor", "ghost-sweep", "harness-grant",
     "docs-aspects-config", "sensitive-in-aspect-eligible", "sensitive-with-aspects",
+    "sensitive-in-external-embedder", "sensitivity-mcp-output",
 )
 
 
@@ -2794,6 +2795,26 @@ def _run_check_sensitive_in_aspect_eligible() -> None:
     from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
 
     for line in sd.render_text(sd.check_sensitive_in_aspect_eligible()):
+        click.echo(line)
+
+
+def _run_check_sensitive_in_external_embedder() -> None:
+    """RDR-243 (nexus-rfvyy.8.7): WARN for a sensitive document in a Voyage (external-embedder) collection.
+    The verdicts and wording are :mod:`nexus.catalog.sensitivity_doctor`'s, shared with ``nx catalog doctor
+    --sensitive-in-external-embedder``. Not applicable, never a pass, on a tenant with no sensitive document;
+    never gates."""
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    for line in sd.render_text(sd.check_sensitive_in_external_embedder()):
+        click.echo(line)
+
+
+def _run_check_sensitivity_mcp_output() -> None:
+    """RDR-243 (nexus-rfvyy.8.7): the active ``sensitivity.mcp_output`` value; WARN when it is ``flag``. A
+    config row, so it is applicable on every box; never gates."""
+    from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    for line in sd.render_text(sd.check_sensitivity_mcp_output()):
         click.echo(line)
 
 
@@ -2909,6 +2930,8 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
         "docs-aspects-config": _run_check_docs_aspects_config,
         "sensitive-in-aspect-eligible": _run_check_sensitive_in_aspect_eligible,
         "sensitive-with-aspects": _run_check_sensitive_with_aspects,
+        "sensitive-in-external-embedder": _run_check_sensitive_in_external_embedder,
+        "sensitivity-mcp-output": _run_check_sensitivity_mcp_output,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
