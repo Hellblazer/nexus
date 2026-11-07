@@ -660,6 +660,28 @@ def test_a_top_up_beside_the_same_base_pair_records_no_mix(
     assert "mixed_base" not in meta and meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"}
 
 
+def test_an_unreadable_kept_dll_never_fails_the_top_up(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-1oexm review r1b: the compare is informational. A kept DLL that cannot be read (an
+    antivirus lock or an ACL on Windows) is skipped; the PDF DLL is still placed."""
+    where = _put_dlls(cfg / "vcrt")
+    real = b.compute_sha256
+
+    def locked(path: Path) -> str:
+        if path.parent == where and path.name in _DLLS:
+            raise PermissionError(13, "locked", str(path))
+        return real(path)
+
+    monkeypatch.setattr(b, "compute_sha256", locked)
+    net = _new_bundle(monkeypatch)
+    r = _ensure(cfg, system, net, tag="engine-service-v9.9.2")
+    assert r.status == "provisioned", r.detail
+    assert (where / _ATOMIC_WAIT).read_bytes() == _BODY[_ATOMIC_WAIT]
+    meta = json.loads((where / "vcrt.meta.json").read_text())
+    assert meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"} and "mixed_base" not in meta
+
+
 def test_an_older_bundle_is_fetched_once_per_pinned_tag_not_on_every_call(
     cfg: Path, tmp_path: Path, net: _Net,
 ) -> None:

@@ -1250,24 +1250,36 @@ def _top_up_pdf_runtime(
             digests = _extract_vc_runtime(
                 asset, stage, _vcrt.VC_RUNTIME_DLLS, optional=_vcrt.PDF_ONLY_DLLS,
             )
-            differ: list[str] = []
+            kept: list[str] = []
             if all(n in digests for n in _vcrt.PDF_ONLY_DLLS):
                 for n in _vcrt.PDF_STACK_DLLS:
                     if not (dest_dir / n).is_file():
                         _atomic_copy(stage / n, dest_dir / n, executable=False)
                         placed[n] = digests[n]
-                    elif n in digests and compute_sha256(dest_dir / n) != digests[n]:
+                    else:
+                        kept.append(n)
+            # After the placement, and never able to fail it: a kept DLL that cannot be read (an
+            # antivirus lock, an ACL) is left out of the compare rather than failing the top-up.
+            differ: list[str] = []
+            for n in kept:
+                try:
+                    if n in digests and compute_sha256(dest_dir / n) != digests[n]:
                         differ.append(n)
+                except OSError as exc:
+                    _log.info("vc_runtime_mixed_check_skipped", dll=n, error=str(exc))
         if not sidecar.get("tag"):
             sidecar = _provenance(tag, name, digest, asset_url, installed_by)
         sidecar["dlls"] = {**(sidecar.get("dlls") or {}), **placed}
         # nexus-1oexm (1): a DLL already here stays (a loaded one cannot be replaced), so a top-up can
         # leave two redistributable versions in one directory, which Microsoft's app-local rule does
         # not want. Record which tag each placed DLL came from and which kept ones differ from it.
-        sidecar["dll_tags"] = {**(sidecar.get("dll_tags") or {}), **{n: tag for n in placed}}
-        if placed and differ:
-            sidecar["mixed_base"] = {"tag": tag, "differ": sorted(differ)}
-            _log.warning("vc_runtime_mixed_versions", tag=tag, differ=sorted(differ), dir=str(dest_dir))
+        if placed:
+            sidecar["dll_tags"] = {**(sidecar.get("dll_tags") or {}), **{n: tag for n in placed}}
+            if differ:
+                sidecar["mixed_base"] = {"tag": tag, "differ": sorted(differ)}
+                _log.warning("vc_runtime_mixed_versions", tag=tag, differ=sorted(differ), dir=str(dest_dir))
+            else:
+                sidecar.pop("mixed_base", None)
         sidecar[_PDF_DLL_CHECKED_KEY] = tag
         try:
             _atomic_write_json(dest_dir / _VCRT_SIDECAR_NAME, sidecar)
