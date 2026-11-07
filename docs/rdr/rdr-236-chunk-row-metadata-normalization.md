@@ -576,9 +576,23 @@ critiqued once before Sam's gate decision (T2
   fails if the call site goes back to `Integer.MAX_VALUE`. The `shared`
   flag is still decided over every holder before the cap. The class javadoc's
   settled semantics (a hit passes once per owning document) now carry the cap.
-  Changing the constant changes what a response drops and nothing else. Not
-  done here: a statement budget on the occurrence lookup, which still reads
-  every occurrence of a boilerplate chunk before the cap applies.
+  Changing the constant changes what a response drops and nothing else.
+  Statement budget (nexus-6cmam remainder): the occurrence lookup behind the
+  stage now reads at most `ManifestLabelStage.OCCURRENCES_PER_CHASH` (64) live
+  occurrences per chash, the first in `(doc_id, position)` order, cut in SQL by
+  a per-chash `LATERAL ... LIMIT` joined back by primary key. The filter still
+  runs in Java after the lookup, so the bound is larger than the owner cap (about
+  twelve times). What it drops: an owner past the first 64 candidates is never
+  seen, so a hit whose first 64 holders all fail the filter returns no row, and
+  one whose passing owners straddle the bound returns only those inside it. Only
+  a chunk held by more than 64 live documents can lose anything. What it does
+  not save: no index is in `(tenant_id, chash, doc_id, position)` order, so the
+  database still visits each occurrence's index entry and heap row to order
+  them (the inner LATERAL sorts, top-N); the saving is the wide row fetch, the
+  rows sent to the engine's Java side and the objects built past the bound.
+  An index in that
+  order would make the LATERAL stop early; adding one to
+  `catalog_document_chunks` is a separate decision.
 
 ### Critical Assumptions
 
