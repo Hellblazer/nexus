@@ -1011,7 +1011,14 @@ public final class TupleHandler implements HttpHandler {
 
     private static int intOrDefault(String field, Object v, int def) {
         Long l = numberOrNull(field, v);
-        return l == null ? def : l.intValue();
+        if (l == null) {
+            return def;
+        }
+        // nexus-14xl5: l.intValue() wrapped, so n = 2^32+5000 read as 5000.
+        if (l < Integer.MIN_VALUE || l > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(field + " must be a whole number within int range, got: " + v);
+        }
+        return l.intValue();
     }
 
     private static long longOrDefault(String field, Object v, long def) {
