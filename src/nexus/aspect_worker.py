@@ -880,7 +880,7 @@ def _try_unlink_unheld(path: Path) -> bool:
         return False
     try:
         try:
-            _locking.lock_fd(fd, blocking=False)
+            _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: probes whether a worker's liveness marker is held; not an election (nexus-dyfsw)
         except (BlockingIOError, OSError):
             return False  # held: a live worker
         if sys.platform != "win32":
@@ -950,7 +950,7 @@ def _write_worker_lock(locks_dir: Path | None = None) -> None:
             _worker_lock_fd = None
         fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            _locking.lock_fd(fd, blocking=False)
+            _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: held for the worker's life as its liveness marker; not an election (nexus-dyfsw)
             os.ftruncate(fd, 0)
             os.write(fd, str(os.getpid()).encode("ascii"))
         except BaseException:

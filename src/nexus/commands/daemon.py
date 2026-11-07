@@ -1508,9 +1508,9 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # printed, never just the first (review finding 1) — a partial pid
     # list is a partial truth for a command whose entire point here is
     # honest reporting.
-    if outcome.refused and not outcome.pids:
-        # Printed below, with the refusal; "stopped" or "already stopped"
-        # would both be false here.
+    if (outcome.refused or outcome.invisible) and not outcome.pids:
+        # Printed below, with the refusal or the invisible-supervisor warning;
+        # "stopped" or "already stopped" would both be false here.
         pass
     elif outcome.source == "none" and outcome.unreadable:
         # nexus-oacd3: a flagless start whose directory could not be read is
@@ -1563,6 +1563,15 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # dropping that caveat. Skipped when source is already
     # "process_table_unavailable" — that branch's own message already
     # covers this.
+    if outcome.invisible:
+        click.echo(
+            f"Warning: the storage-service lease is still heartbeating, but its supervisor "
+            f"(pid {', '.join(str(p) for p in outcome.invisible)}) is not visible from here: "
+            "it runs in another PID namespace that shares this config directory (a container, "
+            "or a namespaced CI job). Nothing was signalled and the lease was kept; stop it from "
+            "where it runs.",
+            err=True,
+        )
     if outcome.unreadable:
         click.echo(
             f"Warning: pid(s) {', '.join(str(p) for p in outcome.unreadable)} "
@@ -1625,7 +1634,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             "'nx daemon service start' until this is resolved manually.",
             err=True,
         )
-    if stubborn_only or outcome.refused:
+    if stubborn_only or outcome.refused or outcome.invisible:
         sys.exit(1)
     if outcome.source == "process_table_unavailable" and not outcome.pids:
         click.echo(
