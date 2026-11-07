@@ -48,7 +48,7 @@ const ERROR_SHAPES: readonly RegExp[] = [
   /^(?!\s*except\b).*\b\w+(Error|Exception): \S/, // ValueError: bad, not `except KeyError:` source
   /^(\S+: )?fatal:/i, // git, and a tool prefixing its own name; not an echoed FATAL mid-line
   /No such file/,
-  /: command not found$/,
+  /: command not found(: |\s*$)/, // bash `sh: x: command not found`, zsh `zsh: command not found: x`
   /^\s*(ERROR|error|Error)(\[[^\]]*\])?:/, // pip, cargo, git push, node
   /^\[ERROR\]|^npm ERR!|^make(\[\d+\])?: \*\*\* .*Error/, // maven, npm, make
   /:\d+(:\d+)?: error:/, // a compiler diagnostic

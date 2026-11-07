@@ -195,6 +195,7 @@ const REAL_ERRORS = [
   'Error: Cannot find module \'x\'',
   '--- FAIL: TestParse (0.00s)',
   'bash: frobnicate: command not found',
+  'zsh: command not found: frobnicate',
   '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin',
   'npm ERR! code ELIFECYCLE',
   'make: *** [Makefile:12: all] Error 2',
