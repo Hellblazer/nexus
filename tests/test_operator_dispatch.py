@@ -98,6 +98,18 @@ def _fake_t1_dispatch_mint(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_sensitive_documents(monkeypatch):
+    """Module-wide default (RDR-243 Phase 3 fix r1): a dispatch that grants Read/Grep/Glob lists the catalog for
+    sensitive documents' source files and takes the tools away when it cannot. This file runs with no catalog, so
+    it stands in "none are sensitive"; ``tests/test_dispatch_sensitive_file_deny.py`` owns the behaviour."""
+    from nexus.operators.sensitive_paths import FileToolRestriction  # noqa: PLC0415 — test-local
+
+    monkeypatch.setattr(
+        "nexus.operators.sensitive_paths.file_tool_restriction", lambda **kw: FileToolRestriction(),
+    )
+
+
 # ── Event-loop safety ──────────────────────────────────────────────────────
 
 class TestEventLoopSafety:
