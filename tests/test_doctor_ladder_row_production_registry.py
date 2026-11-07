@@ -25,6 +25,7 @@ from nexus.upgrade_ladder.registry import (
     default_registry,
 )
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
 from tests.upgrade.conftest import InMemoryCompletionLedger
 
 #: The rungs that answer an unattended run on a managed service only from a record (or, on an engine with the route,
@@ -156,7 +157,9 @@ def test_a_walk_over_the_production_registry_under_auto_lists_nothing_once_recor
     from nexus.upgrade_ladder.unattended import unattended_run
 
     for rung in REFUSABLE:
-        install.ledger.record_verified(rung, package_version="9.9.9")
+        # the two manifest rungs read a record as current only under the title rule (nexus-l8o33)
+        detail = TITLE_RULE_MARK if rung in (RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL) else ""
+        install.ledger.record_verified(rung, package_version="9.9.9", detail=detail)
     refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
     with unattended_run():
         report = LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
