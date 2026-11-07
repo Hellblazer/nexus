@@ -1300,6 +1300,12 @@ def test_harness_a_read_path_that_ignores_the_posture_turns_every_exclude_row_re
         return current(self, *a, **kw)
 
     monkeypatch.setattr(hvc.HttpVectorClient, "search_per_collection", include_always)
+    # RDR-243 Phase 3 (nexus-rfvyy.8.2): the MCP search tools now withhold a sensitive hit at their output whatever
+    # the read asked for, so with the engine filter deleted that second layer would hide the leak this mutation is
+    # meant to show. The mutation removes both layers: the output posture reads ``flag`` for the run.
+    import nexus.sensitive_output as so  # noqa: PLC0415 - after the substrate is pinned
+
+    monkeypatch.setattr(so, "mcp_output_setting", lambda: so.McpOutputSetting("flag", "flag"))
     try:
         SURFACE_DRIVERS[surface.target](world)
     except AssertionError as exc:
