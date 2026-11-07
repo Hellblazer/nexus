@@ -191,14 +191,17 @@ def _external_embedder(collection: str) -> str | None:
     """The external model token a collection embeds with, or ``None`` when it embeds locally. A conformant
     name carries its model token; a token outside :data:`nexus.corpus.LOCAL_EMBEDDING_MODELS` is Voyage. A
     legacy name carries none and counts as Voyage (``voyage_model_for_collection`` is its only dispatch)."""
+    from nexus.catalog.collection_name import CollectionName  # noqa: PLC0415 — deferred: leaf value object
     from nexus.corpus import (  # noqa: PLC0415 — deferred, corpus has a heavy import graph
         LOCAL_EMBEDDING_MODELS,
-        embedding_model_for_collection_name,
         voyage_model_for_collection,
     )
 
-    token = embedding_model_for_collection_name(collection)
-    if token is None:
+    # The value object is the one sanctioned parse of a candidate name (the same rule the write verbs use in
+    # nexus.sensitive_write); a name it cannot parse is a legacy one and reads as Voyage.
+    try:
+        token = CollectionName.parse(collection).embedding_model
+    except ValueError:
         return voyage_model_for_collection(collection)
     return None if token in LOCAL_EMBEDDING_MODELS else token
 
