@@ -196,7 +196,7 @@ REGISTERED_TOOLS = frozenset(f"hook_{spec.name}" for spec in HOOK_TOOLS)
 
 def _walk(path: Path) -> list[tuple[str, dict]]:
     """``(event, entry)`` for every leaf hook entry in a manifest."""
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     out: list[tuple[str, dict]] = []
     for event, groups in data["hooks"].items():
         for group in groups:
@@ -393,7 +393,7 @@ def test_every_launched_script_declares_the_interpreter_floor() -> None:
     assert NX_LAUNCH in scripts, "no entry goes through the launcher; the walk lost it"
     assert scripts == PLUGIN_RESIDENT_SCRIPTS | {NX_LAUNCH}, scripts
     for script in sorted(scripts):
-        text = (REPO_ROOT / "conexus" / script.removeprefix("${CLAUDE_PLUGIN_ROOT}/")).read_text()
+        text = (REPO_ROOT / "conexus" / script.removeprefix("${CLAUDE_PLUGIN_ROOT}/")).read_text(encoding="utf-8")
         match = re.search(r"(?m)^# /// script$\n((?:^#(?: .*)?$\n)+?)^# ///$", text)
         assert match, f"{script} has no PEP 723 `# /// script` block, so uv cannot see its floor"
         body = "\n".join(line.removeprefix("# ").removeprefix("#") for line in match.group(1).splitlines())
