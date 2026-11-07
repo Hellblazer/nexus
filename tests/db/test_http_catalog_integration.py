@@ -1717,7 +1717,10 @@ class TestResyncChunkCount:
 
 # ── nexus-njrcn.8: live wire for resolve_span / resolve_chash ──────────────────
 
-_RESOLVE_COLL_OLD = "knowledge__resolvewire__bge-base-en-v15-768__v1"
+# The OLDER collection sorts FIRST by name ("...1" < "...2" under any collation), so the
+# repository's third sort key (collection ASC) would pick OLD and only the created_at DESC
+# key picks NEW: dropping or reversing created_at in the tie-break fails the no-preference test.
+_RESOLVE_COLL_OLD = "knowledge__resolvewire1__bge-base-en-v15-768__v1"
 _RESOLVE_COLL_NEW = "knowledge__resolvewire2__bge-base-en-v15-768__v1"
 
 
@@ -1728,7 +1731,13 @@ def _seed_resolvable_chunk(
     """Seed a real ``nexus.chunks`` row with distinguishing text, JSONB metadata and
     ``created_at`` (``_seed_chunks`` writes the literal text ``seed`` and no metadata,
     which cannot show a wire round-trip). Text and metadata are dollar-quoted so the
-    unicode and quotes in them reach the column unchanged."""
+    unicode and quotes in them reach the column unchanged.
+
+    It does not use ``tests/_chunk_seed.py::chunks_insert_sql`` (the helper
+    ``tests/AGENTS.md`` names for a module with its own initdb) because that statement
+    has no ``created_at`` column parameter, and the tie-break test needs two copies of
+    one chash with different ``created_at``. This module's own PG and service match the
+    sibling ``_seed_chunks`` hand INSERT."""
     model = "bge-base-en-v15-768"
     vec = "[" + ",".join(["0"] * 768) + "]"
     _psql(pg, (
@@ -1751,9 +1760,15 @@ class TestResolveSpanAndChashLiveWire:
     The unit tests drive a fake server and the Java tests call the repository directly;
     neither covers the JSONB metadata wire round-trip (Postgres -> Jackson -> client), the
     ``prefer_collection`` bind, the live ``doc_id`` join to the manifest, or the handler's
-    tenant scope. Each assertion below is a real repository result: a broken route, a
-    dropped ``withTenant``, a mis-bound tie-break or a metadata parser that returns ``{}``
-    fails one of them.
+    tenant scope. Most assertions are real repository results: the stored ``chunk_text``,
+    the JSONB ``metadata``, ``physical_collection``, ``doc_id`` and the misses. Two kinds
+    are CLIENT-derived and cannot fail on a server break: the ``chunk_hash`` / ``chash``
+    equality asserts (the client echoes the requested hash) and the ``char_range`` slice
+    (``HttpCatalogClient`` cuts the served text itself); they pin the client's mapping
+    only. A broken route, a dropped ``withTenant``, a mis-bound tie-break or a metadata
+    parser that returns ``{}`` fails a repository-derived assertion. Every miss or
+    tenant test carries a positive control in the same test, because the client maps a
+    404 to ``None`` and a dead route would otherwise pass them.
     """
 
     _TEXT = "Résumé: chunk body with 'quotes', \"double\" and ünïcode.\nSecond line."
@@ -1811,6 +1826,10 @@ class TestResolveSpanAndChashLiveWire:
         assert got["char_range"] == (3, 9)
 
     def test_resolve_span_misses_are_none(self, cat, seeded) -> None:
+        # Positive control: the route answers for a stored chunk, so a None below is a
+        # miss and not a dead route (the client maps 404 to None).
+        stored = cat.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_OLD)
+        assert stored is not None and stored["chunk_text"] == self._TEXT
         unknown = _ch("resolve_wire_never_stored")
         assert cat.resolve_span(f"chash:{unknown}", _RESOLVE_COLL_OLD) is None
         # A legacy 32-hex reference is a miss on the wire, not an error (nexus-lgdel.l1).
@@ -1836,8 +1855,10 @@ class TestResolveSpanAndChashLiveWire:
         assert got["metadata"]["nested"] == {"tags": ["a", "b"], "ok": True}
 
     def test_resolve_chash_tie_break_newest_wins_without_a_preference(self, cat, seeded) -> None:
-        # prefer_collection is absent on the wire: the repository binds it as "" and the
-        # newest created_at wins (a null-vs-empty-string bind mistake would break this).
+        # prefer_collection is absent on the wire: the repository binds it as "", no row
+        # is preferred, and created_at DESC decides. The older collection sorts first by
+        # name, so dropping or reversing the created_at key returns the other copy. This
+        # does not tell a NULL bind from an empty one (both leave every row unpreferred).
         got = cat.resolve_chash(seeded["shared"])
         assert got is not None
         assert got["physical_collection"] == _RESOLVE_COLL_NEW
@@ -1850,11 +1871,19 @@ class TestResolveSpanAndChashLiveWire:
         assert got["chunk_text"] == self._TEXT
 
     def test_resolve_chash_miss_is_none(self, cat, seeded) -> None:
+        stored = cat.resolve_chash(seeded["only_old"])  # positive control: the route answers
+        assert stored is not None and stored["chunk_text"] == "only in the old collection"
         assert cat.resolve_chash(_ch("resolve_wire_never_stored")) is None
 
     # ── tenant scope at the handler ───────────────────────────────────────────
 
-    def test_another_tenant_cannot_resolve_the_chunk_either_way(self, cat_b, seeded) -> None:
+    def test_another_tenant_cannot_resolve_the_chunk_either_way(self, cat, cat_b, seeded) -> None:
+        # Positive control: the owning tenant resolves the same chunks over the same
+        # routes, so a None for the other tenant is isolation and not a 404 route.
+        own_span = cat.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_OLD)
+        assert own_span is not None and own_span["chunk_text"] == self._TEXT
+        own_chash = cat.resolve_chash(seeded["shared"])
+        assert own_chash is not None and own_chash["physical_collection"] == _RESOLVE_COLL_NEW
         assert cat_b.resolve_span(f"chash:{seeded['shared']}", _RESOLVE_COLL_OLD) is None
         assert cat_b.resolve_chash(seeded["shared"]) is None
         assert cat_b.resolve_chash(seeded["only_old"], prefer_collection=_RESOLVE_COLL_OLD) is None
