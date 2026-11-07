@@ -797,6 +797,14 @@ reads back, then remove it by hand.
 
 ## If the RDR-231 note-URI backfill halts startup
 
+**Upgrade the client first.** The `nx daemon service note-uri-pairs` verb that the
+local steps below use ships in the first client release after 7.97.0 (it is in
+CHANGELOG's `[Unreleased]` section until that release is cut). Client releases
+7.88.0 through 7.97.0 carry the backfill without it. A halted engine does not
+block `uv tool upgrade conexus`, so upgrade the client before step 1. If you
+cannot, step 1 has a short POSIX fallback for an older client; there is none for
+Windows.
+
 **Symptom.** The new engine does not come up. `nx daemon service start` exits 2,
 within a few seconds when it starts the supervisor directly and after 60 seconds
 when it starts it through an autostart unit (launchd, systemd, Task Scheduler),
@@ -866,6 +874,18 @@ was refused. Restore the key from a backup of `pg_credentials`, or reset the rol
 password in single-user mode and record it there (the exception's message has the
 steps).
 
+**An older client (Linux and macOS only).** Open a session as the superuser and paste
+the query below at the psql prompt. The role is `$USER`, or `postgres` (see the
+verb's account above); the password and port are in `pg_credentials`, and the
+password is set for that one command without printing it.
+
+```bash
+CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
+PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")" \
+  "$CFG/pg-bundle/bundle/bin/psql" -h 127.0.0.1 \
+  -p "$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")" -U "$USER" -d nexus
+```
+
 In the cloud, run the query below as the operator's diagnostic role, or paste it
 into any session that bypasses row-level security. It is the query the verb runs.
 
@@ -911,8 +931,10 @@ into such an empty one leaves the note's lookups resolving to a row with no chun
 Then merge the other row (the duplicate) into the one you keep, in the tenant that
 owns both. The CLI call is `nx catalog merge <duplicate> <canonical>` and the
 engine route is `POST /v1/catalog/merge` with
-`{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`. Run the step 1 query
-again: it must return no rows.
+`{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`. Run
+`nx daemon service note-uri-pairs --check` again: it must exit 0, meaning no pair is
+left (exit 3 lists the pairs that remain). In the cloud, run the step 1 query again:
+it must return no rows.
 
 If both rows have chunks, the merge does not combine them. The duplicate stays a
 live catalog row, and a chunk is live while any live document owns it (a manifest
@@ -937,9 +959,9 @@ did:
 
 - `nx daemon service status` lists `service_release_version` as the new engine's
   version (the `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`).
-- `nx daemon service note-uri-pairs` (step 1) ends with `Changeset note-uri-001-1:
-  EXECUTED`, and its count of pairs is 0. It prints `not run` while the backfill has
-  not run. (It reads `public.databasechangelog`: Liquibase's own tables are in the
+- `nx daemon service note-uri-pairs --check` exits 0 (no pair) and its last line is
+  `Changeset note-uri-001-1: EXECUTED`. That line reads `not run` while the backfill
+  has not run. (It reads `public.databasechangelog`: Liquibase's own tables are in the
   `public` schema, not `nexus`. In the cloud, `SELECT id, exectype FROM
   public.databasechangelog WHERE id = 'note-uri-001-1'` returns the same row.)
 - `nx catalog show <the canonical>` prints `URI:` with an `nx-note://` spelling.

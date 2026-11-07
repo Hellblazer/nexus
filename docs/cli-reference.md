@@ -4614,6 +4614,7 @@ shows `scram-sha-256`).
 
 ```
 nx daemon service note-uri-pairs
+nx daemon service note-uri-pairs --check      # exit 3 when a pair exists, 0 when none
 ```
 
 Lists the notes the RDR-231 note-URI backfill (changeset `note-uri-001-1`) halts on: one note stored under
@@ -4622,20 +4623,25 @@ cluster as the cluster's superuser, so it works while the engine is halted, and 
 and Windows: the command finds the port, the bundled `psql`, the superuser's name (the login name on Linux
 and macOS; `nx_` plus 16 hex digits of the SHA-256 of the service SID on Windows) and its password
 (`PG_SUPERUSER_PASS` in `pg_credentials`) itself. The password reaches `psql` only as `PGPASSWORD` in that
-child's environment, never on a command line, in the output or in an error message.
+child's environment, never on a command line, in the output or in an error message. The child
+runs with `PGCLIENTENCODING=UTF8` and English messages, and psql separates fields and rows with NUL, so a
+`source_uri` that holds a tab or a newline cannot corrupt the table. If the login-name role is refused, a POSIX
+run retries as `postgres` once (a cluster provisioned by a process with no `USER`); the message names every
+role tried.
 
 Output: a first line with the number of pairs, a tab-separated table (`tenant_id`, `chroma_row`,
 `nx_note_row`, `source_uri`) when there are any, and a last line saying whether the changeset has run
 (`EXECUTED`, `not run`, or that `public.databasechangelog` could not be read). Merge each pair with
-`nx catalog merge <duplicate> <canonical>`. Exit 0 when the query ran, with or without pairs; exit 1 with a
-message when it could not: a managed or cloud install (it has no local cluster; the cloud steps of the
+`nx catalog merge <duplicate> <canonical>`. Exit 0 when the query ran, with or without pairs (with `--check`: 3 when
+a pair exists, so a script can gate on it); exit 1 with a message when it could not: a managed or cloud install (it has no local cluster; the cloud steps of the
 runbook run the same query as the operator's diagnostic role), no `pg_credentials`, no bundled `psql`, a
 cluster that is not accepting connections, or a refused role. Steps: `docs/migration-runbook.md`, "If the
 RDR-231 note-URI backfill halts startup".
 
 | Flag | Description |
 |------|-------------|
-| `--config-dir PATH` | Config directory override. |
+| `--config-dir PATH` | Config directory override. The credentials, and the bundled `psql` (unless `NEXUS_PG_BIN` names one), are read from that directory. |
+| `--check` | Exit 3 when any pair exists, 0 when there is none. The listing is printed either way. |
 
 ### nx daemon service install-binary
 
