@@ -145,10 +145,14 @@ def guarded[T](what: str, call: Callable[[], T], default: T) -> T:
         return default
 
 
+class NoteUnreadable(Exception):
+    """The note store could not be read (as opposed to holding no note); raised only by ``load(strict=True)``."""
+
+
 class NoteStore(Protocol):
     """Durable, per-tenant single note."""
 
-    def load(self) -> dict[str, Any] | None: ...
+    def load(self, *, strict: bool = False) -> dict[str, Any] | None: ...
     def save(self, note: dict[str, Any]) -> None: ...
     def clear(self) -> None: ...
 
@@ -172,15 +176,26 @@ class T2NoteStore:
         finally:
             store.close()
 
-    def load(self) -> dict[str, Any] | None:
+    def load(self, *, strict: bool = False) -> dict[str, Any] | None:
+        """The note, or None when there is none or its content is not a JSON object.
+
+        A failed read is also None, unless *strict*: then it raises :class:`NoteUnreadable`, so a
+        caller that rewrites the note from what it read can tell "no note" from "could not read"
+        (nexus-4qygk).
+        """
         try:
             with self._store() as store:
                 row = store.get(project=self._project, title=self._title)
-            note = json.loads(row["content"]) if row else None
-            return note if isinstance(note, dict) else None
-        except Exception as exc:  # noqa: BLE001 — a note that cannot be read is no note
+        except Exception as exc:  # noqa: BLE001 — a note that cannot be read is no note, unless the caller asks
             _log.debug("census_progress_load_failed", error=str(exc))
+            if strict:
+                raise NoteUnreadable(str(exc)) from exc
             return None
+        try:
+            note = json.loads(row["content"]) if row else None
+        except (TypeError, ValueError, KeyError):
+            return None  # unparseable content: no usable note, and rewriting it is the repair
+        return note if isinstance(note, dict) else None
 
     def save(self, note: dict[str, Any]) -> None:
         try:
