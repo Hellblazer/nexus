@@ -122,6 +122,13 @@ class VectorSensitivityExcludeIntegrationTest {
         };
     }
 
+    /**
+     * A second collection of the first one's embedding model, holding the non-sensitive chunks under their own owners
+     * (stem + "-384b"), so a search over both runs one fan-out and one chash is a hit in two collections whose flags
+     * differ (nexus-rfvyy.7.17 review F2).
+     */
+    static final String COLL_B = "knowledge__rfvyy73-384b__minilm-l6-v2-384__v1";
+
     static String text(String key) {
         return "chunk " + key + " " + GATE;
     }
@@ -155,6 +162,7 @@ class VectorSensitivityExcludeIntegrationTest {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.seedServiceToken(dsl, TOKEN, TENANT, "rfvyy73-sensitivity");
             for (int dim : DIMS) seedDim(dsl, dim);
+            seedSecond384(dsl);
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -244,6 +252,34 @@ class VectorSensitivityExcludeIntegrationTest {
             dsl.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
                     CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
                 .values(TENANT, seed, tumbler(stem, dim), "cites", "test")
+                .execute();
+        }
+    }
+
+    private void seedSecond384(DSLContext dsl) {
+        PgContainerHelper.insertCollection(dsl, TENANT, COLL_B);
+        String model = PgContainerHelper.collectionModel(dsl, TENANT, COLL_B);
+        for (String key : NON_SENSITIVE) {
+            byte[] chash = HexFormat.of().parseHex(hex(key));
+            double theta = ANGLE.get(key);
+            dsl.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL_B).set(CHUNKS.CHASH, chash)
+                .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, text(key))
+                .set(VectorSeeds.chunkEmbedding(384),
+                     VectorSeeds.vecXY(384, (float) Math.cos(theta), (float) Math.sin(theta)))
+                .execute();
+            String doc = tumbler(key, 384) + "b";
+            dsl.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
+                .set(CATALOG_DOCUMENTS.TITLE, "Doc " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL_B)
+                .set(CATALOG_DOCUMENTS.SENSITIVE, false)
+                .execute();
+            dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL_B)
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                 .execute();
         }
     }
@@ -1113,6 +1149,171 @@ class VectorSensitivityExcludeIntegrationTest {
                 }
             }
         });
+    }
+
+    // ── nexus-rfvyy.7.17 review r1 (F1, F2): the lexical report follows the race drop on EVERY path ─────
+
+    /** One search-per-collection request with the lexical leg, over the collections named; no threshold unless given. */
+    private HttpResponse<String> lexicalSearch(List<String> collections, int limit, Map<String, Double> thresholds)
+            throws Exception {
+        Map<String, Object> b = body("query", GATE, "collections", collections, "per_collection_k", K,
+                                     "limit", limit, "lexical", true);
+        if (thresholds != null) b.put("thresholds", thresholds);
+        return post(new Route("/v1/vectors/search-per-collection", b, true), "exclude", true);
+    }
+
+    private static JsonNode statOf(HttpResponse<String> r, String collection) throws Exception {
+        for (JsonNode pc : MAPPER.readTree(r.body()).get("per_collection")) {
+            if (pc.get("collection").asText().equals(collection)) return pc;
+        }
+        throw new AssertionError("no per_collection entry for " + collection + " in " + r.body());
+    }
+
+    private static List<String> idsOf(JsonNode array) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode n : array) out.add(n.asText());
+        return out;
+    }
+
+    private static List<String> servedFrom(HttpResponse<String> r, String collection) throws Exception {
+        List<String> out = new ArrayList<>();
+        for (JsonNode row : rows(r)) if (row.get("collection").asText().equals(collection)) out.add(chashOf(row));
+        return out;
+    }
+
+    /** Every id the lexical arm reports for a collection is a row of the response from that collection. */
+    private static void assertReportMatchesResponse(HttpResponse<String> r, String collection) throws Exception {
+        JsonNode pc = statOf(r, collection);
+        assertThat(idsOf(pc.get("lexical_ids")))
+            .as("lexical_ids of %s lists exactly the ids still in the response", collection)
+            .containsExactlyInAnyOrderElementsOf(servedFrom(r, collection));
+        assertThat(pc.get("lexical_count").asInt()).as("lexical_count of %s follows the ids", collection)
+            .isEqualTo(pc.get("lexical_ids").size());
+    }
+
+    /**
+     * Both arms hit the same rows (no threshold): the vector survivors ARE the page and the lexical arm adds no extra,
+     * the common case. Every one is flagged after the search; none may be served and none may be reported.
+     */
+    @Test
+    void lexicalRace_rowsBothArmsHit_areDroppedFromTheResponseAndTheLexicalReport() throws Exception {
+        String a = coll(384);
+        var calm = lexicalSearch(List.of(a), K, null);
+        assertThat(servedFrom(calm, a)).as("non-vacuity: no race, the vector arm serves the page")
+            .containsExactlyInAnyOrderElementsOf(hexes("n1", "n2", "n3", "n4", "n5"));
+        assertThat(idsOf(statOf(calm, a).get("lexical_ids")))
+            .as("non-vacuity: the lexical arm hit the same rows (hit in both arms)")
+            .containsExactlyInAnyOrderElementsOf(hexes("n1", "n2", "n3", "n4", "n5"));
+        withFlagAppearingBetweenReadAndLookup(List.of("n1", "n2", "n3", "n4", "n5", "n6"), () -> {
+            var raced = lexicalSearch(List.of(a), K, null);
+            assertThat(rows(raced)).as("every flagged row is dropped").isEmpty();
+            assertThat(statOf(raced, a).get("lexical_ids")).as("and none is reported by the lexical arm").isEmpty();
+            assertThat(statOf(raced, a).get("lexical_count").asInt()).isZero();
+        });
+    }
+
+    /** A partial drop: the rows the lookup did not flag stay in the response and in the report, the count is exact. */
+    @Test
+    void lexicalRace_aPartialDrop_keepsTheSurvivorsInTheReportAndTheCountExact() throws Exception {
+        String a = coll(384);
+        withFlagAppearingBetweenReadAndLookup(List.of("n1", "n2"), () -> {
+            var raced = lexicalSearch(List.of(a), K, null);
+            assertThat(servedFrom(raced, a)).containsExactlyInAnyOrderElementsOf(hexes("n3", "n4", "n5"));
+            assertThat(idsOf(statOf(raced, a).get("lexical_ids")))
+                .containsExactlyInAnyOrderElementsOf(hexes("n3", "n4", "n5"));
+            assertThat(statOf(raced, a).get("lexical_count").asInt()).as("5 returned less the 2 dropped").isEqualTo(3);
+            assertReportMatchesResponse(raced, a);
+        });
+    }
+
+    /**
+     * One chash a hit in two collections, flagged in one only (the seam flags the first collection's owners; the
+     * second's are not): its row and its lexical id go from the first collection and stay in the second.
+     */
+    @Test
+    void lexicalRace_aChashFlaggedInOneCollectionOnly_isDroppedThereAndKeptInTheOther() throws Exception {
+        String a = coll(384);
+        var calm = lexicalSearch(List.of(a, COLL_B), 10, null);
+        assertThat(servedFrom(calm, a)).as("non-vacuity: both collections serve n1").contains(hex("n1"));
+        assertThat(servedFrom(calm, COLL_B)).contains(hex("n1"));
+        withFlagAppearingBetweenReadAndLookup(List.of("n1"), () -> {
+            var raced = lexicalSearch(List.of(a, COLL_B), 10, null);
+            assertThat(servedFrom(raced, a)).as("flagged in A: dropped there").doesNotContain(hex("n1"));
+            assertThat(servedFrom(raced, COLL_B)).as("not flagged in B: still served there").contains(hex("n1"));
+            assertThat(idsOf(statOf(raced, a).get("lexical_ids"))).doesNotContain(hex("n1"));
+            assertThat(idsOf(statOf(raced, COLL_B).get("lexical_ids"))).as("B still reports n1").contains(hex("n1"));
+            assertReportMatchesResponse(raced, a);
+            assertReportMatchesResponse(raced, COLL_B);
+            assertThat(statOf(raced, COLL_B).get("lexical_count").asInt()).isEqualTo(K);
+            assertThat(statOf(raced, a).get("lexical_count").asInt()).isEqualTo(K - 1);
+        });
+    }
+
+    /**
+     * The vector copy survives and the lexical extras are the rows dropped: a threshold of 0.03 keeps only n1 (cosine
+     * distance 0.0199) as a vector row, n2..n5 are the lexical arm's extras, and the lookup flags n3 alone. n1 stays
+     * served from the vector arm and reported; the extra n3 goes from both; the other extras stay in both.
+     */
+    @Test
+    void lexicalRace_aVectorRowThatSurvives_staysReportedWhileAnExtraIsDropped() throws Exception {
+        String a = coll(384);
+        var calm = lexicalSearch(List.of(a), K, Map.of(a, 0.03));
+        assertThat(servedFrom(calm, a)).as("non-vacuity: n1 is the vector row, n2..n5 the lexical extras")
+            .containsExactlyInAnyOrderElementsOf(hexes("n1", "n2", "n3", "n4", "n5"));
+        assertThat(statOf(calm, a).get("dropped").asInt())
+            .as("non-vacuity: the threshold cut four of the vector arm's five rows").isEqualTo(4);
+        withFlagAppearingBetweenReadAndLookup(List.of("n3"), () -> {
+            var raced = lexicalSearch(List.of(a), K, Map.of(a, 0.03));
+            assertThat(servedFrom(raced, a)).containsExactlyInAnyOrderElementsOf(hexes("n1", "n2", "n4", "n5"));
+            assertReportMatchesResponse(raced, a);
+            assertThat(statOf(raced, a).get("lexical_count").asInt()).isEqualTo(K - 1);
+        });
+    }
+
+    /**
+     * The labelled path (a {@code section_type} filter follows the search): the lexical report is cut to the ids the
+     * filter left in the response, keyed by (collection, id). n1's owner in the first collection is labelled
+     * {@code references} and filtered out there; n1 is a hit in the second collection too, where it is kept, and its
+     * served copy there must not keep the first collection's id in that collection's report.
+     */
+    @Test
+    void lexicalLabelled_aChashFilteredOutOfOneCollectionOnly_leavesTheOthersReportAlone() throws Exception {
+        String a = coll(384);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, "references")
+                .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, true)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler("n1", 384)))
+                .execute();
+        }
+        try {
+            Map<String, Object> b = body("query", GATE, "collections", List.of(a, COLL_B), "per_collection_k", K,
+                                         "limit", 10, "lexical", true,
+                                         "where", Map.of("section_type", Map.of("$ne", "references")));
+            var r = post(new Route("/v1/vectors/search-per-collection", b, true), "exclude", true);
+            assertThat(servedFrom(r, a)).as("the filter removed n1 from the first collection")
+                .doesNotContain(hex("n1"));
+            assertThat(servedFrom(r, COLL_B)).as("and left it in the second").contains(hex("n1"));
+            assertThat(idsOf(statOf(r, a).get("lexical_ids"))).as("A no longer reports the id it does not serve")
+                .doesNotContain(hex("n1"));
+            assertThat(idsOf(statOf(r, COLL_B).get("lexical_ids"))).contains(hex("n1"));
+            assertThat(idsOf(statOf(r, a).get("lexical_ids")))
+                .containsExactlyInAnyOrderElementsOf(servedFrom(r, a));
+            assertThat(idsOf(statOf(r, COLL_B).get("lexical_ids")))
+                .containsExactlyInAnyOrderElementsOf(servedFrom(r, COLL_B));
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENT_CHUNKS)
+                    .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, (String) null)
+                    .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, false)
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                    .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler("n1", 384)))
+                    .execute();
+            }
+        }
     }
 
     @ParameterizedTest(name = "{0}")
