@@ -101,6 +101,7 @@ from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SPAN_FILL
 from nexus.upgrade_ladder.rungs.manifest_section_labels import (
     DOC_BATCH,
     MAX_ROWS_PER_REQUEST,
+    TITLE_RULE_MARK,
     ManifestSectionLabelsRung,
     RouteAbsent,
     _chunk_metadatas,
@@ -528,21 +529,38 @@ class ManifestSpanFillRung:
 
     # ── detect ───────────────────────────────────────────────────────────────
 
-    def _recorded(self) -> bool:
-        """True when this tenant's completion is on file, at any package version. An unreadable ledger is not a
-        record. A one-time transition: rows that stay NULL by design stay NULL."""
+    def _record(self) -> CompletionRecord | None:
+        """This tenant's completion record, or ``None`` (none on file, or an unreadable ledger, where the scan
+        decides)."""
         try:
-            return self._record_fn() is not None
+            return self._record_fn()
         except Exception as exc:  # noqa: BLE001 — an unreadable ledger is 'not recorded', and the scan decides
             _log.info("manifest_span_fill_ledger_unreadable", error=str(exc))
-            return False
+            return None
+
+    def _recorded(self) -> bool:
+        """True when this tenant's completion is on file under the current title rule, at any package version. A
+        one-time transition: rows that stay NULL by design stay NULL."""
+        record = self._record()
+        return record is not None and TITLE_RULE_MARK in (getattr(record, "detail", "") or "")
 
     def detect(self) -> RungStatus:
         """READ-ONLY. Converged at once from the completion record; not applicable, with no read, unattended against
         a managed service (the answer is a walk of the whole catalog and no engine count exists to shorten it);
         otherwise the dry run, which honours the ``--auto`` time limit and then says pending."""
-        if self._recorded():
+        record = self._record()
+        if record is not None and TITLE_RULE_MARK in (getattr(record, "detail", "") or ""):
             return RungStatus(applicable=True, converged=True)
+        if record is not None and not refuses_unbounded_read(self._managed_fn):
+            # Written before the title rule stripped the document title's suffix (nexus-l8o33): pending once, so the
+            # walk's converge, verify and record rewrite it with the mark even when nothing turns out fillable.
+            return RungStatus(
+                applicable=True, converged=False,
+                pending_detail=(
+                    f"the completion record predates the current title rule ({TITLE_RULE_MARK}): the rows the old "
+                    "rule refused are scanned once more (`nx upgrade`)"
+                ),
+            )
         if refuses_unbounded_read(self._managed_fn):
             reason = (
                 "unattended `nx upgrade --auto` does not scan a managed catalog for manifest rows that lack a span "
@@ -654,7 +672,7 @@ class ManifestSpanFillRung:
         if counts.fillable:
             self._verify_detail = f"{counts.fillable} manifest row(s) can still take their chunk row's span ({counts.summary()})"
             return False
-        self._record_detail = f"{self._filled} filled this run; {counts.summary()}"
+        self._record_detail = f"{self._filled} filled this run; {counts.summary()}; {TITLE_RULE_MARK}"
         return True
 
     def verify_deferred(self) -> bool:

@@ -255,11 +255,15 @@ is *legacy*: NULL labels, flag false, and readers fall back to the shared T3 chu
 row's label, which belongs to whichever document wrote that chunk last. `doc_indexer`
 skips unchanged files, so a re-index never fills them. This rung fills the rows where
 the chunk row's label is exact (nexus-1nrcu). The scan runs until a completion is
-recorded, then never again: `detect()` answers from the recorded completion (at any
-package version) without listing a document, since `nx doctor`, each session start's
+recorded: `detect()` then answers from the recorded completion (at any package
+version) without listing a document, since `nx doctor`, each session start's
 `nx upgrade --auto` and every walk call it. A row left legacy by design (shared
 chash, no label keys, a chunk titled for another file) stays legacy, and a forced
-re-index of its document is the only later path.
+re-index of its document is the only later path. One exception: a completion
+recorded before the title guard stripped the document title's suffix (below) has
+no `title rule 2` in its detail and is scanned once more, with no engine count read,
+then recorded again with the mark. Against a managed service that pass needs one
+interactive `nx upgrade`; unattended it is not applicable, as a first scan is.
 
 - **The rule.** A legacy row takes the chunk row's label only when its chash has
   exactly one live manifest row in the tenant, and that row is this one. One *owner*
@@ -271,7 +275,12 @@ re-index of its document is the only later path.
   than the document's plus five minutes (a later row was written by someone else).
   Its `title` (the last writer's) must name this document: the document's title, its
   file path or file name, with or without the `:12-30` / `:chunk-3` / `:page-2`
-  suffix the indexers add; a row with no title is not contradicted, and one that
+  suffix the indexers add, on either side (an import can title a document after one
+  of its chunks, `paper.pdf:page-3`, and its other pages' chunks then name
+  `paper.pdf:page-11`; gate-xr789 had 111553 such rows, nexus-l8o33); a name that is
+  only a suffix is empty once stripped and matches nothing; a document titled with a
+  bare file name takes a chunk titled for that name in any directory, which the
+  ownership guards bound; a row with no title is not contradicted, and one that
   names another file stays legacy and is counted as "chunk row not attributable".
   Just before each write the batch's manifests and ownership are read again; a row
   that became written, moved or gained a co-owner is skipped.
@@ -313,8 +322,8 @@ The retire-keys sweep deletes the four span keys from the chunk rows (`line_star
 `char_end`) are then the only copy. A manifest row written without a span (the orphan backfill writes NULL on
 purpose) has NULL columns where its chunk row still holds one, and the engine counts it in `null_span_rows`.
 This rung copies the chunk row's span onto those rows where it is exact (nexus-l8o33), before the sweep. It is
-independent of `manifest-section-labels` (that rung is recorded once and reads converged for good, so it cannot
-run a second pass), and shares its rule and guards:
+independent of `manifest-section-labels` (that rung is recorded once and reads converged after that, so it cannot
+run a span pass), and shares its rule and guards, the title-rule record mark included:
 
 - **The rule.** The chash has exactly one live manifest row in the tenant, that row is this one, and no tombstoned
   document holds it. A span is a property of one position in one file: a chunk shared by two rows holds the span of

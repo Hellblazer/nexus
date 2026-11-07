@@ -18,6 +18,7 @@ import pytest
 from nexus.catalog.types import ManifestRow
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SPAN_FILL, RUNG_ORDER, default_registry
+from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
 from nexus.upgrade_ladder.rungs.manifest_span_fill import ManifestSpanFillRung
 
 COLL = "code__art__bge-base-en-v15-768__v1"
@@ -484,8 +485,42 @@ def test_a_recorded_completion_is_converged_with_no_catalog_read(world: World) -
     d = world.doc("1.1.1")
     world.row(d, 0, h(1))
     world.chunk(h(1), **SPAN)
-    status = world.rung(record_fn=lambda: object()).detect()
+    status = world.rung(record_fn=lambda: SimpleNamespace(detail=f"0 filled this run; {TITLE_RULE_MARK}")).detect()
     assert status.converged and world.listings == 0
+
+
+def test_a_record_from_before_the_title_rule_is_pending_once_and_the_walk_rewrites_it(world: World) -> None:
+    """nexus-l8o33: a span-fill completion written under the old title rule (develop installs since 7e205178e) is
+    scanned once more; the walk records it again with the mark, and the next detect reads it as current."""
+    from tests.upgrade.conftest import InMemoryCompletionLedger
+    from nexus.upgrade_ladder.registry import LadderRegistry
+    from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    ledger = InMemoryCompletionLedger()
+    ledger.record_verified(RUNG_MANIFEST_SPAN_FILL, package_version="7.97.0", detail="0 filled this run; ...")
+    rung = world.rung(record_fn=lambda: ledger.completions().get(RUNG_MANIFEST_SPAN_FILL))
+    runner = LadderRunner(LadderRegistry((rung,)), ledger, package_version_fn=lambda: "9.9.9")
+
+    assert [r.outcome for r in runner.run().runs] == [RungOutcome.RECORDED]
+    assert TITLE_RULE_MARK in ledger.completions()[RUNG_MANIFEST_SPAN_FILL].detail
+    assert world.spans(d) == [(0, 3, 9, 40, 190)]
+    listings = world.listings
+    assert [r.outcome for r in runner.run().runs] == [RungOutcome.ALREADY_RECORDED]
+    assert world.listings == listings
+
+
+def test_a_pre_rule_record_is_not_scanned_unattended_on_a_managed_service(world: World) -> None:
+    from nexus.upgrade_ladder.completion import CompletionRecord
+
+    old = CompletionRecord(rung_name=RUNG_MANIFEST_SPAN_FILL, verified_at="t0", package_version="7.97.0")
+    from nexus.upgrade_ladder.unattended import unattended_run
+
+    with unattended_run():
+        status = world.rung(managed_fn=lambda: True, record_fn=lambda: old).detect()
+    assert (status.applicable, status.converged) == (False, False) and world.listings == 0
 
 
 def test_an_unreadable_ledger_is_not_a_record_and_the_scan_runs(world: World) -> None:

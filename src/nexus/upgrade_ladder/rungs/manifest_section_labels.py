@@ -62,8 +62,10 @@ batch did not update, or a failed batch, gets ``update(doc, indexed_at=...)`` wi
 ends DEFERRED: its stamp is the run time until someone restores it.
 
 WHAT IT DOES.
-  detect   : converged at once when this tenant's completion is on file (any package version: the rung is a
-             one-time transition, and rows that stay legacy by design stay legacy until a forced re-index).
+  detect   : converged at once when this tenant's completion is on file under the current title rule (any
+             package version: the rung is a one-time transition, and rows that stay legacy by design stay legacy
+             until a forced re-index). A record from before the title rule stripped the document title's suffix
+             (no ``TITLE_RULE_MARK`` in its detail, nexus-l8o33) is pending once, with no engine count read.
              Otherwise ONE bounded engine read (``GET /manifest/section_label_fillable``, nexus-l4hds): the
              count of legacy rows that pass the guards below, tenant-wide, in one query. Zero is converged,
              more is pending with that count. The count is a REPORT, not a licence to fill: an unattended run
@@ -676,11 +678,8 @@ class ManifestSectionLabelsRung:
         rescan per release would copy what the guards refused once a co-owner left. A record from before the rule
         changed is not current: the rows the old rule refused are scanned once more."""
         record = self._record()
-        return record is not None and TITLE_RULE_MARK in (record.detail or "")
+        return record is not None and TITLE_RULE_MARK in (getattr(record, "detail", "") or "")
 
-    def _record_predates_title_rule(self) -> bool:
-        record = self._record()
-        return record is not None and TITLE_RULE_MARK not in (record.detail or "")
 
     def _stale_zero(self) -> bool:
         """True when the deferral log says the engine's count was outdated at the last walk (see
@@ -688,7 +687,8 @@ class ManifestSectionLabelsRung:
         return guarded("stale_zero", self._stale_zero_fn, False)
 
     def detect(self) -> RungStatus:
-        """Converged at once when the completion is on file: ``nx doctor``, every ``nx upgrade --auto`` (each
+        """Converged at once when the completion is on file under the current title rule (a record from before it is
+        pending once, see :data:`TITLE_RULE_MARK`): ``nx doctor``, every ``nx upgrade --auto`` (each
         session start) and every walk call this, and a scan lists every document. Next cheapest, the engine's
         count (one bounded query, nexus-l4hds): zero is converged, more is pending. When the engine cannot say,
         under ``--auto`` against a MANAGED service, not applicable with no catalog read (nexus-75w5d: an
@@ -699,9 +699,10 @@ class ManifestSectionLabelsRung:
         a managed service, not applicable): a count that was wrong once is not asked again until a scan has run.
         READ-ONLY: nothing is written and nothing is kept (see the module docstring)."""
         self._from_engine = False
-        if self._recorded():
+        record = self._record()  # one ledger read for both questions
+        if record is not None and TITLE_RULE_MARK in (getattr(record, "detail", "") or ""):
             return RungStatus(applicable=True, converged=True)
-        if self._record_predates_title_rule():
+        if record is not None:
             # One more pass under the current title rule; pending even when nothing turns out fillable, so that the
             # walk's converge, verify and record rewrite the record with the mark and the next detect reads it as
             # current. No engine count: an engine from before the rule change counts by the old rule.

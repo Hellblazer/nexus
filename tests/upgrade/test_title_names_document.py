@@ -35,6 +35,9 @@ def test_a_document_titled_after_one_of_its_chunks_owns_its_other_chunks(doc_tit
     # a page suffix on both sides does not make two files one
     (_doc(title="papers/2408.04948.pdf:page-2"), "papers/2604.15583.pdf:page-6"),
     (_doc(file_path="src/a.py", title="a.py"), "other/file.py:1-5"),
+    # a name that is only a suffix is empty once stripped, and an empty name never matches
+    (_doc(title=":page-3"), ":chunk-3"),
+    (_doc(), ":chunk-3"),
 ])
 def test_a_chunk_naming_another_file_is_still_refused(doc: SimpleNamespace, chunk_title: str) -> None:
     assert not _title_names_document(chunk_title, doc)
@@ -48,3 +51,11 @@ def test_a_chunk_naming_another_file_is_still_refused(doc: SimpleNamespace, chun
 ])
 def test_the_forms_that_matched_before_still_match(doc: SimpleNamespace, chunk_title: str) -> None:
     assert _title_names_document(chunk_title, doc)
+
+
+def test_a_bare_file_name_title_still_matches_that_file_in_any_directory() -> None:
+    """A known leniency, older than the suffix strip and now reaching suffixed titles too: a document titled with a
+    bare file name (no directory) takes a chunk titled for that file name in any directory. The ownership guards
+    (one live holder, no tombstoned holder, indexed_at) bound it."""
+    assert _title_names_document("b/x.pdf:page-11", _doc(title="x.pdf:page-3"))
+    assert _title_names_document("b/x.pdf", _doc(title="x.pdf"))
