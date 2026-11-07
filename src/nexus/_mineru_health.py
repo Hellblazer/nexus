@@ -396,6 +396,11 @@ def server_is_broken(url: str, error_text: str, info: dict[str, Any] | None) -> 
     machine-shared server for it cost every other indexer its in-flight work."""
     if not info or not isinstance(info.get("pid"), int):
         return False
+    from nexus._mineru_pid import pid_file_from_other_namespace  # noqa: PLC0415 — deferred: patchable at the source module
+
+    if pid_file_from_other_namespace(info):
+        # nexus-dyfsw: its pid names nothing here, so its cwd and paths cannot be read from here.
+        return False
     if not _is_registered_server_url(url, info):
         return False
     if process_cwd_state(info["pid"]) == "gone":

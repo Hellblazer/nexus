@@ -5417,6 +5417,12 @@ file, and `nx mineru start` report it running instead of starting a second
 one; `nx mineru stop --force` clears the record. A file from this namespace, or
 one with no `pid_ns`, is judged by PID alone, whatever answers on its port.
 
+A foreign server counts as alive only when its recorded port is reachable from
+the reader at `127.0.0.1`, as in a shared network namespace. A container on the
+default Docker bridge network is not covered: its port is not reachable from the
+host, so the file it wrote is alive for 120 s after `started_at` and stale after
+that, and `nx mineru start` can then start a second server.
+
 ### nx mineru status
 
 ```

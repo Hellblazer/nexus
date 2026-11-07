@@ -739,7 +739,7 @@ class ServiceRegistry:
                 ttl=self._ttl,
                 endpoint=dict(endpoint),
                 version=version,
-                payload={**_pid_ns_field(), **(payload or {})},
+                payload={**pid_ns_field(), **(payload or {})},
             )
             self._write_record_atomic(record)
             return record
@@ -2124,8 +2124,6 @@ def pid_ns_field() -> dict[str, str]:
     ns = own_pid_namespace()
     return {"pid_ns": ns} if ns else {}
 
-
-_pid_ns_field = pid_ns_field
 
 
 def lease_holder_invisible(

@@ -53,7 +53,8 @@ def is_process_alive(pid: int) -> bool:
 #: models), and the on-demand lifecycle waits up to this long for it (``_ENSURE_HEALTH_WAIT_S``).
 FOREIGN_WARMUP_GRACE_S: float = 120.0
 
-_HEALTH_PROBE_TIMEOUT_S = 1.0
+#: As long as `nx mineru status` waits: a server mid-parse answers slowly, and a slow answer is not a dead server.
+_HEALTH_PROBE_TIMEOUT_S = 5.0
 
 
 def pid_file_from_other_namespace(info: dict) -> bool:
