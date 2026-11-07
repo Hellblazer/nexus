@@ -2,12 +2,12 @@
 title: "Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It"
 id: RDR-240
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-11-01
-accepted_date:
+accepted_date: 2026-11-07
 related_issues: [nexus-qo7ie.2, nexus-mdbds.1]
 related_rdrs: [RDR-238, RDR-242, RDR-239, RDR-209, RDR-111, RDR-190]
 ---
@@ -860,3 +860,4 @@ keep a caller write until a write verb exists, rather than adding one here.
 | 2026-11-07 | Round-1 fixes: the transcript result is paged by whole days under RDR-242's 1 MB result cap (`next_since`), with a page line in the A2 spike (C1); the header parser and the `header` and `args` refusal kinds live in RDR-242's `run_script`, built by its Phase 3 Step 3 (S1); reserved `now` and `repo` arguments, `preflight` returns commands and lives in the nexus repo root (S2); `gate_record` covers the review agents' records only, kind `fix-check` (S3); sessions belong to their start window, records carry deferred tools and error flags (S4). |
 | 2026-11-07 | Fix-check repairs (fix check `nexus_rdr/240-fix-check-5aea31c79` failed on one row): reserved `repo` is the worktree-stable repo name, and `run_script` fills `now` and `repo` only when the header declares them; `next_since` may be a timestamp and the result echoes `until`; rows are sized by a stated estimate under 768 KB; `result-window:` is a Lua error message, not a kind; join rules for every query; the research vocabulary's plan step. |
 | 2026-11-07 | Gate round 2 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `6bc7c1ed1`; critique `nexus_rdr/240-gate-critique-2026-11-07-r2`. |
+| 2026-11-07 | Accepted (Sam). Round-2 Significants S1 to S6 dispositioned to nexus-qo7ie (bead comment, with their Implementation Plan steps). |
