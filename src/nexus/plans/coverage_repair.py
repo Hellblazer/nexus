@@ -9,8 +9,9 @@ repair has its own allowance inside the original monotonic deadline and one shar
 is unaffordable it is skipped. :meth:`~nexus.plans.coverage_ledger.CoverageBoundary.run` orchestrates;
 this module holds the constants, the report, the query builder and the two affordability rules.
 
-**The queries are deterministic and cost no model call.** A repair query is the facet's own text, which is
-what the request asked for and what the first assessment found nothing for. The order is the RDR's: every
+**The queries are deterministic and cost no client model call.** A repair query is the facet's own text, which is
+what the request asked for and what the first assessment found nothing for (a lexical twin, below, is its key
+terms). The order is the RDR's: every
 unsupported facet against the primary source's collections first (a named source is the strongest claim on
 the answer), then against the corpora the plan's own retrieval steps used, which are already narrowed to the
 caller's explicit scope. The targets are therefore never wider than the scope that governed the plan: a
@@ -34,7 +35,25 @@ can still read their tail (``CoverageResult.unread_tail_facet_ids``, nexus-se11w
   reassessment, so generation keeps at least the other 0.7 of what was left.
 * USD: one accumulator. The repair is not started when nothing is left, nor when what is left is under the
   estimated cost of the reassessment (the mean of the assessment calls already paid for times the calls
-  planned; an unknown cost never fabricates a refusal). Retrieval is a known-zero ``sql`` step.
+  planned; an unknown cost never fabricates a refusal). Retrieval is a known-zero ``sql`` step. A lexical twin
+  asks the search tool for its server rerank (RDR-217), which the engine runs; that cost, if any, is the engine's and
+  is not in the accumulator.
+* :data:`MAX_LEXICAL_REPAIR_QUERIES` (3): the lexical twins below, inside the six, never added to them.
+
+**The lexical leg (nexus-0ihqj).** A fact stated once inside a long multi-topic chunk can rank past the vector
+floor for its own question, so the facet's text finds nothing new even though the chunk is indexed. The engine's
+lexical route (RDR-217: full-text and trigram match, additive to the vector rows, exempt from the distance
+threshold) finds such a chunk by an exact token. So a facet whose text carries key terms (:func:`key_terms`:
+quoted strings and identifiers; never a bare number) gets a lexical twin of each of its ``search`` queries: the
+same target and filters, ``lexical=True``, and the key terms alone as its text, since the full-text match ANDs
+every word and the whole facet would rarely match anything. The twins come after every vector query and only in
+the slots of :data:`MAX_REPAIR_QUERIES` the vector queries leave, so the vector queries are the ones they were and
+the budget is not raised. Their hits join after every vector hit, so the fetch window and :data:`MAX_REPAIR_ITEMS`
+cut them first; otherwise they enter like any repair hit (the same scope check, the one reassessment). A target
+that needs ``query`` (a subtree, ``author`` or ``content_type``) has no lexical route and gets none, so a twin
+never widens the scope. Each twin gets an equal share of the query time left; one that fails or times out is
+skipped and is not, on its own, a failed retrieval (``CoverageBoundary.run``). The extraction is a starting point,
+not a measurement.
 
 Pure: stdlib and the RDR-232 value types.
 """
@@ -51,6 +70,7 @@ from nexus.plans.request_coverage import Facet
 __all__ = [
     "JOINED_DROP_REASONS",
     "MAX_ANCHORS_PER_ASSESSMENT_CALL",
+    "MAX_LEXICAL_REPAIR_QUERIES",
     "MAX_REPAIR_ITEMS",
     "MAX_REPAIR_QUERIES",
     "MIN_REPAIR_ALLOWANCE_S",
@@ -70,6 +90,7 @@ __all__ = [
     "RepairReport",
     "RepairTarget",
     "build_repair_queries",
+    "key_terms",
     "repair_allowance",
     "repair_reason",
     "unresolved_note",
@@ -108,8 +129,103 @@ MIN_REPAIR_QUERY_S: float = 1.0
 #: Defined here, beside the repair's call estimate that counts packs, and re-exported by ``coverage_ledger``.
 MAX_ANCHORS_PER_ASSESSMENT_CALL: int = 20
 
+#: Lexical repair queries one repair may issue (nexus-0ihqj). They come out of :data:`MAX_REPAIR_QUERIES`, never on
+#: top of it (the repair spends its existing budget, as Sam ruled for the unread-tail repair on 2026-10-31), and only
+#: in the slots the vector queries leave: every vector query is issued first.
+MAX_LEXICAL_REPAIR_QUERIES: int = 3
+
 _MAX_QUERY_CHARS = 500
 _WS = re.compile(r"\s+")
+
+#: Key terms one lexical query carries; every one must match (the full-text route ANDs them), so few.
+_MAX_KEY_TERMS = 2
+_MAX_QUOTED_CHARS = 60
+_QUOTE_PAIRS = {'"': '"', "“": "”", "`": "`"}
+#: A token joined by ``_ . / :`` or ``-``, a ``--flag``, or a CamelCase name. It may end a sentence: a trailing
+#: period is not part of it.
+_IDENT = re.compile(r"(?<![\w-])(?:--[A-Za-z][\w-]+|[A-Za-z0-9]+(?:[_./:-]+[A-Za-z0-9]+)+|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*)")
+_STOPWORDS = frozenset(
+    "a an and are as at be by does for from has have how in is it its not of on or the this to was what when "
+    "where which who why with".split()
+)
+
+
+#: Words that form slash alternations in prose (``client/server``, ``read/write/execute``), not paths.
+_ALTERNATIONS = frozenset(
+    "and or not yes no maybe on off true false pass fail pros cons in out input output read write execute client "
+    "server request response send receive start stop open close before after old new his her he she they them"
+    .split()
+)
+
+
+def _quoted(text: str) -> list[tuple[int, int, str]]:
+    """Quoted spans, each opening quote paired with the next matching close, so a long quote that is skipped never
+    pairs its close with the next quote's opening. A single lowercase word in double quotes (a scare quote) is not a
+    term; in backticks it is (`` `nx` `` names a command)."""
+    out: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(text):
+        close = _QUOTE_PAIRS.get(text[i])
+        if close is None:
+            i += 1
+            continue
+        j = text.find(close, i + 1)
+        if j < 0:
+            break
+        body = _WS.sub(" ", text[i + 1:j]).strip()
+        scare = text[i] != "`" and re.fullmatch(r"[a-z]+", body) is not None
+        if 2 <= len(body) <= _MAX_QUOTED_CHARS and "\n" not in text[i + 1:j] and not scare:
+            out.append((i, j + 1, body))
+        i = j + 1
+    return out
+
+
+def _is_identifier(tok: str, parts: Sequence[str]) -> bool:
+    """A token :data:`_IDENT` matched is a key term unless it reads as prose or is only a number: parts that are all
+    single characters (``e.g``), all stopwords (``and/or``), all digits (``0.5``, ``10:30``, a version), slash
+    alternations of common words (``client/server``, ``yes/no/maybe``; a path such as ``docs/rdr`` stays), or words
+    joined only by hyphens with no digit (``multi-topic``; ``RDR-232`` and ``nexus-0ihqj`` stay, and so, at a cost,
+    is a digitless id such as ``nexus-dklxy`` missed). A ``--flag`` and a CamelCase name always count."""
+    if tok.startswith("--") or len(parts) <= 1:
+        return True
+    if all(len(p) == 1 for p in parts) or all(p.lower() in _STOPWORDS for p in parts):
+        return False
+    if all(p.isdigit() for p in parts):
+        return False
+    if "/" in tok and all(p.lower() in _ALTERNATIONS for p in parts):
+        return False
+    if not re.search(r"[_./:]", tok) and not any(c.isdigit() for c in tok):
+        return False
+    return True
+
+
+def key_terms(text: str) -> tuple[str, ...]:
+    """The exact-match terms in *text* (nexus-0ihqj), in order of appearance, at most two, each once.
+
+    * a quoted or backticked string, without its quotes (not a single lowercase word in double quotes);
+    * an identifier: a token joined by ``_``, ``.``, ``/``, ``:`` or ``-`` that does not read as prose or a bare
+      number (``retry_budget``, ``RDR-217``, ``src/nexus/plans/x.py``; see :func:`_is_identifier`), a ``--flag``,
+      or a CamelCase name.
+
+    Bare numbers are not terms, nor years, bare dotted versions or times: a bare number matches every chunk that
+    carries it (a token around one, such as ``v1.4.2`` or ``HTTP/2``, is an identifier and counts). Empty when the text has none, so a plain-prose facet gets no lexical query."""
+    found: list[tuple[int, str]] = []
+    taken: list[tuple[int, int]] = []
+    for start, end, body in _quoted(text):
+        found.append((start, body))
+        taken.append((start, end))
+    for m in _IDENT.finditer(text):
+        if any(not (m.end() <= s or m.start() >= e) for s, e in taken):
+            continue
+        tok = m.group(0)
+        if _is_identifier(tok, [p for p in re.split(r"[_./:-]+", tok) if p]):
+            found.append((m.start(), tok))
+    out: list[str] = []
+    for _, term in sorted(found):
+        if term.lower() not in (t.lower() for t in out):
+            out.append(term)
+    return tuple(out[:_MAX_KEY_TERMS])
+
 
 #: Why a repair ran (:attr:`RepairReport.reason`): a facet was assessed and nothing held bears on it (``unsupported``),
 #: a covered or contradicted facet had most of its anchors left unread by the assessment's size cap (``unread_tail``,
@@ -358,21 +474,28 @@ def planned_reassessment_calls(
 
 def build_repair_queries(
     facets: Sequence[Facet], *, primary_collections: Sequence[str], plan_targets: Sequence[RepairTarget],
-    max_queries: int, limit: int, primary_subtree: str = "",
+    max_queries: int, limit: int, primary_subtree: str = "", max_lexical: int = 0,
 ) -> list[RepairQuery]:
-    """The targeted queries, in the RDR's order, at most *max_queries*.
+    """The targeted queries, in the RDR's order, at most *max_queries* in all.
 
     Every facet against each primary collection first (under *primary_subtree* when the caller's scope is a
     catalog subtree), then every facet against each plan target. A target with a subtree, a ``content_type`` or
     an ``author`` uses ``query`` (the tool that takes them); any other uses ``search``. A target's ``where`` rides
     either. Repeats collapse; targets that differ only in filters do not.
+
+    Lexical twins (nexus-0ihqj) follow every vector query: for each ``search`` of a facet with :func:`key_terms`,
+    in the same order, the same target and filters with ``lexical=True`` and the key terms as the text, at most
+    *max_lexical* of them and only in the slots of *max_queries* the vector queries left. So the vector queries
+    are exactly the ones they were, and the total stays within *max_queries*. ``0`` (the default) emits none.
     """
     origin: Literal["primary", "plan"]
     targets: list[tuple[Literal["primary", "plan"], RepairTarget]] = [
         ("primary", RepairTarget(c, primary_subtree)) for c in dict.fromkeys(primary_collections) if c]
     targets += [("plan", t) for t in plan_targets if t.corpus]
     out: list[RepairQuery] = []
+    twins: list[RepairQuery] = []
     seen: set[tuple[str, str, str, tuple[tuple[str, str], ...]]] = set()
+    twin_seen: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
     for origin, target in targets:
         for f in facets:
             key = (f.id, target.corpus, target.subtree, target.filters)
@@ -390,4 +513,12 @@ def build_repair_queries(
                 out.append(RepairQuery(f.id, "query", args, origin))
             else:
                 out.append(RepairQuery(f.id, "search", {"query": text, "corpus": target.corpus, "limit": limit, **filters}, origin))
-    return out
+                terms = key_terms(f.text) if max_lexical > 0 else ()
+                twin_key = (" ".join(terms).lower(), target.corpus, target.filters)
+                if terms and twin_key not in twin_seen:
+                    twin_seen.add(twin_key)
+                    twins.append(RepairQuery(f.id, "search", {
+                        "query": " ".join(terms), "corpus": target.corpus, "limit": limit, "lexical": True, **filters,
+                    }, origin))
+    room = max(0, min(max_lexical, max_queries - len(out)))
+    return out + twins[:room]
