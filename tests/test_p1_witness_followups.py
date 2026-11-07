@@ -231,3 +231,92 @@ def test_hygiene_reports_a_stored_claimless_verify() -> None:
     findings = _hygiene_scan(_HygieneLibrary(rows))
     assert [f["id"] for f in findings] == [1]
     assert "step 2 is a verify step with no claim" in findings[0]["reason"]
+
+
+# nexus-iy2ep: the same pay-then-abort class beyond a claim-less verify, caught at the same doors before any step runs.
+NO_EVIDENCE = {"steps": [{"tool": "search", "args": {"query": "latency", "corpus": "knowledge"}},
+                         {"tool": "verify", "args": {"claim": "latency drops"}}]}
+NO_INSTRUCTION = {"steps": [{"tool": "search", "args": {"query": "latency", "corpus": "knowledge"}},
+                            {"tool": "check", "args": {"ids": "$step1.ids"}}]}
+INSTRUCTED = {"steps": [{"tool": "search", "args": {"query": "latency", "corpus": "knowledge"}},
+                        {"tool": "check", "args": {"ids": "$step1.ids", "check_instruction": "does latency drop"}}]}
+_DEFECTS = [
+    (NO_EVIDENCE, "step 2 is a verify step with neither ids nor evidence"),
+    (NO_INSTRUCTION, "step 2 is a check step with no check_instruction"),
+]
+
+
+@pytest.mark.parametrize(
+    ("plan", "expected"),
+    [
+        (CLAIMLESS, (1, runner.claimless_verify_reason(CLAIMLESS))),
+        (NO_EVIDENCE, 1),
+        (_steps({"claim": "x", "evidence": "  "}), None),  # ids present: hydrated at run time
+        ({"steps": [{"tool": "verify", "args": {"claim": "x", "evidence": "$step1.text"}}]}, None),
+        ({"steps": [{"tool": "verify", "args": {"claim": "x", "evidence": " "}}]}, 0),
+        (NO_INSTRUCTION, 1),
+        ({"steps": [{"tool": "mcp__plugin_conexus_nexus__operator_check", "args": {"check_instruction": ""}}]}, 0),
+        (INSTRUCTED, None),
+        (CLAIMED, None),
+        ("not json", None),
+        (None, None),
+    ],
+)
+def test_the_operator_arg_scan_finds_the_first_step_missing_an_author_supplied_arg(plan, expected) -> None:
+    found = runner.find_operator_arg_defect(plan)
+    if expected is None or isinstance(expected, tuple):
+        assert found == expected
+    else:
+        assert found is not None and found[0] == expected
+
+
+@pytest.mark.parametrize(("plan", "why"), _DEFECTS, ids=["no_evidence", "no_instruction"])
+def test_the_planner_re_asks_once_naming_the_defect_then_fails_before_any_step_runs(monkeypatch, plan, why) -> None:
+    match, prompts, _ = _planner_run(monkeypatch, [plan, INSTRUCTED])
+    assert len(prompts) == 2 and why in prompts[1][len(prompts[0]):]
+    assert json.loads(match.plan_json) == INSTRUCTED
+    with pytest.raises(ValueError, match=why):
+        _planner_run(monkeypatch, [plan, plan])
+
+
+@pytest.mark.parametrize(("plan", "why"), _DEFECTS, ids=["no_evidence", "no_instruction"])
+def test_plan_save_refuses_the_defect_and_writes_nothing(plan, why) -> None:
+    out, writes = _save(plan)
+    assert out.startswith(f"Plan not saved: {why}") and writes == []
+
+
+@pytest.mark.parametrize(("plan", "why"), _DEFECTS, ids=["no_evidence", "no_instruction"])
+def test_the_seed_loader_refuses_the_defect(tmp_path, plan, why) -> None:
+    (tmp_path / "bad.yml").write_text(yaml.safe_dump(_template("bad-arg", plan)))
+    (tmp_path / "good.yml").write_text(yaml.safe_dump(_template("good-instructed", INSTRUCTED)))
+    result = load_seed_directory(tmp_path, library=_SeedLibrary())
+    assert result.inserted == ["good.yml"]
+    assert any("bad-arg" in msg and why in msg for _src, msg in result.errors)
+
+
+@pytest.mark.parametrize(("plan", "why"), _DEFECTS, ids=["no_evidence", "no_instruction"])
+def test_the_matcher_excludes_and_hygiene_reports_the_defect(plan, why, info_logging) -> None:
+    lib = _Library([_row(1, plan, "does latency drop"), _row(2, INSTRUCTED, "does latency drop, instructed")])
+    ids = [m.plan_id for m in plan_match(intent="does latency drop", library=lib, cache=None, min_confidence=0.5)]
+    assert 2 in ids and 1 not in ids
+    rows = [{**_row(1, plan, "bad"), "verb": "research"}, {**_row(2, INSTRUCTED, "good"), "verb": "research"}]
+    findings = _hygiene_scan(_HygieneLibrary(rows))
+    assert [f["id"] for f in findings] == [1] and why in findings[0]["reason"]
+
+
+@pytest.mark.parametrize("name", ["Verify", "VERIFY", "Check"])
+def test_a_planned_operator_in_another_case_is_kept_not_dropped(monkeypatch, name) -> None:
+    """A dropped verify step would let the answer pass for a checked one."""
+    args = {"ids": "$step1.ids", "claim": "latency drops"} if name.lower() == "verify" else {
+        "ids": "$step1.ids", "check_instruction": "does latency drop"}
+    plan = {"steps": [{"tool": "search", "args": {"query": "latency", "corpus": "knowledge"}}, {"tool": name, "args": args}]}
+    match, _, _ = _planner_run(monkeypatch, [plan])
+    assert [s["tool"] for s in json.loads(match.plan_json)["steps"]] == ["search", name.lower()]
+
+
+def test_a_retried_plan_with_an_embedded_step_ref_fails_in_the_planner(monkeypatch) -> None:
+    """nexus-iy2ep: the claim retry's plan is rescanned, so an embedded ref it brings fails here, by name."""
+    embedded = json.loads(json.dumps(CLAIMED))
+    embedded["steps"][0]["args"]["query"] = "see $step9.text"
+    with pytest.raises(ValueError, match=r"planner plan cannot run: step reference .*no step was run"):
+        _planner_run(monkeypatch, [CLAIMLESS, embedded])

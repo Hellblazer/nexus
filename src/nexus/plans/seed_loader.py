@@ -516,7 +516,7 @@ def load_seed_directory(
             # nexus-jypmj.4: a step arg with a step reference inside other text or an object is
             # never substituted, so the runner refuses the plan before its first dispatch. Refuse it
             # here, by name, rather than seed a row that can only fail at run time.
-            from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — deferred: the runner is heavy and the seed loader otherwise is not
+            from nexus.plans.runner import find_embedded_step_ref, operator_arg_reason  # noqa: PLC0415 — deferred: the runner is heavy and the seed loader otherwise is not
 
             embedded = find_embedded_step_ref(template.get("plan_json"))
             if embedded is not None:
@@ -525,7 +525,7 @@ def load_seed_directory(
                     f"{embedded.ref} ({embedded.reason}); not seeded"
                 )
             # nexus-z1d0l.1.11: likewise a verify step with no claim.
-            claimless = claimless_verify_reason(template.get("plan_json"))
+            claimless = operator_arg_reason(template.get("plan_json"))
             if claimless is not None:
                 raise PlanTemplateSchemaError(
                     f"plan {template.get('name') or path.name!r}: {claimless}; not seeded"

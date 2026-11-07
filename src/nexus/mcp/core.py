@@ -8241,7 +8241,7 @@ def plan_save(
             )
         # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted,
         # so the plan would fail at run time (nexus-jypmj.1.19). Refuse it at the door.
-        from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.plans.runner import find_embedded_step_ref, operator_arg_reason  # noqa: PLC0415 — deferred import; rare/branch-local path
 
         embedded = find_embedded_step_ref(parsed_plan)
         if embedded is not None:
@@ -8250,7 +8250,7 @@ def plan_save(
                 f"({embedded.reason})."
             )
         # nexus-z1d0l.1.11: a verify step with no claim is refused when the runner reaches it.
-        if (claimless := claimless_verify_reason(parsed_plan)) is not None:
+        if (claimless := operator_arg_reason(parsed_plan)) is not None:
             return _fail(f"Plan not saved: {claimless}.")
         # nexus-0vh80 (Sam, 2026-11-03): a saved plan declares the kind of answer it serves, so it is never
         # unattested. Required like the verb; "unknown" is a legal answer and serves nothing. Checked after the
@@ -12457,22 +12457,24 @@ async def _claimed_verify_plan(
     reports it as a planner failure, and nothing is searched, answered or grown. The step is never
     dropped, because the answer would then pass for a checked one.
     """
-    from nexus.plans.runner import claimless_verify_reason, find_claimless_verify  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
+    from nexus.plans.runner import find_embedded_step_ref, find_operator_arg_defect, operator_arg_reason  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
 
     import structlog as _slog4  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
 
     log = _slog4.get_logger()
-    index = find_claimless_verify(plan_json)
-    if index is None:
+    defect = find_operator_arg_defect(plan_json)
+    if defect is None:
         return plan_json
+    index, why = defect
     if may_retry:
         log.warning("nx_answer_planner_verify_claim_retry", step=index + 1)
         try:
             retried = await plan_from(
                 prompt
-                + f"\n\nYour previous plan cannot run: step {index + 1} is a verify step with no "
-                + "claim. The host never invents a claim. Give every verify step a claim (text, or a "
-                + "reference such as $stepN.text), or leave verify out."
+                + f"\n\nYour previous plan cannot run: {why}. The host never invents an operator's "
+                + "claim, evidence or instruction. Give every verify step a claim and its evidence (ids, or "
+                + "evidence text), and every check step a check_instruction (text, or a reference such as "
+                + "$stepN.text), or leave the step out."
             )
         except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan's refusal below stands
             log.warning(
@@ -12481,7 +12483,10 @@ async def _claimed_verify_plan(
             )
         else:
             plan_json = retried
-    reason = claimless_verify_reason(plan_json)
+    reason = operator_arg_reason(plan_json)
+    if reason is None and (embedded := find_embedded_step_ref(plan_json)) is not None:
+        # nexus-iy2ep: the retried plan is a new plan, so it is scanned for the embedded-ref defect too.
+        reason = f"step reference {embedded.ref!r}: {embedded.reason}"
     if reason is None:
         return plan_json
     raise ValueError(f"planner plan cannot run: {reason}; no step was run")
@@ -12693,7 +12698,9 @@ async def _nx_answer_plan_miss(
         for step in steps:
             raw_tool = step.get("tool", "")
             bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
-            bare = _TOOL_ALIASES.get(bare.lower(), bare)
+            # nexus-iy2ep: a planned "Verify" or "Check" is the operator, not a tool to drop silently (dropping a
+            # verify step would let the answer pass for a checked one); the allowlist is all lower case.
+            bare = _TOOL_ALIASES.get(bare.lower(), bare.lower() if bare.lower() in _ALLOWED_TOOLS else bare)
             if bare not in _ALLOWED_TOOLS:
                 _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
                 dropped.append(raw_tool or bare or "?")

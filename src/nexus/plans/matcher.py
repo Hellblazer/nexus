@@ -383,12 +383,12 @@ def _embedded_step_ref(m: Match) -> tuple[str, str] | None:
     holding either only wastes a match and bumps its failure count (nexus-jypmj.4). The scans are
     the runner's own, imported at call time so this module stays light.
     """
-    from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — deferred: the runner is heavy and this is the rare path
+    from nexus.plans.runner import find_embedded_step_ref, operator_arg_reason  # noqa: PLC0415 — deferred: the runner is heavy and this is the rare path
 
     err = find_embedded_step_ref(m.plan_json)
     if err is not None:
         return (err.ref, err.reason)
-    claimless = claimless_verify_reason(m.plan_json)
+    claimless = operator_arg_reason(m.plan_json)
     return None if claimless is None else ("verify", claimless)
 
 

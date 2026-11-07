@@ -96,7 +96,7 @@ def _hygiene_scan(library) -> list[dict]:
     import json as _json  # noqa: PLC0415 — command-local import
 
     from nexus.plans.matcher import _is_always_failing  # noqa: PLC0415 — command-local import
-    from nexus.plans.runner import claimless_verify_reason, find_embedded_step_ref  # noqa: PLC0415 — command-local import
+    from nexus.plans.runner import find_embedded_step_ref, operator_arg_reason  # noqa: PLC0415 — command-local import
     from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_steps  # noqa: PLC0415 — command-local import
 
     findings: list[dict] = []
@@ -128,7 +128,7 @@ def _hygiene_scan(library) -> list[dict]:
                     f"({embedded.reason}); the runner refuses it before dispatch"
                 )
         if reason is None:
-            reason = claimless_verify_reason(parsed)  # nexus-z1d0l.1.11
+            reason = operator_arg_reason(parsed)  # nexus-z1d0l.1.11, nexus-iy2ep
         if reason is None and not (row.get("verb") or "").strip():
             reason = "null-verb (pre-fiovt pollution; unmatchable by verb-filtered nx_answer)"
         if reason is None and _is_always_failing(row):
@@ -178,7 +178,8 @@ def hygiene_cmd(apply_: bool) -> None:
         return
     findings = _hygiene_scan(library)
     if not findings:
-        click.echo("Plan library clean: no bead-dumps, embedded step references, null-verb, or always-failing plans.")
+        click.echo("Plan library clean: no bead-dumps, embedded step references, operator steps missing a claim, evidence "
+                   "or check_instruction, null-verb, or always-failing plans.")
         return
     click.echo(f"{len(findings)} plan(s) flagged:")
     for f in findings:

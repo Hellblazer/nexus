@@ -119,6 +119,8 @@ __all__ = [
     "ToolDispatcher",
     "claimless_verify_reason",
     "find_claimless_verify",
+    "find_operator_arg_defect",
+    "operator_arg_reason",
     "find_embedded_step_ref",
     "merge_bindings",
     "plan_run",
@@ -1229,10 +1231,7 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
         return None
     for index, step in enumerate(steps):
         tool = step.get("tool") if isinstance(step, dict) else None
-        if not isinstance(tool, str) or not (
-            tool in _VERIFY_TOOL_NAMES
-            or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in _VERIFY_TOOL_NAMES)))
-        ):
+        if not isinstance(tool, str) or not _is_named(tool, _VERIFY_TOOL_NAMES):
             continue
         args = step.get("args")
         claim = args.get("claim") if isinstance(args, dict) else None
@@ -1242,15 +1241,82 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
 
 
 def claimless_verify_reason(plan: "str | dict[str, Any] | None") -> str | None:
-    """Why *plan* cannot run, when :func:`find_claimless_verify` finds a step, else ``None``: the
-    one wording every door reports."""
+    """Why *plan* cannot run, when :func:`find_claimless_verify` finds a step, else ``None``."""
     index = find_claimless_verify(plan)
-    if index is None:
-        return None
+    return None if index is None else _claimless_text(index)
+
+
+def _claimless_text(index: int) -> str:
     return (
         f"step {index + 1} is a verify step with no claim; the host never invents one, "
         "so the step cannot check anything"
     )
+
+
+#: The names a check step goes by in plan JSON, before an ``mcp__...__`` prefix.
+_CHECK_TOOL_NAMES: tuple[str, ...] = ("check", "operator_check")
+
+
+def _is_named(tool: str, names: tuple[str, ...]) -> bool:
+    """*tool* is one of *names*, as ``plan_run`` reads it: case kept, an ``mcp__`` prefix matched by suffix."""
+    return tool in names or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in names)))
+
+
+def _blank(value: Any) -> bool:
+    return not (isinstance(value, str) and value.strip())
+
+
+def find_operator_arg_defect(plan: "str | dict[str, Any] | None") -> tuple[int, str] | None:
+    """``(0-based index, reason)`` of the first step missing an operator argument the plan author must supply,
+    else ``None`` (nexus-iy2ep, extending nexus-z1d0l.1.11).
+
+    ``plan_run`` refuses such a step only when it reaches it, after the steps before it have run and been paid
+    for, so every door a plan comes through asks this first (the inline planner, ``plan_save``, the seed loader,
+    the matcher and ``nx plan hygiene``). Three defects, in step order:
+
+    * a verify step with no non-blank ``claim`` (the host never invents one);
+    * a verify step with neither ``ids`` nor a non-blank ``evidence`` (nothing to check the claim against);
+    * a check step with no non-blank ``check_instruction`` (the claim or question it checks).
+
+    A value counts only as a non-blank string (``$stepN.text`` is one); a deferred-ref mapping exists only
+    inside a running bundle, never in plan JSON. Anything that is not a plan with a ``steps`` list returns
+    ``None``, as :func:`find_embedded_step_ref` does.
+    """
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (TypeError, ValueError):
+            return None
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return None
+    for index, step in enumerate(steps):
+        tool = step.get("tool") if isinstance(step, dict) else None
+        if not isinstance(tool, str):
+            continue
+        args = step.get("args")
+        args = args if isinstance(args, dict) else {}
+        if _is_named(tool, _VERIFY_TOOL_NAMES):
+            if _blank(args.get("claim")):
+                return index, _claimless_text(index)
+            if "ids" not in args and _blank(args.get("evidence")):
+                return index, (
+                    f"step {index + 1} is a verify step with neither ids nor evidence, "
+                    "so it has nothing to check its claim against"
+                )
+        elif _is_named(tool, _CHECK_TOOL_NAMES) and _blank(args.get("check_instruction")):
+            return index, (
+                f"step {index + 1} is a check step with no check_instruction, "
+                "so it has no claim or question to check"
+            )
+    return None
+
+
+def operator_arg_reason(plan: "str | dict[str, Any] | None") -> str | None:
+    """Why *plan* cannot run, when :func:`find_operator_arg_defect` finds a step, else ``None``: the one wording
+    every door reports."""
+    defect = find_operator_arg_defect(plan)
+    return None if defect is None else defect[1]
 
 
 def _resolve_args(
