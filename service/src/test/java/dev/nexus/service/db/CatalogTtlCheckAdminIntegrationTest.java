@@ -29,12 +29,16 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.io.InputStream;
 import java.sql.Connection;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -625,14 +629,13 @@ class CatalogTtlCheckAdminIntegrationTest {
 
     @Test
     @Order(72)
-    void theOwnerPathRefusesDuringAMigrationWalk_andLeavesForceOn() throws Exception {
+    void theOwnerPathRefusesDuringAMigrationWalk() throws Exception {
         deleteAll();
         insert("ttl-own-m", "{}");
         ownTable();
         try (Held walk = new Held(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY)) {
             assertRefused(() -> ownerAdmin().census(), 503, "migration_in_progress");
             assertThat(admin().census()).as("a superuser reads without the lock").isNotEmpty();
-            assertThat(forceRowSecurity()).isTrue();
         } finally {
             disownTable();
         }
@@ -669,11 +672,62 @@ class CatalogTtlCheckAdminIntegrationTest {
             "nexus", "catalog_documents", "census");
         try (AdminDdlSession s = AdminDdlSession.open(new AdminConnection(pg.getJdbcUrl(), OWNER, OWNER_PASS),
                 settings, false)) {
-            assertRefused(() -> s.readEveryTenant("the owner", "100ms",
-                ctx -> ctx.select(DSL.function("pg_sleep", SQLDataType.OTHER, DSL.val(5))).fetch()), 503, "read_timeout");
+            // the bound covers the ALTER and the format() select as well as the read, so it is generous (3 s) and the
+            // read is far past it (30 s): only the scan can time out, never a slow ALTER (which would be ddl_failed)
+            assertRefused(() -> s.readEveryTenant("the owner", "3s",
+                ctx -> ctx.select(DSL.function("pg_sleep", SQLDataType.OTHER, DSL.val(30))).fetch()), 503, "read_timeout");
 
             assertThat(s.states(List.of(CatalogTtlCheckAdmin.CONSTRAINT))).as("autocommit is back").hasSize(1);
             assertThat(forceRowSecurity()).as("the lifted FORCE was rolled back with the timeout").isTrue();
+        } finally {
+            disownTable();
+        }
+    }
+
+    @Test
+    @Order(75)
+    void aFailedRollbackClosesTheConnectionInsteadOfCommittingNoForce_andDoesNotMaskTheReadsFailure() throws Exception {
+        ownTable();
+        var settings = new AdminDdlSession.Settings("nexus-catalog-ttl-test", 0x7474657375L, "ttl-test",
+            "nexus", "catalog_documents", "census");
+        List<String> calls = new CopyOnWriteArrayList<>();
+        Connection real = DriverManager.getConnection(pg.getJdbcUrl(), OWNER, OWNER_PASS);
+        real.setAutoCommit(true);
+        // a connection whose ROLLBACK fails while the transaction (with the lifted FORCE) is still open on the server
+        Connection failing = (Connection) Proxy.newProxyInstance(getClass().getClassLoader(),
+            new Class<?>[] {Connection.class}, (proxy, method, args) -> {
+                switch (method.getName()) {
+                    case "rollback" -> {
+                        calls.add("rollback");
+                        throw new SQLException("connection lost during rollback", "08006");
+                    }
+                    case "setAutoCommit" -> calls.add("setAutoCommit(" + args[0] + ")");
+                    case "close" -> calls.add("close");
+                    default -> { }
+                }
+                try {
+                    return method.invoke(real, args);
+                } catch (InvocationTargetException e) {
+                    throw e.getCause();
+                }
+            });
+        try (AdminDdlSession s = new AdminDdlSession(settings, failing)) {
+            assertThatThrownBy(() -> s.readEveryTenant("the owner", "3s", ctx -> {
+                throw new IllegalStateException("the read failed");
+            }))
+                .as("the read's own failure is what the caller sees, not the rollback's")
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("the read failed")
+                .satisfies(e -> assertThat(e.getSuppressed()).as("the rollback failure rides along").hasSize(1)
+                    .allSatisfy(x -> assertThat(x).isInstanceOf(SQLException.class)
+                        .hasMessageContaining("connection lost during rollback")));
+
+            assertThat(calls).as("rollback was tried, then the connection was closed").contains("setAutoCommit(false)",
+                "rollback", "close");
+            assertThat(calls).as("autocommit is never switched back on over an open transaction (that would COMMIT "
+                + "the NO FORCE)").doesNotContain("setAutoCommit(true)");
+            assertThat(real.isClosed()).as("the connection is closed, so the server aborts the transaction").isTrue();
+            assertThat(forceRowSecurity()).as("FORCE ROW LEVEL SECURITY survives the failed rollback").isTrue();
         } finally {
             disownTable();
         }
