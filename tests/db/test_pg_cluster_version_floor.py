@@ -8,7 +8,9 @@ import threading
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+import nexus.daemon.service_registry as sr
 import nexus.daemon.storage_service_daemon as ssd
 import nexus.db.pg_provision as pp
 from nexus.commands import daemon as daemon_mod
@@ -263,6 +265,18 @@ def test_a_reinit_while_waiting_exits_3_for_a_fresh_process(tmp_path: Path, monk
     assert sup.stops == 1
 
 
+def test_a_reinit_to_another_data_path_wakes_the_waiter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The old PG_DATA stays at 16 forever; the new credentials alone must end the wait.
+    monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 0.01)
+    (tmp_path / pp.CREDENTIALS_FILENAME).write_text("PG_PORT=5433\n")
+    sup = _BelowFloorSup(_pgdata(tmp_path, "16"))
+    threading.Timer(0.2, lambda: (tmp_path / pp.CREDENTIALS_FILENAME).write_text(
+        f"PG_DATA={tmp_path / 'postgres-new'}\nPG_PORT=6543\n")).start()
+    stop = threading.Event()
+    threading.Timer(3.0, stop.set).start()  # bounds the wrong behaviour, which would wait for the old path
+    assert ssd._supervise_until_stopped(sup, stop, lambda: None) == 3  # type: ignore[arg-type]
+
+
 def test_the_recheck_is_short_enough_for_a_unit_start_to_see_the_engine() -> None:
     assert ssd._BELOW_FLOOR_RECHECK_S <= 10 < daemon_mod._UNIT_START_WAIT_S
 
@@ -281,8 +295,12 @@ def _cli_config(tmp_path: Path, marker: str) -> Path:
 
 @pytest.fixture
 def start_paths(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Both ways ensure_storage_supervisor starts a supervisor, recorded and stopped at once."""
+    """Both ways ensure_storage_supervisor starts a supervisor, recorded and stopped at once.
+
+    Nothing on this box answers the test cluster's port, whatever listens on it for real.
+    """
     reached: list[str] = []
+    monkeypatch.setattr(ssd, "_port_accepting", lambda host, port: False)
 
     def via_unit(*a, **kw):
         reached.append("unit")
@@ -319,8 +337,6 @@ def test_the_cli_leaves_a_running_old_cluster_to_the_engine(
 
 
 def test_a_refused_start_leaves_the_stop_marker(tmp_path: Path, start_paths: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
-    import nexus.daemon.service_registry as sr
-
     cleared: list[object] = []
     monkeypatch.setattr(sr, "clear_stop_marker", lambda *a, **kw: cleared.append(a))
     with pytest.raises(StorageServiceStartError):
@@ -328,8 +344,8 @@ def test_a_refused_start_leaves_the_stop_marker(tmp_path: Path, start_paths: lis
     assert cleared == []
 
 
-def test_status_says_why_no_lease_exists(tmp_path: Path) -> None:
-    from click.testing import CliRunner
+def test_status_says_why_no_lease_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ssd, "_port_accepting", lambda host, port: False)
 
     config_dir = _cli_config(tmp_path, "16")
     result = CliRunner().invoke(daemon_mod.service_status_cmd, ["--config-dir", str(config_dir)])

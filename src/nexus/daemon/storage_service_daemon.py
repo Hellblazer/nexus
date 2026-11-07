@@ -3593,9 +3593,9 @@ def _wait_for_cluster_at_floor(
     logs the refusal once and re-reads the cluster's PG_VERSION every ``_BELOW_FLOOR_RECHECK_S``,
     returning a :class:`_ClusterFloorWait` value. The wait is a loop of waits no longer than
     ``DEFAULT_HEARTBEAT_INTERVAL``: on Windows a SIGBREAK handler runs only between them (RDR-224,
-    src/nexus/daemon/AGENTS.md). When the marker passes, a credentials file that changed since the
-    refusal (the cluster was moved aside and ``nx init`` re-run) asks for a fresh process, since
-    this one holds the old port, password and artifact.
+    src/nexus/daemon/AGENTS.md). A credentials file that changed since the refusal (the cluster was
+    moved aside and ``nx init`` re-run, possibly with a new PG_DATA) asks for a fresh process at the
+    next check, since this one holds the old port, password, data path and artifact.
     """
     from nexus.db.pg_provision import PgClusterBelowFloorError, refuse_cluster_below_floor  # noqa: PLC0415 — deferred import — pg_provision is loaded only on this path
 
@@ -3615,14 +3615,20 @@ def _wait_for_cluster_at_floor(
         while (left := deadline - time.monotonic()) > 0:
             if stop_requested.wait(min(left, DEFAULT_HEARTBEAT_INTERVAL)):
                 return _ClusterFloorWait.STOPPED
+        if stop_requested.is_set():
+            return _ClusterFloorWait.STOPPED
+        if _creds_file_bytes(sup._config_dir) != creds_at_refusal:
+            # A re-init, wherever its PG_DATA now points: a fresh process reads the new credentials.
+            _log.info("storage_service_credentials_changed_while_refused", pgdata=str(pgdata))
+            flush_logging()
+            return _ClusterFloorWait.RESTART
         try:
             refuse_cluster_below_floor(pgdata)
         except PgClusterBelowFloorError:
             continue
-        changed = _creds_file_bytes(sup._config_dir) != creds_at_refusal
-        _log.info("storage_service_cluster_at_floor", pgdata=str(pgdata), credentials_changed=changed)
+        _log.info("storage_service_cluster_at_floor", pgdata=str(pgdata))
         flush_logging()
-        return _ClusterFloorWait.RESTART if changed else _ClusterFloorWait.RETRY
+        return _ClusterFloorWait.RETRY
 
 
 def _supervise_until_stopped(
@@ -3677,6 +3683,7 @@ def _supervise_until_stopped(
                 raise
             if waited == _ClusterFloorWait.RETRY:
                 continue
+            flush_logging()
             sup.stop()
             # A stop is a stand-down (0). New credentials need a fresh process: exit 3 so the OS
             # unit restarts the supervisor, which reads them (RDR-175's ordinary restart).
