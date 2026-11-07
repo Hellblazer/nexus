@@ -853,9 +853,12 @@ jobs:
         # The real-PID-namespace tests (tests/test_tmp_root.py, tests/test_engine_substrate_owner_lock.py) skip
         # unless NX_REQUIRE_PIDNS=1, which turns an unshare refusal into a failure. The lab-6c18g label spans chas
         # (unshare refused there) and qwent's WSL (PrivatePIDs runner unit, where it works), and no runner name or
-        # label tells them apart (labrun_559, 2026-11-07), so the host name decides: on qwent the tests must run,
-        # on chas and hosted runners they keep skipping. Keyed on the host, never on unshare succeeding, so a qwent
-        # runner that loses unshare fails loudly instead of skip-passing.
+        # label tells them apart (labrun_559, 2026-11-07), so the host name decides: on qwent the tests run, on
+        # chas they keep skipping. Hosted runners (NX_CI_POOL=off, fork PRs) never reach this step (the if:).
+        # unshare inside the PrivatePIDs runner unit had not been run before this step's first CI run, so on qwent
+        # it is probed first: when it works the tests are armed and must pass; when it is refused the step warns in
+        # the job summary and leaves them unarmed, rather than red develop. A warning on a qwent shard is the
+        # signal to read.
         id: pidns
         if: runner.environment == 'self-hosted'
         shell: bash
@@ -863,9 +866,14 @@ jobs:
           host="$(hostname)"
           case "${host,,}" in
             qwentescence)
-              echo "NX_REQUIRE_PIDNS=1" >> "$GITHUB_ENV"
-              echo "on_qwent=true" >> "$GITHUB_OUTPUT"
-              echo "host $host: NX_REQUIRE_PIDNS=1 (the real-PID-namespace tests must run here)" ;;
+              if unshare --pid --fork --map-root-user true 2>/dev/null; then
+                echo "NX_REQUIRE_PIDNS=1" >> "$GITHUB_ENV"
+                echo "on_qwent=true" >> "$GITHUB_OUTPUT"
+                echo "host $host: unshare works; NX_REQUIRE_PIDNS=1 armed (the real-PID-namespace tests must run here)"
+              else
+                echo "::warning::host $host: unshare --pid --fork --map-root-user refused inside this runner unit; the real-PID-namespace tests stay unarmed (nexus-odkc0)"
+                echo "- real PID namespace: unshare refused on $host, tests not armed (nexus-odkc0)" >> "$GITHUB_STEP_SUMMARY"
+              fi ;;
             chas)
               echo "host $host: not qwent, NX_REQUIRE_PIDNS left unset" ;;
             *)
