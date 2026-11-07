@@ -237,6 +237,17 @@ By default `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdi
 - A writer that commits between one test's teardown and the next test's setup is caught by the lease-start census. A writer that fires DURING the next test's body is NOT detected: the next teardown wipes its rows before the census, so it shows up, if at all, only as an unexplained failure in that test. The A/B found one such writer, the engine reaper (now off in the pool's engine); fix the writer, never the census.
 - The summary ends with `tenant pool: leases=N mints=M retired=R fresh_tenant=K workers=W ...`. A pool tenant that is not empty at the end, or tenant tests that took no lease, fail the run. `tests/test_tenant_pool.py` drives each behaviour against the real engine, each with a control that skips the eviction (or the lease-start census) and must show the stale state. Its engine-backed tests skip under `NX_TEST_TENANT_POOL=0`; there `tests/test_tenant_pool_end_to_end.py` runs the file in a child with the pool on (must run at least one test, pass all, skip none) and asserts the engine posture of the flag unset and `0`.
 
+## The signal fence (nexus-xzorj item 3, report mode)
+
+`tests/_signal_fence.py` wraps `os.kill` and `os.killpg` in every Linux test process and classifies each target as
+the session's (a descendant of the root pytest process, or a carrier of `NX_TEST_SIGNAL_FENCE_TOKEN`) or foreign.
+It sends every signal unchanged. The terminal summary line `signal fence (report mode, nexus-xzorj): signals=N
+own=N foreign=N unclassified=N errors=N` (per CI shard log) counts them, and the `foreign:` lines under it name the
+test, call site, signal and target program. Expected false positive: a child reparented away from the session
+whose environment was scrubbed (`env={...}`). Not counted: child pytest sessions (they print their own line into
+output the parent usually discards) and a crashed worker's counts. A foreign signal in a new test is a bug to fix,
+or a scrubbed-env reparented child to name in the test. `NX_TEST_SIGNAL_FENCE=off` turns it off.
+
 ## Bytes written and DDL per run (nexus-sz651)
 
 The primary gated signal is the **DDL count per test** (exact, the same on every host, and the lever that explains the writes); WAL bytes are a churn proxy for disk thrashing, not a disk meter. Every run with the engine substrate prints a `ddl: migration=<n> tests=<n> per_test=<x> wal: ...` line in the terminal summary and writes `nx-ddl-report.json` (under `NX_DDL_REPORT_DIR`, else the controller's basetemp). **WAL is a relative, lower-bound churn proxy, not what a disk-backed cluster would write, and on Linux it lands on tmpfs and never reaches the NVMe** (`fsync=off`, no full-page images; the Python substrate also `wal_level=minimal`, so Python and Java WAL are not comparable). `io_wbytes` is the job cgroup's write counter over the pytest window where readable: informational, not ratcheted. **Not measured**: the job workspace and checkout, `target/`, `.venv`, jar builds, journald, anything before pytest starts, and the docker-run and e2e shell clusters. The labrun NVMe sampler is the source of truth for bytes written to disk. `tests/_ddl_counter.py` explains the DDL signals and the counting rule; the Java twin is `DdlLogParser`/`DdlCounts`, and its server-log and container mechanics are in [test-running](../docs/agents/test-running.md) § DDL counter, Java side. A Java test must not call `getLogs()` on a Postgres container (`PgContainerTmpfsGateTest` fails the build if one does).
