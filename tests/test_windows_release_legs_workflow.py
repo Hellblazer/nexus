@@ -832,6 +832,7 @@ REAL_KERNEL_PATTERNS = (
     "test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale",
     # RDR-228 Phase 3: the PowerShell installer, whose cases skip where there is no pwsh.
     "test_help_states_the_autostart_default_and_installs_nothing",
+    "test_the_server_outlives_the_desktop_extensions_job",
 )
 
 
