@@ -849,6 +849,23 @@ jobs:
           UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
         run: uv sync --group dev
 
+      - name: Require the real PID namespace on qwent (nexus-odkc0)
+        # The real-PID-namespace tests (tests/test_tmp_root.py, tests/test_engine_substrate_owner_lock.py) skip
+        # unless NX_REQUIRE_PIDNS=1, which turns an unshare refusal into a failure. The lab-6c18g label spans chas
+        # (unshare refused there) and qwent's WSL (PrivatePIDs runner unit, where it works), and no runner name or
+        # label tells them apart (labrun_559, 2026-11-07), so the host name decides: on qwent the tests must run,
+        # on chas and hosted runners they keep skipping. Keyed on the host, never on unshare succeeding, so a qwent
+        # runner that loses unshare fails loudly instead of skip-passing.
+        if: runner.environment == 'self-hosted'
+        run: |
+          host="$(hostname)"
+          if [ "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" = "qwentescence" ]; then
+            echo "NX_REQUIRE_PIDNS=1" >> "$GITHUB_ENV"
+            echo "host $host: NX_REQUIRE_PIDNS=1 (the real-PID-namespace tests must run here)"
+          else
+            echo "host $host: not qwent, NX_REQUIRE_PIDNS left unset"
+          fi
+
       - name: Run tests (shard ${{ matrix.shard }}/6)
         # nexus-n0ful: pytest-split partitions the SAME collection every leg
         # sees (addopts' `-m 'not integration and not slow'` applies
