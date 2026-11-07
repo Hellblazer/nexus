@@ -682,6 +682,28 @@ def test_an_unreadable_kept_dll_never_fails_the_top_up(
     assert meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"} and "mixed_base" not in meta
 
 
+def test_a_matching_top_up_clears_a_stale_mix_record(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    where = _put_dlls(cfg / "vcrt")
+    for n in _DLLS:
+        (where / n).write_bytes(_BODY[n])
+    (where / "vcrt.meta.json").write_text(
+        json.dumps({"tag": "engine-service-v9.9.1", "mixed_base": {"tag": "old", "differ": list(_DLLS)}}),
+        encoding="utf-8",
+    )
+    net = _new_bundle(monkeypatch)
+    assert _ensure(cfg, system, net, tag="engine-service-v9.9.2").status == "provisioned"
+    assert "mixed_base" not in json.loads((where / "vcrt.meta.json").read_text())
+
+
+def test_a_bundle_without_the_pdf_dll_writes_no_dll_tags(cfg: Path, tmp_path: Path, net: _Net) -> None:
+    """`net` serves the older bundle: nothing is placed, so nothing is tagged."""
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    _ensure(cfg, sysdir, net, tag="engine-service-v9.9.1")
+    assert "dll_tags" not in json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())
+
+
 def test_an_older_bundle_is_fetched_once_per_pinned_tag_not_on_every_call(
     cfg: Path, tmp_path: Path, net: _Net,
 ) -> None:
