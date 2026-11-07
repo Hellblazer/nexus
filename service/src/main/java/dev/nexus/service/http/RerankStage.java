@@ -51,6 +51,25 @@ import java.util.Map;
  * refer to the filtered document list and are re-mapped to the original rows
  * here; an out-of-range/duplicate index from the scorer degrades loud rather
  * than corrupting the row mapping.
+ *
+ * <p><strong>Sensitive rows never reach a reranker that sends text off the machine</strong>
+ * (RDR-243 Q4, nexus-rfvyy.8.4). A row whose {@code sensitive} flag is true (set by the
+ * search routes' batched chunk-sensitivity lookup, which runs BEFORE this stage) is held
+ * back from {@link Reranker#sendsTextOffMachine()} rerankers, i.e. the Voyage client; the
+ * local cross-encoder sends nothing anywhere and still scores every row. Held rows use no
+ * {@code maxCandidates} slot and carry no {@code rerank_score}.
+ *
+ * <p><strong>Merge order (slot-preserving)</strong>, written once here and pinned by
+ * {@code VoyageRerankSensitivityTest}: a held row keeps the index it had in the input
+ * list, which is vector (distance) order. The remaining slots, in index order, are filled
+ * by the rows that were not held: first the scored rows by {@code rerank_score}
+ * descending, then the unscored ones (textless, past {@code maxCandidates}, past the
+ * scorer's {@code topK}) in input order. {@code topK} truncates after the merge. A held
+ * row is therefore never demoted below reranked rows and never lost to the cut: a
+ * sensitive top-1 hit stays top-1. The cost is ranking quality for the sensitive rows (they
+ * rank by vector order alone), which RDR-243 Q4 accepts. {@code topK} is still forwarded to
+ * the scorer unchanged: held rows only take slots, so the scorer is never asked for fewer
+ * rows than the final cut needs.
  */
 final class RerankStage {
 
@@ -106,17 +125,31 @@ final class RerankStage {
 
         // Exclude textless rows (reference-only chunks): docIndexToRowIndex maps
         // the reranker's filtered-list indices back to the original rows.
+        // Sensitive rows are excluded the same way when the reranker sends text off the machine (Q4).
+        boolean holdSensitive = reranker.sendsTextOffMachine();
         List<String> documents = new ArrayList<>(rows.size());
         List<Integer> docIndexToRowIndex = new ArrayList<>(rows.size());
+        int heldWithText = 0;
         for (int i = 0; i < rows.size(); i++) {
             if (maxCandidates != null && documents.size() >= maxCandidates) break;
             Object content = rows.get(i).get("content");
             if (content instanceof String s && !s.isBlank()) {
+                if (holdSensitive && isSensitive(rows.get(i))) {
+                    heldWithText++;
+                    continue;
+                }
                 documents.add(s);
                 docIndexToRowIndex.add(i);
             }
         }
         if (documents.isEmpty()) {
+            if (heldWithText > 0) {
+                // Nothing left to score once the sensitive rows are withheld: no Voyage call is made.
+                // Loud, with the true reason, never the textless message: the rows have text.
+                return degrade(rows, topK, "no rerank performed: every rerankable row is sensitive and is "
+                        + "withheld from the Voyage reranker (" + heldWithText + " of " + rows.size()
+                        + " rows); results are in vector order");
+            }
             return degrade(rows, topK, "no rerankable content in result rows (all "
                     + rows.size() + " rows are reference-only/textless)");
         }
@@ -152,7 +185,7 @@ final class RerankStage {
         }
 
         boolean[] taken = new boolean[rows.size()];
-        List<Map<String, Object>> ordered = new ArrayList<>(rows.size());
+        List<Map<String, Object>> ordered = new ArrayList<>(rows.size());   // rows not held back, best first
         for (Reranker.Scored s : scored) {
             if (s.index() < 0 || s.index() >= documents.size()) {
                 log.warn("event=rerank_degraded reason=invalid_scorer_index index={} docs={}",
@@ -171,11 +204,12 @@ final class RerankStage {
             ordered.add(row);
         }
         // Unscored rows (textless, beyond maxCandidates, or beyond the scorer's topK) rank below every
-        // scored row, keeping their original relative order.
+        // scored row, keeping their original relative order. Held-back sensitive rows are not in this
+        // list: mergeHeld puts them back at their input slots.
         for (int i = 0; i < rows.size(); i++) {
-            if (!taken[i]) ordered.add(rows.get(i));
+            if (!taken[i] && !(holdSensitive && isSensitive(rows.get(i)))) ordered.add(rows.get(i));
         }
-        return envelope(truncate(ordered, topK), false, reranker.modelToken(), null);
+        return envelope(truncate(mergeHeld(rows, holdSensitive, ordered), topK), false, reranker.modelToken(), null);
     }
 
     /**
@@ -222,10 +256,39 @@ final class RerankStage {
         }
         scored.sort(java.util.Comparator.comparingDouble(
                 (Map<String, Object> row) -> ((Number) row.get("rerank_score")).doubleValue()).reversed());
+        boolean holdSensitive = reranker != null && reranker.sendsTextOffMachine();
         List<Map<String, Object>> ordered = new ArrayList<>(scored.size() + unscored.size());
         ordered.addAll(scored);
-        ordered.addAll(unscored);
-        return envelope(truncate(ordered, topK), degraded, model, error, retryAfter);
+        for (Map<String, Object> row : unscored) {
+            if (!(holdSensitive && isSensitive(row))) ordered.add(row);
+        }
+        // Held-back sensitive rows (never sent to Voyage, so never scored) return to their slots in the
+        // input order, the vector rows then the lexical extras: the same merge as apply.
+        List<Map<String, Object>> input = new ArrayList<>(primary.size() + extras.size());
+        input.addAll(primary);
+        input.addAll(extras);
+        return envelope(truncate(mergeHeld(input, holdSensitive, ordered), topK), degraded, model, error, retryAfter);
+    }
+
+    private static boolean isSensitive(Map<String, Object> row) {
+        return Boolean.TRUE.equals(row.get("sensitive"));
+    }
+
+    /**
+     * The slot-preserving merge (see the class comment): the result has {@code input.size()} rows; slot
+     * {@code i} holds {@code input[i]} itself when that row is held back (sensitive, {@code hold} true),
+     * otherwise the next row of {@code rest}, which is every row that was not held, best first. With
+     * {@code hold} false there is nothing to place back and {@code rest} is returned as it is.
+     */
+    private static List<Map<String, Object>> mergeHeld(List<Map<String, Object>> input, boolean hold,
+                                                       List<Map<String, Object>> rest) {
+        if (!hold) return rest;
+        List<Map<String, Object>> merged = new ArrayList<>(input.size());
+        int next = 0;
+        for (Map<String, Object> row : input) {
+            merged.add(isSensitive(row) ? row : rest.get(next++));
+        }
+        return merged;
     }
 
     private Map<String, Object> degrade(List<Map<String, Object>> rows, Integer topK, String reason) {
