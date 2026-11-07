@@ -63,62 +63,72 @@ def test_clear_stale_lock_removes_empty_old_file(tmp_path: Path) -> None:
     assert not lock.exists()
 
 
-def test_clear_stale_lock_keeps_fresh_empty_file(tmp_path: Path) -> None:
-    """Empty lock files younger than _LOCK_STALE_SECONDS are left alone."""
+def _hold(lock: Path) -> int:
+    """Take the platform lock on *lock* through its own descriptor, as a live indexer does."""
+    from nexus import _locking
+
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
+    _locking.lock_fd(fd, blocking=False)
+    return fd
+
+
+def test_clear_stale_lock_removes_an_unheld_file_whatever_it_holds(tmp_path: Path) -> None:
+    """The lock is the test (nexus-dyfsw): an unheld file is stale, fresh, empty or naming a live PID."""
     from nexus.indexer import _clear_stale_lock
 
-    lock = tmp_path / "fresh.lock"
-    lock.touch()  # just created — mtime is now
+    for name, body in (("fresh.lock", ""), ("live.lock", str(os.getpid())), ("garbage.lock", "x")):
+        lock = tmp_path / name
+        lock.write_text(body)
+        _clear_stale_lock(lock)
+        assert not lock.exists(), name
 
-    _clear_stale_lock(lock)
-    assert lock.exists()
 
-
-def test_clear_stale_lock_removes_dead_pid(tmp_path: Path) -> None:
-    """Lock files containing a dead PID are removed."""
+def test_clear_stale_lock_keeps_a_held_file_whatever_pid_it_names(tmp_path: Path) -> None:
+    """A holder whose PID this process cannot see (another PID namespace) still holds the lock (nexus-dyfsw)."""
     from nexus.indexer import _clear_stale_lock
 
-    lock = tmp_path / "dead.lock"
-    lock.write_text("999999999")  # PID that almost certainly doesn't exist
-
-    _clear_stale_lock(lock)
-    assert not lock.exists()
-
-
-def test_clear_stale_lock_keeps_live_pid(tmp_path: Path) -> None:
-    """Lock files containing the current (live) PID are kept."""
-    from nexus.indexer import _clear_stale_lock
-
-    lock = tmp_path / "live.lock"
-    lock.write_text(str(os.getpid()))
-
-    _clear_stale_lock(lock)
-    assert lock.exists()
+    lock = tmp_path / "held.lock"
+    fd = _hold(lock)
+    try:
+        os.write(fd, b"999999999")  # a PID that is dead here: the old test removed the file for it
+        _clear_stale_lock(lock)
+        assert lock.exists()
+    finally:
+        os.close(fd)
 
 
 def test_sweep_stale_locks_cleans_directory(tmp_path: Path) -> None:
-    """_sweep_stale_locks removes all stale files from a directory."""
-    from nexus.indexer import _sweep_stale_locks, _LOCK_STALE_SECONDS
+    """_sweep_stale_locks removes every unheld lock file and keeps the held one."""
+    from nexus.indexer import _sweep_stale_locks
 
     locks_dir = tmp_path / "locks"
     locks_dir.mkdir()
-
-    # Create 3 stale empty lock files
-    old_time = time.time() - _LOCK_STALE_SECONDS - 1
     for name in ["aaa.lock", "bbb.lock", "ccc.lock"]:
-        f = locks_dir / name
-        f.touch()
-        os.utime(f, (old_time, old_time))
+        (locks_dir / name).touch()
+    fd = _hold(locks_dir / "held.lock")
+    try:
+        _sweep_stale_locks(locks_dir)
+        remaining = list(locks_dir.glob("*.lock"))
+    finally:
+        os.close(fd)
+    assert [p.name for p in remaining] == ["held.lock"]
 
-    # Create 1 fresh file that should survive
-    fresh = locks_dir / "fresh.lock"
-    fresh.touch()
 
-    _sweep_stale_locks(locks_dir)
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot unlink an open file")
+def test_same_file_tells_an_unlinked_lock_from_the_one_the_path_names(tmp_path: Path) -> None:
+    """A holder that locked an inode a sweep then unlinked must notice and lock the path's file instead."""
+    from nexus.indexer import _same_file
 
-    remaining = list(locks_dir.glob("*.lock"))
-    assert len(remaining) == 1
-    assert remaining[0].name == "fresh.lock"
+    lock = tmp_path / "repo.lock"
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        assert _same_file(fd, lock)
+        lock.unlink()
+        assert not _same_file(fd, lock)
+        lock.touch()  # the next arrival's file
+        assert not _same_file(fd, lock)
+    finally:
+        os.close(fd)
 
 
 # ── lock path helper ──────────────────────────────────────────────────────────
