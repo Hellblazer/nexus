@@ -1838,3 +1838,53 @@ def test_reindex_refuses_code_collections_before_deleting(runner, env_creds, moc
     assert "nx index repo" in result.output
     cascade.assert_not_called()
     mock_db.delete_collection.assert_not_called()
+
+
+def _rmp2p_catalog():
+    """A catalog reader stub for the nexus-rmp2p reindex tests: no tombstones, nothing else read."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    return MagicMock(spec=HttpCatalogClient)
+
+
+def test_reindex_refuses_a_docs_collection_holding_non_markdown_files(runner, env_creds, mock_db, tmp_path) -> None:
+    """nexus-rmp2p: this verb re-indexes a docs__ / knowledge__ collection through doc_indexer's markdown
+    path, so a repo prose file that is not markdown (.sql, a ghidra .sinc, .mdx) would come back chunked by
+    the markdown chunker with chunk rows tagged markdown, not as `nx index repo` wrote it. Same shape as the
+    nexus-caifp code__ refusal: refuse before any delete, name the files, point at `nx index repo`."""
+    md = tmp_path / "guide.md"
+    md.write_text("# Guide\ncontent")
+    sql = tmp_path / "schema.sql"
+    sql.write_text("create table t (id int);\n")
+    vr = _setup_reindex_mock(
+        mock_db,
+        [{"source_path": str(md)}, {"source_path": str(sql)}],
+        [{"source_path": str(md)}, {"source_path": str(sql)}],
+        before_count=2, after_count=2,
+    )
+    with patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=_rmp2p_catalog()), \
+         patch("nexus.catalog.tombstones.read_tombstones", return_value=[]), \
+         patch("nexus.catalog.tombstones.deleted_only_sources", return_value=[]), \
+         patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()) as cascade, \
+         patch("nexus.doc_indexer.index_markdown", return_value=1) as index_md, \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(main, ["collection", "reindex", "docs__myrepo"])
+    assert result.exit_code != 0, result.output
+    assert "nx index repo" in result.output
+    assert "schema.sql" in result.output
+    cascade.assert_not_called()
+    index_md.assert_not_called()
+    mock_db.delete_collection.assert_not_called()
+
+
+def test_non_markdown_sources_names_only_what_the_markdown_path_would_mishandle() -> None:
+    """nexus-rmp2p negative control for the refusal: .md, .markdown and .pdf (any case) are re-indexable and
+    never named. The end-to-end proceed path for a markdown docs__ collection is
+    test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable."""
+    from nexus.commands.collection import _non_markdown_sources
+
+    keep = ["/r/a.md", "/r/B.MD", "/r/c.markdown", "/r/d.pdf", "/r/E.PDF"]
+    assert _non_markdown_sources(keep) == []
+    assert _non_markdown_sources(keep + ["/r/schema.sql", "/r/x.mdx", "/r/Module.manifest", "/r/README"]) == [
+        "/r/Module.manifest", "/r/README", "/r/schema.sql", "/r/x.mdx",
+    ]

@@ -22,6 +22,20 @@ from nexus.corpus import (
 _log = structlog.get_logger(__name__)
 
 
+#: The suffixes ``nx collection reindex`` re-indexes faithfully in a docs__ / knowledge__ collection: the
+#: markdown path (doc_indexer.index_markdown) and the PDF path. Anything else came from ``nx index repo``'s
+#: prose path and is refused (nexus-rmp2p).
+_REINDEXABLE_SUFFIXES: frozenset[str] = frozenset({".md", ".markdown", ".pdf"})
+
+
+def _non_markdown_sources(source_paths: set[str] | list[str]) -> list[str]:
+    """The sources a docs__ / knowledge__ reindex would mishandle, sorted: every path whose suffix is not
+    in :data:`_REINDEXABLE_SUFFIXES` (case-insensitive)."""
+    from pathlib import PurePath  # noqa: PLC0415 — stdlib import kept function-local, as this module does
+
+    return sorted(p for p in source_paths if PurePath(p).suffix.lower() not in _REINDEXABLE_SUFFIXES)
+
+
 def _doc_id_to_file_path(doc_id: str) -> str:
     """nexus-7b5n: resolve a chunk's ``doc_id`` to the catalog's
     ``file_path``. Returns "" when the catalog is uninitialized or has
@@ -1205,6 +1219,22 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
     # collection". GitHub #367: a user lost 28 store_put-only entries this
     # way during an embedding-model migration. Refuse unconditionally and
     # point at `nx collection delete` for the genuine-delete path.
+    # nexus-rmp2p: the docs/knowledge branch below re-indexes every non-PDF source through
+    # doc_indexer.index_markdown, so a repo prose file that is not markdown (.sql, .mdx, a ghidra
+    # .sinc) would come back chunked by the markdown chunker with chunk rows tagged markdown, not as
+    # `nx index repo` wrote it. Refuse before the delete, as nexus-caifp does for code__.
+    if candidate_type in ("docs", "knowledge"):
+        foreign = _non_markdown_sources(source_paths)
+        if foreign:
+            raise click.ClickException(
+                f"Refusing to reindex '{name}': {len(foreign)} of its sources are not markdown or PDF ("
+                + ", ".join(Path(p).name for p in foreign[:5])
+                + (" ..." if len(foreign) > 5 else "")
+                + "), and this verb re-indexes through the markdown path, which would re-chunk them "
+                "unlike `nx index repo`. Use `nx index repo <path>` for the repository that holds them, "
+                "which re-indexes in place. Nothing was deleted."
+            )
+
     if sourceless and not source_paths:
         raise click.ClickException(
             f"Refusing to reindex '{name}': all {len(sourceless)} entries "
