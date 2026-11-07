@@ -162,6 +162,8 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
     private final Supplier<ChunkConstraintAdmin> constraints;
     private final Supplier<List<String>> tenants;
     private final Supplier<Audit> auditSink;
+    /** Whether a credential (the {@code sha256Hex} of the bearer) still resolves: a job asks at each batch boundary. */
+    private final java.util.function.Predicate<String> credentialLive;
 
     /** Where a root-targeted sweep call is recorded: {@code CatalogRepository#recordGcAudit} in the engine. */
     @FunctionalInterface
@@ -203,6 +205,19 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
      */
     public ChunkKeysAdminHandler(Supplier<ChunkKeySweep> sweepSource, Supplier<ChunkConstraintAdmin> constraints,
                                  Supplier<List<String>> tenants, Supplier<Audit> auditSink, ChunkKeysSweepJobs jobs) {
+        this(sweepSource, constraints, tenants, auditSink, jobs, hash -> true);
+    }
+
+    /**
+     * As above, with the check a job makes of its starter's credential at each batch boundary: {@code
+     * credentialLive} answers whether the bearer (the {@code sha256Hex} of the token) still resolves, as the auth
+     * filter resolves it (a revoked or expired token does not). A job whose credential no longer resolves stops like
+     * a cancel, with {@code stopped: "credential_revoked"}.
+     */
+    public ChunkKeysAdminHandler(Supplier<ChunkKeySweep> sweepSource, Supplier<ChunkConstraintAdmin> constraints,
+                                 Supplier<List<String>> tenants, Supplier<Audit> auditSink, ChunkKeysSweepJobs jobs,
+                                 java.util.function.Predicate<String> credentialLive) {
+        this.credentialLive = credentialLive;
         this.sweepSource = sweepSource;
         this.constraints = constraints;
         this.tenants = tenants;
@@ -227,15 +242,22 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             return;
         }
         boolean jobRoute = op.startsWith(JOBS_PREFIX);
-        boolean cancel = jobRoute && op.endsWith(CANCEL_SUFFIX);
+        String rest = jobRoute ? op.substring(JOBS_PREFIX.length()) : "";
+        boolean cancel = jobRoute && rest.endsWith(CANCEL_SUFFIX);
+        String jobId = cancel ? rest.substring(0, rest.length() - CANCEL_SUFFIX.length()) : rest;
+        if (jobRoute && (jobId.isEmpty() || "cancel".equals(jobId))) {
+            // No id: ".../jobs/", ".../jobs//cancel" and ".../jobs/cancel" name no job. Whatever the method, the route
+            // is not found (a job id is a UUID, never the word cancel).
+            HttpUtil.send(ex, 404, "{\"error\":\"not found\"}");
+            return;
+        }
         if (!(jobRoute && !cancel ? "GET" : "POST").equals(ex.getRequestMethod().toUpperCase(Locale.ROOT))) {
             HttpUtil.send(ex, 405, "{\"error\":\"method not allowed\"}");
             return;
         }
         try {
             if (jobRoute) {
-                String id = op.substring(JOBS_PREFIX.length(), op.length() - (cancel ? CANCEL_SUFFIX.length() : 0));
-                handleJob(ex, tenant, id, cancel);
+                handleJob(ex, tenant, jobId, cancel);
                 return;
             }
             switch (op) {
@@ -496,9 +518,10 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                                int budget) throws IOException {
         String fingerprint = "apply|" + new TreeMap<>(accepted) + "|" + batchSize + "|" + only + "|" + maxBatches + "|"
             + budget + "|" + plan.fingerprint();
+        String credential = RequestContext.credentialHash();   // read here: the job runs on another thread
         startJob(ex, tenant, callerTenant, root, trail, ChunkKeysSweepJobs.Kind.APPLY, fingerprint,
-            (job, stage) -> runApply(job, tenant, callerTenant, trail, plan, accepted, only, batchSize, maxBatches,
-                budget, stage));
+            (job, stage) -> runApply(job, tenant, callerTenant, credential, trail, plan, accepted, only, batchSize,
+                maxBatches, budget, stage));
     }
 
     /**
@@ -645,19 +668,33 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
      * The work of one apply job: the synchronous client loop, inside the engine. Call 1 carries no token and counts
      * every precondition (a residue that is not accepted refuses the job exactly as it refuses a synchronous apply);
      * the later calls carry the token the previous one returned, each with the request's {@code max_batches} and
-     * {@code budget_seconds}, until the sweep is done. The stop request (cancel, the wall-clock cap, a tenant reset)
-     * is asked before every batch and never inside one, so a stopped job holds whole batches only. Three calls in a row
+     * {@code budget_seconds}, until the sweep is done. The stop request (cancel, the wall-clock cap, a tenant reset,
+     * the starter's credential no longer resolving) is asked before every batch and never inside one, so a stopped job
+     * holds whole batches only; it is also asked at each stage of call 1's count, where a stop sweeps nothing and ends
+     * the job {@code stopped} with no rows counted ({@code remaining_rows} null). The credential is looked up again at
+     * each of those points, as the synchronous loop authenticates on every call. Three calls in a row
      * that sweep nothing while rows remain (a writer's locks) end the job unfinished, as the verb's loop gives up.
      * Failures map as the synchronous call maps them, with the rows the committed batches swept.
      */
     private ChunkKeysSweepJobs.Outcome runApply(ChunkKeysSweepJobs.Job job, String tenant, String callerTenant,
-                                                Trail trail, ChunkKeyPlan plan, Map<String, Long> accepted, String only,
-                                                int batchSize, int maxBatches, int budgetSeconds,
-                                                java.util.function.Consumer<String> stage) {
+                                                String credential, Trail trail, ChunkKeyPlan plan,
+                                                Map<String, Long> accepted, String only, int batchSize, int maxBatches,
+                                                int budgetSeconds, java.util.function.Consumer<String> stage) {
         long t0 = System.nanoTime();
         ChunkKeySweep sweep = sweep();   // one instance for the whole loop: its token verifies only against itself
         Map<String, Object> counts = new LinkedHashMap<>();
         java.util.concurrent.atomic.AtomicReference<String> stopReason = new java.util.concurrent.atomic.AtomicReference<>();
+        // Call 1's count: a stop asked at one of its stages ends the job there (nothing is swept yet), as the dry run
+        // job ends. The "sweeping" stage that closes the count is left to the batch check, which keeps the counts.
+        java.util.function.Consumer<String> countStage = name -> {
+            if (!"sweeping".equals(name)) {
+                String why = stopWhy(job, credential);
+                if (why != null) {
+                    throw new ChunkKeysSweepJobs.Stopped(why);
+                }
+            }
+            stage.accept(name);
+        };
         ChunkKeySweep.Applied last = null;
         ChunkKeySweep.Resume resume = null;
         ChunkKeySweep.Progress current = null;
@@ -678,14 +715,14 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 final int batchesBefore = batches;
                 current = new ChunkKeySweep.Progress(
                     () -> {
-                        String why = job.stopReason();
+                        String why = stopWhy(job, credential);
                         if (why != null) {
                             stopReason.set(why);
                         }
                         return why != null;
                     },
                     p -> job.progress(batchesBefore + p.batches(), rowsBefore + p.rowsSwept(), p.remaining()),
-                    stage);
+                    countStage);
                 ChunkKeySweep.Applied a = sweep.apply(tenant, plan, accepted, only, batchSize, maxBatches,
                     Duration.ofSeconds(budgetSeconds), resume, current);
                 calls++;
@@ -711,6 +748,11 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 resume = a.resume();
             }
             completed = true;
+        } catch (ChunkKeysSweepJobs.Stopped stopped) {
+            // Told to stop at a stage of call 1's count: nothing was swept, and the count did not finish.
+            stoppedByRequest = true;
+            stopReason.set(stopped.reason());
+            completed = true;
         } catch (RuntimeException e) {
             failure = e;
         } finally {
@@ -722,10 +764,10 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 counts.put("rows_swept", rows);
                 counts.put("batches", batches);
                 counts.put("calls", calls);
-                counts.put("done", last.done());
-                counts.put("remaining_rows", last.remainingRows());
-                counts.put("locked_skipped_rows", last.lockedSkippedRows());
-                counts.put("blocked_collections", last.blocked().size());
+                counts.put("done", last != null && last.done());
+                counts.put("remaining_rows", last == null ? null : last.remainingRows());
+                counts.put("locked_skipped_rows", last == null ? 0L : last.lockedSkippedRows());
+                counts.put("blocked_collections", last == null ? 0 : last.blocked().size());
                 if (stoppedByRequest) {
                     counts.put("stopped", stopReason.get());
                     counts.put("cancelled", "cancelled".equals(stopReason.get()));
@@ -788,17 +830,17 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("tenant", last.tenant());
+        out.put("tenant", tenant);
         out.put("dry_run", false);
         out.put("rows_swept", rows);
         out.put("batches", batches);
         out.put("calls", calls);
-        out.put("done", last.done());
-        out.put("remaining_rows", last.remainingRows());
-        out.put("locked_skipped_rows", last.lockedSkippedRows());
+        out.put("done", last != null && last.done());
+        out.put("remaining_rows", last == null ? null : last.remainingRows());
+        out.put("locked_skipped_rows", last == null ? 0L : last.lockedSkippedRows());
         out.put("first_batch_ms", firstBatchMs);
         out.put("elapsed_ms", Duration.ofNanos(System.nanoTime() - t0).toMillis());
-        out.put("blocked_collections", blockedList(last.blocked()));
+        out.put("blocked_collections", last == null ? List.of() : blockedList(last.blocked()));
         out.put("resume", null);
         out.put("resume_ignored", false);
         if (stoppedByRequest) {
@@ -819,6 +861,19 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             }
         }
         return new ChunkKeysSweepJobs.Outcome(200, out);
+    }
+
+    /**
+     * Why an apply job should stop at its next boundary, or null. The starter's credential is looked up first: one
+     * that no longer resolves (revoked, or past its expiry) stops the job like a cancel ({@code credential_revoked}),
+     * so a job does not outlive the authority it was started under. Then the job's own reasons (cancel, the cap, a
+     * tenant reset).
+     */
+    private String stopWhy(ChunkKeysSweepJobs.Job job, String credential) {
+        if (credential != null && !credentialLive.test(credential)) {
+            job.stopFor("credential_revoked");
+        }
+        return job.stopReason();
     }
 
     /**
@@ -861,7 +916,44 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             callerTenant, accepted);
         Map<String, Object> m = jobBody(job, true);
         m.put("cancel_accepted", accepted);
+        if (accepted && RequestContext.isOperator()) {
+            // A root credential's sweep is recorded in gc_audit; so is the root credential that stopped it. The cancel
+            // is already in force: a sink that cannot take the row is reported, it does not undo the stop.
+            m.put("cancel_audit_id", recordCancel(job, callerTenant));
+        }
         HttpUtil.send(ex, 200, json(m));
+    }
+
+    /** The gc_audit row naming the root credential that cancelled {@code job}; its id, or null when it was not written. */
+    private Long recordCancel(ChunkKeysSweepJobs.Job job, String callerTenant) {
+        Audit audit = auditSink.get();
+        String hash = RequestContext.credentialHash();
+        String actor = "root:" + (hash == null ? "unknown" : hash.substring(0, Math.min(16, hash.length())));
+        if (audit == null) {
+            log.error("event=retire_keys_cancel_audit_failed job={} tenant={} actor={} error=no audit sink", job.id(),
+                job.tenant(), actor);
+            return null;
+        }
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("phase", "cancel_requested");
+        details.put("mode", "apply");
+        details.put("target_tenant", job.tenant());
+        details.put("caller_tenant", callerTenant);
+        details.put("scope", RequestContext.scope());
+        details.put("job_id", job.id());
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("operation", AUDIT_OPERATION);
+        row.put("collection", "");
+        row.put("actor", actor);
+        row.put("dry_run", false);
+        row.put("details", details);
+        try {
+            return audit.record(job.tenant(), row);
+        } catch (RuntimeException e) {
+            log.error("event=retire_keys_cancel_audit_failed job={} tenant={} actor={} error={}", job.id(), job.tenant(),
+                actor, e.getMessage(), e);
+            return null;
+        }
     }
 
     private Map<String, Object> jobBody(ChunkKeysSweepJobs.Job job, boolean withOutcome) {

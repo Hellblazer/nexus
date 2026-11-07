@@ -163,7 +163,7 @@ def _engine_error(exc: VectorServiceError, *, swept_before: int = 0,
             f"{exc} Nothing was written. The dry run is a read; the engine bounds how many it runs at once.",
             EXIT_FAILED,
         )
-    if exc.reason == "sweep_job_left_running":
+    if exc.reason in ("sweep_job_left_running", "sweep_job_gone_after_cancel"):
         _fail(str(exc), EXIT_FAILED)
     if exc.reason == "sweep_job_running":
         running = exc.engine_body or {}

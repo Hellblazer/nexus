@@ -396,6 +396,27 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   `SupersededCollectionWriteError`, or any other 409) defers those rows
   (`write_refused_409`) and the run goes on; the rung ends deferred and retries on the next `nx upgrade`.
 
+### The retire-keys sweep as an engine job
+
+`nx t3 retire-keys` counts and sweeps through the engine as a background job (`docs/cli-reference.md` § `nx t3
+retire-keys` has the verb). Four things an operator running it should know:
+
+- **A job keeps sweeping until something stops it.** Closing the terminal, a lost network or a `--wait-seconds`
+  that ran out does not stop an apply; the same command joins it. What stops it: the tenant is done, a cancel
+  (Ctrl-C and yes, or `POST .../jobs/{job_id}/cancel` by the credential that started it), the 4-hour wall-clock
+  cap, a tenant reset, or its starter's credential no longer resolving. The engine looks the credential up again
+  at each stage of the first count and before each batch, so a revoked or expired token stops the job at the next
+  boundary with `stopped: credential_revoked` (the batches that ran are kept).
+- **Cancel and the cap are honoured during the first count too.** A stop asked while the apply is still counting
+  ends it there with nothing swept and no rows counted (`remaining_rows` null).
+- **Two jobs run at a time, engine-wide.** A long apply holds one of the two workers for as long as it sweeps, so
+  with two long applies running (any two tenants) a third job waits in the queue, and a dry run's client waits only
+  `--wait-seconds` (default 1800) before giving up on it. The 4-hour cap starts when a job starts RUNNING, not
+  when it was queued: time in the queue does not count against it.
+- **A root cancel is audited.** A cancel by a root credential writes a `gc_audit` row (`phase:
+  cancel_requested`, the job id, an actor naming the credential by a hash prefix) in the target tenant, next to
+  the job's own intent and outcome rows.
+
 ### Restoring chunks the reaper quarantined
 
 `nx t3 quarantine restore` brings back chunks the engine reaper moved to a `quarantine-` collection, by chash, `gc_audit` id or date window, and with `--reattach` (the default) makes them visible again when their own metadata names a live document.

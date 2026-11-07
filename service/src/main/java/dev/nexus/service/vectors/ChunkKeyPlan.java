@@ -86,7 +86,7 @@ public record ChunkKeyPlan(List<String> allowed, List<String> rowKeys, List<Stri
     /**
      * A digest of the whole plan: the allow-list, the ROW keys, the bypass prefixes and the implication, each list
      * framed by its length so a key moved between lists changes it. Two requests carry the same plan exactly when this
-     * is equal; a dry-run job and a signed continuation name the plan they were made under by it (nexus-v75nw).
+     * is equal; a sweep job's start fingerprint is built over it, so only a start with the same plan is handed a running job (nexus-v75nw).
      */
     public String fingerprint() {
         StringBuilder b = new StringBuilder();

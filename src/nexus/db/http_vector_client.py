@@ -2816,14 +2816,26 @@ class ChunkKeysDryRunTimeout(VectorServiceError):
 class ChunkKeysJobLeftRunning(VectorServiceError):
     """The operator interrupted the wait (Ctrl-C) and the job was left running in the engine (nexus-v75nw).
 
-    Nothing is lost: an apply that goes on sweeps whole batches only, and the same command joins the running job."""
+    Nothing is lost: an apply that goes on sweeps whole batches only, and the same command joins the running job.
 
-    def __init__(self, job_id: str, what: str) -> None:
-        super().__init__(
-            f"stopped waiting for the retire-keys {what} (job {job_id}); it is still running in the engine"
-            + (" and keeps sweeping" if what == "apply" else "") + ". Run the same command again to join it.",
-            reason="sweep_job_left_running", engine_body={"job_id": job_id},
-        )
+    ``gone`` is the other end of a cancel: the operator asked to cancel and the engine no longer holds the job (it
+    restarted, or the job expired), so there is nothing to join and the apply is NOT started again; the batches it
+    committed are kept (reason ``sweep_job_gone_after_cancel``)."""
+
+    def __init__(self, job_id: str, what: str, *, gone: bool = False) -> None:
+        if gone:
+            super().__init__(
+                f"the engine no longer holds the retire-keys {what} (job {job_id}) that you asked to cancel (it "
+                "restarted, or the job expired). It was not started again. The batches it committed are kept; run "
+                "the same command again to count and take what is left.",
+                reason="sweep_job_gone_after_cancel", engine_body={"job_id": job_id},
+            )
+        else:
+            super().__init__(
+                f"stopped waiting for the retire-keys {what} (job {job_id}); it is still running in the engine"
+                + (" and keeps sweeping" if what == "apply" else "") + ". Run the same command again to join it.",
+                reason="sweep_job_left_running", engine_body={"job_id": job_id},
+            )
         self.job_id = job_id
         self.what = what
 
@@ -5754,7 +5766,9 @@ class HttpVectorClient:
         An engine that predates the apply job ignores the field and answers the first call of the synchronous loop: the
         result then has ``job_id`` None and the caller carries on with the loop from that answer. A wait that runs out
         raises :class:`ChunkKeysDryRunTimeout` (``what == "apply"``); the job goes on in the engine and the same command
-        joins it. An engine that lost the job is asked once more (a second start recounts and takes what is left).
+        joins it. An engine that lost the job is asked once more (a second start recounts and takes what is left),
+        except after a cancel was asked: a job the engine lost then raises :class:`ChunkKeysJobLeftRunning` (``gone``)
+        and is never started again.
         """
         note = progress or (lambda event: None)
         restarted = False
@@ -5792,7 +5806,7 @@ class HttpVectorClient:
         deadline = monotonic() + max_wait_s
         failures = 0
         polls = 0
-        cancelling = False
+        cancelling = False   # the operator asked to cancel: the job must not be started again if the engine lost it
         while True:
             polls += 1
             try:
@@ -5801,6 +5815,8 @@ class HttpVectorClient:
                 except VectorServiceError as exc:
                     # A 429 is the edge or the engine asking for less: a bad poll like a 5xx (the job does not depend
                     # on it), counted toward the allowance, not a refusal of the request.
+                    if exc.reason == "sweep_job_not_found" and cancelling:
+                        raise ChunkKeysJobLeftRunning(job_id, what, gone=True) from None
                     if exc.reason == "sweep_job_not_found" or (
                             exc.code is not None and exc.code < 500 and exc.code != 429):
                         raise
@@ -5826,9 +5842,18 @@ class HttpVectorClient:
             except KeyboardInterrupt:
                 if cancelling or on_interrupt is None or not on_interrupt(job_id):
                     raise ChunkKeysJobLeftRunning(job_id, what) from None
-                self.chunk_keys_cancel_job(job_id)
-                note({"event": "cancel_requested", "job_id": job_id})
                 cancelling = True
+                try:
+                    self.chunk_keys_cancel_job(job_id)
+                except KeyboardInterrupt:
+                    # A second Ctrl-C while the cancel is in flight: the cancel may or may not have landed. Leave the
+                    # job and say which one it is, instead of a raw traceback with no job id.
+                    raise ChunkKeysJobLeftRunning(job_id, what) from None
+                except VectorServiceError as exc:
+                    if exc.reason == "sweep_job_not_found":
+                        raise ChunkKeysJobLeftRunning(job_id, what, gone=True) from None
+                    raise
+                note({"event": "cancel_requested", "job_id": job_id})
 
     def chunk_keys_add_constraints(self, *, replace: bool = False) -> dict:
         """POST /v1/admin/chunk-keys/add-constraints: the table-wide add of the chunk CHECKs, NOT VALID (nexus-6pfgb.43).
