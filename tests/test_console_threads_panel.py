@@ -7,6 +7,7 @@ test in ``tests/test_console_app.py``, so this module provisions no tenant.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,12 +16,13 @@ from fastapi.testclient import TestClient
 
 from nexus.console.app import create_app
 from nexus.console.routes import threads as threads_route
-from nexus.console.threads import Bead, BeadsResult
+from nexus.console.threads import Bead, BeadsResult, answer_title, parse_session
 
 NO_BEADS = lambda: BeadsResult(())  # noqa: E731 -- a seam stand-in
 
 
 def _client(**kw) -> TestClient:
+    kw.setdefault("answers_reader", lambda: [])  # never reach the real T2 'asks' project
     return TestClient(create_app(**kw))
 
 
@@ -438,3 +440,71 @@ def test_an_entry_with_no_ask_block_renders_as_before() -> None:
              "content": "## A\nstate: live\nneeds_sam: pick the port\n"}]
     html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows).get("/threads").text
     assert "1 thing needs you." in html and "pick the port" in html
+
+
+# ── nexus-wc4jj.13 follow-ups ────────────────────────────────────────────────
+
+
+def test_an_ask_with_an_empty_question_shows_a_placeholder_not_a_blank_strong() -> None:
+    content = _ASK_FIXTURE.read_text(encoding="utf-8").replace(_QUESTION, "")
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: _halcyon_rows(content)).get("/threads").text
+    assert "1 thing needs you." in html
+    assert "<strong></strong>" not in html
+    assert "<strong>(no question given)</strong>" in html
+
+
+def test_a_bead_folded_ask_with_an_empty_question_shows_the_placeholder() -> None:
+    content = _ASK_FIXTURE.read_text(encoding="utf-8").replace(_QUESTION, "")
+    beads = BeadsResult((Bead("nexus-k9kr9", "Keying decision", 2),))
+    html = _client(bd_runner=lambda: beads, threads_reader=lambda: _halcyon_rows(content)).get("/threads").text
+    assert "(no question given)" in html
+
+
+def _sent_record_for_halcyon() -> dict[str, str]:
+    ask = parse_session("halcyon", _ASK_FIXTURE.read_text(encoding="utf-8")).threads[0].asks[0]
+    return {"title": answer_title(ask), "content": json.dumps({"status": "sent"})}
+
+
+def test_a_sent_answer_record_takes_the_ask_off_the_board() -> None:
+    html = _client(
+        bd_runner=NO_BEADS, threads_reader=_halcyon_rows, answers_reader=lambda: [_sent_record_for_halcyon()]
+    ).get("/threads").text
+    assert "Nothing needs you." in html
+    assert "1 thing needs you." not in html
+
+
+def test_an_ask_with_no_answer_record_is_still_counted() -> None:
+    html = _client(bd_runner=NO_BEADS, threads_reader=_halcyon_rows, answers_reader=lambda: []).get("/threads").text
+    assert "1 thing needs you." in html
+
+
+def test_an_unreadable_answers_project_leaves_the_ask_counted() -> None:
+    def broken():
+        raise RuntimeError("t2 down")
+
+    html = _client(bd_runner=NO_BEADS, threads_reader=_halcyon_rows, answers_reader=broken).get("/threads").text
+    assert "1 thing needs you." in html
+
+
+def test_the_answers_are_not_read_when_no_entry_holds_a_structured_ask() -> None:
+    def boom():
+        raise AssertionError("answers read for a board with no structured ask")
+
+    rows = [{"title": "s", "timestamp": _iso(datetime.now(timezone.utc)), "content": "## A\nneeds_sam: pick\n"}]
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows, answers_reader=boom).get("/threads").text
+    assert "1 thing needs you." in html
+
+
+def test_a_lone_ask_with_a_bad_id_is_counted_on_the_board() -> None:
+    content = _ASK_FIXTURE.read_text(encoding="utf-8").replace("ask: d1105-k9kr9-keying", "ask: Bad_Id").replace(
+        "needs_sam: Bad_Id", "needs_sam: none"
+    )
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: _halcyon_rows(content)).get("/threads").text
+    assert "Nothing needs you" not in html
+    assert "Bad_Id" in html
+
+
+def test_a_legacy_ask_sam_line_is_counted_on_the_board() -> None:
+    rows = [{"title": "s", "timestamp": _iso(datetime.now(timezone.utc)), "content": "## A\nask: sam\n"}]
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows).get("/threads").text
+    assert "1 thing needs you." in html

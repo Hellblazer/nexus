@@ -27,7 +27,7 @@
     {% endfor %}
     {% for o in asks.structured %}
     <li class="needs-sam">
-      <strong>{{ o.ask.question }}</strong>
+      <strong>{{ o.ask.question or "(no question given)" }}</strong>
       <span class="ts">&mdash; asked by {{ o.session }} on &ldquo;{{ o.ask.thread }}&rdquo;, updated {{ o.age }}</span>
       {% if o.ask.refs %}<small class="ts">&nbsp;{{ o.ask.refs | join(", ") }}</small>{% endif %}
     </li>
@@ -39,7 +39,7 @@
       <span class="ts">&mdash;
         {% if b.assignee %}assigned to {{ b.assignee }}{% else %}not assigned{% endif %}{% if b.updated %}, updated {{ age_of(b.updated) }}{% endif %}</span>
       <small class="ts">&nbsp;{{ b.id }}{% if b.priority is not none %} &middot; P{{ b.priority }}{% endif %}</small>
-      {% for r in a.raised_by %}<br><small class="ts">raised by {{ r.session }} on &ldquo;{{ r.thread.title }}&rdquo;: {% if has_value(r.thread.needs_sam) %}{{ r.thread.needs_sam }}{% else %}{% for q in r.thread.asks %}{{ q.question }}{% if not loop.last %}; {% endif %}{% endfor %}{% endif %}</small>{% endfor %}
+      {% for r in a.raised_by %}<br><small class="ts">raised by {{ r.session }} on &ldquo;{{ r.thread.title }}&rdquo;: {% if has_value(r.thread.needs_sam) %}{{ r.thread.needs_sam }}{% else %}{% for q in r.thread.asks %}{{ q.question or "(no question given)" }}{% if not loop.last %}; {% endif %}{% endfor %}{% endif %}</small>{% endfor %}
     </li>
     {% endfor %}
   </ul>

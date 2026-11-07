@@ -480,7 +480,7 @@ def test_prose_after_ask_colon_in_a_legacy_thread_is_not_a_bad_id_finding() -> N
 
 
 def test_lint_flags_an_option_whose_text_is_empty() -> None:
-    found = findings(row("e", entry_text(ask_text(option=["Ship", "", "[irreversible]"]))))
+    found = findings(row("e", entry_text(ask_text(option=["Ship", "Wait", "", "[irreversible]"]))))
     assert [(f.rule, f.ask) for f in found if f.rule == "empty-option"] == [("empty-option", "a1")] * 2
     assert all(f.rule in {"empty-option", "reversible-conflict"} for f in found)
 
@@ -923,3 +923,134 @@ def test_a_repeated_after_with_any_non_empty_value_is_conditional(first: str, se
 def test_a_repeated_after_with_only_empty_values_is_not_conditional() -> None:
     a = only_ask(entry_text(ask_text(after="") + "\nafter:"))
     assert a.after == "" and a.conditional is False
+
+
+# --- nexus-wc4jj.13: S1 follow-ups --------------------------------------------------------
+
+
+@pytest.mark.parametrize("word", ["sam", "ok", "fixme", "Sam"])
+def test_a_lone_id_shaped_ask_word_is_legacy_prose_not_a_block(word: str) -> None:
+    (t,) = parse_session("e", f"## T\nask: {word}\nstate: x\n").threads
+    assert t.asks == ()
+    if word.lower() == "sam":
+        assert t.needs_sam == f"ask: {word}" and t.notes == ()
+    else:
+        assert t.needs_sam == "" and t.notes == (f"ask: {word}",)
+
+
+def test_a_legacy_ask_sam_reaches_needs_sam_on_the_board() -> None:
+    board = build_board([row("e", "## T\nask: sam\n")], NOW)
+    assert [i.thread.needs_sam for i in board.needs_you] == ["ask: sam"]
+    assert board.structured == ()
+
+
+def test_a_lone_ask_word_at_the_end_of_the_entry_is_legacy_prose() -> None:
+    assert parse_session("e", "## T\nstate: x\nask: ok").threads[0].asks == ()
+
+
+def test_an_id_with_one_following_ask_field_still_opens_a_block() -> None:
+    (a,) = parse_session("e", "## T\nask: a1\nquestion: Q?\n").threads[0].asks
+    assert (a.id, a.question) == ("a1", "Q?")
+
+
+def test_ask_fields_after_a_thread_field_do_not_make_the_lone_id_a_block() -> None:
+    (t,) = parse_session("e", "## T\nask: a1\nstate: x\nquestion: Q?\n").threads
+    assert t.asks == ()
+
+
+def test_an_empty_needs_sam_then_a_structured_ask_keeps_the_structured_ask() -> None:
+    (t,) = parse_session("e", entry_text(ask_text("a1"), thread_lines="needs_sam:")).threads
+    assert [a.id for a in t.asks] == ["a1"]
+    assert t.needs_sam == ""
+    assert t.notes == ()
+
+
+def test_an_empty_needs_sam_then_a_structured_ask_is_not_a_lint_finding() -> None:
+    assert findings(row("e", entry_text(ask_text("a1"), thread_lines="needs_sam:"))) == ()
+
+
+def test_an_empty_needs_sam_then_a_structured_ask_is_classified() -> None:
+    c = classify([row("e", entry_text(ask_text("a1"), thread_lines="needs_sam:"))], NOW, ())
+    assert ids(c.batch) == ["a1"]
+
+
+def test_a_lone_ask_with_a_bad_id_and_fields_is_surfaced_not_lost() -> None:
+    content = entry_text(ask_text("Bad_Id", question="Other?"))
+    (t,) = parse_session("e", content).threads
+    assert t.asks == ()
+    assert t.needs_sam != "" and "Bad_Id" in t.needs_sam and "Other?" in t.needs_sam
+    assert [(u.id, u.question) for u in t.unopened] == [("Bad_Id", "Other?")]
+    board = build_board([row("e", content)], NOW)
+    assert len(board.needs_you) == 1
+
+
+def test_classify_names_an_ask_whose_id_is_bad() -> None:
+    c = classify([row("e", entry_text(ask_text("Bad_Id", question="Other?")))], NOW, ())
+    assert [(u.entry, u.id, u.question) for u in c.malformed] == [("e", "Bad_Id", "Other?")]
+    assert all(not g for g in (c.interrupt, c.batch, c.quiet, c.conditional, c.answered))
+
+
+def test_a_bad_id_beside_a_good_ask_is_surfaced_too_and_the_good_ask_is_untouched() -> None:
+    content = entry_text(ask_text("a1"), ask_text("Bad_Id", question="Lost?"))
+    c = classify([row("e", content)], NOW, ())
+    assert ids(c.batch) == ["a1"]
+    assert [u.id for u in c.malformed] == ["Bad_Id"]
+
+
+def test_a_bad_id_ask_line_with_no_fields_after_it_is_not_malformed() -> None:
+    c = classify([row("old", "## T\nask: Sam please pick the port\n")], NOW, ())
+    assert c.malformed == ()
+
+
+def test_a_bad_id_ask_still_has_its_lint_finding() -> None:
+    assert ("bad-id", "Bad_Id") in pairs(findings(row("e", entry_text(ask_text("Bad_Id")))))
+
+
+@pytest.mark.parametrize("options", [["Ship", ""], ["", ""], ["Ship", "[irreversible]"]])
+def test_few_options_counts_only_non_blank_options(options: list[str]) -> None:
+    found = findings(row("e", entry_text(ask_text(option=options, rec=None, why=None))))
+    assert "few-options" in {f.rule for f in found}
+    assert "empty-option" in {f.rule for f in found}  # still fires too
+
+
+def test_two_real_options_with_a_blank_third_is_not_few_options() -> None:
+    found = findings(row("e", entry_text(ask_text(option=["Ship", "Wait", ""]))))
+    assert "few-options" not in {f.rule for f in found}
+
+
+# --- merge_asks with answer records (console) ---------------------------------------------
+
+
+def _open_asks(records, content: str | None = None, beads=()):
+    entries = [row("release", content or fixture("classes.txt"))]
+    board = build_board(entries, NOW)
+    return merge_asks(board.needs_you, beads, board.structured, records)
+
+
+def test_merge_asks_drops_an_ask_with_a_sent_record() -> None:
+    before = _open_asks(())
+    after = _open_asks([sent_record("already-answered")])
+    assert "already-answered" in [o.ask.id for o in before.structured]
+    assert "already-answered" not in [o.ask.id for o in after.structured]
+    assert after.count == before.count - 1
+
+
+def test_merge_asks_keeps_an_ask_whose_record_is_not_sent() -> None:
+    kept = _open_asks([sent_record("already-answered", "sending")])
+    assert "already-answered" in [o.ask.id for o in kept.structured]
+
+
+def test_merge_asks_keeps_an_ask_whose_record_is_for_an_older_version() -> None:
+    kept = _open_asks([sent_record("already-answered", version="0123456789abcdef")])
+    assert "already-answered" in [o.ask.id for o in kept.structured]
+
+
+def test_an_answered_ask_folded_into_a_bead_leaves_the_bead_pointer_and_question() -> None:
+    board = build_board([row("halcyon", fixture("halcyon.txt"))], NOW)
+    ask = board.structured[0].thread.asks[0]
+    rec = {"title": answer_title(ask), "content": json.dumps({"status": "sent"})}
+    bead = Bead("nexus-k9kr9", "Keying")
+    asks = merge_asks(board.needs_you, (bead,), board.structured, [rec])
+    assert asks.beads[0].ask_pointers == ()
+    assert asks.beads[0].raised_by == ()
+    assert asks.count == 1  # the bead itself still needs Sam
