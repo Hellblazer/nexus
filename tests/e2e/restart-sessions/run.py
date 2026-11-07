@@ -60,14 +60,20 @@ Shared by every scenario:
   sessions write to that service as the operator would: the restart mail expires with its
   TTL, and nothing here asks a session to write anything permanent;
 - nx-mcp's own exit teardown, judged on the engine (nexus-iz8ub; needs an installed nx-mcp that
-  carries 75e22da36, release 7.97.0 or later). Cleanup reads each session's T1 lease (session id and
-  token) and probes the token live, kills the tmux server (its pty hangup sends SIGHUP to each nx-mcp),
-  waits up to TEARDOWN_WAIT_S for the nx-mcp processes to exit with config.yml still in place (the
-  teardown reads it), and only then deletes the config. It fails the scenario on: an nx-mcp still
-  running; its t1_session_lease file still there; its T1 token still honoured by ``nx scratch list``
-  (the probe must have read ``live`` before the kill, so it cannot pass by being broken); a
-  ``directory/<name>`` row still leased to one of the scenario's sessions (``nx tuple directory``). So
-  the harness's own file deletion no longer stands in for the teardown, and nothing is "left on purpose";
+  carries 75e22da36, release 7.97.0 or later; with an older nx, or one whose version cannot be read, the
+  teardown findings are skipped with a loud note and the run ends "unverified", exit 2, no pass
+  recorded). Before the kill, cleanup reads each session's T1 lease (session id and token), probes the
+  token until it reads ``live``, and reads the ``directory/<name>`` rows the sessions hold; it then kills
+  the tmux server, waits up to TEARDOWN_WAIT_S for the nx-mcp processes to exit with config.yml still in
+  place (the teardown reads it), reads the engine again (repeated for SETTLE_S: the directory release
+  re-sends the row with a 1 s TTL), and only then deletes the config. It fails the scenario on: an
+  nx-mcp still running or unreadable; its t1_session_lease file still there; its T1 token still honoured
+  by ``nx scratch list``, or never proven live before; a ``directory/<name>`` row still leased to one of
+  the scenario's sessions, or none held before; and on a check that examined nothing (sessions ran but no
+  lease, no nx-mcp process or no session id was found, or a read raised). So the harness's own file
+  deletion no longer stands in for the teardown, and nothing is "left on purpose". The gate measures the
+  teardown however it was triggered, SIGHUP from the pty hangup or the stdin EOF of a dying claude: both
+  run the same code with the config still present, and it does not tell the two apart;
 - the conexus and sn plugins from a git marketplace named nexus-plugins, served from the
   scratch HOME over smart HTTP on 127.0.0.1 (``git http-backend``; Claude Code 2.1.316
   accepts an http URL, refuses ``git://`` and ``file://``, and cannot shallow-clone the dumb
@@ -139,9 +145,11 @@ sessions on the old release). The pre-cmqe8 copy (rs_draft, argv) and a caller-f
 install-early, shell-ready copy (caller-last, install window, rs_shell) failed the one-roll
 harness these checks come from (nexus-8m0ho); they were not rerun here.
 
-``run.py --hangup-check`` (no claude, no token, tmux and sh only) proves the premise of that teardown: that
+``run.py --hangup-check`` (no claude, no token, tmux and sh only) checks the tmux half of that: that
 ``tmux kill-server`` on a private ``-L`` server sends SIGHUP to a child process group that is not its group's
-leader, in a bash pane and in an ``exec`` pane. Its unit test runs it with the rest of the suite.
+leader, in a bash pane and in an ``exec`` pane. It runs ``sh`` processes, not the real claude -> uv ->
+nx-mcp chain, so it shows the mechanism and not that nx-mcp's group is the pane's foreground group; only a
+real sandbox run shows that. Its unit test runs it with the rest of the suite.
 
 Run through run.sh (it supplies the automation token, RDR-219). Prints one verdict line,
 ``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1 (a precondition
@@ -636,7 +644,7 @@ class Sandbox:
                 "CLAUDE_CODE_SSE_PORT", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "NEXUS_CONFIG_DIR",
                 "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
                 "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID",
-                "NX_SESSION_ID", "NX_T1_SESSION_ID",
+                "NX_SESSION_ID", "NX_T1_SESSION_ID", "NX_T1_SESSION",
                 # the operator's generation root: hooks would resolve nx there, past the nx stand-in
                 "NX_TOOLS_DIR")
         self.env = {k: v for k, v in os.environ.items() if k not in drop}
@@ -1839,15 +1847,50 @@ def _end(procs: list[tuple[int, str]]) -> int:
 
 
 #: How long cleanup waits, after kill-server, for the sessions' nx-mcp processes to exit by themselves
-#: (nexus-iz8ub). nx-mcp's exit teardown (75e22da36: SIGHUP runs it like SIGTERM) flushes flagged T1 rows
-#: for up to 5 s, revokes the token, and releases the directory name for up to 3 s, so a slow engine can
-#: take 8 s; 10 s leaves room. Deleting config.yml sooner would starve it: the teardown builds its token
-#: store when it runs and reads the config then.
-TEARDOWN_WAIT_S = 10.0
+#: (nexus-iz8ub). The exit teardown (75e22da36) runs the T1 flush (bounded 5 s) and then the token
+#: revoke (bounded 5 s) one after the other, with the directory-name release (bounded 3 s) running
+#: alongside them, plus the search-telemetry drain before them; the worst case is a little over 10 s,
+#: so 20 s. Deleting config.yml sooner would starve it: the teardown builds its token store when it
+#: runs and reads the config then.
+TEARDOWN_WAIT_S = 20.0
+#: How long the engine-side reads are repeated until they settle: the directory release re-sends the
+#: row with a 1 s TTL (so it can still read live just after the exit), and a session just started may
+#: not have published its row yet.
+SETTLE_S = 5.0
+#: The first release whose nx-mcp runs its exit teardown on SIGHUP (75e22da36). Below it the gate cannot
+#: judge a teardown, and says so rather than failing.
+TEARDOWN_MIN_VERSION = (7, 97, 0)
+#: Sandboxes whose teardown check was skipped (one reason each); main() exits "unverified" instead of
+#: passing when this is not empty.
+UNVERIFIED: list[str] = []
 #: What ``nx scratch list`` prints for a T1 session token the engine has revoked
 #: (``nexus.db.http_scratch_store.SESSION_UNAUTHORIZED_MARKER`` minus its prefix; a test pins the pair).
+#: A bearer that is wrong prints it too, which is why the probe must read ``live`` before the kill.
 T1_UNAUTHORIZED = "unauthorized T1 session (HTTP 401)"
 LEASE_PREFIX = "t1_session_lease."
+
+
+def nx_version(nx: str, *, run=None) -> tuple[int, int, int] | None:
+    """``nx --version`` as (major, minor, patch); None when it cannot be read."""
+    run = run or subprocess.run
+    try:
+        r = run([nx, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", r.stdout) if r.returncode == 0 else None
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def teardown_unverified_reason(nx: str, *, run=None) -> str:
+    """Why the nx-mcp teardown cannot be judged with this nx ("" when it can): the installed release is
+    below TEARDOWN_MIN_VERSION, or its version cannot be read. The sessions run the installed nx-mcp."""
+    floor = ".".join(map(str, TEARDOWN_MIN_VERSION))
+    v = nx_version(nx, run=run)
+    if v is None:
+        return f"could not read `{nx} --version`: the installed release may predate nx-mcp's SIGHUP teardown ({floor})"
+    if v < TEARDOWN_MIN_VERSION:
+        return f"installed nx is {'.'.join(map(str, v))}, below {floor}, the first release whose nx-mcp tears down on SIGHUP"
+    return ""
 
 
 def nx_mcp_procs(procs: list[tuple[int, str]]) -> list[tuple[int, str]]:
@@ -1864,26 +1907,53 @@ def nx_mcp_procs(procs: list[tuple[int, str]]) -> list[tuple[int, str]]:
     return sorted(out)
 
 
+def _args_or_none(pid: int) -> str | None:
+    """The pid's argv ("" when no such process), or None when ps did not answer: unknown, not gone."""
+    try:
+        return subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=30).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def wait_for_exit(procs: list[tuple[int, str]], timeout: float = TEARDOWN_WAIT_S, *, poll_s: float = 0.25,
                   args_of=None, clock=time.monotonic, sleep=time.sleep) -> list[tuple[int, str]]:
     """Wait up to *timeout* s for each (pid, argv) to stop running with that argv (a reused pid is a
-    different process, as in :func:`_end`); return the stragglers, empty when all exited. Waits for the
-    last one only as long as the bound allows, never longer."""
-    args_of = args_of or _args_of
+    different process, as in :func:`_end`); return the stragglers, empty when all exited. *args_of* gives
+    the pid's argv, "" for no such process, or None when it could not be read: that is unknown, so the
+    pid is kept and waited on (and reported at the bound), never taken as exited. Waits for the last one
+    only as long as the bound allows, never longer."""
+    args_of = args_of or _args_or_none
     deadline = clock() + timeout
     live = list(procs)
     while True:
-        live = [(p, a) for p, a in live if a and args_of(p) == a]
+        live = [(p, a) for p, a in live if a and args_of(p) in (None, a)]
         if not live or clock() >= deadline:
             return live
         sleep(min(poll_s, max(0.0, deadline - clock())))
 
 
+def poll(read, done, settle_s: float, *, every: float = 1.0, clock=None, sleep=None):
+    """``read()`` until ``done(value)`` or *settle_s* seconds have passed (one read when 0); return the
+    last value. *sleep* must advance *clock*."""
+    clock, sleep = clock or time.monotonic, sleep or time.sleep
+    deadline = clock() + settle_s
+    while True:
+        value = read()
+        if done(value) or clock() >= deadline:
+            return value
+        sleep(min(every, max(0.0, deadline - clock())))
+
+
 def read_t1_leases(config_dir: Path) -> dict[str, str]:
     """The T1 session leases published in *config_dir*, as {session id: token}. No freshness check: the
-    point is the token a live session held. A file that does not parse is left out."""
+    point is the token a live session held. A file that does not parse is left out, and so are the
+    transient ``<lease>.<pid>.<uuid>.tmp`` files a publish writes before it renames them into place
+    (nexus.db.t1.publish_t1_session_lease)."""
     out = {}
     for f in sorted(config_dir.glob(f"{LEASE_PREFIX}*")):
+        if f.name.endswith(".tmp"):
+            continue
         try:
             token = json.loads(f.read_text(encoding="utf-8"))["token"]
         except (OSError, ValueError, KeyError, TypeError):
@@ -1893,56 +1963,139 @@ def read_t1_leases(config_dir: Path) -> dict[str, str]:
     return out
 
 
-def t1_session_state(nx: str, sid: str, token: str, env: dict[str, str], *, run=None) -> str:
+def t1_session_state(nx: str, sid: str, token: str, env: dict[str, str], *, run=None, sleep=None,
+                     attempts: int = 3, pause_s: float = 1.0, timeout_s: float = 20.0) -> str:
     """Ask the engine whether a T1 session token still works: ``nx scratch list`` with the token as the
     inherited session (that path never mints a session of its own). ``live`` on exit 0, ``revoked`` on a
-    401 naming T1_UNAUTHORIZED, else ``unknown (...)``; never the token or the command's output."""
-    run = run or subprocess.run
-    try:
-        r = run([nx, "scratch", "list"], capture_output=True, text=True, timeout=60,
-                env={**env, "NX_T1_SESSION": token, "NX_T1_SESSION_ID": sid})
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"unknown ({type(exc).__name__})"
-    if r.returncode == 0:
-        return "live"
-    if T1_UNAUTHORIZED in f"{r.stdout}\n{r.stderr}":
-        return "revoked"
-    return f"unknown (exit {r.returncode})"
+    401 naming T1_UNAUTHORIZED, else ``unknown (...)``, which is tried again up to *attempts* times with
+    *pause_s* between, each bounded by *timeout_s*. An unknown carries the last line of stderr (the token
+    masked), never the token."""
+    run, sleep = run or subprocess.run, sleep or time.sleep
+    state = "unknown"
+    for i in range(attempts):
+        if i:
+            sleep(pause_s)
+        try:
+            r = run([nx, "scratch", "list"], capture_output=True, text=True, timeout=timeout_s,
+                    env={**env, "NX_T1_SESSION": token, "NX_T1_SESSION_ID": sid})
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            state = f"unknown ({type(exc).__name__})"
+            continue
+        if r.returncode == 0:
+            return "live"
+        if T1_UNAUTHORIZED in f"{r.stdout}\n{r.stderr}":
+            return "revoked"
+        last = next((ln.strip() for ln in reversed((r.stderr or "").splitlines()) if ln.strip()), "")
+        last = last.replace(token, "<token>")[:120]
+        state = f"unknown (exit {r.returncode}{': ' + last if last else ''})"
+    return state
 
 
-def t1_states(nx: str, leases: dict[str, str], env: dict[str, str], *, run=None) -> dict[str, str]:
-    return {sid: t1_session_state(nx, sid, token, env, run=run) for sid, token in sorted(leases.items())}
+def t1_states(nx: str, leases: dict[str, str], env: dict[str, str], *, run=None, sleep=None) -> dict[str, str]:
+    return {sid: t1_session_state(nx, sid, token, env, run=run, sleep=sleep)
+            for sid, token in sorted(leases.items())}
 
 
-def engine_teardown_findings(*, nx: str, names: list[str], sids: set[str], leases: dict[str, str],
-                             before: dict[str, str], env: dict[str, str], config_dir: Path,
-                             exited: list[tuple[int, str]], stragglers: list[tuple[int, str]],
-                             run=None) -> list[str]:
+def poll_t1_states(nx: str, leases: dict[str, str], env: dict[str, str], want: str, settle_s: float, *,
+                   run=None, sleep=None, clock=None) -> dict[str, str]:
+    """The T1 states, read again until every one is *want* or *settle_s* passes."""
+    return poll(lambda: t1_states(nx, leases, env, run=run, sleep=sleep),
+                lambda st: all(v == want for v in st.values()), settle_s, clock=clock, sleep=sleep)
+
+
+@dataclasses.dataclass
+class Baseline:
+    """What nx-mcp's teardown is judged against, read while the sessions still run (nexus-iz8ub)."""
+    leases: dict[str, str] = dataclasses.field(default_factory=dict)  #: session id -> token
+    live: dict[str, str] = dataclasses.field(default_factory=dict)  #: each token's probe before the kill
+    sids: set[str] = dataclasses.field(default_factory=set)  #: session ids that could hold a directory lease
+    directory: tuple[list[str], list[str]] | None = None  #: (leases held, rows not read) before the kill
+    errors: list[str] = dataclasses.field(default_factory=list)  #: what could not be read: each a finding
+
+
+def read_baseline(sb: Sandbox, supported: bool, *, run=None, sleep=None, clock=None,
+                  settle_s: float | None = None) -> Baseline:
+    """Read the baseline: the T1 leases, the session ids and, with an nx to ask and a nx-mcp that tears
+    down, each token probed live and the directory rows read, both repeated until they settle. A read
+    that raises is a finding, never a note: the check must not read as clean when it did not look."""
+    b = Baseline()
+    settle_s = SETTLE_S if settle_s is None else settle_s
+
+    def attempt(what: str, fn) -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 -- a baseline that could not be read is a finding
+            b.errors.append(f"{what} not read before the kill: {type(exc).__name__}: {exc}")
+
+    def leases() -> None:
+        b.leases = read_t1_leases(sb.nexus_config)
+
+    def sids() -> None:
+        b.sids = {str(d.get("sessionId", "")) for d in [*sb.entries(), *sb.before.values()] if d} - {""}
+
+    attempt("T1 session leases", leases)
+    attempt("session ids", sids)
+    if sb.real_nx and supported:
+        attempt("T1 session probes", lambda: b.live.update(
+            poll_t1_states(sb.real_nx, b.leases, sb.env, "live", settle_s, run=run, sleep=sleep, clock=clock)))
+
+        def directory() -> None:
+            b.directory = poll(lambda: directory_leases(sb.real_nx, directory_names(sb), b.sids, run=run),
+                               lambda v: bool(v[0]), settle_s, clock=clock, sleep=sleep)
+
+        attempt("directory rows", directory)
+    return b
+
+
+def engine_teardown_findings(*, nx: str, names: list[str], base: Baseline, env: dict[str, str],
+                             config_dir: Path, exited: list[tuple[int, str]],
+                             stragglers: list[tuple[int, str]], expect: bool = False,
+                             settle_s: float | None = None, run=None, sleep=None, clock=None) -> list[str]:
     """What nx-mcp's own exit teardown left undone, read where it happens and before the harness deletes
     anything: the processes still running (*stragglers*), each session's lease file still on disk, each T1
-    session the engine still honours, each ``directory/<name>`` row still leased. *before* is each lease's
-    state read while its session ran: a probe that did not read ``live`` then proves nothing after, so that
-    session is a finding. *exited* is the nx-mcp processes that were waited on; with leases but none,
-    nothing was checked and the run says so rather than passing."""
-    out = [f"nx-mcp pid {p} still running {TEARDOWN_WAIT_S:.0f} s after kill-server (its teardown did not "
-           f"finish, or it never got SIGHUP): {a[:100]}" for p, a in stragglers]
-    if leases and not exited:
-        out.append(f"{len(leases)} T1 session lease(s) were published but no nx-mcp process was found to wait "
-                   f"for: the teardown check examined nothing")
-    for sid in sorted(leases):
+    session the engine still honours, each ``directory/<name>`` row still leased. The engine reads are
+    repeated for *settle_s*, since the row release re-sends the row with a 1 s TTL.
+
+    Each engine read needs a positive control from *base*: the token must have probed ``live``, and a
+    directory lease must have been held, before the kill; otherwise "released" proves nothing and that is a
+    finding. *expect* (sessions ran and there is an nx to ask): no leases, no nx-mcp process or no session
+    id means the check examined nothing, which is a finding and not a pass."""
+    out = list(base.errors)
+    settle_s = SETTLE_S if settle_s is None else settle_s
+    if stragglers:
+        out += [f"nx-mcp pid {p} still running (or unreadable) {TEARDOWN_WAIT_S:.0f} s after kill-server: its "
+                f"teardown did not finish, or it was not hung up: {a[:100]}" for p, a in stragglers]
+    if expect and not base.leases:
+        out.append("teardown unexamined: sessions ran but no T1 session lease was published or readable")
+    if not exited and (expect or base.leases):
+        out.append(f"teardown unexamined: {len(base.leases)} T1 session lease(s) were published but no nx-mcp "
+                   f"process was found to wait for")
+    if expect and not base.sids:
+        out.append("teardown unexamined: no session id was collected, so no directory lease can be attributed")
+    for sid in sorted(base.leases):
         if (config_dir / f"{LEASE_PREFIX}{sid}").exists():
             out.append(f"T1 session {sid[:8]}: nx-mcp left its lease file {LEASE_PREFIX}{sid[:8]}... behind")
-    if leases and nx:
-        for sid, state in t1_states(nx, leases, env, run=run).items():
-            if before.get(sid) != "live":
+    if base.leases and nx:
+        after = poll_t1_states(nx, base.leases, env, "revoked", settle_s, run=run, sleep=sleep, clock=clock)
+        for sid, state in after.items():
+            if base.live.get(sid) != "live":
                 out.append(f"T1 session {sid[:8]}: revocation not provable, the probe read "
-                           f"{before.get(sid, 'nothing')!r} while the session ran (it must read 'live')")
+                           f"{base.live.get(sid, 'nothing')!r} while the session ran (it must read 'live')")
             elif state == "live":
                 out.append(f"T1 session {sid[:8]}: not revoked after its nx-mcp exited")
             elif state != "revoked":
                 out.append(f"T1 session {sid[:8]}: revocation not determined, the probe read {state}")
-    if nx and sids:
-        held, unread = directory_leases(nx, names, sids, run=run)
+    if nx and base.sids:
+        if base.directory is None:
+            out.append("directory leases not read before the kill: their release proves nothing")
+        else:
+            held_before, unread_before = base.directory
+            out += [f"before the kill: {u}" for u in unread_before]
+            if not held_before:
+                out.append("no directory lease was held by the scenario's sessions while they ran: their "
+                           "release proves nothing")
+        held, unread = poll(lambda: directory_leases(nx, names, base.sids, run=run), lambda v: not v[0],
+                            settle_s, clock=clock, sleep=sleep)
         if held:
             out.append(f"directory lease still held after nx-mcp exited: {held}")
         out += unread
@@ -1985,34 +2138,31 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
         leftovers = sorted(set(leftovers) | set(sb.watch.still_running()))
     except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
         notes.append(f"watched processes not checked: {type(exc).__name__}: {exc}")
-    # What nx-mcp's own SIGHUP teardown has to be judged against, read while the sessions still run
-    # (nexus-iz8ub): their nx-mcp pids, the T1 leases they published (session id and token), each token
-    # probed live, and the session ids that could hold a directory lease.
+    # What nx-mcp's own SIGHUP teardown is judged against is read while the sessions still run
+    # (nexus-iz8ub): their nx-mcp pids, the T1 leases they published (each token probed live), the session
+    # ids that could hold a directory lease and which rows they hold.
     nx_mcp = nx_mcp_procs(leftovers)
-    leases: dict[str, str] = {}
-    live_states: dict[str, str] = {}
-    sids: set[str] = set()
-    try:
-        leases = read_t1_leases(sb.nexus_config)
-        if sb.real_nx:
-            live_states = t1_states(sb.real_nx, leases, sb.env)
-        sids = {str(d.get("sessionId", "")) for d in [*sb.entries(), *sb.before.values()] if d} - {""}
-    except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
-        notes.append(f"teardown baseline not read: {type(exc).__name__}: {exc}")
+    unverified = teardown_unverified_reason(sb.real_nx) if sb.real_nx else ""
+    if unverified:
+        UNVERIFIED.append(f"{sb.spec.name}: {unverified}")
+        notes.append(f"UNVERIFIED: nx-mcp's teardown is NOT judged in this run: {unverified}")
+    base = Baseline() if unverified else read_baseline(sb, True)
     try:
         sb.tmux("kill-server", timeout=30)
     except subprocess.TimeoutExpired:
         notes.append("tmux kill-server timed out")
     # The hangup reaches nx-mcp now; its teardown reads config.yml, so the config stays until it is done.
     stragglers = wait_for_exit(nx_mcp, TEARDOWN_WAIT_S)
-    try:
-        teardown = engine_teardown_findings(
-            nx=sb.real_nx, names=directory_names(sb), sids=sids, leases=leases, before=live_states, env=sb.env,
-            config_dir=sb.nexus_config, exited=nx_mcp, stragglers=stragglers)
-    except Exception as exc:  # noqa: BLE001 -- a check that could not run is a finding, not a pass
-        teardown = [f"engine-side teardown check did not run: {type(exc).__name__}: {exc}"]
+    teardown: list[str] = []
+    if not unverified:
+        try:
+            teardown = engine_teardown_findings(
+                nx=sb.real_nx, names=directory_names(sb), base=base, env=sb.env, config_dir=sb.nexus_config,
+                exited=nx_mcp, stragglers=stragglers, expect=bool(sb.before and sb.real_nx))
+        except Exception as exc:  # noqa: BLE001 -- a check that could not run is a finding, not a pass
+            teardown = [f"engine-side teardown check did not run: {type(exc).__name__}: {exc}"]
     notes.append(f"teardown: waited on {len(nx_mcp)} nx-mcp process(es), {len(stragglers)} still running after "
-                 f"{TEARDOWN_WAIT_S:.0f} s; {len(leases)} T1 session(s) and {len(directory_names(sb))} directory "
+                 f"{TEARDOWN_WAIT_S:.0f} s; {len(base.leases)} T1 session(s) and {len(directory_names(sb))} directory "
                  f"name(s) read from the engine" + ("" if sb.real_nx else " (skipped: nx is not on PATH)"))
     sb.delete_config()
     time.sleep(3)
@@ -2508,6 +2658,7 @@ def main() -> int:
     # were before the first scenario, and only if neither changed by the end (a fast-forward of the
     # primary or a Claude Code auto-update mid-run would otherwise be recorded as tested).
     tested = (crs.script_sha256(SCRIPT), crs.claude_version(claude), crs.tmux_version(), crs.harness_sha256())
+    UNVERIFIED.clear()
     for name in chosen:
         ok, failures, _ = run_scenario(name, claude, a, crs)
         results[name] = (ok, len(failures))
@@ -2516,7 +2667,13 @@ def main() -> int:
     verdict = "RESTART SANDBOX FAILED" if bad else "RESTART SANDBOX PASSED"
     print(f"{verdict} -- {len(chosen)} scenario(s) ({', '.join(chosen)}), {total} failure(s)"
           + (f" in {', '.join(bad)}" if bad else "") + f", {time.time() - t0:.0f}s", flush=True)
-    if records_a_pass(chosen, bad):
+    if UNVERIFIED:  # nexus-iz8ub: the teardown was not judged, so neither a pass nor a recorded one
+        for why in UNVERIFIED:
+            print(f"RESTART SANDBOX UNVERIFIED -- nx-mcp's teardown was not judged ({why})", flush=True)
+        if not bad:
+            print("the scenarios passed but the gate is incomplete: no pass recorded, exit 2", flush=True)
+            return 2
+    elif records_a_pass(chosen, bad):
         print(record_full_pass(crs, claude, tested, chosen, time.time() - t0), flush=True)
     return 1 if bad else 0
 
