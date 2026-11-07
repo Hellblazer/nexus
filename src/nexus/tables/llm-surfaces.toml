@@ -462,6 +462,7 @@ targets = [
     "nexus.commands.mineru:start",
     "nexus.commands.mineru:status",
     "nexus.daemon.mineru_lifecycle:_healthy",
+    "nexus._mineru_pid:server_identified",
   ]
 endpoints = ["mineru-url"]
 behaviour = "skip"
