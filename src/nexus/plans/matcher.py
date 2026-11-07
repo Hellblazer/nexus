@@ -376,7 +376,8 @@ def _log_reserved_drops(drops: list[tuple[int, tuple[str, ...]]]) -> None:
 
 def _embedded_step_ref(m: Match) -> tuple[str, str] | None:
     """``(ref, reason)`` when *m*'s plan holds a ``$stepN.field`` the runner will not substitute,
-    or a verify step with no claim (ref ``verify``; nexus-z1d0l.1.11).
+    or an operator step missing an argument its author must supply (ref ``operator_arg``: a verify with no claim
+    or no evidence, a check with no check_instruction; nexus-z1d0l.1.11, nexus-iy2ep).
 
     The runner raises on the first before its first dispatch (nexus-jypmj.1.19) and on the second
     when it reaches the step, after the steps before it are paid for, so a saved or imported row
@@ -388,8 +389,8 @@ def _embedded_step_ref(m: Match) -> tuple[str, str] | None:
     err = find_embedded_step_ref(m.plan_json)
     if err is not None:
         return (err.ref, err.reason)
-    claimless = operator_arg_reason(m.plan_json)
-    return None if claimless is None else ("verify", claimless)
+    missing = operator_arg_reason(m.plan_json)
+    return None if missing is None else ("operator_arg", missing)
 
 
 def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
@@ -409,8 +410,8 @@ def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
         detail=[{"plan_id": pid, "ref": ref, "reason": why} for pid, ref, why in snapshot],
         remedy=(
             "the plan can only fail at run time; nx plan hygiene --apply retires it, or "
-            "edit it so each arg is one $stepN.<field> reference or a list of them, and every "
-            "verify step has a claim"
+            "edit it so each arg is one $stepN.<field> reference or a list of them, every "
+            "verify step has a claim and ids or evidence, and every check step a check_instruction"
         ),
     )
 

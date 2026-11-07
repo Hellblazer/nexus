@@ -588,8 +588,9 @@ class CoverageResult:
 
     @property
     def conflicted_facet_ids(self) -> tuple[str, ...]:
-        """Facets that are covered and also contradicted by other evidence: answered, but the reduction and the
-        notice say the evidence conflicts."""
+        """Facets that are covered and also contradicted by other evidence. A plain conflicted facet is answered,
+        with the reduction and the notice saying the evidence conflicts; one that started contradicted
+        (``conflicted_from_contradicted``) is listed as unresolved in both (nexus-2hx2u)."""
         return tuple(f.facet_id for f in self.ledger.findings if f.state == "covered" and f.reason in CONFLICTED_REASONS)
 
     @property

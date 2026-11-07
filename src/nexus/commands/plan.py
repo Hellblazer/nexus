@@ -173,8 +173,9 @@ def _hygiene_apply(library, findings: list[dict]) -> int:
 @click.option("--apply", "apply_", is_flag=True,
               help="Disable the flagged plans (default: report only).")
 def hygiene_cmd(apply_: bool) -> None:
-    """Scan the plan library for bead-dumps, embedded step references,
-    null-verb rows, and always-failing plans; --apply DISABLES them (reversible via
+    """Scan the plan library for bead-dumps, embedded step references, operator
+    steps missing a claim, evidence or check_instruction, null-verb rows, and
+    always-failing plans; --apply DISABLES them (reversible via
     `nx plan enable` — never deletes).
 
     Routes through HttpPlanLibrary, so it cleans the live engine-served

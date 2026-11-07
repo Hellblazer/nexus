@@ -6,6 +6,7 @@ nx plan hygiene refuse it (nexus-z1d0l.1.11)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,8 @@ from nexus.plans.seed_loader import load_seed_directory
 from tests.test_6pfgb11_provenance_from_catalog import COLL, X, _position, _t3
 from tests.test_6pfgb50_runner_chash_reuses_rows import _CountingCatalog, _plain
 from tests.test_plan_run import _match
+from tests.test_rdr232_caller_scope import _drive_nx_answer, _plan_run_result
+from tests.test_rdr232_caller_scope import _match as _cs_match
 from tests.test_rdr232_embedded_ref_guards import (  # noqa: F401 - info_logging is a fixture
     _Cache,
     _HygieneLibrary,
@@ -222,7 +225,7 @@ def test_the_matcher_excludes_a_stored_claimless_verify(path, info_logging) -> N
     ids = [m.plan_id for m in matches]
     assert 2 in ids and 1 not in ids
     excluded = [e for e in logs if e.get("event") == "plan_match_embedded_step_ref_excluded"]
-    assert [(d["plan_id"], d["ref"]) for d in excluded[0]["detail"]] == [(1, "verify")]
+    assert [(d["plan_id"], d["ref"]) for d in excluded[0]["detail"]] == [(1, "operator_arg")]
     assert 1 not in lib.bumped
 
 
@@ -240,6 +243,10 @@ NO_INSTRUCTION = {"steps": [{"tool": "search", "args": {"query": "latency", "cor
                             {"tool": "check", "args": {"ids": "$step1.ids"}}]}
 INSTRUCTED = {"steps": [{"tool": "search", "args": {"query": "latency", "corpus": "knowledge"}},
                         {"tool": "check", "args": {"ids": "$step1.ids", "check_instruction": "does latency drop"}}]}
+#: A verify right after an operator step bundles with it and takes that step's output as its evidence.
+BUNDLED = {"steps": [{"tool": "search", "args": {"query": "latency", "corpus": "knowledge"}},
+                     {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "claim"}},
+                     {"tool": "verify", "args": {"claim": "latency drops"}}]}
 _DEFECTS = [
     (NO_EVIDENCE, "step 2 is a verify step with neither ids nor evidence"),
     (NO_INSTRUCTION, "step 2 is a check step with no check_instruction"),
@@ -258,6 +265,11 @@ _DEFECTS = [
         ({"steps": [{"tool": "mcp__plugin_conexus_nexus__operator_check", "args": {"check_instruction": ""}}]}, 0),
         (INSTRUCTED, None),
         (CLAIMED, None),
+        (BUNDLED, None),  # the bundle hands verify the extract step's output (review r1 I1)
+        ({"steps": [{"tool": "search", "args": {}}, {"tool": "extract", "args": {}},
+                    {"tool": "search", "args": {}}, {"tool": "verify", "args": {"claim": "x"}}]}, 3),
+        ({"steps": [{"tool": "verify", "args": {"claim": "x", "evidence": ["a", "b"]}}]}, None),
+        ({"steps": [{"tool": "verify", "args": {"claim": "x", "evidence": []}}]}, 0),
         ("not json", None),
         (None, None),
     ],
@@ -327,11 +339,6 @@ def test_a_retried_plan_with_an_embedded_step_ref_fails_in_the_planner(monkeypat
 async def test_nx_answer_final_text_of_a_zero_evidence_terminal_is_the_no_evidence_text(tool) -> None:
     """nexus-iy2ep: nx_answer reads the terminal payload text-first, so a zero-evidence check or verify ends in its
     no-evidence text, never the JSON-encoded v1 payload."""
-    import asyncio
-
-    from tests.test_rdr232_caller_scope import _drive_nx_answer, _plan_run_result
-    from tests.test_rdr232_caller_scope import _match as _cs_match
-
     args = {"inputs": ["", ""], "check_instruction": "agree?"} if tool == "check" else {
         "ids": [], "claim": "latency drops", "evidence": ""}
     with patch(f"nexus.mcp.core.operator_{tool}") as op:
@@ -345,3 +352,22 @@ async def test_nx_answer_final_text_of_a_zero_evidence_terminal_is_the_no_eviden
     env, _ = await asyncio.to_thread(_drive_nx_answer, plan, scope="", structured=True, plan_run_result=res)
     assert env["final_text"].startswith(runner._NO_EVIDENCE_RESULT_PREFIX), env["final_text"]
     assert not env["final_text"].lstrip().startswith("{")
+
+
+@pytest.mark.asyncio
+async def test_the_bundled_extract_then_verify_shape_the_scan_admits_is_one_plan_run_runs() -> None:
+    """Review r1 I1: the scan must refuse no plan plan_run runs. This shape runs as one bundle."""
+    assert runner.find_operator_arg_defect(BUNDLED) is None
+    bundles: list = []
+
+    async def fake_dispatch_bundle(bundle, **_kw):
+        bundles.append(bundle)
+        return {"verified": True, "reason": "ok", "evidence": [], "rejected": [], "requires_review": True}
+
+    async def stub_search(**_kw):
+        return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"],
+                "chunk_text_hash": ["h1"], "chunk_collections": ["knowledge"]}
+
+    with patch("nexus.plans.bundle.dispatch_bundle", fake_dispatch_bundle), patch.object(mcp_core, "search", stub_search):
+        result = await runner.plan_run(_match(BUNDLED))
+    assert len(bundles) == 1 and result.final is not None

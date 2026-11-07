@@ -4065,7 +4065,7 @@ nx plan disable PLAN_ID          # Soft-disable a plan without deleting it
 nx plan enable PLAN_ID           # Re-enable a previously disabled plan
 nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
 nx plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
-nx plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, null-verb, always-failing plans
+nx plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, operator steps missing a claim/evidence/check_instruction, null-verb, always-failing plans
 ```
 
 Service mode is the only mode: all verbs (`list` / `show` / `delete` /

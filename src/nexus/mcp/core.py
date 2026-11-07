@@ -10432,7 +10432,9 @@ from a retrieval step; the runner hydrates them and keeps each item's source.
   verify(claim, ids, collections)
       - Tests ONE claim against the retrieved passages. `claim` is the
         assertion to test and is REQUIRED: a verify step with ids and no
-        claim fails the plan, it is never filled in for you.
+        claim fails the plan, it is never filled in for you. Its evidence is
+        `ids` (or `evidence` text, or the output of the operator step right
+        before it); a verify step with none of these fails the plan too.
       - Output: {verified, reason, evidence: [same items as check],
         rejected, requires_review, citations}.
 
@@ -12448,7 +12450,8 @@ def _nx_answer_planner_request_block(coverage: "RequestCoverage | None") -> str:
 async def _claimed_verify_plan(
     plan_json: str, prompt: str, plan_from: Callable[[str], Awaitable[str]], *, may_retry: bool,
 ) -> str:
-    """*plan_json*, once no verify step in it lacks a claim (nexus-z1d0l.1.11).
+    """*plan_json*, once no operator step in it lacks an author-supplied argument (a verify's claim or evidence, a
+    check's check_instruction; nexus-z1d0l.1.11, nexus-iy2ep) and, after a retry, it holds no embedded step ref.
 
     ``plan_run`` refuses a verify step with no claim when it reaches it, after the steps before it
     are paid for, and the host never invents a claim. So the planner is asked once more with the

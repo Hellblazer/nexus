@@ -1262,6 +1262,12 @@ def _is_named(tool: str, names: tuple[str, ...]) -> bool:
     return tool in names or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in names)))
 
 
+def _is_operator(tool: str) -> bool:
+    """*tool* names an operator step (bare, ``operator_*`` or ``mcp__...__``-prefixed): contiguous operators bundle."""
+    bare = tool.rsplit("__", 1)[-1] if tool.startswith("mcp__") else tool
+    return bare in _OPERATOR_TOOL_MAP or bare in _OPERATOR_RESOLVED_TOOLS
+
+
 def _blank(value: Any) -> bool:
     return not (isinstance(value, str) and value.strip())
 
@@ -1275,11 +1281,13 @@ def find_operator_arg_defect(plan: "str | dict[str, Any] | None") -> tuple[int, 
     the matcher and ``nx plan hygiene``). Three defects, in step order:
 
     * a verify step with no non-blank ``claim`` (the host never invents one);
-    * a verify step with neither ``ids`` nor a non-blank ``evidence`` (nothing to check the claim against);
+    * a verify step with neither ``ids`` nor ``evidence`` that does not follow an operator step (nothing to check
+      the claim against; after an operator, a bundle hands it that step's output as its evidence);
     * a check step with no non-blank ``check_instruction`` (the claim or question it checks).
 
-    A value counts only as a non-blank string (``$stepN.text`` is one); a deferred-ref mapping exists only
-    inside a running bundle, never in plan JSON. Anything that is not a plan with a ``steps`` list returns
+    A claim or instruction counts only as a non-blank string (``$stepN.text`` is one); evidence counts as a
+    non-blank string or a non-empty list. A deferred-ref mapping exists only inside a running bundle, never in
+    plan JSON. Other missing args (a check with no items, a summarize with no content) are not scanned. Anything that is not a plan with a ``steps`` list returns
     ``None``, as :func:`find_embedded_step_ref` does.
     """
     if isinstance(plan, str):
@@ -1290,16 +1298,23 @@ def find_operator_arg_defect(plan: "str | dict[str, Any] | None") -> tuple[int, 
     steps = plan.get("steps") if isinstance(plan, dict) else None
     if not isinstance(steps, list):
         return None
+    after_operator = False
     for index, step in enumerate(steps):
         tool = step.get("tool") if isinstance(step, dict) else None
         if not isinstance(tool, str):
+            after_operator = False
             continue
+        follows_operator, after_operator = after_operator, _is_operator(tool)
         args = step.get("args")
         args = args if isinstance(args, dict) else {}
         if _is_named(tool, _VERIFY_TOOL_NAMES):
             if _blank(args.get("claim")):
                 return index, _claimless_text(index)
-            if "ids" not in args and _blank(args.get("evidence")):
+            evidence = args.get("evidence")
+            if (
+                not follows_operator and "ids" not in args and _blank(evidence)
+                and not (isinstance(evidence, list) and evidence)
+            ):
                 return index, (
                     f"step {index + 1} is a verify step with neither ids nor evidence, "
                     "so it has nothing to check its claim against"

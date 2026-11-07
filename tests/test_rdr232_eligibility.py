@@ -1379,6 +1379,15 @@ def test_a_matrix_refusal_reports_no_recorded_kind() -> None:
     assert filt.to_wire()["refused_recorded_kinds"] == {}
 
 
+def test_a_grown_plan_refused_for_another_reason_is_not_counted_as_a_lookup_refusal() -> None:
+    """Review r1: a grown plan with a recorded kind refused for a non-lookup request (its route unreviewed) carries
+    recorded_kind too; only grown_route_not_lookup refusals are counted."""
+    _, filt = _match([GROWN_SYNTHESIS], [(904, 0.05)], C)
+    wire = filt.to_wire()
+    assert filt.excluded_plan_ids == [904] and "grown_route_not_lookup" not in wire["branches"]["cosine"]["reasons"]
+    assert wire["refused_recorded_kinds"] == {}
+
+
 def test_the_lookup_narrowing_reason_is_in_the_closed_vocabulary() -> None:
     assert "grown_route_not_lookup" in el.REASONS
 
