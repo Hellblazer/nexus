@@ -882,7 +882,7 @@ class VectorSensitivityRouteParityTest {
             "return ctx.select(CHUNKS.as(\"c\").asterisk()).fetch();",
             "return ctx.fetchInto(CHUNKS, Row.class);",
             "return ctx.fetch(\"select * from nexus.chunks where tenant_id = ?\", t);",
-            "return ctx.fetch(\"SELECT c.* FROM nexus.chunks_384 c WHERE c.tenant_id = ?\", t);"}) {
+            "return ctx.fetch(\"SELECT c.* FROM nexus.chunks_mad318272_t_af8b38277810aea6 c WHERE c.tenant_id = ?\", t);"}) {
             assertThat(freshOf(body, Set.of()).readsChunkText()).as(body).isTrue();
         }
         for (String body : new String[] {
