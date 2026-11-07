@@ -18,6 +18,14 @@ from nexus.daemon.service_registry import ServiceRegistry, service_identity, ttl
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups and pid probes")
 
 _INVISIBLE = 999_999_003
+_OURS, _THEIRS = "pid:[4026531836]", "pid:[4026532221]"
+
+
+@pytest.fixture(autouse=True)
+def _namespaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    import nexus.daemon.service_registry as sr
+
+    monkeypatch.setattr(sr, "own_pid_namespace", lambda: _OURS)
 
 
 def _registry(cfg: Path) -> ServiceRegistry:
@@ -28,10 +36,11 @@ def test_a_heartbeating_lease_whose_supervisor_is_invisible_is_kept_and_reported
     registry = _registry(tmp_path)
     registry.publish(
         service_identity(), endpoint={"pid": _INVISIBLE + 1, "port": 1}, version="t",
-        owner_token="tok", payload={"supervisor_pid": _INVISIBLE},
+        owner_token="tok", payload={"supervisor_pid": _INVISIBLE, "pid_ns": _THEIRS},
     )
     outcome = ssd.stop_storage_service(config_dir=tmp_path)
     assert outcome.invisible == (_INVISIBLE,)
+    assert outcome.sweep_verified, "the sweep ran; an invisible supervisor is not an unread process table"
     assert outcome.pids == () and not outcome.already_stopped
     assert len(registry.records()) == 1, "the lease of a supervisor alive elsewhere is kept"
 
@@ -48,3 +57,40 @@ def test_a_legacy_lease_naming_someone_elses_pid_does_not_signal_its_group(tmp_p
     finally:
         bystander.kill()
         bystander.wait(timeout=10)
+
+
+def test_a_killed_supervisor_in_our_own_namespace_is_not_called_invisible(tmp_path: Path) -> None:
+    # kill -9, then a stop inside the lease TTL: the old outcome, not "another PID namespace".
+    registry = _registry(tmp_path)
+    registry.publish(
+        service_identity(), endpoint={"pid": _INVISIBLE + 1, "port": 1}, version="t",
+        owner_token="tok", payload={"supervisor_pid": _INVISIBLE, "pid_ns": _OURS},
+    )
+    outcome = ssd.stop_storage_service(config_dir=tmp_path)
+    assert outcome.invisible == ()
+
+
+def test_the_replacement_is_blocked_while_an_invisible_supervisor_runs() -> None:
+    from nexus.daemon.replace_quiesce import blocked_message
+
+    outcome = ssd.StopOutcome(pids=(), stubborn=(), source="none", lease_seen=True, invisible=(_INVISIBLE,))
+    message = blocked_message(outcome, replacing="engine")
+    assert message is not None and "not visible from here" in message and "No file was replaced" in message
+    clean = ssd.StopOutcome(pids=(), stubborn=(), source="none")
+    assert blocked_message(clean, replacing="engine") is None
+
+
+def test_service_stop_exits_1_and_says_why_for_an_invisible_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from click.testing import CliRunner
+
+    from nexus.commands import daemon as daemon_mod
+
+    outcome = ssd.StopOutcome(pids=(), stubborn=(), source="none", lease_seen=True, invisible=(_INVISIBLE,))
+    monkeypatch.setattr(ssd, "stop_storage_service", lambda **kw: outcome)
+    result = CliRunner().invoke(daemon_mod.service_group, ["stop", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "not visible from here" in result.output
+    assert "already stopped" not in result.output
+    assert "process table could not be checked" not in result.output

@@ -946,7 +946,13 @@ def _write_worker_lock(locks_dir: Path | None = None) -> None:
         lock.parent.mkdir(parents=True, exist_ok=True)
         _sweep_dead_worker_locks(lock.parent)
         if _worker_lock_fd is not None:
-            os.close(_worker_lock_fd)  # a restart in this process: the file is rewritten below
+            try:
+                held, there = os.fstat(_worker_lock_fd), os.stat(lock)
+                if (held.st_dev, held.st_ino) == (there.st_dev, there.st_ino):
+                    return  # already advertised and held: an idempotent start changes nothing
+            except OSError:
+                pass
+            os.close(_worker_lock_fd)  # the file went away under us: take a fresh one below
             _worker_lock_fd = None
         fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
         try:

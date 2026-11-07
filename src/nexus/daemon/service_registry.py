@@ -739,7 +739,7 @@ class ServiceRegistry:
                 ttl=self._ttl,
                 endpoint=dict(endpoint),
                 version=version,
-                payload=dict(payload or {}),
+                payload={**_pid_ns_field(), **(payload or {})},
             )
             self._write_record_atomic(record)
             return record
@@ -2104,6 +2104,23 @@ class HolderStopResult:
     invisible: tuple[int, ...] = ()
 
 
+def own_pid_namespace() -> str | None:
+    """This process's PID-namespace id (``readlink /proc/self/ns/pid``, e.g. ``pid:[4026531836]``), or None.
+
+    None where there are no PID namespaces (macOS, Windows) or the link cannot be read.
+    """
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+
+
+def _pid_ns_field() -> dict[str, str]:
+    """``{"pid_ns": <id>}`` for a lease payload where the id can be read, else nothing (nexus-dyfsw)."""
+    ns = own_pid_namespace()
+    return {"pid_ns": ns} if ns else {}
+
+
 def lease_holder_invisible(
     record: LeaseRecord,
     pid: int,
@@ -2111,15 +2128,21 @@ def lease_holder_invisible(
     alive: Callable[[int], bool] | None = None,
     now: float | None = None,
 ) -> bool:
-    """True when *pid* is not alive here but *record* still heartbeats (nexus-dyfsw).
+    """True when *pid* is not alive here, *record* still heartbeats, and it was published from another PID namespace (nexus-dyfsw).
 
-    The one rule every stop path applies to a holder it cannot see: a fresh heartbeat
-    means the holder is alive somewhere this process cannot see (another PID namespace
-    sharing the config directory), so its record must not be relinquished and nothing
-    may be started beside it. A stale record of an absent pid is a dead holder, as
-    before. *alive* is the caller's own liveness probe (default :func:`pid_running`).
+    The one rule every stop path applies to a holder it cannot see. The lease records its
+    publisher's PID-namespace id (``pid_ns``, Linux). When that differs from ours, an
+    absent pid with a fresh heartbeat is a holder alive where this process cannot see it,
+    so its record must not be relinquished and nothing may be started beside it. In our
+    own namespace an absent pid is a dead holder (a SIGKILLed supervisor whose lease has
+    not aged out yet), as before, and so is a lease that records no namespace (an older
+    client, macOS, Windows). *alive* is the caller's own liveness probe (default
+    :func:`pid_running`).
     """
     probe = alive if alive is not None else pid_running
+    theirs, ours = record.payload.get("pid_ns"), own_pid_namespace()
+    if not theirs or not ours or theirs == ours:
+        return False
     return not probe(pid) and record.is_fresh(time.time() if now is None else now)
 
 

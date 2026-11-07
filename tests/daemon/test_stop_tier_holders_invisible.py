@@ -18,14 +18,21 @@ _TIER = "test_tier_dyfsw"
 _PID = 999_999_001  # absent on this box
 
 
+_OURS, _THEIRS = "pid:[4026531836]", "pid:[4026532221]"
+
+
 @pytest.fixture(autouse=True)
 def _absent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sr, "pid_running", lambda pid: False)
+    monkeypatch.setattr(sr, "own_pid_namespace", lambda: _OURS)
 
 
-def _publish(cfg: Path, *, at: float) -> ServiceRegistry:
+def _publish(cfg: Path, *, at: float, ns: str | None = _THEIRS) -> ServiceRegistry:
     registry = ServiceRegistry(dir=cfg, tier=_TIER, clock=lambda: at, ttl=5.0)
-    registry.publish("default", endpoint={"pid": _PID}, version="t", owner_token="tok")
+    registry.publish(
+        "default", endpoint={"pid": _PID}, version="t", owner_token="tok",
+        payload={"pid_ns": ns} if ns else {"pid_ns": ""},
+    )
     return ServiceRegistry(dir=cfg, tier=_TIER, ttl=5.0)
 
 
@@ -46,3 +53,24 @@ def test_a_stale_record_of_an_absent_pid_is_dropped_as_before(tmp_path: Path) ->
     result = _stop(tmp_path)
     assert result.invisible == ()
     assert registry.records() == []
+
+
+def test_an_absent_pid_from_our_own_namespace_is_a_dead_holder(tmp_path: Path) -> None:
+    # A SIGKILLed holder whose lease has not aged out yet: dropped as before, never "invisible".
+    registry = _publish(tmp_path, at=time.time(), ns=_OURS)
+    result = _stop(tmp_path)
+    assert result.invisible == ()
+    assert registry.records() == []
+
+
+def test_a_lease_with_no_namespace_recorded_is_judged_as_before(tmp_path: Path) -> None:
+    # An older client, macOS or Windows records none: the pid rule of before applies.
+    registry = _publish(tmp_path, at=time.time(), ns=None)
+    assert _stop(tmp_path).invisible == ()
+    assert registry.records() == []
+
+
+def test_publish_records_the_publishers_namespace(tmp_path: Path) -> None:
+    registry = ServiceRegistry(dir=tmp_path, tier=_TIER, ttl=5.0)
+    record = registry.publish("default", endpoint={"pid": 1}, version="t", owner_token="tok")
+    assert record.payload["pid_ns"] == _OURS
