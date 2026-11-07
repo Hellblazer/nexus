@@ -344,6 +344,23 @@ class DocumentListing:
     #: The document's own ``indexed_at`` (the catalog column, nexus-6pfgb.13), ``""`` for a chunk-keyed
     #: row with no catalog document; the listing then shows the chunk row's.
     indexed_at: str = ""
+    #: The catalog document is flagged sensitive (RDR-243): its title and chunk handle are content to a reader
+    #: that feeds the session model. False for a chunk-keyed row no catalog document owns.
+    sensitive: bool = False
+
+
+def _sensitive_document_keys(collection: str, catalog_keys: Any) -> set[str]:
+    """Tumblers of *collection*'s sensitive live documents (one listing read), for :func:`group_documents`.
+
+    When the catalog cannot answer, every document key the manifest index named is treated as sensitive: a
+    listing that cannot say which titles are content withholds the titles it can attribute to a document."""
+    from nexus import doc_sensitivity  # noqa: PLC0415 — deferred: this module loads on every CLI start
+
+    try:
+        return {str(getattr(e, "tumbler", "")) for e in doc_sensitivity.flagged_in_collection(collection)}
+    except doc_sensitivity.SensitivityUnknown as exc:
+        _log.warning("document_listing_sensitivity_unknown", collection=collection, error=exc.detail)
+        return {str(k) for k in catalog_keys}
 
 
 def group_documents(
@@ -374,6 +391,9 @@ def group_documents(
                 seen.setdefault(key, e)
                 counts[key] = counts.get(key, 0) + 1
         offset += 300
+    # Only a degraded index has no document keys to attribute; it is already reported, and the call is skipped
+    # when no catalog document was named at all.
+    flagged_keys = _sensitive_document_keys(collection, doc_titles) if doc_titles else set()
     rows = [
         DocumentListing(
             key=key,
@@ -382,6 +402,7 @@ def group_documents(
             chunks=counts[key],
             entry=e,
             indexed_at=doc_stamps.get(key, ""),
+            sensitive=key in flagged_keys,
         )
         for key, e in seen.items()
     ]

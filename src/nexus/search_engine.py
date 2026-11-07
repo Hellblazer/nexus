@@ -3287,11 +3287,22 @@ def _relabel_clusters(results: list[SearchResult]) -> None:
     """
     from nexus.search_clusterer import _cluster_label  # noqa: PLC0415 — branch-local; only when clustering applied
 
+    from nexus.sensitive_output import hit_facts  # noqa: PLC0415 — branch-local; only when clustering applied
+
+    # RDR-243 Phase 3 (nexus-rfvyy.1): the label is a catalog title, so a sensitive member (which the MCP output
+    # withholds) must not name its cluster: the best member that is NOT sensitive does. A cluster whose members are
+    # all sensitive keeps the best one's label; its header never prints under the default posture.
     best: dict[int, SearchResult] = {}
+    best_clean: dict[int, SearchResult] = {}
     for r in results:
         idx = r.metadata.get(_CLUSTER_INDEX_KEY)
-        if idx is not None and (idx not in best or r.distance < best[idx].distance):
+        if idx is None:
+            continue
+        if idx not in best or r.distance < best[idx].distance:
             best[idx] = r
+        if not hit_facts(r.metadata)[0] and (idx not in best_clean or r.distance < best_clean[idx].distance):
+            best_clean[idx] = r
+    best = {idx: best_clean.get(idx, r) for idx, r in best.items()}
     labels = {
         idx: _cluster_label({"id": r.id, "metadata": r.metadata}) for idx, r in best.items()
     }
