@@ -44,6 +44,9 @@ EXEMPT: dict[tuple[str, str], int] = {
     ("tests/test_semaphore_leak_rootcause.py", "test_process_group_spawn_and_killpg_contract"): 2,
     # The posix_spawn adapter's census of which group/session requests keep the fast path.
     ("tests/test_posix_spawn_adapter.py", "test_session_and_group_requests_hold_and_take_posix_spawn"): 1,
+    # The session signal fence (nexus-xzorj item 3) wraps os.killpg itself, and puts it back.
+    ("tests/_signal_fence.py", "install"): 2,
+    ("tests/_signal_fence.py", "uninstall"): 1,
 }
 
 #: Non-vacuity: the sweep must read at least this many files under tests/.

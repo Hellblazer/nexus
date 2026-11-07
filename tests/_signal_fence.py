@@ -15,12 +15,14 @@ target is classified:
   inherits unless its environment is scrubbed);
 * **foreign**: anything else, including ``kill(-1, ...)`` and a group no member of which is ours;
 * a probe (signal 0) and a target whose ``/proc/<pid>/stat`` is gone (it exited) are not classified; a target whose
-  environment cannot be read (another user's process) and that does not descend from the root is foreign.
+  environment cannot be read (another user's process) and that does not descend from the root is foreign. Under
+  ``hidepid=2`` another user's process has no readable ``stat`` and reads as unclassified.
 
 The identity (root pid and marker) is captured once per process at configure, so a test that edits or clears
 ``os.environ`` changes nothing here. Each foreign event names the test (or the session phase), the call site, the
-signal, the target and its command line; the summary groups repeats. Expected false positives: a child reparented
-away from the session whose environment was scrubbed (``env={...}``) carries no marker and reads as foreign.
+signal, the target and its program name (argv[0]'s basename, never its arguments); the summary groups repeats.
+Expected false positives: a child reparented away from the session whose environment was scrubbed (``env={...}``)
+carries no marker and reads as foreign.
 
 Report mode records every foreign signal and the terminal summary (grep ``signal fence (report mode``) counts and
 lists them, from every xdist worker. The bead's next step is measurement: a develop CI run counts the false positives (the dry
@@ -68,7 +70,7 @@ def active() -> bool:
 def _stat(pid: int) -> tuple[int, int] | None:
     """``(ppid, pgrp)`` of *pid* from ``/proc``, or ``None`` when it is gone or unreadable."""
     try:
-        raw = Path(f"/proc/{pid}/stat").read_text()
+        raw = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", "replace")
     except OSError:
         return None
     # The command name (field 2) is parenthesised and may hold spaces or parentheses: split after the last ')'.
@@ -88,10 +90,13 @@ def _has_token(pid: int, token: str) -> bool:
 
 
 def _cmdline(pid: int) -> str:
+    """The basename of the target's argv[0] only: the summary lands in CI logs, and a foreign process's arguments can
+    carry anything."""
     try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()[:160]
+        argv0 = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
     except OSError:
         return ""
+    return Path(argv0.decode("utf-8", "replace")).name[:60]
 
 
 def owned(pid: int, *, root: int, token: str) -> bool | None:

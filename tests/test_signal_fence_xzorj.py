@@ -121,6 +121,17 @@ def test_a_group_whose_leader_exited_is_judged_by_a_live_member(tmp_path) -> Non
         _reap(member)
 
 
+def test_a_live_child_with_a_scrubbed_environment_is_the_sessions_by_ancestry() -> None:
+    p = subprocess.Popen(_SLEEP, env={"PATH": os.environ.get("PATH", "")})
+    try:
+        root, token = _ids()
+        assert not fence._has_token(p.pid, token), "no marker: only the ancestor walk can claim it"
+        assert fence.classify("kill", p.pid, signal.SIGTERM, root=root, token=token) == ("own", p.pid)
+    finally:
+        p.kill()
+        p.wait()
+
+
 def test_a_reparented_child_keeps_its_claim_through_the_inherited_marker(tmp_path) -> None:
     pid = _orphan(tmp_path, env=None)
     try:
@@ -238,3 +249,24 @@ def test_the_workers_counts_fan_in_to_the_controllers_summary(pytester) -> None:
         "signal fence (report mode, nexus-xzorj): signals=4 own=0 foreign=2 unclassified=2 errors=0",
         '  foreign: *"test": "test_probe*.py::test_*"*',
     ])
+
+
+def test_switched_off_the_fence_installs_nothing_and_reports_nothing(pytester) -> None:
+    pytester.makepyfile(test_off=(
+        "import os\n"
+        "from tests import _signal_fence as fence\n"
+        "def test_off():\n"
+        "    assert os.kill is fence._real_kill\n"
+    ))
+    with pytest.MonkeyPatch.context() as mp:
+        for k in (fence.TOKEN_ENV, fence.ROOT_ENV):
+            mp.delenv(k, raising=False)
+        mp.setenv(fence.MODE_ENV, "off")
+        mp.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
+        result = pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+    assert "signal fence (report mode" not in result.stdout.str()
+
+
+def test_the_logged_program_name_never_carries_arguments(child) -> None:
+    assert fence._cmdline(child.pid) == Path(sys.executable).name
