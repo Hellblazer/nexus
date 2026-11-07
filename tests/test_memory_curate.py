@@ -1140,3 +1140,32 @@ def test_the_git_fallback_runs_in_the_callers_env(tmp_path: Path, monkeypatch: p
     monkeypatch.delenv("GIT_DIR", raising=False)
     assert md.primary_checkout_root(outside, {}) is None
     assert md.primary_checkout_root(outside, {**os.environ, "GIT_DIR": str(repo / ".git")}) == repo
+
+
+def test_ceilings_and_cwds_through_symlinks_match_git(tmp_path: Path) -> None:
+    # nexus-nrqqk r1: the resolved forms are what git compares, so each case below goes red if one is dropped.
+    repo = _make_repo(tmp_path)
+    (repo / "sub").mkdir()
+    ceiling_link = tmp_path / "ceiling-link"
+    ceiling_link.symlink_to(repo, target_is_directory=True)
+    sub_link = tmp_path / "sub-link"
+    sub_link.symlink_to(repo / "sub", target_is_directory=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    cases = [
+        (repo / "sub", str(ceiling_link)),  # a ceiling written through a symlink still stops git
+        (sub_link, str(repo)),  # a cwd reached through a symlink is below the real ceiling
+        (repo / "sub", f"{tmp_path / 'elsewhere'}{os.pathsep}{repo}"),  # the second entry of a list counts
+    ]
+    for cwd, ceiling in cases:
+        assert md.primary_checkout_root(cwd, {**env, "GIT_CEILING_DIRECTORIES": ceiling}) is None, (cwd, ceiling)
+        assert md._primary_via_git(cwd, {**env, "GIT_CEILING_DIRECTORIES": ceiling}) is None, (cwd, ceiling)
+    # with no ceiling, a symlinked cwd is searched from its target, as git does
+    assert md.primary_checkout_root(sub_link, env) == repo == md._primary_via_git(sub_link, env)
+
+
+def test_an_empty_git_dir_is_asked_of_git(tmp_path: Path) -> None:
+    # nexus-nrqqk r1: git treats GIT_DIR="" as set and refuses; reading the layout would answer otherwise.
+    repo = _make_repo(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    assert md.primary_checkout_root(repo, env) == repo
+    assert md.primary_checkout_root(repo, {**env, "GIT_DIR": ""}) is None

@@ -39,7 +39,8 @@ THE MAPPING, :func:`memory_dir`. Given a working directory *cwd*:
      unrecognised (a ``.git`` directory or a ``gitdir:`` target without ``HEAD``, a ``gitdir:``
      line that is malformed or points nowhere, a ``commondir`` that points nowhere)
      does it run ``git rev-parse --path-format=absolute --git-common-dir`` through
-     ``run_bounded`` (deferred import; 5 s limit), in the caller's *env* when one is given. Not matched to git by the read:
+     ``run_bounded`` (deferred import; 5 s limit), in the caller's *env* (a whole environment) when
+     one is given. The read walks *cwd*'s physical parents, as git does. Not matched to git by the read:
      filesystem-boundary stops and ``safe.directory``. In a ``--separate-git-dir``, submodule or
      bare-repository worktree layout the primary is the git directory's parent, as git reports
      it, which (inferred, not observed) is not the directory Claude Code keyed its memory by;
@@ -126,6 +127,7 @@ def _common_dir_by_reading(cwd: Path) -> Path | None:
     here = Path(os.path.abspath(cwd))
     if not here.is_dir():
         return None  # git -C refuses a directory that does not exist; so does this
+    here = _real(here)  # git walks the physical parents: a cwd reached through a symlink is searched from its target
     for directory in (here, *here.parents):
         dot_git = directory / ".git"
         if dot_git.is_dir():
@@ -148,8 +150,9 @@ def _ceiling_can_stop(cwd: Path, ceilings: str) -> bool:
     """
     here = {Path(os.path.abspath(cwd)), _real(cwd)}
     for entry in ceilings.split(os.pathsep):
-        if not entry or not os.path.isabs(entry):
-            continue  # git ignores a relative entry; an empty one only changes symlink handling
+        if not entry or not (os.path.isabs(entry) or entry[0] in "/\\"):
+            continue  # git ignores a relative entry; an empty one only changes symlink handling.
+            # A rooted entry without a drive (``\\x`` on Windows) is absolute to git though not to isabs.
         for ceiling in {Path(os.path.abspath(entry)), _real(entry)}:
             if any(h != ceiling and h.is_relative_to(ceiling) for h in here):
                 return True
@@ -164,7 +167,7 @@ def primary_checkout_root(cwd: Path, env: Mapping[str, str] | None = None) -> Pa
     entry lies above *cwd*, or the layout is unrecognised. See the module docstring.
     """
     e = os.environ if env is None else env
-    redirected = bool(e.get("GIT_DIR") or e.get("GIT_COMMON_DIR"))
+    redirected = "GIT_DIR" in e or "GIT_COMMON_DIR" in e  # set even when empty: git then refuses, so ask it
     ceilings = e.get("GIT_CEILING_DIRECTORIES", "")
     if not redirected and not (ceilings and _ceiling_can_stop(cwd, ceilings)):
         try:
@@ -178,6 +181,9 @@ def primary_checkout_root(cwd: Path, env: Mapping[str, str] | None = None) -> Pa
 
 def _primary_via_git(cwd: Path, env: Mapping[str, str] | None = None) -> Path | None:
     """The fallback: ask git, in *env* when one is given (else this process's environment).
+
+    *env* is the whole environment git runs in, as for ``subprocess``: a mapping without PATH or
+    HOME gives git neither.
 
     The imports are deferred because they pull structlog and ~230 modules.
     """
