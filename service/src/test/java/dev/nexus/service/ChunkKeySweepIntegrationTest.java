@@ -705,6 +705,66 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         assertThat(after.path("blocking").toString()).doesNotContain("null_span_rows");
     }
 
+    /**
+     * The span value rule held to ONE table (nexus-qmrfi, review of c58372716): {@code manifest-span-cases.json}, which
+     * {@code tests/catalog/test_manifest_span_cases.py} holds the client's {@code manifest_span} to. One owned chunk per
+     * case, its manifest row NULL in all four span columns; {@code null_span_rows} must count the cases that record
+     * anything, and {@code by_field} each column the table records. A case whose chunk holds a value the sweep drops
+     * unrecorded (a string, a float, a 0) is counted by nothing: the sweep may delete those keys, because they are not
+     * spans {@code manifest_span} would write.
+     */
+    @Test
+    void nullSpanRowsFollowsTheSharedSpanCaseTable() throws Exception {
+        JsonNode table;
+        try (java.io.InputStream in = ChunkKeySweepIntegrationTest.class.getResourceAsStream("/manifest-span-cases.json")) {
+            assertThat(in).as("resource manifest-span-cases.json").isNotNull();
+            table = MAPPER.readTree(in).path("cases");
+        }
+        assertThat(table.size()).as("the table is read whole").isGreaterThanOrEqualTo(20);
+        List<String> spanKeys = List.of("line_start", "line_end", "chunk_start_char", "chunk_end_char");
+        String tenant = "sw-span-table";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        Map<String, Map<String, Object>> rows = new LinkedHashMap<>();
+        Map<String, Long> wantByField = new LinkedHashMap<>();
+        for (String key : spanKeys) {
+            wantByField.put(key, 0L);
+        }
+        long wantRows = 0;
+        for (JsonNode c : table) {
+            String id = c.path("id").asText();
+            Map<String, Object> meta = keyed(tenant, live, id);
+            meta.putAll(MAPPER.convertValue(c.path("chunk"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { }));
+            rows.put(id, meta);
+            boolean any = false;
+            for (String key : spanKeys) {
+                if (!c.path("recorded").path(key).isNull()) {
+                    wantByField.merge(key, 1L, Long::sum);
+                    any = true;
+                }
+            }
+            if (any) {
+                wantRows++;
+            }
+        }
+        seed(tenant, live, rows);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, live,
+                rows.keySet().stream().map(id -> hexOf(tenant, live, id)).toArray(String[]::new));
+        }
+
+        JsonNode pre = json(sweep(token, plan()));
+
+        assertThat(pre.path("preconditions").path("null_span_rows").asLong())
+            .as("one row per case that records any column").isEqualTo(wantRows);
+        JsonNode byField = pre.path("precondition_details").path("null_span_rows").path("by_field");
+        for (var want : wantByField.entrySet()) {
+            assertThat(byField.path(want.getKey()).asLong()).as("by_field %s", want.getKey()).isEqualTo(want.getValue());
+        }
+        assertThat(wantRows).as("the table has cases that record and cases that do not").isBetween(1L, (long) table.size() - 1);
+    }
+
     @Test
     void aCountThatGrowsBetweenTheDryRunAndTheApplyIsRefused_theAcceptedNumberIsAnUpperBound() throws Exception {
         Pre p = preconditionTenant("sw-pre-grow");

@@ -3,14 +3,23 @@
 package dev.nexus.service;
 
 import dev.nexus.service.vectors.RacedEmbedActivity;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-223 P1.4 (bead nexus-z0o2p.5) -- {@code manifest/append_many}: several documents in
@@ -570,6 +579,55 @@ class AppendManyTest extends AtomicWriteTestBase {
         var refused = (List<Map<String, Object>>) response.get("expected_refused");
         assertThat(refused.get(0)).containsEntry("reason", "span_changed");
         assertThat(manifestRow(f.docId(), 0)).containsEntry("line_start", 70).containsEntry("line_end", 80);
+    }
+
+    /**
+     * The compare is only a compare-and-set because the stored rows are read FOR UPDATE: a writer that holds the row
+     * makes the guarded append WAIT, and when it commits the append reads the committed value and refuses. A second
+     * transaction holds the row, a span is written under that lock, and the guarded append (which names the span as
+     * NULL and would write 5 over it) is still in flight until the holder commits; then it is refused as
+     * {@code span_changed} and the holder's 7 stands. With a plain read in {@code refuseStaleExpected} the append
+     * would not wait, would compare against the old NULL, and the upsert would put 5 over the 7.
+     */
+    @Test
+    void aGuardedAppend_waitsForAWriterHoldingTheRow_thenRefusesOnTheCommittedValue() throws Exception {
+        String a = ch("exp-lock-a"), b = ch("exp-lock-b"), c = ch("exp-lock-c");
+        Fx f = seededGuardFixture("explock", a, b, c);
+        Map<String, Object> mine = new LinkedHashMap<>(row(0, a));
+        mine.put("line_start", 5);
+        Map<String, Object> expected = new LinkedHashMap<>();
+        expected.put("chash", a);
+        expected.put("line_start", null);
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSLContext ctx = DSL.using(holder, SQLDialect.POSTGRES);
+            var heldRow = CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(f.docId()))
+                .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(0));
+            assertThat(ctx.selectFrom(CATALOG_DOCUMENT_CHUNKS).where(heldRow).forUpdate().fetch()).hasSize(1);
+
+            CompletableFuture<Map<String, Object>> append = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return svc.appendManyCombined(TENANT, f.collection(),
+                        List.of(mdoc(f.docId(), List.of(guarded(mine, expected)))), null, false).response();
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            assertThatThrownBy(() -> append.get(1500, TimeUnit.MILLISECONDS))
+                .as("the guarded append waits for the row's lock instead of comparing against an old read")
+                .isInstanceOf(TimeoutException.class);
+
+            ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.LINE_START, 7).where(heldRow).execute();
+            holder.commit();
+
+            var response = append.get(30, TimeUnit.SECONDS);
+            assertThat(response).containsEntry("rows", 0).containsEntry("expected_refused_count", 1);
+            @SuppressWarnings("unchecked")
+            var refused = (List<Map<String, Object>>) response.get("expected_refused");
+            assertThat(refused).containsExactly(Map.of("doc_id", f.docId(), "position", 0, "reason", "span_changed"));
+        }
+        assertThat(manifestRow(f.docId(), 0)).as("the holder's span stands").containsEntry("line_start", 7);
     }
 
     @Test
