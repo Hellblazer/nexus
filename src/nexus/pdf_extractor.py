@@ -3276,6 +3276,14 @@ class PDFExtractor:
         if self._restart_refused():
             self._restart_skipped = "refused"
             return False
+        from nexus._mineru_pid import pid_file_from_other_namespace, recorded_server_alive  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        if pid_file_from_other_namespace(info) and recorded_server_alive(info):
+            # nexus-dyfsw: it cannot be replaced from here, and the machine-wide cooldown below
+            # is stamped for every process: do not spend it on a restart that cannot happen.
+            _log.warning("mineru_replace_pid_other_namespace", pid=info["pid"])
+            self._restart_skipped = "other-namespace"
+            return False
         if not claim_broken_restart():
             _log.warning("mineru_broken_restart_in_cooldown")
             self._restart_skipped = "cooldown"

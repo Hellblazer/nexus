@@ -442,3 +442,94 @@ def test_ensure_replaces_a_foreign_record_whose_server_is_gone(
             wait_healthy_s=4.0, _monotonic=clock.monotonic, _wall_time=clock.time, _sleep=clock.sleep,
         )
     lifecycle.assert_called_once()
+
+
+# ── fix round: review findings ───────────────────────────────────────────────
+
+
+def test_a_busy_foreign_server_that_answers_after_two_seconds_is_alive(config_dir: Path) -> None:
+    """The probe waits as long as `nx mineru status` does (5 s): a server mid-parse is slow, not dead."""
+    import time
+
+    class _Slow(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — http.server's name
+            time.sleep(2.5)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(_MINERU_BODY).encode())
+
+        def log_message(self, *a) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        assert mp.server_identified(_info(server.server_address[1]))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_server_is_broken_never_judges_a_foreign_server(config_dir: Path) -> None:
+    from nexus._mineru_health import server_is_broken
+
+    foreign = _info(8123, pid=os.getpid())
+    foreign["output_root"] = "/srv/mineru-out/x"
+    url = "http://127.0.0.1:8123"
+    # Control: the same record from our own namespace is judged by its error text.
+    own = {**foreign, "pid_ns": _OURS}
+    assert server_is_broken(url, "FileNotFoundError: /srv/mineru-out/x/a.pdf", own)
+    assert not server_is_broken(url, "FileNotFoundError: /srv/mineru-out/x/a.pdf", foreign)
+
+
+def test_a_restart_that_cannot_happen_here_does_not_burn_the_machine_cooldown(
+    config_dir: Path, mineru_port: int, other_service_port: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.pdf_extractor import PDFExtractor
+    import nexus._mineru_health as health
+
+    claims: list[int] = []
+    monkeypatch.setattr(health, "claim_broken_restart", lambda *a, **k: claims.append(1) or True)
+    ex = PDFExtractor()
+    monkeypatch.setattr(ex, "_restart_refused", lambda: False)
+    assert ex._restart_broken_mineru_server(_info(mineru_port)) is False
+    assert ex._restart_skipped == "other-namespace"
+    assert claims == [], "the cooldown was claimed for a restart that cannot happen"
+    # Control: a foreign record whose server is gone is replaceable, so it does claim.
+    monkeypatch.setattr(ex, "_restart_mineru_server", lambda replace_pid=None: True)
+    assert ex._restart_broken_mineru_server(_info(other_service_port)) is True
+    assert claims == [1]
+
+
+def test_the_stale_server_row_ignores_a_foreign_file_even_when_its_pid_is_a_live_local_process(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """upgrade_finish feeds an automatic SIGTERM: a pid from another namespace names nothing here."""
+    from nexus.upgrade_finish import _registered_mineru_outside_generation
+
+    monkeypatch.setattr(mp, "is_process_alive", lambda pid: True)
+    monkeypatch.setattr("nexus.upgrade_finish._classify_pid", lambda pid, cmd: "mineru")
+    monkeypatch.setattr("nexus.upgrade_finish.process_command", lambda pid: "mineru-api")
+    elsewhere = config_dir / "elsewhere"
+    now = datetime.now(timezone.utc).timestamp()
+    info = {**_info(1, pid=os.getpid()), "python": str(config_dir / "other" / "bin" / "python")}
+    _write(config_dir, info)
+    assert _registered_mineru_outside_generation(elsewhere, now=now) is None
+    # Control: the same record from our own namespace IS a stale row, so the None above is the guard's.
+    _write(config_dir, {**info, "pid_ns": _OURS})
+    assert _registered_mineru_outside_generation(elsewhere, now=now) is not None
+
+
+def test_the_console_card_follows_the_server_not_the_pid(
+    config_dir: Path, mineru_port: int, other_service_port: int,
+) -> None:
+    from nexus.console.routes.health import _mineru_card
+
+    _write(config_dir, _info(mineru_port))
+    assert _mineru_card(config_dir)["running"] is True
+    _write(config_dir, _info(other_service_port))
+    assert _mineru_card(config_dir) == {"running": False, "stale_pid": True}
+    _write(config_dir, _info(mineru_port, ns=_OURS))  # an ordinary dead pid
+    assert _mineru_card(config_dir)["running"] is False
+    (config_dir / "mineru.pid").unlink()
+    assert _mineru_card(config_dir) == {"running": False}
