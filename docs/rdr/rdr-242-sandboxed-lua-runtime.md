@@ -1147,3 +1147,4 @@ since this preparation changes no design text.
 - 2026-11-07: research recorded as structured findings, Finalization Gate
   responses written, plan steps re-headed to the template grammar (no design
   change).
+- 2026-11-07: Gate round 1 — BLOCKED (1 Critical, 7 Significant, 1 ship-blocker(s)); commit `d2ccb784e`; critique `nexus_rdr/242-gate-critique-2026-11-07-r1`.
