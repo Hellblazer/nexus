@@ -671,9 +671,12 @@ PostgreSQL is gone, install the same major version first (for example Homebrew
 directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 
 Save the block as a script and run it with `bash <file>`; do not paste it into
-a shell. Each step below ends the script with `exit 1` when it fails (step 2
+a shell. Steps 2 to 4 end the script with `exit 1` when they fail (step 2
 when a `$DATA.old` is already there), so nothing after the failure runs. Pasted,
 the `exit` can leave the rest of the block running in the shell you pasted into.
+The script's variables (`CFG`, `OLD_BIN`, `NEW_BIN`, `DATA`) live only while it
+runs: before you run any recovery command below in your own shell, set them
+there exactly as the script's first four lines do.
 
 ```bash
 CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
@@ -691,11 +694,14 @@ nx daemon service stop
 "$OLD_BIN/pg_ctl" -D "$DATA" status           # "no server running"
 
 # 2. Move the old directory aside. If a previous attempt left one, STOP: this
-#    ends the script (exit 1), so nothing below it runs. After a failed attempt
-#    `$DATA.old` is your ORIGINAL cluster: do not remove it. Follow "To back
-#    out before the service starts" below (remove the new `$DATA`, then
-#    `mv "$DATA.old" "$DATA"`), and run the script again.
-if [ -e "$DATA.old" ]; then echo "STOP: $DATA.old exists: it is the original cluster of a failed attempt; follow \"To back out before the service starts\" in the runbook" >&2; exit 1; fi
+#    ends the script (exit 1), so nothing below it runs. `$DATA.old` is your
+#    ORIGINAL cluster: do not remove it. If the service has never run on the new
+#    cluster (the earlier attempt failed), follow "To back out before the
+#    service starts" below (remove the new `$DATA`, then
+#    `mv "$DATA.old" "$DATA"`), and run the script again. If the service has
+#    run on the new cluster, the upgrade already succeeded: keep both, and do
+#    not run this script again.
+if [ -e "$DATA.old" ]; then echo "STOP: $DATA.old exists and is the pre-upgrade cluster: keep it. If the service never ran on the new cluster, follow \"To back out before the service starts\" in the runbook; if it did, the upgrade is done" >&2; exit 1; fi
 mv "$DATA" "$DATA.old" || exit 1
 
 # 3. A new cluster with the options nx creates its own with, trust auth for the
