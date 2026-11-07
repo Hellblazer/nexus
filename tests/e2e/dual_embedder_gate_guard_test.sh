@@ -265,7 +265,7 @@ missing_mvv_needles() {  # <body>: each MVV check predicate that is absent from 
       "len\(d\['by_coll'\].get\('\\\$DG_MVV_NOTE_COLL', \[\]\)\) == 1" \
       "\['ids'\]\) <= set\(d\['ids'\]\)" \
       "\['by_coll'\]\['\\\$DG_MVV_NOTE_COLL'\] == d\['by_coll'\].get\('\\\$target'\)" \
-      "d\['top'\] == '\\\$DG_MVV_RANK_CHASH'" \
+      "d\['nearest'\] == '\\\$DG_MVV_RANK_CHASH'" \
       "d.get\('collection'\)=='\\\$DG_VOY_COLL' and d.get\('problem_formulation'\)" \
       "d.get\('count', 0\) >= \\\$DG_MVV_THEME_DOCS" \
       "len\(\{r.get\('doc_id'\) for r in d\}\) >= 10" \
@@ -490,6 +490,47 @@ expect_fail "a 503 that never clears fails" "CHECK FAILED: GET /health (code=503
 [[ "$(( $(grep -c 'GET /health' "$REQS") - health_before ))" -eq 5 ]] \
   && ok "a 503 is retried to five tries in all" || bad "a 503 was sent $(( $(grep -c 'GET /health' "$REQS") - health_before )) times, not 5"
 rm -f "$SCEN/GET_health.code"
+
+# The Phase 6 rank check (nexus-lpu6e) judges document 1 by its raw vector distance, not by the
+# page order: `nx search` ranks by distance minus a topic-boost credit that goes to every hit sharing a
+# topic with another, so a sibling that clustered can lead the page while document 1, left as noise,
+# is still the nearest vector. The gate's own rank lines run here against a canned client.
+MVV_FNS="$WORKDIR/gate_mvv_checks.sh"
+{
+  sed -n 's/^\(DG_MVV_WRITE_REASON=.*\)$/\1/p; s/^\(DG_MVV_CLIENT_KEYED=0\)$/\1/p' "$GATE"
+  for fn in dg_mvv_client dg_mvv_client_fail dg_mvv_search dg_mvv_search_check; do
+    sed -n "/^$fn()[[:space:]]*{/,/^}/p" "$GATE"
+  done
+} > "$MVV_FNS"
+for fn in dg_mvv_client dg_mvv_client_fail dg_mvv_search dg_mvv_search_check; do
+  grep -qE "^$fn\(\)" "$MVV_FNS" || fail_loud_and_exit "the extracted Phase 6 block has no $fn(); its sed anchors need updating"
+done
+rank_lines="$(code_of "$GATE" | sed -n '/^dg_run_mvv()[[:space:]]*{/,/^}/p' \
+  | sed -n '/^[[:space:]]*dg_mvv_search "\$DG_VOY_COLL" "\$DG_MVV_RANK_TEXT"/,/DG_MVV_RANK_CHASH/p')"
+[[ "$(grep -c 'dg_mvv_search' <<<"$rank_lines")" -eq 2 ]] \
+  || fail_loud_and_exit "the rank-check lines of dg_run_mvv matched nothing (or too much); this test needs updating"
+rank_rows() {  # <JSON rows the canned client prints>
+  printf '%s\n' "$1" > "$SCEN/combined.json"
+  printf '0\n' > "$SCEN/combined.rc"
+}
+rank_run() {
+  fn_run "source $(printf '%q' "$MVV_FNS"); DG_VOY_COLL=voy; DG_MVV_RANK_TEXT='doc one'; DG_MVV_RANK_CHASH=r1
+$rank_lines"
+}
+rank_rows '[{"id": "s3", "distance": 0.21, "collection": "voy"}, {"id": "r1", "distance": 0.12, "collection": "voy"}, {"id": "p1", "distance": 0.70, "collection": "voy"}]'
+rank_run
+expect_pass "the rank check passes when document 1 is the nearest vector though a boosted sibling leads the page"
+rank_rows '[{"id": "s3", "distance": 0.10, "collection": "voy"}, {"id": "r1", "distance": 0.12, "collection": "voy"}]'
+rank_run
+expect_fail "the rank check refuses a sibling nearer than document 1" "the first theme document's own text"
+[[ "$OUT" == *'"distance": 0.1'* ]] && ok "a failed rank check prints each hit's distance" \
+  || bad "a failed rank check does not print the distances: $OUT"
+rank_rows '[{"id": "r1", "distance": 0.12, "collection": "voy"}, {"id": "s3", "distance": 0.12, "collection": "voy"}]'
+rank_run
+expect_fail "the rank check refuses a tie for the nearest distance, whichever row leads" "the first theme document's own text"
+rank_rows '[{"id": "r1", "distance": 0.12, "collection": "voy"}, {"id": "s3", "collection": "voy"}]'
+rank_run
+expect_fail "the rank check refuses a page with a hit that carries no distance" "the first theme document's own text"
 
 # The keyed_voyage pytest run waits for the build lease (the release battery runs this gate beside
 # local-service-gate.sh, which holds it while it stamps release.properties; 7.85.0 battery).
