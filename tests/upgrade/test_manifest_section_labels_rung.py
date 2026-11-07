@@ -90,6 +90,7 @@ class World:
         self.position_reads = 0
         self.before_second_manifest_read = None  # called with self, once, before the re-read
         self.before_append = None  # called with self, once, between the rung's re-read and the engine's compare
+        self.raise_after_append: Exception | None = None  # raised once the engine has written and restamped (an old engine, seen by the client's ack echo)
         self._manifest_reads = 0
         self.tombstoned: list[dict] = []  # manifest rows of deleted documents (nexus-6pfgb.58)
         self.tombstoned_reported = True  # False: an engine before include_tombstoned, which sends no list
@@ -210,6 +211,8 @@ class World:
                     labels_written=new["labels_written"])
             if self.restamp_on_append is not None:
                 self.docs[d].indexed_at = self.restamp_on_append
+        if self.raise_after_append is not None:
+            raise self.raise_after_append
         return {"ok": True, "docs": len(docs), "failed_doc_ids": failed,
                 "expected_refused": refused, "expected_refused_count": len(refused)}
 
@@ -502,6 +505,24 @@ def test_the_documents_indexed_at_is_restored_after_the_write_so_a_second_pass_c
     assert len(world.appends) == writes, "the second pass sends no write"
     assert world.labels("1.1.1")[1] == (1, None, None, None, False), "the departed co-owner's label is never copied"
     assert second.verify() is True
+
+
+def test_a_write_that_raises_after_the_engine_committed_it_still_restores_the_stamps(world: World) -> None:
+    """NEW client + OLD engine (nexus-tj0wu review): the old engine ignores ``expected``, writes the rows and
+    restamps ``indexed_at``; the client's ack echo then raises EngineOlderThanClientError. The raise comes
+    AFTER the commit, so the documents of the request in flight were restamped and must be restored, as the
+    span rung does with its ``in_flight``."""
+    from nexus.errors import EngineOlderThanClientError
+
+    _one_fillable_and_one_newer_row(world)
+    world.restamp_on_append = RUN_TIME
+    world.raise_after_append = EngineOlderThanClientError("append_manifest_many answered without expected_refused_count")
+
+    with pytest.raises(EngineOlderThanClientError):
+        world.rung().converge(Report())
+
+    assert world.docs["1.1.1"].indexed_at == DOC_STAMP, "the stamp the old engine bumped is written back"
+    assert world.updates == [("1.1.1", {"indexed_at": DOC_STAMP})]
 
 
 def test_a_document_that_was_not_written_is_not_restamped(world: World) -> None:

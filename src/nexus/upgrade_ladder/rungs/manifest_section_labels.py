@@ -577,10 +577,13 @@ class ManifestSectionLabelsRung:
                 "expected": expected_values(now, spans=False),
             })
         written: set[str] = set()
+        in_flight: list[str] = []  # the request being sent: a raise after the engine committed it restamped these too
         try:
             for collection, per_doc in sorted(by_collection.items()):
                 for request in self._requests(sorted(per_doc.items())):
+                    in_flight = [d for d, _rows in request]
                     result = writer.append_manifest_many(request, collection=collection)
+                    in_flight = []
                     failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
                     refused = refused_positions(result)
                     for doc_id, rows in request:
@@ -595,9 +598,11 @@ class ManifestSectionLabelsRung:
                             self._filled += len(rows) - lost
                             written.add(doc_id)
         finally:
-            # once per document, however many requests or collections carried its rows; also when a later request
-            # raised: the engine restamped indexed_at on every document an earlier request wrote
-            self._restore_batch(writer, sorted(written), stamps, counts)
+            # once per document, however many requests or collections carried its rows; also when a request raised:
+            # the engine restamped indexed_at on every document an earlier request wrote, and on those of the one
+            # that raised when it committed before the client saw the failure (a new client's ack echo against an
+            # engine without the expected guard raises after that engine wrote the rows unguarded)
+            self._restore_batch(writer, sorted(written | set(in_flight)), stamps, counts)
 
     @classmethod
     def _restore_batch(cls, writer: Any, docs: list[str], stamps: dict[str, str], counts: Counts) -> None:

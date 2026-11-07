@@ -476,12 +476,12 @@ class ManifestSpanFillRung:
                         continue
                     in_flight = []
                     failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
-                    refused = refused_positions(result)
+                    lost_positions = refused_positions(result)
                     for doc_id, rows in request:
                         if doc_id in failed:
                             counts.write_failed += len(rows)
                             continue
-                        lost = sum(1 for r in rows if (doc_id, int(r["position"])) in refused)
+                        lost = sum(1 for r in rows if (doc_id, int(r["position"])) in lost_positions)
                         counts.raced += lost
                         if len(rows) > lost:
                             counts.filled += len(rows) - lost

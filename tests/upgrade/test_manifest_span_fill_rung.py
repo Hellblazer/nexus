@@ -936,3 +936,21 @@ def test_a_filled_row_whose_other_column_has_a_zero_key_leaves_the_engine_count_
     assert world.spans(d) == [(0, 3, 9, None, None), (1, 3, 9, 40, 190)]
     assert (c.counted, c.fillable, c.filled) == (2, 2, 2)
     assert c.engine_count_after() == 0 and c.reconciles(), "the 0 chars are not counted by the engine, so zero is reached"
+
+
+def test_a_refused_row_in_one_request_does_not_stall_the_collections_later_requests(world: World) -> None:
+    """nexus-tj0wu review: ``refused`` was the collection's 409 flag AND, after a request with an ``expected``
+    refusal, the set of refused positions (non-empty, so truthy): every later request of the collection took the
+    409 branch and was never sent. Seven rows in requests of 3 / 3 / 1, a re-index of row 0 between the re-read
+    and the first POST: the other six rows are still written and none is counted as a 409."""
+    d = _seven_rows(world)
+    world.before_append = lambda w: w.manifests[d].__setitem__(0, replace(w.manifests[d][0], chash=h(99)))
+    rung = world.rung(max_rows=3)
+
+    rung.converge(Report())
+
+    assert [len(rows) for _c, req in world.appends for _d, rows in req] == [3, 3, 1], "every request is sent"
+    c = rung._partial
+    assert (c.raced, c.filled, c.write_refused_409) == (1, 6, 0), c.summary()
+    assert world.spans(d)[0] == (0, None, None, None, None), "the re-indexed row is not written"
+    assert all(None not in span for _p, *span in world.spans(d)[1:]), world.spans(d)
