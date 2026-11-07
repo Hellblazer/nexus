@@ -23,6 +23,7 @@ import java.util.TreeSet;
 import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * nexus-rfvyy.7.4 (RDR-243 Phase 2 Step 2.1b, Test Plan "Route parity"): every engine route that returns chunk text
@@ -70,6 +71,11 @@ class VectorSensitivityRouteParityTest {
 
     /** Every {@code nexus} function whose result row carries chunk text, to its argument list, from {@code pg_proc}. */
     static Map<String, String> textFunctionsFromPgProc(PostgreSQLContainer<?> pg) throws Exception {
+        return textFunctionsFromPgProc(pg, "nexus");
+    }
+
+    /** The result-shape derivation over any schema (the negative control plants a function in its own). */
+    static Map<String, String> textFunctionsFromPgProc(PostgreSQLContainer<?> pg, String schema) throws Exception {
         var proc = DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p");
         var nsp = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
         Field<String> name = DSL.field(DSL.name("p", "proname"), String.class);
@@ -81,17 +87,123 @@ class VectorSensitivityRouteParityTest {
             var rows = DSL.using(su, SQLDialect.POSTGRES)
                 .select(name, args, result).from(proc)
                 .join(nsp).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("p", "pronamespace"))))
-                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
                 .fetch();
             for (var r : rows) {
                 String res = r.get(result);
-                if (res != null && TEXT_COLUMN.matcher(res).find()) out.put(r.get(name), r.get(args));
+                if (res != null && resultCarriesChunkText(res)) out.put(r.get(name), r.get(args));
             }
         }
         return out;
     }
 
+    /** True when a function's result type names a {@code content} or {@code chunk_text} text column. */
+    static boolean resultCarriesChunkText(String result) {
+        return TEXT_COLUMN.matcher(result).find();
+    }
+
+    /**
+     * nexus-rfvyy.7.17: the second derivation. The result-shape matcher above sees only a result column NAMED {@code
+     * content} or {@code chunk_text}; a function that returns the text as {@code body} or {@code snippet} would slip
+     * past it and out of the exclude-argument check. So also list every function of the schema whose definition
+     * mentions the {@code chunk_text} column (function name to result type), whatever it calls its result column.
+     */
+    static Map<String, String> functionsMentioningChunkText(PostgreSQLContainer<?> pg, String schema) throws Exception {
+        Map<String, String> out = new TreeMap<>();
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES).fetch(
+                "select p.proname, pg_get_function_result(p.oid) as res from pg_catalog.pg_proc p "
+                + "join pg_catalog.pg_namespace n on n.oid = p.pronamespace "
+                + "where n.nspname = ? and p.prokind in ('f', 'p') "
+                + "and pg_get_functiondef(p.oid) ~ '\\mchunk_text\\M'", schema);
+            for (var r : rows) out.put(r.get("proname", String.class), String.valueOf(r.get("res", String.class)));
+        }
+        return out;
+    }
+
+    /**
+     * The functions that mention {@code chunk_text} in their definition but are neither in the result-shape set nor
+     * classified (as returning no chunk text) in {@code classified}: each must be classified or covered by the
+     * exclude-argument check.
+     */
+    static Map<String, String> unclassifiedDefinitionReaders(Map<String, String> byDefinition, Set<String> byShape,
+                                                             Set<String> classified) {
+        Map<String, String> out = new TreeMap<>(byDefinition);
+        out.keySet().removeAll(byShape);
+        out.keySet().removeAll(classified);
+        return out;
+    }
+
     // ── pg_proc ───────────────────────────────────────────────────────────────
+
+    @Test
+    void theResultShapeMatcherFiresOnTheColumnNamesItClaimsAndOnlyThose() {
+        assertThat(resultCarriesChunkText("TABLE(chash bytea, content text, distance double precision)")).isTrue();
+        assertThat(resultCarriesChunkText("TABLE(chash bytea, chunk_text text)")).isTrue();
+        assertThat(resultCarriesChunkText("TABLE(content text)")).as("first column").isTrue();
+        assertThat(resultCarriesChunkText("TABLE(chash bytea, chunk_text_hash text)"))
+            .as("a hash column is not chunk text").isFalse();
+        assertThat(resultCarriesChunkText("TABLE(chash bytea, body text)"))
+            .as("a text column under another name is invisible to the shape matcher: the definition scan covers it")
+            .isFalse();
+    }
+
+    @Test
+    void aFunctionThatReturnsChunkTextUnderAnotherColumnNameIsCaughtByTheDefinitionScan() throws Exception {
+        String probe = "census_probe";
+        try (Connection su = pg.createConnection(""); var st = su.createStatement()) {
+            st.execute("drop schema if exists " + probe + " cascade");
+            st.execute("create schema " + probe);
+            st.execute("create function " + probe + ".leak(p text) returns table(chash bytea, body text) "
+                + "language plpgsql as $f$ begin return query select c.chash, c.chunk_text from nexus.chunks_384 c; "
+                + "end $f$");
+        }
+        try {
+            Map<String, String> byShape = textFunctionsFromPgProc(pg, probe);
+            Map<String, String> byDefinition = functionsMentioningChunkText(pg, probe);
+            assertThat(byShape).as("the planted function returns chunk text as 'body': the shape matcher misses it")
+                .doesNotContainKey("leak");
+            assertThat(byDefinition).as("the definition scan sees the planted function").containsKey("leak");
+            assertThat(unclassifiedDefinitionReaders(byDefinition, byShape.keySet(), Set.of()))
+                .as("so the cross-check names it").containsOnlyKeys("leak");
+        } finally {
+            try (Connection su = pg.createConnection(""); var st = su.createStatement()) {
+                st.execute("drop schema if exists " + probe + " cascade");
+            }
+        }
+    }
+
+    /**
+     * Functions whose definition mentions the {@code chunk_text} column but whose result carries no chunk text, with
+     * the reason. An entry here is a claim a reviewer can read.
+     */
+    static final Map<String, String> DEFINITION_READERS_RETURNING_NO_TEXT = Map.ofEntries(
+        Map.entry("gc_quarantine_orphans", "moves reapable chunks (no live owner, never sensitive) to quarantine; "
+            + "returns a count and a jsonb sample labelled by left(chunk_text, 80)"),
+        Map.entry("gc_quarantine_orphans_bounded", "the bounded form of gc_quarantine_orphans: the same sample labels"),
+        Map.entry("gc_restore_rereferenced", "INSERT..SELECT of quarantined rows back to the live collection; returns "
+            + "a bigint count"),
+        Map.entry("gc_restore_rereferenced_bounded", "the bounded form: returns restored and remaining counts"),
+        Map.entry("manifest_qualifying_hits", "text gate over manifest chunks; returns hit, collection and chash "
+            + "key, no text"),
+        Map.entry("quarantine_restore_chunks", "moves quarantine rows back; returns verdict rows (chash, outcome, "
+            + "owner id and titles, counts), no chunk text"),
+        Map.entry("reaper_quarantine_chunks", "moves reapable chunks to quarantine; returns counts and a refusal flag"),
+        Map.entry("text_gate_probe_384", "text gate; SETOF bytea, the chashes whose text matches, no text"),
+        Map.entry("text_gate_probe_768", "text gate; SETOF bytea, the chashes whose text matches, no text"),
+        Map.entry("text_gate_probe_1024", "text gate; SETOF bytea, the chashes whose text matches, no text"));
+
+    @Test
+    void everyNexusFunctionThatMentionsChunkTextIsInTheShapeSetOrClassified() throws Exception {
+        Map<String, String> byDefinition = functionsMentioningChunkText(pg, "nexus");
+        assertThat(byDefinition.keySet()).as("non-vacuity: the definition scan sees the search families")
+            .containsAll(textFunctionArgs.keySet());
+        assertThat(unclassifiedDefinitionReaders(byDefinition, textFunctionArgs.keySet(),
+                                                 DEFINITION_READERS_RETURNING_NO_TEXT.keySet()))
+            .as("nexus functions whose definition reads chunk_text, returned under a column name the shape matcher "
+                + "does not know: add the name to it, or classify the function as returning no text")
+            .isEmpty();
+    }
 
     @Test
     void everyNexusFunctionThatReturnsChunkTextEndsInTheExcludeArgument() {
@@ -198,6 +310,17 @@ class VectorSensitivityRouteParityTest {
         "ReembedSourceReader.java#chunks", "internal re-embed job input; the job route returns state and counts",
         "ReembedSourceReader.java#planCounts", "octet_length of the text: byte counts"));
 
+    static {
+        // found when the census began reading string literals and field initialisers (nexus-rfvyy.7.17)
+        OTHER_TEXT_READERS.put("CatalogRepository.java#chunkRow", "map builder resolveSpan (GATED above) calls with "
+            + "the values it read; it reads nothing itself");
+        OTHER_TEXT_READERS.put("DimTables.java#<type ChunkTable>", "the column handle of the chunk tables "
+            + "(t.field(\"chunk_text\")): a reference, not a read; every query that selects it is a method this "
+            + "census judges");
+        OTHER_TEXT_READERS.put("PipelineHandler.java#handleChunks", "request validation of the chunk_text key of an "
+            + "uploaded pdf chunk: input to a write of pdf_chunks, not a read");
+    }
+
     // ── route table ───────────────────────────────────────────────────────────
 
     private List<ChunkTextRouteCensus.Finding> findings() throws Exception {
@@ -279,8 +402,8 @@ class VectorSensitivityRouteParityTest {
             String handlerName = "handle" + Character.toUpperCase(name.charAt(0)) + name.substring(1);
             var repoTexts = ChunkTextRouteCensus.memberTexts(repoSrc, name);
             assertThat(repoTexts).as("%s exists", name).isNotEmpty();
-            assertThat(repoTexts.stream().anyMatch(t -> t.contains(ChunkTextRouteCensus.FLAG)))
-                .as("%s carries %s", name, ChunkTextRouteCensus.FLAG).isTrue();
+            assertThat(repoTexts.stream().anyMatch(ChunkTextRouteCensus::usesFlag))
+                .as("%s uses %s", name, ChunkTextRouteCensus.FLAG).isTrue();
             var handlerTexts = ChunkTextRouteCensus.memberTexts(handlerSrc, handlerName);
             assertThat(handlerTexts).as("%s exists", handlerName).isNotEmpty();
             assertThat(handlerTexts.stream().allMatch(t -> t.contains("ChunkSensitivity.excludeFlag")))
@@ -384,6 +507,77 @@ class VectorSensitivityRouteParityTest {
             """;
         var f = ChunkTextRouteCensus.census(handler, repo, Set.of(), Set.of()).get(0);
         assertThat(f.readsChunkText()).as("body.get(...) is not repo.get(...)").isFalse();
+    }
+
+    // ── nexus-rfvyy.7.17: literals are read, and the flag must be USED ─────────
+
+    private static ChunkTextRouteCensus.Finding freshOf(String freshBody, Set<String> textFunctions) {
+        String repo = "final class R {\n    List fresh(String a) { " + freshBody + " }\n}\n";
+        return ChunkTextRouteCensus.census(HANDLER, repo, textFunctions, Set.of()).stream()
+            .filter(f -> f.route().equals("/brand-new")).findFirst().orElseThrow();
+    }
+
+    @Test
+    void aRawSqlReadOfChunkTextInsideAStringLiteralIsDetected() {
+        assertThat(freshOf("return ctx.fetch(\"select chash, chunk_text from nexus.chunks\");", Set.of())
+            .readsChunkText()).as("select chunk_text in a string literal").isTrue();
+        assertThat(freshOf("return ctx.fetch(\"\"\"\n            select left(chunk_text, 80)\n"
+            + "            from nexus.chunks\n            \"\"\");", Set.of())
+            .readsChunkText()).as("select chunk_text in a text block").isTrue();
+        assertThat(freshOf("return ctx.fetch(\"select * from nexus.plain_search_384(?, ?)\");",
+                           Set.of("plain_search_384")).readsChunkText())
+            .as("a raw-SQL call of a function the pg_proc derivation found").isTrue();
+    }
+
+    @Test
+    void aLiteralThatMerelyResemblesChunkTextIsNotARead() {
+        assertThat(freshOf("return ctx.fetch(\"select chunk_text_hash from nexus.chunks\");", Set.of())
+            .readsChunkText()).as("chunk_text_hash is a different column").isFalse();
+        assertThat(freshOf("// select chunk_text from nexus.chunks\n return ctx.fetch(\"select 1\");", Set.of())
+            .readsChunkText()).as("a comment is not a read").isFalse();
+        assertThat(freshOf("return ctx.fetch(\"select 1\");", Set.of("plain_search_384"))
+            .readsChunkText()).isFalse();
+    }
+
+    @Test
+    void aRawSqlConstantInAFieldInitialiserFailsTheCensusRatherThanBeingMissed() {
+        String repo = """
+            final class R {
+                private static final String SQL = "select chunk_text from nexus.chunks";
+                List fresh(String a) { return ctx.fetch(SQL); }
+            }
+            """;
+        assertThatThrownBy(() -> ChunkTextRouteCensus.census(HANDLER, repo, Set.of(), Set.of()))
+            .isInstanceOf(AssertionError.class).hasMessageContaining("field initialiser");
+    }
+
+    @Test
+    void aParameterThatIsDeclaredButNeverUsedIsNotTheFlag() {
+        var unused = ChunkTextRouteCensus.census(HANDLER,
+            REPO.replace("PLAIN_SEARCH_384.call(a, excludeSensitive)", "PLAIN_SEARCH_384.call(a)"),
+            Set.of("plain_search_384"), Set.of());
+        assertThat(unused.stream().filter(f -> f.route().equals("/search")).findFirst().orElseThrow().conforms())
+            .as("the method that reads the text declares the flag and never uses it").isFalse();
+        var viaPlan = ChunkTextRouteCensus.census(HANDLER,
+            REPO.replace("PLAIN_SEARCH_384.call(a, excludeSensitive)", "PLAIN_SEARCH_384.call(a, wherePlan.excludeSensitive())")
+                .replace(", boolean excludeSensitive", ""),
+            Set.of("plain_search_384"), Set.of());
+        assertThat(viaPlan.stream().filter(f -> f.route().equals("/search")).findFirst().orElseThrow().conforms())
+            .as("wherePlan.excludeSensitive() is a use").isTrue();
+    }
+
+    @Test
+    void aHandlerThatParsesTheFlagButNeverPassesItToTheRepositoryFailsTheCensus() {
+        var dropped = ChunkTextRouteCensus.census(
+            HANDLER.replace("repo.plain(a, excludeSensitive)", "repo.plain(a, true)"), REPO,
+            Set.of("plain_search_384"), Set.of());
+        assertThat(dropped.stream().filter(f -> f.route().equals("/search")).findFirst().orElseThrow().conforms())
+            .as("the parsed flag does not reach the repository call").isFalse();
+        var nested = ChunkTextRouteCensus.census(
+            HANDLER.replace("repo.plain(a, excludeSensitive)", "repo.plain(a, Boolean.valueOf(excludeSensitive))"),
+            REPO, Set.of("plain_search_384"), Set.of());
+        assertThat(nested.stream().filter(f -> f.route().equals("/search")).findFirst().orElseThrow().conforms())
+            .as("the flag inside a nested call argument still reaches it").isTrue();
     }
 
     @Test
