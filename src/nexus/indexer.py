@@ -16,17 +16,20 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.indexer_utils  — staleness check, credential check, shared helpers
   nexus.index_context  — IndexContext dataclass
 """
+import contextlib
 import os
+import sys
 import subprocess
 import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 import structlog
 
+from nexus import _locking
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.indexed_meta import document_register_meta, fill_only_meta
@@ -328,7 +331,6 @@ def _repo_lock_path(repo: Path) -> Path:
     return nexus_config_dir() / "locks" / f"{path_hash}.lock"
 
 
-_LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
 #: Page size for the batched catalog register_many pass (nexus-9dvqy). Matches
 #: the server's MAX_BATCH_DOC_IDS cap. Module-level so tests can shrink it to
 #: force multi-page behaviour without a 1000+ file corpus.
@@ -380,40 +382,66 @@ def _gc_floor_fraction() -> float:
     return val
 
 
-def _clear_stale_lock(lock_path: Path) -> None:
-    """Delete *lock_path* if it is stale (dead PID or old empty file).
+def _acquire_repo_lock(lock_path: Path, on_locked: str) -> IO[str] | None:
+    """Open and lock the repo lock file; the open file, or None when *on_locked* is 'skip' and it is held.
 
-    A lock file is stale when:
-    - It contains a PID that no longer exists (ESRCH), OR
-    - It has no parseable PID and is older than ``_LOCK_STALE_SECONDS``.
-
-    The second case handles background processes (disown/&) that were killed
-    before writing their PID, leaving empty 0-byte lock files forever.
-
-    This is advisory cleanup — the platform lock from
-    :mod:`nexus._locking` provides the real mutual exclusion.
+    Locks the file the path names at the moment it returns: a sweep may unlink the inode between
+    this process's open and its lock (nexus-dyfsw), and a lock on an unlinked inode excludes
+    nobody, so the loop re-opens the path and locks again. A sweep's own probe holds an unheld
+    file for microseconds, so a 'skip' caller asks once more before reading the lock as held.
     """
-    if not lock_path.exists():
-        return
-    try:
-        pid = int(lock_path.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        # No readable PID — check file age.  A just-opened lock will be
-        # younger than _LOCK_STALE_SECONDS; an orphan from a crashed
-        # process will be much older.
+    probe_retried = False
+    while True:
+        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")  # noqa: SIM115  (must stay open while locked)
         try:
-            age = time.time() - lock_path.stat().st_mtime
-        except OSError:
-            return
-        if age > _LOCK_STALE_SECONDS:
-            _remove_stale(lock_path)
-        return
-    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: advisory cleanup path only
+            lock_file(lock_fd, blocking=(on_locked == "wait"))
+        except BlockingIOError:
+            # on_locked == "skip" and another process holds the lock.
+            # Nothing has been written to the file — close and leave the
+            # holder's content exactly as it was. A sweep's probe holds an
+            # unheld file for microseconds (nexus-dyfsw), so ask once more
+            # before reading the lock as a live indexer's.
+            lock_fd.close()
+            if not probe_retried:
+                probe_retried = True
+                time.sleep(0.05)
+                continue
+            return None
+        # nexus-dyfsw: another process's sweep may have unlinked this file
+        # between our open and our lock; a lock on an unlinked inode
+        # excludes nobody, so take the lock on the file the path names now.
+        if sys.platform == "win32" or _same_file(lock_fd.fileno(), lock_path):
+            return lock_fd
+        lock_fd.close()
 
-    # pid_alive reads only ESRCH (Windows: no such process) as dead, so an
-    # ambiguous probe leaves the lock, as before (nexus-f9bgu.25).
-    if not pid_alive(pid):
-        _remove_stale(lock_path)
+
+def _clear_stale_lock(lock_path: Path) -> None:
+    """Delete *lock_path* when no process holds its platform lock.
+
+    The lock itself is the test, not the PID written in the file (nexus-dyfsw): a holder in
+    another PID namespace has a PID this process cannot see, so a PID test unlinked a live
+    holder's file and let a second indexer lock a fresh inode. A file that nobody holds is stale
+    whatever it contains, an empty one left by a process killed before it wrote its PID
+    included. The lock is held across the unlink on POSIX; Windows cannot unlink an open file,
+    so it is released first, and a file someone opened in that gap is left. A holder that locked
+    the inode just unlinked notices and retries (the lock loop in :func:`index_repository`).
+    """
+    try:
+        fd = os.open(str(lock_path), os.O_RDWR)
+    except OSError:
+        return  # absent, or not ours to open: nothing to sweep
+    try:
+        try:
+            _locking.lock_fd(fd, blocking=False)
+        except (BlockingIOError, OSError):
+            return  # held: a live indexer
+        if sys.platform != "win32":
+            _remove_stale(lock_path)
+            return
+    finally:
+        os.close(fd)  # also releases the lock
+    _remove_stale(lock_path)
 
 
 def _sweep_stale_locks(lock_dir: Path) -> None:
@@ -425,12 +453,21 @@ def _sweep_stale_locks(lock_dir: Path) -> None:
 
 
 def _remove_stale(lock_path: Path) -> None:
-    """Unlink *lock_path*, ignoring FileNotFoundError (concurrent cleanup)."""
+    """Unlink *lock_path*, ignoring a concurrent cleanup and, on Windows, a file another process has open."""
     try:
         lock_path.unlink()
         _log.debug("stale_lock_removed", path=str(lock_path))
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         pass
+
+
+def _same_file(fd: int, lock_path: Path) -> bool:
+    """True when *lock_path* still names the file open on *fd* (a sweep may have unlinked it)."""
+    try:
+        here, there = os.fstat(fd), os.stat(lock_path)
+    except OSError:
+        return False
+    return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
 
 
 def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
@@ -2658,15 +2695,8 @@ def index_repository(
         # known, so a loser left its own (soon-dead) PID in the file the
         # winner still held; the next arrival's stale-lock sweep then saw
         # ESRCH on that dead PID and unlinked the live holder's lock.
-        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")  # noqa: SIM115  (must stay open while locked)
-        try:
-            lock_file(lock_fd, blocking=(on_locked == "wait"))
-        except BlockingIOError:
-            # on_locked == "skip" and another process holds the lock.
-            # Nothing has been written to the file — close and leave the
-            # holder's content exactly as it was.
-            lock_fd.close()
+        lock_fd = _acquire_repo_lock(lock_path, on_locked)
+        if lock_fd is None:
             return {}
         # We now hold the exclusive flock: safe to stamp our own PID.
         try:
@@ -2763,14 +2793,23 @@ def index_repository(
                     _set_owner_head_hash(repo, _current_head(repo))
             return stats
         finally:
-            if lock_fd is not None:
+            # nexus-dyfsw: unlink while still holding the lock, and only the file
+            # the path still names, so a waiter cannot lock this inode in the gap
+            # and then lose its path to a third arrival. Windows cannot unlink an
+            # open file, so it releases first, as before.
+            if lock_fd is not None and lock_path is not None and sys.platform != "win32":
+                if _same_file(lock_fd.fileno(), lock_path):
+                    with contextlib.suppress(FileNotFoundError):
+                        lock_path.unlink()
                 unlock_file(lock_fd)
                 lock_fd.close()
-            if lock_path is not None:
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass  # already gone — harmless
+            else:
+                if lock_fd is not None:
+                    unlock_file(lock_fd)
+                    lock_fd.close()
+                if lock_path is not None:
+                    with contextlib.suppress(FileNotFoundError, PermissionError):
+                        lock_path.unlink()
             # nexus-hg2dw point (2): runs on EVERY exit — normal return, an
             # exception propagating out of `_run_index`, or a KeyboardInterrupt
             # (SIGINT) — fail-stamping anything Pass 1 registered as needing

@@ -243,6 +243,7 @@ def run_bounded(
     stderr: IO[Any] | int = subprocess.PIPE,
     extra_creationflags: int = 0,
     contained: bool = True,
+    kill_on_interrupt: bool = False,
 ) -> subprocess.CompletedProcess[Any]:
     """``subprocess.run(capture_output=True, timeout=...)`` that is actually bounded.
 
@@ -279,6 +280,14 @@ def run_bounded(
     nothing is killed on return and the child may break away from the caller's own
     job. A timeout then reaches the direct child only, the same reach as a failed
     containment.
+
+    *kill_on_interrupt* (default False) extends the group kill to any exception that
+    interrupts the wait (``KeyboardInterrupt``, or one a signal handler raises). The
+    child runs in its own session, so a Ctrl-C at the terminal never reaches it, and
+    without this flag it keeps running after the caller has unwound. A caller that
+    undoes work after an interrupt (``nx daemon service pg-upgrade``'s rollback) must
+    not do so while the child can still write: it passes True, and the child's group
+    is killed and reaped BEFORE the exception continues (nexus-j738q).
 
     *encoding* and *errors* decode the child's pipes (and encode ``input=``)
     in text mode; they are ignored when ``text=False``. The default is UTF-8,
@@ -354,6 +363,16 @@ def run_bounded(
                 # the group was already gone.
                 descendants_reached=(reach == "group"),
             )
+            raise
+        except BaseException:
+            if not kill_on_interrupt:
+                raise
+            # An interrupt (Ctrl-C, or a signal handler's exception): kill the group, then reap
+            # it, so the caller never unwinds while the child can still run.
+            kill_child_and_descendants(proc, job)
+            job = None
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=REAP_TIMEOUT_S)
             raise
     finally:
         # nexus-6y4e0 review (CRITICAL): contain()'s handle must close on

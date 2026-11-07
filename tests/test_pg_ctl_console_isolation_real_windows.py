@@ -45,6 +45,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.pg_provision import PG_CTL_START_CREATIONFLAGS
+from tests._child_process import kill_if_identity
 
 #: Runs as ``python -I <this> <flags> <workdir> <test pid>`` on the base
 #: interpreter (a venv ``python.exe`` is a launcher that starts the interpreter
@@ -191,11 +192,10 @@ _HELPER = textwrap.dedent(
 )
 
 
-def _kill_pid(pid: int) -> None:
-    try:
-        os.kill(pid, 9)  # TerminateProcess on Windows
-    except OSError:
-        pass
+def _kill_pid(pid: int, workdir: Path) -> None:
+    """End one child the helper recorded, only while it is still that child: its command line holds its heartbeat
+    path under *workdir* (nexus-xzorj). TerminateProcess on Windows."""
+    kill_if_identity(pid, str(workdir), sig=9)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="console control events exist only on Windows")
@@ -238,7 +238,7 @@ class TestRealWindows:
                 written = workdir / "result.json"
                 if written.exists():
                     for pid in json.loads(written.read_text(encoding="utf-8")).get("pids", {}).values():
-                        _kill_pid(int(pid))
+                        _kill_pid(int(pid), workdir)
 
         result_file = workdir / "result.json"
         assert result_file.exists(), f"the helper wrote no result: rc={helper.returncode} log={helper_log.read_text(errors='replace', encoding="utf-8")!r}"

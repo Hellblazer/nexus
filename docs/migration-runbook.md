@@ -691,6 +691,13 @@ PostgreSQL is gone, install the same major version first (for example Homebrew
 `postgresql@16`). If you do not need the data, skip all of this: move the data
 directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 
+`nx daemon service pg-upgrade --old-bin <bin dir>` does all of this for you: with no
+other flag it prints the plan and changes nothing, `--check-only` runs
+`pg_upgrade --check` against the real cluster with a temporary new one, and `--apply`
+upgrades with a rollback on any failure (see `docs/cli-reference.md`). The command is
+not yet run against a real pre-17 cluster; copy the data directory first. The manual
+steps below are the same procedure, and the way to recover by hand.
+
 Save the block as a script and run it with `bash <file>`; do not paste it into
 a shell. Steps 2 to 4 end the script with `exit 1` when they fail (step 2
 when a `$DATA.old` is already there), so nothing after the failure runs. Pasted,

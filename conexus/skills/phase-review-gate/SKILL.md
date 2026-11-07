@@ -21,6 +21,7 @@ A manual checklist for the phase boundary. Before a phase is declared closed, ev
 2. For each item, find the closing bead (`bd show <id>`) whose acceptance criteria cover it. Write `Item N = <bead-id>`.
 3. An item with no closing bead is either unfinished or deferred. Finish it, or write `Item N = none` with a one-line reason (for example "T1 stays put, no work needed").
 4. Do not close the phase while an item has no pointer and no stated deferral.
+5. When the phase closes, mark its heading in the RDR: `### Phase N (CLOSED, YYYY-MM-DD): <title>`. `nx memory curate --t2` reads that marker to list the phase's gate records that still have no TTL (RDR-209 Phase 3 Step 4).
 
 Nothing enforces this. No command checks the list and nothing blocks the close. The reviewer is accountable for every `none`.
 

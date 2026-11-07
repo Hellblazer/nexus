@@ -2510,7 +2510,7 @@ class TestPeerFrame:
         eng.rows = [_row("pf08", body=body)]
         _wired(tmp_path, eng)
         out = _run(tmp_path=tmp_path, argv=argv).stdout
-        real = re.findall(r"^\(end of peer data ([0-9a-f]{16})\)$", out, flags=re.M)
+        real = re.findall(r"^\(end of peer data ([0-9a-f]{16})\)\r?$", out, flags=re.M)
         assert len(real) == 1, out
         nonce = real[0]
         assert f"carries the code {nonce}" in out.split(self._FRAME, 1)[1].split("\n", 1)[0], out
@@ -2524,7 +2524,7 @@ class TestPeerFrame:
         eng.rows = [_row("pf09", body="one"), _row("pf10", body="two")]
         _wired(tmp_path, eng)
         out = _run(tmp_path=tmp_path, argv=argv).stdout
-        nonces = re.findall(r"^\(end of peer data ([0-9a-f]{16})\)$", out, flags=re.M)
+        nonces = re.findall(r"^\(end of peer data ([0-9a-f]{16})\)\r?$", out, flags=re.M)
         assert len(nonces) == 2 and nonces[0] != nonces[1], out
 
     def test_a_nonce_the_text_happens_to_contain_is_redrawn(self, monkeypatch) -> None:
@@ -2547,7 +2547,7 @@ class TestPeerFrame:
         )
         out = res.stdout.decode("cp1252")
         assert res.returncode == 0 and "ok ? snowman" in out, (out, res.stderr)
-        assert re.search(r"^\(end of peer data [0-9a-f]{16}\)$", out, flags=re.M), out
+        assert re.search(r"^\(end of peer data [0-9a-f]{16}\)\r?$", out, flags=re.M), out
         assert b"unexpected" not in res.stderr, res.stderr
         pending = tmp_path / "config" / "tuple-watch" / f"{SESSION_ID}.pending.json"
         assert not pending.exists(), "delivered, so the pending entry is cleared"

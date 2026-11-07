@@ -119,8 +119,10 @@ def _resolve_dt_collection(
 
 
 # nexus-i0cwh: DEVONthink's own metadata for a record, read once per run over
-# the DT MCP (fail-soft), used for the catalog row (title/url/year) and for
-# the page-coverage check (pageCount).
+# the DT MCP (fail-soft), used for the catalog row (title/url) and for the
+# page-coverage check (pageCount). No year: DEVONthink's creationDate is the
+# file's or the import's date, not the publication's (nexus-55clh: a 1986
+# paper was stamped 2025), and a wrong year is worse than none.
 _FACTS_CACHE: dict[str, dict | None] = {}
 
 
@@ -136,20 +138,17 @@ def _reset_facts_cache() -> None:
 
 
 def _dt_record_facts(uuid: str) -> dict | None:
-    """``{name, url, year, page_count}`` from ``get_record_properties``, or
+    """``{name, url, page_count}`` from ``get_record_properties``, or
     ``None`` when the DT MCP is unreachable. Cached for the run."""
     if uuid in _FACTS_CACHE:
         return _FACTS_CACHE[uuid]
     result = _dt_call("get_record_properties", {"uuid": uuid})
     facts: dict | None = None
     if isinstance(result, dict) and result:
-        created = str(result.get("creationDate") or "")
-        year = int(created[:4]) if re.match(r"^\d{4}", created) else 0
         raw_pages = result.get("pageCount")
         facts = {
             "name": str(result.get("name") or ""),
             "url": str(result.get("url") or ""),
-            "year": year,
             "page_count": int(raw_pages) if isinstance(raw_pages, (int, float)) and raw_pages > 0 else 0,
         }
     _FACTS_CACHE[uuid] = facts
@@ -509,13 +508,13 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
             return False
 
         tumbler = entry.tumbler
-        # nexus-i0cwh: DEVONthink's own url/pageCount/year travel onto the
-        # row; the indexer's PDF-derived year stands when it has one.
+        # nexus-i0cwh: DEVONthink's own url/pageCount travel onto the row.
+        # The year stays the indexer's (nexus-55clh: none from DEVONthink).
         meta: dict = {"devonthink_uri": dt_uri}
         fields: dict = {}
         if facts:
             # The catalog title is DEVONthink's record name (the bead's
-            # acceptance names DEVONthink's title/url/year), not the
+            # acceptance names DEVONthink's title/url), not the
             # indexer's PDF-derived guess.
             if facts.get("name") and facts["name"] != getattr(entry, "title", ""):
                 fields["title"] = facts["name"]
@@ -523,8 +522,6 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str, facts: dict | None = None
                 meta["devonthink_url"] = facts["url"]
             if facts.get("page_count"):
                 meta["devonthink_page_count"] = facts["page_count"]
-            if facts.get("year") and not getattr(entry, "year", 0):
-                fields["year"] = facts["year"]
         writer.update(
             tumbler,
             source_uri=dt_uri,

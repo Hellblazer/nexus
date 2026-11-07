@@ -524,7 +524,7 @@ nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force --re-embed
 | `--dt-content` | Index non-file-backed records (web archives, bookmarks, formatted notes) from DT's AI-extracted text instead of skipping them (RDR-139 Layer D). Web-archive boilerplate (navigation chrome, cookie banners, footers) is stripped before chunking (nexus-mok9x). Every such chunk is stamped `extraction_source=dt_content`; file-backed records still index from their file. DT unavailable → records skipped as before. Opt-in |
 | `--highlights` | After a record indexes, ingest its DT highlights + mentions as a markdown note attached to the record's tumbler in the `document_highlights` T2 table (RDR-139 Layer E). Read back with `nx dt highlights`. Opt-in |
 
-**Page coverage and DEVONthink metadata (nexus-i0cwh).** On every fresh PDF index the verb reads the record's properties over the DEVONthink MCP (`get_record_properties`) and compares the pages the extractor produced text for (`pages_with_text`, every backend's per-page callback; never the pages chunks happen to start on) with DEVONthink's `pageCount`. A gap prints `page coverage: N of M pages produced text; missing pages …`, counts as `page-coverage failed` in the summary, and exits non-zero unless `--allow-page-gap` (then `page gap allowed`). When the MCP is unreachable, or the extraction was resumed from a pipeline buffer written before this check existed, the record counts as `page coverage unverified` with the reason printed: unverified is never covered. The same read stamps `year` (from `creationDate`, when the PDF carried none), `meta.devonthink_url` and `meta.devonthink_page_count` onto the catalog row beside the `x-devonthink-item://` identity. `/conexus:devonthink-index <uuid|/group path|smart group>` is the plugin command over this verb.
+**Page coverage and DEVONthink metadata (nexus-i0cwh).** On every fresh PDF index the verb reads the record's properties over the DEVONthink MCP (`get_record_properties`) and compares the pages the extractor produced text for (`pages_with_text`, every backend's per-page callback; never the pages chunks happen to start on) with DEVONthink's `pageCount`. A gap prints `page coverage: N of M pages produced text; missing pages …`, counts as `page-coverage failed` in the summary, and exits non-zero unless `--allow-page-gap` (then `page gap allowed`). When the MCP is unreachable, or the extraction was resumed from a pipeline buffer written before this check existed, the record counts as `page coverage unverified` with the reason printed: unverified is never covered. The same read stamps `meta.devonthink_url` and `meta.devonthink_page_count` onto the catalog row beside the `x-devonthink-item://` identity. It stamps no year: DEVONthink's `creationDate` is the file's or the import's date, not the publication's (nexus-55clh). `/conexus:devonthink-index <uuid|/group path|smart group>` is the plugin command over this verb.
 
 **RDR-139 layered ingest.** The opt-in flags above compose: a single
 `nx dt index --selection --link-semantic --writeback --enrich --highlights`
@@ -2830,7 +2830,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 `nx memory curate` (RDR-238) prints a curation report and stores it in T2 as `<repo>/curation-report-<YYYY-MM-DD>` with a 90-day TTL (tag `curation-report`; the repo name is the primary checkout's, so a worktree reports under it). A run that selects fewer than `--files`, `--t2` and `--agents` stores `<repo>/curation-report-<YYYY-MM-DD>-<sections>` (for example `-files` or `-t2-agents`) instead, so a partial run never replaces the day's full report. It only lists: it deletes, quarantines and edits nothing, and it exits 0 whatever it finds. A section that cannot run (T2 unreachable, no memory directory) prints one `not available: <reason>` line and the others still run. The 90-day TTL puts each report on RDR-207's quarantine path; only a rolled-up row is ever reaped, so old reports stay quarantined.
 
 - `--files` reads the repository's Claude Code memory directory. The directory is found by `nexus._hook_runtime.memory_dir.memory_dir`, the function the SessionStart curation hook shares: `autoMemoryDirectory` from `.claude/settings.local.json`, `.claude/settings.json` (in the working directory, then the primary checkout) or `<config dir>/settings.json` when one holds an absolute or `~/` path to an existing directory; otherwise `<config dir>/projects/<key>/memory`, where `<config dir>` is `$CLAUDE_CONFIG_DIR` or `~/.claude` and `<key>` is the primary checkout's absolute path with every non-alphanumeric character replaced by `-`. A linked worktree reports its primary's directory; the primary is found by reading `.git` (a directory, or a `gitdir:` file and its `commondir`), with no process spawned, and git is asked only when `GIT_DIR` or `GIT_COMMON_DIR` is set, a `GIT_CEILING_DIRECTORIES` entry lies above the working directory, or the layout is unrecognised. The section lists: files named in neither `MEMORY.md` nor `MEMORY-ondemand.md` (the two index files are never listed, and are exempt from the size check); files over 8192 bytes; index links naming a missing file; files that another file names in its frontmatter `replaces:` and that still exist (the writer should delete the old file); and **likely near-duplicates**, for you to review and never acted on. There is no rule that infers a file was replaced without saying so (Sam's decision S-7); a file declares supersession with `replaces: <slug>` in its frontmatter, and the near-duplicate list is the only help for the ones that did not. The near-duplicate measure is the Jaccard overlap of the tokens of each file's frontmatter `name` (its file name if absent) and `description`: lowercase `[a-z0-9]+` words of two or more characters minus a short stopword list; a pair is listed at overlap 0.5 or more, and a file with fewer than four tokens is not compared. The row for unread files prints `not available` until RDR-240's `memory` query exists (nexus-qo7ie.18).
-- `--t2` reads every live row of the repository's T2 projects (the repo name and `<repo>_*`; one large read for a big project) and lists the rows that a later row names as replaced: a line in the later row's title or body of the form `replaces: <title>` or `supersedes <title>` (several titles separated by `,` or `;`, or in backticks), where the title matches a row of the same project exactly and is older than the row that names it. Rows carrying an audit tag from the AUDIT_TAGS table (`src/nexus/tables/audit-tags.toml`, whole-tag match) or matching its title backstop are skipped, and the count skipped is printed. A title that is only a number (`100`, `RDR-107`: an incidental number after `supersedes` names an RDR, not a row) is never a candidate, and neither is a row already tagged `superseded`. The read returns live rows only, so a quarantined row is never listed. It also prints the RDR-209 Phase 3 Step 4 census: gate records (tag `gate` or `kind:gate`, in `<repo>` and `<repo>_rdr`) older than 30 days, with no TTL, whose phase is closed. The phase is the RDR the record belongs to (its `rdr:<NNN>` tag, or the leading number of its title in `<repo>_rdr`), and "phase closed" is read as that RDR's frontmatter `status` being `closed` (a closed phase of a still-open RDR is not flagged; per-phase flagging is nexus-qo7ie.28), read from the working tree's RDR directory (`docs/rdr`, or the first `indexing.rdr_paths` entry in `.nexus.yml`). A gate record that maps to no RDR is counted and not judged.
+- `--t2` reads every live row of the repository's T2 projects (the repo name and `<repo>_*`; one large read for a big project) and lists the rows that a later row names as replaced: a line in the later row's title or body of the form `replaces: <title>` or `supersedes <title>` (several titles separated by `,` or `;`, or in backticks), where the title matches a row of the same project exactly and is older than the row that names it. Rows carrying an audit tag from the AUDIT_TAGS table (`src/nexus/tables/audit-tags.toml`, whole-tag match) or matching its title backstop are skipped, and the count skipped is printed. A title that is only a number (`100`, `RDR-107`: an incidental number after `supersedes` names an RDR, not a row) is never a candidate, and neither is a row already tagged `superseded`. The read returns live rows only, so a quarantined row is never listed. It also prints the RDR-209 Phase 3 Step 4 census: gate records (tag `gate` or `kind:gate`, in `<repo>` and `<repo>_rdr`) older than 30 days, with no TTL, whose phase is closed. The record's RDR is its `rdr:<NNN>` tag, or the leading number of its title in `<repo>_rdr`. It is flagged when that RDR's frontmatter `status` is `closed`, or when every phase its title names is a closed phase of that RDR (nexus-qo7ie.28; RDR-209 Phase 3 Step 4): the title's `-p<N>` or `-phase-<N>` pieces name the phases (`rdr-238-p3a-critique` is Phase 3a; a sub-phase counts as closed when its phase is, but a closed 3a does not close Phase 3), and a phase is closed when its own `## Phase N` to `#### Phase N` heading carries a parenthetical or dash-led CLOSED, SHIPPED, DONE or COMPLETE, the marker the `phase-review-gate` close step writes (`### Phase 3 (CLOSED, 2026-11-06)`). A record of an open RDR whose title names no phase is not judged. Both are read from the working tree's RDR directory (`docs/rdr`, or the first `indexing.rdr_paths` entry in `.nexus.yml`). A gate record that maps to no RDR is counted and not judged.
 - `--agents` reads each `<config dir>/agent-memory/<agent>/` directory that holds a `MEMORY.md` (the reviewers' own memory). Per directory: index length (the reviewer definitions say to keep it under 40 lines, so 40 or more is flagged); entries (`- [title](file.md) ...`) whose line and linked file name no repo (one of `repo: <name>`, `learned in <name>` or `<name> repo`; a generic word such as `whole`, `this`, `any`, `git` or a language name like `Java` is not a name, so `whole repo` and `the Java repo` do not count); and four signs of concurrent-write damage, since two sessions running one reviewer edit one `MEMORY.md` and the last writer wins: a duplicate entry (an identical line, or two entries linking one file), a truncated last line (no final newline and a bullet that does not close, down to a line cut to just `-`), a dangling entry (links a file the directory lacks), and an orphan file (no index line names it).
 - `--cold` prints `not available` and the reason until RDR-238 Phase 3 Step 3.
 
@@ -3861,6 +3861,22 @@ Exit codes. A pending backlog never fails the check. A WARN line on stderr says 
 
 The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any UNACKNOWLEDGED failure — never the all-time total, and never a failure an operator has durably acknowledged. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Two rounds of scoping close two separate traps found in review: (1) an unscoped all-time gate turned the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever — fixed by gating on the latest run instead, with a failure older than 30 days no longer gating at all (self-heals over time with no operator action); (2) staleness alone did not self-heal a corpus re-indexed on a cadence SHORTER than that window, since every run mints a fresh run id for the identical recurring failure — fixed by `nx index failures --acknowledge`, a durable adjudication the gate excludes regardless of how many times it recurs under a new run id. `nx index failures --clear` remains the immediate one-time remedy for a failure an operator has already handled and does not want to wait out the staleness window for. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days), unacknowledged latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
 
+```
+nx doctor --probe-edge                              # Prove Idempotency-Key reaches the engine through the edge (nexus-t0ms7)
+nx doctor --probe-edge --expect-host <host>         # Same, and refuse any other endpoint host
+```
+
+The `--probe-edge` flag (nexus-t0ms7, RDR-222) checks the one hop failure that nothing else shows: the client resends a keyed sweep after an unknown outcome, which is safe only if the engine saw `Idempotency-Key`, and a gateway, CDN or proxy that drops the header (RDR-007 A5 did, conexus-c4i2) turns that resend into a second unkeyed run. It sends ONE keyed bounded expire-quarantine page that cannot do anything: it names a dedicated sibling, `quarantine-nx-doctor-edge-probe`, that nothing ever fills, with `row_limit` 1, `force` false, cutoff `2000-01-01` and a registered collection of the tenant as origin, so no real drain contends with it and no row can qualify. It then reads `GET /v1/requests/<key>` whatever the response header said, and requires a 200 with `expired` 0, the ledger answering `state: committed`, and the `Idempotency-Key` response header echoing the key.
+
+A failure prints `[✗] Edge idempotency probe (host <host>): FAIL: ...` and a `hop:` line naming where the key most likely stopped: the network, the edge, an engine without the keyed form, the request path (the ledger has no row and no echo: the engine never saw the key), the response path (the ledger committed under the key but the response header was stripped on the way back: the key reached the engine), a status route not served through the path, or a ledger with no committed row. Only the two key-loss hops point at the RDR-007 A5 origin request policy. Every row names the endpoint host it probed. A loopback or local-lease endpoint has no edge to lose the key, so it is `NOT PROBED: not a managed edge`; `--expect-host <host>` pins the host a scheduled step means to test (a different resolved host is `NOT PROBED`), and naming a loopback host there lets the probe run against a local engine. A tenant with no registered collection to name as the origin is `NOT PROBED` too: a pass over nothing is not a pass.
+
+Exit codes:
+- `0` — passed.
+- `1` — failed, or could not probe (not a managed edge, wrong `--expect-host`, no collection, no endpoint).
+- `2` — inconclusive, printed `[?] ... NOT PROBED`: the credentials cannot send the write (HTTP 401 or 403 with no edge-refusal header) or the engine's sweep gate was busy (503 `sweep_gate_busy`). Neither says anything about the edge; fix the credential or run it again.
+
+It is opt-in on purpose and is never part of the default sweep or `--json`: it sends a mutating request, and `nx doctor` is a command users run unasked. It writes one request-ledger row per run, which the engine keeps 7 days (`NX_REQUEST_LEDGER_RETENTION_DAYS`), and deletes nothing. It takes one mode per invocation like the `--check-*` flags. It goes through the client's own transport, so a process run from a dev checkout is still stopped by the production-write guard unless `NX_ALLOW_PROD_WRITE` carries a reason. No workflow runs it: scheduling it needs production credentials, so the command is the step and the schedule is the operator's call.
+
 ### Doctor rows
 
 The rows below are written up at length because their remedies are not obvious from the row text.
@@ -3988,7 +4004,7 @@ tombstone, are ignored.
 
 The only remedy the warning gives is to measure: for k of 40, 60, 80, 100 and 120, compare the collection's index top-k
 with an exact top-k, on query vectors written for the collection's own topics, and expect 0.99 or better at every k
-(RDR-227 Gap 1; nexus-a6mys will package it as a script). Raising `NX_SEARCH_EXACT_MAX_ROWS` keeps a collection exact and
+(RDR-227 Gap 1). `scripts/prose_index_recall_check.py` runs it from a nexus source checkout (nexus-a6mys): `uv run python scripts/prose_index_recall_check.py <collection> --queries-file <file>` (or `--sample N --seed S`; `--dry-run` prints the plan and request count first). It is read only. The index arm is the collection's ordinary single-collection search at each k; the exact arm is the same search with the collection's chunk hashes sent as `chash_allow` in slices of 3000, merged by distance. It prints recall per k and the minimum and exits 1 under 0.99, 2 when it cannot run (an engine without `chash_allow`, an empty or incompletely listed collection, fewer than 10 queries, or an engine or network error), 3 when the collection is at or below the threshold (the router runs it exact, so the answer would be 1.0 whatever the index does; `--threshold` takes the engine's `NX_SEARCH_EXACT_MAX_ROWS`, which a client cannot read). Each search embeds its query on the engine, so a run is 5 + ceil(rows/3000) Voyage-embedded searches per query; tell the engine's operator before a run against a shared engine. A client cannot see which route a search took, so a run before the collection's index is built measures the `ef_search` 1000 walk. Raising `NX_SEARCH_EXACT_MAX_ROWS` keeps a collection exact and
 is the engine's remedy when the measurement fails, but it is engine-wide, bounded (docs/configuration.md names 30000
 for this; each exact arm reads every row of its collection, and the 27,893- and 29,355-row code collections
 went from 25-50 ms index arms to 0.6-0.9 s exact arms), and `nx doctor` cannot see the value the engine runs with, so the
@@ -4508,6 +4524,70 @@ and its definition current).
 |------|-------------|
 | `--autostart` | Required. Install the OS autostart unit. |
 | `--force` | Overwrite an existing unit file even when its content differs. |
+
+### nx daemon service pg-upgrade
+
+```
+nx daemon service pg-upgrade --old-bin <bin dir>                 # dry run: prints the plan
+nx daemon service pg-upgrade --old-bin <bin dir> --check-only
+nx daemon service pg-upgrade --old-bin <bin dir> --apply
+```
+
+Upgrades a local cluster made by PostgreSQL below 17 (for example one made by a
+Homebrew PostgreSQL 16, before nx shipped its own) to the bundle's PostgreSQL 17,
+with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
+`nx daemon service start` stops before `pg_ctl` with a pointer to this command.
+It is the scripted form of "A local cluster older than PostgreSQL 17" in
+[the migration runbook](migration-runbook.md). Linux and macOS only.
+
+**Not yet run against a real pre-17 cluster; copy the data directory first.** Nothing locks the service while
+the upgrade runs: close other `nx` sessions and Claude Code sessions with the conexus plugin, and disable an
+autostart unit (launchd, systemd), before `--apply`.
+The command is tested against fake PostgreSQL binaries only. Until a real run
+exists, take a copy of the data directory (`cp -a <data> <copy>`) before
+`--apply`; the dry run and `--apply` both print this reminder.
+
+`--old-bin` is the `bin/` directory of the PostgreSQL that created the cluster;
+its `pg_ctl --version` must match the cluster's `PG_VERSION`. If that PostgreSQL
+is gone, install the same major version first. A cluster already at 17 or newer,
+a `--old-bin` of another major, and an existing `<data>.old` are refused before
+anything changes.
+
+Without a mode flag the command changes nothing: it validates the cluster and
+`--old-bin` and prints every step `--apply` would take. `--check-only` runs
+`initdb` into a temporary directory (never the real data directory) with the
+options nx creates its own clusters with, runs `pg_upgrade --check` against the
+real cluster (it starts and stops the old server on it and does not modify it),
+and removes the temporary directory; the old server must not be running. `--apply` stops the service, stops the old server with the old
+`pg_ctl` and checks it is down, moves the data directory to `<data>.old`, runs
+`initdb` (`--auth=trust` for the upgrade; the next service start converts it to
+`scram-sha-256`), `pg_upgrade --check` and `pg_upgrade`, starts the service, then
+runs `update_extensions.sql` (it looks in its work directory and under
+`<new data>/pg_upgrade_output.d`, and says whether it found one) and
+`vacuumdb --all --analyze-in-stages` over TCP.
+
+The superuser password from `pg_credentials` reaches `pg_upgrade`, `psql` and
+`vacuumdb` only as `PGPASSWORD` in that child's environment: never on a command
+line, in the output or in a log, and never in the service's environment. Any
+failure after the data directory has moved removes the new directory and moves
+the original back; `pg_upgrade`'s logs are kept in a work directory the message
+names. That directory can hold the roles' SCRAM password hashes (not the
+password): delete it once you have read the logs. Ctrl-C, SIGTERM and SIGHUP
+during `--apply` stop the running `pg_upgrade` (and any server it started) first,
+then roll back; the rollback stops the original cluster's server with
+`-m fast`, checks that no server runs, and prints `ROLLBACK INCOMPLETE` with the
+manual steps when it cannot finish. On Linux, an old PostgreSQL from a
+distribution may not start under the bundle's libraries; the command rolls back. After a success the pre-upgrade cluster stays at `<data>.old`: remove it
+by hand once the service has run and your data reads back. Check the result with
+`nx doctor` ("Local PostgreSQL version" passes, "Local PostgreSQL authentication"
+shows `scram-sha-256`).
+
+| Flag | Description |
+|------|-------------|
+| `--old-bin PATH` | Required. The `bin/` of the PostgreSQL that created the cluster. |
+| `--check-only` | `initdb` into a temporary directory and `pg_upgrade --check` against the real cluster (starts and stops the old server, modifies nothing). |
+| `--apply` | Do the upgrade; rolls back on any failure after the move. |
+| `--config-dir PATH` | Config directory override. |
 
 ### nx daemon service install-binary
 

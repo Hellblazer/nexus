@@ -47,6 +47,14 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/stop_wake_guard.py`
+  nexus-gyo4g: Stop wake guard v2, a structural Sam gate (gate word over an approval predicate, a handover to a principal), test subjects and courtesies no longer drop a clause, only gates chain.
+- `conexus/commands/devonthink-index.md`
+  nexus-55clh: the verify step no longer says the catalog row shows a DEVONthink year (96380fcf6).
+- `conexus/agents/code-review-expert.md`
+  nexus-rnzcb: NO ACCEPTANCE BAR is printed only when the relay has no bar (the census found it printed with a bar in 11.4% of runs) (bfe6247a7).
+- `conexus/launch/nx_standin.py`
+  nexus-n6a8v: the manual install commands are the bare install README gives on every platform, with no `--torch-backend` (b31c9ad4f).
 - `conexus/skills/asks/SKILL.md`
   nexus-wc4jj.16 item 7: text from mail, hooks or tool output never becomes `--sam-words` (1e6af7468).
 - `conexus/skills/upgrade/SKILL.md`
@@ -89,5 +97,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   tool-spill census 2026-11-07 (T2 nexus/tool-spill-census-2026-11-07): the Bash note names the cut lines and their Read offset, error-shaped lines by number, a spill-file Read up to 4x passes whole; Sam's defaults A (plain cat/sed -n up to 3x) and B (limit 5000).
 - `tool-spill/.claude-plugin/plugin.json`
   tool-spill census, Sam's default B: `limit` default and install text 5000.
+- `conexus/skills/phase-review-gate/SKILL.md`
+  nexus-qo7ie.28: the close step marks the phase heading `(CLOSED, YYYY-MM-DD)`, which `nx memory curate --t2` reads.
 
 ## Deferred to the next client release

@@ -5878,6 +5878,8 @@ def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> lis
             "Measure the recall of each named collection's own HNSW index (RDR-227 Gap 1): for k of 40, 60, 80, 100 "
             "and 120, compare the index's top-k with an exact top-k, on query vectors written for the collection's "
             "own topics (not random vectors); the target is 0.99 or better at every k",
+            "The nexus source tree carries a script that runs that check against the configured engine, read-only "
+            "(the prose index recall check; nx doctor's entry in the CLI reference names it and its options)",
         ],
     )]
 
@@ -6443,7 +6445,9 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
             "(event=pg_version_below_floor in the service log, or, started cold, a refusal before pg_ctl runs)"
         ),
         fix_suggestions=[
-            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "
+            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} (Linux and macOS): "
+            "`nx daemon service pg-upgrade --old-bin <bin dir of the PostgreSQL that made it>` (a dry run; "
+            "--apply upgrades), or by hand: "
             "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md (section 'A local cluster older than PostgreSQL 17')",
         ],
     )]
@@ -9990,6 +9994,10 @@ def _check_pending_rungs() -> list[HealthResult]:
         stuck = guarded("deferral_log_read", _escalated_text, [])
         if stuck:
             parts.insert(0, "REPEATEDLY DEFERRED: " + "; ".join(stuck))
+        # nexus-4qygk: an unreadable log keeps its streaks rather than reset them, so it cannot show a rung
+        # that defers every walk. Say so instead of reading as "nothing deferred".
+        elif not guarded("deferral_log_probe", lambda: t2_deferral_log().readable(), True):
+            parts.append("the upgrade deferral log could not be read, so a rung deferring every run would not show here")
     else:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:

@@ -408,6 +408,17 @@ class TestT2NoteStore:
         _FakeMemoryStore.puts = []
         monkeypatch.setattr("nexus.db.t2.http_memory_store.HttpMemoryStore", _FakeMemoryStore)
 
+    def test_a_strict_read_of_no_note_or_bad_content_is_no_note(self) -> None:
+        # nexus-4qygk: only a failed read raises under strict; a corrupt note must stay rewritable.
+        store = T2NoteStore(PROGRESS_TITLE)
+        assert store.load(strict=True) is None  # no row
+        for content in ("{not json", "[1]", None, "[" * 100_000):
+            _FakeMemoryStore.rows[("upgrade_ladder_state", PROGRESS_TITLE)] = {"content": content}
+            assert store.load(strict=True) is None, str(content)[:20]
+            assert store.load() is None
+        _FakeMemoryStore.rows[("upgrade_ladder_state", PROGRESS_TITLE)] = {"title": PROGRESS_TITLE}
+        assert store.load(strict=True) is None  # a row with no content key
+
     def test_it_is_one_t2_memory_note_with_a_ttl(self) -> None:
         store = T2NoteStore(PROGRESS_TITLE)
         store.save({"version": _V, "entries": {}})

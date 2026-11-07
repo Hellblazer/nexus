@@ -906,7 +906,7 @@ class _MemoryNote:
     def __init__(self) -> None:
         self.note: dict | None = None
 
-    def load(self):
+    def load(self, *, strict: bool = False):
         return self.note
 
     def save(self, note) -> None:

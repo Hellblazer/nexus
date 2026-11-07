@@ -50,7 +50,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _HOOK = _ROOT / "conexus" / "hooks" / "scripts" / "nx_setup_notice.py"
 _LAUNCH = _ROOT / "conexus" / "launch"
 
-_FIRST = "uv tool install conexus --python 3.12" + (" --torch-backend cpu" if sys.platform.startswith("linux") else "")
+_FIRST = "uv tool install conexus --python 3.12"
 _MANUAL_COMMANDS = (_FIRST, "nx self install", "nx init")
 _BROKEN_PHRASE = "Nexus is installed but cannot start; setup repairs it"
 _ASK_FIRST = re.compile(r"ask the user first|if the user agrees|ASK THE USER FIRST", re.IGNORECASE)

@@ -1115,6 +1115,41 @@ public final class PgContainerHelper {
     }
 
     /**
+     * The chunk-text census's negative controls (nexus-rfvyy.7.17): plant functions that return or read chunk text
+     * in {@code schema}, a throwaway schema the caller has just created, through a test changelog (jOOQ has no
+     * CREATE FUNCTION). {@code schema} is a plain test identifier other than {@code public}; the bookkeeping tables
+     * land in the connection's current schema. Leaves {@code su} autoCommit.
+     */
+    public static void plantCensusProbeLeak(Connection su, String schema) throws Exception {
+        requireTestIdentifier(schema);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-census-probe-leak.xml",
+            CENSUS_PROBE_BOOKKEEPING, Map.of("probe", schema));
+    }
+
+    /** {@link #plantCensusProbeLeak}: a whole-chunk-row function, a select over the chunk table, and an unrelated one. */
+    public static void plantCensusProbeRel(Connection su, String schema) throws Exception {
+        requireTestIdentifier(schema);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-census-probe-rel.xml",
+            CENSUS_PROBE_BOOKKEEPING, Map.of("probe", schema));
+    }
+
+    /** {@link #plantCensusProbeLeak}: two overloads of one chunk-text function. */
+    public static void plantCensusProbeOverloads(Connection su, String schema) throws Exception {
+        requireTestIdentifier(schema);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-census-probe-overloads.xml",
+            CENSUS_PROBE_BOOKKEEPING, Map.of("probe", schema));
+    }
+
+    /** {@link #plantCensusProbeLeak}: one chunk-text function. */
+    public static void plantCensusProbeKept(Connection su, String schema) throws Exception {
+        requireTestIdentifier(schema);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-census-probe-kept.xml",
+            CENSUS_PROBE_BOOKKEEPING, Map.of("probe", schema));
+    }
+
+    private static final String CENSUS_PROBE_BOOKKEEPING = "databasechangelog_test_census_probe";
+
+    /**
      * {@code ALTER TABLE table SET SCHEMA schema} (nexus-cbo4a batch 8), through
      * {@code db.changelog-test-table-schema.xml}: jOOQ has no SET SCHEMA for a table. Run it on a connection of the
      * table's owner; {@code table} is a jOOQ {@link Table}, rendered quoted and schema-qualified, and {@code schema}

@@ -141,25 +141,6 @@ class TestPlanList:
         assert "grown-x" in result.output
         assert "research-default" not in result.output
 
-    def test_list_origin_grown_matches_the_shape_the_grow_path_writes(
-        self, runner: CliRunner, plan_db: T2Database,
-    ) -> None:
-        """nexus-7bwe: _nx_answer_plan_grow tags ``ad-hoc,grown`` under the session's project, which the old
-        heuristic labelled ``user``; a ``builtin-template`` substring inside another token is not builtin."""
-        _seed_plan_row(
-            plan_db, name="grown-in-project", query="g", verb="research",
-            scope="personal", project="ART", tags="ad-hoc,grown",
-        )
-        _seed_plan_row(
-            plan_db, name="not-builtin", query="n", verb="research",
-            tags="my-builtin-templates",
-        )
-        result = runner.invoke(main, ["plan", "list", "--origin", "grown"])
-        assert result.exit_code == 0, result.output
-        assert "grown-in-project" in result.output and "not-builtin" not in result.output
-        result = runner.invoke(main, ["plan", "list", "--origin", "builtin"])
-        assert "not-builtin" not in result.output
-
     def test_list_name_substring(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -439,3 +420,38 @@ def test_classify_origin_reads_tag_tokens_and_the_declaration(row, expected) -> 
     from nexus.commands.plan import _classify_origin
 
     assert _classify_origin(row) == expected
+
+
+class _FakePlanLibrary:
+    """Rows for ``nx plan list`` with no engine: the origin labels are the subject, not storage (nexus-7bwe).
+    A tenant-backed version of this test raised the tenant ceiling on develop (5360 against 5359)."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def list_plans(self, *_a, **_k) -> list[dict]:
+        return list(self.rows)
+
+    def close(self) -> None:
+        pass
+
+
+def _row(id_: int, name: str, tags: str, project: str = "") -> dict:
+    return {"id": id_, "name": name, "query": name, "verb": "research", "scope": "personal", "project": project,
+            "tags": tags, "plan_json": '{"steps": []}', "use_count": 0, "match_count": 0, "last_used": None,
+            "disabled": False}
+
+
+def test_list_origin_grown_matches_the_shape_the_grow_path_writes(monkeypatch) -> None:
+    """nexus-7bwe: _nx_answer_plan_grow tags ``ad-hoc,grown`` under the session's project, which the old
+    heuristic labelled ``user``; a ``builtin-template`` substring inside another token is not builtin."""
+    from nexus.commands import plan as plan_cmd
+
+    lib = _FakePlanLibrary([_row(1, "grown-in-project", "ad-hoc,grown", "ART"), _row(2, "not-builtin", "my-builtin-templates")])
+    monkeypatch.setattr(plan_cmd, "_open_plan_library", lambda: lib)
+    runner = CliRunner()
+    result = runner.invoke(main, ["plan", "list", "--origin", "grown"])
+    assert result.exit_code == 0, result.output
+    assert "grown-in-project" in result.output and "not-builtin" not in result.output
+    result = runner.invoke(main, ["plan", "list", "--origin", "builtin"])
+    assert result.exit_code == 0 and "not-builtin" not in result.output

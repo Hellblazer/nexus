@@ -82,6 +82,7 @@ import sys
 _popen = subprocess.Popen
 import threading
 import time
+import dataclasses
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -3890,10 +3891,15 @@ class StopOutcome:
     #: were NOT signalled and may still be running, so ``sweep_verified`` is
     #: False and the outcome is not "already stopped".
     unreadable: tuple[int, ...] = ()
+    #: Supervisor pids a FRESH lease names that are not visible from this process
+    #: (nexus-dyfsw): a supervisor in another PID namespace sharing the config
+    #: directory, still heartbeating. Nothing was signalled and the lease was kept,
+    #: so this stop did not bring the service down.
+    invisible: tuple[int, ...] = ()
 
     @property
     def already_stopped(self) -> bool:
-        return not self.pids and not self.refused and not self.unreadable
+        return not self.pids and not self.refused and not self.unreadable and not self.invisible
 
 
 def stop_storage_service(
@@ -3976,14 +3982,18 @@ def stop_storage_service(
         # The marker is the launcher's hint, never a precondition of stopping: a
         # config dir that cannot take the file must not stop the stop itself.
         _log.warning("storage_service_stop_marker_failed", error=str(exc))
+    invisible: list[int] = []
     outcome = _stop_marked_service(
         config_dir=config_dir,
         registry=registry,
         scope=scope,
         platform=platform,
         console_api=console_api,
+        invisible_out=invisible,
     )
-    if outcome.refused or outcome.stubborn:
+    if invisible:
+        outcome = dataclasses.replace(outcome, invisible=tuple(invisible))
+    if outcome.refused or outcome.stubborn or outcome.invisible:
         # The marker said "this service is meant to stay down". It must be
         # written BEFORE the signal (the signal itself can produce the exit the
         # launcher would otherwise answer with a respawn), so it cannot wait for
@@ -4002,10 +4012,14 @@ def _stop_marked_service(
     scope: str,
     platform: str | None,
     console_api: Any,
+    invisible_out: list[int] | None = None,
 ) -> StopOutcome:
     """The signalling half of :func:`stop_storage_service`, run with the stop
-    marker already on disk (Windows)."""
+    marker already on disk (Windows). A fresh lease whose supervisor pid this
+    process cannot see is appended to *invisible_out* and left alone."""
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        lease_from_other_pid_namespace,
+        lease_holder_invisible,
         storage_service_member_check,
         storage_service_stack_matcher,
         sweep_matching_processes,
@@ -4030,11 +4044,27 @@ def _stop_marked_service(
 
         # Only trust supervisor_pid from a FRESH lease (guaranteed above by
         # discover()'s TTL reap), and only when the process is still alive.
-        if (
-            isinstance(supervisor_pid, int)
-            and supervisor_pid > 0
+        # A pid recorded in another PID namespace names nothing here: a live pid with the
+        # same number is someone else's, so it is never signalled (nexus-dyfsw).
+        supervisor_seen = (
+            isinstance(supervisor_pid, int) and supervisor_pid > 0
+            and not lease_from_other_pid_namespace(record)
             and _pid_is_alive(supervisor_pid)
+        )
+        if (
+            not supervisor_seen
+            and isinstance(supervisor_pid, int)
+            and supervisor_pid > 0
+            and lease_holder_invisible(record, supervisor_pid, alive=_pid_is_alive)
         ):
+            # nexus-dyfsw: the lease still heartbeats, so its supervisor is alive
+            # somewhere this process cannot see (another PID namespace sharing
+            # this directory). Signalling the endpoint pid or relinquishing the
+            # lease would let a second service start beside it.
+            _log.warning("storage_service_stop_supervisor_not_visible", supervisor_pid=supervisor_pid)
+            if invisible_out is not None:
+                invisible_out.append(supervisor_pid)
+        elif supervisor_seen:
             source = "lease"
             _log.info(
                 "storage_service_stopping_supervisor", supervisor_pid=supervisor_pid
@@ -4102,7 +4132,7 @@ def _stop_marked_service(
                     registry, record, budget=_STOP_ELECTION_BUDGET,
                 )
             signalled.append(supervisor_pid)
-        elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
+        elif isinstance(pid_to_signal, int) and pid_to_signal > 0 and not lease_from_other_pid_namespace(record):
             source = "lease"
             if (platform if platform is not None else sys.platform) == "win32":
                 # No process group to signal there. CTRL_BREAK through the
@@ -4141,9 +4171,18 @@ def _stop_marked_service(
                     hard_kill_pid(pid_to_signal, platform=platform)
                     lease_stubborn.extend(wait_for_exit([pid_to_signal]))
             else:
+                from nexus.daemon.service_registry import process_command  # noqa: PLC0415 — deferred import — stop path only
                 from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-                safe_killpg(pid_to_signal, signal.SIGTERM)
+                # nexus-dyfsw: a legacy lease's endpoint pid may have been reused.
+                # Signal its group only when its live command line is this
+                # directory's stack; an unreadable one keeps the old behaviour.
+                live_cmd = process_command(pid_to_signal, platform=platform)
+                if live_cmd and not storage_service_stack_matcher(config_dir, platform=platform)(live_cmd):
+                    _log.warning("storage_service_stop_endpoint_pid_not_ours", pid=pid_to_signal)
+                    pid_to_signal = None  # not signalled; the stale lease is still released below
+                else:
+                    safe_killpg(pid_to_signal, signal.SIGTERM)
             # Clean up the lease record. Bounded (nexus-cd1k0 review round 3
             # finding 6): this is the OUTER ``stop_storage_service`` caller
             # (e.g. the CLI's ``nx daemon service stop``) doing its own
@@ -4152,8 +4191,9 @@ def _stop_marked_service(
             # a supervisor process, so it gets the same budget.
             with contextlib.suppress(Exception):
                 registry.relinquish(record, budget=_STOP_ELECTION_BUDGET)
-            _log.info("storage_service_stopped", pid=pid_to_signal)
-            signalled.append(pid_to_signal)
+            if pid_to_signal is not None:
+                _log.info("storage_service_stopped", pid=pid_to_signal)
+                signalled.append(pid_to_signal)
 
     # Phase 2/3: consult the process table. Runs even after a lease-based
     # signal above (tree-signalling requirement — the engine child can

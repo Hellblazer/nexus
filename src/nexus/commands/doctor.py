@@ -1551,6 +1551,26 @@ def _run_check_engine_activity(status: object = _ENGINE_STATUS_UNSET) -> None:
     _report_engine_activity(status)
 
 
+# ── --probe-edge (nexus-t0ms7) ───────────────────────────────────────────────
+
+
+def _run_probe_edge(expect_host: str | None = None) -> None:
+    """``nx doctor --probe-edge``: the keyed no-op sweep through the edge.
+
+    Not a read: it sends one keyed ``expire-quarantine`` page that cannot do anything (a dedicated empty
+    sibling; one request-ledger row per run), which is why it is opt-in and absent from the default sweep
+    and from ``_SUPPLEMENTARY_CHECK_NAMES``. Exit 0 passed; 1 failed, or nothing to probe (a probe that
+    examined nothing must not read as a pass); 2 inconclusive (credentials cannot send the write, or the
+    sweep gate was busy).
+    """
+    from nexus.doctor_edge_probe import render, run_edge_probe  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    result = run_edge_probe(expect_host=expect_host)
+    click.echo(render(result))
+    if result.exit_code:
+        raise click.exceptions.Exit(result.exit_code)
+
+
 # ── --check-fanout-floor (nexus-rbhci) ───────────────────────────────────────
 
 
@@ -2731,6 +2751,11 @@ def _stale_mineru_server() -> str | None:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
 #                                          | state to surface.
+#   --probe-edge                  | NO        | NOT a read: sends one keyed
+#                                          | expire-quarantine page (a ledger
+#                                          | row per run, nothing deleted), so
+#                                          | it never runs unasked and is not
+#                                          | in _OPT_IN_ONLY_CHECKS (nexus-t0ms7).
 #   --check-engine-activity       | YES       | ONE unauthenticated GET
 #                                          | (GET /v1/status), same cost
 #                                          | class as --check-aspect-queue;
@@ -3372,6 +3397,28 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> b
     help="Retention window for --trim-telemetry (days; minimum 1).",
 )
 @click.option(
+    "--probe-edge",
+    "probe_edge",
+    is_flag=True,
+    default=False,
+    help="Prove Idempotency-Key reaches the engine through the edge (nexus-t0ms7, "
+         "RDR-222). Sends ONE keyed expire-quarantine page with cutoff 2000-01-01, "
+         "which nothing qualifies for, and requires the key echoed on the 200 and "
+         "GET /v1/requests/<key> answering committed; a failure names the hop that "
+         "lost the key. OPT-IN and never part of the default sweep: it sends a "
+         "mutating request (one request-ledger row per run, nothing deleted). "
+         "Exit 1 on any failure, so a scheduler can run it as a smoke step.",
+)
+@click.option(
+    "--expect-host",
+    "expect_host",
+    default=None,
+    help="With --probe-edge, the endpoint host the probe must resolve to (for example the production "
+         "edge's host name). A different host is NOT PROBED (exit 1), so a scheduled step cannot pass "
+         "against the wrong endpoint. Naming a loopback host explicitly lets the probe run against a "
+         "local engine; without it a loopback or local-lease endpoint is NOT PROBED (not a managed edge).",
+)
+@click.option(
     "--git-hooks-scope",
     "git_hooks_scope",
     default=None,
@@ -3417,6 +3464,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
                phase: str | None,
+               probe_edge: bool,
+               expect_host: str | None,
                git_hooks_scope: str | None) -> None:
     """Verify that all required services and credentials are available."""
     if json_out:
@@ -3443,6 +3492,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-wal-retention": check_wal_retention,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
+            "--probe-edge": probe_edge,
             "--fix": fix,
             "--fix-paths": fix_paths,
             "--clean-checkpoints": clean_checkpoints,
@@ -3458,6 +3508,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                 "--json only works with the main sweep (no mode flag), "
                 "--check-search, --check-quotas, or --check-mcp-logs."
             )
+
+    if expect_host is not None and not probe_edge:
+        raise click.UsageError("--expect-host only applies to --probe-edge.")
 
     # nexus-sis0m.2: each mode below runs and returns, so a second --check-*
     # flag was silently dropped and the run exited 0 as if both had passed
@@ -3484,6 +3537,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
             "--check-tier-discipline": check_tier_discipline,
+            "--probe-edge": probe_edge,
             # The non-check modes share the same run-and-return chain.
             "--trim-telemetry": trim_telemetry,
             "--fix": fix,
@@ -3601,6 +3655,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_tier_discipline:
         _run_check_tier_discipline()
+        return
+
+    if probe_edge:
+        _run_probe_edge(expect_host=expect_host)
         return
 
     if fix:

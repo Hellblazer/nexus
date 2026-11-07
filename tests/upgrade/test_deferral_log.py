@@ -24,7 +24,7 @@ import nexus.upgrade_ladder.registry as ladder_registry
 from nexus.commands.upgrade import _run_ladder
 from nexus.hooks import upgrade_auto
 from nexus.health import _check_pending_rungs
-from nexus.upgrade_ladder.census_progress import PROGRESS_PROJECT, T2NoteStore
+from nexus.upgrade_ladder.census_progress import PROGRESS_PROJECT, NoteUnreadable, T2NoteStore
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.deadline import Deadline
 from nexus.upgrade_ladder.deferral_log import (
@@ -75,7 +75,7 @@ class _MemoryStore:
     def __init__(self) -> None:
         self.note: dict | None = None
 
-    def load(self):
+    def load(self, *, strict: bool = False):
         return self.note
 
     def save(self, note):
@@ -88,7 +88,7 @@ class _MemoryStore:
 class _RaisingStore:
     """A note store that must not be reached."""
 
-    def load(self):
+    def load(self, *, strict: bool = False):
         raise AssertionError("the note was read")
 
     def save(self, note):
@@ -598,3 +598,77 @@ def test_the_doctor_row_reads_the_real_t2_note(monkeypatch: pytest.MonkeyPatch) 
     store.save({"rungs": {"slow": _entry(4, timedelta(days=3))}})
     row = _row(monkeypatch, _Rung("slow"))
     assert row.warn is True and row.detail.startswith("REPEATEDLY DEFERRED: ") and "4 consecutive" in row.detail
+
+
+# ── a failed read (nexus-4qygk) ──────────────────────────────────────────────
+
+
+class _UnreadableStore(_MemoryStore):
+    """A store whose read fails: strict callers are told, the lenient reader sees no note."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saves = 0
+
+    def load(self, *, strict: bool = False):
+        if strict:
+            raise NoteUnreadable("T2 unreachable")
+        return None
+
+    def save(self, note):
+        self.saves += 1
+        super().save(note)
+
+
+def test_a_failed_read_skips_the_write_instead_of_restarting_the_streak(clock: Clock) -> None:
+    store = _MemoryStore()
+    log = DeferralLog(store, now_fn=clock)
+    for _ in range(3):
+        log.record(_report(slow=_deferred("census timed out")), {})
+        clock.tick()
+    kept = json.loads(json.dumps(store.note))
+    assert kept["rungs"]["slow"]["n"] == 3
+
+    unreadable = _UnreadableStore()
+    unreadable.note = kept
+    DeferralLog(unreadable, now_fn=clock).record(_report(slow=_deferred("census timed out")), {})
+    assert unreadable.saves == 0  # nothing written over the streak it could not read
+    assert unreadable.note == kept
+
+
+class _BrokenT2NoteStore(T2NoteStore):
+    def _store(self):  # type: ignore[override]
+        raise ConnectionError("engine down")
+
+
+def test_the_t2_note_store_tells_a_failed_read_from_no_note_only_when_asked() -> None:
+    store = _BrokenT2NoteStore(DEFERRAL_TITLE, project=PROGRESS_PROJECT)
+    assert store.load() is None  # census progress keeps its "a failed read is no note"
+    with pytest.raises(NoteUnreadable, match="engine down"):
+        store.load(strict=True)
+
+
+def test_the_doctor_says_when_the_deferral_log_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    # nexus-4qygk: an unreadable log keeps its streaks, so the row must not read as "nothing deferred".
+    _LEDGER.clear()
+    monkeypatch.setattr("nexus.upgrade_ladder.http_store.DeferredLadderLedger", _LedgerStandIn)
+    monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: DeferralLog(_UnreadableStore()))
+    row = _row(monkeypatch, _Rung("slow"))
+    assert "deferral log could not be read" in row.detail
+    monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: DeferralLog(_MemoryStore()))
+    assert "could not be read" not in _row(monkeypatch, _Rung("slow")).detail  # control
+
+
+def test_a_probe_that_errors_reads_as_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The probe is guarded with a default of readable: a doctor bug must not invent an outage.
+    class _Broken:
+        def readable(self) -> bool:
+            raise RuntimeError("probe bug")
+
+        def escalated(self, *a, **kw):
+            return {}
+
+    _LEDGER.clear()
+    monkeypatch.setattr("nexus.upgrade_ladder.http_store.DeferredLadderLedger", _LedgerStandIn)
+    monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: _Broken())
+    assert "could not be read" not in _row(monkeypatch, _Rung("slow")).detail

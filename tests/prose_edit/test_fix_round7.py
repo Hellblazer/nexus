@@ -21,11 +21,17 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_process import kill_if_identity
 from tests.prose_edit.conftest import ROOT, Prose
 from tests.prose_edit.test_acceptance_tools import ACC, _verdicts
 from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok, run_brief, seed
 from tests.prose_edit.test_fix_round1 import _step
-from tests.prose_edit.test_fix_round3 import ESSAY, PLAIN_ENGLISH_RULE, STALE_OPEN, _treat
+from tests.prose_edit.test_fix_round3 import (
+    ESSAY,
+    PLAIN_ENGLISH_RULE,
+    STALE_OPEN,
+    _treat,
+)
 from tests.prose_edit.test_fix_round5 import GUARD, _bash, _plant_holder, box  # noqa: F401  (box is a fixture)
 
 AGENT_TEXT = AGENT.read_text(encoding="utf-8")
@@ -183,7 +189,7 @@ def test_a_runner_that_is_killed_leaves_no_live_background_job_or_its_child(
     env = {**os.environ, "PROSE_EDIT_RUNNER_LOCK": str(lock)}
     runner = subprocess.Popen(
         ["bash", "-c", f'set -u\nWT={repo}\n. {GUARD}\nrunner_lock run-jobs.sh\n'
-                       f'( sleep 300 & echo $! > {child}; wait ) &\necho $! > {sub}\n'
+                       f'( bash -c \'exec -a "$1" sleep 300\' _ {child}.sleeper & echo $! > {child}; wait ) &\necho $! > {sub}\n'
                        f'touch {ready}\nwhile :; do sleep 0.2; done'],
         env=env, stderr=subprocess.PIPE, text=True)
     pids: list[int] = []
@@ -204,12 +210,14 @@ def test_a_runner_that_is_killed_leaves_no_live_background_job_or_its_child(
             runner.wait()
         alive = []
         for pid in pids:
+            # pids from files; each is signalled only while it is still this test's process (nexus-xzorj): the
+            # subshell's command line is the runner script, which names {child}; the sleeper's argv[0] does too.
             try:
                 os.kill(pid, 0)
-                alive.append(pid)
-                os.kill(pid, signal.SIGKILL)
             except OSError:
-                pass
+                continue
+            alive.append(pid)
+            kill_if_identity(pid, str(child))
     assert not alive, f"live after the runner was killed: {alive}"
     assert not lock.exists()
 

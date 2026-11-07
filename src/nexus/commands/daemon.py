@@ -459,6 +459,11 @@ def service_group() -> None:
     """Storage-service daemon: managed native service binary + local Postgres."""
 
 
+from nexus.commands.service_pg_upgrade import pg_upgrade_cmd as _pg_upgrade_cmd  # noqa: E402 — needs service_group above
+
+service_group.add_command(_pg_upgrade_cmd, "pg-upgrade")
+
+
 @service_group.command("install")
 @click.option(
     "--autostart",
@@ -1508,9 +1513,9 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # printed, never just the first (review finding 1) — a partial pid
     # list is a partial truth for a command whose entire point here is
     # honest reporting.
-    if outcome.refused and not outcome.pids:
-        # Printed below, with the refusal; "stopped" or "already stopped"
-        # would both be false here.
+    if (outcome.refused or outcome.invisible) and not outcome.pids:
+        # Printed below, with the refusal or the invisible-supervisor warning;
+        # "stopped" or "already stopped" would both be false here.
         pass
     elif outcome.source == "none" and outcome.unreadable:
         # nexus-oacd3: a flagless start whose directory could not be read is
@@ -1563,6 +1568,15 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # dropping that caveat. Skipped when source is already
     # "process_table_unavailable" — that branch's own message already
     # covers this.
+    if outcome.invisible:
+        click.echo(
+            f"Warning: the storage-service lease is still heartbeating, but its supervisor "
+            f"(pid {', '.join(str(p) for p in outcome.invisible)}) is not visible from here: "
+            "it runs in another PID namespace that shares this config directory (a container, "
+            "or a namespaced CI job). Nothing was signalled and the lease was kept; stop it from "
+            "where it runs.",
+            err=True,
+        )
     if outcome.unreadable:
         click.echo(
             f"Warning: pid(s) {', '.join(str(p) for p in outcome.unreadable)} "
@@ -1625,7 +1639,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             "'nx daemon service start' until this is resolved manually.",
             err=True,
         )
-    if stubborn_only or outcome.refused:
+    if stubborn_only or outcome.refused or outcome.invisible:
         sys.exit(1)
     if outcome.source == "process_table_unavailable" and not outcome.pids:
         click.echo(
@@ -2127,7 +2141,7 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
     result = stop_aspect_workers(config_dir)
     if result.stopped:
         click.echo(f"Aspect-worker stopped (pid {', '.join(str(p) for p in result.stopped)}).")
-    elif not (result.survivors or result.unreadable or result.foreign):
+    elif not (result.survivors or result.unreadable or result.foreign or result.invisible):
         click.echo("No aspect-worker running.")
     failed = False
     if result.survivors or result.unreadable:
@@ -2140,6 +2154,15 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
             f"Pid {pids} is alive but is not an aspect worker serving {config_dir}; "
             "not signalled, and its lease is kept. If it is a stale lease whose pid was "
             "recycled, remove the aspect_worker_addr.* file in that directory.",
+            err=True,
+        )
+        failed = True
+    if result.invisible:
+        pids = ", ".join(str(p) for p in result.invisible)
+        click.echo(
+            f"Pid {pids} is not visible from here, but its lease is still heartbeating, so a "
+            "worker in another PID namespace (a container sharing this directory) may hold it; "
+            "not signalled, and its lease is kept. Stop it from where it runs.",
             err=True,
         )
         failed = True

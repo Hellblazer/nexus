@@ -69,6 +69,7 @@ from unittest.mock import patch
 
 import pytest
 
+from nexus import session as _sess
 from nexus.daemon import service_registry as sr
 from nexus.daemon import storage_service_daemon as ssd
 from nexus.daemon.service_registry import (
@@ -90,11 +91,10 @@ from nexus.daemon.service_registry import (
 )
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.win_console import ConsoleBreakResult
-from nexus import session as _sess
-from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
-from tests._child_process import NEVER_ALIVE_PID
-from tests._module_seam import patch_in, patch_time
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests._child_process import NEVER_ALIVE_PID, kill_if_identity
+from tests._module_seam import patch_in, patch_time
+from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
 # places it used to assume POSIX are named once here so each platform branch is
@@ -2490,9 +2490,8 @@ def test_a_stand_in_whose_harness_died_exits_instead_of_polling_forever(tmp_path
         for p in (child, harness):
             with contextlib.suppress(OSError):
                 p.kill()
-        if engine_pid is not None:
-            with contextlib.suppress(OSError):
-                os.kill(engine_pid, signal.SIGKILL)
+        if engine_pid is not None:  # a pid from ready.json: only while it is still this test's stand-in (nexus-xzorj)
+            kill_if_identity(engine_pid, str(tmp_path / "engine_standin.py"))
 
 
 class _StopFileConsoleApi(_ScriptedConsoleApi):

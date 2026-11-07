@@ -85,15 +85,12 @@ INSTALL_PAGE: str = "https://hellblazer.github.io/nexus/"
 
 
 def manual_commands(platform: str | None = None, mode: str | None = None) -> tuple[str, ...]:
-    """The first install for this machine, as README.md and the install page
-    give it. On Linux the first command names the CPU build of torch; without
-    it uv installs the GPU build on x86-64, 4.3 GB that Nexus never uses. The
-    third command sets up the local service; for *mode* ``cloud`` it is the
-    wizard that asks for a managed service's address, token and tenant."""
-    platform = sys.platform if platform is None else platform
+    """The first install for this machine, as README.md gives it: the same bare install on every platform. A bare
+    install has no torch (torch is only in the ``[pdf]`` extra), so it takes no ``--torch-backend``; the install
+    script and the PDF install pass that option themselves (nexus-n6a8v). The third command sets up the local
+    service; for *mode* ``cloud`` it is the wizard that asks for a managed service's address, token and tenant.
+    *platform* is kept for callers; the commands no longer differ by it."""
     first = "uv tool install conexus --python 3.12"
-    if platform.startswith("linux"):
-        first += " --torch-backend cpu"
     # `nx self install` moves a uv tool tree onto the generation layout and, because the tree
     # is an existing install, carries PDF support with it (nexus-2k66t.4.2): the manual route
     # ends with everything installed, as setup does (nexus-2k66t.4.9).
@@ -102,12 +99,7 @@ def manual_commands(platform: str | None = None, mode: str | None = None) -> tup
 
 def platform_note(platform: str | None = None) -> str:
     """What the commands need that the user may not have, or ``""``."""
-    platform = sys.platform if platform is None else platform
-    if platform.startswith("linux"):
-        return (
-            " The first command needs uv 0.9.19 or newer; if uv rejects "
-            "`--torch-backend`, run `uv self update` first."
-        )
+    del platform  # the bare install needs nothing platform-specific since it takes no --torch-backend (nexus-n6a8v)
     return ""
 
 

@@ -305,7 +305,7 @@ def _report_stray_t2_launchagent_cleanup(config_dir: Path) -> None:
         click.echo(f"  T2 LaunchAgent cleanup failed ({exc}) — skipping this step.", err=True)
 
 
-def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import cycle)
+def _start_service_step(config_dir: Path):  # noqa: ANN201 — returns LeaseRecord (avoid import cycle)
     """Start the PERSISTENT storage-service supervisor and confirm it is serving.
 
     Returns the live ``LeaseRecord`` so a programmatic caller can read the
@@ -324,14 +324,18 @@ def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import
     heartbeats the lease for the process lifetime, so 'serving' stays true.
     Idempotent — a live lease short-circuits, so re-running ``nx init`` is safe.
     Any failure surfaces as an actionable error with a remedy, never a traceback.
+
+    ``config_dir`` is the nexus config dir the supervisor and the stray
+    LaunchAgent cleanup act on (nexus-5yn9c: symmetric with
+    ``_ensure_service_binary_step``; the function no longer resolves the
+    default dir itself).
     """
     from nexus.commands.daemon import ensure_storage_supervisor  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     click.echo("\nStarting the storage service …")
     try:
-        lease = ensure_storage_supervisor(nexus_config_dir())
+        lease = ensure_storage_supervisor(config_dir)
     except StorageServiceStartError as exc:
         # StorageServiceStartError messages already carry a remedy (build/install
         # the artifact, re-run init, etc.); relay verbatim, fail fatal.
@@ -347,7 +351,7 @@ def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import
         f"  Service running on {ep.get('host')}:{ep.get('port')} "
         f"(pid {ep.get('pid')}, generation {lease.generation})."
     )
-    _report_stray_t2_launchagent_cleanup(nexus_config_dir())
+    _report_stray_t2_launchagent_cleanup(config_dir)
     click.echo("  nx init --service complete — the service backend is serving.")
     return lease
 
@@ -469,7 +473,7 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
             "(idempotent — PG and the binary are not re-provisioned).",
             err=True,
         )
-        return _start_service_step()
+        return _start_service_step(config_dir)
     except installer.InstallerError as exc:
         # SymlinkRefusedError / ContentDiffersError: a real install conflict (e.g.
         # a pre-existing unit with different content). Do NOT session-fall-back
@@ -757,7 +761,7 @@ def provision_and_start_service(embedder: str | None = None):  # noqa: ANN201
     """
     if not provision_service_stack(embedder):
         return None
-    return _start_service_step()
+    return _start_service_step(_config.nexus_config_dir())
 
 
 def provision_service_stack(embedder: str | None = None) -> bool:

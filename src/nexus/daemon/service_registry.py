@@ -739,7 +739,7 @@ class ServiceRegistry:
                 ttl=self._ttl,
                 endpoint=dict(endpoint),
                 version=version,
-                payload=dict(payload or {}),
+                payload={**_pid_ns_field(), **(payload or {})},
             )
             self._write_record_atomic(record)
             return record
@@ -2091,6 +2091,9 @@ class HolderStopResult:
     ``unreadable``: alive, but the command line could not be read, so not
     signalled (an empty read is inconclusive, never proof it is not ours).
     ``foreign``: alive and running something else (a recycled pid); untouched.
+    ``invisible``: no such pid here, but its record's heartbeat is fresh, so a
+    holder this process cannot see (another PID namespace) is still beating;
+    nothing was signalled and the record stays (nexus-dyfsw).
     """
 
     stopped: tuple[int, ...] = ()
@@ -2098,6 +2101,72 @@ class HolderStopResult:
     refused: tuple[GracefulStopSend, ...] = ()
     unreadable: tuple[int, ...] = ()
     foreign: tuple[int, ...] = ()
+    invisible: tuple[int, ...] = ()
+
+
+def own_pid_namespace() -> str | None:
+    """This process's PID-namespace id (``readlink /proc/self/ns/pid``, e.g. ``pid:[4026531836]``), or None.
+
+    None where there are no PID namespaces (macOS, Windows) or the link cannot be read.
+    """
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+
+
+def _pid_ns_field() -> dict[str, str]:
+    """``{"pid_ns": <id>}`` for a lease payload where the id can be read, else nothing (nexus-dyfsw)."""
+    ns = own_pid_namespace()
+    return {"pid_ns": ns} if ns else {}
+
+
+def lease_holder_invisible(
+    record: LeaseRecord,
+    pid: int,
+    *,
+    alive: Callable[[int], bool] | None = None,
+    now: float | None = None,
+) -> bool:
+    """True when *pid* is not alive here, *record* still heartbeats, and it was published from another PID namespace (nexus-dyfsw).
+
+    The one rule every stop path applies to a holder it cannot see. The lease records its
+    publisher's PID-namespace id (``pid_ns``, Linux). When that differs from ours, an
+    absent pid with a fresh heartbeat is a holder alive where this process cannot see it,
+    so its record must not be relinquished and nothing may be started beside it. In our
+    own namespace an absent pid is a dead holder (a SIGKILLed supervisor whose lease has
+    not aged out yet), as before, and so is a lease that records no namespace (an older
+    client, macOS, Windows). *alive* is the caller's own liveness probe (default
+    :func:`pid_running`).
+    """
+    if not lease_from_other_pid_namespace(record):
+        return False
+    # Its pid names nothing here, so a local process with the same number proves nothing
+    # either way: the heartbeat alone decides.
+    del pid, alive
+    return record.is_fresh(time.time() if now is None else now)
+
+
+def lease_from_other_pid_namespace(record: LeaseRecord) -> bool:
+    """True when *record* was published from a PID namespace other than ours (nexus-dyfsw).
+
+    A lease with no ``pid_ns`` (an older client, macOS, Windows) is never "other". A lease that
+    has one, read where PID namespaces do not exist (macOS or Windows reading a Linux container's
+    lease through a shared directory), is other: its pids mean nothing here. A Linux reader that
+    cannot read its own namespace keeps the old rule.
+    """
+    theirs = record.payload.get("pid_ns")
+    if not theirs:
+        return False
+    ours = own_pid_namespace()
+    if ours is None:
+        return not _platform_has_pid_namespaces()
+    return theirs != ours
+
+
+def _platform_has_pid_namespaces() -> bool:
+    """Linux has PID namespaces; macOS and Windows do not (a test seam, so no test patches sys.platform)."""
+    return sys.platform.startswith("linux")
 
 
 def stop_tier_holders(
@@ -2126,7 +2195,8 @@ def stop_tier_holders(
     refusal is never escalated. The pid is ``endpoint[pid_key]``, else
     ``payload[pid_key]`` (the storage service records ``supervisor_pid`` in its
     payload, the aspect worker ``pid`` in its endpoint). A record is relinquished unless its pid is
-    still running our command afterwards, so a dead holder's lease goes too.
+    still running our command afterwards, so a dead holder's lease goes too; a pid that cannot be
+    seen here keeps its record while the record's heartbeat is fresh (``invisible``, nexus-dyfsw).
     A pid that is alive but runs something else (``foreign``) is a recycled
     pid, so by default its record goes as well; a caller whose stop must not
     read as done while a live process stays unexplained passes
@@ -2144,6 +2214,9 @@ def stop_tier_holders(
     targets: list[int] = []
     unreadable: list[int] = []
     foreign: list[int] = []
+    invisible: list[int] = []
+    now = time.time()
+
     def _pid_of(record: LeaseRecord) -> object:
         return record.endpoint.get(pid_key, record.payload.get(pid_key))
 
@@ -2151,12 +2224,17 @@ def stop_tier_holders(
         pid = _pid_of(record)
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == os.getpid():
             continue
-        if pid in targets or pid in unreadable or pid in foreign:
+        if pid in targets or pid in unreadable or pid in foreign or pid in invisible:
             continue
         cmd = read_command(pid)
         if not cmd:
             if pid_running(pid):
                 unreadable.append(pid)
+            elif lease_holder_invisible(record, pid, now=now):
+                # nexus-dyfsw: a pid this process cannot see whose holder still heartbeats is
+                # alive elsewhere (another PID namespace); dropping its record would let a
+                # second holder start beside it.
+                invisible.append(pid)
             continue
         argv = read_argv(pid) if is_ours_argv is not None else []
         ours = is_ours_argv(argv) if is_ours_argv is not None and argv else is_ours(cmd)
@@ -2173,7 +2251,7 @@ def stop_tier_holders(
         if targets
         else []
     )
-    held = set(survivors) | set(unreadable)
+    held = set(survivors) | set(unreadable) | set(invisible)
     if keep_foreign_leases:
         held |= set(foreign)
     for record in records:
@@ -2189,6 +2267,7 @@ def stop_tier_holders(
         refused=tuple(refused),
         unreadable=tuple(unreadable),
         foreign=tuple(foreign),
+        invisible=tuple(invisible),
     )
 
 

@@ -858,19 +858,57 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     return base / f"aspect_worker.{os.getpid()}"
 
 
+#: The open descriptor of this process's worker lock file, held locked for the worker's life
+#: (nexus-dyfsw): the lock, not the PID in the name, is what tells a sweep the worker is alive.
+_worker_lock_fd: int | None = None
+
+
+def _try_unlink_unheld(path: Path) -> bool:
+    """Unlink *path* when no process holds its platform lock; True when it was removed.
+
+    POSIX holds the lock across the unlink. Windows cannot unlink an open file, so it releases
+    first, and leaves a file someone opened in that gap.
+    """
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
+    import sys  # noqa: PLC0415 — deferred with os above
+
+    from nexus import _locking  # noqa: PLC0415 — deferred with os above
+
+    try:
+        fd = os.open(str(path), os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        try:
+            _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: probes whether a worker's liveness marker is held; not an election (nexus-dyfsw)
+        except (BlockingIOError, OSError):
+            return False  # held: a live worker
+        if sys.platform != "win32":
+            path.unlink(missing_ok=True)
+            return True
+    finally:
+        os.close(fd)
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        return False
+    return True
+
+
 def _sweep_dead_worker_locks(locks_dir: Path) -> None:
-    """Remove ``aspect_worker.<pid>`` lock files whose PID is dead.
+    """Remove ``aspect_worker.<pid>`` lock files that no live worker holds.
 
     nexus-zir76: ``_remove_worker_lock`` only runs on a clean
     ``stop_worker``; a ``-9`` or a crash leaks the file. Over many
     sessions these accumulate unbounded (85 found in the wild on
-    2026-05-27). Sweeping dead-PID locks at worker startup bounds the
-    pileup. Live locks (including this process's own) are left intact;
-    non-PID-shaped files are ignored. Best-effort — never raises.
+    2026-05-27). Sweeping at worker startup bounds the pileup. A live
+    worker holds its file's platform lock for its whole life, so the
+    sweep judges by that lock and not by the PID in the name, which a
+    worker in another PID namespace makes invisible (nexus-dyfsw). This
+    process's own file and non-PID-shaped files are left alone.
+    Best-effort — never raises.
     """
     import os  # noqa: PLC0415 — stdlib os deferred to function scope
-
-    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred with os above
 
     if not locks_dir.exists():
         return
@@ -882,20 +920,17 @@ def _sweep_dead_worker_locks(locks_dir: Path) -> None:
             continue  # not a PID-suffixed lock file
         if pid == own_pid:
             continue
-        # pid_alive (nexus-f9bgu.25): alive under another user stays alive,
-        # and the Windows branch never signals.
-        if not pid_alive(pid):
-            try:
-                lock_file.unlink(missing_ok=True)
+        try:
+            if _try_unlink_unheld(lock_file):
                 _log.info("aspect_worker_stale_lock_swept", pid=pid)
-            except Exception:  # noqa: BLE001 — liveness probe of foreign pid is best-effort; treat unknown as stale
-                pass
+        except Exception:  # noqa: BLE001 — the sweep is best-effort
+            pass
 
 
 def _write_worker_lock(locks_dir: Path | None = None) -> None:
-    """Write a process-scoped lock file advertising this worker.
+    """Write a process-scoped lock file advertising this worker, and hold its lock while the worker lives.
 
-    Sweeps dead-PID lock files first (nexus-zir76) so leaked locks from
+    Sweeps unheld lock files first (nexus-zir76, nexus-dyfsw) so leaked locks from
     crashed/killed predecessors do not accumulate. Non-fatal if the locks
     directory cannot be created or the file cannot be written — the lock
     is advisory; a missing file merely means ``drain_worker`` from another
@@ -903,24 +938,60 @@ def _write_worker_lock(locks_dir: Path | None = None) -> None:
     """
     import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
+    from nexus import _locking  # noqa: PLC0415 — deferred with os above
+
+    global _worker_lock_fd
     try:
         lock = _worker_lock_path(locks_dir)
         lock.parent.mkdir(parents=True, exist_ok=True)
         _sweep_dead_worker_locks(lock.parent)
-        lock.write_text(str(os.getpid()), encoding="utf-8")
+        if _worker_lock_fd is not None:
+            try:
+                held, there = os.fstat(_worker_lock_fd), os.stat(lock)
+                if (held.st_dev, held.st_ino) == (there.st_dev, there.st_ino):
+                    return  # already advertised and held: an idempotent start changes nothing
+            except OSError:
+                pass
+            os.close(_worker_lock_fd)  # the file went away under us: take a fresh one below
+            _worker_lock_fd = None
+        fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            try:
+                _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: held for the worker's life as its liveness marker; not an election (nexus-dyfsw)
+            except BlockingIOError:
+                # Another process's sweep probes the file for microseconds; ask once more.
+                time.sleep(0.05)
+                _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: the same marker lock, retried once after a sweep's probe (nexus-dyfsw)
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+        except BaseException:
+            os.close(fd)
+            raise
+        _worker_lock_fd = fd
     except Exception:  # noqa: BLE001 — lock-file write is best-effort; failure logged via log.warning
         _log.warning("aspect_worker_lock_write_failed", exc_info=True)
 
 
 def _remove_worker_lock(locks_dir: Path | None = None) -> None:
-    """Remove the process-scoped lock file when the worker stops.
+    """Remove the process-scoped lock file when the worker stops, and release its lock.
 
     Non-fatal if the file does not exist or cannot be removed.
     """
+    import os  # noqa: PLC0415 — stdlib os deferred to function scope
+    import sys  # noqa: PLC0415 — deferred with os above
+
+    global _worker_lock_fd
+    fd, _worker_lock_fd = _worker_lock_fd, None
     try:
+        if fd is not None and sys.platform == "win32":
+            os.close(fd)  # Windows cannot unlink an open file
+            fd = None
         _worker_lock_path(locks_dir).unlink(missing_ok=True)
     except Exception:  # noqa: BLE001 — lock-file remove is best-effort; failure logged via log.warning
         _log.warning("aspect_worker_lock_remove_failed", exc_info=True)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def ensure_worker_started(

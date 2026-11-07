@@ -106,7 +106,7 @@ _KWARGS_READ: dict[str, str] = {
         "which holds only ``cwd`` (and an ``env`` copy when NEXUS_CONFIG_DIR is relative; "
         "nexus-x3m8e); stdout and stderr are a binary log handle, nothing reads it as text"
     ),
-    "tests/test_mcpb_bootstrap.py:187": (
+    "tests/test_mcpb_bootstrap.py:188": (
         "a test double for ``bootstrap._sync_with_retry``'s ``run`` argument: the kwargs are the "
         "bootstrap's own, which carry encoding='utf-8' and errors='replace' and no text "
         "(pinned by test_sync_does_not_inherit_the_hosts_stdin_and_decodes_utf8)"

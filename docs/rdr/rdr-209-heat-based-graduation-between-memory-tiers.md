@@ -411,7 +411,12 @@ review bead, not the skill alone.
    open phase is never touched.
 4. A census flag in `nx memory curate --t2` (RDR-238) lists gate records
    older than 30 days whose phase is closed and that have no TTL, so a missed
-   close step is visible.
+   close step is visible. A phase is closed when its RDR's status is `closed`,
+   or when its own phase heading carries the close marker the
+   `phase-review-gate` close step writes (`### Phase N (CLOSED, YYYY-MM-DD)`);
+   a record's phases are the `-p<N>` / `-phase-<N>` pieces of its title, and
+   each must be closed (a sub-phase such as 3a is closed when Phase 3 is)
+   (nexus-qo7ie.28, 2026-11-06).
 
 Test: a seeded closed phase with three gate records gets one T3 pointer
 record, all three titles resolve from it, and all three carry a 30-day TTL; a

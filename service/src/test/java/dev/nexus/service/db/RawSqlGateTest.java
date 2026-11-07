@@ -3084,7 +3084,9 @@ class RawSqlGateTest {
         // else in code
         "role-planner-guc", "nologin-role", "schema-usage", "schema-default-select-acl", "table-owner",
         "login-role", "role-admin-option", "product-schema-owner", "table-schema", "drop-exclusive-role",
-        "auto-explain");
+        "auto-explain",
+        // nexus-rfvyy.7.17: the chunk-text census's negative-control function plants, behind PgContainerHelper.plantCensusProbe*
+        "census-probe-leak", "census-probe-rel", "census-probe-overloads", "census-probe-kept");
 
     /**
      * The parameterised test changelogs that are NOT on the validated list, each with the reason it is allowed. Every

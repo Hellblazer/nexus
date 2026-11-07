@@ -14,8 +14,9 @@ likely near-duplicates for review instead, by the measure on :func:`near_duplica
 
 ``--t2`` lists live T2 rows that a later row names as replaced, skipping audit records (the
 AUDIT_TAGS table, tags and title backstop), rows tagged ``superseded`` and titles that are only a
-number, and RDR-209 Phase 3 Step 4's census flag ("phase closed" is read as the RDR's status:
-closed; per-phase flagging is nexus-qo7ie.28). It
+number, and RDR-209 Phase 3 Step 4's census flag (a phase is closed when its RDR's status is
+closed, or when its own ``## Phase N`` to ``#### Phase N`` heading carries the marker the phase-review-gate close step
+writes, nexus-qo7ie.28). It
 reads every row of the repo's projects once (``get_all``), so a project with thousands of
 rows costs one large read; run it at a release step, not in a loop.
 
@@ -280,6 +281,7 @@ class CensusHit:
     title: str
     rdr: str
     age_days: int
+    phase: str | None = None  # set when the flag comes from a closed phase of an open RDR
 
 
 @dataclass
@@ -299,6 +301,28 @@ _RDR_TITLE = re.compile(r"^(?:rdr-)?0*(\d+)(?!\d)", re.IGNORECASE)
 #: A row titled "100" or "RDR-107" is never a replaced candidate: an incidental number after "supersedes"
 #: in a research finding names an RDR, not a row (measured on the first live run: 2 of 6 candidates).
 _BARE_NUMBER_TITLE = re.compile(r"^(?:rdr-)?[0-9]+$", re.IGNORECASE)
+#: A title piece naming a phase: ``-p3-``, ``-p3a-`` (sub-phase 3a), ``-phase-2-``, ``-phase2-``.
+_PHASE_TITLE = re.compile(r"(?:^|[-_])(?:p|phase[-_]?)0*(\d+[a-z]?)(?=[-_]|$)", re.IGNORECASE)
+#: A phase heading in an RDR: ``## Phase 3`` to ``#### Phase 3`` (``# Phase`` is a document title); a dotted
+#: ``Phase 2.5`` is not Phase 2.
+_PHASE_HEADING = re.compile(r"^#{2,4}\s+Phase\s+0*(\d+[a-z]?)(?![.\d])\b(.*)$", re.IGNORECASE)
+#: The close marker: a parenthetical or a dash-led CLOSED, SHIPPED, DONE or COMPLETE, as the phase-review-gate
+#: close step writes it (``### Phase 3 (CLOSED, 2026-11-06)``) and rdr-222 and rdr-227 already do. A marker word in
+#: the heading's own title (``Phase 2: Complete the migration``) is not one.
+_PHASE_CLOSED_MARK = re.compile(
+    r"(?:\(\s*(?:closed|shipped|done|complete)\b(?=\s*(?:[,;)]|with\b|\d{4}-))"   # (CLOSED, ...) (shipped with X)
+    r"|(?:[—–]|\s-)\s*(?:closed|shipped|done|complete)\b(?=\s*(?:$|[,;(]|\d{4}-)))",  # — done 2026-10-09
+    re.IGNORECASE)
+
+
+def _phases_of(title: str) -> list[str]:
+    """The phases a gate record's title names (lower case, sub-phase letter kept)."""
+    return [m.lower() for m in _PHASE_TITLE.findall(title)]
+
+
+def _all_closed(named: list[str], closed: set[str]) -> bool:
+    """True when the title names at least one phase and each is closed, or a sub-phase of a closed phase."""
+    return bool(named) and all(p in closed or p.rstrip("abcdefghijklmnopqrstuvwxyz") in closed for p in named)
 
 
 def _named_titles(title: str, content: str) -> set[str]:
@@ -327,8 +351,10 @@ def _repo_projects(db: Any, repo: str) -> list[str]:
     return sorted(n for n in names if n == repo or (n and n.startswith(f"{repo}_")))
 
 
-def t2_findings(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime) -> T2Findings:
-    """The ``--t2`` findings. *db* is a ``T2Database``; reads only, writes nothing."""
+def t2_findings(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime,
+                closed_phases: dict[str, set[str]] | None = None) -> T2Findings:
+    """The ``--t2`` findings. *db* is a ``T2Database``; reads only, writes nothing. *closed_phases*
+    maps an RDR number to its closed phases (:func:`closed_phase_numbers`)."""
     result = T2Findings(projects=_repo_projects(db, repo))
     cutoff = now - timedelta(days=CENSUS_DAYS)
     census_projects = {repo, f"{repo}_rdr"}
@@ -355,20 +381,22 @@ def t2_findings(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime) -> 
             result.replaced.append(Replaced(project, title, namer))
 
         if project in census_projects:
-            _census(result, project, repo, rows, closed_rdrs, cutoff, now)
+            _census(result, project, repo, rows, closed_rdrs, closed_phases or {}, cutoff, now)
     return result
 
 
 def _census(
     result: T2Findings, project: str, repo: str, rows: list[dict[str, Any]],
-    closed: set[str], cutoff: datetime, now: datetime,
+    closed: set[str], closed_phases: dict[str, set[str]], cutoff: datetime, now: datetime,
 ) -> None:
     """RDR-209 Phase 3 Step 4: gate records older than 30 days, no TTL, phase closed.
 
-    A gate record is a row whose whole tags include ``gate`` or ``kind:gate``. Its phase is the
-    RDR it belongs to, from the ``rdr:<NNN>`` tag or, in ``<repo>_rdr``, the leading number of its
-    title; the phase is closed when that RDR's frontmatter ``status`` is ``closed``. A record that
-    maps to no RDR is counted as unmapped and never flagged.
+    A gate record is a row whose whole tags include ``gate`` or ``kind:gate``. Its RDR comes from the
+    ``rdr:<NNN>`` tag or, in ``<repo>_rdr``, the leading number of its title. It is flagged when that
+    RDR's frontmatter ``status`` is ``closed``, or (nexus-qo7ie.28) when every phase its title names
+    (``-p<N>``, ``-phase-<N>``) is a closed phase of that RDR (:func:`closed_phase_numbers`). A record
+    that maps to no RDR is counted as unmapped and never flagged; one of an open RDR whose title names
+    no phase is not judged.
     """
     for r in rows:
         tags = split_tags(r.get("tags"))
@@ -385,6 +413,8 @@ def _census(
             result.census_unmapped += 1
         elif number in closed:
             result.census.append(CensusHit(project, r["title"], number, (now - stamp).days))
+        elif _all_closed(named := _phases_of(r["title"]), closed_phases.get(number, set())):
+            result.census.append(CensusHit(project, r["title"], number, (now - stamp).days, ", ".join(named)))
 
 
 def repo_toplevel(cwd: Path) -> Path:
@@ -415,6 +445,29 @@ def closed_rdr_numbers(root: Path) -> set[str]:
     return out
 
 
+def closed_phase_numbers(root: Path) -> dict[str, set[str]]:
+    """RDR number -> the phases whose own heading marks them closed (nexus-qo7ie.28).
+
+    The marker is the one the phase-review-gate close step writes and rdr-222 and rdr-227 already
+    carry: ``### Phase 3 (CLOSED, 2026-11-06)``, ``### Phase 0 (SHIPPED, ...)``,
+    ``#### Phase 4: Measure ... — done 2026-10-09``. Prose that says a phase closed is not read.
+    """
+    out: dict[str, set[str]] = {}
+    try:
+        files = sorted(_rdr_dir(root).glob("rdr-*.md"))
+    except OSError:
+        return out
+    for p in files:
+        m = re.match(r"^rdr-0*(\d+)(?:-|$)", p.stem)
+        if not m:
+            continue
+        for line in read_text(p).splitlines():
+            h = _PHASE_HEADING.match(line)
+            if h and _PHASE_CLOSED_MARK.search(h.group(2)):
+                out.setdefault(m.group(1), set()).add(h.group(1).lower())
+    return out
+
+
 def _rdr_dir(root: Path) -> Path:
     cfg = root / ".nexus.yml"
     if cfg.is_file():
@@ -432,8 +485,9 @@ def _rdr_dir(root: Path) -> Path:
     return root / "docs" / "rdr"
 
 
-def t2_section(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime) -> list[str]:
-    f = t2_findings(db, repo, closed_rdrs=closed_rdrs, now=now)
+def t2_section(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime,
+               closed_phases: dict[str, set[str]] | None = None) -> list[str]:
+    f = t2_findings(db, repo, closed_rdrs=closed_rdrs, closed_phases=closed_phases, now=now)
     lines = [
         f"projects read: {', '.join(f.projects) or 'none'} ({f.rows_read} live rows)",
         "report only: this list is for a person to confirm; nothing is deleted or quarantined",
@@ -445,8 +499,9 @@ def t2_section(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime) -> l
     )
     lines.append(f"skipped as audit records (AUDIT_TAGS tag or title): {f.skipped_audit}")
     lines += _listing(
-        f"census: gate records older than {CENSUS_DAYS} days, no TTL, RDR closed",
-        [f"{c.project}/{c.title} (RDR-{c.rdr}, {c.age_days} days old)" for c in f.census],
+        f"census: gate records older than {CENSUS_DAYS} days, no TTL, RDR or phase closed",
+        [f"{c.project}/{c.title} (RDR-{c.rdr}{f' Phase {c.phase}' if c.phase else ''}, {c.age_days} days old)"
+         for c in f.census],
         key="census",
     )
     if f.census_unmapped:

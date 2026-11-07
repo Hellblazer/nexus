@@ -703,9 +703,10 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
         lines += mc.section("--files", lambda: mc.files_section(memory_dir(cwd)))
     if do_t2:
         def _t2_lines() -> list[str]:
-            closed = mc.closed_rdr_numbers(mc.repo_toplevel(cwd))
+            root = mc.repo_toplevel(cwd)
+            closed, phases = mc.closed_rdr_numbers(root), mc.closed_phase_numbers(root)
             with t2_handle() as db:
-                return mc.t2_section(db, repo, closed_rdrs=closed, now=now)
+                return mc.t2_section(db, repo, closed_rdrs=closed, closed_phases=phases, now=now)
 
         lines += mc.section("--t2", _t2_lines)
     if do_agents:

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import shutil
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests._child_process import _command_text
 
 RUN_PY = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "run.py"
 
@@ -161,8 +162,14 @@ def test_proc_watch_records_a_grandchild_that_outlives_its_parent(run, tmp_path)
             pytest.fail("the recorded grandchild survived _end")
     finally:
         watch.stop()
+        # A pid from a file, signalled only while it is still this test's grandchild (nexus-xzorj). Its argv is
+        # deliberately a bare `sleep 307` (the test's premise), so no path token can identify it; it is the
+        # leader of the session start_new_session gave it, which a reused pid would not be.
         try:
-            os.kill(int(pidfile.read_text(encoding="utf-8")), signal.SIGKILL)
+            stray = int(pidfile.read_text(encoding="utf-8"))
+            if (stray > 1 and os.getsid(stray) == stray
+                    and _command_text(stray).split()[-2:] == ["sleep", "307"]):
+                os.kill(stray, signal.SIGKILL)
         except (OSError, ValueError):
             pass
 
@@ -225,6 +232,7 @@ def _cleanup_sandbox(run, tmp_path: Path, procs: list[tuple[int, str]]):
     sb.nexus_config.mkdir(parents=True)
     sb.watch = _Watch(procs)
     sb.before = {"rs_alpha": {"sessionId": "x"}}
+    sb.real_nx = ""  # the engine-side teardown reads (nexus-iz8ub) are covered in test_restart_sandbox_teardown
     sb.tmux = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "")  # no server: nothing to kill
     return sb
 

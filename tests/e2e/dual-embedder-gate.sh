@@ -650,8 +650,13 @@ dg_mvv_client_fail() {
 
 # dg_mvv_search CORPUS [QUERY]: one search over CORPUS through the real client (QUERY defaults to the MVV query).
 # $DG_DIR/resp.json gets the chunk ids it returned (content-addressed, so a moved chunk keeps its id), the
-# doc_ids, the chunk ids per collection and the top hit's id; the raw client output is kept in
+# doc_ids, the chunk ids per collection and the nearest hit's id; the raw client output is kept in
 # $DG_DIR/search.json and printed when a check on it fails.
+# 'nearest' is the one id at the smallest raw vector distance, or None when the minimum is tied or a hit
+# carries no numeric distance. It is not the page's first row: `nx search` ranks by distance minus a
+# topic-boost credit (nexus.scoring.apply_topic_boost) that every hit sharing a topic with another gets,
+# so a clustered sibling can lead the page while an unclustered document is still the nearest vector
+# (nexus-lpu6e). The JSON's 'distance' is the raw distance; the credit never enters it.
 dg_mvv_search() {
   dg_mvv_client search "${2:-$DG_MVV_QUERY}" --corpus "$1" --json --no-rerank --no-threshold --n 50 \
     || dg_mvv_client_fail "nx search over $1 exited non-zero"
@@ -662,10 +667,16 @@ by_coll = {}
 for r in rows:
     if r.get('id'):
         by_coll.setdefault(r.get('collection') or '', set()).add(r['id'])
+hits = [r for r in rows if r.get('id')]
+nearest = None
+if hits and all(isinstance(r.get('distance'), (int, float)) and not isinstance(r.get('distance'), bool) for r in hits):
+    best = min(r['distance'] for r in hits)
+    at_best = {r['id'] for r in hits if r['distance'] == best}
+    nearest = next(iter(at_best)) if len(at_best) == 1 else None
 json.dump({'ids': sorted({r.get('id') for r in rows if r.get('id')}),
            'doc_ids': sorted({r.get('doc_id') for r in rows if r.get('doc_id')}),
            'by_coll': {c: sorted(v) for c, v in by_coll.items()},
-           'top': rows[0].get('id') if rows else None}, open(sys.argv[2], 'w'))" \
+           'nearest': nearest}, open(sys.argv[2], 'w'))" \
     "$DG_DIR/search.json" "$DG_DIR/resp.json" || dg_fail "could not read the search results of $1"
 }
 
@@ -674,7 +685,7 @@ dg_mvv_search_check() {
   if ! dg_holds "$2"; then
     DG_CODE="n/a"
     echo "[dual-gate]   search results: $("$E2E_PYTHON" -c "import json
-print(json.dumps([{k: r.get(k) for k in ('id', 'doc_id', 'collection', 'title')} for r in json.load(open('$DG_DIR/search.json'))]))")" >&2
+print(json.dumps([{k: r.get(k) for k in ('id', 'doc_id', 'collection', 'title', 'distance', 'hybrid_score')} for r in json.load(open('$DG_DIR/search.json'))]))")" >&2
     dg_fail "$1"
   fi
   dg_ok "$1"
@@ -816,10 +827,13 @@ print(next((j.get('target_collection') or '' for j in jobs if j.get('source_coll
     "set(json.load(open('$DG_DIR/mvv_before.json'))['ids']) <= set(d['ids']) and set(json.load(open('$DG_DIR/mvv_before.json'))['doc_ids']) <= set(d['doc_ids'])"
   dg_mvv_search_check "after: ...the theme chunks from the Voyage collection and the note from its Voyage sibling" \
     "set('$DG_MVV_CHASHES'.split()) <= set(d['by_coll'].get('$DG_VOY_COLL', [])) and json.load(open('$DG_DIR/mvv_before.json'))['by_coll']['$DG_MVV_NOTE_COLL'] == d['by_coll'].get('$target')"
-  # The vectors are real, not just present: a document's own text finds it first after the move.
+  # The vectors are real, not just present: a document's own text finds it nearest after the move. By raw
+  # distance, not page order: --wait's discover has run, so the page carries topic-boost credit that
+  # depends on how HDBSCAN clustered the set, and document 1's unique clause is what makes it the likeliest
+  # noise point among siblings that do cluster (nexus-lpu6e).
   dg_mvv_search "$DG_VOY_COLL" "$DG_MVV_RANK_TEXT"
-  dg_mvv_search_check "after: the first theme document's own text ranks it first in the Voyage collection" \
-    "d['top'] == '$DG_MVV_RANK_CHASH'"
+  dg_mvv_search_check "after: the first theme document's own text is its nearest vector in the Voyage collection" \
+    "d['nearest'] == '$DG_MVV_RANK_CHASH'"
 
   read -r adoc apath <<<"$DG_MVV_ASPECT_DOC"
   dg_request GET "/v1/aspects/get_by_doc_id?doc_id=$adoc"

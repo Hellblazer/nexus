@@ -162,6 +162,7 @@ def _cleanup_sandbox(run, home: Path):
     sb.nexus_config.mkdir(parents=True)
     sb.watch = _Watch()
     sb.before = {"rs_alpha": {"sessionId": SID}}
+    sb.real_nx = ""  # the engine-side teardown reads (nexus-iz8ub) are covered in test_restart_sandbox_teardown
     sb.tmux = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "")
     return sb
 
@@ -322,12 +323,24 @@ def test_directory_leases_count_only_this_scenario_s_sessions(run, tmp_path, pla
     assert run.footprint_after(before, sb, {"bbbb2222-y"}, nx) == {}
 
 
-def test_route_leftovers_notes_what_is_expected_and_fails_the_rest(run) -> None:
+def test_route_leftovers_fails_everything_it_is_given(run) -> None:
+    """Nothing is left on purpose (nexus-iz8ub): a directory lease fails like any other place."""
     failures, notes = [], []
-    assert run.route_leftovers({"directory lease": ["directory/rs_alpha (1234abcd)"]}, failures, notes) is False
+    assert run.route_leftovers({"directory lease": ["directory/rs_alpha (1234abcd)"]}, failures, notes) is True
+    assert run.route_leftovers({"tmux socket": ["/tmp/x"]}, failures, notes) is True
+    assert failures == ["left outside the HOME: directory lease: ['directory/rs_alpha (1234abcd)']",
+                        "left outside the HOME: tmux socket: ['/tmp/x']"]
+    failures, notes = [], []
+    assert run.route_leftovers({}, failures, notes) is False
+    assert notes == ["footprint: nothing left outside the HOME but what is left on purpose"]
+
+
+def test_route_leftovers_still_notes_a_place_listed_as_expected(run, monkeypatch) -> None:
+    """The EXPECTED_PLACES mechanism stays for a future on-purpose leftover; it is empty today."""
+    monkeypatch.setattr(run, "EXPECTED_PLACES", ("directory lease",))
+    failures, notes = [], []
+    assert run.route_leftovers({"directory lease": ["d"]}, failures, notes) is False
     assert failures == [] and notes[0].startswith("left on purpose: directory lease")
-    assert run.route_leftovers({"tmux socket": ["/tmp/x"], "directory lease": ["d"]}, failures, notes) is True
-    assert failures == ["left outside the HOME: tmux socket: ['/tmp/x']"]
 
 
 def _function(name: str):
@@ -468,11 +481,11 @@ def test_run_scenario_fails_on_each_check(run, scenario, key, value, expect) -> 
     assert any(f.startswith(expect) for f in failures), failures
 
 
-def test_run_scenario_passes_with_only_what_is_left_on_purpose(run, scenario) -> None:
+def test_run_scenario_fails_a_directory_lease_left_behind(run, scenario) -> None:
     scenario["left"] = {"directory lease": ["directory/rs_alpha (1234abcd)"]}
-    ok, failures, notes = run.run_scenario("gate", "claude", _Args(), None)
-    assert ok and failures == []
-    assert any(n.startswith("left on purpose: directory lease") for n in notes)
+    ok, failures, _ = run.run_scenario("gate", "claude", _Args(), None)
+    assert not ok
+    assert failures == ["left outside the HOME: directory lease: ['directory/rs_alpha (1234abcd)']"]
 
 
 def test_claude_session_files_names_only_this_scenario_s(run, tmp_path, monkeypatch) -> None:

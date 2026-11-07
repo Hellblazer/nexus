@@ -35,8 +35,9 @@ from types import SimpleNamespace
 import pytest
 
 from nexus.util import win_job
-from tests._module_seam import setattr_in
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests._child_process import kill_if_identity
+from tests._module_seam import setattr_in
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOOTSTRAP_PATH = REPO_ROOT / "mcpb" / "src" / "bootstrap.py"
@@ -723,8 +724,10 @@ go, pidfile = sys.argv[1], sys.argv[2]
 while not os.path.exists(go):
     time.sleep(0.05)
 from nexus.daemon.aspect_worker_daemon import _popen_outliving_host_job
+# The pid file's path rides on the child's command line, so the cleanup can tell this child from a stranger that
+# reused its pid (nexus-xzorj): a bare sleep command line is every such process on the box.
 child = _popen_outliving_host_job(
-    subprocess.Popen, [sys.executable, "-c", "import time; time.sleep(120)"],
+    subprocess.Popen, [sys.executable, "-c", "import time; time.sleep(120)", pidfile],
     creationflags=0, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )
 with open(pidfile + ".tmp", "w") as fh:
@@ -801,8 +804,8 @@ class TestRealWindows:
             if member.poll() is None:
                 member.kill()
                 member.wait(timeout=30)
-            if child is not None and self._alive(child):
-                os.kill(child, signal.SIGTERM)
+            if child is not None and self._alive(child):  # a pid from a pid file: only while it is this child
+                kill_if_identity(child, str(pidfile), sig=signal.SIGTERM)
 
     def test_closing_the_bootstrap_job_kills_its_member_and_spares_a_child_that_broke_away(
         self, bootstrap, tmp_path,

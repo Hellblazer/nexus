@@ -277,6 +277,22 @@ class TestSupplementaryChecks:
         assert "--- t1 ---" in result.output
         assert "Remaining opt-in-only checks" in result.output
 
+    @pytest.mark.parametrize("extra_args", [None, ["--json"]])
+    def test_default_sweep_never_sends_the_edge_probe(self, runner, mock_reg, extra_args):
+        """nexus-t0ms7: --probe-edge sends a mutating request, so neither a bare `nx doctor` nor
+        `nx doctor --json` may reach it. The sweep swallows a runner's exception, so the probe is a
+        recording stub and the test asserts it was never called."""
+        from unittest.mock import MagicMock
+
+        stub = MagicMock(name="run_edge_probe")
+        result = _invoke(
+            runner, mock_reg, extra_args=extra_args,
+            extra_patches=[patch("nexus.doctor_edge_probe.run_edge_probe", stub)],
+        )
+        assert result.exit_code == 0
+        stub.assert_not_called()
+        assert "Edge idempotency probe" not in result.output
+
 
 # ── --check-fanout-floor census content (nexus-rbhci) ───────────────────────
 #

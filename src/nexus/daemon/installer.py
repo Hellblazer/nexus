@@ -1879,6 +1879,11 @@ def _stop_background_workers(config_dir: Path) -> tuple[tuple[int, ...], list[st
                 f"aspect worker pid {pid} is running but its command line could not be "
                 "read; not stopped"
             )
+        for pid in aspect.invisible:
+            warnings.append(
+                f"aspect worker pid {pid} is not visible from here but its lease is still "
+                "heartbeating (another PID namespace?); not stopped"
+            )
     labeling_stopped, labeling_warnings = _stop_deferred_labeling(config_dir)
     stopped.extend(labeling_stopped)
     warnings.extend(labeling_warnings)
