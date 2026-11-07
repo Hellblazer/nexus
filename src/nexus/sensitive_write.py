@@ -16,6 +16,7 @@ write runs.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -28,7 +29,7 @@ __all__ = [
     "BGE_TOKEN", "ExternalEmbedderRefusedError", "catalog_flags_uri", "flagged_for_import", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
     "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
     "cloud_refusal_text", "external_legs_gate", "gate_sensitive_import", "gate_sensitive_reindex", "import_ack_help", "is_external_embedder", "raise_flag", "refuse_external_existing",
-    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_glob_matches", "sensitive_glob_help", "sensitive_help", "route_for_index",
+    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_glob_hits", "sensitive_glob_matches", "sensitive_glob_help", "sensitive_help", "route_for_index",
     "sensitive_write_kwargs",
 ]
 
@@ -557,10 +558,15 @@ def sensitive_write_kwargs(
 def sensitive_glob_help() -> str:
     """Help for ``nx index repo --sensitive-glob`` (RDR-243 Q8, Technical Design item 8)."""
     return (
-        "Register every file whose repo-relative path matches PATTERN as sensitive (repeatable). A pattern "
-        "with no '/' is matched against the file name at any depth; one with a '/' is matched against the "
-        "whole POSIX path from the repo root, and '*' matches across '/' (so 'secrets/*' is the whole "
-        "subtree). The flag is set before any chunk is written and is never lowered by a later run. "
+        "Register every file whose repo-relative path matches PATTERN as sensitive (repeatable), with "
+        "gitignore-like matching: a pattern with no '/' (other than a trailing one) is matched against "
+        "every file and directory name at any depth, and a directory name matches its whole subtree "
+        "('secrets', 'secrets/'); a pattern with a '/' is anchored at the repo root; '**/' matches zero "
+        "or more directories ('**/*.pem' finds a top-level a.pem, 'secrets/**/x' finds secrets/x); "
+        "'*' also matches across '/' (so 'secrets/*' is the whole subtree); a trailing '/' matches "
+        "directories only. The run prints how many files each pattern matched and warns when a "
+        "pattern matched none. With --since-head only the files the delta visits are flagged. "
+        "The flag is set before any chunk is written and is never lowered by a later run. "
         "A repo run has no --ack-external-embedder: a matched file whose collection embeds with Voyage AI "
         "(every collection in cloud mode) is skipped with a warning, not sent; in local mode on a bge "
         "install it is indexed on this machine, and a matched PDF is extracted by the local MinerU "
@@ -569,30 +575,90 @@ def sensitive_glob_help() -> str:
     )
 
 
-def sensitive_glob_matches(rel_path: str, globs: Sequence[str]) -> bool:
-    """True when *rel_path* (repo-relative, any separator) matches one of *globs* (``--sensitive-glob``).
+def _glob_regex(pat: str) -> str:
+    """Translate one glob (already normalised: no leading './' or '/', no trailing '/') to a regex source.
 
-    ``fnmatch.fnmatchcase`` on the POSIX form (not ``PurePath.full_match``, which needs Python 3.13):
-    ``*`` and ``?`` match across ``/``. A pattern with no ``/`` is tried against the file name, so
-    ``*.pem`` finds ``deploy/keys/a.pem``; one with a ``/`` is tried against the whole path.
+    ``**/`` is zero or more directories, a bare ``**`` and ``*`` match anything (``/`` included: the
+    documented, over-flagging-is-safe contract), ``?`` one character, ``[...]`` a class.
+    """
+    out: list[str] = []
+    i, n = 0, len(pat)
+    while i < n:
+        c = pat[i]
+        if c == "*":
+            if pat.startswith("**/", i):
+                out.append("(?:.*/)?")
+                i += 3
+                continue
+            j = i
+            while j < n and pat[j] == "*":
+                j += 1
+            out.append(".*")
+            i = j
+            continue
+        if c == "?":
+            out.append(".")
+        elif c == "[":
+            j = pat.find("]", i + 1 + (pat[i + 1:i + 2] in ("!", "^")) + 1)
+            if j == -1:
+                out.append("\\[")
+            else:
+                body = pat[i + 1:j]
+                neg = body[:1] in ("!", "^")
+                out.append("[" + ("^" if neg else "") + body[neg:].replace("\\", "\\\\") + "]")
+                i = j
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return "".join(out)
+
+
+def _compile_glob(glob: str) -> tuple[re.Pattern[str], bool, bool]:
+    """``(regex, anchored, dir_only)`` for one ``--sensitive-glob`` pattern."""
+    pat = glob.replace("\\", "/").strip()
+    while pat.startswith("./"):
+        pat = pat[2:]
+    dir_only = pat.endswith("/")
+    pat = pat.rstrip("/")
+    anchored = "/" in pat
+    pat = pat.lstrip("/")
+    return re.compile(_glob_regex(pat) + r"\Z", re.DOTALL), anchored, dir_only
+
+
+def sensitive_glob_hits(rel_path: str, globs: Sequence[str]) -> list[int]:
+    """Indexes of the *globs* that match *rel_path* (``--sensitive-glob``, gitignore-like).
+
+    A pattern with no ``/`` (a trailing one aside) is tried against every path component, so
+    ``*.pem`` finds ``deploy/keys/a.pem`` and a directory name (``secrets``) matches its whole subtree;
+    one with a ``/`` is anchored at the repo root and tried against the file path and each of its
+    directory prefixes (so ``secrets/x`` takes ``secrets/x/y``). ``**/`` matches zero or more
+    directories (``**/*.pem`` takes a top-level ``a.pem``, ``secrets/**/x`` takes ``secrets/x``);
+    ``*`` also crosses ``/``. A trailing ``/`` matches directories only. Case-sensitive, and the
+    ``fnmatch``-free translation works on any Python (``PurePath.full_match`` needs 3.13).
     """
     if not globs:
-        return False
-    import fnmatch  # noqa: PLC0415 — stdlib, used only by the glob option
-    from pathlib import PurePath  # noqa: PLC0415 — as above
+        return []
+    parts = [p for p in rel_path.replace("\\", "/").split("/") if p]
+    if not parts:
+        return []
+    hits: list[int] = []
+    for idx, g in enumerate(globs):
+        rx, anchored, dir_only = _compile_glob(g)
+        last = len(parts)
+        # prefix i is the first i components; the whole path is a file, every shorter prefix a directory
+        for i in range(1, last + 1):
+            if dir_only and i == last:
+                continue
+            cand = "/".join(parts[:i]) if anchored else parts[i - 1]
+            if rx.match(cand):
+                hits.append(idx)
+                break
+    return hits
 
-    posix = rel_path.replace("\\", "/")
-    name = PurePath(posix).name
-    for g in globs:
-        pat = g.replace("\\", "/")
-        if pat.startswith("./"):
-            pat = pat[2:]
-        if "/" in pat:
-            if fnmatch.fnmatchcase(posix, pat):
-                return True
-        elif fnmatch.fnmatchcase(name, pat):
-            return True
-    return False
+
+def sensitive_glob_matches(rel_path: str, globs: Sequence[str]) -> bool:
+    """True when *rel_path* (repo-relative, any separator) matches one of *globs* (see :func:`sensitive_glob_hits`)."""
+    return bool(sensitive_glob_hits(rel_path, globs))
 
 
 def raise_flag(writer: Any, tumbler: str, *, what: str) -> None:

@@ -46,10 +46,44 @@ from tests._catalog_fixture_ops import documents_by_file_path
         pytest.param("src/a.py", ["*.pem", "secrets/*"], False, id="no-match"),
         pytest.param("src/a.py", [], False, id="no-patterns"),
         pytest.param("SECRETS/a.txt", ["secrets/*"], False, id="case-sensitive"),
+        # gitignore-like shapes (nexus-rfvyy.8, review r1 S1/S3): '**/' is zero or more directories,
+        # a directory name or a trailing slash is the whole subtree.
+        pytest.param("a.pem", ["**/*.pem"], True, id="globstar-slash-matches-top-level"),
+        pytest.param("deploy/keys/a.pem", ["**/*.pem"], True, id="globstar-slash-matches-deep"),
+        pytest.param("a.pem.bak", ["**/*.pem"], False, id="globstar-slash-still-needs-the-suffix"),
+        pytest.param("secrets/x", ["secrets/**/x"], True, id="globstar-between-matches-zero-dirs"),
+        pytest.param("secrets/a/b/x", ["secrets/**/x"], True, id="globstar-between-matches-many-dirs"),
+        pytest.param("secrets/a/y", ["secrets/**/x"], False, id="globstar-between-needs-the-tail"),
+        pytest.param("other/secrets/x", ["secrets/**/x"], False, id="globstar-between-is-anchored"),
+        pytest.param("secrets/a/b.txt", ["secrets/**"], True, id="trailing-globstar-is-the-subtree"),
+        pytest.param("src/secrets/c.txt", ["secrets"], True, id="bare-dir-name-matches-its-subtree-at-depth"),
+        pytest.param("secrets/c.txt", ["secrets"], True, id="bare-dir-name-top-level"),
+        pytest.param("secrets", ["secrets"], True, id="bare-name-matches-a-file-of-that-name"),
+        pytest.param("mysecrets/c.txt", ["secrets"], False, id="bare-dir-name-is-exact"),
+        pytest.param("src/secrets/c.txt", ["secrets/"], True, id="trailing-slash-matches-the-subtree-at-depth"),
+        pytest.param("secrets/a/b/c.txt", ["secrets/"], True, id="trailing-slash-deep-file"),
+        pytest.param("secrets", ["secrets/"], False, id="trailing-slash-is-directories-only"),
+        pytest.param("conf/secrets/k", ["conf/secrets/"], True, id="anchored-dir-with-trailing-slash"),
+        pytest.param("x/conf/secrets/k", ["conf/secrets/"], False, id="anchored-dir-does-not-float"),
+        pytest.param("secrets/c.txt", ["/secrets"], True, id="leading-slash-anchors-at-the-root"),
+        pytest.param("a/secrets/c.txt", ["/secrets"], False, id="leading-slash-pins-the-name-to-the-root"),
+        pytest.param("a/b.pem", ["b.[pq]em"], True, id="char-class"),
+        pytest.param("a/b.pem", ["b.[!p]em"], False, id="negated-char-class"),
+        pytest.param("a/b.pem", ["b.?em"], True, id="question-mark"),
     ],
 )
 def test_the_matcher(rel: str, globs: list[str], expected: bool) -> None:
     assert sensitive_glob_matches(rel, globs) is expected
+
+
+def test_hits_name_every_pattern_that_matched() -> None:
+    from nexus.sensitive_write import sensitive_glob_hits
+
+    globs = ["*.pem", "secrets/", "docs/**/x.md", "nothing-here"]
+    assert sensitive_glob_hits("secrets/a.pem", globs) == [0, 1]
+    assert sensitive_glob_hits("docs/x.md", globs) == [2]
+    assert sensitive_glob_hits("src/a.py", globs) == []
+    assert sensitive_glob_hits("", globs) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -65,12 +99,12 @@ def repo_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return d
 
 
-def _invoke(args: list[str], *, probe=lambda what: None):
+def _invoke(args: list[str], *, probe=lambda what: None, stats: dict | None = None):
     reg = MagicMock()
     reg.get.return_value = {"collection": "code__myrepo"}
     with patch("nexus.commands.index._registry", return_value=reg), \
             patch("nexus.sensitive_write.require_sensitive_engine", probe), \
-            patch("nexus.indexer.index_repository", return_value={}) as idx:
+            patch("nexus.indexer.index_repository", return_value=stats or {}) as idx:
         result = CliRunner().invoke(main, ["index", "repo", *args])
     return result, idx
 
@@ -112,12 +146,48 @@ def test_the_option_with_frecency_only_is_a_usage_error(repo_dir: Path) -> None:
     idx.assert_not_called()
 
 
+@pytest.mark.t2_tenant  # one scenario, one tenant: each run reaches the (faked) indexer and ends in storage touches
+def test_the_run_prints_a_count_per_pattern_and_warns_loudly_on_a_pattern_that_matched_nothing(
+    repo_dir: Path,
+) -> None:
+    """A sweep that found nothing is a failure (nexus-moht0): a typo'd pattern would otherwise index the files
+    it was meant to protect as ordinary and say nothing."""
+    result, _ = _invoke(
+        [str(repo_dir), "--sensitive-glob", "*.pem", "--sensitive-glob", "secrts/"],
+        stats={"sensitive_glob_counts": {"*.pem": 3, "secrts/": 0}},
+    )
+    assert result.exit_code == 0, result.output
+    assert "*.pem: 3 file(s)" in result.output and "secrts/: 0 file(s)" in result.output, result.output
+    warnings = [ln for ln in result.output.splitlines() if ln.startswith("WARNING:")]
+    assert len(warnings) == 1 and "'secrts/'" in warnings[0] and "matched 0 files" in warnings[0], result.output
+    assert "NOT flagged" in warnings[0]
+    assert "--since-head" not in warnings[0], "the delta explanation is only for a --since-head run"
+
+    # a --since-head run says why a pattern may have matched nothing
+    result, _ = _invoke(
+        [str(repo_dir), "--since-head", "--sensitive-glob", "*.pem"],
+        stats={"sensitive_glob_counts": {"*.pem": 0}},
+    )
+    assert result.exit_code == 0, result.output
+    (warning,) = [ln for ln in result.output.splitlines() if ln.startswith("WARNING:")]
+    assert "--since-head visits only the files changed" in warning
+
+    # control: every pattern matched, no warning; no option, no report
+    result, _ = _invoke([str(repo_dir), "--sensitive-glob", "*.pem"], stats={"sensitive_glob_counts": {"*.pem": 1}})
+    assert "*.pem: 1 file(s)" in result.output and "WARNING" not in result.output, result.output
+    result, _ = _invoke([str(repo_dir)])
+    assert "--sensitive-glob matches" not in result.output, "no option, no report"
+
+
 def test_the_help_states_the_matching_rule_and_the_external_rule() -> None:
     result = CliRunner().invoke(main, ["index", "repo", "--help"])
     assert result.exit_code == 0
     flat = " ".join(result.output.split())
     assert "--sensitive-glob PATTERN" in flat
-    assert "file name at any depth" in flat and "matches across '/'" in flat
+    assert "file and directory name at any depth" in flat and "matches across '/'" in flat
+    assert "'**/' matches zero or more directories" in flat
+    assert "how many files each pattern matched" in flat and "matched none" in flat
+    assert "--since-head only the files the delta visits are flagged" in flat
     assert "skipped with a warning" in flat and "local MinerU" in flat
 
 
@@ -268,9 +338,14 @@ def test_a_matched_file_is_indexed_on_this_machine_and_skipped_for_an_external_e
     exists in a repo run) the flagged file is skipped, loudly, and the other file is not gated. The first
     half is the positive control for the second: the same query finds the same content when not skipped."""
     local = _two_file_repo(tmp_path / "local")
-    out = CliRunner().invoke(main, ["index", "repo", str(local), "--no-taxonomy", "--sensitive-glob", "vault_*"])
+    out = CliRunner().invoke(
+        main, ["index", "repo", str(local), "--no-taxonomy", "--sensitive-glob", "vault_*", "--sensitive-glob", "vualt_*"])
     assert out.exit_code == 0, out.output
     assert _flag("vault_secret.py") and not _flag("ring_buffer.py")
+    # the walk's own count, per pattern, and a loud warning for the typo'd one (nexus-rfvyy.8 review r1 S1/S3)
+    assert "vault_*: 1 file(s)" in out.output and "vualt_*: 0 file(s)" in out.output, out.output
+    assert "WARNING: --sensitive-glob 'vualt_*' matched 0 files" in out.output, out.output
+    assert "WARNING: --sensitive-glob 'vault_*'" not in out.output
     assert "escrow" in _hits("rotate harbour vault credentials escrow token")
     assert "ring-buffer" in _hits("round up to next power of two ring buffer sizing")
 
