@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 
 from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
+from tests._child_process import kill_group, popen_in_group
+from tests._module_seam import setattr_in
 
 RUN_PY = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "run.py"
 SID = "1234abcd-0000-0000-0000-000000000001"
@@ -115,7 +117,7 @@ def test_args_or_none_says_none_when_ps_times_out(run, monkeypatch) -> None:
     def slow(argv, **kw):
         raise subprocess.TimeoutExpired(argv, 30)
 
-    monkeypatch.setattr(run.subprocess, "run", slow)
+    setattr_in(monkeypatch, run, "subprocess.run", slow)
     assert run._args_or_none(1234) is None
 
 
@@ -502,16 +504,13 @@ def _cleanup(run, monkeypatch, tmp_path, *, teardown_s=0.5, wait_s=10.0, revokes
     monkeypatch.setattr(run, "TEARDOWN_WAIT_S", wait_s)
     monkeypatch.setattr(run, "SETTLE_S", settle_s)
     run.UNVERIFIED.clear()
-    proc = subprocess.Popen([str(mcp)], start_new_session=True)
+    proc = popen_in_group([str(mcp)])
     sb.watch = _Watch([(proc.pid, _ps_args(proc.pid))])
     notes: list[str] = []
     try:
         dirty = run.cleanup(sb, notes)
     finally:
-        try:
-            os.killpg(proc.pid, 9)  # its own session: the script and its sleep, nothing else
-        except (ProcessLookupError, PermissionError):  # already gone and reaped
-            pass
+        kill_group(proc)  # its own group: the script and its sleep, nothing else
         proc.wait()
     return dirty, notes, saw_config, cfg
 
@@ -590,7 +589,7 @@ def test_cleanup_with_an_older_nx_skips_the_findings_loudly_and_is_unverified(ru
 
 def _main_with(run, monkeypatch, *, bad: bool, unverified: bool):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
-    monkeypatch.setattr(run.shutil, "which", lambda name: f"/bin/{name}")
+    setattr_in(monkeypatch, run, "shutil.which", lambda name: f"/bin/{name}")
     monkeypatch.setattr(sys, "argv", ["run.py"])
     crs = types.SimpleNamespace(script_sha256=lambda _s: "s", claude_version=lambda _c: "1", tmux_version=lambda: "t",
                                 harness_sha256=lambda *a: "h")
@@ -626,7 +625,7 @@ def test_a_keep_run_is_unverified_not_a_pass(run, tmp_path, monkeypatch) -> None
     unverified, so main() exits 2 and records nothing."""
     home = tmp_path / "kept"
     home.mkdir()
-    monkeypatch.setattr(run.tempfile, "mkdtemp", lambda prefix="": str(home))
+    setattr_in(monkeypatch, run, "tempfile.mkdtemp", lambda prefix="": str(home))
     monkeypatch.setattr(run.Sandbox, "setup", lambda self, crs: None)
     monkeypatch.setattr(run.Sandbox, "entries", lambda self: [])
     monkeypatch.setattr(run, "RUNNERS", {"gate": lambda sb, crs, a, failures, notes: None})
