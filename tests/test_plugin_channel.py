@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
 import pytest
 
+from check_plugin_only_eligibility import FREE_EXACT, FREE_PREFIXES
 from plugin_channel import (
     ALLOWED_EXACT,
     ALLOWED_PREFIXES,
@@ -159,6 +161,35 @@ def test_is_channel_path(path: str, expected: bool) -> None:
     """Empty DENIED_PREFIXES and the two carve-out rows fail: the plugin trees
     hold wheel content that a plugin-only release may never alter."""
     assert is_channel_path(path) is expected
+
+
+def test_free_paths_are_off_the_wheel_and_sdist_surface() -> None:
+    """The eligibility gate treats FREE_PREFIXES and FREE_EXACT as paths that
+    never reach the nx code under test. That holds only while none of them is
+    in, or contains, a wheel force-include or sdist include entry (nexus-rbmja.9;
+    this replaces the pin that went with the wheel-surface proof). Add an entry
+    that overlaps and this fails: a free path can never hide wheel content."""
+    assert FREE_PREFIXES and FREE_EXACT, "the free set must not be empty"
+    entries = _wheel_and_sdist_entries()
+    assert entries, "no wheel or sdist entries parsed: the check examined nothing"
+    for free in (*FREE_PREFIXES, *FREE_EXACT):
+        for entry in entries:
+            assert not path_has_prefix(entry, free), (entry, free)
+            assert not path_has_prefix(free, entry), (entry, free)
+
+
+@pytest.mark.parametrize("planted", ["docs/", "tests/e2e/lib", "CHANGELOG.md", "tests"])
+def test_the_free_path_pin_fires_on_a_planted_entry(
+    planted: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity: a scratch copy of the entry list with a free path planted
+    in it (the real pyproject is never touched) must fail the pin."""
+    real = _wheel_and_sdist_entries()
+    monkeypatch.setattr(
+        sys.modules[__name__], "_wheel_and_sdist_entries", lambda: [*real, planted]
+    )
+    with pytest.raises(AssertionError):
+        test_free_paths_are_off_the_wheel_and_sdist_surface()
 
 
 def test_the_allowlist_carves_out_every_wheel_path() -> None:

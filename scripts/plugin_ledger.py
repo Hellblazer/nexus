@@ -82,8 +82,9 @@ def _deferred_entries(ledger_text: str) -> list[str]:
     """Path-carrying entries sitting under :data:`DEFERRED_SECTION_HEADING`.
 
     A deferred entry is one the releaser does not cherry-pick into a
-    plugin-only release, and :func:`deferred_paths` reads that set. Reuses ``_ledger_blocks`` so section membership and
-    entry boundaries come from the one grouping.
+    plugin-only release, and :func:`deferred_paths` reads that set. Reuses
+    ``_ledger_blocks`` so section membership and entry boundaries come
+    from the one grouping.
     """
     deferred: list[str] = []
     in_section = False

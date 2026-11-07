@@ -29,7 +29,6 @@ __all__ = [
     "ALLOWED_PREFIXES",
     "DENIED_PREFIXES",
     "PLUGIN_BY_ALLOWLIST_PREFIX",
-    "GitCommandError",
     "TagVisibilityError",
     "assert_tag_visibility",
     "client_version_of",
@@ -40,10 +39,6 @@ __all__ = [
 
 class TagVisibilityError(RuntimeError):
     """The base client tag does not resolve: the checkout is blind to tags."""
-
-
-class GitCommandError(RuntimeError):
-    """A git invocation failed; the answer is unknown, not empty."""
 
 
 #: The channel allowlist — a strict SUPERSET of the loader-visible
@@ -63,11 +58,11 @@ ALLOWED_EXACT: tuple[str, ...] = (".claude-plugin/marketplace.json",)
 #: may never alter wheel behaviour.
 DENIED_PREFIXES: tuple[str, ...] = ("conexus/plans/", "conexus/daemon/")
 
-#: Ref movement keys on THIS mapping, not on SURFACE_BY_PLUGIN: a cut
-#: carrying only conexus/evals/ or conexus/registry.yaml ships real
-#: content the loader-visible surface does not cover, and keying on
-#: SURFACE_BY_PLUGIN would move no ref and ship nothing.
-#: .claude-plugin/marketplace.json belongs to no plugin and moves no ref.
+#: The marketplace plugin each allowlist prefix is installed as. No code
+#: moves refs by it any more; tests/test_plugin_channel.py pins it against
+#: marketplace.json so a new plugin directory must be added to
+#: ALLOWED_PREFIXES and here together (docs/agents/plugin-release-channel.md).
+#: .claude-plugin/marketplace.json belongs to no plugin.
 PLUGIN_BY_ALLOWLIST_PREFIX: dict[str, str] = {
     "conexus/": "conexus",
     "sn/": "sn",

@@ -50,6 +50,7 @@ on:
       - 'conexus/.mcp.json'
       - '.claude-plugin/marketplace.json'
       - 'scripts/plugin_ledger.py'
+      - 'scripts/plugin_channel.py'
       - 'tests/test_plugin_release_drift_ledger.py'
       - '.github/workflows/plugin-drift-ledger.yml'
   pull_request:

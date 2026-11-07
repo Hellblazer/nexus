@@ -67,9 +67,9 @@ EXEMPT_FILES = (
 
 #: Symbols pruned from the anchored-tag machinery (nexus-rbmja.9): none may
 #: appear in scripts/plugin_channel.py or in any tracked file outside the
-#: record locations above. ``assert_tag_visibility``, ``TagVisibilityError``,
-#: ``GitCommandError`` and ``client_version_of`` are NOT here: the eligibility
-#: script still uses them. The Phase 2 guard went with the anchored code
+#: record locations above. ``assert_tag_visibility``, ``TagVisibilityError``
+#: and ``client_version_of`` are NOT here: the eligibility script still uses
+#: them. The Phase 2 guard went with the anchored code
 #: (``phase2_in_play`` was False at the last client tag, v7.97.0, and RDR-228
 #: Phase 2 shipped in v7.81.0 and every client tag since).
 PRUNED_SYMBOLS = (
@@ -81,6 +81,7 @@ PRUNED_SYMBOLS = (
     "current_branch_name",
     "cut_head_sha",
     "wheel_surface_offenders",
+    "GitCommandError",
     "NEVER_DELIVERED_PREFIXES",
     "_head_is_plugin_tag",
     "INVARIANT R",
