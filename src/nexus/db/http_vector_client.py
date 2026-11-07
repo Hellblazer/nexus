@@ -1970,6 +1970,14 @@ def _request_deadline_ms_for(path: str) -> int | None:
 #: ``budget_seconds`` and by the census it runs first, so this is a ceiling above both.
 _CHUNK_KEYS_TIMEOUT_S = 300
 
+#: A retire-keys dry run that runs as an engine job (nexus-v75nw): seconds between two polls of the job, and how long
+#: the client waits for it before it stops waiting (the job goes on, and the same command joins it).
+_CHUNK_KEYS_JOB_POLL_S = 2.0
+_CHUNK_KEYS_JOB_MAX_WAIT_S = 1800.0
+#: Polls that fail in a row (a 5xx, the edge's 504, a dropped connection) before the dry run gives up. A poll is a
+#: cheap read and the job does not depend on it, so a single bad one is not the job's failure.
+_CHUNK_KEYS_JOB_POLL_FAILURES = 5
+
 #: The validate route scans the whole chunk table (the engine allows it 30 minutes); the socket outlasts that.
 _CHUNK_KEYS_VALIDATE_TIMEOUT_S = 2100
 
@@ -2778,6 +2786,35 @@ class SensitivityExcludeUnavailable(VectorServiceError):
 #: sensitive owner; ``include`` sends nothing, the request the client made before the argument existed.
 Sensitivity = ReadSensitivity
 _check_sensitivity = check_read_sensitivity
+
+
+class ChunkKeysDryRunTimeout(VectorServiceError):
+    """The client stopped waiting for a retire-keys dry run job (nexus-v75nw); the job is still running in the engine.
+
+    The same dry run started again joins it (the engine runs one job per tenant and hands a repeat of the same request
+    the one that is running), so waiting longer is a rerun of the same command."""
+
+    def __init__(self, job_id: str, waited_s: float) -> None:
+        super().__init__(
+            f"the retire-keys dry run (job {job_id}) was still running after {waited_s:.0f} s; it goes on in the "
+            "engine. Run the same command again to join it, or raise the wait.",
+            reason="sweep_job_still_running", engine_body={"job_id": job_id},
+        )
+        self.job_id = job_id
+
+
+def _dry_run_job_answer(job_id: str, job: dict) -> dict:
+    """What the synchronous dry run would have answered, read off an ended job: the body, or its error."""
+    status = job.get("http_status")
+    body = job.get("body")
+    if status == 200 and isinstance(body, dict):
+        return body
+    err = body if isinstance(body, dict) else {}
+    raise VectorServiceError(
+        f"the retire-keys dry run (job {job_id}) ended in HTTP {status}: "
+        f"{redact_credentials(str(err.get('error', 'no body')))}",
+        code=status if isinstance(status, int) else None, reason=error_reason(err), engine_body=err or None,
+    )
 
 
 class IdempotencyKeyRefusedError(VectorServiceError):
@@ -5530,7 +5567,7 @@ class HttpVectorClient:
         self, *, dry_run: bool = True, accept: Mapping[str, int] | None = None, collection: str | None = None,
         batch_size: int | None = None, max_batches: int | None = None, budget_seconds: int | None = None,
         measure_batch: bool | None = None, resume: Mapping[str, Any] | None = None, tenant: str | None = None,
-        operator: str | None = None,
+        operator: str | None = None, start_job: bool = False,
     ) -> dict:
         """POST /v1/admin/chunk-keys/sweep: the retire-keys sweep of THIS credential's tenant, or of ``tenant`` when the
         credential is the root one (nexus-6pfgb.43).
@@ -5576,11 +5613,18 @@ class HttpVectorClient:
         (:func:`~nexus.db.service_endpoint.guard_production_write`, ``NX_ALLOW_PROD_WRITE``) before the first
         request; a dry run does not.
 
+        ``start_job`` (a dry run only; nexus-v75nw) asks the engine to run the count in the background: the answer is
+        then ``{"job_id", "tenant", "state": "running", "stage", "elapsed_ms"}`` at once, and the counts come from
+        ``GET /v1/admin/chunk-keys/sweep/jobs/{job_id}``. Use :meth:`chunk_keys_dry_run`, which polls. An engine that
+        predates the field ignores it and answers the dry run itself, with no ``job_id``.
+
         Raises :class:`VectorServiceError` (``code=404`` on an engine that predates the route).
         """
         from nexus.tables.chunk_metadata_keys import engine_plan  # noqa: PLC0415 — deferred: the table loads a TOML
 
         body: dict[str, Any] = {**engine_plan(), "dry_run": dry_run}
+        if start_job and dry_run:
+            body["async"] = True
         if tenant is not None:
             body["tenant"] = tenant
         if operator is not None:
@@ -5598,6 +5642,78 @@ class HttpVectorClient:
         if not dry_run:
             _guard_chunk_keys_write()
         return _post("/v1/admin/chunk-keys/sweep", body, tenant=self._tenant, timeout=_CHUNK_KEYS_TIMEOUT_S)
+
+    def chunk_keys_dry_run(
+        self, *, accept: Mapping[str, int] | None = None, collection: str | None = None,
+        batch_size: int | None = None, measure_batch: bool | None = None, tenant: str | None = None,
+        operator: str | None = None, progress: Callable[[dict], None] | None = None,
+        max_wait_s: float = _CHUNK_KEYS_JOB_MAX_WAIT_S, poll_interval_s: float = _CHUNK_KEYS_JOB_POLL_S,
+        sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
+    ) -> dict:
+        """The retire-keys dry run, through the engine's background job when it has one (nexus-v75nw).
+
+        The counts of a large tenant take longer than the public edge's origin timeout (about 30 s: four 504s on the
+        production tenant), so the synchronous call cannot carry them. This starts the dry run as a job
+        (``POST .../sweep`` with ``async``), polls ``GET .../sweep/jobs/{id}`` every ``poll_interval_s`` for up to
+        ``max_wait_s`` and answers what the synchronous call would have: the same dict, or the same
+        :class:`VectorServiceError` (the job's ``http_status`` and ``body`` are the call's).
+
+        ``progress`` is called with ``{"event": "started" | "poll" | "restarted" | "synchronous", ...}`` (a poll
+        carries ``job_id``, ``state``, ``stage`` and ``elapsed_ms``). ``synchronous`` means the engine predates the
+        job and answered the dry run itself in the one request: this is the fallback, and the answer is complete.
+
+        An engine that no longer holds the job (it restarted, or the job expired) is asked once more; the second time
+        raises ``VectorServiceError`` with ``reason == "sweep_job_not_found"``. A wait that runs out raises
+        :class:`ChunkKeysDryRunTimeout`; the job goes on in the engine, and starting the same dry run again joins it.
+        """
+        note = progress or (lambda event: None)
+        restarted = False
+        while True:
+            reply = self.chunk_keys_sweep(
+                dry_run=True, accept=accept, collection=collection, batch_size=batch_size,
+                measure_batch=measure_batch, tenant=tenant, operator=operator, start_job=True,
+            )
+            job_id = reply.get("job_id") if isinstance(reply, dict) else None
+            if not job_id or reply.get("state") is None:
+                note({"event": "synchronous"})
+                return reply
+            note({"event": "restarted" if restarted else "started", "job_id": job_id})
+            try:
+                return self._await_dry_run_job(str(job_id), note, max_wait_s, poll_interval_s, sleep, monotonic)
+            except VectorServiceError as exc:
+                if exc.reason != "sweep_job_not_found" or restarted:
+                    raise
+                restarted = True
+
+    def _await_dry_run_job(
+        self, job_id: str, note: Callable[[dict], None], max_wait_s: float, poll_interval_s: float,
+        sleep: Callable[[float], None], monotonic: Callable[[], float],
+    ) -> dict:
+        deadline = monotonic() + max_wait_s
+        failures = 0
+        while True:
+            try:
+                job = _get(f"/v1/admin/chunk-keys/sweep/jobs/{job_id}", tenant=self._tenant)
+            except VectorServiceError as exc:
+                if exc.reason == "sweep_job_not_found" or (exc.code is not None and exc.code < 500):
+                    raise
+                failures += 1
+                if failures >= _CHUNK_KEYS_JOB_POLL_FAILURES:
+                    raise
+            except (OSError, TimeoutError):   # urllib.error.URLError is an OSError
+                failures += 1
+                if failures >= _CHUNK_KEYS_JOB_POLL_FAILURES:
+                    raise
+            else:
+                failures = 0
+                state = job.get("state")
+                note({"event": "poll", "job_id": job_id, "state": state, "stage": job.get("stage"),
+                      "elapsed_ms": job.get("elapsed_ms")})
+                if state != "running":
+                    return _dry_run_job_answer(job_id, job)
+            if monotonic() >= deadline:
+                raise ChunkKeysDryRunTimeout(job_id, max_wait_s)
+            sleep(poll_interval_s)
 
     def chunk_keys_add_constraints(self, *, replace: bool = False) -> dict:
         """POST /v1/admin/chunk-keys/add-constraints: the table-wide add of the chunk CHECKs, NOT VALID (nexus-6pfgb.43).

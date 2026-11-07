@@ -133,6 +133,16 @@ def _swept_phrase(body: dict, swept_before: int) -> str:
 
 def _engine_error(exc: VectorServiceError, *, swept_before: int = 0,
                   audits: list[tuple[str, dict]] | None = None) -> NoReturn:
+    if exc.reason == "sweep_job_not_found":
+        _fail(
+            "The engine no longer holds the dry-run job (it restarted, or the job expired) and a second start was "
+            "lost the same way. Nothing was written; run the same command again.", EXIT_FAILED,
+        )
+    if exc.reason == "sweep_job_still_running":
+        _fail(
+            f"{exc} Nothing was written. The dry run is a read; the engine bounds how many it runs at once.",
+            EXIT_FAILED,
+        )
     if exc.code == 404:
         _fail(
             "This engine does not carry the retire-keys routes (HTTP 404). Upgrade the engine to the release that "
@@ -272,13 +282,36 @@ def _render_dry_run(report: dict, *, tenant: str) -> None:
         )
 
 
+def _dry_run_progress() -> Any:
+    """A progress sink for the dry run job: one stderr line when the engine's stage changes, and one a minute while it
+    stays on a stage, so a long count shows it is alive without a line per poll."""
+    state: dict[str, Any] = {"stage": None, "printed_ms": 0}
+
+    def note(event: dict) -> None:
+        kind = event.get("event")
+        if kind == "synchronous":
+            click.echo("  This engine predates the background dry run: counted in the one request.", err=True)
+        elif kind in ("started", "restarted"):
+            click.echo(f"  dry run {'restarted' if kind == 'restarted' else 'started'} as engine job "
+                       f"{event.get('job_id')}", err=True)
+        elif kind == "poll":
+            stage, elapsed = event.get("stage"), int(event.get("elapsed_ms") or 0)
+            if stage != state["stage"] or elapsed - state["printed_ms"] >= 60_000:
+                click.echo(f"  dry run {event.get('state')}: {stage} ({elapsed / 1000:.0f} s)", err=True)
+                state["stage"], state["printed_ms"] = stage, elapsed
+
+    return note
+
+
 def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int], collection: str | None,
-               batch_size: int | None, as_json: bool, operator: str | None = None) -> None:
+               batch_size: int | None, as_json: bool, operator: str | None = None,
+               wait_seconds: int | None = None) -> None:
     audits: list[tuple[str, dict]] = []
     try:
-        report = client.chunk_keys_sweep(
-            dry_run=True, accept=accept, collection=collection, batch_size=batch_size,
+        report = client.chunk_keys_dry_run(
+            accept=accept, collection=collection, batch_size=batch_size,
             measure_batch=None if not apply else False, tenant=tenant, operator=operator,
+            progress=_dry_run_progress(), **({} if wait_seconds is None else {"max_wait_s": float(wait_seconds)}),
         )
     except VectorServiceError as exc:
         _engine_error(exc, audits=audits)
@@ -453,10 +486,14 @@ def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) ->
                    "VALID is NOT VALID until --validate runs again; the engine says so per constraint.")
 @click.option("--validate", "validate", is_flag=True, default=False,
               help="Table-wide, operator only: VALIDATE the chunk CHECKs. Needs --apply.")
+@click.option("--wait-seconds", "wait_seconds", type=click.IntRange(1, 86400), default=None, metavar="N",
+              help="How long to wait for the dry run before giving up on waiting (default 1800). The count runs as a "
+                   "background job in the engine, because a large tenant's takes longer than the public edge allows "
+                   "one request; giving up leaves the job running, and running the same command again joins it.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit one JSON document.")
 def retire_keys_cmd(tenant: str | None, operator: str | None, dry_run: bool, apply: bool, accept: tuple[str, ...], collection: str | None,
                     batch_size: int | None, max_rps: float | None, add_check: bool, replace: bool, validate: bool,
-                    as_json: bool) -> None:
+                    wait_seconds: int | None, as_json: bool) -> None:
     """Retire the chunk-row metadata keys: sweep a tenant, then add and validate the CHECKs (nexus-6pfgb.43).
 
     \b
@@ -520,4 +557,4 @@ def retire_keys_cmd(tenant: str | None, operator: str | None, dry_run: bool, app
         else:
             assert tenant is not None
             _run_sweep(client, tenant=tenant, apply=apply, accept=accepted, collection=collection,
-                       batch_size=batch_size, as_json=as_json, operator=operator)
+                       batch_size=batch_size, as_json=as_json, operator=operator, wait_seconds=wait_seconds)
