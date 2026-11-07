@@ -132,6 +132,99 @@ def test_an_unreadable_aspect_store_is_not_applicable_with_the_cause_not_a_false
     assert report["status"] == sd.NOT_APPLICABLE and "aspects store down" in report["reason"]
 
 
+# ── sensitive_in_external_embedder (nexus-rfvyy.8.7) ────────────────────────
+
+VOYAGE = "knowledge__ext__voyage-context-3__v1"
+BGE = "knowledge__loc__bge-base-en-v15-768__v1"
+MINILM = "knowledge__loc__minilm-l6-v2-384__v1"
+
+
+def test_external_embedder_warns_on_a_sensitive_document_in_a_voyage_collection() -> None:
+    report = sd.check_sensitive_in_external_embedder(
+        reader=_Reader([_doc("1.1.1", VOYAGE), _doc("1.1.2", VOYAGE, sensitive=False)]))
+    assert report["status"] == sd.WARN
+    assert [f["tumbler"] for f in report["findings"]] == ["1.1.1"], "only the sensitive document is named"
+    assert report["findings"][0]["collection"] == VOYAGE
+    assert "voyage-context-3" in report["findings"][0]["why"]
+    text = "\n".join(sd.render_text(report))
+    assert "1.1.1" in text and VOYAGE in text and "WARN" in text
+
+
+def test_external_embedder_counts_a_legacy_two_segment_name_as_external() -> None:
+    report = sd.check_sensitive_in_external_embedder(reader=_Reader([_doc("1.1.1", "knowledge__legacy")]))
+    assert report["status"] == sd.WARN
+
+
+@pytest.mark.parametrize("collection", [BGE, MINILM], ids=["bge", "minilm"])
+def test_external_embedder_does_not_warn_on_a_local_model_collection(collection) -> None:
+    report = sd.check_sensitive_in_external_embedder(reader=_Reader([_doc("1.1.1", collection)]))
+    assert report["status"] == sd.PASS and report["findings"] == []
+    assert report["sensitive_documents"] == 1, "a pass names how many documents it examined"
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [
+        _Reader([]),
+        _Reader([_doc("1.1.1", VOYAGE, sensitive=False)]),
+        _Reader([_doc("1.1.1", VOYAGE)], supported=False),
+        _Reader([], raises=OSError("engine unreachable")),
+    ],
+    ids=["empty-catalog", "no-sensitive-document", "engine-without-the-column", "catalog-unreadable"],
+)
+def test_external_embedder_with_nothing_examined_is_not_applicable_never_a_pass(reader) -> None:
+    report = sd.check_sensitive_in_external_embedder(reader=reader)
+    assert report["status"] == sd.NOT_APPLICABLE and report["findings"] == []
+    text = "\n".join(sd.render_text(report))
+    assert "not applicable" in text and "[✓]" not in text
+
+
+# ── sensitivity.mcp_output (nexus-rfvyy.8.7 note: the Day 2 Verify column) ──
+
+
+def test_mcp_output_row_reports_withhold_as_the_default_and_does_not_warn() -> None:
+    report = sd.check_sensitivity_mcp_output(value=None)
+    assert report["status"] == sd.PASS and report["value"] == "withhold"
+    assert "withhold" in "\n".join(sd.render_text(report))
+
+
+def test_mcp_output_row_warns_when_it_is_flag() -> None:
+    report = sd.check_sensitivity_mcp_output(value="flag")
+    assert report["status"] == sd.WARN and report["value"] == "flag"
+    text = "\n".join(sd.render_text(report))
+    assert "flag" in text and "WARN" in text
+
+
+def test_mcp_output_row_warns_on_an_unrecognised_value() -> None:
+    report = sd.check_sensitivity_mcp_output(value="open")
+    assert report["status"] == sd.WARN and "open" in report["reason"]
+
+
+def test_mcp_output_row_reads_the_config_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("sensitivity:\n  mcp_output: flag\n")
+    assert sd.check_sensitivity_mcp_output()["value"] == "flag"
+    (tmp_path / "config.yml").write_text("{}\n")
+    assert sd.check_sensitivity_mcp_output()["value"] == "withhold"
+
+
+def test_nx_doctor_runs_the_two_new_rows_and_neither_gates(monkeypatch, capsys) -> None:
+    from nexus.commands import doctor as doctor_mod
+
+    assert "sensitive-in-external-embedder" in doctor_mod._SUPPLEMENTARY_CHECK_NAMES
+    assert "sensitivity-mcp-output" in doctor_mod._SUPPLEMENTARY_CHECK_NAMES
+    assert not {"sensitive-in-external-embedder", "sensitivity-mcp-output"} & doctor_mod._GATING_SUPPLEMENTARY_CHECKS
+    warn = {"name": sd.IN_EXTERNAL_EMBEDDER, "status": sd.WARN, "reason": "", "sensitive_documents": 1,
+            "findings": [{"tumbler": "1.1.1", "collection": VOYAGE, "why": "x"}]}
+    monkeypatch.setattr(sd, "check_sensitive_in_external_embedder", lambda **kw: warn)
+    flag_report = sd.check_sensitivity_mcp_output(value="flag")
+    monkeypatch.setattr(sd, "check_sensitivity_mcp_output", lambda **kw: flag_report)
+    assert doctor_mod._run_check_sensitive_in_external_embedder() is None
+    assert doctor_mod._run_check_sensitivity_mcp_output() is None
+    out = capsys.readouterr().out
+    assert "sensitive_in_external_embedder" in out and "sensitivity_mcp_output" in out
+
+
 # ── the wiring, on the engine substrate ─────────────────────────────────────
 
 substrate = pytest.mark.t2_tenant
@@ -317,3 +410,39 @@ def test_the_row_does_not_walk_the_catalog_when_the_engine_cannot_hold_the_flag(
         report = check(reader=Unsupported([_doc("1.1.1")], supported=False), aspects=_Aspects(), **kw)
         assert report["status"] == sd.NOT_APPLICABLE
     assert walked == [], "the full-catalog walk is skipped when the engine does not advertise the capability"
+
+
+@substrate
+def test_catalog_doctor_external_embedder_row_is_not_applicable_on_a_virgin_tenant(t2_service_env) -> None:
+    result = CliRunner().invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder", "--json"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    payload = json.loads("\n".join(lines[next(i for i, l in enumerate(lines) if l.startswith("{")):]))
+    assert payload["sensitive_in_external_embedder"]["status"] == "not_applicable"
+    text = CliRunner().invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder"])
+    assert text.exit_code == 0 and "not applicable" in text.output and "[✓]" not in text.output
+
+
+@substrate
+def test_catalog_doctor_warns_on_a_flagged_document_in_a_voyage_collection_and_not_in_a_local_one(t2_service_env) -> None:
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner("rfvyy87-owner", owner_type="curator", tumbler_prefix="74.1")
+        ext = str(cat.register(owner, "ext", content_type="knowledge", physical_collection=VOYAGE,
+                               source_uri="file:///rfvyy87/ext.md", file_path="ext.md"))
+        loc = str(cat.register(owner, "loc", content_type="knowledge", physical_collection=BGE,
+                               source_uri="file:///rfvyy87/loc.md", file_path="loc.md"))
+        cat.set_sensitivity([ext, loc], True, reason="rfvyy87")
+    result = CliRunner().invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder"])
+    assert result.exit_code == 0, "a warn row never changes the exit status"
+    assert "WARN" in result.output and ext in result.output and VOYAGE in result.output
+    assert loc not in result.output
+
+
+def test_catalog_doctor_mcp_output_flag_warns_without_the_engine(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("sensitivity:\n  mcp_output: flag\n")
+    result = CliRunner().invoke(main, ["catalog", "doctor", "--sensitivity-mcp-output"])
+    assert result.exit_code == 0, result.output
+    assert "flag" in result.output and "WARN" in result.output
