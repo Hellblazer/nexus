@@ -97,27 +97,27 @@ def test_a_dispatch_in_another_project_gets_no_preflight_row(tmp_path: Path) -> 
 
 @pytest.mark.t2_tenant
 def test_a_dispatch_in_a_project_with_the_script_gets_the_row(tmp_path: Path) -> None:
+    """Also nexus-13mbx, in the same tenant (the storage-touch ceiling counts tests that mint
+    one): the hook process runs outside any repo, so git finds no root, and the payload's cwd is
+    a checkout carrying the script (a bare repo with worktrees, or a git that timed out). Before
+    nexus-13mbx the row was withheld there."""
     ctx = _injected(_repo(tmp_path / "nexus-like", with_script=True))
     assert "| Preflight |" in ctx
     assert "agent-worktree-preflight.sh" in ctx
 
-
-@pytest.mark.t2_tenant
-def test_nexus_13mbx_payload_cwd_gives_the_row_outside_any_git_repo(tmp_path: Path) -> None:
-    """The hook process runs outside any repo, so git finds no root, and the payload's cwd is
-    a checkout that carries the script (the shape of a bare repo with worktrees, or a git that
-    timed out). Before nexus-13mbx the row was withheld here."""
     checkout = tmp_path / "checkout"
     script = checkout / subagent_start._WORKTREE_PREFLIGHT_SCRIPT
     script.parent.mkdir(parents=True)
     script.write_text("#!/bin/sh\n", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
-    payload = json.dumps({"session_id": "test-session", "hook_event_name": "SubagentStart",
-                          "task": "general research task", "prompt": "look into something",
-                          "cwd": str(checkout)})
-    result = _run_hook(cwd=str(outside), stdin=payload,
+    result = _run_hook(cwd=str(outside), stdin=_payload_with_cwd(checkout),
                        env_overrides={"GIT_CEILING_DIRECTORIES": str(tmp_path)})
     assert result.returncode == 0, result.stderr
-    ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert "| Preflight |" in ctx
+    assert "| Preflight |" in json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def _payload_with_cwd(cwd: Path) -> str:
+    return json.dumps({"session_id": "test-session", "hook_event_name": "SubagentStart",
+                       "task": "general research task", "prompt": "look into something",
+                       "cwd": str(cwd)})
