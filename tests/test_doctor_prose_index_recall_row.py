@@ -98,6 +98,9 @@ def test_a_prose_collection_above_the_threshold_warns_naming_it_its_count_and_ho
     assert "0.99" in fix and "own topics" in fix and "RDR-227 Gap 1" in fix
     assert "nexus_rdr" not in fix and "docs/rdr" not in fix and "nexus-a6mys" not in fix
     assert "raise" not in fix.lower() and "NX_SEARCH_EXACT_MAX_ROWS" not in fix
+    # nexus-a6mys: the remedy names the script that runs the check, and the script exists.
+    assert "scripts/prose_index_recall_check.py" in fix
+    assert (_ROOT / "scripts" / "prose_index_recall_check.py").is_file()
 
 
 def test_the_threshold_itself_does_not_warn_the_router_runs_it_exact() -> None:
