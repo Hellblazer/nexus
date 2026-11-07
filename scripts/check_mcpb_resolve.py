@@ -26,6 +26,17 @@ rewrites the requirement to ``conexus[pdf]``. The PDF lock must also carry
 ``PDF_REQUIRED`` and at least ``MIN_LOCKED_PDF`` packages, and the bare lock none of
 ``PDF_REQUIRED`` (or the setting would decide nothing).
 
+A universal ``uv lock`` needs only ONE compatible wheel per package, so it
+cannot see a pinned version that has no wheel on one platform the extension
+ships to (macOS arm64 at the macOS 14 floor, Windows x64, Linux x86_64 or
+aarch64): that fails later, on the user's ``uv sync`` (nexus-tlt23). So each
+variant is also resolved PER TARGET after the lock: ``uv pip compile
+--python-platform`` of the bundle's own requirements (conexus pointed at the
+same source) under the staged lock and the bundle's overrides, for every
+``PLATFORMS`` x ``PYTHONS`` cell, in the shape tests/e2e/constraints-resolve-gate.sh
+compiles the install path. A cell that does not resolve, resolves to almost
+nothing, or loses the pdf stack (or gains it, bare) fails the gate by name.
+
     python3 scripts/check_mcpb_resolve.py [--conexus PATH] [--conexus-version X.Y.Z] [--uv UV]
 
 Needs the network (package index metadata). Prints one verdict line, either
@@ -37,12 +48,14 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -58,6 +71,24 @@ MIN_HELD = 80
 MIN_LOCKED_PDF = 170
 PDF_REQUIRED = ("mineru", "torch")
 UV_TIMEOUT_S = 900
+
+#: Per-target cells (nexus-tlt23): (tag, ``uv --python-platform``, MACOSX_DEPLOYMENT_TARGET or None). macOS is
+#: compiled at 14.0, the declared floor: uv's default for aarch64-apple-darwin is 13.0, where the onnxruntime
+#: wheels end. The manifest ships darwin, linux and win32; macOS x64 is not a target (the product's floor is arm64).
+PLATFORMS: tuple[tuple[str, str, str | None], ...] = (
+    ("linux-x86_64", "x86_64-unknown-linux-gnu", None),
+    ("linux-aarch64", "aarch64-unknown-linux-gnu", None),
+    ("windows-x64", "x86_64-pc-windows-msvc", None),
+    ("macos14-arm64", "aarch64-apple-darwin", "14.0"),
+)
+PYTHONS = ("3.12", "3.13")  # the manifest's runtimes.python is >=3.12,<3.14
+#: The cells per variant, a literal on purpose (the nexus-moht0 doctrine): deleting a row of PLATFORMS or PYTHONS
+#: must fail the gate, not shrink it.
+EXPECTED_CELLS = 8
+#: Pinned-line floors for a compile, the e2e leg's (80-85% of the real lock's compile on each variant).
+MIN_COMPILED = 110
+MIN_COMPILED_PDF = 180
+_COMPILE_WORKERS = 4
 
 _IGNORE = shutil.ignore_patterns(".venv", "uv.lock", "__pycache__", "*.pyc", "constraints.txt", "*.mcpb")
 
@@ -135,7 +166,10 @@ def _run(args: argparse.Namespace, scratch: Path) -> int:
         rc, summary = _lock_and_check(args, bundle, pins, release, variant)
         if rc:
             return rc
-        summaries.append(summary)
+        rc, cells = _platform_check(args, bundle, source, release, variant)
+        if rc:
+            return rc
+        summaries.append(f"{summary}; {cells}")
     print(f"MCPB RESOLVE GATE PASSED: conexus {release}; " + "; ".join(summaries))
     return 0
 
@@ -197,6 +231,99 @@ def _lock_and_check(args: argparse.Namespace, bundle: Path, pins: list[str], rel
         return fail(f"only {held} pins held (floor {MIN_HELD}); the pins reached almost nothing")
     return 0, (f"{variant}: {len(locked)} packages locked, {held} of {len(pins)} pins held, "
                f"{absent} pinned packages not needed, 0 pins moved")
+
+
+def _bundle_requirements(bundle: Path, source: Path) -> list[str]:
+    """The bundle's own ``[project].dependencies`` as plain requirements, conexus taken from ``source``.
+
+    No ``[tool.uv.sources]``: ``uv pip compile`` is handed the conexus location in the requirement itself,
+    the way ``uv lock`` got it from the sources table."""
+    deps = tomllib.loads((bundle / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    out = []
+    for dep in deps:
+        m = re.match(r"conexus(\[[^\]]*\])?\s*(?:[<>=!~]|$)", dep)
+        out.append(f"conexus{m.group(1) or ''} @ {source.as_uri()}" if m else dep)
+    return out
+
+
+def _compile_cell(args: argparse.Namespace, work: Path, req: Path, overrides: Path, constraints: Path,
+                  cell: tuple[str, str, str | None], python: str) -> tuple[str, str | None, str]:
+    """One ``uv pip compile``: (cell name, the failure or None, the compiled pins as text)."""
+    tag, platform, macos = cell
+    name = f"{tag}-py{python}"
+    out = work / f"{name}.txt"
+    cmd = [args.uv, "pip", "compile", str(req), "--no-config", "--no-header", "--python-platform", platform,
+           "--python-version", python, "--overrides", str(overrides), "--constraints", str(constraints),
+           "--output-file", str(out)]
+    env = {k: v for k, v in os.environ.items() if k != "MACOSX_DEPLOYMENT_TARGET"}
+    if macos:
+        env["MACOSX_DEPLOYMENT_TARGET"] = macos
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=UV_TIMEOUT_S, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return name, f"could not run {args.uv} pip compile ({type(exc).__name__})", ""
+    if proc.returncode != 0:
+        tail = " | ".join((proc.stderr or proc.stdout).strip().splitlines()[-4:])
+        return name, f"uv pip compile exited {proc.returncode}: {tail[:400]}", ""
+    try:
+        return name, None, out.read_text(encoding="utf-8")
+    except OSError as exc:
+        return name, f"uv wrote no output file ({type(exc).__name__})", ""
+
+
+def _platform_check(args: argparse.Namespace, bundle: Path, source: Path, release: str,
+                    variant: str) -> tuple[int, str]:
+    """Resolve the variant once per PLATFORMS x PYTHONS cell: (exit code, the variant's counts).
+
+    The universal lock accepts a pin with a wheel on only some platforms; this does not."""
+    def fail(msg: str) -> tuple[int, str]:
+        return _fail(f"{variant}: {msg}"), ""
+
+    if len(PLATFORMS) * len(PYTHONS) != EXPECTED_CELLS:
+        return fail(f"{len(PLATFORMS) * len(PYTHONS)} cells declared, {EXPECTED_CELLS} expected")
+    work = Path(tempfile.mkdtemp(prefix="nx-mcpb-cells-", dir=bundle.parent))
+    reqs = _bundle_requirements(bundle, source)
+    if not any(r.startswith("conexus") for r in reqs):
+        return fail("the bundle's dependencies name no conexus")
+    req = work / "requirements.in"
+    req.write_text("\n".join(reqs) + "\n", encoding="utf-8")
+    overrides = work / "overrides.txt"
+    uv_table = tomllib.loads((bundle / "pyproject.toml").read_text(encoding="utf-8")).get("tool", {}).get("uv", {})
+    overrides.write_text("\n".join(uv_table.get("override-dependencies", [])) + "\n", encoding="utf-8")
+    constraints = bundle / "constraints.txt"  # the staged lock, the file the launcher pins from
+
+    cells = [(c, py) for c in PLATFORMS for py in PYTHONS]
+    with ThreadPoolExecutor(max_workers=_COMPILE_WORKERS) as pool:
+        results = list(pool.map(
+            lambda cp: _compile_cell(args, work, req, overrides, constraints, cp[0], cp[1]), cells))
+    if len(results) != EXPECTED_CELLS:
+        return fail(f"{len(results)} cells examined of {EXPECTED_CELLS} expected")
+
+    floor = MIN_COMPILED_PDF if variant == "pdf" else MIN_COMPILED
+    failures: list[str] = []
+    smallest: int | None = None
+    for name, err, text in results:
+        if err:
+            failures.append(f"{name}: {err}")
+            continue
+        # A path or wheel source compiles to ``conexus @ file:///...`` (no version in the line): the staged
+        # ``conexus==<release>`` constraint is what ties that source to the release, and uv fails the compile
+        # when the source's version differs. A version-pinned line would be ``conexus==...``.
+        names = {_norm(m.group(1)) for m in re.finditer(r"^([A-Za-z0-9_.-]+)(?:==| @ )", text, re.M)}
+        if "conexus" not in names:
+            failures.append(f"{name}: conexus is not in the compile")
+        elif len(names) < floor:
+            failures.append(f"{name}: only {len(names)} packages compiled (floor {floor}); the compile examined almost nothing")
+        elif variant == "pdf" and (gone := [n for n in PDF_REQUIRED if n not in names]):
+            failures.append(f"{name}: the PDF stack is not in the compile ({', '.join(gone)} missing)")
+        elif variant != "pdf" and (extra := [n for n in PDF_REQUIRED if n in names]):
+            failures.append(f"{name}: the bare compile carries the PDF stack ({', '.join(extra)})")
+        else:
+            smallest = len(names) if smallest is None else min(smallest, len(names))
+    if failures:
+        return fail(f"{len(failures)} of {len(results)} platform cells do not resolve: " + "; ".join(failures))
+    return 0, f"{variant} per platform: {len(results)} of {EXPECTED_CELLS} cells resolved (smallest {smallest} packages)"
 
 
 def main(argv: list[str] | None = None) -> int:
