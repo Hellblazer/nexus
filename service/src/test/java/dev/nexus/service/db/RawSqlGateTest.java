@@ -423,11 +423,12 @@ class RawSqlGateTest {
             // in Java, and Pass#comment refuses any index that is not a builder index of the leaf before it renders.
             // Plain JDBC Statement.execute for the reason runBuild gives. Single-homed: Pass#comment.
             "runComment", Map.of(".execute(sql)", 1))),
-        Map.entry("ChunkConstraintAdmin.java", Map.of(
-            // SANCTIONED RAW (RDR-236 Phase 4 Step 3, nexus-6pfgb.43): ALTER TABLE ... ADD CONSTRAINT ... NOT VALID and
-            // VALIDATE CONSTRAINT take a rendered CHECK expression, which has no typed jOOQ form. The text is rendered
-            // by PostgreSQL's format() with %I and %L (Session#ddl), so no identifier, key or prefix is concatenated in
-            // Java. Plain JDBC Statement.execute, as PciBuilderSession's does. Single-homed: Session#ddl.
+        Map.entry("AdminDdlSession.java", Map.of(
+            // SANCTIONED RAW (RDR-236 Phase 4 Step 3, nexus-6pfgb.43; shared with nexus-6pfgb.44): ALTER TABLE ... ADD
+            // CONSTRAINT ... NOT VALID and VALIDATE CONSTRAINT take a rendered CHECK expression, which has no typed
+            // jOOQ form. The text is rendered by PostgreSQL's format() with %I, %L and %s (AdminDdlSession#ddl), so no
+            // identifier, key or prefix is concatenated in Java. Plain JDBC Statement.execute, as PciBuilderSession's
+            // does. Single-homed: AdminDdlSession#ddl, for the chunk constraints and the catalog TTL CHECK alike.
             "runDdl", Map.of(".execute(sql)", 1))),
         Map.entry("PgContainerHelper.java", Map.of(
             // SANCTIONED RAW (nexus-cbo4a batch 10): replayPart is the one site of the changeset-replay idiom

@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.nexus.service.ChunkReaper.RunResult;
 import dev.nexus.service.ChunkReaper.Settings;
 import dev.nexus.service.db.AdminConnection;
+import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.Rdr192BackfillGate;
@@ -204,8 +205,8 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
     }
 
     private List<String> presentConstraints() {
-        return admin().states().stream().filter(ChunkConstraintAdmin.State::present)
-            .map(ChunkConstraintAdmin.State::name).toList();
+        return admin().states().stream().filter(AdminDdlSession.State::present)
+            .map(AdminDdlSession.State::name).toList();
     }
 
     // ---- 0. before the sweep: a legacy-keyed row is still written --------------------------------------------

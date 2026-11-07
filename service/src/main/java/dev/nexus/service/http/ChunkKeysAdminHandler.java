@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.vectors.ChunkConstraintAdmin;
@@ -268,7 +269,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             }
         } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException e) {
             HttpUtil.send(ex, 400, json(Map.of("error", String.valueOf(e.getMessage()))));
-        } catch (ChunkConstraintAdmin.Refused e) {
+        } catch (AdminDdlSession.Refused e) {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("error", e.getMessage());
             body.put("reason", e.reason());
@@ -1267,7 +1268,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         List<ChunkConstraintAdmin.TenantProbe> probe = admin.probe(plan);
         List<String> undercounted = undercounted(probe, scoped);
         if (!undercounted.isEmpty()) {
-            throw new ChunkConstraintAdmin.Refused(503, "admin_probe_undercount",
+            throw new AdminDdlSession.Refused(503, "admin_probe_undercount",
                 "the table-wide probe counted fewer chunk rows than a tenant-scoped count for tenant(s) "
                     + undercounted + ": the admin session is not reading every row, so no constraint check can be "
                     + "trusted. Nothing was changed; if rows were deleted while this ran, retry");
@@ -1383,6 +1384,14 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         for (var p : probe) {
             seen.merge(p.tenant(), p.rows(), Long::sum);
         }
+        return undercounted(seen, scoped);
+    }
+
+    /**
+     * The same comparison over the table-wide counts per tenant ({@code seen}); shared with the catalog TTL CHECK
+     * routes (nexus-6pfgb.44), which count a different table.
+     */
+    static List<String> undercounted(Map<String, Long> seen, Map<String, Long> scoped) {
         List<String> out = new ArrayList<>();
         for (var e : scoped.entrySet()) {
             if (seen.getOrDefault(e.getKey(), 0L) < e.getValue()) {
