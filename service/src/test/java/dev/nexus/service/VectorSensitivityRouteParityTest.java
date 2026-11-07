@@ -865,6 +865,39 @@ class VectorSensitivityRouteParityTest {
         }
         assertThat(freshOf("return ctx.selectFrom(CATALOG_DOCUMENTS).fetch();", Set.of()).readsChunkText())
             .as("a table with no chunk_text column is not a text read").isFalse();
+    }
+
+    @Test
+    void aWholeRowReadThroughAChunkHandleAQualifiedConstantOrRawSqlIsAChunkTextRead() {
+        // nexus-rfvyy.7.17 r2: the handle forms PgVectorRepository uses (ch.table()), Tables. qualification,
+        // an aliased table, fetchInto, and raw select * / x.* over a chunk relation or one of its children.
+        for (String body : new String[] {
+            "DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim); return ctx.selectFrom(ch.table()).fetch();",
+            "var ch = DimTables.CHUNKS.get(dim); return ctx.select().from(ch.table()).fetch();",
+            "DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim); return ctx.select(ch.table().asterisk()).from(ch.table()).fetch();",
+            "DimTables.ChunkTable t = DimTables.CHUNKS.get(dim); return ctx.select(t.table().as(\"c\").fields()).fetch();",
+            "return ctx.selectFrom(DimTables.CHUNKS.get(dim).table()).fetch();",
+            "return ctx.selectFrom(Tables.CHUNKS).fetch();",
+            "return ctx.select(Tables.PDF_CHUNKS.asterisk()).from(Tables.PDF_CHUNKS).fetch();",
+            "return ctx.select(CHUNKS.as(\"c\").asterisk()).fetch();",
+            "return ctx.fetchInto(CHUNKS, Row.class);",
+            "return ctx.fetch(\"select * from nexus.chunks where tenant_id = ?\", t);",
+            "return ctx.fetch(\"SELECT c.* FROM nexus.chunks_384 c WHERE c.tenant_id = ?\", t);"}) {
+            assertThat(freshOf(body, Set.of()).readsChunkText()).as(body).isTrue();
+        }
+        for (String body : new String[] {
+            "CollectionScopedTable x = scoped(); return ctx.selectFrom(x.table()).fetch();",
+            "DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim); return ctx.select(ch.collection()).from(ch.table()).fetch();",
+            "return ctx.fetch(\"select * from nexus.catalog_documents where tenant_id = ?\", t);",
+            "return ctx.selectFrom(Tables.CATALOG_DOCUMENTS).fetch();"}) {
+            assertThat(freshOf(body, Set.of()).readsChunkText()).as("negative control: " + body).isFalse();
+        }
+    }
+
+    @Test
+    void aNamedColumnSelectIsNotAWholeRowRead() {
+        assertThat(freshOf("return ctx.selectFrom(CATALOG_DOCUMENTS).fetch();", Set.of()).readsChunkText())
+            .as("a table with no chunk_text column is not a text read").isFalse();
         assertThat(freshOf("return ctx.select(CHUNKS.COLLECTION).from(CHUNKS).fetch();", Set.of()).readsChunkText())
             .as("a named column other than chunk_text is not a text read").isFalse();
     }

@@ -89,11 +89,30 @@ final class ChunkTextRouteCensus {
      * A whole-row read of a table: the jOOQ forms that select every column without naming {@code chunk_text}
      * (nexus-rfvyy.7.17 r1 F4). The captured group is the table constant.
      */
+    /** An optional {@code Tables.} qualifier before a table constant. */
+    private static final String TABLES_PREFIX = "(?:Tables\\s*\\.\\s*)?";
+
     private static final List<Pattern> WHOLE_ROW_READS = List.of(
-        Pattern.compile("\\bselectFrom\\s*\\(\\s*([A-Z][A-Z0-9_]*)\\b"),
-        Pattern.compile("\\.\\s*select\\s*\\(\\s*\\)\\s*\\.\\s*from\\s*\\(\\s*([A-Z][A-Z0-9_]*)\\b"),
-        Pattern.compile("\\b([A-Z][A-Z0-9_]*)\\s*\\.\\s*(?:asterisk|fields)\\s*\\(\\s*\\)"),
-        Pattern.compile("\\.\\s*fetch\\s*\\(\\s*([A-Z][A-Z0-9_]*)\\s*[,)]"));
+        Pattern.compile("\\bselectFrom\\s*\\(\\s*" + TABLES_PREFIX + "([A-Z][A-Z0-9_]*)(?![\\w(])"),
+        Pattern.compile("\\.\\s*select\\s*\\(\\s*\\)\\s*\\.\\s*from\\s*\\(\\s*" + TABLES_PREFIX + "([A-Z][A-Z0-9_]*)(?![\\w(])"),
+        Pattern.compile("(?<![\\w.])" + TABLES_PREFIX + "([A-Z][A-Z0-9_]*)\\s*\\.\\s*(?:as\\s*\\([^)]*\\)\\s*\\.\\s*)?(?:asterisk|fields)\\s*\\(\\s*\\)"),
+        Pattern.compile("\\.\\s*fetch(?:Into)?\\s*\\(\\s*" + TABLES_PREFIX + "([A-Z][A-Z0-9_]*)\\s*[,)]"));
+
+    /**
+     * The same whole-row forms over a per-dimension chunk handle ({@code ch.table()}, nexus-rfvyy.7.17 r2): the
+     * receiver counts when the member declares it a {@code ChunkTable} or takes it from {@code DimTables.CHUNKS},
+     * or the handle is written inline ({@code DimTables.CHUNKS.get(dim).table()}). Every chunk table has the column.
+     */
+    private static final String HANDLE = "(\\w+|DimTables\\s*\\.\\s*CHUNKS\\s*\\.\\s*get\\s*\\([^)]*\\))\\s*\\.\\s*table\\s*\\(\\s*\\)";
+    private static final List<Pattern> WHOLE_ROW_HANDLE_READS = List.of(
+        Pattern.compile("\\bselectFrom\\s*\\(\\s*" + HANDLE),
+        Pattern.compile("\\.\\s*select\\s*\\(\\s*\\)\\s*\\.\\s*from\\s*\\(\\s*" + HANDLE),
+        Pattern.compile(HANDLE + "\\s*\\.\\s*(?:as\\s*\\([^)]*\\)\\s*\\.\\s*)?(?:asterisk|fields)\\s*\\(\\s*\\)"),
+        Pattern.compile("\\.\\s*fetch(?:Into)?\\s*\\(\\s*" + HANDLE + "\\s*[,)]"));
+
+    /** A raw-SQL whole-row read: {@code select *} or {@code select x.*} from a relation; group 1 is its name. */
+    private static final Pattern RAW_SELECT_STAR = Pattern.compile(
+        "(?i)\\bselect\\s+(?:distinct\\s+)?(?:\\w+\\s*\\.\\s*)?\\*\\s+from\\s+(?:\\w+\\s*\\.\\s*)?\"?(\\w+)");
 
     /**
      * The generated jOOQ table constants ({@code Tables.CHUNKS}, {@code Tables.PDF_CHUNKS}, ...) that have a
@@ -245,6 +264,36 @@ final class ChunkTextRouteCensus {
         return seen;
     }
 
+    /** The lower-case relation names of {@link #TEXT_TABLES} ({@code chunks}, {@code pdf_chunks}). */
+    static final Set<String> TEXT_RELATIONS = textRelations();
+
+    private static Set<String> textRelations() {
+        Set<String> out = new TreeSet<>();
+        try {
+            for (String name : TEXT_TABLES) {
+                Table<?> t = (Table<?>) dev.nexus.service.jooq.nexus.Tables.class.getField(name).get(null);
+                out.add(t.getName().toLowerCase(java.util.Locale.ROOT));
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+        return out;
+    }
+
+    /** A relation with the column: a {@link #TEXT_RELATIONS} name, or one of its per-dimension or leaf children. */
+    static boolean isTextRelation(String relation) {
+        String r = relation.toLowerCase(java.util.Locale.ROOT);
+        for (String base : TEXT_RELATIONS) if (r.equals(base) || r.startsWith(base + "_")) return true;
+        return false;
+    }
+
+    private static boolean isChunkHandle(String receiver, String memberText) {
+        if (receiver.startsWith("DimTables")) return true;
+        String q = Pattern.quote(receiver);
+        return Pattern.compile("\\bChunkTable\\s+" + q + "\\b").matcher(memberText).find()
+            || Pattern.compile("\\b" + q + "\\s*=\\s*DimTables\\s*\\.\\s*CHUNKS\\b").matcher(memberText).find();
+    }
+
     static boolean readsChunkText(Member m, Set<String> textFunctions) {
         if (CHUNK_TEXT_READ.matcher(m.text()).find()) return true;
         Matcher c = CONSTANT_CALL.matcher(m.text());
@@ -256,8 +305,14 @@ final class ChunkTextRouteCensus {
             Matcher w = whole.matcher(m.text());
             while (w.find()) if (TEXT_TABLES.contains(w.group(1))) return true;
         }
+        for (Pattern whole : WHOLE_ROW_HANDLE_READS) {
+            Matcher w = whole.matcher(m.text());
+            while (w.find()) if (isChunkHandle(w.group(1), m.text())) return true;
+        }
         // raw SQL: the column, or a call of one of the text functions, written inside a string literal
         if (RAW_CHUNK_TEXT.matcher(m.literalText()).find()) return true;
+        Matcher star = RAW_SELECT_STAR.matcher(m.literalText());
+        while (star.find()) if (isTextRelation(star.group(1))) return true;
         for (String fn : textFunctions) {
             if (Pattern.compile("(?i)\\b" + Pattern.quote(fn) + "\\s*\\(").matcher(m.literalText()).find()) return true;
         }

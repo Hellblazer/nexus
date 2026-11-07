@@ -836,7 +836,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("the baseline applied exactly the rows that precede vectors-055-1 (the rolled-back "
                             + "database's count), not merely a tail that ends at vectors-054-2")
                         .isEqualTo(precedingRows);
-                    baseline =PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus");
+                    baseline = PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus");
                 }
             }
 
