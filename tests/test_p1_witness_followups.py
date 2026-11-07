@@ -320,3 +320,28 @@ def test_a_retried_plan_with_an_embedded_step_ref_fails_in_the_planner(monkeypat
     embedded["steps"][0]["args"]["query"] = "see $step9.text"
     with pytest.raises(ValueError, match=r"planner plan cannot run: step reference .*no step was run"):
         _planner_run(monkeypatch, [CLAIMLESS, embedded])
+
+
+@pytest.mark.parametrize("tool", ["check", "verify"])
+@pytest.mark.asyncio
+async def test_nx_answer_final_text_of_a_zero_evidence_terminal_is_the_no_evidence_text(tool) -> None:
+    """nexus-iy2ep: nx_answer reads the terminal payload text-first, so a zero-evidence check or verify ends in its
+    no-evidence text, never the JSON-encoded v1 payload."""
+    import asyncio
+
+    from tests.test_rdr232_caller_scope import _drive_nx_answer, _plan_run_result
+    from tests.test_rdr232_caller_scope import _match as _cs_match
+
+    args = {"inputs": ["", ""], "check_instruction": "agree?"} if tool == "check" else {
+        "ids": [], "claim": "latency drops", "evidence": ""}
+    with patch(f"nexus.mcp.core.operator_{tool}") as op:
+        payload = await runner._default_dispatcher(tool, args)
+    op.assert_not_called()
+    plan = _cs_match({"steps": [{"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                                {"tool": tool, "args": {"ids": "$step1.ids", "claim": "x", "check_instruction": "x"}}]},
+                     default_bindings={"intent": "q"}, required=["intent"])
+    # retrieval found something; the check step was handed none of it (all filtered empty)
+    res = _plan_run_result([{"ids": ["c1"], "tumblers": ["1.1.1"], "chunk_collections": ["knowledge__x"]}, payload], [])
+    env, _ = await asyncio.to_thread(_drive_nx_answer, plan, scope="", structured=True, plan_run_result=res)
+    assert env["final_text"].startswith(runner._NO_EVIDENCE_RESULT_PREFIX), env["final_text"]
+    assert not env["final_text"].lstrip().startswith("{")
