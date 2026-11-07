@@ -8,6 +8,7 @@ rules (tested against a fake catalog reader). ``CliBackend.run`` puts the rules 
 (tested through ``run_case``, the golden harness's fake-subprocess runner)."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -81,6 +82,10 @@ def test_a_bare_path_without_a_uri_is_denied_by_its_own_spelling() -> None:
         pytest.param(_file("/c:/Users/a/notes/s.md"), id="file-uri-lowercase-drive"),
         pytest.param(_Doc(file_path="C:\\Users\\a\\notes\\s.md"), id="bare-backslash-path"),
         pytest.param(_Doc(file_path="C:/Users/a/notes/s.md"), id="bare-forward-slash-path"),
+        # the raw spelling every registration path mints on Windows: "file://" + the backslash path
+        pytest.param(_Doc(source_uri="file://C:\\Users\\a\\notes\\s.md"), id="raw-registration-spelling"),
+        pytest.param(_Doc(source_uri="file://c:/Users/a/notes/s.md"), id="two-slash-forward-slash"),
+        pytest.param(_Doc(source_uri="FILE:///C:/Users/a/notes/s.md"), id="upper-case-scheme"),
     ],
 )
 def test_a_windows_drive_letter_path_is_written_in_the_documented_posix_form(doc) -> None:
@@ -112,13 +117,57 @@ def test_a_path_with_a_comma_is_denied_by_its_nearest_safe_directory() -> None:
     assert r.deny_rules == ("Read(//h/papers/**)",)
 
 
+def _read_rule(path) -> str:
+    """The deny rule for the absolute local path *path* in this platform's documented form: ``Read(//abs/path)``
+    on POSIX, ``Read(//c/Users/...)`` (lowercase drive, forward slashes) for a ``C:`` path on Windows."""
+    text = str(path)
+    if os.name == "nt":
+        drive, rest = os.path.splitdrive(text)
+        return f"Read(//{drive[0].lower()}{rest.replace(chr(92), '/')})"
+    return f"Read(/{text})"
+
+
 def test_a_symlinked_path_is_denied_under_both_spellings(tmp_path) -> None:
     real = tmp_path / "real.md"
     real.write_text("x")
     link = tmp_path / "link.md"
-    link.symlink_to(real)
+    try:
+        link.symlink_to(real)
+    except OSError as exc:  # Windows without symlink privilege
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    # "file://" + the OS path is the raw spelling registration mints (on Windows ``file://C:\\...``)
     r = sp.file_tool_restriction(reader=_Reader([_file(str(link))]))
-    assert f"Read(/{link})" in r.deny_rules and f"Read(/{real.resolve()})" in r.deny_rules
+    assert not r.drop_file_tools
+    assert _read_rule(link) in r.deny_rules and _read_rule(real.resolve()) in r.deny_rules
+    assert len(r.deny_rules) == 2, "the link and the real path, no more"
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        pytest.param(_Doc(source_uri="file://\\\\server\\share\\s.md"), id="unc-share-in-a-file-uri"),
+        pytest.param(_Doc(source_uri="file:////server/share/s.md"), id="empty-authority-unc"),
+        pytest.param(_Doc(source_uri="file://host/share/s.md"), id="authority-host"),
+        pytest.param(_Doc(source_uri="file://relative/s.md"), id="not-an-absolute-path"),
+        pytest.param(_Doc(source_uri="file:/C:/s.md"), id="single-slash-file-uri"),
+        pytest.param(_Doc(file_path="\\\\server\\share\\s.md"), id="bare-unc-path"),
+        pytest.param(_Doc(file_path="//server/share/s.md"), id="bare-slash-unc-path"),
+    ],
+)
+def test_a_sensitive_location_that_cannot_be_read_as_a_path_fails_closed(doc) -> None:
+    """A sensitive document whose location is a file location this module cannot write as a rule must take the
+    file tools away. It must never come back as ``deny_rules=()`` with ``drop_file_tools=False``: that is a
+    sensitive document protected by nothing (the Windows raw ``file://C:\\...`` spelling did exactly that)."""
+    r = sp.file_tool_restriction(reader=_Reader([doc, _file("/h/also-sensitive.md", 2)]))
+    assert r.drop_file_tools and r.deny_rules == ()
+    assert "cannot be written as a deny rule" in r.reason
+    assert r.examined == 2 and r.sensitive == 2
+
+
+def test_an_unrecognisable_location_on_a_clean_document_is_not_a_reason_to_drop_the_tools() -> None:
+    """Non-vacuity of the case above: the same location on a document that is not sensitive changes nothing."""
+    r = sp.file_tool_restriction(reader=_Reader([_Doc(source_uri="file://host/share/s.md", sensitive=False)]))
+    assert not r.drop_file_tools and r.deny_rules == () and r.examined == 1 and r.sensitive == 0
 
 
 def test_a_merged_duplicate_of_a_flagged_document_is_denied_too() -> None:

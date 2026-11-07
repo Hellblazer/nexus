@@ -16,13 +16,19 @@ directory, ``Read(//dir/**)`` for a whole directory; gitignore syntax, so ``\\ *
 On Windows Claude Code normalises ``C:\\Users\\alice`` to ``/c/Users/alice`` before matching and documents
 ``Read(//c/Users/**)`` for it, so a drive-letter location (``file:///C:/...``, ``C:\\...``) is written that way
 (:func:`_posix_drive_path`); the text after the drive letter keeps its case, which the docs do not address.
+A drive path is rewritten from its Windows spelling, and its real path (a symlink, a junction, an 8.3 short name)
+is resolved through the Windows filesystem before it is written the same way. On Windows the catalog's raw
+``"file://" + C:\\Users\\a\\x.md`` registration spelling (two slashes, a backslash path) is a file location like
+``file:///C:/Users/a/x.md``; both give ``Read(//c/Users/a/x.md)``.
 Sources: https://code.claude.com/docs/en/permissions (Read and Edit), /cli-reference (--disallowedTools).
 
 **Bound.** At most :data:`MAX_DENY_RULES` (100) rules. Over that, one rule per parent directory of the
 sensitive files (a directory deny can only over-deny). Over that in directories as well, or when a path cannot
 be written as a rule, the file tools are taken away from the child instead (``drop_file_tools``).
 
-**Fail closed.** A catalog that cannot be listed gives ``drop_file_tools``: the dispatch removes Read, Grep and
+**Fail closed.** A ``file:`` location or a bare path that cannot be read as a local path (a UNC share, a
+``file://host/...`` authority, a drive path whose real path leaves the drives) gives ``drop_file_tools``; a
+sensitive document never produces "no rule" because its path was not understood. A catalog that cannot be listed gives ``drop_file_tools``: the dispatch removes Read, Grep and
 Glob from the child by name. Nothing is cached: the flag is one-way and can be set between two dispatches.
 """
 from __future__ import annotations
@@ -76,6 +82,11 @@ def _is_safe(path: str) -> bool:
 
 
 _DRIVE = re.compile(r"^/?([A-Za-z]):(?=[\\/]|$)")
+_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+class _Unrecognisable(Exception):
+    """A location that is, or may be, a local file but cannot be written as a deny rule."""
 
 
 def _posix_drive_path(path: str) -> str:
@@ -87,37 +98,78 @@ def _posix_drive_path(path: str) -> str:
     return "/" + m.group(1).lower() + path[m.end():].replace("\\", "/")
 
 
-def _locator(entry: Any) -> str:
-    """The local path an entry's source lives at, as ``/abs/path`` or ``./rel/path``; ``""`` for none.
+def _drive_locator(path: str) -> str:
+    """A drive path as ``C:/Users/a`` (forward slashes, the drive letter as written), or ``""``."""
+    m = _DRIVE.match(path)
+    return "" if m is None else m.group(1) + ":" + path[m.end():].replace("\\", "/")
 
-    ``file:///abs`` source URIs are taken verbatim after the scheme, as ``search_engine._local_source_path`` does,
-    except that a drive-letter path becomes Claude Code's POSIX form (``/c/...``). Any other scheme is not a file
-    and is skipped. An entry with no URI falls back to its ``file_path``."""
+
+def _locator(entry: Any) -> str:
+    """The local path an entry's source lives at, as ``/abs/path``, ``C:/abs/path`` or ``./rel/path``; ``""`` for
+    none (the entry is not a local file). Raises :class:`_Unrecognisable` for a ``file:`` location or a path whose
+    form this module cannot write as a rule.
+
+    ``file://`` + path source URIs are taken verbatim after the scheme, as ``search_engine._local_source_path``
+    does: every registration path mints the raw ``"file://" + absolute``, so on Windows the spelling is
+    ``file://C:\\Users\\a\\x.md`` (two slashes, backslashes) as well as ``file:///C:/Users/a/x.md``. Any other
+    scheme is not a file and is skipped. An entry with no URI falls back to its ``file_path``."""
     uri = getattr(entry, "source_uri", "") or ""
     if isinstance(uri, str) and uri:
-        if not uri.startswith("file:///"):
-            return ""
-        path = uri[len("file://"):]
-        return _posix_drive_path(path) or path
+        if drive := _drive_locator(uri):  # a bare drive path in the URI field
+            return drive
+        if not uri[:5].lower() == "file:":
+            return "" if _SCHEME.match(uri) else _bare(uri)
+        if not uri[:7].lower() == "file://":
+            raise _Unrecognisable(f"file location {uri[:80]!r}")
+        rest = uri[len("file://"):]
+        if drive := _drive_locator(rest):
+            return drive
+        if rest.startswith("/") and not rest.startswith("//"):
+            return rest
+        raise _Unrecognisable(f"file location {uri[:80]!r}")
     fp = getattr(entry, "file_path", "") or ""
     if not isinstance(fp, str) or not fp or "://" in fp:
         return ""
-    if drive := _posix_drive_path(fp):
+    return _bare(fp)
+
+
+def _bare(fp: str) -> str:
+    if drive := _drive_locator(fp):
         return drive
+    if fp.startswith("\\\\") or fp.startswith("//"):
+        raise _Unrecognisable(f"network path {fp[:80]!r}")
+    if os.name == "nt":
+        fp = fp.replace("\\", "/")
     if fp.startswith("/"):
         return fp
     return "./" + fp[2:] if fp.startswith("./") else "./" + fp
 
 
+def _real_drive_path(native: str) -> str:
+    """*native* resolved through the Windows filesystem as ``C:/...``; raises when the real path is no drive path."""
+    real = os.path.realpath(native)
+    for prefix in ("\\\\?\\", "\\\\.\\"):
+        if real.startswith(prefix):
+            real = real[len(prefix):]
+    if drive := _drive_locator(real):
+        return drive
+    raise _Unrecognisable(f"real path {real[:80]!r}")
+
+
 def _variants(locator: str) -> list[str]:
-    """The locator plus, for an absolute path whose real path differs (a symlink), the real path."""
-    out = [locator]
-    if locator.startswith("/") and os.path.lexists(locator):  # an absent path has no real path (macOS firmlinks rewrite one)
+    """The rule-form spellings of *locator*: itself plus, for an absolute path whose real path differs (a symlink),
+    the real path. A drive path is returned as ``/c/...``."""
+    drive = _DRIVE.match(locator) is not None
+    out = [_posix_drive_path(locator) if drive else locator]
+    if not locator.startswith("./") and os.path.lexists(locator) and (drive == (os.name == "nt")):
+        # an absent path has no real path (macOS firmlinks rewrite one); a drive path exists only on Windows, a
+        # rooted POSIX one only off it
         try:
-            real = os.path.realpath(locator)
+            real = _real_drive_path(locator) if drive else os.path.realpath(locator)
         except OSError:
             real = locator
-        if real != locator:
+        real = _posix_drive_path(real) if drive else real
+        if real != out[0]:
             out.append(real)
     return out
 
@@ -152,10 +204,15 @@ def _restrict(entries: list[Any]) -> FileToolRestriction:
     files: dict[str, None] = {}  # ordered, deduped
     safe_dirs: dict[str, None] = {}
     for e in chosen:
-        loc = _locator(e)
-        if not loc:
-            continue
-        for v in _variants(loc):
+        try:
+            loc = _locator(e)
+            variants = _variants(loc) if loc else []
+        except _Unrecognisable as exc:
+            return FileToolRestriction(
+                drop_file_tools=True, examined=len(entries), sensitive=len(chosen),
+                reason=f"a sensitive document's location cannot be written as a deny rule: {exc}"[:300],
+            )
+        for v in variants:
             if _is_safe(v):
                 files[v] = None
             else:

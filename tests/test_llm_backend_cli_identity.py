@@ -123,6 +123,9 @@ def run_case(kwargs: dict, extra_env: dict[str, str], *, restriction=None, restr
         patch("nexus.util.stable_cwd.current_project_root", return_value="/proj"),
         patch("nexus.util.stable_cwd.cwd_was_healed", return_value=False),
         patch("nexus.operators.dispatch.uuid4", return_value=_FIXED_UUID),
+        # Windows resolves a bare ``claude`` off the working directory and raises when no ``claude`` is on PATH;
+        # the spawn is intercepted here, so there is no binary to find and the argv stays as recorded.
+        patch("nexus.operators.dispatch.argv_off_cwd", side_effect=lambda argv, **kw: list(argv)),
         patch("nexus.operators.dispatch._close_dispatch_session"),
         patch(
             "nexus.operators.sensitive_paths.file_tool_restriction",
