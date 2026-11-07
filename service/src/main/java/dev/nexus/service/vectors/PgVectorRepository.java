@@ -4185,10 +4185,10 @@ public final class PgVectorRepository {
                                                boolean excludeSensitive) {
         List<String> ids = (List<String>) envelope.get("ids");
         if (!ids.isEmpty()) runBeforeSensitiveLookupHook();
-        Set<String> sensitive = ids.isEmpty() ? Set.of()
+        Set<String> sensitiveIds = ids.isEmpty() ? Set.of()
             : tenantScope.withTenant(tenant, ctx -> ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, ids));
         List<Boolean> flags = new ArrayList<>(ids.size());
-        for (String id : ids) flags.add(sensitive.contains(id));
+        for (String id : ids) flags.add(sensitiveIds.contains(id));
         Map<String, Object> out = new LinkedHashMap<>(envelope);
         out.put("sensitives", flags);
         if (excludeSensitive && flags.contains(Boolean.TRUE)) {
@@ -9754,7 +9754,7 @@ FROM scope s
             chashesByCollection.computeIfAbsent(coll, k -> new LinkedHashSet<>()).add(hex);
         }
         runBeforeSensitiveLookupHook();
-        Set<String> sensitive = tenantScope.withTenant(tenant, ctx -> {
+        Set<String> sensitiveKeys = tenantScope.withTenant(tenant, ctx -> {
             Set<String> out = new HashSet<>();
             for (var e : chashesByCollection.entrySet()) {
                 for (String hex : ChunkSensitivity.sensitiveChashes(ctx, tenant, e.getKey(), e.getValue())) {
@@ -9765,7 +9765,7 @@ FROM scope s
         });
         for (Map<String, Object> row : rows) {
             String hex = row.get("chash") instanceof String c ? c : (String) row.get("id");
-            row.put("sensitive", sensitive.contains(ManifestLabelStage.ownerKey((String) row.get("collection"), hex)));
+            row.put("sensitive", sensitiveKeys.contains(ManifestLabelStage.ownerKey((String) row.get("collection"), hex)));
         }
         if (excludeSensitive) dropSensitiveRows(rows);
     }
