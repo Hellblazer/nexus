@@ -210,54 +210,141 @@ class ChunkKeysSweepJobsTest {
         assertThat(tenantStart.job().startedBy("u", false)).isFalse();
     }
 
-    // ---- the fix round: finished-job rerun join, eviction of a running job, the continuation's life ------------
+    // ---- no finished-job join, eviction of a running job, cancel and the wall-clock cap -----------------------
 
     @Test
-    void aStartMatchingAFinishedJobInsideRetentionIsHandedThatJob_aFailedOrOtherCallersOrExpiredOneIsNot()
-            throws Exception {
-        Started first = jobs.start("t", "t", false, "fp", stage -> ok("t"));
+    void aStartNeverJoinsAFinishedJob_itRunsAgain_whateverTheRequestOrTheOutcome() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger runs = new java.util.concurrent.atomic.AtomicInteger();
+        Started first = jobs.start("t", "t", false, "fp", stage -> {
+            runs.incrementAndGet();
+            return ok("t");
+        });
         await(() -> first.job().state() == State.DONE);
 
         Started again = jobs.start("t", "t", false, "fp", stage -> {
-            throw new AssertionError("a finished job is reused, not recounted");
+            runs.incrementAndGet();
+            return ok("t");
         });
-        assertThat(again.created()).isFalse();
-        assertThat(again.job().id()).isEqualTo(first.job().id());
-        Started other = jobs.start("t", "t", false, "fp-other", stage -> ok("t"));
-        assertThat(other.job().id()).as("another request").isNotEqualTo(first.job().id());
-        await(() -> other.job().state() == State.DONE);
+        assertThat(again.created()).as("a finished job is read, never handed to a new start").isTrue();
+        assertThat(again.job().id()).isNotEqualTo(first.job().id());
+        await(() -> again.job().state() == State.DONE);
+        assertThat(runs.get()).as("the second start recounted").isEqualTo(2);
+        assertThat(jobs.find(first.job().id())).as("the first stays readable by id until the retention ends").isNotNull();
 
-        Started failed = jobs.start("f", "f", false, "fp", stage -> new Outcome(500, Map.of("reason", "sweep_failed")));
-        await(() -> failed.job().state() == State.FAILED);
-        assertThat(jobs.start("f", "f", false, "fp", stage -> ok("f")).created()).as("a failed job is recounted").isTrue();
-
-        Started mine = jobs.start("r", "default", true, "fp", stage -> ok("r"));
-        await(() -> mine.job().state() == State.DONE);
-        assertThat(jobs.start("r", "r", false, "fp", stage -> ok("r")).created())
-            .as("not handed to a credential that could not have read it").isTrue();
-
-        now.addAndGet(Duration.ofMinutes(31).toMillis());
-        assertThat(jobs.start("t", "t", false, "fp", stage -> ok("t")).created()).as("past the retention").isTrue();
+        Started blocked = jobs.start("f", "f", false, "fp", stage -> new Outcome(409, Map.of("reason", "sweep_preconditions_not_met")));
+        await(() -> blocked.job().state() == State.FAILED);
+        Started rerun = jobs.start("f", "f", false, "fp", stage -> ok("f"));
+        assertThat(rerun.created()).as("a refused (blocked) outcome is not replayed to the rerun after the fix").isTrue();
     }
 
     @Test
-    void evictFinishedDropsAFinishedJobOfTheTenant_andARunningOneStays() throws Exception {
+    void anApplyAndADryRunOfOneTenantExcludeEachOther_theSameApplyJoinsOnly() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
-        Started done = jobs.start("t", "t", false, "fp", stage -> ok("t"));
-        await(() -> done.job().state() == State.DONE);
-        Started running = jobs.start("u", "u", false, "fp", stage -> {
+        ChunkKeysSweepJobs.JobWork hold = (job, stage) -> {
             release.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        };
+        Started apply = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", hold);
+
+        assertThatThrownBy(() -> jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.DRY_RUN, "fp", hold))
+            .as("a dry run of the same request is still another job").isInstanceOf(Conflict.class);
+        assertThatThrownBy(() -> jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp-other", hold))
+            .isInstanceOf(Conflict.class);
+        Started same = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", hold);
+        assertThat(same.created()).isFalse();
+        assertThat(same.job().id()).isEqualTo(apply.job().id());
+        release.countDown();
+        await(() -> apply.job().state() == State.DONE);
+
+        CountDownLatch release2 = new CountDownLatch(1);
+        Started dry = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.DRY_RUN, "fp", (job, stage) -> {
+            release2.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        });
+        assertThatThrownBy(() -> jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", hold))
+            .as("and an apply while a dry run counts").isInstanceOf(Conflict.class)
+            .satisfies(e -> assertThat(((Conflict) e).jobId()).isEqualTo(dry.job().id()));
+        release2.countDown();
+    }
+
+    @Test
+    void aCancelIsAcceptedByARunningApplyOnly_andTheWorkSeesItAtItsNextBoundary() throws Exception {
+        CountDownLatch atBoundary = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        Started apply = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            assertThat(job.stopReason()).as("nothing asked yet").isNull();
+            atBoundary.await(20, TimeUnit.SECONDS);
+            seen.set(job.stopReason());
+            return ok("t");
+        });
+        Started dry = jobs.start("u", "u", false, "fp", stage -> {
+            Thread.sleep(50);
             return ok("u");
         });
-        assertThat(jobs.holdsFinished(done.job().id(), "t")).isTrue();
-        assertThat(jobs.holdsFinished(done.job().id(), "other")).as("another tenant's id").isFalse();
-        assertThat(jobs.holdsFinished(running.job().id(), "u")).as("a running job has no continuation yet").isFalse();
-        assertThat(jobs.holdsFinished(null, "t")).isFalse();
 
-        assertThat(jobs.evictFinished("t")).isEqualTo(1);
-        assertThat(jobs.holdsFinished(done.job().id(), "t")).isFalse();
-        assertThat(jobs.evictFinished("u")).as("a running job stays").isZero();
+        assertThat(dry.job().requestCancel()).as("a dry run has no batch to stop at").isFalse();
+        assertThat(dry.job().cancelRequested()).isFalse();
+        assertThat(apply.job().requestCancel()).isTrue();
+        assertThat(apply.job().stopReason()).isEqualTo("cancelled");
+        atBoundary.countDown();
+        await(() -> apply.job().state() == State.DONE);
+
+        assertThat(seen.get()).isEqualTo("cancelled");
+        assertThat(apply.job().requestCancel()).as("a job that has ended cannot be cancelled").isFalse();
+    }
+
+    @Test
+    void aJobPastTheWallClockCapIsToldToStop_andOneInsideItIsNot() throws Exception {
+        jobs.shutdown();
+        jobs = new ChunkKeysSweepJobs(now::get, Duration.ofMinutes(30), 64, 2, 2, Duration.ofHours(4));
+        CountDownLatch release = new CountDownLatch(1);
+        Started running = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            release.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        });
+
+        now.addAndGet(Duration.ofHours(4).toMillis() - 1);
+        assertThat(running.job().stopReason()).as("one millisecond inside the cap").isNull();
+        now.addAndGet(1);
+        assertThat(running.job().stopReason()).isEqualTo("wall_clock_cap");
+        running.job().requestCancel();
+        assertThat(running.job().stopReason()).as("an explicit cancel is named before the cap").isEqualTo("cancelled");
+        jobs.evictTenant("t");
+        assertThat(running.job().stopReason()).as("a tenant reset is named first").isEqualTo("evicted");
         release.countDown();
+    }
+
+    @Test
+    void anApplyPublishesItsProgress_andAFinishedOneKeepsIt() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch published = new CountDownLatch(1);
+        Started apply = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            assertThat(job.remaining()).as("not known before the count").isEqualTo(-1);
+            job.progress(3, 2_500, 7_500);
+            published.countDown();
+            release.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        });
+
+        assertThat(published.await(20, TimeUnit.SECONDS)).isTrue();
+        assertThat(apply.job().batches()).isEqualTo(3);
+        assertThat(apply.job().rowsSwept()).isEqualTo(2_500);
+        assertThat(apply.job().remaining()).isEqualTo(7_500);
+        release.countDown();
+    }
+
+    @Test
+    void anErrorInAnApplyJobEndsItFailedWithTheRowsItHadSwept() throws Exception {
+        Started apply = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            job.progress(2, 2_000, 5);
+            throw new AssertionError("an Error, not an Exception");
+        });
+        await(() -> apply.job().state() == State.FAILED);
+
+        Map<String, Object> body = apply.job().outcome().body();
+        assertThat(apply.job().outcome().httpStatus()).isEqualTo(500);
+        assertThat(body).containsEntry("reason", "sweep_failed").containsEntry("dry_run", false)
+            .containsEntry("rows_swept", 2_000L).containsEntry("rows_changed", true);
     }
 
     @Test
@@ -278,19 +365,18 @@ class ChunkKeysSweepJobsTest {
         assertThat(jobs.evictTenant("t")).as("already hidden: not counted twice").isZero();
         release.countDown();
         await(() -> running.job().state() == State.DONE);
-        assertThat(jobs.holdsFinished(running.job().id(), "t")).as("a hidden job gives no continuation").isFalse();
         assertThat(jobs.start("t", "t", false, "fp", stage -> ok("t")).created())
             .as("the guard ends with the worker, and the hidden job is dropped").isTrue();
     }
 
     @Test
-    void theWorkIsToldItsJobsId() throws Exception {
+    void theWorkIsToldItsJob() throws Exception {
         java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
-        Started s = jobs.start("t", "t", false, "fp", (id, stage) -> {
-            seen.set(id);
+        Started s = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.DRY_RUN, "fp", (job, stage) -> {
+            seen.set(job.id() + "/" + job.kind().wire());
             return ok("t");
         });
         await(() -> s.job().state() == State.DONE);
-        assertThat(seen.get()).isEqualTo(s.job().id());
+        assertThat(seen.get()).isEqualTo(s.job().id() + "/dry_run");
     }
 }
