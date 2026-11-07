@@ -41,7 +41,6 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -62,7 +61,10 @@ from nexus.operators.llm_types import (
 
 _log = structlog.get_logger(__name__)
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+#: Control characters, the Unicode line separators, bidi overrides and
+#: zero-width characters: none of them belongs in a one-line message.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+")
+_LOCATION_HOST = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#@]*@)?([^/?#:]*|\[[^\]]*\])")
 
 NX_LLM_MAX_CONCURRENCY_ENV: str = "NX_LLM_MAX_CONCURRENCY"
 NX_LLM_MAX_TOKENS_ENV: str = "NX_LLM_MAX_TOKENS"
@@ -722,10 +724,13 @@ class ApiBackend:
                 try:
                     async with client.stream("POST", url, headers=headers, json=body) as resp:
                         if 300 <= resp.status_code < 400:
-                            where = urlsplit(resp.headers.get("location", "")).hostname
+                            # Scrub the raw Location before any parsing: urlsplit lowercases the
+                            # host, which would defeat an exact-key match.
+                            m = _LOCATION_HOST.match(self._clean(resp.headers.get("location", "")))
+                            where = m.group(1) if m else ""
                             raise OperatorAPIError(
                                 f"{self.name}: the server answered {resp.status_code}, a redirect"
-                                f"{' to ' + self._clean(where)[:100] if where else ''}; redirects are not followed, "
+                                f"{' to ' + where[:100] if where else ''}; redirects are not followed, "
                                 "so point base_url at the final endpoint",
                                 status=resp.status_code, retryable=False,
                             )
