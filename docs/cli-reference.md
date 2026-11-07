@@ -6221,7 +6221,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   RDR-232 section 1. `{request_kind, kind_decision, enforced, shadow_reason,
   library_check, builtins_checked, undeclared_builtins, undeclared_builtin_names, branches,
   excluded_total, excluded_plan_ids, returned, selected, fallback_reason, enforced_reasons,
-  enforced_excluded_total}`.
+  enforced_excluded_total, refused_recorded_kinds}`. `refused_recorded_kinds` maps each kind a
+  grown plan recorded to the number of its `grown_route_not_lookup` exclusions, counted like
+  `excluded` (one plan found by two branches counts twice); `{}` when there were none.
   `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
   `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
   fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
