@@ -41,6 +41,15 @@ public interface Reranker {
     }
 
     /**
+     * Whether {@link #rerank} sends the documents' text to another machine (nexus-rfvyy.8.4, RDR-243 Q4). True
+     * only for {@link VoyageReranker}; the local cross-encoder runs in this process and sends nothing, so it
+     * stays false. The fused rerank stage keeps sensitive rows out of a reranker for which this is true.
+     */
+    default boolean sendsTextOffMachine() {
+        return false;
+    }
+
+    /**
      * Rerank {@code documents} against {@code query}, returning
      * {@code (input index, relevance score)} pairs ordered by relevance
      * descending. With {@code topK} set, at most {@code topK} entries return.

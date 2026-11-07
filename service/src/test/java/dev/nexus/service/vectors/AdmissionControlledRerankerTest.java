@@ -189,6 +189,20 @@ class AdmissionControlledRerankerTest {
     }
 
     /** Same shape as {@link BlockingFakeReranker} but shares the embedder's live/peak counters. */
+    @Test
+    void theWrapperReportsWhetherItsDelegateSendsTextOffTheMachine() {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(1, 1000);
+        Reranker offMachine = new Reranker() {
+            @Override public String modelToken() { return "off"; }
+            @Override public boolean sendsTextOffMachine() { return true; }
+            @Override public List<Scored> rerank(String q, List<String> d, Integer k) { return List.of(); }
+        };
+        assertThat(new AdmissionControlledReranker(offMachine, admission, true).sendsTextOffMachine()).isTrue();
+        assertThat(new AdmissionControlledReranker(availability(true), admission, true).sendsTextOffMachine())
+                .as("the default is false: a reranker sends nothing off the machine unless it says so").isFalse();
+        assertThat(new VoyageReranker("k", "rerank-2.5").sendsTextOffMachine()).isTrue();
+    }
+
     private static final class BlockingFakeRerankerSharingCounters implements Reranker {
         final CountDownLatch release;
         final AtomicInteger live;
