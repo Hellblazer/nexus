@@ -201,6 +201,7 @@ def test_the_wrapper_sends_the_signal_unchanged_and_records_only_foreign_targets
     assert os.kill is fence._kill, "the fence is installed in this test process"
     events: list[dict] = []
     monkeypatch.setattr(fence, "_events", events)
+    monkeypatch.setattr(fence, "_seen", {})
     monkeypatch.setattr(fence, "_counts", {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0})
     os.kill(child.pid, signal.SIGTERM)
     assert child.wait(timeout=10) == -signal.SIGTERM, "the signal was delivered"
@@ -214,6 +215,9 @@ def test_the_wrapper_sends_the_signal_unchanged_and_records_only_foreign_targets
 def test_a_foreign_signal_is_recorded_with_the_test_that_sent_it(monkeypatch) -> None:
     events: list[dict] = []
     monkeypatch.setattr(fence, "_events", events)
+    monkeypatch.setattr(fence, "_seen", {})
+    # The session's real counts must not carry this test's deliberate foreign signal (review r2).
+    monkeypatch.setattr(fence, "_counts", {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0})
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(fence, "_real_kill", lambda pid, sig: sent.append((pid, sig)))
     outsider = _outsider(_ids()[0])
@@ -315,3 +319,17 @@ def test_on_linux_the_fence_is_live_unless_switched_off() -> None:
     if os.environ.get(fence.MODE_ENV) == "off":
         pytest.skip("switched off on purpose")
     assert fence.active() and os.kill is fence._kill
+
+
+@_linux_fence
+def test_a_repeating_foreign_signal_is_one_event_with_a_repeat_count(monkeypatch) -> None:
+    events: list[dict] = []
+    monkeypatch.setattr(fence, "_events", events)
+    monkeypatch.setattr(fence, "_seen", {})
+    monkeypatch.setattr(fence, "_counts", {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0})
+    monkeypatch.setattr(fence, "_real_kill", lambda pid, sig: None)
+    outsider = _outsider(_ids()[0])
+    for _ in range(5):
+        os.kill(outsider, signal.SIGTERM)
+    assert fence._counts["foreign"] == 5
+    assert len(events) == 1 and events[0]["repeats"] == 5

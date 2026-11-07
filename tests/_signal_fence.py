@@ -20,7 +20,8 @@ target is classified:
 
 The identity (root pid and marker) is captured once per process at configure, so a test that edits or clears
 ``os.environ`` changes nothing here. Each foreign event names the test (or the session phase), the call site, the
-signal, the target and its program name (argv[0]'s basename, never its arguments); the summary groups repeats.
+signal, the target and its program name (argv[0]'s basename up to its first space: never the separate arguments,
+though a process that rewrote its title can show a title word); the summary groups repeats.
 Expected false positives: a child reparented away from the session whose environment was scrubbed (``env={...}``)
 carries no marker and reads as foreign.
 
@@ -59,6 +60,12 @@ _current_test = "session setup"
 _root = 0
 _token = ""
 _events: list[dict[str, Any]] = []
+#: Distinct foreign events by (test, call, signal, site), deduplicated as they are recorded, so one repeating test
+#: cannot fill the list; ``repeats`` counts the rest. The counts are exact whatever the cap.
+_seen: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+_MAX_DISTINCT = 200
+#: Standard-library files that only relay a signal (``Popen.kill`` and friends): the reported site is their caller.
+_RELAY_FILES = frozenset({"subprocess.py", "_signal_fence.py"})
 _counts = {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0}
 
 
@@ -161,10 +168,18 @@ def _record(kind: str, target: int, sig: int) -> None:
                 name = signal.Signals(sig).name
             except ValueError:
                 name = str(sig)
-            caller = sys._getframe(2)  # the frame that called os.kill / os.killpg
+            caller = sys._getframe(2)  # the frame that called os.kill / os.killpg ...
+            while caller.f_back is not None and Path(caller.f_code.co_filename).name in _RELAY_FILES:
+                caller = caller.f_back  # ... or, through Popen.kill/terminate/send_signal, the code that called those
             site = "/".join(Path(caller.f_code.co_filename).parts[-2:]) + f":{caller.f_lineno}"
-            _events.append({"test": _current_test, "call": kind, "target": target, "signal": name, "site": site,
-                            "pid": pid, "cmdline": _cmdline(pid) if pid else "", "fence_pid": os.getpid()})
+            key = (_current_test, kind, name, site)
+            if key in _seen:
+                _seen[key]["repeats"] += 1
+            elif len(_events) < _MAX_DISTINCT:
+                _seen[key] = {"test": _current_test, "call": kind, "target": target, "signal": name, "site": site,
+                              "pid": pid, "cmdline": _cmdline(pid) if pid else "", "fence_pid": os.getpid(),
+                              "repeats": 1}
+                _events.append(_seen[key])
     except Exception:  # noqa: BLE001
         _counts["errors"] = _counts.get("errors", 0) + 1
 
@@ -225,7 +240,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         return
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:
-        workeroutput[_WORKEROUTPUT_KEY] = {"counts": dict(_counts), "events": _events[:200]}
+        workeroutput[_WORKEROUTPUT_KEY] = {"counts": dict(_counts), "events": list(_events)}
 
 
 @pytest.hookimpl(optionalhook=True)
@@ -245,12 +260,12 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
         "signal fence (report mode, nexus-xzorj): signals={signals} own={own} foreign={foreign} "
         "unclassified={unclassified} errors={errors}".format(**{"errors": 0, **_counts}))
     grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    for e in _events:
+    for e in _events:  # distinct per process already; workers can repeat one another's
         key = (e["test"], e["call"], e["signal"], e.get("site", ""))
         if key in grouped:
-            grouped[key]["repeats"] += 1
+            grouped[key]["repeats"] += e.get("repeats", 1)
         else:
-            grouped[key] = {**e, "repeats": 1}
+            grouped[key] = dict(e)
     for e in list(grouped.values())[:_MAX_LISTED]:
         tr.write_line("  foreign: " + json.dumps(e, sort_keys=True))
     if len(grouped) > _MAX_LISTED:
