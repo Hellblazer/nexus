@@ -306,6 +306,12 @@ def test_the_real_policy_and_the_real_help_carry_the_line_once() -> None:
         assert "Not yet enforced" not in POLICY.read_text(encoding="utf-8")
         assert "Not yet enforced" not in SENSITIVITY.read_text(encoding="utf-8")
         assert "Not yet enforced" not in ls.render_sensitive_help()
+        text = SENSITIVITY.read_text(encoding="utf-8")
+        begin, end = gen.begin_marker("llm-surfaces-pending"), gen.end_marker("llm-surfaces-pending")
+        region = text[text.index(begin) + len(begin):text.index(end)]
+        row18 = next(r for r in ls.rows() if r.census_row == 18)
+        assert row18.label in region, "the generated not-enforced line must name the row no phase covers"
+        assert "Memory rollup" in ls.render_sensitive_help(), "the help must still name the uncovered row"
 
 
 def test_the_line_is_absent_once_every_row_it_derives_from_is_enforced() -> None:
@@ -418,10 +424,10 @@ def test_memory_rollup_is_stated_as_not_enforced() -> None:
     assert row.behaviour == "n/a-not-a-document", "non-vacuity: the row is the gap the page must state"
     section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
     assert row.label in section, "row 18 is named in the not-enforced section"
-    para = next(p for p in re.split(r"\n\n|\n- ", section) if row.label in p)
-    assert "not enforced" in para.lower()
-    assert "T2 note" in para
-    assert "memory_consolidate" in para
+    paras = [p for p in re.split(r"\n\n|\n- ", section) if row.label in p]
+    assert any(
+        "not enforced" in p.lower() and "T2 note" in p and "memory_consolidate" in p for p in paras
+    ), "one paragraph naming row 18 states it is not enforced, for T2 notes, via memory_consolidate"
 
 
 @pytest.mark.parametrize(

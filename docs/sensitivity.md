@@ -110,7 +110,7 @@ Each row is a feature that sends document-derived text off the machine or to a m
 
 ## What each surface does
 
-The table above lists the rows the registry marks as enforced in the release being built. This table lists every row of the registry, 25 in all, with the behaviour the registry gives it and the phase that enforces it, so you can read what a surface does and when. A row's phase is its own: a phase 2 or phase 3 row is implemented on the development branch and is not described as enforced by the generated text until the registry's release phase reaches it (see "Release phase" below).
+The table above lists the rows the registry marks as enforced in the release being built. This table lists every row of the registry, 25 in all, with the behaviour the registry gives it and the phase that enforces it, so you can read what a surface does and when. A row's phase is the release phase from which the generated text lists it as enforced (see "Release phase" below).
 
 The behaviours are `refuse` (the surface turns the document away), `skip` (it drops the document and says so in a log line and a count), `exclude` (the read leaves the document out, at the engine or at selection), `withhold` (the output side replaces it with a stub), `disclose` (the verb prints a disclosure and needs your acknowledgement), and two `n/a` values for surfaces that are not documents or carry no content.
 
@@ -199,10 +199,10 @@ In short: the `--sensitive` write verbs and `nx catalog sensitive` need the cata
 ## What it does not enforce
 
 <!-- BEGIN GENERATED: llm-surfaces-pending (scripts/gen_privacy_policy_table.py; edit the registry, not this region) -->
-Every registry row is enforced in this release.
+Every phase-gated surface is enforced in this release. Not covered by any phase, described below: Memory rollup (`memory_consolidate`) (census row 18).
 <!-- END GENERATED: llm-surfaces-pending -->
 
-The generated line above is derived from the registry's release phase and names every surface the release does not yet cover; with every phase enforced it is empty. The list below is every gap the design records, including the ones no phase closes.
+The generated line above is derived from the registry's release phase: below the last phase it names every surface the release does not yet cover, and at the last phase it names the one row no phase covers. The list below is every gap the design records, including the ones no phase closes.
 
 - **Memory rollup (census row 18).** Memory rollup (`memory_consolidate`) sends T2 notes to the LLM. A T2 note that quotes a sensitive document is not covered, and RDR-243 proposes no mitigation for it: a note is not a document, so it carries no flag. This is not enforced and stays that way. Keep flagged text out of notes you roll up.
 - **Release phase.** `RELEASE_ENFORCED_PHASE` is 3, the last phase, from conexus 7.98.0, which pins engine-service-v0.1.182. The generated tables and the `--sensitive` help list every row a phase enforces: phase 1 (the write-side refusals and skips), phase 2 (the engine read filter and the model-bound surfaces: `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`) and phase 3 (the output posture, rerank exclusion, the Knowledge Map, the DEVONthink import, the child file deny). A phase 2 or 3 behaviour still needs the engine key it depends on (see "Capabilities and old engines"): against an older engine it refuses or degrades as that section says.

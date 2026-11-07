@@ -1,6 +1,6 @@
 # Privacy Policy — Conexus
 
-_Effective: 2026-09-28_
+_Effective: 2026-11-07_
 
 > **Change note (2026-08-18):** corrected three data-locality misstatements
 > present since the 2026-06-20 revision — T1 session scratch is Postgres-backed
