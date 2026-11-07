@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -80,6 +81,18 @@ def _run(work: Path, *vouch: str, env: dict | None = None) -> subprocess.Complet
         merged.setdefault("NX_PUSH_SKIP_LOCK", "pre-existing test, lock not under test")
     return subprocess.run(
         [str(SCRIPT), *vouch], cwd=work, env=merged,
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def _run_flags(work: Path, *argv: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run the script with every NX_PUSH_* variable scrubbed from the inherited
+    environment and NO defaults added: whatever the call needs (a skip, an
+    allowlist) must come from ``argv`` or from the ``env`` it names. This is the
+    no-env-prefix invocation the flags exist for."""
+    base = {k: v for k, v in os.environ.items() if not k.startswith("NX_PUSH_")}
+    return subprocess.run(
+        [str(SCRIPT), *argv], cwd=work, env={**base, **(env or {})},
         capture_output=True, text=True, timeout=60,
     )
 
@@ -220,6 +233,27 @@ class TestTenantHint:
                     env={"NX_PUSH_TENANT_CHECK": "0"})
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert not (work / "tenant-stub-ran").exists()
+
+    def test_the_tenant_check_flag_is_the_twin_of_the_env_zero(self, repos) -> None:
+        _origin, work = repos
+        self._arm(work)
+        self._touch_test(work)
+        shas = _git("rev-list", "origin/develop..HEAD", cwd=work).split()
+        proc = _run_flags(work, "--tenant-check", "0", "--skip-lock", "tenant flag test",
+                          "--skip-scope-audit", "tenant flag test", *shas)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert not (work / "tenant-stub-ran").exists()
+
+    def test_the_tenant_check_flag_beats_the_env(self, repos) -> None:
+        _origin, work = repos
+        self._arm(work)
+        self._touch_test(work)
+        shas = _git("rev-list", "origin/develop..HEAD", cwd=work).split()
+        proc = _run_flags(work, "--tenant-check", "1", "--skip-lock", "tenant flag test",
+                          "--skip-scope-audit", "tenant flag test", *shas,
+                          env={"NX_PUSH_TENANT_CHECK": "0"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (work / "tenant-stub-ran").exists()
 
     def test_a_failing_count_is_reported_and_the_push_goes_through(self, repos) -> None:
         origin, work = repos
@@ -425,7 +459,9 @@ class TestScopeAudit:
         assert proc.returncode == 7, proc.stdout + proc.stderr
         assert "PUSH_REFUSED_SCOPE" in proc.stdout
         assert "mine.txt" in proc.stdout
-        assert "NX_PUSH_ALLOWED_PATHS=" in proc.stdout
+        assert "--allowed-paths '" in proc.stdout, "the pasteable line is the flag form"
+        assert "--allowed-paths-from-range" in proc.stdout
+        assert "NX_PUSH_ALLOWED_PATHS=" not in proc.stdout, "no env-prefixed form is suggested"
         assert _remote_tip(origin) == before
 
     def test_a_glob_pathspec_is_not_expanded_by_this_shell(self, repos) -> None:
@@ -504,7 +540,7 @@ class TestScopeAudit:
         )
         assert proc.returncode == 7, proc.stdout + proc.stderr
         assert "matches every file" in proc.stdout
-        assert "NX_PUSH_SKIP_SCOPE_AUDIT" in proc.stdout
+        assert "--skip-scope-audit" in proc.stdout
         assert _remote_tip(origin) == before
 
     def test_the_file_listing_is_correct_for_a_multi_commit_range(self, repos) -> None:
@@ -968,3 +1004,484 @@ esac
         assert proc.returncode == 10, proc.stdout + proc.stderr
         assert proc.stdout.startswith("PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX")
         assert _remote_tip(origin) == before, "no qualifying nx must not let the push through"
+
+
+_NO_LOCK = ("--skip-lock", "flag test, lock not under test")
+
+
+class TestFlags:
+    """The script is callable with no environment-variable prefix: every NX_PUSH_*
+    setting has a flag twin, and the flag wins when both are set. Every call here
+    goes through ``_run_flags``, which scrubs NX_PUSH_* from the environment and adds
+    no defaults, so what makes a push pass is on the argv under test."""
+
+    # -- --source -----------------------------------------------------------
+    @pytest.mark.parametrize("spelling", [("--source", "HEAD"), ("--source=HEAD",)])
+    def test_source_pushes_a_detached_worktree_and_leaves_the_local_branch(self, repos, tmp_path, spelling) -> None:
+        origin, work = repos
+        peer = _commit(work, "peer-unpushed")
+        wt = tmp_path / "wt"
+        _git("worktree", "add", "-q", "--detach", str(wt), "origin/develop", cwd=work)
+        mine = _commit(wt, "mine")
+        proc = _run_flags(wt, *spelling, "--allowed-paths", "mine", *_NO_LOCK, mine)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.stdout.strip() == f"PUSH_OK n=1 tip={mine}"
+        assert _remote_tip(origin) == mine
+        assert _git("rev-parse", "refs/heads/develop", cwd=work) == peer
+
+    def test_source_still_refuses_an_unvouched_commit(self, repos, tmp_path) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        wt = tmp_path / "wt"
+        _git("worktree", "add", "-q", "--detach", str(wt), "origin/develop", cwd=work)
+        _commit(wt, "a")
+        b = _commit(wt, "b")
+        proc = _run_flags(wt, "--source", "HEAD", "--allowed-paths", "a b", *_NO_LOCK, b)
+        assert proc.returncode == 2
+        assert _remote_tip(origin) == before
+
+    def test_source_beats_the_env(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        # control: the env alone is the NO_BRANCH refusal
+        control = _run_flags(work, "--allowed-paths", "mine.txt", *_NO_LOCK, sha,
+                             env={"NX_PUSH_SOURCE": "refs/heads/does-not-exist"})
+        assert control.returncode == 6, control.stdout + control.stderr
+        proc = _run_flags(work, "--source", "HEAD", "--allowed-paths", "mine.txt", *_NO_LOCK, sha,
+                          env={"NX_PUSH_SOURCE": "refs/heads/does-not-exist"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_branch_and_remote_flags_beat_the_env(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--branch", "develop", "--remote", "origin",
+                          "--allowed-paths", "mine.txt", *_NO_LOCK, sha,
+                          env={"NX_PUSH_BRANCH": "nope", "NX_PUSH_REMOTE": "nowhere"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_missing_branch_flag_is_the_no_branch_refusal(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--branch", "nope", "--allowed-paths", "mine.txt", *_NO_LOCK, sha)
+        assert proc.returncode == 6
+        assert proc.stdout.startswith("PUSH_REFUSED_NO_BRANCH")
+
+    # -- --allowed-paths / --allowed-paths-from -----------------------------
+    def test_allowed_paths_in_scope_pushes_and_foreign_file_refuses(self, repos) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        (work / "mine.txt").write_text("mine")
+        (work / "peer-draft.md").write_text("a peer's draft")
+        _git("add", "mine.txt", "peer-draft.md", cwd=work)
+        _git("commit", "-q", "-m", "mine", cwd=work)
+        sha = _git("rev-parse", "HEAD", cwd=work)
+        proc = _run_flags(work, "--allowed-paths", "mine.txt", *_NO_LOCK, sha)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "PUSH_REFUSED_SCOPE" in proc.stdout and "peer-draft.md" in proc.stdout
+        assert _remote_tip(origin) == before
+        ok = _run_flags(work, "--allowed-paths", "mine.txt peer-draft.md", *_NO_LOCK, sha)
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        assert ok.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
+
+    def test_allowed_paths_is_repeatable_and_accumulates(self, repos) -> None:
+        origin, work = repos
+        (work / "one.txt").write_text("1")
+        (work / "two.txt").write_text("2")
+        _git("add", "one.txt", "two.txt", cwd=work)
+        _git("commit", "-q", "-m", "pair", cwd=work)
+        sha = _git("rev-parse", "HEAD", cwd=work)
+        proc = _run_flags(work, "--allowed-paths", "one.txt", "--allowed-paths=two.txt", *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_allowed_paths_glob_is_not_expanded_by_the_shell(self, repos) -> None:
+        """Twin of the env glob regression: `docs/*` must cover a file absent from the
+        working tree at push time."""
+        origin, work = repos
+        (work / "docs").mkdir()
+        (work / "docs" / "removed.md").write_text("x")
+        _git("add", "docs/removed.md", cwd=work)
+        _git("commit", "-q", "-m", "add", cwd=work)
+        _git("rm", "-q", "docs/removed.md", cwd=work)
+        _git("commit", "-q", "-m", "drop", cwd=work)
+        shas = _git("rev-list", "--reverse", "origin/develop..HEAD", cwd=work).split()
+        proc = _run_flags(work, "--allowed-paths", "docs/*", *_NO_LOCK, *shas)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == shas[-1]
+
+    @pytest.mark.parametrize("wildcard", ["*", "src/ *"])
+    def test_allowed_paths_wildcard_is_refused_and_names_the_skip_flag(self, repos, wildcard) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--allowed-paths", wildcard, *_NO_LOCK, sha)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "matches every file" in proc.stdout
+        assert "--skip-scope-audit" in proc.stdout
+        assert _remote_tip(origin) == before
+
+    def test_allowed_paths_from_reads_a_newline_separated_file(self, repos, tmp_path) -> None:
+        origin, work = repos
+        (work / "one.txt").write_text("1")
+        (work / "two.txt").write_text("2")
+        _git("add", "one.txt", "two.txt", cwd=work)
+        _git("commit", "-q", "-m", "pair", cwd=work)
+        sha = _git("rev-parse", "HEAD", cwd=work)
+        listing = tmp_path / "allowed.txt"
+        listing.write_text("one.txt\ntwo.txt\n")
+        proc = _run_flags(work, "--allowed-paths-from", str(listing), *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_allowed_paths_from_a_file_still_refuses_a_foreign_file(self, repos, tmp_path) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        listing = tmp_path / "allowed.txt"
+        listing.write_text("something-else.txt\n")
+        proc = _run_flags(work, "--allowed-paths-from", str(listing), *_NO_LOCK, sha)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == before
+
+    def test_allowed_paths_from_a_missing_or_empty_file_is_a_usage_error(self, repos, tmp_path) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        empty = tmp_path / "empty.txt"
+        empty.write_text("\n  \n")
+        for target in (tmp_path / "absent.txt", empty):
+            proc = _run_flags(work, "--allowed-paths-from", str(target), *_NO_LOCK, sha)
+            assert proc.returncode == 64, proc.stdout + proc.stderr
+            assert proc.stdout.startswith("PUSH_REFUSED_USAGE")
+        assert _remote_tip(origin) == before
+
+    def test_allowed_paths_flag_beats_the_env_in_both_directions(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        # env would refuse, flag allows
+        ok = _run_flags(work, "--allowed-paths", "mine.txt", *_NO_LOCK, sha,
+                        env={"NX_PUSH_ALLOWED_PATHS": "unrelated.txt"})
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        assert _remote_tip(origin) == sha
+        # env would allow, flag refuses (a fresh commit so the range is non-empty)
+        sha2 = _commit(work, "second.txt")
+        bad = _run_flags(work, "--allowed-paths", "unrelated.txt", *_NO_LOCK, sha2,
+                         env={"NX_PUSH_ALLOWED_PATHS": "second.txt"})
+        assert bad.returncode == 7, bad.stdout + bad.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_the_env_allowlist_still_works_alone(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, *_NO_LOCK, sha, env={"NX_PUSH_ALLOWED_PATHS": "mine.txt"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_no_allowlist_refusal_suggests_flag_forms_and_repeats_source(self, repos, tmp_path) -> None:
+        origin, work = repos
+        wt = tmp_path / "wt"
+        _git("worktree", "add", "-q", "--detach", str(wt), "origin/develop", cwd=work)
+        sha = _commit(wt, "mine.txt")
+        # No lock flag: the scope audit refuses before the lock stage is reached.
+        proc = _run_flags(wt, "--source", "HEAD", sha)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "--source HEAD --allowed-paths 'mine.txt'" in proc.stdout
+        assert "--source HEAD --allowed-paths-from-range" in proc.stdout
+        assert "NX_PUSH_ALLOWED_PATHS=" not in proc.stdout, "no env-prefixed form is suggested"
+
+    # -- --skip-scope-audit ---------------------------------------------------
+    def test_skip_scope_audit_flag_is_loud_and_named(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        refused = _run_flags(work, *_NO_LOCK, sha)
+        assert refused.returncode == 7, "control: with no allowlist and no skip the audit refuses"
+        proc = _run_flags(work, "--skip-scope-audit", "rebuilding an index git mangled", *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_SCOPE_AUDIT_SKIPPED reason=rebuilding an index git mangled" in proc.stderr
+        assert proc.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
+        assert _remote_tip(origin) == sha
+
+    def test_skip_scope_audit_flag_reason_beats_the_env_reason(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--skip-scope-audit", "flag reason", *_NO_LOCK, sha,
+                          env={"NX_PUSH_SKIP_SCOPE_AUDIT": "env reason"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "reason=flag reason" in proc.stderr and "env reason" not in proc.stderr
+
+    # -- --skip-lock ------------------------------------------------------------
+    def test_skip_lock_flag_is_the_twin_of_the_env_skip(self, repos, tmp_path) -> None:
+        """Only a venv nx on PATH: the lock stage refuses with 10 unless the skip is
+        given. The flag lifts that refusal exactly as the env var does, and says so."""
+        origin, work = repos
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        stub = venv_bin / "nx"
+        stub.write_text("#!/usr/bin/env bash\necho stub-nx-should-never-run\nexit 1\n")
+        stub.chmod(0o755)
+        kept = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d and not (Path(d) / "nx").exists()]
+        path_env = {"PATH": os.pathsep.join([str(venv_bin), *kept])}
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        refused = _run_flags(work, "--allowed-paths", "mine.txt", sha, env=path_env)
+        assert refused.returncode == 10, refused.stdout + refused.stderr
+        assert "--skip-lock" in refused.stdout, "the refusal names the flag"
+        assert _remote_tip(origin) == before
+        proc = _run_flags(work, "--allowed-paths", "mine.txt", "--skip-lock", "no installed nx here", sha, env=path_env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_LOCK_SKIPPED reason=no installed nx here" in proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_skip_lock_flag_reason_beats_the_env_reason(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--allowed-paths", "mine.txt", "--skip-lock", "flag reason", sha,
+                          env={"NX_PUSH_SKIP_LOCK": "env reason"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_LOCK_SKIPPED reason=flag reason" in proc.stderr and "env reason" not in proc.stderr
+
+    # -- --batch-minutes -------------------------------------------------------
+    @pytest.mark.parametrize("value, hinted", [("0", False), ("30", True)])
+    def test_batch_minutes_flag_is_the_twin_of_the_env(self, repos, value, hinted) -> None:
+        _origin, work = repos
+        assert _run(work, _commit(work, "one")).returncode == 0
+        proc = _run_flags(work, "--batch-minutes", value, "--skip-scope-audit", "batch test", *_NO_LOCK,
+                          _commit(work, "two"))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert ("PUSH_BATCH_HINT" in proc.stderr) is hinted
+
+    def test_batch_minutes_flag_beats_the_env(self, repos) -> None:
+        _origin, work = repos
+        assert _run(work, _commit(work, "one")).returncode == 0
+        proc = _run_flags(work, "--batch-minutes", "0", "--skip-scope-audit", "batch test", *_NO_LOCK,
+                          _commit(work, "two"), env={"NX_PUSH_BATCH_MINUTES": "30"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_BATCH_HINT" not in proc.stderr
+
+    # -- usage errors ----------------------------------------------------------
+    @pytest.mark.parametrize("argv", [
+        ("--no-such-flag",),
+        ("--no-such-flag=1",),
+        ("--source",),
+        ("--source", "--allowed-paths"),
+        ("--source=",),
+        ("--skip-lock", ""),
+        ("--allowed-paths-from-range=1",),
+        ("--allowed-paths-from-range=ABCDEF012345",),
+        ("--tenant-check", "2"),
+        ("--allowed-paths-from-range", "--allowed-paths", "x"),
+        ("--allowed-paths-from-range", "--allowed-paths-from", "x"),
+    ])
+    def test_a_bad_flag_is_refused_with_64_before_anything_is_pushed(self, repos, argv) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        # The sha comes first so a trailing value-less flag has nothing to swallow.
+        proc = _run_flags(work, sha, *argv)
+        assert proc.returncode == 64, proc.stdout + proc.stderr
+        assert proc.stdout.startswith("PUSH_REFUSED_USAGE")
+        assert _remote_tip(origin) == before
+
+    def test_double_dash_ends_flag_parsing(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--allowed-paths", "mine.txt", *_NO_LOCK, "--", sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_flags_may_follow_the_shas(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, sha, "--allowed-paths", "mine.txt", *_NO_LOCK)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    # -- --allowed-paths-from-range ----------------------------------------------
+    def _three_commits_with_an_intermediate_only_file(self, work: Path) -> list[str]:
+        _commit(work, "first.txt")
+        _commit(work, "mid-only.txt")
+        _git("rm", "-q", "mid-only.txt", cwd=work)
+        (work / "last.txt").write_text("last")
+        _git("add", "last.txt", cwd=work)
+        _git("commit", "-q", "-m", "drop mid, add last", cwd=work)
+        return _git("rev-list", "--reverse", "origin/develop..HEAD", cwd=work).split()
+
+    def _range_digest(self, work: Path, *shas: str, extra: tuple[str, ...] = ()) -> str:
+        """Step 1 of the two-step flow: the bare flag prints and refuses; returns the digest it printed."""
+        proc = _run_flags(work, "--allowed-paths-from-range", *extra, *_NO_LOCK, *shas)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        m = re.search(r"--allowed-paths-from-range=([0-9a-f]{12})", proc.stdout)
+        assert m, proc.stdout
+        return m.group(1)
+
+    def test_range_flag_bare_prints_the_list_and_digest_and_pushes_nothing(self, repos) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        shas = self._three_commits_with_an_intermediate_only_file(work)
+        proc = _run_flags(work, "--allowed-paths-from-range", *_NO_LOCK, *shas)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert proc.stdout.startswith("PUSH_REFUSED_SCOPE")
+        for name in ("first.txt", "mid-only.txt", "last.txt"):
+            assert f"    {name}" in proc.stdout, f"{name} missing from the printed list:\n{proc.stdout}"
+        assert "n=3 files" in proc.stdout
+        # the pasteable step-2 line repeats the shas
+        assert "--allowed-paths-from-range=" in proc.stdout and " ".join(shas) in proc.stdout, proc.stdout
+        assert _remote_tip(origin) == before
+        assert "merge commit(s) in the range" not in proc.stdout, "no merge in the range: no merge warning"
+
+    def test_range_flag_warns_that_a_merge_commits_own_changes_are_not_listed(self, repos) -> None:
+        """The printed list is diff-tree over each commit, which shows nothing for a merge: a file only a
+        merge (or its conflict resolution) adds is pushed unlisted. The print says so and names the read."""
+        origin, work = repos
+        before = _remote_tip(origin)
+        _commit(work, "main-side.txt")
+        _git("checkout", "-q", "-b", "side", "HEAD~1", cwd=work)
+        _commit(work, "side.txt")
+        _git("checkout", "-q", "-", cwd=work)
+        _git("merge", "-q", "--no-ff", "-m", "merge side", "side", cwd=work)
+        shas = _git("rev-list", "--reverse", "origin/develop..HEAD", cwd=work).split()
+        proc = _run_flags(work, "--allowed-paths-from-range", *_NO_LOCK, *shas)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "WARNING: 1 merge commit(s) in the range" in proc.stdout, proc.stdout
+        assert "git show --first-parent -m --stat <merge-sha>" in proc.stdout
+        assert _remote_tip(origin) == before
+
+    def test_range_flag_with_the_right_digest_pushes_the_union_and_says_so(self, repos) -> None:
+        origin, work = repos
+        shas = self._three_commits_with_an_intermediate_only_file(work)
+        tip_diff = _git("diff", "--name-only", "origin/develop", "HEAD", cwd=work).split()
+        assert "mid-only.txt" not in tip_diff, "fixture: the intermediate file is absent from the tip diff"
+        digest = self._range_digest(work, *shas)
+        proc = _run_flags(work, f"--allowed-paths-from-range={digest}", *_NO_LOCK, *shas)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        lines = proc.stdout.strip().splitlines()
+        assert lines[-1] == f"PUSH_OK n=3 tip={shas[-1]}"
+        assert lines[0].startswith(f"PUSH_SCOPE_CONFIRMED_RANGE n=3 digest={digest}"), proc.stdout
+        assert _remote_tip(origin) == shas[-1]
+
+    def test_range_flag_with_a_wrong_digest_refuses_and_reprints(self, repos) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        sha = _commit(work, "mine.txt")
+        real = self._range_digest(work, sha)
+        wrong = "0" * 12 if real != "0" * 12 else "f" * 12
+        proc = _run_flags(work, f"--allowed-paths-from-range={wrong}", *_NO_LOCK, sha)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "does not match" in proc.stdout
+        assert f"--allowed-paths-from-range={real}" in proc.stdout, "the fresh digest is reprinted"
+        assert "PUSH_OK" not in proc.stdout
+        assert _remote_tip(origin) == before
+
+    def test_range_flag_refuses_a_file_added_to_a_commit_after_the_digest_was_printed(self, repos) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        old = _commit(work, "mine.txt")
+        stale = self._range_digest(work, old)
+        # a peer's staged file lands in the same commit (nexus-bbriq shape)
+        (work / "peer.txt").write_text("peer")
+        _git("add", "peer.txt", cwd=work)
+        _git("commit", "-q", "--amend", "--no-edit", cwd=work)
+        new = _git("rev-parse", "HEAD", cwd=work)
+        proc = _run_flags(work, f"--allowed-paths-from-range={stale}", *_NO_LOCK, new)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "    peer.txt" in proc.stdout, "the reprinted list shows the new file"
+        assert _remote_tip(origin) == before
+
+    def test_range_flag_pushes_a_rename_clean(self, repos) -> None:
+        """git log --name-only lists only the new name; the audit's diff-tree lists both."""
+        origin, work = repos
+        _commit(work, "old.txt")
+        _git("push", "-q", "origin", "develop", cwd=work)
+        _git("mv", "old.txt", "new.txt", cwd=work)
+        _git("commit", "-q", "-m", "rename", cwd=work)
+        sha = _git("rev-parse", "HEAD", cwd=work)
+        proc0 = _run_flags(work, "--allowed-paths-from-range", *_NO_LOCK, sha)
+        assert "    old.txt" in proc0.stdout and "    new.txt" in proc0.stdout, proc0.stdout
+        digest = self._range_digest(work, sha)
+        proc = _run_flags(work, f"--allowed-paths-from-range={digest}", *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_range_flag_pushes_a_deletion_clean(self, repos) -> None:
+        origin, work = repos
+        _commit(work, "doomed.txt")
+        _git("push", "-q", "origin", "develop", cwd=work)
+        _git("rm", "-q", "doomed.txt", cwd=work)
+        _git("commit", "-q", "-m", "delete", cwd=work)
+        sha = _git("rev-parse", "HEAD", cwd=work)
+        digest = self._range_digest(work, sha)
+        proc = _run_flags(work, f"--allowed-paths-from-range={digest}", *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_range_flag_still_enforces_the_vouch_checks(self, repos) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        mine = _commit(work, "mine.txt")
+        _commit(work, "peer.txt")
+        proc = _run_flags(work, "--allowed-paths-from-range", *_NO_LOCK, mine)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "digest" not in proc.stdout, "the vouch refusal comes first"
+        assert _remote_tip(origin) == before
+
+    def test_range_flag_beats_an_env_allowlist_and_says_the_env_is_ignored(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        env = {"NX_PUSH_ALLOWED_PATHS": "unrelated.txt"}
+        first = _run_flags(work, "--allowed-paths-from-range", *_NO_LOCK, sha, env=env)
+        assert first.returncode == 7
+        assert "NX_PUSH_ALLOWED_PATHS environment value is ignored" in first.stderr
+        digest = re.search(r"=([0-9a-f]{12})", first.stdout).group(1)
+        proc = _run_flags(work, f"--allowed-paths-from-range={digest}", *_NO_LOCK, sha, env=env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_allowed_paths_flag_over_an_env_value_says_the_env_is_ignored(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--allowed-paths", "mine.txt", *_NO_LOCK, sha,
+                          env={"NX_PUSH_ALLOWED_PATHS": "unrelated.txt"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "NX_PUSH_ALLOWED_PATHS environment value is ignored" in proc.stderr
+        # control: no env value, no note
+        sha2 = _commit(work, "mine2.txt")
+        quiet = _run_flags(work, "--allowed-paths", "mine2.txt", *_NO_LOCK, sha2)
+        assert quiet.returncode == 0, quiet.stdout + quiet.stderr
+        assert "is ignored" not in quiet.stderr
+
+    def test_allowed_paths_from_accepts_a_crlf_file(self, repos, tmp_path) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        listing = tmp_path / "allowed.txt"
+        listing.write_bytes(b"mine.txt\r\n")
+        proc = _run_flags(work, "--allowed-paths-from", str(listing), *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_range_flag_passes_a_path_with_a_space_whole(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "my file.txt")
+        digest = self._range_digest(work, sha)
+        proc = _run_flags(work, f"--allowed-paths-from-range={digest}", *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _remote_tip(origin) == sha
+
+    def test_range_flag_with_no_files_refuses_rather_than_auditing_nothing(self, repos) -> None:
+        origin, work = repos
+        before = _remote_tip(origin)
+        _git("commit", "-q", "--allow-empty", "-m", "empty", cwd=work)
+        sha = _git("rev-parse", "HEAD", cwd=work)
+        proc = _run_flags(work, "--allowed-paths-from-range", *_NO_LOCK, sha)
+        assert proc.returncode == 7, proc.stdout + proc.stderr
+        assert "found no files" in proc.stdout
+        assert _remote_tip(origin) == before
+
+    def test_range_flag_is_skipped_quietly_when_the_audit_is_skipped(self, repos) -> None:
+        origin, work = repos
+        sha = _commit(work, "mine.txt")
+        proc = _run_flags(work, "--allowed-paths-from-range", "--skip-scope-audit", "named skip", *_NO_LOCK, sha)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "PUSH_SCOPE_AUDIT_SKIPPED" in proc.stderr
+        assert "PUSH_SCOPE_CONFIRMED_RANGE" not in proc.stdout

@@ -127,14 +127,30 @@ things to avoid carefully; they are impossible.
    into a verdict any more, so read the `conclusion` of the check runs, not
    the board.
 
-8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...`
-   from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`
-   in; `git -C` does not cover it. Direct to `develop` per the project
+8. **Push unchanged**, in two steps, from INSIDE the worktree.
+   Step 1: `scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <sha>...`
+   pushes nothing: it prints the files your commits touch, a 12-hex digest of that
+   list and the pasteable step-2 line, and exits 7. Read the list. Step 2: the same
+   command with `--allowed-paths-from-range=<digest>` pushes, and refuses (reprinting
+   the fresh list) when the digest no longer matches the outbound range. It reads HEAD from the shell's cwd, so `cd`
+   in; `git -C` does not cover it. Every setting is a flag (`--source`,
+   `--allowed-paths`, `--allowed-paths-from <file>`, `--allowed-paths-from-range`,
+   `--skip-lock`, `--skip-scope-audit`), so the command starts with the script
+   path and needs no `NX_PUSH_*=` prefix; the env forms still work and a
+   flag wins when both are set (a stderr line says the env value is ignored).
+   The range list is the union of the files the outbound commits touch, built
+   per commit with the same `git diff-tree` call the scope audit uses (a rename
+   lists both paths). It cannot catch a foreign file in your own commit, because
+   it is derived from that commit: your read of the printed list is the check,
+   and the digest makes the confirming command fail if the range changed after
+   you read it (`--allowed-paths 'a b'` is the stricter form). A confirmed push
+   prints `PUSH_SCOPE_CONFIRMED_RANGE` on stdout, so it is distinguishable
+   afterwards from a hand-scoped push. It is not for a push from the shared primary checkout. Direct to `develop` per the project
    rule; the feature branch is a local name that never reaches origin.
    The script itself now takes the `lock/ci-develop-push` tuple-space
    lock immediately before the push and releases it right after
    (nexus-agctp) — a `PUSH_REFUSED_LOCK_HELD` names the holder and lease
-   expiry; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape when the
+   expiry; `--skip-lock '<reason>'` is the named escape when the
    tuple space is unreachable.
 
    **Batch develop pushes** (Sam, 2026-10-21, nexus-cvtxu): develop CI runs

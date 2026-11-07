@@ -2,7 +2,7 @@
 name: asks-no-reply
 ---
 
-Go through my asks.
+Go through my asks. I am stepping away, so take the recommendation on anything reversible and do not wait for me.
 
 This is a scripted session and I am not at the keyboard. AskUserQuestion is not available here, so ask me
 anything in plain text. Do the whole session in this one turn: each time you would stop and wait for me,

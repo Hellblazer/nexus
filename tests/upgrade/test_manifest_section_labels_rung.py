@@ -1396,3 +1396,29 @@ def test_the_auto_time_limit_defers_between_batches_and_the_rest_resumes(world: 
     monkeypatch.setattr("nexus.upgrade_ladder.rungs.manifest_section_labels.active_expired", lambda: False)
     assert rung.converge(Report()).outcome is ConvergeOutcome.COMPLETED
     assert all(world.labels(t)[0][-1] for t in world.docs)
+
+
+def test_a_request_that_raises_after_an_earlier_one_wrote_still_restores_the_written_documents_stamp(
+    world: World,
+) -> None:
+    """nexus-l8o33 (review r1): the engine restamps a document's ``indexed_at`` on every manifest write. A later request
+    that raises (a 409 for a superseded collection, a timeout) must not skip the restore of the documents an earlier
+    request already wrote, or their chunk-newer guard stays off for good."""
+    docs = _many_written_documents(world, 2)
+    real, calls = world.append_manifest_many, []
+
+    def second_request_raises(request, *, collection, **kw):
+        calls.append(request)
+        if len(calls) == 2:
+            raise RuntimeError("engine unavailable")
+        return real(request, collection=collection, **kw)
+
+    world.append_manifest_many = second_request_raises  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="engine unavailable"):
+        world.rung(max_rows=1).converge(Report())
+
+    assert len(calls) == 2
+    assert world.docs[docs[0]].indexed_at == DOC_STAMP, "the document the first request wrote has its stamp back"
+    assert (docs[0], {"indexed_at": DOC_STAMP}) in world.updates
+    assert world.docs[docs[1]].indexed_at == DOC_STAMP, "the second document was never written"

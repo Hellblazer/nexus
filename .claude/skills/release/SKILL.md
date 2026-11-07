@@ -558,7 +558,10 @@ Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check pas
 git checkout develop && git pull
 git merge origin/main --no-edit    # trivially clean right after a release:
                                    # the release branch just CONTAINED develop
-scripts/git-push-develop.sh HEAD
+scripts/git-push-develop.sh --allowed-paths-from-range HEAD
+# step 1 prints the files and a digest and pushes nothing; read the list
+# (it should be the release's bump files and main's release commits), then:
+scripts/git-push-develop.sh --allowed-paths-from-range=<digest> HEAD
 # the merge commit vouches for what it merged in (nexus-9wxu6)
 ```
 

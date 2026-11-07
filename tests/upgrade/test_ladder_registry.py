@@ -159,4 +159,5 @@ def test_default_registry_is_exactly_the_canonical_rung_order() -> None:
         "rdr192-manifest-backfill",
         "note-tags-array",  # RDR-236 RF-17 (nexus-6pfgb.38)
         "manifest-section-labels",  # RDR-236 position labels (nexus-1nrcu)
+        "manifest-span-fill",  # RDR-236 manifest spans (nexus-l8o33)
     ]

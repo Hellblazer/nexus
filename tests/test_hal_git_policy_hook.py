@@ -649,7 +649,11 @@ def test_bare_push_to_develop_is_allowed_where_no_script_exists(repo_on):
 
 
 @pytest.mark.parametrize("cmd", ["git push origin feature/x", "git push origin v1.2.3", "git push --tags",
-                                 "scripts/git-push-develop.sh abc1234"])
+                                 "scripts/git-push-develop.sh abc1234",
+                                 "scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range abc1234",
+                                 "scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range=0123456789ab abc1234",
+                                 "scripts/git-push-develop.sh --allowed-paths 'a b' --skip-lock reason abc1234",
+                                 "scripts/git-push-develop.sh --allowed-paths-from list.txt --batch-minutes 0 abc1234"])
 def test_other_pushes_and_the_script_itself_are_allowed(cmd, repo_on):
     work = repo_on("develop")
     _with_script(work)

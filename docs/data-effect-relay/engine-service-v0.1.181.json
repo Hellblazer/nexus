@@ -1,0 +1,8 @@
+{
+  "changeset_ids": [
+    "aspects-005-retire-aspect-queue-table.xml:aspects-005-2"
+  ],
+  "engine_tag": "engine-service-v0.1.181",
+  "from_tag": "engine-service-v0.1.180",
+  "recorded_at": "2026-11-07T00:38:17Z"
+}

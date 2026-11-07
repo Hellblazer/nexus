@@ -28,6 +28,7 @@ cat > bin/nx <<'STUB'
 # Recorded copy of `nx ask` for the asks evals (RDR-245 S3, nexus-wc4jj.8). It serves the board in data/,
 # appends every call to nx-calls.log, and checks each `answer` the way the real command and the mediator
 # contract would, writing one CHECK line per answer for the graders. It never contacts a real board.
+# REPLY is the user's reply the case's prompt scripts; MEDIATE=no-session-id makes it refuse a mediator send.
 # A CHECK line starts `CHECK ref=<ref as typed> choice=[<reply as typed>]` whatever order the flags came
 # in, so a grader reads the ask and the choice from those fields and never from argv position.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +38,7 @@ line=""
 for a in "$@"; do line+="[$a]"; done
 
 REPLY='The thousand one makes sense given how much volume we saw last week, go with the bigger batch. And keep events for ninety days, support needs the replay window.'
+MEDIATE=ok  # ok: this session can mediate; no-session-id: `--via mediator` is refused, as in Claude Desktop chat or Cowork
 
 norm() { printf '%s' "$1" | tr '\n\t' '  ' | tr -s ' ' | sed -e 's/^ //' -e 's/ $//'; }
 
@@ -157,10 +159,13 @@ case "$sub" in
         done < <(options_of "$id")
       fi
       # Another ask's marker inside this ask's words means the record carries words that are not its own.
-      # A marker is a word of that ask's own part of the reply (empty when the reply has no such part).
-      while IFS='|' read -r e i v m; do
+      # An ask has two markers, both taken from its own part of the user's reply, so a span that crosses
+      # the boundary is caught by either word. Both are empty when the reply has no part for that ask.
+      while IFS='|' read -r e i v m1 m2; do
         [ "$i" = "$id" ] && continue
-        [ -n "$m" ] && [[ "$nsw" == *"$m"* ]] && c_scope=BAD
+        for mk in "$m1" "$m2"; do
+          [ -n "$mk" ] && [[ "$nsw" == *"$mk"* ]] && c_scope=BAD
+        done
       done < "$DATA/asks.tsv"
     fi
     c_batch=NONE
@@ -180,6 +185,10 @@ case "$sub" in
     fi
     if [ "$swset" = 0 ] || [ -z "$(norm "$sw")" ]; then
       echo "Error: --via mediator needs --sam-words: the words Sam typed for this ask" >&2; exit 1
+    fi
+    if [ "$MEDIATE" = no-session-id ]; then  # Claude Desktop chat or Cowork: nothing resolves this session's id
+      echo "Error: --via mediator needs this session's own id, and it did not resolve to a UUID (tuple-watch marker, then NX_T1_SESSION_ID, then NX_SESSION_ID)" >&2
+      printf 'REFUSED no-session-id\n' >> "$LOG"; exit 1
     fi
     echo "answered $entry/$id ($c_reply $reply), via mediator; status sent" ;;
   *)
@@ -292,8 +301,8 @@ Also: quiet 0, conditional 0, answered 0
 Digest, last 48 hours (0)
 TXT
 cat > data/asks.tsv <<'TSV'
-aurora|aur-batch-size|0b94d7e1f3a85c26|thousand
-aurora|aur-retention|e47a2c58d1b93f60|ninety
+aurora|aur-batch-size|0b94d7e1f3a85c26|thousand|bigger batch
+aurora|aur-retention|e47a2c58d1b93f60|ninety|replay window
 TSV
 cat > data/options/aur-batch-size.txt <<'OPT'
 500 events per batch

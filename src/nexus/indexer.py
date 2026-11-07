@@ -2406,6 +2406,11 @@ def _indexed_relpaths(indexed_files: list, repo: "Path") -> set[str]:
     return out
 
 
+# Consecutive index runs an orphan may be missing before housekeeping
+# deletes it; the rename link pre-pass predicts the same sweep from it.
+_ORPHAN_DELETE_MISSES: int = 2
+
+
 def _run_housekeeping(
     cat: "CatalogReader",
     owner: "Tumbler",
@@ -2419,7 +2424,7 @@ def _run_housekeeping(
     - If the file is present in *indexed_set*, reset miss_count to 0.
     - If absent and a content_hash match exists at a new path, treat as rename:
       transfer links to the new entry and delete the old one.
-    - If absent with no rename match, increment miss_count. Delete at threshold >= 2.
+    - If absent with no rename match, increment miss_count. Delete once it reaches ``_ORPHAN_DELETE_MISSES``.
     """
     # RDR-146 P1.2 strict split: reads via ``cat``, writes via ``w``
     # (the write-only proxy; defaults to ``cat`` for single-object callers).
@@ -2432,6 +2437,39 @@ def _run_housekeeping(
         ch = (e.meta or {}).get("content_hash", "")
         if ch and e.file_path in indexed_set:
             hash_to_entry[ch] = e
+
+    # Every entry this run retires as a rename, old tumbler -> new tumbler,
+    # built before any link moves so a link between two renamed entries can
+    # be redirected whichever one is processed first (nexus-12ml0).
+    # Orphans the miss-count sweep below deletes in this same run: a link
+    # to or from one of them is not moved, since the engine refuses an edge
+    # to a deleted entry and an edge to one about to go would dangle.
+    renamed_to: dict[str, object] = {}
+    swept: set[str] = set()
+    for e in owner_entries:
+        if e.file_path in indexed_set:
+            continue
+        ch = (e.meta or {}).get("content_hash", "")
+        if ch and ch in hash_to_entry:
+            renamed_to[str(e.tumbler)] = hash_to_entry[ch].tumbler
+        elif int((e.meta or {}).get("miss_count", 0)) + 1 >= _ORPHAN_DELETE_MISSES:
+            swept.add(str(e.tumbler))
+
+    def _moved(t: object) -> object:
+        return renamed_to.get(str(t), t)
+
+    # A delete is a tombstone and leaves its link rows, so a link read here
+    # can name an entry deleted in an EARLIER run (a second rename of a
+    # file whose partner was renamed before). The engine refuses an edge to
+    # it, which used to abort housekeeping on every later run; such a link
+    # is not moved (nexus-12ml0). Liveness is looked up once per tumbler.
+    live: dict[str, bool] = {}
+
+    def _is_live(t: object) -> bool:
+        key = str(t)
+        if key not in live:
+            live[key] = cat.resolve(t) is not None
+        return live[key]
 
     for entry in owner_entries:
         if entry.file_path in indexed_set:
@@ -2465,28 +2503,28 @@ def _run_housekeeping(
                 if not new_meta.get(NON_EVIDENTIARY_META_KEY):
                     new_meta[NON_EVIDENTIARY_META_KEY] = True
                     w.update(new_entry.tumbler, meta=new_meta)
-            # Transfer links from old entry to new entry. A link between the
-            # two entries (a symlink ghost citing its own target, or the
-            # target citing the ghost) would land as a self-link on the new
-            # entry, and a self-link on the old entry would leave the new one
-            # linked to the deleted entry, so both are dropped (nexus-x3bxj).
-            pair = {str(new_entry.tumbler), str(entry.tumbler)}
-            old_links = cat.links_from(entry.tumbler)
-            for lnk in old_links:
-                if str(lnk.to_tumbler) in pair:
+            # Transfer links from old entry to new entry, both directions.
+            # Each endpoint that names an entry renamed in this run is
+            # redirected to that entry's new tumbler, so a link between two
+            # renamed entries joins their new entries rather than pointing
+            # at one this run deletes (nexus-12ml0). A link that then joins
+            # an entry to itself (a symlink ghost citing its own target, the
+            # target citing the ghost, the ghost's own self-link) is dropped
+            # (nexus-x3bxj). The text is unchanged (same content_hash), so
+            # the spans move with the link (nexus-12ml0). link_if_absent
+            # keys on (from, to, type): when the new entry already holds
+            # that edge, the existing row and its spans are left as they are.
+            for lnk in cat.links_from(entry.tumbler) + cat.links_to(entry.tumbler):
+                src, dst = _moved(lnk.from_tumbler), _moved(lnk.to_tumbler)
+                if str(src) == str(dst) or {str(src), str(dst)} & swept:
+                    continue
+                other = dst if str(src) == str(new_entry.tumbler) else src
+                if not _is_live(other):
                     continue
                 w.link_if_absent(
-                    new_entry.tumbler, lnk.to_tumbler, lnk.link_type,
+                    src, dst, lnk.link_type,
                     created_by=lnk.created_by,
-                )
-            # Also transfer incoming links
-            incoming = cat.links_to(entry.tumbler)
-            for lnk in incoming:
-                if str(lnk.from_tumbler) in pair:
-                    continue
-                w.link_if_absent(
-                    lnk.from_tumbler, new_entry.tumbler, lnk.link_type,
-                    created_by=lnk.created_by,
+                    from_span=lnk.from_span, to_span=lnk.to_span,
                 )
             w.delete_document(entry.tumbler)
             _log.info(
@@ -2502,7 +2540,7 @@ def _run_housekeeping(
         meta = dict(entry.meta or {})
         miss_count = int(meta.get("miss_count", 0)) + 1
 
-        if miss_count >= 2:
+        if miss_count >= _ORPHAN_DELETE_MISSES:
             w.delete_document(entry.tumbler)
             _log.info(
                 "housekeeping_orphan_deleted",

@@ -11,6 +11,6 @@ arrived. Message 1 is the line above.
 
 Message 2 (what I type after you present the queue):
 
-> Hmm, I don't know. Maybe the second one? Or the first, whichever you think.
+> Hmm, I don't know. Maybe the second one? Or the first, whichever you think. Go ahead and send it.
 
 No message follows message 2: end your turn after you have answered it.

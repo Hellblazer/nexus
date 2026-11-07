@@ -529,20 +529,23 @@ class ManifestSectionLabelsRung:
                 "chash": row.chash, "position": row.position, **labels, "labels_written": True,
             })
         written: set[str] = set()
-        for collection, per_doc in sorted(by_collection.items()):
-            for request in self._requests(sorted(per_doc.items())):
-                result = writer.append_manifest_many(request, collection=collection)
-                failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
-                for doc_id, rows in request:
-                    if doc_id in failed:
-                        counts.write_failed += len(rows)
-                    else:
-                        counts.filled += len(rows)
-                        counts.by_collection[collection] += len(rows)
-                        self._filled += len(rows)
-                        written.add(doc_id)
-        # once per document, however many requests or collections carried its rows
-        self._restore_batch(writer, sorted(written), stamps, counts)
+        try:
+            for collection, per_doc in sorted(by_collection.items()):
+                for request in self._requests(sorted(per_doc.items())):
+                    result = writer.append_manifest_many(request, collection=collection)
+                    failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
+                    for doc_id, rows in request:
+                        if doc_id in failed:
+                            counts.write_failed += len(rows)
+                        else:
+                            counts.filled += len(rows)
+                            counts.by_collection[collection] += len(rows)
+                            self._filled += len(rows)
+                            written.add(doc_id)
+        finally:
+            # once per document, however many requests or collections carried its rows; also when a later request
+            # raised: the engine restamped indexed_at on every document an earlier request wrote
+            self._restore_batch(writer, sorted(written), stamps, counts)
 
     @classmethod
     def _restore_batch(cls, writer: Any, docs: list[str], stamps: dict[str, str], counts: Counts) -> None:
