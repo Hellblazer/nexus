@@ -1434,6 +1434,12 @@ _DEFAULTS: dict[str, Any] = {
     "voyageai": {
         "read_timeout_seconds": 120,
     },
+    # RDR-243 Phase 3 (nexus-rfvyy.8.2): what the MCP read tools print for a sensitive hit. ``withhold`` replaces
+    # it with one stub line and a count; ``flag`` shows the content with a [sensitive] badge. Read from the GLOBAL
+    # config only (nexus.sensitive_output.mcp_output_posture); any other value fails closed to withhold.
+    "sensitivity": {
+        "mcp_output": "withhold",
+    },
     # RDR-087: search-observability opt-outs. Default-on.
     "telemetry": {
         "search_enabled": True,       # Phase 2.2 hot-path INSERT OR IGNORE.
@@ -1681,6 +1687,8 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
     if dotted_key == "credentials.service_url" and isinstance(value, str):
         # The dotted spelling reaches the same key set_credential guards.
         require_no_userinfo(value.strip(), source="the service_url value")
+    if dotted_key == "sensitivity.mcp_output" and (not isinstance(value, str) or value.strip().lower() not in ("withhold", "flag")):
+        raise ValueError(f"sensitivity.mcp_output must be 'withhold' or 'flag', got {value!r}")
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     parts = dotted_key.split(".")
