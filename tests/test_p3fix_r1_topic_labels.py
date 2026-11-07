@@ -56,15 +56,23 @@ class _Catalog:
         return {t: rows.get(t, []) for t in tumblers}
 
 
-def test_the_topics_holding_the_document_and_their_ancestors_are_relabelled_and_no_other() -> None:
+def _route_t2(monkeypatch, tax) -> None:
+    """The module reaches T2 through ``nexus.mcp_infra.t2_index_write`` (the storage-boundary lint forbids a
+    ``T2Database`` of its own); run each routed function against the fake taxonomy."""
+    monkeypatch.setattr("nexus.mcp_infra.t2_index_write", lambda write_fn, **_kw: write_fn(SimpleNamespace(taxonomy=tax)))
+
+
+def test_the_topics_holding_the_document_and_their_ancestors_are_relabelled_and_no_other(monkeypatch) -> None:
     tax = _Taxonomy()
+    _route_t2(monkeypatch, tax)
     assert sensitive_topics.withhold_topic_labels(tax, _Catalog(), ["1.1.5"]) == [1, 10]
     assert sorted(tax.renamed) == [(1, TOPIC_LABEL_WITHHELD), (10, TOPIC_LABEL_WITHHELD)]
     assert tax.topics[20]["label"] == "gardening"
 
 
-def test_a_document_in_no_topic_relabels_nothing() -> None:
+def test_a_document_in_no_topic_relabels_nothing(monkeypatch) -> None:
     tax = _Taxonomy()
+    _route_t2(monkeypatch, tax)
     assert sensitive_topics.withhold_topic_labels(tax, _Catalog(), ["1.9.9"]) == []
     assert tax.renamed == []
 
@@ -77,6 +85,7 @@ def test_the_knowledge_map_no_longer_prints_the_stale_label(tmp_path, monkeypatc
     tax = _Taxonomy()
     before = context.generate_context_l1(tax, output_path=tmp_path / "before.txt")
     assert STALE in before.read_text(encoding="utf-8")
+    _route_t2(monkeypatch, tax)
     sensitive_topics.withhold_topic_labels(tax, _Catalog(), ["1.1.5"])
     after = context.generate_context_l1(tax, output_path=tmp_path / "after.txt")
     text = after.read_text(encoding="utf-8")
@@ -120,17 +129,7 @@ def verb(monkeypatch, tmp_path):
     monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", lambda: writer)
     tax = _Taxonomy()
 
-    class _T2:
-        def __init__(self, *_a, **_k) -> None:
-            self.taxonomy = tax
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return None
-
-    monkeypatch.setattr("nexus.db.t2.T2Database", _T2)
+    _route_t2(monkeypatch, tax)
     ctx = tmp_path / "context"
     ctx.mkdir()
     (ctx / "r-1.txt").write_text(STALE, encoding="utf-8")

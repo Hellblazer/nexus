@@ -54,11 +54,29 @@ def _chashes_of(cat: Any, tumblers: Iterable[str]) -> list[str]:
     return list(out)
 
 
+class _RoutedReads:
+    """The two taxonomy reads :func:`withhold_topic_labels` makes, through the shared T2 handle
+    (``t2_index_write``), so the module opens no :class:`T2Database` of its own (the storage-boundary lint)."""
+
+    def get_assignments_for_docs(self, chashes: list[str]) -> dict[str, int]:
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred: heavy import graph
+
+        return t2_index_write(lambda db: db.taxonomy.get_assignments_for_docs(chashes), op="sensitive_topics_read")
+
+    def get_topic_by_id(self, topic_id: int) -> dict | None:
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - as above
+
+        return t2_index_write(lambda db: db.taxonomy.get_topic_by_id(topic_id), op="sensitive_topics_read")
+
+
 def withhold_topic_labels(taxonomy: Any, cat: Any, tumblers: Iterable[str]) -> list[int]:
     """Relabel every topic holding a chunk of *tumblers* (and each ancestor) :data:`TOPIC_LABEL_WITHHELD`.
 
-    Returns the topic ids relabelled, sorted. Raises whatever the catalog or taxonomy raises: the caller says
-    whether a failure is loud (the verb) or logged."""
+    The topics are found through *taxonomy* (the reads); the relabel is a T2 write and goes through
+    ``t2_index_write``. Returns the topic ids relabelled, sorted. Raises whatever the catalog or taxonomy raises:
+    the caller says whether a failure is loud (the verb) or logged."""
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred: heavy import graph
+
     chashes = _chashes_of(cat, tumblers)
     topic_ids: set[int] = set()
     for start in range(0, len(chashes), _BATCH):
@@ -72,7 +90,7 @@ def withhold_topic_labels(taxonomy: Any, cat: Any, tumblers: Iterable[str]) -> l
             seen.add(int(parent))
             pending.append(int(parent))
     for tid in sorted(seen):
-        taxonomy.update_topic_label(tid, TOPIC_LABEL_WITHHELD)
+        t2_index_write(lambda db, _t=tid: db.taxonomy.update_topic_label(_t, TOPIC_LABEL_WITHHELD), op="sensitive_topics_relabel")
     return sorted(seen)
 
 
@@ -80,11 +98,7 @@ def withhold_after_flag(cat: Any, tumblers: Iterable[str]) -> list[int]:
     """What a verb that has just flagged *tumblers* runs: relabel the topics that hold them, and when any was
     relabelled drop the Knowledge Map caches. Returns the relabelled topic ids. Raises on a catalog or taxonomy
     failure; the caller decides how loud that is."""
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 - deferred: the T2 handle is only needed here
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 - as above
-
-    with T2Database(default_db_path()) as db:
-        ids = withhold_topic_labels(db.taxonomy, cat, tumblers)
+    ids = withhold_topic_labels(_RoutedReads(), cat, tumblers)
     if ids:
         purge_knowledge_map_caches()
     return ids

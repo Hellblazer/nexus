@@ -53,6 +53,7 @@ import hashlib
 import json
 import os
 import threading
+import types
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1170,19 +1171,12 @@ def _drive_knowledge_map(world: CanaryWorld) -> None:
     mp.setenv("NEXUS_CONFIG_DIR", str(world.workdir))
     taxonomy = _KnowledgeMapTaxonomy(world)
 
-    class _T2:
-        taxonomy = None
-
-        def __init__(self, *_a: Any, **_k: Any) -> None:
-            _T2.taxonomy = taxonomy
-
-        def __enter__(self) -> "_T2":
-            return self
-
-        def __exit__(self, *_exc: Any) -> None:
-            return None
-
-    mp.setattr("nexus.db.t2.T2Database", _T2)
+    # The relabel reaches T2 through ``nexus.mcp_infra.t2_index_write``; the taxonomy double stands in for the
+    # tenant's topics (the topics are seeded by this driver, not by a discover run).
+    mp.setattr(
+        "nexus.mcp_infra.t2_index_write",
+        lambda write_fn, **_kw: write_fn(types.SimpleNamespace(taxonomy=taxonomy)),
+    )
     with HttpCatalogClient() as cat:
         sensitive_topics.withhold_after_flag(cat, [world.sensitive_tumbler])
     repo_root = str(world.workdir / "repo")
@@ -1195,20 +1189,52 @@ def _drive_knowledge_map(world: CanaryWorld) -> None:
 
 @driver("nexus.search_engine:search_cross_corpus")
 def _drive_rerank(world: CanaryWorld) -> None:
-    """Census row 20. The Voyage rerank request itself is made by the engine, to a fixed host, and its body is
-    pinned in the engine's own test (``VoyageRerankSensitivityTest`` asserts the raw request bodies); Python
-    cannot observe that leg. What this driver judges is the Python side of the same search: a ``lexical=true``
-    search, which asks the engine to rerank, over both models' collections, through the real route, with the
-    page the session model reads captured as a return value. The sensitive row comes back from the engine
-    flagged and un-scored, and the output posture is the line that keeps its text off the page. The read is an
-    ``include`` read whatever the case's marks say: the session model's own search, the one that can reach a
-    sensitive row, is what the hold exists for (an ``exclude`` read would never see the row)."""
-    from nexus.mcp import core  # noqa: PLC0415 - after the substrate is pinned
+    """Census row 20. The Voyage rerank request itself is made by the engine, to a fixed host, and what the
+    engine puts in it is pinned ONLY in Java: ``VoyageRerankSensitivityTest`` asserts the raw request bodies
+    (the sensitive row's text is in none of them) and is the named engine check for this row. Python cannot
+    observe that leg, so this driver judges the leg Python owns, the client's rerank gate
+    (``HttpVectorClient._rerank_permitted``), against the real engine:
 
-    _mp(world).setattr("nexus.sensitivity.read_sensitivity", lambda posture=None: "include")
+    * a ``lexical=true`` ``include`` search through the real route must actually ASK the engine to rerank (a
+      ``rerank: true`` search body is captured at ``_post``). A search that never requested one proves nothing
+      about the hold, so that is a harness failure, not a pass;
+    * the engine's own report of whether it keeps sensitive rows out of the reranker (``GET /version``'s
+      ``rerank_sensitive_exclusion_supported``) is read through the same ``_get`` the client uses, and a rerank
+      request that goes to an engine that does not report it is recorded as the sensitive text handed over: an
+      engine without the hold reranks every candidate it is given through Voyage, sensitive rows included.
+
+    The read is an ``include`` read whatever the case's marks say: the session model's own search, the one that
+    can reach a sensitive row, is what the hold exists for (an ``exclude`` read would never see the row). The
+    page the session model reads is captured as a return value, so the output posture is judged here too."""
+    from nexus.db import http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.mcp import core  # noqa: PLC0415 - as above
+
+    mp = _mp(world)
+    mp.setattr("nexus.sensitivity.read_sensitivity", lambda posture=None: "include")
     _arm_reads(world)
+    rerank_bodies: list[dict[str, Any]] = []
+    tenants: list[str] = []
+    real_post = hvc._post
+
+    def spy(path: str, body: dict, **kw: Any) -> Any:
+        if path.startswith("/v1/vectors/") and "search" in path and isinstance(body, dict) and body.get("rerank") is True:
+            rerank_bodies.append({"path": path, "sensitivity": body.get("sensitivity")})
+            tenants.append(kw.get("tenant", "default"))
+        return real_post(path, body, **kw)
+
+    mp.setattr(hvc, "_post", spy)
     out = core.search(query=_READ_QUERY, corpus=_corpus_arg(world), limit=10, threshold=float("inf"), lexical=True)
     world.capture.record_return("search(lexical=true)", result=out)
+    assert rerank_bodies, (
+        "harness: the include search never asked the engine to rerank (no search body carried rerank: true), so "
+        "the row's gate was not exercised"
+    )
+    info = hvc._get("/version", tenant=tenants[0], timeout=10.0)
+    holds = isinstance(info, dict) and info.get("rerank_sensitive_exclusion_supported") is True
+    if not holds:
+        world.capture.record_outbound(
+            "rerank_request_to_an_engine_without_the_hold", requests=rerank_bodies, would_hand_over=world.canary_sensitive,
+        )
 
 
 @driver("nexus.mcp.core:search")
@@ -1532,6 +1558,24 @@ def _mutate_mcp_posture_off(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(so, "mcp_output_setting", lambda: so.McpOutputSetting("flag", "flag"))
 
 
+def _mutate_rerank_gate_removed_on_a_keyless_engine(mp: pytest.MonkeyPatch) -> None:
+    """Row 20's gate removed: the engine answers ``/version`` without ``rerank_sensitive_exclusion_supported``
+    (an engine that predates the hold) and the client's ``_rerank_permitted`` is bypassed, so an ``include``
+    search sends ``rerank: true`` to it."""
+    import nexus.db.http_vector_client as hvc  # noqa: PLC0415 - after the substrate is pinned
+
+    real_get = hvc._get
+
+    def keyless_get(path: str, **kw: Any) -> Any:
+        out = real_get(path, **kw)
+        if path == "/version" and isinstance(out, dict):
+            return {k: v for k, v in out.items() if k != "rerank_sensitive_exclusion_supported"}
+        return out
+
+    mp.setattr(hvc, "_get", keyless_get)
+    mp.setattr(hvc.HttpVectorClient, "_rerank_permitted", lambda self, rerank, sensitivity, rerank_meta_out: rerank)
+
+
 def _mutate_cli_posture_off(mp: pytest.MonkeyPatch) -> None:
     mp.setattr("nexus.session.started_by_claude_code", lambda: False)
     mp.setattr("nexus.commands.search_cmd.started_by_claude_code", lambda: False)
@@ -1541,7 +1585,7 @@ def _mutate_cli_posture_off(mp: pytest.MonkeyPatch) -> None:
 #: ``tests/test_sensitivity_canary_drivers.py::test_every_phase_3_row_has_a_mutation``.
 PHASE_3_MUTATIONS: dict[str, Callable[[pytest.MonkeyPatch], None]] = {
     "nexus.hooks.subagent_start:_knowledge_map_section": _mutate_labels_not_withheld,
-    "nexus.search_engine:search_cross_corpus": _mutate_mcp_posture_off,
+    "nexus.search_engine:search_cross_corpus": _mutate_rerank_gate_removed_on_a_keyless_engine,
     "nexus.mcp.core:search": _mutate_mcp_posture_off,
     "nexus.commands.search_cmd:search_cmd": _mutate_cli_posture_off,
 }
