@@ -4,9 +4,9 @@
 
 ``NX_GC_QUARANTINE_DAYS`` used to be honoured by the client's own expiry only: the engine's expiry of client-moved
 knowledge quarantine ran on its own 14 days whatever the user set. The client now sends ``quarantine_expires_at``
-(``quarantined_at`` plus ``quarantine_days()``, an absolute fixed-width UTC instant) on every move, the engine
-(vectors-056) writes it on the rows that call moved, and its expiry waits for the later of its retention and the
-stamp. The engine half is pinned in ``GcQuarantineExpiresAtRouteTest`` (service/).
+(``quarantined_at`` plus ``quarantine_days()``, an absolute fixed-width UTC instant) on every move of a KNOWLEDGE
+origin (the engine's expiry reads it nowhere else), the engine (vectors-056) writes it on the rows that call moved,
+and its expiry waits for the later of its retention and the stamp. The engine half is pinned in ``GcQuarantineExpiresAtRouteTest`` (service/).
 
 What each test pins is named by what its revert would do: a wrapper that dropped the field leaves the request
 without it; an HTTP method that dropped it never puts it in the body; a stamp computed from the wrong clock, shape
@@ -53,11 +53,17 @@ def test_a_moved_at_that_is_not_the_stamp_shape_gets_no_stamp(bad) -> None:
 
 
 class _Db:
-    """A handle that records the keyword fields each move call carried and answers from a script."""
+    """A handle that records the keyword fields each move call carried and answers from a script. It resolves the
+    origin's catalog row the way ``HttpVectorClient`` does, answering ``content_type`` (knowledge unless told)."""
+
+    content_type: str | None = "knowledge"
 
     def __init__(self, *responses: dict) -> None:
         self.responses = list(responses)
         self.calls: list[dict] = []
+
+    def _resolve_collection_row(self, collection, *, strict=False):
+        return None if self.content_type is None else {"content_type": self.content_type}
 
     def gc_quarantine_orphans_bounded(self, c, q, at, sample, row_limit, **kw):
         self.calls.append(kw)
@@ -115,14 +121,58 @@ def test_an_unusable_moved_at_sends_no_stamp_rather_than_a_guess() -> None:
     assert db.calls == [{}]
 
 
+# ── knowledge only: the engine's expiry reads the stamp nowhere else ──────────
+
+
+@pytest.mark.parametrize("kind", ["code", "docs", "rdr"])
+def test_a_non_knowledge_origin_sends_no_stamp(kind) -> None:
+    """The engine's expiry touches a registered live KNOWLEDGE origin only; a stamp on a code, docs or rdr move
+    would be a write nothing reads."""
+    bounded = _Db(_batch(1, 0))
+    bounded.content_type = kind
+    cq.quarantine_orphans_bounded_serverside(bounded, _COLL, _QUAR, _STAMP)
+    unbounded = _Db({"moved": 1, "sample": []})
+    unbounded.content_type = kind
+    cq.quarantine_orphans_serverside(unbounded, _COLL, _QUAR, _STAMP)
+    assert bounded.calls == [{}] and unbounded.calls == [{}]
+
+
+def test_an_origin_whose_row_cannot_be_read_sends_no_stamp_and_the_move_still_runs() -> None:
+    class _Unreadable(_Db):
+        def _resolve_collection_row(self, collection, *, strict=False):
+            raise RuntimeError("listing failed")
+
+    no_row = _Db(_batch(1, 0))
+    no_row.content_type = None
+    unreadable = _Unreadable(_batch(1, 0))
+    assert cq.quarantine_orphans_bounded_serverside(no_row, _COLL, _QUAR, _STAMP) == (1, [])
+    assert cq.quarantine_orphans_bounded_serverside(unreadable, _COLL, _QUAR, _STAMP) == (1, [])
+    assert no_row.calls == [{}] and unreadable.calls == [{}]
+
+
+def test_a_handle_that_cannot_resolve_a_row_sends_no_stamp() -> None:
+    class _Bare:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def gc_quarantine_orphans_bounded(self, c, q, at, sample, row_limit, **kw):
+            self.calls.append(kw)
+            return _batch(1, 0)
+
+    bare = _Bare()
+    cq.quarantine_orphans_bounded_serverside(bare, _COLL, _QUAR, _STAMP)
+    assert bare.calls == [{}]
+
+
 # ── the HTTP client ───────────────────────────────────────────────────────────
 
 
-def _http_client():
+def _http_client(content_type: str = "knowledge"):
     from nexus.db.http_vector_client import HttpVectorClient
 
     client = HttpVectorClient.__new__(HttpVectorClient)
     client._tenant = None
+    client._row_resolver = lambda name: {"content_type": content_type}
     return client
 
 

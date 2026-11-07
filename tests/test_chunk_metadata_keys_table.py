@@ -57,15 +57,16 @@ def test_row_vocabulary_is_closed():
 
 
 def test_row_counts_per_class_are_pinned():
-    """The RDR's key table has 56 keys over six classes; a change is deliberate."""
+    """The RDR's key table has 56 keys over seven classes; a change is deliberate."""
     counts = {c: sum(1 for r in ckm.rows() if r.cls == c) for c in ckm.CLASSES}
     assert counts == {
         "CHUNK": 2,
         "DOCUMENT": 25,
         "POSITION": 7,
-        "ROW": 8,
+        "ROW": 7,
         "LEGACY": 12,
         "NOT_ROW": 4,
+        "STAMP": 1,
     }
 
 
@@ -149,8 +150,20 @@ def test_bypass_prefixes_equal_the_write_path_exemption():
 
 def test_row_keys_are_the_engine_written_quarantine_keys():
     assert ckm.keys_of("ROW") == frozenset(
-        {"quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at", "quarantine_expires_at"}
+        {"quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at"}
     )
+
+
+def test_the_quarantine_retention_stamp_is_a_stamp_not_an_engine_owned_row_key():
+    """nexus-alsq3: ``quarantine_expires_at`` is written by the engine on quarantine-* rows only. It stays out of
+    the ROW set, so the key-retirement plan an old client renders (and the digest an old engine holds) is unchanged in
+    both directions, and out of the allow-list the CHECK and the sweep read."""
+    assert ckm.keys_of("STAMP") == frozenset({"quarantine_expires_at"})
+    plan = ckm.engine_plan()
+    assert "quarantine_expires_at" not in plan["allowed_keys"]
+    assert "quarantine_expires_at" not in ckm.keys_of("ROW") | ckm.keys_of("CHUNK")
+    assert "quarantine_expires_at" not in ALLOWED_TOP_LEVEL
+    assert ckm.row_for("quarantine_expires_at").on_row == "engine"
 
 
 def test_non_chunk_metadata_keys_is_document_position_and_legacy():

@@ -113,9 +113,12 @@ class ChunkMetadataKeysTest {
                 .isEqualTo(p.metadataKeysByClass().getOrDefault(e.getKey(), Set.of()));
         }
         // ROW is the one class the generator leaves out on purpose: the reaper's quarantine keys are
-        // engine-owned and EngineOwnedPredicateIntegrationTest forbids a main source naming them.
+        // engine-owned and EngineOwnedPredicateIntegrationTest forbids a main source naming them. STAMP (the
+        // quarantine retention stamp, nexus-alsq3) is the other: written by the engine on quarantine-* rows only,
+        // outside the ROW digest on purpose, and not generated.
         Set<String> emittedOrRow = new HashSet<>(generated.keySet());
         emittedOrRow.add("ROW");
+        emittedOrRow.add("STAMP");
         assertThat(p.metadataKeysByClass().keySet())
             .as("a class in the table the generator does not emit")
             .isSubsetOf(emittedOrRow);

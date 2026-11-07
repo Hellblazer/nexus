@@ -43,17 +43,12 @@ class _Db:
     def __init__(self, *responses: dict) -> None:
         self.responses = list(responses)
         self.calls: list[dict] = []
-        self.stamps: list[str | None] = []
 
-    # nexus-alsq3: the retention stamp rides every request too; it is split off so ``calls`` stays the floor fields
-    # these tests are about (the stamp is pinned in test_alsq3_quarantine_expires_at.py).
     def gc_quarantine_orphans_bounded(self, c, q, at, sample, row_limit, **floor):
-        self.stamps.append(floor.pop("quarantine_expires_at", None))
         self.calls.append(floor)
         return self.responses.pop(0)
 
     def gc_quarantine_orphans(self, c, q, at, sample, **floor):
-        self.stamps.append(floor.pop("quarantine_expires_at", None))
         self.calls.append(floor)
         return self.responses.pop(0)
 
@@ -183,7 +178,7 @@ class _PruneDb:
     """Every route ``_prune_collection_serverside`` drives; the move answers from *move*."""
 
     def __init__(self, move: dict) -> None:
-        self.move, self.calls, self.floor, self.stamp = move, [], None, None
+        self.move, self.calls, self.floor = move, [], None
 
     def gc_restore_rereferenced_bounded(self, quarantine, origin, row_limit, *, resolve_siblings=False):
         self.calls.append("restore")
@@ -191,7 +186,6 @@ class _PruneDb:
 
     def gc_quarantine_orphans_bounded(self, origin, quarantine, at, sample, row_limit, **floor):
         self.calls.append("move")
-        self.stamp = floor.pop("quarantine_expires_at", None)  # nexus-alsq3: the retention stamp, not a floor field
         self.floor = floor
         return self.move
 

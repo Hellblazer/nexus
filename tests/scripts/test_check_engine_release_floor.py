@@ -39,8 +39,6 @@ def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
     # RDR-243 Phase 2 (nexus-rfvyy.7): the sensitivity-exclude floor leads the pin on develop the same way.
     monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
-    # nexus-alsq3: the quarantine-expires floor leads the pin on develop the same way.
-    monkeypatch.setattr(gate._engine_version, "QUARANTINE_EXPIRES_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
 
 
 @pytest.fixture(autouse=True)
@@ -658,41 +656,6 @@ def test_the_live_sensitivity_floor_leads_or_meets_the_pin() -> None:
     import re
     src = (REPO_ROOT / "src" / "nexus" / "engine_version.py").read_text(encoding="utf-8")
     m = re.search(r"^SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
-    assert m is not None
-    assert tuple(int(g) for g in m.groups()) >= (0, 1, 182)
-
-
-# ── nexus-alsq3 quarantine-expires floor vs the pin ─────────────────────────
-
-def test_a_pin_below_the_quarantine_expires_floor_fails_the_release_check(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(gate._engine_version, "QUARANTINE_EXPIRES_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
-    assert gate.check_quarantine_expires_floor_vs_pin() == 1
-    err = capsys.readouterr().err
-    assert "QUARANTINE EXPIRES FLOOR CHECK FAILED" in err and ".".join(map(str, _PIN_BELOW_FLOOR)) in err
-
-
-@pytest.mark.parametrize(
-    "floor",
-    [pytest.param((0, 0, 0), id="unset"), pytest.param(REQUIRED_ENGINE_VERSION, id="equal"),
-     pytest.param((0, 0, 1), id="below")],
-)
-def test_a_pin_at_or_above_the_quarantine_expires_floor_passes(monkeypatch, floor) -> None:
-    monkeypatch.setattr(gate._engine_version, "QUARANTINE_EXPIRES_MIN_ENGINE_VERSION", floor)
-    assert gate.check_quarantine_expires_floor_vs_pin() == 0
-
-
-def test_ledger_only_runs_the_quarantine_expires_floor_check(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(gate._engine_version, "QUARANTINE_EXPIRES_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, None)):
-        assert gate.main(["--ledger-only"]) == 1
-
-
-def test_the_live_quarantine_expires_floor_is_set_and_never_below_the_next_engine() -> None:
-    """The tree's literal (the autouse fixture patches the attribute, so read the source): never unset while the
-    client's key table names ``quarantine_expires_at``, and never below the first engine after v0.1.181."""
-    import re
-    src = (REPO_ROOT / "src" / "nexus" / "engine_version.py").read_text(encoding="utf-8")
-    m = re.search(r"^QUARANTINE_EXPIRES_MIN_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
     assert m is not None
     assert tuple(int(g) for g in m.groups()) >= (0, 1, 182)
 

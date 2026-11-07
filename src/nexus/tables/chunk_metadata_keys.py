@@ -25,7 +25,7 @@ from nexus.tables.load import Table, load_packaged_table
 
 TABLE_RESOURCE: Final = "chunk-metadata-keys.toml"
 
-CLASSES: Final[tuple[str, ...]] = ("CHUNK", "DOCUMENT", "POSITION", "ROW", "LEGACY", "NOT_ROW")
+CLASSES: Final[tuple[str, ...]] = ("CHUNK", "DOCUMENT", "POSITION", "ROW", "LEGACY", "NOT_ROW", "STAMP")
 KINDS: Final[tuple[str, ...]] = ("metadata-key", "column", "table", "catalog")
 ON_ROW: Final[tuple[str, ...]] = ("allowed", "unvalidated", "engine", "stored", "absent")
 REMEDIES: Final[tuple[str, ...]] = ("R1", "R2", "R3", "R4", "R5", "R6", "keep", "n/a")

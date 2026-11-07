@@ -107,10 +107,16 @@ class GcQuarantineExpiresAtRouteTest {
     // ── http ────────────────────────────────────────────────────────────────
 
     private HttpResponse<String> post(Map<String, Object> body) throws Exception {
-        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/gc/quarantine-orphans")
+        return post(body, null);
+    }
+
+    /** As {@link #post(Map)}, with an {@code Idempotency-Key} when {@code key} is given (the keyed, bounded form). */
+    private HttpResponse<String> post(Map<String, Object> body, String key) throws Exception {
+        var b = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/gc/quarantine-orphans")
             .header("Authorization", "Bearer " + TOKEN)
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(),
+            .header("Content-Type", "application/json");
+        if (key != null) b.header("Idempotency-Key", key);
+        return http.send(b.POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(),
             HttpResponse.BodyHandlers.ofString());
     }
 
@@ -287,20 +293,101 @@ class GcQuarantineExpiresAtRouteTest {
     }
 
     @Test
-    void aStampThatIsNotAnInstantKeepsTheRowRatherThanLosingIt() throws Exception {
+    void aStampThatIsNotAnInstantIsNoStamp_theRowExpiresAtTheEnginesRetentionNeverLater() throws Exception {
         Fixture f = newFixture();
-        String hex = Chash.ofText(f.sibling() + "/hand-edited").toHex();
+        String old = Chash.ofText(f.sibling() + "/hand-edited-old").toHex();
+        String young = Chash.ofText(f.sibling() + "/hand-edited-young").toHex();
         su(ctx -> {
             PgContainerHelper.insertCollection(ctx, TENANT, f.sibling());
-            PgContainerHelper.insertChunks(ctx, TENANT, f.sibling(), List.of(hex), List.of("hand edited"),
-                List.of(new float[384]), List.of(Map.<String, Object>of(
-                    "quarantined_at", "2026-01-01T00:00:00Z", "origin_collection", f.origin(),
-                    "quarantine_expires_at", "tomorrow")));
+            for (String[] row : new String[][] {{old, "2026-01-01T00:00:00Z"}, {young, AFTER_CUTOFF}}) {
+                PgContainerHelper.insertChunks(ctx, TENANT, f.sibling(), List.of(row[0]), List.of("hand edited"),
+                    List.of(new float[384]), List.of(Map.<String, Object>of(
+                        "quarantined_at", row[1], "origin_collection", f.origin(),
+                        "quarantine_expires_at", "tomorrow")));
+            }
         });
 
         var out = reaper.expireClientMoved(TENANT, f.sibling(), f.origin(), CUTOFF, 5000, 25_000, 2_000);
 
-        assertThat(out.expired()).isZero();
-        assertThat(present(f.sibling(), hex)).isTrue();
+        assertThat(out.expired()).as("a stamp that is not an instant is no stamp: the engine default applies").isEqualTo(1);
+        assertThat(present(f.sibling(), old)).as("past the engine's cutoff: expired, the bad stamp does not hold it").isFalse();
+        assertThat(present(f.sibling(), young)).as("a bad stamp never expires a row before the engine's cutoff").isTrue();
+    }
+
+    // ── the stamp reaches only the rows this call moved ──────────────────────
+
+    @Test
+    void theStampIsWrittenOnTheRowsThisCallMovedAndOnNoOtherRowOfTheSibling() throws Exception {
+        Fixture f = newFixture();
+        // An earlier, unstamped move with the SAME quarantined_at and origin: indistinguishable by metadata from this
+        // call's rows, so a stamp that scanned the sibling by metadata would take it. A victim-set join does not.
+        List<String> earlier = addReapable(f, "earlier", 2);
+        json(post(req(f, "2026-01-01T00:00:00Z")));
+        List<String> mine = addReapable(f, "mine", 2);
+
+        json(post(req(f, "2026-01-01T00:00:00Z", "quarantine_expires_at", "2026-02-01T00:00:00Z")));
+
+        var got = stamps(f.sibling());
+        for (String h : mine) assertThat(got).containsEntry(h, "2026-02-01T00:00:00Z");
+        for (String h : earlier) assertThat(got).as("moved by another call: not this call's to stamp").containsEntry(h, null);
+    }
+
+    @Test
+    void theBoundedDrainStampsEachBatchsRowsFromThatBatchsVictimSet() throws Exception {
+        Fixture f = newFixture();
+        addReapable(f, "drain", 5);
+
+        var first = json(post(req(f, "2026-01-01T00:00:00Z", "row_limit", 2, "quarantine_expires_at", "2026-02-01T00:00:00Z")));
+        assertThat(stamps(f.sibling()).values()).as("only the first batch's two rows are stamped").containsOnly("2026-02-01T00:00:00Z");
+        assertThat(stamps(f.sibling())).hasSize(2);
+        var second = json(post(req(f, "2026-01-01T00:00:00Z", "row_limit", 2, "quarantine_expires_at", "2026-03-01T00:00:00Z")));
+
+        assertThat(first.get("moved")).isEqualTo(2);
+        assertThat(second.get("moved")).isEqualTo(2);
+        var got = stamps(f.sibling());
+        assertThat(got).hasSize(4);
+        assertThat(got.values()).as("two rows per batch, each with its own batch's stamp; the first batch's rows are not restamped")
+            .containsExactlyInAnyOrder("2026-02-01T00:00:00Z", "2026-02-01T00:00:00Z",
+                "2026-03-01T00:00:00Z", "2026-03-01T00:00:00Z");
+    }
+
+    // ── the keyed (Idempotency-Key) form, which is the one the client's bounded move takes ──
+
+    @Test
+    void aKeyedBoundedMoveCarriesTheStamp_withOrWithoutAFloor_andItsReplayReturnsTheStoredBody() throws Exception {
+        Fixture f = newFixture();
+        addReapable(f, "keyed-nofloor", 3);
+        String key1 = java.util.UUID.randomUUID().toString();
+        var request1 = req(f, "2026-01-01T00:00:00Z", "row_limit", 2, "quarantine_expires_at", "2026-02-01T00:00:00Z");
+
+        var r1 = post(request1, key1);
+        var body1 = json(r1);
+
+        assertThat(r1.headers().firstValue("Idempotency-Key")).contains(key1);
+        assertThat(body1.keySet()).as("a stamped keyed call without a floor keeps the floor-less bounded shape")
+            .containsExactlyInAnyOrder("moved", "sample", "remaining", "row_limit", "floor");
+        assertThat(body1.get("moved")).isEqualTo(2);
+        assertThat(body1.get("remaining")).isEqualTo(1);
+        var after1 = stamps(f.sibling());
+        assertThat(after1).hasSize(2);
+        assertThat(after1.values()).as("the keyed branch passed the stamp to the function").containsOnly("2026-02-01T00:00:00Z");
+
+        var replay = post(request1, key1);
+
+        assertThat(replay.headers().firstValue("Idempotency-Replayed")).contains("true");
+        assertThat(json(replay)).as("the replay is the stored body, field for field").isEqualTo(body1);
+        assertThat(stamps(f.sibling())).as("and moved and stamped nothing more").isEqualTo(after1);
+
+        // The same keyed branch with a floor in the request.
+        addReapable(f, "keyed-floored", 2);
+        String key2 = java.util.UUID.randomUUID().toString();
+        var request2 = req(f, "2026-01-02T00:00:00Z", "row_limit", 10, "floor_fraction", 1.0, "floor_min_chunks", 1000,
+            "quarantine_expires_at", "2026-03-01T00:00:00Z");
+        var body2 = json(post(request2, key2));
+        assertThat(body2).as("the floored shape carries the floor echo and the refused key").containsKeys("refused", "floor");
+        var replay2 = post(request2, key2);
+        assertThat(replay2.headers().firstValue("Idempotency-Replayed")).contains("true");
+        assertThat(json(replay2)).isEqualTo(body2);
+        assertThat(stamps(f.sibling()).values()).contains("2026-03-01T00:00:00Z");
     }
 }

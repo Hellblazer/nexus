@@ -681,6 +681,33 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
         }
     }
 
+    @Test
+    @Order(75)
+    void afterTheAdd_theRetentionStampOutsideTheAllowListRidesAQuarantineRowButNotALiveOne() throws Exception {
+        // nexus-alsq3: quarantine_expires_at is in neither the CHUNK nor the ROW keys, so the allow-list does not
+        // name it. It is safe on a quarantine-* row only because that collection prefix is exempt by name.
+        String stamp = "2026-12-01T00:00:00Z";
+        assertThat((List<?>) plan().get("allowed_keys")).as("the plan's allow-list does not name the stamp")
+            .doesNotContain("quarantine_expires_at");
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String live = conformant("cc-b");
+            String liveHex = Chash.ofText("stamp on a live row").toHex();
+            assertThatThrownBy(() -> PgContainerHelper.insertChunks(ctx, B, live, List.of(liveHex), List.of("t"),
+                List.of(new float[384]), List.of(Map.<String, Object>of("chunk_text_hash", liveHex,
+                    "embedding_model", MODEL, "quarantine_expires_at", stamp))))
+                .as("the stamp on a live row is outside the allow-list").hasMessageContaining("chunks_metadata_keys_check");
+            String q = "quarantine-" + live;
+            String qHex = Chash.ofText("stamp on a quarantine row").toHex();
+            PgContainerHelper.insertCollection(ctx, B, q, MODEL);
+            PgContainerHelper.insertChunks(ctx, B, q, List.of(qHex), List.of("t"), List.of(new float[384]),
+                List.of(Map.<String, Object>of("chunk_text_hash", qHex, "embedding_model", MODEL,
+                    "quarantined_at", "2026-11-01T00:00:00Z", "quarantine_expires_at", stamp)));
+            assertThat(metadataOf(B, q, qHex)).as("the CHECK admits the stamp on a quarantine-* row")
+                .containsEntry("quarantine_expires_at", stamp);
+        }
+    }
+
     // ---- 3. validate --------------------------------------------------------------------------------------------
 
     @Test

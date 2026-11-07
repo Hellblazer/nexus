@@ -34,9 +34,10 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    a floor wedged every bulk quarantine, because one burst ages out as ~100%
    of the sibling's client rows. ``NX_GC_FLOOR_FRACTION`` / ``NX_GC_FORCE``
    govern the move into quarantine and nothing on this path.
-   ``NX_GC_QUARANTINE_DAYS`` governs this client expiry, and rides every move as
-   an absolute ``quarantine_expires_at`` stamp (nexus-alsq3,
-   :func:`quarantine_expires_at`). For a ``quarantine-knowledge__*`` sibling a
+   ``NX_GC_QUARANTINE_DAYS`` governs this client expiry, and for a KNOWLEDGE
+   origin it rides every move as an absolute ``quarantine_expires_at`` stamp
+   (nexus-alsq3, :func:`quarantine_expires_at`; the engine's expiry reads it only
+   for knowledge, so a code, docs or rdr move sends none). For a ``quarantine-knowledge__*`` sibling a
    newer engine also expires the client-moved rows, at the LATER of its own
    ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14) and the row's
    stamp, so a longer ``NX_GC_QUARANTINE_DAYS`` is honoured there too. A row moved
@@ -309,8 +310,31 @@ def _read_floor(result: dict, floor: GcFloor | None, moved_before: int) -> None:
         )
 
 
-def _expires_fields(quarantined_at: str) -> dict[str, Any]:
-    """The additive ``quarantine_expires_at`` request field (nexus-alsq3), or nothing when the stamp is unusable."""
+def _origin_is_knowledge(db: Any, collection_name: str) -> bool:
+    """Whether *collection_name* is a knowledge collection, from its catalog row and never its name (RDR-204).
+
+    The engine's expiry reads the retention stamp only for a client-moved row of a registered live KNOWLEDGE
+    origin (``reaper_expire_client_quarantine``); a code, docs or rdr sibling is expired by the client's own sweep
+    and never reads it. So the stamp is sent for knowledge only, and the engine is not asked to write a key nothing
+    reads. A handle with no row resolver (a test double, an in-memory store), a failed read and a missing row all
+    answer ``False``: no stamp, and the engine keeps its own retention, which is what an unstamped row gets.
+    """
+    # Looked up on the type: a mock store answers any attribute.
+    if getattr(type(db), "_resolve_collection_row", None) is None:
+        return False
+    try:
+        row = db._resolve_collection_row(collection_name)
+    except Exception:  # noqa: BLE001 — the stamp is optional and additive; an unreadable row must never block the move
+        _log.warning("quarantine_retention_stamp_row_unreadable", collection=collection_name, exc_info=True)
+        return False
+    return bool(row) and row.get("content_type") == "knowledge"
+
+
+def _expires_fields(db: Any, collection_name: str, quarantined_at: str) -> dict[str, Any]:
+    """The additive ``quarantine_expires_at`` request field (nexus-alsq3): present for a knowledge origin only, and
+    nothing when the stamp is unusable."""
+    if not _origin_is_knowledge(db, collection_name):
+        return {}
     stamp = quarantine_expires_at(quarantined_at)
     return {} if stamp is None else {"quarantine_expires_at": stamp}
 
@@ -329,7 +353,7 @@ def quarantine_orphans_serverside(
     if fn is None:
         return None
     # nexus-alsq3: the client's retention rides the move, so the engine's expiry honours NX_GC_QUARANTINE_DAYS.
-    extra = _expires_fields(quarantined_at)
+    extra = _expires_fields(db, collection_name, quarantined_at)
     if floor is None:
         result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, **extra)
     else:
@@ -647,6 +671,8 @@ def quarantine_orphans_bounded_serverside(
     max_iterations = _gc_loop_max_iterations(row_limit)
     remaining = None
     batches = 0
+    # The retention stamp (nexus-alsq3), resolved once for the whole drain: the origin's kind does not change.
+    retention_fields = _expires_fields(db, collection_name, quarantined_at)
     for _ in range(max_iterations):
         # The floor rides the FIRST batch only (nexus-wbfpw.52): the engine judges it on a
         # whole-collection count, which is real work inside the 25 s statement bound and the
@@ -657,7 +683,7 @@ def quarantine_orphans_bounded_serverside(
         extra = floor.request_fields() if floor_bearing else {}
         # The retention stamp rides EVERY batch (nexus-alsq3): each batch moves its own rows and the engine stamps
         # the rows of the call that moved them.
-        extra.update(_expires_fields(quarantined_at))
+        extra.update(retention_fields)
         try:
             result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit, **extra)
         except Exception as exc:  # noqa: BLE001 — strict mode re-labels a mid-drain failure; otherwise re-raised unchanged

@@ -1490,6 +1490,8 @@ public final class VectorHandler implements HttpHandler {
      * {@code gc_quarantine_orphans_floored} as the floor does; WITHOUT a floor it goes to the same function with no
      * floor (which judges nothing and calls the move untouched), and the response keeps the floor-less shape. An
      * older engine ignores the field and expires at its own retention; it says nothing in its response either way.
+     * The engine accepts the field for any origin, but only the knowledge expiry reads the stamp, so the client sends
+     * it for a knowledge origin only.
      */
     private void handleGcQuarantineOrphans(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");

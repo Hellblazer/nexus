@@ -82,7 +82,7 @@ public final class ChunkMetadataKeys {
 
     /** SHA-256 (hex) of the ROW keys, sorted and joined by a newline: the engine holds the exact set without naming a key. A request whose engine-owned keys hash otherwise is refused. */
     public static final String ROW_KEYS_SHA256 =
-        "de70c95e91171a841b60007d5a253a4183102d38d48f45aafc6cd01d97286c96";
+        "17db997f36279dacacbe4a6c63ce7b9d3ad252cf2d590564eb768f6a04482111";
 
     /** SHA-256 (hex) of the quarantine implication pair {@code by} then {@code at}, joined by a newline. */
     public static final String QUARANTINE_IMPLIES_SHA256 =

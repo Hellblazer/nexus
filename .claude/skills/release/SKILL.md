@@ -109,9 +109,7 @@ surfaces the whole fix list. The checks:
   release must pin an engine that can hold `nx-note://`; the floor leads the pin
   on develop, which no develop run checks), and when it is below
   `SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION` (RDR-243 Phase 2: a release must pin an
-  engine with vectors-055, or every `nx_answer` search step is refused), and when
-  it is below `QUARANTINE_EXPIRES_MIN_ENGINE_VERSION` (nexus-alsq3: a release must
-  pin an engine with vectors-056, or the engine refuses the client's chunk-key plan);
+  engine with vectors-055, or every `nx_answer` search step is refused);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under

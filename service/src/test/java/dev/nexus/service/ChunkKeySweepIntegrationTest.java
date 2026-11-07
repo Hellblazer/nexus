@@ -244,6 +244,33 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
     }
 
     @Test
+    void aKeyOutsideTheAllowListOnAQuarantineRowSurvivesTheSweep_theRetentionStampLivesThereOnPurpose()
+            throws Exception {
+        // nexus-alsq3: quarantine_expires_at is not an allow-list key (neither CHUNK nor ROW), so the sweep would
+        // strip it from a live row. It sits on a quarantine-* row, a bypass collection the sweep never reads.
+        String tenant = "sw-stamp";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        String quarantine = "quarantine-" + live;
+        String stamp = "2026-12-01T00:00:00Z";
+        assertThat((List<?>) plan().get("allowed_keys")).doesNotContain("quarantine_expires_at");
+        List<String> liveRow = seed(tenant, live, rows(
+            "stray", legacy(keyed(tenant, live, "stray", "quarantine_expires_at", stamp))));
+        List<String> quarantined = seed(tenant, quarantine, rows(
+            "q1", keyed(tenant, quarantine, "q1", "quarantined_at", "2026-11-01T00:00:00Z",
+                "origin_collection", live, "quarantine_expires_at", stamp)));
+
+        HttpResponse<String> r = sweep(token, applyBody());
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(metadataOf(tenant, quarantine, quarantined.get(0)))
+            .as("the stamp on a quarantine-* row is left alone").containsEntry("quarantine_expires_at", stamp);
+        assertThat(metadataOf(tenant, live, liveRow.get(0)))
+            .as("the same key on a live row is not on the allow-list, so the sweep strips it")
+            .doesNotContainKey("quarantine_expires_at");
+    }
+
+    @Test
     void anotherTenantAndTheBypassCollectionsAreUntouched() throws Exception {
         Fx mine = tenantFixture("sw-iso-a");
         Fx theirs = tenantFixture("sw-iso-b");

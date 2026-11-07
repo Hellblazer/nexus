@@ -540,9 +540,10 @@ def gc_cmd(
     retention this verb stamps on each row it moves (the move time plus
     ``NX_GC_QUARANTINE_DAYS``), so a longer value of that variable keeps
     knowledge quarantine longer on an engine that carries the stamp (nexus-alsq3).
-    An older engine ignores the stamp and deletes at its own retention, and a
-    row moved before the stamp existed keeps the engine's retention alone. The
-    two never conflict. A
+    The stamp is sent for a ``knowledge__*`` collection only, because nothing
+    else reads it. An older engine ignores the stamp and deletes at its own
+    retention, and a row moved before the stamp existed keeps the engine's
+    retention alone. The two never conflict. A
     chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
     engine alone, on its own retention. A chunk whose document is re-registered
     is restored automatically by the ``nx index repo`` run. The operator restore
@@ -901,9 +902,9 @@ def gc_cmd(
         f"NX_GC_QUARANTINE_DAYS (a later run of this verb, or of 'nx index repo' for a repo "
         f"collection, does it). An engine that expires client-moved knowledge quarantine "
         f"(a newer engine does, an older one does not) deletes them at the later of its own "
-        f"retention (default 14 days) and the retention this run stamped on them "
-        f"(NX_GC_QUARANTINE_DAYS from now); an engine that predates the stamp uses its own "
-        f"retention alone."
+        f"retention (default 14 days) and, for a knowledge collection, the retention this run "
+        f"stamped on them (NX_GC_QUARANTINE_DAYS from now); an engine that predates the stamp "
+        f"uses its own retention alone."
     )
     if moved < len(candidates):
         click.echo(
