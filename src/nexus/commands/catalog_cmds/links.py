@@ -333,8 +333,15 @@ def link_audit_cmd(as_json: bool) -> None:
 
 @click.command("links-for-file")
 @click.argument("file_path")
-def links_for_file_cmd(file_path: str) -> None:
+@click.option(
+    "--for-model", "for_model", is_flag=True, hidden=True,
+    help="The output goes into a model's context (the SubagentStart hook): withhold sensitive documents whatever the environment says.",
+)
+def links_for_file_cmd(file_path: str, for_model: bool) -> None:
     """Show catalog entries linked to a specific file.
+
+    A sensitive document (the file's own or a linked one) is the one-line stub under Claude Code and carries a
+    [sensitive] badge in a terminal (RDR-243 Q2).
 
     \b
     Examples:
@@ -342,7 +349,9 @@ def links_for_file_cmd(file_path: str) -> None:
       nx catalog links-for-file docs/rdr/rdr-060.md
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    from nexus.sensitive_output import cli_output_posture  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
+    posture = "withhold" if for_model else cli_output_posture()
     cat = _cat_cmd._get_catalog()
     # A PATH CAN NAME SEVERAL DOCUMENTS, and this command answers about a FILE.
     # Nothing forbids two catalog documents sharing a file_path — the only
@@ -365,46 +374,59 @@ def links_for_file_cmd(file_path: str) -> None:
             f"{', '.join(str(e.tumbler) for e in entries)}"
         )
     for entry in entries:
-        _echo_links_for_entry(cat, entry)
+        _echo_links_for_entry(cat, entry, posture)
 
 
-def _echo_links_for_entry(cat, entry) -> None:
-    """Print one document's header and its links, or 'No links.'"""
+def _echo_links_for_entry(cat, entry, posture: str = "flag") -> None:
+    """Print one document's header and its links, or 'No links.'
+
+    A sensitive document (the entry or a peer) is presented by ``nexus.sensitive_output`` under *posture* (RDR-243
+    Phase 3 fix r1, nexus-rfvyy.8): the stub line in place of its title, or its title with a badge."""
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 \u2014 deferred to avoid CLI startup cost
+    from nexus.sensitive_output import BADGE, present_entries, withheld_note  # noqa: PLC0415 \u2014 as above
+
     tumbler_str = str(entry.tumbler)
-    click.echo(f"{tumbler_str} {entry.content_type}: {entry.title}")
-
     links_out = cat.links_from(entry.tumbler)
     links_in  = cat.links_to(entry.tumbler)
 
-    all_link_rows = []
+    raw_rows = []  # (peer tumbler, peer entry or None, link type, direction)
     for lnk in links_out:
         peer = cat.resolve(lnk.to_tumbler) if hasattr(lnk, "to_tumbler") else None
-        to_t = getattr(lnk, "to_tumbler", "")
-        all_link_rows.append((
-            str(to_t),
-            peer.title if peer else str(to_t),
-            peer.content_type if peer else "",
-            getattr(lnk, "link_type", ""),
-            "outgoing",
-        ))
+        raw_rows.append((str(getattr(lnk, "to_tumbler", "")), peer, getattr(lnk, "link_type", ""), "outgoing"))
     for lnk in links_in:
         peer = cat.resolve(lnk.from_tumbler) if hasattr(lnk, "from_tumbler") else None
-        from_t = getattr(lnk, "from_tumbler", "")
-        all_link_rows.append((
-            str(from_t),
-            peer.title if peer else str(from_t),
-            peer.content_type if peer else "",
-            getattr(lnk, "link_type", ""),
-            "incoming",
-        ))
+        raw_rows.append((str(getattr(lnk, "from_tumbler", "")), peer, getattr(lnk, "link_type", ""), "incoming"))
+
+    peers = {t: p for t, p, _l, _d in raw_rows if p is not None}
+    presented = present_entries(cat, [entry, *peers.values()], posture=posture)
+    shown = {str(r.get("tumbler", "")): r for r in presented.rows}
+
+    if presented.shown_sensitive:
+        click.echo(SENSITIVE_READER_CLAUSE)
+    head = shown.get(tumbler_str, {})
+    if head.get("withheld"):
+        click.echo(f"{head['withheld']} ({entry.content_type})")
+    else:
+        click.echo(f"{tumbler_str} {entry.content_type}: {entry.title}" + (f" {BADGE}" if head.get("badge") else ""))
+
+    all_link_rows = []
+    for t, peer, l_type, direction in raw_rows:
+        row = shown.get(str(peer.tumbler), {}) if peer is not None else {}
+        t_type = peer.content_type if peer else ""
+        if row.get("withheld"):
+            label = row["withheld"]
+        else:
+            label = f"{t} {t_type}: {peer.title if peer else t}" + (f" {BADGE}" if row.get("badge") else "")
+        all_link_rows.append((label, t_type, l_type, direction))
 
     if not all_link_rows:
         click.echo("  No links.")
-        return
-
-    for t, t_title, t_type, l_type, direction in sorted(all_link_rows, key=lambda r: (r[3], r[2])):
-        arrow = "\u2192" if direction == "outgoing" else "\u2190"
-        click.echo(f"  {arrow} [{l_type}] {t} {t_type}: {t_title}")
+    else:
+        for label, _t_type, l_type, direction in sorted(all_link_rows, key=lambda r: (r[2], r[1])):
+            arrow = "\u2192" if direction == "outgoing" else "\u2190"
+            click.echo(f"  {arrow} [{l_type}] {label}")
+    if presented.withheld:
+        click.echo(f"[{withheld_note(presented.withheld)}]")
 
 
 @click.command("link-density")

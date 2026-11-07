@@ -49,6 +49,7 @@ from nexus import sensitivity as _sensitivity  # reads go through the module so 
 from nexus.sensitivity import ReadSensitivity, bound_to
 from nexus.sensitive_output import (
     BADGE as _SENSITIVE_BADGE,
+    chunk_row_facts as _chunk_row_facts,
     first_sensitive_owner as _first_sensitive_owner,
     hit_facts as _hit_facts,
     hit_is_sensitive as _hit_is_sensitive,
@@ -6556,12 +6557,9 @@ def store_get(
         # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture. The engine's flag on the row, or a live owner the
         # catalog flags, makes the note sensitive; withheld, nothing of it (id, collection, title, tags, body) is
         # printed beyond the stub.
-        _sens_owners = tuple(
-            str(getattr(o, "tumbler", "")) for o in (owners or ()) if getattr(o, "sensitive", False) is True
-        )
-        posture = _OutputPosture.for_facts([
-            (_hit_is_sensitive(entry.get("sensitive"), _sens_owners), _sens_owners, str(entry["id"])),
-        ])
+        # An unreadable catalog (owners None) is sensitive, as in store_list (nexus-rfvyy.8 fix r1).
+        _sens, _sens_owners = _chunk_row_facts(entry.get("sensitive"), owners)
+        posture = _OutputPosture.for_facts([(_sens, _sens_owners, str(entry["id"]))])
         if posture.withheld(0):
             return "\n".join([posture.stub(0), posture.note_line()])
         shown = note_display(
@@ -7614,15 +7612,12 @@ def store_list(
         # stub in the same slot, and the page says how many.
         _page_facts: list[_HitFacts] = []
         for e in page:
-            _owners = tuple(
-                str(getattr(o, "tumbler", ""))
-                for o in ((owner_map or {}).get(e.get("id", ""), ()))
-                if getattr(o, "sensitive", False) is True
-            )
             # An unreadable catalog (owner_map None) is "could not look", not "no owner": every row is withheld, as
             # the document view treats it (nexus-rfvyy.8 fix r1, review B1).
-            _flag = True if owner_map is None else e.get("sensitive")
-            _page_facts.append((_hit_is_sensitive(_flag, _owners), _owners, str(e.get("id", ""))))
+            _sens, _owners = _chunk_row_facts(
+                e.get("sensitive"), None if owner_map is None else owner_map.get(e.get("id", ""), []),
+            )
+            _page_facts.append((_sens, _owners, str(e.get("id", ""))))
         posture = _OutputPosture.for_facts(_page_facts)
         for _idx, e in enumerate(page):
             if posture.withheld(_idx):
@@ -9646,11 +9641,29 @@ def collection_info(name: str) -> str:
         if count > 0:
             peek = db.list_store(name, limit=5, offset=0)
             if peek:
+                # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): a sample title is a note's title, content to the session
+                # model: a sensitive note (the row's flag, a live owner the catalog flags, or an unreadable catalog)
+                # is the stub, as in store_list.
+                from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+                owner_map = _store_hook.live_owner_entries(name, [e.get("id", "") for e in peek])
+                posture = _OutputPosture.for_facts([
+                    (*_chunk_row_facts(e.get("sensitive"), None if owner_map is None else owner_map.get(e.get("id", ""), [])),
+                     str(e.get("id", "")))
+                    for e in peek
+                ])
                 lines.append("")
+                if posture.shown_sensitive:
+                    lines.append(_sensitive_reader_clause())
                 lines.append("Sample entries:")
-                for e in peek:
+                for i, e in enumerate(peek):
+                    if posture.withheld(i):
+                        lines.append(f"  - {posture.stub(i)}")
+                        continue
                     title = (e.get("title") or "untitled")[:60]
-                    lines.append(f"  - {title}")
+                    lines.append(f"  - {title}" + (f"  {_SENSITIVE_BADGE}" if posture.flagged(i) else ""))
+                if note := posture.note_line():
+                    lines.append(note)
 
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
