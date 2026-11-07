@@ -381,7 +381,8 @@ and leave legacy entries as they parse today:
    lone `ask:` line is legacy prose whatever its value (`ask: sam` is a note
    to Sam). An `ask:` line that opens no block but has ask-level lines after
    it, because its id is not `[a-z0-9-]{1,40}` or because a thread field
-   comes between, is an unopened ask: the board shows it as needing Sam,
+   comes between (then a `question` line must be among them, and a lone
+   `ask: sam` is never read this way), is an unopened ask: the board shows it as needing Sam,
    names the cause, and `nx ask lint` flags it. Ask keys outside a block are
    notes.
 3. Inside an ask block the Sam-mention backstop (`_is_ask_key`,

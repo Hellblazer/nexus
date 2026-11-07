@@ -1092,6 +1092,19 @@ def test_a_bad_id_with_fields_after_a_thread_field_names_both_causes() -> None:
     assert "thread field" in u.reason and "[a-z0-9-]" in u.reason
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "## T\nask: sam\nstate: x\ncontext: c\nwhy: w\n",  # the legacy note to Sam, later ask-ish keys
+        "## T\nask: pick-port\nstate: x\ncontext: c\n",  # ask keys after a thread field but no question
+    ],
+)
+def test_the_late_scan_needs_a_question_and_never_takes_a_legacy_ask_sam(content: str) -> None:
+    (t,) = parse_session("e", content).threads
+    assert t.unopened == ()
+    assert ("ask-after-thread-field" not in {k for k, _ in pairs(findings(row("e", content)))})
+
+
 def test_a_valid_id_note_beside_a_structured_ask_is_not_a_bad_id() -> None:
     content = entry_text(ask_text("a1")) + "ask: ok\n"
     found = findings(row("e", content))

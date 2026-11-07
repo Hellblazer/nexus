@@ -458,6 +458,10 @@ def parse_session(name: str, content: str) -> Session:
             # an ask: line that opens no block still ends the open block; what follows is outside it
             close_block()
             late = [] if following else _following_fields(lines, i, past_thread_fields=True)
+            if field[1].strip().lower() == "sam" or not any(k == "question" for k, _ in late):
+                # the late scan reaches past thread fields, so it needs a stronger signal than any ask key:
+                # a legacy `ask: sam` is a note to Sam, and fields with no question are not a split ask
+                late = []
             if following or late:
                 # ask-level lines follow, but no block can hold them (a bad id, or a thread field in between):
                 # the writer meant a structured ask. Say so instead of losing it.
