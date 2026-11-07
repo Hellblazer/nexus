@@ -304,9 +304,9 @@ class VectorSensitivityExcludeIntegrationTest {
     private static Field<?> nullDouble() { return DSL.val(null, SQLDataType.DOUBLE); }
     private static Field<?> nullBytea() { return DSL.val(null, SQLDataType.VARBINARY.array()); }
 
-    private static Table<?> fnTable(String fn, int dim, boolean exclude, Field<?>... args) {
+    private static Table<?> fnTable(String fn, int dim, Boolean exclude, Field<?>... args) {
         List<Field<?>> all = new ArrayList<>(List.of(args));
-        all.add(DSL.val(exclude));
+        all.add(DSL.val(exclude, SQLDataType.BOOLEAN));
         StringBuilder sql = new StringBuilder("nexus.").append(fn);
         if (dim > 0) sql.append('_').append(dim);
         sql.append('(');
@@ -315,18 +315,26 @@ class VectorSensitivityExcludeIntegrationTest {
         return DSL.table(sql.toString(), all.toArray(new QueryPart[0]));
     }
 
-    private Result<Record> call(String fn, int dim, boolean exclude, Field<?>... args) {
+    private Result<Record> call(String fn, int dim, Boolean exclude, Field<?>... args) {
         Table<?> t = fnTable(fn, dim, exclude, args);
         return scope.withTenant(TENANT, ctx -> ctx.select().from(t).fetch());
     }
 
     /** The chunk hashes (hex) the family returns for the fixture's query, nearest first. */
-    private List<String> run(Family family, int dim, boolean exclude, int n) {
+    private List<String> run(Family family, int dim, Boolean exclude, int n) {
+        return runIn(family, dim, exclude, n, textArray(coll(dim)),
+            hexes(S1, X, S2, "n1", "n2", "n3", "n4", "n5", "n6"));
+    }
+
+    /**
+     * {@link #run} over a chosen {@code p_collections} and chash allow-list ({@code exclude} may be null: the flag is
+     * passed as a SQL NULL). search_topic_scoped takes one collection, not an array, so it always searches
+     * {@code coll(dim)}.
+     */
+    private List<String> runIn(Family family, int dim, Boolean exclude, int n, Field<?> colls, List<String> all) {
         String c = coll(dim);
         Field<?> m = DSL.val(MODELS.get(dim));
         Field<?> t = DSL.val(TENANT);
-        Field<?> colls = textArray(c);
-        List<String> all = hexes(S1, X, S2, "n1", "n2", "n3", "n4", "n5", "n6");
         Result<Record> r;
         String col = "id";
         switch (family.fn()) {
@@ -414,6 +422,107 @@ class VectorSensitivityExcludeIntegrationTest {
         }
     }
 
+    /**
+     * An explicit NULL flag excludes, as the first form of the predicate (NOT p OR NOT EXISTS) did: the sublink's
+     * flag reads {@code IS NOT FALSE}, so only a false flag is "include" (nexus-rfvyy.7.16 review S1). A raw-SQL
+     * caller with a NULL must not get sensitive chunks back.
+     */
+    @ParameterizedTest(name = "{0} at {1}")
+    @MethodSource("familyByDim")
+    void nullFlag_excludes_failsClosed(Family family, int dim) {
+        List<String> got = run(family, dim, null, 10);
+        assertThat(got).as("a NULL p_exclude_sensitive withholds the sensitive chunks")
+            .doesNotContainAnyElementsOf(SENSITIVE_HEX);
+        assertThat(got).containsExactlyInAnyOrderElementsOf(hexes("n1", "n2", "n3", "n4", "n5", "n6"));
+    }
+
+    @ParameterizedTest(name = "manifest_qualifying_hits at {0}")
+    @ValueSource(ints = {384, 768, 1024})
+    void manifestQualifyingHits_nullFlag_excludes(int dim) {
+        assertThat(qualifying(dim, null)).containsExactlyInAnyOrderElementsOf(hexes("n1", "n2", "n3", "n4", "n5", "n6"));
+    }
+
+    // ── two collections, the sensitive owner in the second, a NULL element in the array ──
+
+    private static final String BS = "bs", BN = "bn";
+    private final Set<Integer> secondSeeded = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    static String collB(int dim) {
+        return coll(dim).replace("rfvyy73-", "rfvyy73b-");
+    }
+
+    /** One sensitive chunk (bs, near the query) and one plain chunk (bn) in a second collection of the same model. */
+    private void seedSecondCollection(int dim) throws Exception {
+        if (!secondSeeded.add(dim)) return;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            String collection = collB(dim);
+            PgContainerHelper.insertCollection(dsl, TENANT, collection);
+            String model = PgContainerHelper.collectionModel(dsl, TENANT, collection);
+            assertThat(model).isEqualTo(MODELS.get(dim));
+            String seed = tumbler("seed", dim);
+            for (var e : Map.of(BS, 0.01, BN, 0.3).entrySet()) {
+                String key = e.getKey();
+                double theta = e.getValue();
+                String doc = tumbler(key, dim);
+                byte[] chash = HexFormat.of().parseHex(hex(key));
+                dsl.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
+                    .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, text(key))
+                    .set(VectorSeeds.chunkEmbedding(dim),
+                         VectorSeeds.vecXY(dim, (float) Math.cos(theta), (float) Math.sin(theta)))
+                    .execute();
+                dsl.insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
+                    .set(CATALOG_DOCUMENTS.TITLE, "Doc " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                    .set(CATALOG_DOCUMENTS.SENSITIVE, BS.equals(key))
+                    .execute();
+                dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                    .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
+                    .execute();
+                dsl.insertInto(DOCUMENT_ASPECTS)
+                    .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT).set(DOCUMENT_ASPECTS.COLLECTION, collection)
+                    .set(DOCUMENT_ASPECTS.SOURCE_PATH, doc).set(DOCUMENT_ASPECTS.PROPOSED_METHOD, "gradient descent")
+                    .set(DOCUMENT_ASPECTS.CONFIDENCE, 0.9).set(DOCUMENT_ASPECTS.EXTRACTED_AT, SEED_TS)
+                    .set(DOCUMENT_ASPECTS.MODEL_VERSION, "rfvyy73").set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "rfvyy73")
+                    .set(DOCUMENT_ASPECTS.DOC_ID, doc).set(DOCUMENT_ASPECTS.SOURCE_URI, "rfvyy73://" + doc)
+                    .execute();
+                dsl.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
+                        CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE, CATALOG_LINKS.CREATED_BY)
+                    .values(TENANT, seed, doc, "cites", "test")
+                    .execute();
+            }
+        }
+    }
+
+    /** Every family that takes an array of collections (search_topic_scoped takes one). */
+    static Stream<org.junit.jupiter.params.provider.Arguments> arrayFamilyByDim() {
+        return familyByDim().filter(a -> !"search_topic_scoped".equals(((Family) a.get()[0]).fn()));
+    }
+
+    @ParameterizedTest(name = "{0} at {1}")
+    @MethodSource("arrayFamilyByDim")
+    void exclude_holdsOverTwoCollections_whenTheSensitiveOwnerSitsInTheSecond_andTheArrayHoldsANull(Family family,
+                                                                                                    int dim)
+            throws Exception {
+        seedSecondCollection(dim);
+        Field<?> colls = DSL.val(new String[] {coll(dim), collB(dim), null}, SQLDataType.VARCHAR.array());
+        List<String> all = hexes(S1, X, S2, "n1", "n2", "n3", "n4", "n5", "n6", BS, BN);
+        List<String> baseline = runIn(family, dim, false, 20, colls, all);
+        assertThat(baseline).as("baseline: the second collection's sensitive chunk is searched too")
+            .contains(hex(BS));
+        List<String> excluded = runIn(family, dim, true, 20, colls, all);
+        assertThat(excluded).as("the sensitive owner in the second collection excludes its chunk")
+            .doesNotContain(hex(BS)).doesNotContainAnyElementsOf(SENSITIVE_HEX);
+        assertThat(new LinkedHashSet<>(excluded)).as("every non-sensitive chunk of both collections")
+            .containsExactlyInAnyOrderElementsOf(hexes("n1", "n2", "n3", "n4", "n5", "n6", BN));
+    }
+
     @ParameterizedTest(name = "manifest_qualifying_hits at {0}")
     @ValueSource(ints = {384, 768, 1024})
     void manifestQualifyingHits_excludesSensitiveChunks_andTracksTheTombstone(int dim) throws Exception {
@@ -430,7 +539,7 @@ class VectorSensitivityExcludeIntegrationTest {
         }
     }
 
-    private Set<String> qualifying(int dim, boolean exclude) {
+    private Set<String> qualifying(int dim, Boolean exclude) {
         String c = coll(dim);
         Result<Record> r = call("manifest_qualifying_hits", 0, exclude, textArray(c), nullJsonb(), nullText(),
                                 nullJsonb(), nullText(), DSL.val(100), DSL.val(MODELS.get(dim)), DSL.val(TENANT),
@@ -438,6 +547,12 @@ class VectorSensitivityExcludeIntegrationTest {
         Set<String> out = new LinkedHashSet<>();
         for (Record rec : r) out.add(HexFormat.of().formatHex(rec.get("chunk_chash", byte[].class)));
         return out;
+    }
+
+    private static int countOf(String haystack, String needle) {
+        int n = 0;
+        for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length())) n++;
+        return n;
     }
 
     @Test
@@ -468,7 +583,18 @@ class VectorSensitivityExcludeIntegrationTest {
             for (var rec : rows) {
                 String fn = rec.get(name);
                 assertThat(rec.get(args)).as(fn).endsWith("p_exclude_sensitive boolean DEFAULT false");
-                assertThat(rec.get(src)).as(fn).contains("p_exclude_sensitive").contains("sd.sensitive");
+                String body = rec.get(src);
+                assertThat(body).as(fn).contains("sd.sensitive");
+                // one sensitive sublink, its flag the first conjunct inside it, NULL = exclude (IS NOT FALSE), never
+                // the OR form that keeps the sublink out of the anti join, and the function's own collection
+                // restriction repeated (nexus-rfvyy.7.16 R1, R2 and review S1)
+                assertThat(countOf(body, "p_exclude_sensitive")).as(fn + ": the flag appears once").isEqualTo(1);
+                assertThat(body).as(fn).contains("WHERE p_exclude_sensitive IS NOT FALSE")
+                    .doesNotContain("NOT p_exclude_sensitive OR");
+                String restriction = fn.startsWith("search_topic_scoped")
+                    ? "AND sm.collection = p_collection" : "AND sm.collection = ANY(p_collections)";
+                assertThat(countOf(body, restriction)).as(fn + ": the sublink repeats the collection restriction")
+                    .isEqualTo(1);
                 assertThat(rec.get(svcExec)).as(fn + " nexus_svc EXECUTE").isTrue();
             }
         }
@@ -1008,7 +1134,7 @@ class VectorSensitivityExcludeIntegrationTest {
         assertThat(on).as("exclude=true: the sensitive owner test is part of the statement").contains("sensitive");
         assertThat(on).as("a plain NOT EXISTS over the owners, not a function call per row")
             .doesNotContain("chunk_sensitive");
-        assertThat(off).as("exclude=false: the term is folded away, the plan is the one it was")
+        assertThat(off).as("exclude=false: the sensitive term never reaches the plan text (the flag folds it to a constant)")
             .doesNotContain("sensitive");
     }
 

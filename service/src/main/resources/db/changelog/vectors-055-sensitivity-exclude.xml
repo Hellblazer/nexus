@@ -8,11 +8,13 @@
     predicate (beside the chunk_live_owners test, or beside d.deleted_at IS NULL in the document-level families):
         AND NOT EXISTS (
                 SELECT 1 FROM nexus.catalog_document_chunks sm JOIN nexus.catalog_documents sd ON ...
-                 WHERE p_exclude_sensitive AND sm.tenant_id = c.tenant_id AND sm.collection = c.collection
+                 WHERE p_exclude_sensitive IS NOT FALSE AND sm.tenant_id = c.tenant_id AND sm.collection = c.collection
                    AND sm.collection = ANY(p_collections)
                    AND sm.chash = c.chash AND sd.deleted_at IS NULL AND sd.sensitive)
     so the HNSW iterative scan fills k from rows that are not sensitive; a post-filter would return a short page. The
-    flag sits INSIDE the sublink (nexus-rfvyy.7.16): written as NOT p_exclude_sensitive OR NOT EXISTS (...) the sublink
+    flag is read IS NOT FALSE: only false includes, and an explicit NULL excludes, as the first form below did (fail
+    closed; Java passes a primitive boolean, so only a raw-SQL caller can pass NULL). With false the qual still
+    constant-folds. The flag sits INSIDE the sublink (nexus-rfvyy.7.16): written as NOT p_exclude_sensitive OR NOT EXISTS (...) the sublink
     stays inside an OR, the planner cannot pull it up, and it builds a hashed SubPlan, a Seq Scan of the tenant's whole
     manifest once per statement (+46 ms at 128k manifest rows, linear in manifest size). Unconditional, the NOT EXISTS
     is pulled up to an anti join that probes the manifest per candidate row by idx_catalog_chunks_chash (tenant_id,
@@ -24,8 +26,12 @@
     planner cannot derive (a = ANY(array) qual is not an equivalence class). On the exact route (a small collection,
     index scans off, a Bitmap Heap Scan under a Sort) the planner has thousands of candidate rows, prefers a Hash Anti
     Join to per-row probes, and without the restriction builds the hash from a Seq Scan of the tenant's whole manifest
-    (R2 of nexus-rfvyy.7.16: cost linear in manifest size). With it the build side reads the searched collections' manifest
-    through idx_catalog_chunks_collection (tenant_id, collection), so the cost follows the collection, not the tenant. The
+    (R2 of nexus-rfvyy.7.16: cost linear in manifest size). With it the manifest side of the build reads the searched
+    collections' manifest through idx_catalog_chunks_collection (tenant_id, collection), so that term follows the
+    collection, not the tenant's manifest. The document side of the build does not: it is the tenant's live sensitive
+    documents (idx_catalog_documents_sensitive_live), whatever the collection. That term grows with the tenant's live
+    sensitive documents: 2504 to 10295 of them moved the exact-route cost, exclude=true minus exclude=false, from 17.4
+    to 19.7 ms, about 0.3 us per sensitive document (a million would be about 300 ms, extrapolated, not measured). The
     join is the one nexus.chunk_sensitive (catalog-047-3) runs: a chunk is sensitive when ANY LIVE owner is, so a chunk
     shared by a sensitive live document and a non-sensitive one is excluded, and comes back once the sensitive owner is
     tombstoned. It is written out here rather than calling chunk_sensitive because the planner cannot inline a scalar
@@ -98,7 +104,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -137,7 +143,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -176,7 +182,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -216,7 +222,7 @@ AS $function$
                      FROM nexus.catalog_document_chunks sm
                      JOIN nexus.catalog_documents sd
                        ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                    WHERE p_exclude_sensitive
+                    WHERE p_exclude_sensitive IS NOT FALSE
                       AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
                       AND sm.collection = ANY(p_collections)
@@ -260,7 +266,7 @@ AS $function$
                      FROM nexus.catalog_document_chunks sm
                      JOIN nexus.catalog_documents sd
                        ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                    WHERE p_exclude_sensitive
+                    WHERE p_exclude_sensitive IS NOT FALSE
                       AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
                       AND sm.collection = ANY(p_collections)
@@ -304,7 +310,7 @@ AS $function$
                      FROM nexus.catalog_document_chunks sm
                      JOIN nexus.catalog_documents sd
                        ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                    WHERE p_exclude_sensitive
+                    WHERE p_exclude_sensitive IS NOT FALSE
                       AND sm.tenant_id  = c.tenant_id
                       AND sm.collection = c.collection
                       AND sm.collection = ANY(p_collections)
@@ -348,7 +354,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -496,7 +502,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -644,7 +650,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -792,7 +798,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -833,7 +839,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -874,7 +880,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -915,7 +921,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -955,7 +961,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -995,7 +1001,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1034,7 +1040,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1074,7 +1080,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1114,7 +1120,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1253,7 +1259,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1399,7 +1405,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1545,7 +1551,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1693,7 +1699,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1844,7 +1850,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -1995,7 +2001,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -2162,7 +2168,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -2320,7 +2326,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -2478,7 +2484,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)
@@ -2524,7 +2530,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = p_collection
@@ -2566,7 +2572,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = p_collection
@@ -2608,7 +2614,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = p_collection
@@ -2736,7 +2742,7 @@ AS $function$
                  FROM nexus.catalog_document_chunks sm
                  JOIN nexus.catalog_documents sd
                    ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
-                WHERE p_exclude_sensitive
+                WHERE p_exclude_sensitive IS NOT FALSE
                   AND sm.tenant_id  = c.tenant_id
                   AND sm.collection = c.collection
                   AND sm.collection = ANY(p_collections)

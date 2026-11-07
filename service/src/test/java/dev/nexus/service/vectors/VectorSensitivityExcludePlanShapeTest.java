@@ -64,7 +64,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * tenant's whole manifest joined to the sensitive documents, once per statement (+46 ms at 128k manifest rows, linear
  * in manifest size; the T2 record nexus_rdr/243-plan-evidence-2026-11-06). The flag now sits inside the sublink, which
  * makes the sublink unconditional, so it is an anti join; with the flag false the inner qual is a constant false and the
- * test folds away (the folding check below covers all 30 functions).
+ * test folds away (the folding checks below cover all 31 functions: the 30 family-by-dimension calls and
+ * manifest_qualifying_hits).
  *
  * <p><b>The metadata family is read under reachability.</b> At 6000 rows per collection the natural plan of
  * {@code search_metadata_scoped} is a Seq or Bitmap scan of the chunks leaf joined to the manifest, with or without
@@ -74,7 +75,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * make the index unreachable. Plain and manifest search are read with the natural planner, no {@code enable_*} setting.
  *
  * <p><b>Scope.</b> 6000 chunks per collection, 10 percent sensitive documents, one dimension (384) for the plan
- * assertions; the folding check covers all 30 dimension-specific functions. Custom plans only (the serving
+ * assertions; the folding checks cover all 31 functions. Custom plans only (the serving
  * {@code plan_cache_mode}). Latency is not measured here.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -268,7 +269,33 @@ class VectorSensitivityExcludePlanShapeTest {
     // -- the plans ---------------------------------------------------------------------------------------
 
     enum Fn {
-        PLAIN, MANIFEST, METADATA
+        PLAIN, MANIFEST, METADATA,
+        /** The two text-gated functions run only on the exact route (a chash allow-list), so only that test uses them. */
+        TEXT_ALLOWED, TEXT_BY_CHASH
+    }
+
+    private static final String HNSW_FAMILIES = "PLAIN,MANIFEST,METADATA";
+
+    /** The chashes of every chunk of EXACT (seedCollection derives them as sha256(collection|i)). */
+    private static byte[][] exactChashes() {
+        byte[][] out = new byte[EXACT_ROWS][];
+        for (int i = 0; i < EXACT_ROWS; i++) out[i] = sha256(EXACT + "|" + i);
+        return out;
+    }
+
+    private Table<?> textGatedCall(boolean byChash, String collection, boolean exclude) {
+        Field<?> chashes = DSL.val(exactChashes(), SQLDataType.VARBINARY.array());
+        Field<?> m = DSL.val(MODEL);
+        Field<?> t = DSL.val(TENANT);
+        Field<?> n = DSL.val(K);
+        List<Field<?>> a = byChash
+            ? List.of(vec(384), chashes, textArray(collection), nullJsonb(), nullText(), n, m, t, DSL.val(exclude))
+            : List.of(vec(384), DSL.val("t1"), chashes, textArray(collection), nullJsonb(), nullText(), n, m, t,
+                      DSL.val(exclude));
+        StringBuilder sql = new StringBuilder(byChash ? "nexus.text_gated_search_by_chash_384(" :
+            "nexus.text_gated_search_allowed_384(");
+        for (int i = 0; i < a.size(); i++) sql.append(i == 0 ? "{0}" : ", {" + i + "}");
+        return DSL.table(sql.append(')').toString(), a.toArray(new QueryPart[0]));
     }
 
     private Table<?> call(Fn fn, String collection, boolean exclude) {
@@ -279,6 +306,8 @@ class VectorSensitivityExcludePlanShapeTest {
                 TENANT, exclude);
             case METADATA -> SEARCH_METADATA_SCOPED_384.call(query, colls, null, null, null, null, null, null, null,
                 null, K, MODEL, TENANT, exclude);
+            case TEXT_ALLOWED -> textGatedCall(false, collection, exclude);
+            case TEXT_BY_CHASH -> textGatedCall(true, collection, exclude);
         };
     }
 
@@ -549,13 +578,13 @@ class VectorSensitivityExcludePlanShapeTest {
     // -- exclude = true: the three families, shared and PCI ----------------------------------------------
 
     @ParameterizedTest(name = "{0} walks the shared leaf index")
-    @EnumSource(Fn.class)
+    @EnumSource(value = Fn.class, names = {"PLAIN", "MANIFEST", "METADATA"})
     void excludeTrue_sharedLeafIndex_drivesTheScan_andTheSensitiveTestIsAnAntiJoinAboveIt(Fn fn) {
         assertExcludeShape(fn, SHARED, "embedding_384");
     }
 
     @ParameterizedTest(name = "{0} walks the per-collection index")
-    @EnumSource(Fn.class)
+    @EnumSource(value = Fn.class, names = {"PLAIN", "MANIFEST", "METADATA"})
     void excludeTrue_perCollectionIndex_drivesTheScan_andTheSensitiveTestIsAnAntiJoinAboveIt(Fn fn) {
         assertExcludeShape(fn, PCI, PCI_INDEX);
     }
@@ -623,6 +652,37 @@ class VectorSensitivityExcludePlanShapeTest {
         // exclude=false still folds the test away on this route
         String off = explainExact(call(fn, EXACT, false));
         assertThat(carriesSensitiveTest(parse(off))).as("exclude=false%n%s", off).isFalse();
+    }
+
+    /**
+     * The exact route with nested loops and merge joins penalised, so the anti join is a hash anti join whatever the
+     * row estimates. The natural plan of search_metadata_scoped and text_gated_search_allowed is a nested loop (their
+     * filters estimate a handful of candidate rows), in which the collection restriction changes nothing; this is the
+     * plan the same statement takes when the estimate is large, and it is where a missing restriction costs (R2).
+     */
+    private String explainExactHash(Table<?> fn) {
+        return scope.withTenant(TENANT, ctx -> {
+            PgSession.disableIndexScanForExactFallback(ctx);
+            PgSession.setSearchPlanCacheMode(ctx);
+            // set_config(..., true) is SET LOCAL; PgSession.setLocal whitelists only the serving settings
+            for (String guc : List.of("enable_nestloop", "enable_mergejoin")) {
+                ctx.select(DSL.function("set_config", String.class, DSL.inline(guc), DSL.inline("off"),
+                    DSL.inline(true))).fetch();
+            }
+            return PgContainerHelper.explainPlan(ctx, ctx.select().from(fn));
+        });
+    }
+
+    @ParameterizedTest(name = "{0} on the exact route, hash anti join forced")
+    @EnumSource(Fn.class)
+    void excludeTrue_exactRoute_aHashAntiJoinBuildsFromTheSearchedCollection(Fn fn) {
+        String on = explainExactHash(call(fn, EXACT, true));
+        Parsed p = parse(on);
+        assertThat(p.nodes().stream().filter(Node::mainPlan).anyMatch(n -> n.type().startsWith("Hash")
+                && n.type().contains("Anti Join")))
+            .as("the forced plan is a hash anti join%n%s", on).isTrue();
+        assertThat(exactRouteFailures(p)).as("%s on %s, exclude=true, hash anti join forced%n%s", fn, EXACT, on)
+            .isEmpty();
     }
 
     /** The R2 plan: a hash anti join whose build side is a Seq Scan of the tenant's whole manifest. */
@@ -772,6 +832,27 @@ class VectorSensitivityExcludePlanShapeTest {
             .isTrue();
         assertThat(off).as("%s_%d, exclude=false: nothing of the sensitive owner test reaches the plan", fn, dim)
             .doesNotContain("sensitive").doesNotContain(" sm ").doesNotContain(" sd ");
+    }
+
+    /** manifest_qualifying_hits, the 31st function: not a family-by-dimension call, so it has its own fold check. */
+    private static Table<?> qualifyingHitsCall(boolean exclude) {
+        List<Field<?>> a = List.of(textArray(SHARED), nullJsonb(), nullText(), nullJsonb(), nullText(), DSL.val(100),
+            DSL.val(MODEL), DSL.val(TENANT), nullText(), DSL.val(exclude));
+        StringBuilder sql = new StringBuilder("nexus.manifest_qualifying_hits(");
+        for (int i = 0; i < a.size(); i++) sql.append(i == 0 ? "{0}" : ", {" + i + "}");
+        return DSL.table(sql.append(')').toString(), a.toArray(new QueryPart[0]));
+    }
+
+    @Test
+    void manifestQualifyingHits_foldsTheSensitiveTestAway_andExcludeTrueCarriesIt() {
+        String off = explain(qualifyingHitsCall(false), false, false);
+        String on = explain(qualifyingHitsCall(true), false, false);
+        assertThat(carriesSensitiveTest(parse(on)))
+            .as("exclude=true: the positive control, a plan that carries the sensitive test%n%s", on).isTrue();
+        assertThat(carriesSensitiveTest(parse(off)))
+            .as("exclude=false: nothing in the plan carries the sensitive test%n%s", off).isFalse();
+        assertThat(antiJoinsAreFoldedToNothing(parse(off))).as("exclude=false%n%s", off).isTrue();
+        assertThat(off).doesNotContain("sensitive").doesNotContain(" sm ").doesNotContain(" sd ");
     }
 
     // -- the parser and the assertions can fail --------------------------------------------------------------
