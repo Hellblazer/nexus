@@ -1257,3 +1257,4 @@ scope change and the round 2 findings named.
   calls, the 60 s default against RDR-240's A2, the Phase 1 cost
   measurement, Phase 1 Step 1 on a bare child process, and the static
   check in the worker. Technical Design renumbered 1 to 13.
+- 2026-11-07: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `55954c930`; critique `nexus_rdr/242-gate-critique-2026-11-07-r3`.
