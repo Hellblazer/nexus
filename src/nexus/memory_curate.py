@@ -15,7 +15,8 @@ likely near-duplicates for review instead, by the measure on :func:`near_duplica
 ``--t2`` lists live T2 rows that a later row names as replaced, skipping audit records (the
 AUDIT_TAGS table, tags and title backstop), rows tagged ``superseded`` and titles that are only a
 number, and RDR-209 Phase 3 Step 4's census flag (a phase is closed when its RDR's status is
-closed, or when its own ``### Phase N`` heading says CLOSED, SHIPPED, DONE or COMPLETE, nexus-qo7ie.28). It
+closed, or when its own ``## Phase N`` to ``#### Phase N`` heading carries the marker the phase-review-gate close step
+writes, nexus-qo7ie.28). It
 reads every row of the repo's projects once (``get_all``), so a project with thousands of
 rows costs one large read; run it at a release step, not in a loop.
 
@@ -291,7 +292,6 @@ class T2Findings:
     skipped_audit: int = 0
     census: list[CensusHit] = field(default_factory=list)
     census_unmapped: int = 0
-    census_phase_unknown: int = 0  # old gate records of an open RDR whose phase could not be read
 
 
 _NAMES_REPLACED = re.compile(r"\b(?:replaces|supersedes)\b\s*:?\s*(.+)", re.IGNORECASE)
@@ -301,22 +301,25 @@ _RDR_TITLE = re.compile(r"^(?:rdr-)?0*(\d+)(?!\d)", re.IGNORECASE)
 #: A row titled "100" or "RDR-107" is never a replaced candidate: an incidental number after "supersedes"
 #: in a research finding names an RDR, not a row (measured on the first live run: 2 of 6 candidates).
 _BARE_NUMBER_TITLE = re.compile(r"^(?:rdr-)?[0-9]+$", re.IGNORECASE)
-_PHASE_TAG = re.compile(r"^phase:0*(\d+[a-z]?)$", re.IGNORECASE)
-#: A title piece naming a phase: ``-p3a-`` (phase 3, review A), ``-phase-2-``, ``-phase2-``. Only the
-#: digits are kept: a letter after them in a title names a review round, not a sub-phase.
-_PHASE_TITLE = re.compile(r"(?:^|[-_])(?:p|phase[-_]?)0*(\d+)(?=[a-z]?(?:[-_]|$))", re.IGNORECASE)
-#: A phase heading in an RDR: ``## Phase 3 ...`` to ``#### Phase 3 ...`` (``# Phase`` is a document title).
-_PHASE_HEADING = re.compile(r"^#{2,4}\s+Phase\s+0*(\d+[a-z]?)\b(.*)$", re.IGNORECASE)
-_PHASE_CLOSED_MARK = re.compile(r"\b(?:closed|shipped|done|complete|completed)\b", re.IGNORECASE)
+#: A title piece naming a phase: ``-p3-``, ``-p3a-`` (sub-phase 3a), ``-phase-2-``, ``-phase2-``.
+_PHASE_TITLE = re.compile(r"(?:^|[-_])(?:p|phase[-_]?)0*(\d+[a-z]?)(?=[-_]|$)", re.IGNORECASE)
+#: A phase heading in an RDR: ``## Phase 3`` to ``#### Phase 3`` (``# Phase`` is a document title); a dotted
+#: ``Phase 2.5`` is not Phase 2.
+_PHASE_HEADING = re.compile(r"^#{2,4}\s+Phase\s+0*(\d+[a-z]?)(?![.\d])\b(.*)$", re.IGNORECASE)
+#: The close marker: a parenthetical or a dash-led CLOSED, SHIPPED, DONE or COMPLETE, as the phase-review-gate
+#: close step writes it (``### Phase 3 (CLOSED, 2026-11-06)``) and rdr-222 and rdr-227 already do. A marker word in
+#: the heading's own title (``Phase 2: Complete the migration``) is not one.
+_PHASE_CLOSED_MARK = re.compile(r"(?:\(|[—–]|\s-)\s*(?:closed|shipped|done|complete)\b", re.IGNORECASE)
 
 
-def _phase_of(title: str, tags: set[str]) -> str | None:
-    """The phase a gate record belongs to: a ``phase:<N>`` tag, else a phase piece of its title."""
-    for t in tags:
-        if m := _PHASE_TAG.match(t):
-            return m.group(1).lower()
-    m = _PHASE_TITLE.search(title)
-    return m.group(1) if m else None
+def _phases_of(title: str) -> list[str]:
+    """The phases a gate record's title names (lower case, sub-phase letter kept)."""
+    return [m.lower() for m in _PHASE_TITLE.findall(title)]
+
+
+def _all_closed(named: list[str], closed: set[str]) -> bool:
+    """True when the title names at least one phase and each is closed, or a sub-phase of a closed phase."""
+    return bool(named) and all(p in closed or p.rstrip("abcdefghijklmnopqrstuvwxyz") in closed for p in named)
 
 
 def _named_titles(title: str, content: str) -> set[str]:
@@ -387,10 +390,10 @@ def _census(
 
     A gate record is a row whose whole tags include ``gate`` or ``kind:gate``. Its RDR comes from the
     ``rdr:<NNN>`` tag or, in ``<repo>_rdr``, the leading number of its title. It is flagged when that
-    RDR's frontmatter ``status`` is ``closed``, or (nexus-qo7ie.28) when its phase, from a
-    ``phase:<N>`` tag or a ``-p<N>`` / ``-phase-<N>`` piece of its title, is a closed phase of that
-    RDR. A record that maps to no RDR is counted as unmapped; one of an open RDR whose phase cannot
-    be read is counted apart. Neither is flagged.
+    RDR's frontmatter ``status`` is ``closed``, or (nexus-qo7ie.28) when every phase its title names
+    (``-p<N>``, ``-phase-<N>``) is a closed phase of that RDR (:func:`closed_phase_numbers`). A record
+    that maps to no RDR is counted as unmapped and never flagged; one of an open RDR whose title names
+    no phase is not judged.
     """
     for r in rows:
         tags = split_tags(r.get("tags"))
@@ -407,10 +410,8 @@ def _census(
             result.census_unmapped += 1
         elif number in closed:
             result.census.append(CensusHit(project, r["title"], number, (now - stamp).days))
-        elif (phase := _phase_of(r["title"], tags)) is None:
-            result.census_phase_unknown += 1
-        elif phase in closed_phases.get(number, set()):
-            result.census.append(CensusHit(project, r["title"], number, (now - stamp).days, phase))
+        elif _all_closed(named := _phases_of(r["title"]), closed_phases.get(number, set())):
+            result.census.append(CensusHit(project, r["title"], number, (now - stamp).days, ", ".join(named)))
 
 
 def repo_toplevel(cwd: Path) -> Path:
@@ -444,9 +445,9 @@ def closed_rdr_numbers(root: Path) -> set[str]:
 def closed_phase_numbers(root: Path) -> dict[str, set[str]]:
     """RDR number -> the phases whose own heading marks them closed (nexus-qo7ie.28).
 
-    The marker is the one RDRs already write: ``### Phase 3 (CLOSED, ...)``, ``### Phase 0 (SHIPPED,
-    ...)``, ``#### Phase 4: Measure ... — done 2026-10-09``, ``### Phase 5 — complete``. Prose that
-    says a phase closed is not read; only a phase heading is.
+    The marker is the one the phase-review-gate close step writes and rdr-222 and rdr-227 already
+    carry: ``### Phase 3 (CLOSED, 2026-11-06)``, ``### Phase 0 (SHIPPED, ...)``,
+    ``#### Phase 4: Measure ... — done 2026-10-09``. Prose that says a phase closed is not read.
     """
     out: dict[str, set[str]] = {}
     try:
@@ -502,9 +503,6 @@ def t2_section(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime,
     )
     if f.census_unmapped:
         lines.append(f"census: {f.census_unmapped} old gate record(s) with no TTL map to no RDR and were not judged")
-    if f.census_phase_unknown:
-        lines.append(f"census: {f.census_phase_unknown} old gate record(s) of an open RDR name no phase "
-                     "(no phase:<N> tag or -p<N> title piece) and were not judged")
     return lines
 
 

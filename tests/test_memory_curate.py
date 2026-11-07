@@ -857,8 +857,6 @@ def test_t2_census_flags_old_ttl_free_gate_records_of_a_closed_phase(db: T2Datab
     assert got.census_unmapped == 1  # no-rdr-gate: counted, never flagged
 
 
-
-
 @pytest.mark.t2_tenant
 def test_t2_section_text(db: T2Database) -> None:
     _put(db, "alpha-notes", age_days=5)
@@ -955,9 +953,12 @@ def test_the_command_adds_exactly_one_row_the_report_and_deletes_nothing(
     _put(db, "alpha-notes", age_days=5)
     _put(db, "alpha-notes-v2", "replaces: alpha-notes")
     _put(db, "census-gate", tags="kind:gate,bead:b,rdr:238", age_days=40)
+    _put(db, "rdr-246-p2-critique", tags="kind:gate,bead:c,rdr:246", age_days=40)
     before = _snapshot(db)
     res = _curate(db)
     assert res.exit_code == 0, res.output
+    # nexus-qo7ie.28: the command reads the working tree's phase headings, not only RDR statuses
+    assert "rdr-246-p2-critique (RDR-246 Phase 2, " in res.output
     after = _snapshot(db)
     title = f"curation-report-{datetime.now(UTC):%Y-%m-%d}"
     # The no-delete clause runs first, so a planted delete fails with its own message
@@ -981,40 +982,53 @@ def test_closed_rdrs_reads_frontmatter_status_only(tmp_path: Path) -> None:
 
 
 def test_closed_phases_read_from_phase_headings(tmp_path: Path) -> None:
-    """nexus-qo7ie.28: an open RDR's phase is closed when its own heading says so, the way RDRs mark it
-    today (rdr-222 "### Phase 3 (CLOSED, ...)", rdr-227 "### Phase 0: Measure ... — done 2026-10-09")."""
+    """nexus-qo7ie.28: a phase is closed when its heading carries the marker the phase-review-gate close
+    step writes, a parenthetical or a dash-led CLOSED, SHIPPED, DONE or COMPLETE (the form rdr-222 and
+    rdr-227 already use). A marker word in the heading's own title text is not a marker."""
     rdr = tmp_path / "docs" / "rdr"
     rdr.mkdir(parents=True)
-    (rdr / "rdr-222-a.md").write_text(
+    (rdr / "rdr-245-a.md").write_text(
         "---\nstatus: accepted\n---\n"
         "### Phase 0 (SHIPPED, engine-service-v0.1.137): instrument\n"
         "### Phase 1a (shipped with Phase 1): keyed expire\n"
-        "### Phase 2: close the gap between A and B\n"          # a verb, not a marker
-        "### Phase 3 (CLOSED, Sam 2026-09-28; design of record only)\n"
+        "### Phase 2: Complete the migration\n"              # title words, not a marker
+        "### Phase 2.5 (CLOSED): a dotted phase is not Phase 2\n"
+        "### Phase 3 (CLOSED, 2026-11-06)\n"
         "#### Phase 4: Measure (decides the approach) — done 2026-10-09\n"
-        "### Phase 5 — complete\n"
-        "Phase 6 closed in prose is not a heading.\n"
-        "# Phase 7 (CLOSED) at the top level is a title, not a phase\n")
+        "### Phase 6: closed vocabularies table\n"            # title words again
+        "Phase 7 closed in prose is not a heading.\n"
+        "# Phase 8 (CLOSED) at the top level is a title, not a phase\n")
     (rdr / "rdr-223-b.md").write_text("---\nstatus: draft\n---\n### Phase 1: plan\n")
-    assert mc.closed_phase_numbers(tmp_path) == {"222": {"0", "1a", "3", "4", "5"}}
+    assert mc.closed_phase_numbers(tmp_path) == {"245": {"0", "1a", "3", "4"}}
     assert mc.closed_phase_numbers(tmp_path / "no-such-root") == {}
 
 
-@pytest.mark.parametrize(("title", "tags", "phase"), [
-    ("whatever", ["kind:gate", "rdr:238", "phase:3"], "3"),
-    ("whatever", ["kind:gate", "phase:03"], "3"),
-    ("whatever", ["kind:gate", "phase:1a"], "1a"),
-    ("rdr-238-p3a-critique-2026-11-03", ["gate"], "3"),
-    ("rdr238-p3-batch3-r1", ["gate"], "3"),
-    ("244-phase-2-gate", ["gate"], "2"),
-    ("244-phase2-gate", ["gate"], "2"),
-    ("238-gate-critique-x", ["gate"], None),
-    ("244-step1-gate", ["gate"], None),
-    ("rdr-238-p3a-critique", ["gate", "phase:2"], "2"),   # the tag wins over the title
-    ("upgrade-plan-gate", ["gate"], None),                 # no phase piece: "plan" is not p<N>
+@pytest.mark.parametrize(("title", "phases"), [
+    ("rdr-238-p3a-critique-2026-11-03", ["3a"]),
+    ("rdr238-p3-batch3-r1", ["3"]),
+    ("244-phase-2-gate", ["2"]),
+    ("244-phase2-gate", ["2"]),
+    ("155-P4a-gate-result", ["4a"]),
+    ("244-p2-p3-gate", ["2", "3"]),
+    ("238-gate-critique-x", []),
+    ("244-step1-gate", []),
+    ("upgrade-plan-gate", []),            # "plan" is not p<N>
 ])
-def test_phase_of_a_gate_record(title: str, tags: list[str], phase: str | None) -> None:
-    assert mc._phase_of(title, set(tags)) == phase
+def test_phases_named_by_a_gate_record_title(title: str, phases: list[str]) -> None:
+    assert mc._phases_of(title) == phases
+
+
+@pytest.mark.parametrize(("named", "closed", "flag"), [
+    (["3"], {"3"}, True),
+    (["3a"], {"3"}, True),        # a sub-phase of a closed phase is closed
+    (["3"], {"3a"}, False),       # one closed sub-phase does not close its phase
+    (["3b"], {"3a"}, False),
+    (["2", "3"], {"3"}, False),   # every phase the title names must be closed
+    (["2", "3"], {"2", "3"}, True),
+    ([], {"3"}, False),
+])
+def test_a_record_is_of_a_closed_phase_only_when_every_named_phase_is(named, closed, flag) -> None:
+    assert mc._all_closed(named, closed) is flag
 
 
 @pytest.mark.t2_tenant
@@ -1025,20 +1039,17 @@ def test_t2_census_flags_a_closed_phase_of_an_open_rdr(db: T2Database) -> None:
     _put(db, "planted-gate", tags="kind:gate,bead:b1,rdr:238", age_days=40)
     assert _t2(db, closed=set()).census == []
     _put(db, "rdr-245-p3-critique", tags="kind:gate,rdr:245", age_days=40)                # phase 3 closed
-    _put(db, "tagged-phase-gate", tags="kind:gate,rdr:245,phase:3", age_days=40)           # phase 3 closed
+    _put(db, "245-p3a-fix-check", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)    # sub-phase of 3
     _put(db, "245-p4-gate", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)           # phase 4 open
-    _put(db, "245-gate-no-phase", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)     # phase unknown
+    _put(db, "245-gate-no-phase", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)     # names no phase
     _put(db, "rdr-245-p3-recent", tags="kind:gate,rdr:245", age_days=10)                   # too new
-    _put(db, "closed-rdr-gate", tags="kind:gate,rdr:238", age_days=40)                     # whole RDR closed
     got = mc.t2_findings(db, REPO, closed_rdrs={"238"}, closed_phases={"245": {"3"}}, now=datetime.now(UTC))
     flagged = sorted((c.title, c.rdr, c.phase) for c in got.census)
-    assert flagged == [("closed-rdr-gate", "238", None), ("planted-gate", "238", None),
-                       ("rdr-245-p3-critique", "245", "3"), ("tagged-phase-gate", "245", "3")]
-    assert got.census_phase_unknown == 1
+    assert flagged == [("245-p3a-fix-check", "245", "3a"), ("planted-gate", "238", None),
+                       ("rdr-245-p3-critique", "245", "3")]
     text = "\n".join(mc.t2_section(db, REPO, closed_rdrs={"238"}, closed_phases={"245": {"3"}},
                                    now=datetime.now(UTC)))
     assert "rdr-245-p3-critique (RDR-245 Phase 3, " in text
-    assert "1 old gate record(s) of an open RDR name no phase" in text
 
 
 # ── the command ──────────────────────────────────────────────────────────────────
@@ -1059,6 +1070,8 @@ def curate_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, P
     _agent(agents, "conexus-code-review-expert", _E1 + _E1, {"h1.md": "x"})
     (repo / "docs" / "rdr").mkdir(parents=True)
     (repo / "docs" / "rdr" / "rdr-238-x.md").write_text("---\nid: RDR-238\nstatus: closed\n---\n")
+    (repo / "docs" / "rdr" / "rdr-246-y.md").write_text("---\nid: RDR-246\nstatus: accepted\n---\n"
+                                                       "### Phase 2 (CLOSED, 2026-11-06): z\n")
     monkeypatch.chdir(repo)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
     monkeypatch.setenv("NX_NO_TELEMETRY", "1")
