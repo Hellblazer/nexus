@@ -3557,6 +3557,45 @@ def _announce_reembed_hint() -> None:
         _log.debug("reembed_hint_failed", error=str(exc))
 
 
+_BELOW_FLOOR_RECHECK_S: float = 300.0
+"""How often a supervisor holding a below-floor refusal re-reads PG_VERSION (nexus-3qhls)."""
+
+
+def _wait_for_cluster_at_floor(
+    sup: StorageServiceSupervisor,
+    exc: StorageServiceStartError,
+    stop_requested: threading.Event,
+    flush_logging: Callable[[], None],
+) -> bool:
+    """Hold a below-floor refusal until the cluster reaches the floor or a stop arrives (nexus-3qhls).
+
+    Returns False when ``exc`` is not that refusal, so the caller re-raises it unchanged. Otherwise
+    logs the refusal once, re-reads the cluster's PG_VERSION every ``_BELOW_FLOOR_RECHECK_S`` and
+    returns True when the marker no longer refuses or ``stop_requested`` is set; the caller tells
+    the two apart by the event.
+    """
+    from nexus.db.pg_provision import PgClusterBelowFloorError, refuse_cluster_below_floor  # noqa: PLC0415 — deferred import — pg_provision is loaded only on this path
+
+    if not isinstance(exc.__cause__, PgClusterBelowFloorError):
+        return False
+    pgdata = Path(sup._creds.get("PG_DATA", ""))
+    _log.error(
+        "storage_service_cluster_below_floor",
+        error=str(exc),
+        recheck_s=_BELOW_FLOOR_RECHECK_S,
+        msg="waiting for the cluster to be upgraded; the supervisor stays up and does not exit",
+    )
+    flush_logging()
+    while not stop_requested.wait(_BELOW_FLOOR_RECHECK_S):
+        try:
+            refuse_cluster_below_floor(pgdata)
+        except PgClusterBelowFloorError:
+            continue
+        _log.info("storage_service_cluster_at_floor", pgdata=str(pgdata))
+        return True
+    return True
+
+
 def _supervise_until_stopped(
     sup: StorageServiceSupervisor,
     stop_requested: threading.Event,
@@ -3571,30 +3610,46 @@ def _supervise_until_stopped(
     whole process (which re-runs ``start()`` — including a fresh PG bring-up),
     instead of an in-process respawn. The lone in-place recovery is the
     ``(True, False)`` PG-only arm: PG is restarted directly while the alive JVM
-    keeps running (the OS supervises the supervisor process, not PG)."""
-    try:
-        sup.start(stop_requested=stop_requested)
-    except readiness.ReadinessStopRequestedError:
-        # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while start() was still
-        # waiting for readiness. This is a CLEAN stop, not a crash: the
-        # not-yet-ready process was already killed inside
-        # _wait_for_service_ready, and no lease was ever published for
-        # this attempt (publish happens only after health succeeds), so
-        # sup.stop() below has nothing further to reclaim — it is still
-        # safe to call unconditionally (mark_shutting_down/relinquish
-        # no-op when self._registry/self._supervisor were never assigned).
-        # Exit 0: this is the SAME "deliberate stand-down, not a failure"
-        # reasoning as the fenced-exit path (fenced_exit_code) — a
-        # non-zero exit here would trip the OS unit's restart policy into
-        # respawning a supervisor that would just start over from scratch
-        # anyway, having lost nothing worth resuming.
-        _log.info(
-            "storage_service_start_stopped_cleanly",
-            msg="SIGTERM/SIGINT arrived mid-start; standing down without a lease",
-        )
-        flush_logging()
-        sup.stop()
-        return 0
+    keeps running (the OS supervises the supervisor process, not PG).
+
+    A cluster below the PostgreSQL floor is a permanent refusal, so exiting
+    on it would only buy an OS respawn every 30 s forever (nexus-3qhls). The
+    supervisor stays up instead, re-reads the cluster's version marker every
+    ``_BELOW_FLOOR_RECHECK_S`` and starts once it reaches the floor; a stop
+    while it waits exits 0. Nothing gives up, and nothing respawns."""
+    while True:
+        try:
+            sup.start(stop_requested=stop_requested)
+        except readiness.ReadinessStopRequestedError:
+            # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while start() was still
+            # waiting for readiness. This is a CLEAN stop, not a crash: the
+            # not-yet-ready process was already killed inside
+            # _wait_for_service_ready, and no lease was ever published for
+            # this attempt (publish happens only after health succeeds), so
+            # sup.stop() below has nothing further to reclaim — it is still
+            # safe to call unconditionally (mark_shutting_down/relinquish
+            # no-op when self._registry/self._supervisor were never assigned).
+            # Exit 0: this is the SAME "deliberate stand-down, not a failure"
+            # reasoning as the fenced-exit path (fenced_exit_code) — a
+            # non-zero exit here would trip the OS unit's restart policy into
+            # respawning a supervisor that would just start over from scratch
+            # anyway, having lost nothing worth resuming.
+            _log.info(
+                "storage_service_start_stopped_cleanly",
+                msg="SIGTERM/SIGINT arrived mid-start; standing down without a lease",
+            )
+            flush_logging()
+            sup.stop()
+            return 0
+        except StorageServiceStartError as exc:
+            if not _wait_for_cluster_at_floor(sup, exc, stop_requested, flush_logging):
+                raise
+            if stop_requested.is_set():
+                flush_logging()
+                sup.stop()
+                return 0
+            continue
+        break
 
     # GH #1369, shared across tiers (RDR-149 §shared primitive) via
     # exit_if_process_unowned: start() may have found an existing, healthy

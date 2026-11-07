@@ -618,6 +618,32 @@ def _migration_halt_cause(supervisor_error: str | None, engine_marks: dict[Path,
     return "" if found is None else f"The engine reported: {found[1]}\n"
 
 
+def _refuse_cluster_below_floor_before_start(config_dir: Path) -> None:
+    """Raise StorageServiceStartError when the bundled cluster's PG_VERSION is below the floor (nexus-3qhls).
+
+    Missing or unreadable credentials, and a config with no PG_DATA (managed PostgreSQL), are
+    left to the supervisor, which reports them itself.
+    """
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        CREDENTIALS_FILENAME,
+        PgClusterBelowFloorError,
+        refuse_cluster_below_floor,
+    )
+
+    try:
+        creds = _ssd._read_pg_credentials(config_dir / CREDENTIALS_FILENAME)
+    except (OSError, ValueError):
+        return
+    pg_data = creds.get("PG_DATA", "")
+    if not pg_data:
+        return
+    try:
+        refuse_cluster_below_floor(Path(pg_data))
+    except PgClusterBelowFloorError as exc:
+        raise _ssd.StorageServiceStartError(str(exc)) from exc
+
+
 def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
@@ -729,6 +755,13 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     # (``nx daemon service start``, ``nx init --service``, the replace-quiesce
     # restart). The unit's own ``--foreground`` supervisor never comes through
     # here: it runs ``run_storage_supervisor`` directly.
+    # nexus-3qhls: a cluster below the PostgreSQL floor is refused here, before
+    # anything starts. A supervisor that meets the refusal itself stays up and
+    # waits for an upgrade (right for the unit's own supervisor, which the OS
+    # would otherwise respawn every 30 s), so one started from here would linger
+    # and this caller would wait out the lease timeout instead of saying why.
+    _refuse_cluster_below_floor_before_start(config_dir)
+
     via_unit = _start_via_autostart_unit(config_dir, registry, scope)
     if via_unit is not None:
         return via_unit
