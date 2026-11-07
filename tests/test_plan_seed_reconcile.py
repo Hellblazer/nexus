@@ -519,3 +519,61 @@ def test_no_retired_dimension_is_still_shipped_on_disk():
             f"{path.name} ships at a RETIRED dimension — either drop the "
             f"file or remove its entry from RETIRED_TEMPLATE_DIMENSIONS"
         )
+
+
+# ── a disabled builtin and the reconcile every upgrade runs (nexus-irndi) ──
+#
+# `nx upgrade` converges the library with `seed_plan_templates(reconcile=True)`
+# (upgrade_ladder/preconditions.py `_plan_library_report`), so a builtin shipped in a release
+# lands on every existing install with no switch. `nx plan disable <id>` is the per-install
+# off. These pins say when it survives the next reconcile and when it does not.
+
+
+@pytest.mark.t2_tenant
+def test_a_disabled_builtin_stays_disabled_through_a_reconcile_of_an_unchanged_template(tmp_path, library):
+    path = _write_template(tmp_path, "off-a")
+    load_seed_directory(tmp_path, library=library)
+    row = _row_for(library, path)
+    assert library.set_plan_disabled(int(row["id"]))
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.skipped_existing == ["off-a.yml"] and result.updated == []
+    after = _row_for(library, path)
+    assert after["id"] == row["id"] and after["disabled_at"]
+
+
+@pytest.mark.t2_tenant
+def test_a_disabled_builtin_with_a_reason_stays_disabled_when_the_reconcile_rewrites_its_tags(tmp_path, library):
+    """`nx plan disable <id> --reason ...` appends a `disable-reason:` tag, which the reconcile reads as drift and
+    rewrites in place. The upsert does not touch `disabled_at`, so the plan stays off; the reason tag is lost."""
+    path = _write_template(tmp_path, "off-b")
+    load_seed_directory(tmp_path, library=library)
+    row = _row_for(library, path)
+    assert library.set_plan_disabled(int(row["id"]), reason="too noisy")
+    assert "disable-reason:too noisy" in _row_for(library, path)["tags"]
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.updated == ["off-b.yml"]
+    after = _row_for(library, path)
+    assert after["id"] == row["id"] and after["disabled_at"]
+    assert "disable-reason" not in after["tags"]
+
+
+@pytest.mark.t2_tenant
+def test_a_disabled_builtin_comes_back_enabled_when_a_release_edits_its_description(tmp_path, library):
+    """The limit of `nx plan disable` as the per-install off: a release that changes a template's description
+    makes the reconcile delete the row and insert a new one (the description is the upsert key), and the new
+    row is enabled. The same holds for any later edit of entity-resolution.yml's description."""
+    path = _write_template(tmp_path, "off-c")
+    load_seed_directory(tmp_path, library=library)
+    row = _row_for(library, path)
+    assert library.set_plan_disabled(int(row["id"]))
+
+    _write_template(tmp_path, "off-c", description="Rewritten by a later release.")
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.updated == ["off-c.yml"]
+    after = _row_for(library, path)
+    assert after["id"] != row["id"] and not after.get("disabled_at")

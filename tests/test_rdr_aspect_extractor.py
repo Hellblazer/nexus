@@ -601,31 +601,24 @@ class TestRdrFrontmatterReachesTheParser:
     def test_the_aspect_worker_persists_the_rdr_id_for_a_queued_row(
         self, tmp_path, chunk_text, monkeypatch,
     ) -> None:
-        """Through ``AspectExtractionWorker._process_row``: the row the worker writes (``complete_aspect``)
-        carries the id."""
+        """Through ``AspectExtractionWorker._extract_tuple_rows`` and ``_attributed``, the two steps before the
+        tuple side's ``complete_aspect``: the record the worker writes carries the id."""
+        import dataclasses
         import types
 
         import nexus.commands.enrich as enrich
-        import nexus.mcp_infra as infra
+        from nexus import aspect_worker as w
         from nexus.aspect_worker import AspectExtractionWorker
 
         path = _write_rdr(tmp_path)
 
-        class _Db:
-            def __init__(self) -> None:
-                self.completed: list[dict] = []
-
-            def complete_aspect(self, fields: dict) -> None:
-                self.completed.append(fields)
-
-        db = _Db()
-        monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(db))
         monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
         monkeypatch.setattr("nexus.aspect_worker._resolve_source_uri_from_doc_id", lambda c, d: path.as_uri())
         row = types.SimpleNamespace(
             collection=_RDR_COLLECTION, source_path="docs/rdr/rdr-099-test.md", content="",
             doc_id="1.2.20", retry_count=0,
         )
-        AspectExtractionWorker(poll_interval=10.0)._process_row(row)
-        assert [d["extras"]["rdr_id"] for d in db.completed] == ["RDR-099"]
-        assert db.completed[0]["extractor_name"] == "rdr-frontmatter-v1" and db.completed[0]["confidence"] == 1.0
+        record = AspectExtractionWorker(poll_interval=10.0)._extract_tuple_rows([types.SimpleNamespace(row=row)])[0]
+        completed = dataclasses.asdict(w._attributed(record, row))
+        assert completed["extras"]["rdr_id"] == "RDR-099"
+        assert completed["extractor_name"] == "rdr-frontmatter-v1" and completed["confidence"] == 1.0

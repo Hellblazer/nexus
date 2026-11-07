@@ -162,9 +162,9 @@ dimensions in the same project will collide at seed time.  This is how
 the seed loader stays idempotent: a second run of `nx plan reseed` with
 unchanged templates produces zero inserts.
 
-## The 12 builtin scenario templates
+## The 13 builtin scenario templates
 
-This count (12, one per file in `conexus/plans/builtin/*.yml`) is
+This count (13, one per file in `conexus/plans/builtin/*.yml`) is
 canonical here — other docs should link to this section rather than
 restating the number.
 
@@ -184,6 +184,7 @@ restating the number.
 | `document-discovery` | research / document-discovery | Single `query` step — returns the matching documents themselves (no synthesis). Fast path: `_nx_answer_classify_plan` routes a one-`query`-step plan straight to `query()`, skipping the ~80s `claude -p` synthesis floor. |
 | `corpus-coverage-check` | research / corpus-coverage-check | Single `query` step answering "does the corpus have anything on this at all" (yes/no coverage, not a document list). Same fast path as `document-discovery`. |
 | `hybrid-factual-lookup` | lookup / hybrid-factual-lookup | Vector recall + factual-evidence graph traversal → per-stream `limit_per_source` budgets → rank merge → generate. RDR-097. |
+| `entity-resolution` | research / entity-resolution | Entity-listing requests ("which customers were affected by these bugs"): the step body of `hybrid-factual-lookup` (vector recall + graph traversal → rank → generate) declared `discovery/listing`, so a request read as a listing still reaches a plan with a coverage boundary instead of the single-`query` `document-discovery`. RDR-147 Step 4 (c). |
 | `abstract-themes` | query / abstract-themes | CheapRAG community-summary pipeline: broad over-fetch (`mode: broad`) → `groupby` by BERTopic centroid label → per-group `aggregate` → `summarize` coalesce. Routes "main themes / overview / give a summary" question shapes. RDR-098. |
 
 The first 5 are the "verb" scenarios: they correspond to the 5

@@ -54,6 +54,9 @@ _STANDALONE_SKILLS = {
     # Reference card for messaging other sessions and dispatched agents and
     # sharing one machine with them, no agent dispatch.
     "peer-messaging",
+    # RDR-245 (bead nexus-wc4jj.8) — the mediator contract for working the user's
+    # structured asks through `nx ask`, no agent dispatch.
+    "asks",
     # RDR-080 P3: pointer skills — delegate directly to MCP tools, no relay structure needed
     "enrich-plan", "knowledge-tidying", "plan-validation",
     # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay
@@ -440,7 +443,7 @@ def _frontmatter_description(path: Path) -> str | None:
 # dropping out of the walk unnoticed. sn and tool-spill ship none today;
 # prose-edit ships two skills (prose-edit, prose-cut) and one agent.
 _DESCRIPTION_SURFACES: dict[str, tuple[Path, int]] = {
-    "conexus": (PLUGIN_DIR, 67),
+    "conexus": (PLUGIN_DIR, 68),
     "sn": (REPO_ROOT / "sn", 0),
     "tool-spill": (REPO_ROOT / "tool-spill", 0),
     "prose-edit": (REPO_ROOT / "prose-edit", 3),

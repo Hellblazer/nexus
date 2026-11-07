@@ -18,7 +18,6 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -121,7 +120,8 @@ class CatalogRenameCollectionTest {
         assertThat(c.get("taxonomy_centroids")).as("taxonomy_centroids (unified, 1+1+1)").isEqualTo(3);
         assertThat(c.get("document_aspects")).as("document_aspects (both rows doc-rooted, hygiene-001)").isEqualTo(2);
         assertThat(c.get("document_highlights")).as("document_highlights").isEqualTo(1);
-        assertThat(c.get("aspect_extraction_queue")).as("aspect_extraction_queue (both rows doc-rooted, hygiene-001)").isEqualTo(2);
+        assertThat(c).as("nexus-hbnml: the aspect queue table is retired, so the rename has no count for it")
+            .doesNotContainKey("aspect_extraction_queue");
         assertThat(c.get("catalog_documents")).as("catalog_documents").isEqualTo(1);
         assertThat(c.get("relevance_log")).as("relevance_log (re-homed, no FK)").isEqualTo(2);
         assertThat(c.get("search_telemetry")).as("search_telemetry (re-homed, no FK)").isEqualTo(2);
@@ -138,14 +138,14 @@ class CatalogRenameCollectionTest {
             // taxonomy_centroids_384/768/1024 collapse to "chunks" and
             // "taxonomy_centroids" -- one orphan-check each, not three.
             //
-            // The nine tables below share an identical (tenant_id, collection) shape but
+            // The eight tables below share an identical (tenant_id, collection) shape but
             // have no common generated-Tables supertype, so this loop resolves each
             // table's TENANT_ID/COLLECTION fields generically via Table#field(String,
-            // Class) rather than unrolling nine near-identical typed calls -- still typed
+            // Class) rather than unrolling eight near-identical typed calls -- still typed
             // jOOQ DSL (the field lookup is checked against the generated Table's real
             // column list at call time), just generic over the table list.
             for (Table<?> table : List.of(CHUNKS, TOPICS, TAXONOMY_META, TAXONOMY_CENTROIDS,
-                    DOCUMENT_ASPECTS, DOCUMENT_HIGHLIGHTS, ASPECT_EXTRACTION_QUEUE,
+                    DOCUMENT_ASPECTS, DOCUMENT_HIGHLIGHTS,
                     RELEVANCE_LOG, SEARCH_TELEMETRY)) {
                 int count = ctx.selectCount().from(table)
                     .where(table.field("tenant_id", String.class).eq(TENANT_A))
@@ -202,10 +202,6 @@ class CatalogRenameCollectionTest {
                     .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_ASPECTS.COLLECTION.eq(NEW))
                     .fetchOne(0, int.class))
                 .as("document_aspects under NEW").isEqualTo(2);
-            assertThat(ctx.selectCount().from(ASPECT_EXTRACTION_QUEUE)
-                    .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A)).and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(NEW))
-                    .fetchOne(0, int.class))
-                .as("aspect_extraction_queue under NEW").isEqualTo(2);
             assertThat(ctx.selectCount().from(TAXONOMY_CENTROIDS)
                     .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT_A)).and(TAXONOMY_CENTROIDS.COLLECTION.eq(NEW))
                     .fetchOne(0, int.class))
@@ -498,6 +494,42 @@ class CatalogRenameCollectionTest {
         assertThat(counts).as("truly-empty retired target revives without refusal").isNotNull();
     }
 
+    /**
+     * nexus-hbnml: a rename on an install that KEPT the retired queue table. The rename no longer re-homes the
+     * table's rows (the engine has no code on it), so a row naming the old name stays under it; the registry row
+     * of the old name is kept as a superseded tombstone, so the row's foreign key still holds and the rename
+     * succeeds. Pinned because the kept table must be inert: the rename completes, the row is neither lost nor
+     * blocking, and a rename back to the old name (the undo) also completes.
+     */
+    @Test @Order(73)
+    void renameCollection_succeedsWithAKeptPopulatedQueueTable_andItsRowIsNotLost() throws Exception {
+        final String src = "knowledge__nrg-kept-src__minilm-l6-v2-384__v1";
+        final String tgt = "knowledge__nrg-kept-tgt__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, src);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_A, "nrg-kept-doc", "Doc", src)
+               .execute();
+            RetiredAspectQueueTable.restore(ctx);
+            RetiredAspectQueueTable.seed(ctx, TENANT_A, src, "nrg-kept-doc", "/p/kept.md", "pending");
+        }
+        try {
+            assertThat(repo.renameCollection(TENANT_A, src, tgt)).isNotNull();
+            assertThat(repo.renameCollection(TENANT_A, tgt, src)).as("the undo").isNotNull();
+            try (Connection su = pg.createConnection("")) {
+                assertThat(RetiredAspectQueueTable.rows(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, src))
+                    .as("the leftover row is not lost").isEqualTo(1);
+            }
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                RetiredAspectQueueTable.drop(DSL.using(su, SQLDialect.POSTGRES));
+            }
+        }
+    }
+
     // ── fixture ──────────────────────────────────────────────────────────────
 
     /** Seed one full collection (all re-homed lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */
@@ -611,19 +643,6 @@ class CatalogRenameCollectionTest {
                        DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
                        DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
            .values(tenant, "rn-doc-1", coll, "file:///rn-doc-1-hl", "hi", OffsetDateTime.now())
-           .execute();
-        // aspect_extraction_queue: 2, both doc-rooted at rn-doc-1 (hygiene-001 step 2:
-        // doc_id is NOT NULL now -- see the document_aspects comment above for why
-        // the second row is no longer DOC-LESS).
-        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-           .values(tenant, coll, "/p/q1.md", "pending", OffsetDateTime.now(), "rn-doc-1")
-           .execute();
-        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-           .values(tenant, coll, "/p/q2.md", "pending", OffsetDateTime.now(), "rn-doc-1")
            .execute();
         // search_telemetry: 2 (no FK, but re-homed)
         ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,

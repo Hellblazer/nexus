@@ -29,7 +29,6 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -444,6 +443,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   note-uri-001-1 nexus-bivz3.5
                 //   vectors-046-4 nexus-yye8l.21
                 //   tuples-012-1 nexus-onjvw
+                //   aspects-005-2 nexus-hbnml
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -763,12 +763,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // hygiene-001-2 (aspect_extraction_queue.doc_id NOT NULL):
                     // reverses fk-001-4's nullable conversion (already applied at
                     // OLD_TAG) -- doc_id NULL is representable at this seed point.
-                    dsl(su).insertInto(ASPECT_EXTRACTION_QUEUE)
-                        .set(ASPECT_EXTRACTION_QUEUE.TENANT_ID, "t1")
-                        .set(ASPECT_EXTRACTION_QUEUE.COLLECTION, "code__x")
-                        .set(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, "seed/hygiene2-orphan.md")
-                        .set(ASPECT_EXTRACTION_QUEUE.DOC_ID, (String) null)
-                        .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, DSL.currentOffsetDateTime())
+                    // The table is retired at HEAD (aspects-005-2, nexus-hbnml), so the generated jOOQ
+                    // class is gone: typed DSL over the table as it stands at this seed point.
+                    dsl(su).insertInto(DSL.table(DSL.name("nexus", "aspect_extraction_queue")),
+                            DSL.field(DSL.name("tenant_id"), String.class),
+                            DSL.field(DSL.name("collection"), String.class),
+                            DSL.field(DSL.name("source_path"), String.class),
+                            DSL.field(DSL.name("doc_id"), String.class),
+                            DSL.field(DSL.name("enqueued_at"), java.time.OffsetDateTime.class))
+                        .values("t1", "code__x", "seed/hygiene2-orphan.md", null, java.time.OffsetDateTime.now())
                         .execute();
 
                     // hygiene-001-3 (document_highlights.source_uri/collection NOT
@@ -1098,6 +1101,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedBoundedQuarantineMisregistrations(su);
                 }
 
+                // ── hygiene-001-2's own effect, read here because aspects-005-2 drops the table at HEAD
+                // (nexus-hbnml): migrateUpTo("hygiene-008-2") has applied hygiene-001-2, so the doc_id-NULL
+                // queue row seeded above must be gone, and the table (still present at this point, aspects-005
+                // is later in the changelog) must be empty: that emptiness is what lets aspects-005-2 drop it
+                // in the whole-hop migrate below. ──────────────────────────────────────────────────────────
+                try (Connection su = pg.createConnection("")) {
+                    assertThat(PgCatalogProbes.tableExists(DSL.using(su, SQLDialect.POSTGRES), "nexus",
+                            "aspect_extraction_queue"))
+                        .as("the queue table still exists before aspects-005-2").isTrue();
+                    assertThat(dsl(su).fetchCount(DSL.table(DSL.name("nexus", "aspect_extraction_queue"))))
+                        .as("hygiene-001-2's DELETE WHERE doc_id IS NULL must remove the orphan queue row, leaving "
+                            + "the table empty")
+                        .isEqualTo(0);
+                }
+
                 // ── note-uri-001-1 (nexus-bivz3.5, RDR-231): the backfill rewrites chroma:// note
                 // source_uris on three FORCE-RLS tables. A chroma:// value is the shape every OLD_TAG
                 // client wrote, but catalog-016-0 (dedup) and aspects-004-1 (doc_id stamp, keyed on an
@@ -1221,6 +1239,22 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 try (Connection su = pg.createConnection("")) {
                     TuplesRetireLedgerLiquibaseTest.assertRetired(su, retiredLedgerSeed);
                     TuplesRetireLedgerLiquibaseTest.assertForceRlsRestored(su);
+                }
+
+                // ── aspects-005-2's own effect (nexus-hbnml): the queue table held no row at that point of the
+                // hop (hygiene-001-2 deleted the one seeded row, asserted above), so the guarded drop took the
+                // table, its two foreign keys and the counting helper with it, and the walk did not halt. The
+                // populated-table case (the table stays, the walk goes on) is AspectQueueRetireLiquibaseTest's. ──
+                try (Connection su = pg.createConnection("")) {
+                    var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "aspect_extraction_queue"))
+                        .as("aspects-005-2 must drop the empty queue table").isFalse();
+                    assertThat(PgCatalogProbes.constraintExists(ctx, "aspect_extraction_queue_collection_fk"))
+                        .as("the collection FK went with the table").isFalse();
+                    assertThat(PgCatalogProbes.constraintExists(ctx, "fk_aspect_queue_catalog_doc"))
+                        .as("the document FK went with the table").isFalse();
+                    assertThat(PgCatalogProbes.routineExists(ctx, "nexus", "aspect_queue_rows_unscoped"))
+                        .as("aspects-005-2 drops its counting helper").isFalse();
                 }
 
                 // ── vectors-046-4's own effect (nexus-yye8l.21): both seeded tenants are registered, exactly
@@ -1641,14 +1675,6 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("hygiene-001-1's UPDATE must backfill the legit row's NULL "
                             + "source_uri to '', leaving its pre-existing doc_id untouched")
                         .isEqualTo(1);
-
-                    // hygiene-001-2: the doc_id-NULL queue row must be gone.
-                    assertThat(dsl(su).fetchCount(ASPECT_EXTRACTION_QUEUE,
-                            ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq("t1")
-                                .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("seed/hygiene2-orphan.md"))))
-                        .as("hygiene-001-2's DELETE WHERE doc_id IS NULL must remove the "
-                            + "orphan queue row")
-                        .isEqualTo(0);
 
                     // hygiene-001-3: the source_uri-and-collection-NULL highlight row
                     // must be gone.

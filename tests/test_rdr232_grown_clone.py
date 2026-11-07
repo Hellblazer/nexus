@@ -2,7 +2,7 @@
 """RDR-232 Phase 1 (nexus-jypmj.1.14): the grown clone of plan 473 in the golden fixture's plan library,
 and the label key that names it.
 
-The baseline's plan library held only the 12 builtins, so the incident request (G06, the ART RDR-084
+The baseline's plan library held only the builtins (12 then, 13 since entity-resolution), so the incident request (G06, the ART RDR-084
 synthesis) selected ``research:default`` and scored as the right shape; the incident selected plan 473,
 the seeded copy of ``lookup:hybrid-factual-lookup`` (RDR-232 line 1606). ``unacceptable_plans`` keys are
 ``<verb>:<strategy>``, which cannot name a grown plan (its strategy is a slug of its originating

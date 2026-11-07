@@ -122,7 +122,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: (`pre` on PreCompact, `post` on PostCompact, `inject` on a SessionStart group
 #: whose matcher is `compact` only).
 #: 19 -> 20 at nexus-mtheb.3: the SubagentStop `subagent-stop-t1-nudge` entry.
-EXPECTED_CONEXUS_ENTRIES = 20
+#: 20 -> 21 at nexus-4cgop: the Stop wake guard, `stop_wake_guard.py` (the first Stop
+#: entry since cleanup steps A2 and A3 deleted the old `stop_verification_hook.sh` one).
+EXPECTED_CONEXUS_ENTRIES = 21
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -176,6 +178,7 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
     {
         COMPACT_CHECKPOINT,
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/stop_wake_guard.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",

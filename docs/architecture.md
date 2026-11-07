@@ -794,7 +794,7 @@ The batch contract exists because some enrichments collapse N dependency calls i
 
 `taxonomy_assign_batch_hook` reads only the batch's chunk chashes: assignment is computed and persisted server-side by `POST /v1/taxonomy/assignments/assign_from_chashes` (nexus-yu9w5), from the `chunks` rows the same flush just upserted and the `taxonomy_centroids` rows, so `contents`, `embeddings` and `metadatas` are accepted for the shared call shape and not read. One hook body covers both the bulk path and the single-document path; there is no separate single-doc taxonomy hook to keep in sync. Since 7.49.0 (nexus-r0vkh) the hook serializes against concurrent fires of itself under `LockedHookRegistry` (it had opted out in 2026-08 on the claim that per-flush chash sets share no rows, which is true of `topic_assignments` and false of `nexus.topics`, where the FK's KEY SHARE and the doc_count recount trigger put every concurrent fire on the same rows); the engine bounds its side of the call with a transaction-local `statement_timeout` and `lock_timeout` (engine-service-v0.1.125, `NX_TAXONOMY_ASSIGN_*_TIMEOUT_MS`) and retries once after a lock timeout. A bounded call that fails is recorded on the taxonomy tripwire and never fails the index write.
 
-`aspect_extraction_enqueue_hook` is the document-grain consumer. The hook queues one task per document on the engine's `aspects` tuple queue (RDR-235; the `aspect_extraction_queue` table producer, selected by `NX_ASPECT_QUEUE=table`, is retired; a stale value logs a warning and uses the tuple queue, nexus-bpikw) and lazy-spawns a daemon worker that drains the queue and invokes the synchronous `extract_aspects` extractor. The async dispatch is necessary because Critical Assumption #2 in [RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) (per-document extraction <3 s) was invalidated by the P1.3 spike (median 26.5 s, p95 38.1 s) — synchronous-inline would block the ingest path for ~25 s per document.
+`aspect_extraction_enqueue_hook` is the document-grain consumer. The hook queues one task per document on the engine's `aspects` tuple queue (RDR-235; the `aspect_extraction_queue` table, its producer and its `/v1/aspects/queue/*` routes are retired, nexus-bpikw and nexus-hbnml; a stale `NX_ASPECT_QUEUE=table` logs a warning and uses the tuple queue) and lazy-spawns a daemon worker that drains the queue and invokes the synchronous `extract_aspects` extractor. The async dispatch is necessary because Critical Assumption #2 in [RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) (per-document extraction <3 s) was invalidated by the P1.3 spike (median 26.5 s, p95 38.1 s) — synchronous-inline would block the ingest path for ~25 s per document.
 
 The ChunkBatcher-driven `nx index repo` path (nexus-nj4ch) is the one exception to "fires once per source document at the document-grain call site": there, the per-file `fire_document()` call for this hook is replaced by one flush-grain `aspect_queue.enqueue_many()` Postgres round trip per upload batch (falling back to the per-row `enqueue()` on batch failure, since one row's constraint violation aborts the whole server-side transaction). The other `fire_document` call sites (`doc_indexer.py`, `pipeline_stages.py`, and MCP `store_put` in `mcp/core.py`) are untouched and still fire the hook per document.
 
@@ -837,7 +837,7 @@ dispatch retry of [RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-conte
 | Telemetry         | `HttpTelemetryStore`        | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
 | Chash index       | `HttpChashIndex`            | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture. `chash_alias`, the legacy-reference resolver that briefly succeeded it, is itself **retired** (nexus-lgdel.l1, 2026-08-16) — a legacy 32-hex reference is no longer resolvable at all. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11) — its own `delete_collection` method was deleted at nexus-lgdel.l2, the last remaining no-op that route ever served. Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
 | Document aspects  | `HttpDocumentAspectsStore`  | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
-| Aspect queue      | `HttpAspectQueue`           | `db.aspect_queue`      | Durable queue feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
+| Aspect queue      | `HttpAspectQueue`           | `db.aspect_queue`      | Producer of the engine's `aspects` tuple queue that feeds the aspect-extraction worker (`enqueue`, `enqueue_many`, `tuple_counts`); the worker claims tasks with leases, and the engine returns a crashed worker's lapsed claims ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
 | Document highlights | `HttpDocumentHighlightsStore` | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |
 | Tuple space       | `HttpTupleStore`             | `db.tuples`             | Linda tuple space (`out`/`rd`/`in`/`ack`/`nack`/`renew`/`release`/`registry`/`subspace_list`/`subspace_stats`) over `/v1/tuples` ([RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md), [RDR-206](rdr/rdr-206-tuple-claim-renew-and-reply-in-ack.md), [RDR-211](rdr/rdr-211-board-queue-and-lock-tuple-templates.md)). See [Tuple space](#tuple-space-rdr-205-rdr-206-rdr-211) below and [Tuple Space](tuple-space.md) for the full reference |
 
@@ -1181,11 +1181,12 @@ is locked` daemon incidents):
   the daemon when reachable (decided by an up-front `database.hello()`
   probe), else a direct `T2Database` fallback. The hot/automated writers
   route through it: the indexer (chash + taxonomy persist + aspect
-  enqueue), the `aspect_worker` poll (`reclaim_stale` + `claim_batch`),
-  the SessionEnd flush, and the routable CLI writers. The daemon RPC wire
-  protocol decodes dataclasses to plain dicts, so methods taking/returning
-  a dataclass the caller introspects (`document_aspects.upsert`,
-  `aspect_queue.claim_batch`) either stay direct or reconstruct on the
+  enqueue), the SessionEnd flush, and the routable CLI writers. (The
+  `aspect_worker` poll went with the aspect queue table, nexus-hbnml: the
+  worker claims `aspects` tuples from the engine directly.) The daemon RPC
+  wire protocol decodes dataclasses to plain dicts, so methods
+  taking/returning a dataclass the caller introspects
+  (`document_aspects.upsert`) either stay direct or reconstruct on the
   client side.
 - **Enforcement.** `nexus.storage_boundary_lint` (wired into `nx doctor
   --check-storage-boundary`) hard-fails any raw `sqlite3.connect` or
@@ -1328,7 +1329,7 @@ logged, not discarded.
 
 ### Builtin plan templates
 
-The plan-centric retrieval stack ships twelve builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
+The plan-centric retrieval stack ships thirteen builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
 
 Grouped by verb:
 
@@ -1343,6 +1344,7 @@ Grouped by verb:
   - `type-scoped-search`: Single-content-type semantic search. Resolves the content-type bucket and runs the query against only those collections.
   - `document-discovery`: "Which documents/papers/RDRs exist on X" — a single-step `query()` fast path (nexus-h33x8.6) that returns the matching documents themselves, not a synthesized answer.
   - `corpus-coverage-check`: "Does the corpus have anything on X" — the sibling yes-or-no fast path to `document-discovery`, kept as a separate template so the matcher has two distinct description vectors to rank against.
+  - `entity-resolution`: "Which companies were affected by issues in X" — a `discovery/listing` template with `hybrid-factual-lookup`'s steps (search, graph traversal, rank, generate), so an entity-listing request reaches a plan with a coverage boundary instead of the single-query `document-discovery`. Tagged `cosine-only`: matched on similarity at or above the floor, never by the below-floor category route (RDR-147 branch (c)).
 - **verb=lookup**
   - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval.
 - **verb=document**

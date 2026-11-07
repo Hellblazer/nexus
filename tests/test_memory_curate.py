@@ -272,7 +272,9 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     # GIT_DIR / GIT_COMMON_DIR redirect git away from the layout on disk: ask git
     assert md.primary_checkout_root(repo, {"GIT_DIR": str(repo / ".git")}) == Path("/via/git")
     assert md.primary_checkout_root(repo, {"GIT_COMMON_DIR": str(repo / ".git")}) == Path("/via/git")
-    assert len(asked) == 2
+    # GIT_CEILING_DIRECTORIES can stop git's search above cwd, which the read does not model: ask git
+    assert md.primary_checkout_root(repo / "sub", {"GIT_CEILING_DIRECTORIES": str(repo)}) == Path("/via/git")
+    assert len(asked) == 3
     # an unrecognised layout: ask git
     broken = tmp_path / "broken"
     broken.mkdir()
@@ -286,9 +288,16 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     badcommon.mkdir()
     gitdir = tmp_path / "badcommon-gitdir"
     gitdir.mkdir()
+    (gitdir / "HEAD").write_text("ref: refs/heads/main\n")  # so it is the commondir that is wrong
     (gitdir / "commondir").write_text("../no-such-common\n")
     (badcommon / ".git").write_text(f"gitdir: {gitdir}\n")
-    for cwd in (broken, dangling, headless, badcommon):
+    headless_target = tmp_path / "headless-target"
+    headless_target.mkdir()
+    (headless_target / "notes").write_text("a directory a gitdir line names, but not a git directory\n")
+    headless_link = tmp_path / "headless-link"
+    headless_link.mkdir()
+    (headless_link / ".git").write_text(f"gitdir: {headless_target}\n")
+    for cwd in (broken, dangling, headless, badcommon, headless_link):
         asked.clear()
         assert md.primary_checkout_root(cwd, {}) == Path("/via/git"), cwd
         assert asked == [cwd], cwd
@@ -417,6 +426,28 @@ def test_files_scan_reports_each_planted_defect(tmp_path: Path) -> None:
     assert scan.dangling == [("MEMORY.md", "gone.md")]
     assert scan.replaced_present == [("new_one.md", "old_one", "old_one.md")]
     assert scan.index_files == ["MEMORY-ondemand.md", "MEMORY.md"]
+
+
+def test_a_file_linked_from_an_indexed_hub_is_indexed_one_level_only(tmp_path: Path) -> None:
+    # Sam, 2026-11-05 (nexus-qo7ie.29): one hub level counts as indexed.
+    d = tmp_path / "mem-hub"
+    d.mkdir()
+    _w(d, "MEMORY.md", "- [Facts](hub.md) - index of technical facts\n- prose hub: hub2.md\n")
+    _w(d, "hub.md", _fm("Facts", "hub") + "- [Child](child.md)\n- see prose_only.md\n"
+                    "- [Archived](archive/elsewhere.md)\n- [Up](../up.md)\n")
+    _w(d, "hub2.md", _fm("Hub two", "named by an index in prose") + "- [Dot](./dot_child.md)\n")
+    _w(d, "dot_child.md", _fm("Dot child", "linked as ./dot_child.md from a prose-named hub"))
+    # same base names as the hub's subdirectory and parent links, but not their targets
+    _w(d, "elsewhere.md", _fm("Elsewhere", "a top-level file, not archive/elsewhere.md"))
+    _w(d, "up.md", _fm("Up", "a top-level file, not ../up.md"))
+    _w(d, "child.md", _fm("Child", "linked from the hub") + "- [Grandchild](grandchild.md)\n")
+    _w(d, "grandchild.md", _fm("Grandchild", "two levels down"))
+    _w(d, "prose_only.md", _fm("Prose", "named by the hub in prose, not linked"))
+    _w(d, "orphan_hub.md", _fm("Orphan hub", "not indexed") + "- [Via orphan](via_orphan.md)\n")
+    _w(d, "via_orphan.md", _fm("Via orphan", "linked only from an unindexed file"))
+    assert ms.scan(d).unindexed == [
+        "elsewhere.md", "grandchild.md", "orphan_hub.md", "prose_only.md", "up.md", "via_orphan.md",
+    ]
 
 
 def test_files_scan_is_silent_on_a_clean_directory(tmp_path: Path) -> None:
@@ -633,6 +664,18 @@ def test_agents_names_a_repo_forms(text: str) -> None:
         "learned in the repo",
         "learned in a session",
         "learned in practice",
+        "keep it in a new repo",
+        "a separate repo for the fixtures",
+        "learned in CI",
+        "learned in prior sessions",
+        "a different repo",
+        "learned in earlier sessions",
+        "an older repo",
+        "learned in recent sessions",
+        "learned in past sessions",
+        "learned in several repos",
+        "learned in long sessions",
+        "learned in multiple sessions",
         "repo: any",
         "check callers before renaming",
         "",

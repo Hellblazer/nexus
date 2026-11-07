@@ -14,7 +14,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -30,9 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-164 P4 (bead nexus-jcx6w) — verify the document-level fk-001 ON DELETE CASCADE
  * fires in the service path, and document what it does NOT cover.
  *
- * <p>fk-001 (fk-001-catalog-cross-store.xml) makes four child tables cascade-delete when
+ * <p>fk-001 (fk-001-catalog-cross-store.xml) makes three child tables cascade-delete when
  * their parent {@code catalog_documents(tenant_id, tumbler)} row is HARD-deleted:
- * {@code document_aspects}, {@code document_highlights}, {@code aspect_extraction_queue},
+ * {@code document_aspects}, {@code document_highlights},
  * {@code catalog_document_chunks}. {@code topic_assignments} has NO document-rooted FK
  * (only a lookup index — its {@code doc_id} is a chunk content-hash, not a tumbler), so it
  * survives a document delete; its collection-scoped cleanup is the taxonomy cascade, not
@@ -40,7 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link CatalogDeleteCollectionCascadeTest}.
  *
  * <p>Three semantics are pinned: (1) a HARD {@code DELETE FROM catalog_documents} cascades to
- * the four FK children (the path {@code deleteCollection} takes); (2) the service's
+ * the three FK children (the path {@code deleteCollection} takes); (2) the service's
  * {@code deleteDocument} API is a SOFT tombstone ({@code UPDATE deleted_at}) — it does NOT
  * fire {@code ON DELETE CASCADE}, so children intentionally survive a tombstone; (3) the
  * composite {@code (tenant_id, doc_id)} FK isolates tenants — deleting one tenant's document
@@ -121,7 +120,7 @@ class CatalogDocumentCascadeTest {
                     CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
                 .as("row tombstoned, not removed").isEqualTo(1);
             // Children survive the tombstone (no cascade on UPDATE deleted_at).
-            assertChildCounts(su, TENANT, "soft-doc-1", 1, 1, 1, 1);
+            assertChildCounts(su, TENANT, "soft-doc-1", 1, 1, 1);
             assertThat(countLinks(su, TENANT, "soft-doc-1"))
                 .as("catalog_links survive a soft-delete (tombstone) of an endpoint").isEqualTo(1);
         }
@@ -142,7 +141,7 @@ class CatalogDocumentCascadeTest {
         }
         // Sanity: children present before the hard delete.
         try (Connection su = pg.createConnection("")) {
-            assertChildCounts(su, TENANT, "hard-doc-1", 1, 1, 1, 1);
+            assertChildCounts(su, TENANT, "hard-doc-1", 1, 1, 1);
             assertThat(countLinks(su, TENANT, "hard-doc-1")).as("links present before delete").isEqualTo(2);
         }
 
@@ -159,7 +158,7 @@ class CatalogDocumentCascadeTest {
 
         try (Connection su = pg.createConnection("")) {
             // The four fk-001 CASCADE children are gone.
-            assertChildCounts(su, TENANT, "hard-doc-1", 0, 0, 0, 0);
+            assertChildCounts(su, TENANT, "hard-doc-1", 0, 0, 0);
             // topic_assignments has NO document-rooted FK (fk-001 changeset 1 = index only) — survives.
             assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT),
@@ -198,8 +197,8 @@ class CatalogDocumentCascadeTest {
             seedLink(su, TENANT_B, shared, partner);
         }
         try (Connection su = pg.createConnection("")) {
-            assertChildCounts(su, TENANT, shared, 1, 1, 1, 1);
-            assertChildCounts(su, TENANT_B, shared, 1, 1, 1, 1);
+            assertChildCounts(su, TENANT, shared, 1, 1, 1);
+            assertChildCounts(su, TENANT_B, shared, 1, 1, 1);
             assertThat(countLinks(su, TENANT, shared)).isEqualTo(1);
             assertThat(countLinks(su, TENANT_B, shared)).isEqualTo(1);
         }
@@ -212,8 +211,8 @@ class CatalogDocumentCascadeTest {
         }
 
         try (Connection su = pg.createConnection("")) {
-            assertChildCounts(su, TENANT, shared, 0, 0, 0, 0);       // tenant A cascaded
-            assertChildCounts(su, TENANT_B, shared, 1, 1, 1, 1);     // tenant B untouched
+            assertChildCounts(su, TENANT, shared, 0, 0, 0);       // tenant A cascaded
+            assertChildCounts(su, TENANT_B, shared, 1, 1, 1);     // tenant B untouched
             assertThat(countLinks(su, TENANT, shared))
                 .as("tenant A's link cascaded").isEqualTo(0);
             assertThat(countLinks(su, TENANT_B, shared))
@@ -223,24 +222,22 @@ class CatalogDocumentCascadeTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    /** Assert the four fk-001 child tables hold the expected row counts for {@code tenant}/{@code tumbler}. */
+    /** Assert the three fk-001 child tables hold the expected row counts for {@code tenant}/{@code tumbler}. */
     private void assertChildCounts(Connection su, String tenant, String tumbler,
-                                   int aspects, int highlights, int queue, int manifest) throws Exception {
+                                   int aspects, int highlights, int manifest) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         assertThat(ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant),
             DOCUMENT_ASPECTS.DOC_ID.eq(tumbler))).as("document_aspects").isEqualTo(aspects);
         assertThat(ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant),
             DOCUMENT_HIGHLIGHTS.DOC_ID.eq(tumbler))).as("document_highlights").isEqualTo(highlights);
-        assertThat(ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant),
-            ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(tumbler))).as("aspect_extraction_queue").isEqualTo(queue);
         assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant),
             CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))).as("catalog_document_chunks manifest").isEqualTo(manifest);
     }
 
-    /** Seed one document + its four fk-001 child rows (aspects/highlights/queue/manifest) for {@code tenant}. */
+    /** Seed one document + its three fk-001 child rows (aspects/highlights/manifest) for {@code tenant}. */
     private static void seedDocument(Connection su, String tenant, String tumbler) throws Exception {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-        // Register the collection first (document_aspects/queue carry an fk-003 collection FK).
+        // Register the collection first (document_aspects carries an fk-003 collection FK).
         PgContainerHelper.insertCollection(ctx, tenant, COLL);
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
@@ -277,12 +274,6 @@ class CatalogDocumentCascadeTest {
                        DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
                        DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
            .values(tenant, tumbler, COLL, "file:///hl-" + tenant + "-" + tumbler, "hi", java.time.OffsetDateTime.now())
-           .execute();
-        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-           .values(tenant, COLL, "/p/q-" + tenant + "-" + tumbler + ".md", "pending", java.time.OffsetDateTime.now(),
-                   tumbler)
            .execute();
     }
 

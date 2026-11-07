@@ -183,6 +183,50 @@ def test_catalog_doctor_fails_on_a_flagged_document_with_an_aspect_row_and_warns
 
 
 @substrate
+def test_the_default_queue_read_fails_on_a_live_tuple_task_and_passes_over_a_dead_one(t2_service_env) -> None:
+    """nexus-hbnml: the row's DEFAULT ``queued_doc_ids`` (no injection) reads the ``aspects`` tuple
+    subspace. Before the fix it called the retired table's ``list_waiting``; the AttributeError landed in
+    the row's catch-all and the row said NOT APPLICABLE, so a flagged document with a queued task never
+    failed. A live (available) task fails the row. A dead one does not: requeue-failed never revives the
+    task of a flagged document and the task holds no text, so it would hold the row red with no remedy."""
+    import json as _json
+
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.db.t2.http_tuple_store import HttpTupleStore
+
+    coll = "knowledge__hbnmldoc__bge-base-en-v15-768__v1"
+    keys = {"queue": "aspects"}
+    store = HttpTupleStore()
+
+    def task(doc: str, path: str) -> None:
+        body = _json.dumps({"collection": coll, "source_path": path, "doc_id": doc, "content_hash": "h"},
+                           separators=(",", ":"))
+        store.out("aspects", keys, None, body, nonce=doc)
+
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner("hbnmldoc-owner", owner_type="curator", tumbler_prefix="73.1")
+        dead_doc, live_doc = (
+            str(cat.register(owner, name, content_type="knowledge", physical_collection=coll,
+                             source_uri=f"file:///hbnmldoc/{name}.md", file_path=f"{name}.md"))
+            for name in ("dead", "live")
+        )
+        cat.set_sensitivity([dead_doc, live_doc], True, reason="hbnml")
+    task(dead_doc, "dead.md")
+    got = store.inp("aspects", keys, claimant="hbnml-dead", lease_s=60)
+    assert got is not None and _json.loads(got[0].body)["doc_id"] == dead_doc
+    store.nack(got[1], "hbnml-dead", dead=True)
+
+    only_dead = sd.check_sensitive_with_aspects()
+    assert only_dead["status"] == sd.PASS, only_dead
+
+    task(live_doc, "live.md")
+    report = sd.check_sensitive_with_aspects()
+    assert report["status"] == sd.FAIL, report
+    assert [f["tumbler"] for f in report["findings"]] == [live_doc]
+    assert report["findings"][0]["why"] == "has a queued aspect task"
+
+
+@substrate
 def test_nx_doctor_supplementary_rows_are_not_applicable_on_a_virgin_tenant_and_never_gate(t2_service_env, capsys) -> None:
     from nexus.commands import doctor as doctor_mod
 

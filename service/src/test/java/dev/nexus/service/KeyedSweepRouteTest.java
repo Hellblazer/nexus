@@ -13,6 +13,7 @@ import dev.nexus.service.db.RequestLedgerActivity;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -41,8 +42,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -72,6 +75,7 @@ class KeyedSweepRouteTest {
     private static final String QUARANTINE_PATH = "/v1/vectors/gc/quarantine-orphans";
     private static final String RESTORE_PATH = "/v1/vectors/gc/restore-rereferenced";
     private static final String EXPIRE_PATH = "/v1/vectors/gc/expire-quarantine";
+    private static final String QUARANTINE_RESTORE_PATH = "/v1/vectors/gc/quarantine-restore";
     private static final String EXPIRE_CUTOFF = "2099-01-01T00:00:00Z";
 
     /** The four keyed shapes (RDR-222 Amendment A1 added {@link #EXPIRE}, nexus-1579m). */
@@ -700,16 +704,18 @@ class KeyedSweepRouteTest {
         expire.put("quarantine_collection", orphans.quarantine());
         expire.put("origin_collection", orphans.origin());
         expire.put("cutoff", "2099-01-01T00:00:00Z");
-        var quarantineRestore = new LinkedHashMap<String, Object>();
-        quarantineRestore.put("collection", orphans.origin());
-        quarantineRestore.put("chashes", List.of(Chash.ofText("anything").toHex()));
+        // nexus-k9kr9: quarantine-restore is keyed now; the shape it cannot key is the dry run.
+        var quarantineRestoreDry = new LinkedHashMap<String, Object>();
+        quarantineRestoreDry.put("origin_collection", orphans.origin());
+        quarantineRestoreDry.put("chashes", List.of(Chash.ofText("anything").toHex()));
+        quarantineRestoreDry.put("dry_run", true);
 
         Map<String, Map<String, Object>> shapes = new LinkedHashMap<>();
         shapes.put(QUARANTINE_PATH + "#unbounded", unbounded);
         shapes.put(QUARANTINE_PATH + "#floor-only", floorOnly);
         shapes.put(RESTORE_PATH + "#unbounded", restoreUnbounded);
         shapes.put("/v1/vectors/gc/expire-quarantine", expire);
-        shapes.put("/v1/vectors/gc/quarantine-restore", quarantineRestore);
+        shapes.put(QUARANTINE_RESTORE_PATH, quarantineRestoreDry);
         shapes.put("/v1/vectors/count", Map.of("collection", orphans.origin()));
         shapes.put("/v1/memory/search", Map.of("query", "x", "project", "p"));
 
@@ -1270,6 +1276,430 @@ class KeyedSweepRouteTest {
         assertThat(count(f.source())).as("nothing ran").isEqualTo(2);
     }
 
+    // ── quarantine-restore: the fourth keyed route (nexus-k9kr9) ─────────────────────────────────────────────
+
+    /**
+     * An origin with two quarantine siblings holding {@code perSibling} chunks each: the reaper's own
+     * ({@code quarantine-<origin>}) and a client-named one found by the chunks' origin tag. When
+     * {@code lockedDoc} is set, the second sibling's first chunk names a live catalog document, so a session
+     * holding that document's index-run lock makes the SECOND sibling's call trip its lock bound.
+     */
+    private record Qr(String origin, String first, String second, List<String> firstHashes,
+                      List<String> secondHashes, String lockedDoc) {
+        List<String> all() {
+            var all = new ArrayList<>(firstHashes);
+            all.addAll(secondHashes);
+            return all;
+        }
+    }
+
+    private Qr seedQr(int perSibling, boolean withLockedDoc) throws Exception {
+        int id = seq.incrementAndGet();
+        String origin = "code__kqr" + id + "__minilm-l6-v2-384__v1";
+        String first = "quarantine-" + origin;
+        String second = "quarantine-code__kqro" + id + "__minilm-l6-v2-384__v1";
+        String doc = withLockedDoc ? "1." + (900 + id) + ".1" : null;
+        List<String> firstHashes = new ArrayList<>();
+        List<String> secondHashes = new ArrayList<>();
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, origin);
+            PgContainerHelper.insertCollection(ctx, TENANT, first);
+            PgContainerHelper.insertCollection(ctx, TENANT, second);
+            for (String[] side : new String[][] {{first, "a"}, {second, "b"}}) {
+                for (int i = 0; i < perSibling; i++) {
+                    String chash = Chash.ofText(origin + "/" + side[1] + "/" + i).toHex();
+                    (side[1].equals("a") ? firstHashes : secondHashes).add(chash);
+                    var meta = new LinkedHashMap<String, Object>();
+                    meta.put("title", "chunk " + side[1] + i);
+                    meta.put("origin_collection", origin);
+                    meta.put("quarantined_at", "2026-09-01T00:00:00Z");
+                    if (doc != null && side[1].equals("b") && i == 0) {
+                        meta.put("catalog_doc_id", doc);
+                        meta.put("chunk_index", 0);
+                    }
+                    PgContainerHelper.insertChunks(ctx, TENANT, side[0], List.of(chash), List.of("text " + chash),
+                        List.of(new float[384]), List.of(meta));
+                }
+            }
+            if (doc != null) {
+                ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                        CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.METADATA)
+                    .values(TENANT, doc, "Locked document", origin, 1, "l.md", JSONB.jsonb("{}")).execute();
+            }
+        });
+        return new Qr(origin, first, second, firstHashes, secondHashes, doc);
+    }
+
+    private static Map<String, Object> qrBody(Qr q, List<String> chashes) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("origin_collection", q.origin());
+        m.put("chashes", chashes);
+        return m;
+    }
+
+    private int qrAuditRows(Qr q) throws Exception {
+        int[] n = new int[1];
+        su(ctx -> n[0] = ctx.fetchCount(GC_AUDIT, GC_AUDIT.TENANT_ID.eq(TENANT)
+            .and(GC_AUDIT.OPERATION.eq("quarantine_restore")).and(GC_AUDIT.COLLECTION.eq(q.origin()))));
+        return n[0];
+    }
+
+    private Connection holdIndexRunLock(String doc) throws Exception {
+        Connection holder = pg.createConnection("");
+        holder.setAutoCommit(false);
+        DSL.using(holder, SQLDialect.POSTGRES)
+           .select(DSL.function("pg_advisory_xact_lock", Object.class,
+                   DSL.function("hashtext", Integer.class, DSL.val("indexrun:" + TENANT + ":" + doc))))
+           .fetch();
+        return holder;
+    }
+
+    @Test
+    void aKeyedQuarantineRestoreCommitsAllSiblingsWithItsLedgerRow_andAReplayIsTheFirstResponse() throws Exception {
+        Qr q = seedQr(2, false);
+        String key = newKey();
+        repo.setAfterSweepSqlHookForTests(sqlCalls::incrementAndGet);
+        sqlCalls.set(0);
+        var before = RequestLedgerActivity.snapshot();
+        String missing = Chash.ofText("kqr-nowhere-" + q.origin()).toHex();
+        var req = qrBody(q, new ArrayList<>(q.all()));
+        ((List<String>) req.get("chashes")).add(missing);
+
+        HttpResponse<String> first = post(QUARANTINE_RESTORE_PATH, req, key);
+        JsonNode live = json(first, 200);
+
+        assertThat(header(first, "Idempotency-Key")).isEqualTo(key);
+        assertThat(header(first, "Idempotency-Replayed")).as("the first response is not a replay").isNull();
+        assertThat(live.get("restored").asInt()).isEqualTo(4);
+        assertThat(live.get("missing").asInt()).isEqualTo(1);
+        assertThat(live.get("audit_ids")).as("one audit row per sibling that moved something").hasSize(2);
+        assertThat(live.get("quarantine_collections")).hasSize(2);
+        assertThat(live.get("rows")).hasSize(5);
+        assertThat(sqlCalls.get()).isEqualTo(1);
+        assertThat(count(q.first()) + count(q.second())).as("the quarantine siblings are empty").isZero();
+        assertThat(qrAuditRows(q)).isEqualTo(2);
+        JsonNode st = status(key);
+        assertThat(st.get("state").asText()).isEqualTo("committed");
+        assertThat(st.get("response")).as("the ledger stored the WHOLE body, rows included").isEqualTo(live);
+
+        HttpResponse<String> replay = post(QUARANTINE_RESTORE_PATH, req, key);
+        assertThat(json(replay, 200)).as("the stored response, field for field").isEqualTo(live);
+        assertThat(header(replay, "Idempotency-Replayed")).isEqualTo("true");
+        assertThat(sqlCalls.get()).as("the replay did not run the restore again").isEqualTo(1);
+        assertThat(qrAuditRows(q)).as("and wrote no audit row").isEqualTo(2);
+        assertThat(replay.body()).as("two replays are the same bytes").isEqualTo(post(QUARANTINE_RESTORE_PATH, req, key).body());
+        assertThat(replay.body().getBytes(StandardCharsets.UTF_8).length)
+            .isLessThanOrEqualTo(65_536);
+        assertThat(replay.body()).doesNotContain("sample_truncated");
+        assertThat(RequestLedgerActivity.snapshot().replays() - before.replays()).isEqualTo(2);
+    }
+
+    @Test
+    void aBusyTripOnTheSecondSiblingRollsTheWholeKeyedCallBack_rolledBack_andTheSameKeyFinishesIt() throws Exception {
+        Qr q = seedQr(2, true);
+        String key = newKey();
+        Connection holder = holdIndexRunLock(q.lockedDoc());
+        try {
+            HttpResponse<String> busy = post(QUARANTINE_RESTORE_PATH, qrBody(q, q.all()), key);
+
+            JsonNode b = json(busy, 503);
+            assertThat(b.get("reason").asText()).isEqualTo("quarantine_restore_busy");
+            assertThat(b.get("nothing_moved").asBoolean()).as("sibling one rolled back too").isTrue();
+            assertThat(b.get("audit_ids")).isEmpty();
+            assertThat(b.get("moved_chashes")).isEmpty();
+            assertThat(header(busy, "Retry-After")).isEqualTo("5");
+            assertThat(header(busy, "Idempotency-Key")).isEqualTo(key);
+            assertThat(count(q.first())).as("sibling one's chunks never left").isEqualTo(2);
+            assertThat(count(q.second())).isEqualTo(2);
+            assertThat(count(q.origin())).isZero();
+            assertThat(qrAuditRows(q)).as("no audit row survived").isZero();
+            assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+            assertThat(ledgerStatus(key)).as("the row records the status the ladder sent").isEqualTo(503);
+        } finally {
+            holder.rollback();
+            holder.close();
+        }
+
+        HttpResponse<String> done = post(QUARANTINE_RESTORE_PATH, qrBody(q, q.all()), key);
+        assertThat(json(done, 200).get("restored").asInt()).as("the same key, sent again, finishes it").isEqualTo(4);
+        assertThat(status(key).get("state").asText()).isEqualTo("committed");
+        assertThat(qrAuditRows(q)).isEqualTo(2);
+    }
+
+    @Test
+    void theUnkeyedRestoreIsUnchanged_aBusySecondSiblingLeavesTheFirstCommittedAndSaysSo() throws Exception {
+        Qr q = seedQr(2, true);
+        Connection holder = holdIndexRunLock(q.lockedDoc());
+        try {
+            HttpResponse<String> busy = post(QUARANTINE_RESTORE_PATH, qrBody(q, q.all()), null);
+
+            JsonNode b = json(busy, 503);
+            assertThat(b.get("reason").asText()).isEqualTo("quarantine_restore_busy");
+            assertThat(b.get("nothing_moved").asBoolean()).as("per-sibling commits: sibling one stayed").isFalse();
+            assertThat(b.get("audit_ids")).hasSize(1);
+            assertThat(b.get("moved_chashes")).hasSize(2);
+            assertThat(header(busy, "Idempotency-Key")).isNull();
+            assertThat(count(q.origin())).isEqualTo(2);
+            assertThat(count(q.first())).isZero();
+        } finally {
+            holder.rollback();
+            holder.close();
+        }
+    }
+
+    @Test
+    void aLostLedgerMarkerRollsEverySiblingOfAKeyedRestoreBack() throws Exception {
+        Qr q = seedQr(2, false);
+        String key = newKey();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        holdFirstSweep(entered, release);
+
+        CompletableFuture<HttpResponse<String>> call = CompletableFuture.supplyAsync(() -> {
+            try {
+                return post(QUARANTINE_RESTORE_PATH, qrBody(q, q.all()), key);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertThat(entered.await(60, TimeUnit.SECONDS)).as("held after both siblings, before the marker").isTrue();
+        assertThat(count(q.origin())).as("nothing visible: one transaction").isZero();
+        su(ctx -> ctx.update(REQUEST_LEDGER).set(REQUEST_LEDGER.LEASE_UNTIL, OffsetDateTime.now().minusSeconds(5))
+            .where(REQUEST_LEDGER.TENANT_ID.eq(TENANT).and(REQUEST_LEDGER.REQUEST_ID.eq(UUID.fromString(key))))
+            .execute());
+        release.countDown();
+
+        HttpResponse<String> r = call.get(60, TimeUnit.SECONDS);
+        assertThat(r.statusCode()).as("the restore did not commit: %s", r.body()).isEqualTo(500);
+        assertThat(count(q.first())).as("both siblings rolled back with the marker").isEqualTo(2);
+        assertThat(count(q.second())).isEqualTo(2);
+        assertThat(count(q.origin())).isZero();
+        assertThat(qrAuditRows(q)).isZero();
+        assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+    }
+
+    @Test
+    void aDryRunWithAKeyIs400Unsupported_nothingRuns_noLedgerRow_andTheUnkeyedDryRunStillWorks() throws Exception {
+        Qr q = seedQr(1, false);
+        String key = newKey();
+        var req = qrBody(q, q.all());
+        req.put("dry_run", true);
+
+        HttpResponse<String> r = post(QUARANTINE_RESTORE_PATH, req, key);
+
+        assertThat(json(r, 400).get("error").asText()).isEqualTo("idempotency_key_unsupported");
+        assertThat(ledgerRows(key)).isZero();
+        assertThat(count(q.first())).isEqualTo(1);
+        assertThat(json(post(QUARANTINE_RESTORE_PATH, req, null), 200).get("would_restore").asInt()).isEqualTo(2);
+    }
+
+    @Test
+    void aKeyedCallOverKChashesIs400Named_nothingRuns_noLedgerRow_andKItselfRuns() throws Exception {
+        int k = dev.nexus.service.http.VectorHandler.MAX_KEYED_QUARANTINE_RESTORE_CHASHES;
+        Qr q = seedQr(1, false);
+        List<String> over = new ArrayList<>(q.all());
+        while (over.size() < k + 1) over.add(Chash.ofText("kqr-pad-" + over.size()).toHex());
+        String key = newKey();
+
+        HttpResponse<String> r = post(QUARANTINE_RESTORE_PATH, qrBody(q, over), key);
+
+        JsonNode b = json(r, 400);
+        assertThat(b.get("error").asText()).isEqualTo("too_many_chashes_for_keyed_restore");
+        assertThat(b.get("max_chashes").asInt()).isEqualTo(k);
+        assertThat(b.get("requested").asInt()).isEqualTo(k + 1);
+        assertThat(ledgerRows(key)).as("refused before the claim").isZero();
+        assertThat(count(q.first()) + count(q.second())).as("nothing ran").isEqualTo(2);
+
+        JsonNode atK = json(post(QUARANTINE_RESTORE_PATH, qrBody(q, over.subList(0, k)), newKey()), 200);
+        assertThat(atK.get("rows")).hasSize(k);
+        assertThat(atK.get("restored").asInt()).isEqualTo(2);
+
+        // The unkeyed call keeps its own ceiling (1000): K + 1 chashes is fine without a key.
+        Qr u = seedQr(1, false);
+        List<String> unkeyedList = new ArrayList<>(u.all());
+        while (unkeyedList.size() < k + 1) unkeyedList.add(Chash.ofText("kqr-upad-" + unkeyedList.size()).toHex());
+        assertThat(json(post(QUARANTINE_RESTORE_PATH, qrBody(u, unkeyedList), null), 200).get("rows"))
+            .hasSize(k + 1);
+    }
+
+    @Test
+    void aKeyedWindowAndAKeyedAuditSourceAreClampedToKAndPageByTheirCursor_unkeyedKeepsItsPage() throws Exception {
+        int k = dev.nexus.service.http.VectorHandler.MAX_KEYED_QUARANTINE_RESTORE_CHASHES;
+        int total = k + 3;
+        Qr q = seedQr(total, false);   // total chunks in each sibling
+        List<String> inFirst = q.firstHashes();
+        long auditId = auditRowFor(q.origin(), inFirst);
+
+        // window source: limit 1000 is clamped to K on the keyed path; the cursor names the rest
+        var window = new LinkedHashMap<String, Object>();
+        window.put("origin_collection", q.origin());
+        window.put("quarantined_since", "2026-01-01T00:00:00Z");
+        window.put("limit", 1000);
+        JsonNode page = json(post(QUARANTINE_RESTORE_PATH, window, newKey()), 200);
+        assertThat(page.get("rows")).as("clamped to K").hasSize(k);
+        assertThat(page.get("next_after").isNull()).as("and the cursor says there is more").isFalse();
+
+        // audit source: same
+        var audit = new LinkedHashMap<String, Object>();
+        audit.put("origin_collection", q.origin());
+        audit.put("audit_id", auditId);
+        audit.put("limit", 1000);
+        JsonNode aPage = json(post(QUARANTINE_RESTORE_PATH, audit, newKey()), 200);
+        assertThat(aPage.get("rows")).hasSize(k);
+        assertThat(aPage.get("source").get("next_offset").asInt()).isEqualTo(k);
+        audit.put("offset", k);
+        JsonNode aLast = json(post(QUARANTINE_RESTORE_PATH, audit, newKey()), 200);
+        assertThat(aLast.get("rows")).hasSize(3);
+        assertThat(aLast.get("source").get("next_offset").isNull()).isTrue();
+
+        // unkeyed: the page is what it always was (limit 1000 takes the lot of what is left)
+        Qr u = seedQr(total, false);
+        var unkeyed = new LinkedHashMap<String, Object>();
+        unkeyed.put("origin_collection", u.origin());
+        unkeyed.put("quarantined_since", "2026-01-01T00:00:00Z");
+        unkeyed.put("limit", 1000);
+        JsonNode all = json(post(QUARANTINE_RESTORE_PATH, unkeyed, null), 200);
+        assertThat(all.get("rows")).as("both siblings' chashes, distinct, in one unclamped page").hasSize(2 * total);
+        assertThat(all.get("next_after").isNull()).isTrue();
+    }
+
+    private long auditRowFor(String origin, List<String> chashes) throws Exception {
+        long[] id = new long[1];
+        su(ctx -> id[0] = ctx.insertInto(GC_AUDIT)
+            .set(GC_AUDIT.TENANT_ID, TENANT).set(GC_AUDIT.OPERATION, "reaper_quarantine")
+            .set(GC_AUDIT.COLLECTION, origin).set(GC_AUDIT.ACTOR, "engine").set(GC_AUDIT.DRY_RUN, false)
+            .set(GC_AUDIT.CHASH_COUNT, chashes.size())
+            .set(GC_AUDIT.CHASHES, JSONB.jsonb(toJsonArray(chashes)))
+            .returningResult(GC_AUDIT.ID).fetchOne().value1());
+        return id[0];
+    }
+
+    private static String toJsonArray(List<String> values) {
+        try {
+            return MAPPER.writeValueAsString(values);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * The keyed body's long title fields are cut, and the whole body at K worst-case-sized rows stays inside the
+     * ledger's cap as Postgres renders it, so a replay is the first response and nothing was truncated.
+     */
+    @Test
+    void aKeyedBodyOfKRowsWithHugeTitlesFitsTheCap_theTitlesAreClipped_theReplayIsComplete() throws Exception {
+        int k = dev.nexus.service.http.VectorHandler.MAX_KEYED_QUARANTINE_RESTORE_CHASHES;
+        int id = seq.incrementAndGet();
+        String origin = "code__kqt" + id + "__minilm-l6-v2-384__v1";
+        String sibling = "quarantine-" + origin;
+        List<String> hashes = new ArrayList<>();
+        String huge = "T".repeat(5_000);
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, origin);
+            PgContainerHelper.insertCollection(ctx, TENANT, sibling);
+            for (int i = 0; i < k; i++) {
+                String chash = Chash.ofText(origin + "/" + i).toHex();
+                hashes.add(chash);
+                PgContainerHelper.insertChunks(ctx, TENANT, sibling, List.of(chash), List.of("text " + i),
+                    List.of(new float[384]), List.of(Map.<String, Object>of(
+                        "title", huge, "origin_collection", origin, "quarantined_at", "2026-09-01T00:00:00Z")));
+            }
+        });
+        String key = newKey();
+        var req = new LinkedHashMap<String, Object>();
+        req.put("origin_collection", origin);
+        req.put("chashes", hashes);
+
+        HttpResponse<String> first = post(QUARANTINE_RESTORE_PATH, req, key);
+        JsonNode live = json(first, 200);
+        assertThat(live.get("rows")).hasSize(k);
+        for (JsonNode row : live.get("rows")) {
+            assertThat(row.get("chunk_title").asText())
+                .as("the 5,000-character title is cut to the keyed ceiling")
+                .isEqualTo("T".repeat(dev.nexus.service.http.VectorHandler.KEYED_RESTORE_TITLE_MAX_JSON_BYTES));
+        }
+
+        HttpResponse<String> replay = post(QUARANTINE_RESTORE_PATH, req, key);
+        assertThat(json(replay, 200)).isEqualTo(live);
+        assertThat(replay.body().getBytes(StandardCharsets.UTF_8).length)
+            .as("the replay's raw bytes, as Postgres renders the stored copy").isLessThanOrEqualTo(65_536);
+    }
+
+    /**
+     * The backstop for the sizes the 74 was measured against (nexus-k9kr9 review r1): nothing in the engine bounds how
+     * many quarantine siblings an origin has or how long their names are, and every sibling name is in the body. A
+     * keyed body that, as the ledger would render it, is over the cap fails INSIDE the transaction: nothing moves, the
+     * key reads rolled_back, and nothing is stored (the ledger's own cut would have added a sample and
+     * sample_truncated to a body with no sample). Real data: K requested chunks with long titles in the reaper's
+     * sibling, and enough other siblings with 128-character names that the names alone push the body over.
+     */
+    @Test
+    void aKeyedBodyOverTheStoredCapIs422Named_nothingMoves_theKeyReadsRolledBack_andTheUnkeyedCallStillWorks()
+            throws Exception {
+        int k = dev.nexus.service.http.VectorHandler.MAX_KEYED_QUARANTINE_RESTORE_CHASHES;
+        int id = seq.incrementAndGet();
+        String origin = "code__kqo" + id + "__minilm-l6-v2-384__v1";
+        String first = "quarantine-" + origin;
+        List<String> hashes = new ArrayList<>();
+        String longTitle = "T".repeat(5_000);
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, origin);
+            PgContainerHelper.insertCollection(ctx, TENANT, first);
+            for (int i = 0; i < k; i++) {
+                String chash = Chash.ofText(origin + "/" + i).toHex();
+                hashes.add(chash);
+                PgContainerHelper.insertChunks(ctx, TENANT, first, List.of(chash), List.of("text " + i),
+                    List.of(new float[384]), List.of(Map.<String, Object>of(
+                        "title", longTitle, "origin_collection", origin, "quarantined_at", "2026-09-01T00:00:00Z")));
+            }
+            for (int i = 0; i < OVER_CAP_SIBLINGS; i++) {
+                // 128 characters, ending in the model token the chunk table derives the vector width from
+                String head = String.format("quarantine-code__kqo%d_s%04d_", id, i);
+                String tail = "__minilm-l6-v2-384__v1";
+                String name = head + "x".repeat(128 - head.length() - tail.length()) + tail;
+                PgContainerHelper.insertCollection(ctx, TENANT, name);
+                String chash = Chash.ofText(origin + "/other/" + i).toHex();
+                PgContainerHelper.insertChunks(ctx, TENANT, name, List.of(chash), List.of("other " + i),
+                    List.of(new float[384]), List.of(Map.<String, Object>of(
+                        "origin_collection", origin, "quarantined_at", "2026-09-01T00:00:00Z")));
+            }
+        });
+        String key = newKey();
+        var req = new LinkedHashMap<String, Object>();
+        req.put("origin_collection", origin);
+        req.put("chashes", hashes);
+
+        HttpResponse<String> r = post(QUARANTINE_RESTORE_PATH, req, key);
+
+        JsonNode b = json(r, 422);
+        assertThat(b.get("error").asText()).isEqualTo("keyed_restore_body_over_cap");
+        assertThat(b.get("cap_bytes").asInt()).isEqualTo(65_536);
+        assertThat(b.get("body_bytes").asInt()).as("the measured size, over the cap").isGreaterThan(65_536);
+        assertThat(b.get("detail").asText()).contains("nothing was restored");
+        assertThat(count(first)).as("nothing moved").isEqualTo(k);
+        assertThat(count(origin)).isZero();
+        assertThat(gcAuditRows(origin)).as("no audit row survived").isZero();
+        assertThat(status(key).get("state").asText()).isEqualTo("rolled_back");
+        assertThat(ledgerStatus(key)).isEqualTo(422);
+        assertThat(header(r, "Idempotency-Key")).isEqualTo(key);
+
+        // The remedy the message names: the same request without a key has no stored copy to fit, and runs.
+        JsonNode unkeyed = json(post(QUARANTINE_RESTORE_PATH, req, null), 200);
+        assertThat(unkeyed.get("restored").asInt()).isEqualTo(k);
+        assertThat(count(first)).isZero();
+    }
+
+    /** Enough 128-character sibling names to push a K-row keyed body over 64 KB; the test asserts it did. */
+    private static final int OVER_CAP_SIBLINGS = 220;
+
+    private int gcAuditRows(String origin) throws Exception {
+        int[] n = new int[1];
+        su(ctx -> n[0] = ctx.fetchCount(GC_AUDIT, GC_AUDIT.TENANT_ID.eq(TENANT)
+            .and(GC_AUDIT.OPERATION.eq("quarantine_restore")).and(GC_AUDIT.COLLECTION.eq(origin))));
+        return n[0];
+    }
+
     // ── census: every route the guard lets a key through is wired to the keyed path ──
 
     @Test
@@ -1281,15 +1711,25 @@ class KeyedSweepRouteTest {
         keyable.put(QUARANTINE_PATH, seedOrphans(Form.BOUNDED, 2, "t"));
         keyable.put(RESTORE_PATH, seedRestore(Form.RESTORE, 2));
         keyable.put(EXPIRE_PATH, seedExpire(Form.EXPIRE, 2));
+        // nexus-k9kr9: the fourth keyed route has its own request shape (no row_limit, no Form).
+        Qr qr = seedQr(1, false);
+        Map<String, java.util.function.Function<String, HttpResponse<String>>> sender = new LinkedHashMap<>();
+        for (var e : keyable.entrySet()) {
+            sender.put(e.getKey(), key -> {
+                try { return sweep(e.getValue(), 1, key); } catch (Exception ex) { throw new IllegalStateException(ex); }
+            });
+        }
+        sender.put(QUARANTINE_RESTORE_PATH, key -> {
+            try { return post(QUARANTINE_RESTORE_PATH, qrBody(qr, qr.all()), key); } catch (Exception ex) { throw new IllegalStateException(ex); }
+        });
 
         var routes = dev.nexus.service.http.IdempotencyKeyGuard.KEYED_ROUTES;
         assertThat(routes).as("the census must see the guard's routes").isNotEmpty();
-        assertThat(keyable.keySet()).as("a keyable request is defined for every route in KEYED_ROUTES")
+        assertThat(sender.keySet()).as("a keyable request is defined for every route in KEYED_ROUTES")
             .containsAll(routes);
         for (String route : routes) {
-            Fx f = keyable.get(route);
             String key = newKey();
-            HttpResponse<String> r = sweep(f, 1, key);
+            HttpResponse<String> r = sender.get(route).apply(key);
             assertThat(r.statusCode()).as("%s: %s", route, r.body()).isEqualTo(200);
             assertThat(header(r, "Idempotency-Key")).as(route).isEqualTo(key);
             assertThat(ledgerRows(key)).as("%s is served by a keyed handler: its key left a ledger row", route)

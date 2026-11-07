@@ -10,17 +10,24 @@ entrypoint (``run_aspect_worker_daemon``) inherits its parent's environment so
 ``claude -p`` credentials flow automatically (the credential model is
 established + tested in Phase 2).
 
-These tests pin the Phase-1 lifecycle contract:
+These tests pin the lifecycle contract:
   - a started daemon publishes a per-tenant lease, discoverable by tenant;
   - the lease is tenant-scoped (a different tenant does not resolve it);
   - a second daemon for the SAME tenant converges to one live owner (generation
     fencing — the loser is fenced on its next heartbeat);
   - the hosted worker is started on start() and stopped on stop();
-  - graceful stop relinquishes the lease (discover → None).
+  - graceful stop relinquishes the lease (discover → None);
+  - the daemon attaches its claim-outcome hooks to a worker that exposes them,
+    and hosts a worker that exposes neither unchanged (nexus-wl9pk);
+  - an unreachable engine (claim round trips failing past the bound) stops the
+    daemon, and an answered claim clears that clock (nexus-wl9pk);
+  - stop releases the worker's held tuple claims and holds no queue handle
+    (RDR-235; the table reclaim loop is gone).
 """
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -52,18 +59,6 @@ class _FakeWorker:
         self.stopped += 1
 
 
-class _NoopQueue:
-    """No-op reclaim queue so lifecycle tests don't build a real HttpAspectQueue
-    (which needs a live service). Reclaim behavior itself is covered in
-    tests/daemon/test_aspect_worker_reclaim.py."""
-
-    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-        return 0
-
-    def close(self) -> None:
-        ...
-
-
 def _registry(config_dir: Path) -> ServiceRegistry:
     return ServiceRegistry(dir=config_dir, tier=_ASPECT_TIER, ttl=ttl_for_tier(_ASPECT_TIER))
 
@@ -79,11 +74,43 @@ class _BindingFakeWorker(_FakeWorker):
         self.bound = config_dir
 
 
+class _ClaimReportingWorker(_FakeWorker):
+    """A fake that exposes both claim-outcome hooks and the tuple-claim release
+    hook. The daemon attaches its handlers in ``start()``; a test drives them
+    directly, so the worker thread never runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_failure: Callable[[], None] | None = None
+        self.on_contact: Callable[[], None] | None = None
+        self.released = 0
+
+    def set_engine_failure_handler(self, handler: Callable[[], None] | None) -> None:
+        self.on_failure = handler
+
+    def set_engine_contact_handler(self, handler: Callable[[], None] | None) -> None:
+        self.on_contact = handler
+
+    def release_held_claims(self) -> int:
+        self.released += 1
+        return 0
+
+
+class _Mono:
+    """A fixed monotonic clock the test steps by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 def test_start_binds_the_daemons_config_dir_to_the_worker(tmp_path: Path) -> None:
     """The wake file is read from the daemon's --config-dir, not the ambient
     one: start() hands the worker the dir it was constructed with."""
     worker = _BindingFakeWorker()
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker)
     d.start()
     try:
         assert worker.bound == tmp_path
@@ -93,7 +120,7 @@ def test_start_binds_the_daemons_config_dir_to_the_worker(tmp_path: Path) -> Non
 
 def test_start_publishes_per_tenant_lease(tmp_path: Path) -> None:
     worker = _FakeWorker()
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker)
     d.start()
     try:
         rec = _registry(tmp_path).discover("tenant-A")
@@ -105,7 +132,7 @@ def test_start_publishes_per_tenant_lease(tmp_path: Path) -> None:
 
 
 def test_lease_is_tenant_scoped(tmp_path: Path) -> None:
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker)
     d.start()
     try:
         reg = _registry(tmp_path)
@@ -117,7 +144,7 @@ def test_lease_is_tenant_scoped(tmp_path: Path) -> None:
 
 def test_stop_relinquishes_lease_and_stops_worker(tmp_path: Path) -> None:
     worker = _FakeWorker()
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker)
     d.start()
     d.stop()
     assert _registry(tmp_path).discover("tenant-A") is None
@@ -128,8 +155,8 @@ def test_second_instance_same_tenant_converges_to_one_owner(tmp_path: Path) -> N
     """Two daemons for the same tenant: the registry's generation fencing makes
     the earlier owner stale. The later publisher holds the live lease; the first
     daemon's next heartbeat detects it is fenced."""
-    d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
-    d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+    d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker)
+    d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker)
     d1.start()
     d2.start()  # higher generation — becomes the live owner
     try:
@@ -143,63 +170,6 @@ def test_second_instance_same_tenant_converges_to_one_owner(tmp_path: Path) -> N
     finally:
         d1.stop()
         d2.stop()
-
-
-class _RecordingQueue:
-    """Like _NoopQueue, but counts reclaim_stale calls so tests can assert
-    on whether the final shutdown sweep ran."""
-
-    def __init__(self) -> None:
-        self.reclaim_calls = 0
-
-    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-        self.reclaim_calls += 1
-        return 0
-
-    def close(self) -> None:
-        ...
-
-
-def test_stop_skips_final_reclaim_when_fenced(tmp_path: Path) -> None:
-    """nexus-cd1k0.6 finding (6): stop() ran reclaim_stale(0) unconditionally,
-    even when this daemon was fenced by a newer owner. reclaim_stale(0)
-    resets ANY stale in_progress row in the tenant's scope, not only rows
-    this daemon owned -- so a fenced loser's final sweep could reset the
-    successor's freshly-claimed in-progress rows back to pending, out from
-    under it. A fenced daemon must skip the sweep entirely."""
-    queue1 = _RecordingQueue()
-    d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                            worker_factory=_FakeWorker, queue_factory=lambda: queue1)
-    d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                            worker_factory=_FakeWorker, queue_factory=_NoopQueue)
-    d1.start()
-    d2.start()  # higher generation — becomes the live owner, fences d1
-    try:
-        d1.heartbeat_once()
-        assert d1.is_fenced() is True
-        # the reclaim-first background thread already ran an unrelated sweep
-        # at start(); isolate the FINAL shutdown sweep's own contribution.
-        calls_before_stop = queue1.reclaim_calls
-        d1.stop()
-        assert queue1.reclaim_calls == calls_before_stop, (
-            "a fenced daemon must not sweep the successor's rows in its final stop()"
-        )
-    finally:
-        d2.stop()
-
-
-def test_stop_runs_final_reclaim_when_not_fenced(tmp_path: Path) -> None:
-    """The sibling of the case above: a daemon that owns its scope (never
-    fenced) still runs its shutdown-observability reclaim sweep."""
-    queue = _RecordingQueue()
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                           worker_factory=_FakeWorker, queue_factory=lambda: queue)
-    d.start()
-    # the reclaim-first background thread already ran an unrelated sweep at
-    # start(); isolate the FINAL shutdown sweep's own contribution.
-    calls_before_stop = queue.reclaim_calls
-    d.stop()
-    assert queue.reclaim_calls == calls_before_stop + 1
 
 
 class _FencesDuringStopWorker(_FakeWorker):
@@ -221,23 +191,15 @@ class _FencesDuringStopWorker(_FakeWorker):
             self.fenced_applied = True
 
 
-def test_mark_relinquish_uses_the_same_captured_fenced_value_as_the_reclaim_sweep(
-    tmp_path: Path,
-) -> None:
-    """nexus-cd1k0.6 review-wave2 follow-up: `fenced` was captured ONCE at
-    the top of stop() for the reclaim-sweep guard, but the later
-    mark/relinquish guard re-read `supervisor.fenced` LIVE -- a fence
-    transition landing in the window between the capture and that later
-    check (e.g. a heartbeat tick completing while the worker drains) made
-    the two guards disagree: the reclaim sweep ran under the PRE-fence
-    answer while mark/relinquish used the POST-fence one. Both guards
-    must use the single value captured at the top, so a daemon that was
-    NOT fenced when stop() started still relinquishes its lease even if
-    it becomes fenced moments later mid-drain."""
+def test_mark_relinquish_uses_the_captured_fenced_value(tmp_path: Path) -> None:
+    """nexus-cd1k0.6 review-wave2 follow-up: ``fenced`` is captured ONCE at the
+    top of stop(). The mark/relinquish guard must use that captured value, not
+    re-read ``supervisor.fenced`` live: a fence transition landing mid-drain
+    (after the capture) must not change whether a daemon that was NOT fenced
+    when stop() began still relinquishes its lease."""
     worker = _FencesDuringStopWorker()
-    queue = _RecordingQueue()
     d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                           worker_factory=lambda: worker, queue_factory=lambda: queue)
+                           worker_factory=lambda: worker)
     d.start()
     worker.daemon = d
     assert d.is_fenced() is False  # not fenced when stop() will capture it
@@ -281,12 +243,12 @@ def test_invalid_tenant_rejected(tmp_path, bad) -> None:
     """The tenant is a discovery-file scope-key suffix; path-special values are
     rejected before Phase 2 wires arbitrary tenant strings (code-review M3)."""
     with pytest.raises(ValueError):
-        AspectWorkerDaemon(config_dir=tmp_path, tenant=bad, worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+        AspectWorkerDaemon(config_dir=tmp_path, tenant=bad, worker_factory=_FakeWorker)
 
 
 def test_empty_tenant_rejected(tmp_path) -> None:
     with pytest.raises(ValueError):
-        AspectWorkerDaemon(config_dir=tmp_path, tenant="", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+        AspectWorkerDaemon(config_dir=tmp_path, tenant="", worker_factory=_FakeWorker)
 
 
 def test_live_heartbeat_loop_detects_fencing(tmp_path) -> None:
@@ -294,9 +256,9 @@ def test_live_heartbeat_loop_detects_fencing(tmp_path) -> None:
     a newer daemon fenced this one and stand down (set _stop). Exercises the
     live scheduling path, not just the data model (code-review M2)."""
     d1 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                            worker_factory=_FakeWorker, heartbeat_interval=0.05, queue_factory=_NoopQueue)
+                            worker_factory=_FakeWorker, heartbeat_interval=0.05)
     d2 = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A",
-                            worker_factory=_FakeWorker, heartbeat_interval=0.05, queue_factory=_NoopQueue)
+                            worker_factory=_FakeWorker, heartbeat_interval=0.05)
     d1.start()
     d2.start()  # higher generation — fences d1
     try:
@@ -334,7 +296,7 @@ class _ClaimHoldingWorker(_FakeWorker):
 
 def test_stop_releases_held_tuple_claims_after_the_worker_stopped(tmp_path: Path) -> None:
     worker = _ClaimHoldingWorker(held=3)
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker)
     d.start()
     d.stop()
     assert worker.order == ["stop", "release"], "release runs once, after stop, so claims in flight are the worker's last"
@@ -342,11 +304,10 @@ def test_stop_releases_held_tuple_claims_after_the_worker_stopped(tmp_path: Path
 
 
 def test_a_fenced_daemon_still_releases_its_own_claims(tmp_path: Path) -> None:
-    """The table sweep is skipped when fenced (the successor owns the scope);
-    a tuple claim is held under THIS process's claimant strings, so releasing it
-    can never touch the successor's work."""
+    """A tuple claim is held under THIS process's claimant strings, so releasing
+    it can never touch the successor's work, fenced or not."""
     worker = _ClaimHoldingWorker(held=2)
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker)
     d.start()
     d._supervisor.fenced = True  # a newer owner won the scope
     d.stop()
@@ -358,14 +319,119 @@ def test_a_release_that_raises_does_not_block_the_rest_of_the_stop(tmp_path: Pat
         def release_held_claims(self) -> int:
             raise RuntimeError("engine down")
 
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_Raising, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_Raising)
     d.start()
     d.stop()
     assert _registry(tmp_path).discover("tenant-A") is None, "the lease was still relinquished"
 
 
 def test_a_worker_fake_without_the_hook_stops_as_before(tmp_path: Path) -> None:
-    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=_FakeWorker)
     d.start()
     d.stop()
     assert _registry(tmp_path).discover("tenant-A") is None
+
+
+# ── nexus-wl9pk: the claim-outcome hooks and the stop that follows ───────────
+
+
+def _claim_daemon(cfg: Path, worker: _FakeWorker, mono: _Mono, *, bound: float = 100.0) -> AspectWorkerDaemon:
+    return AspectWorkerDaemon(
+        config_dir=cfg, tenant="tenant-U", worker_factory=lambda: worker,
+        heartbeat_interval=0.02, engine_unreachable_exit_seconds=bound, monotonic=mono,
+    )
+
+
+def test_the_daemon_attaches_both_claim_hooks_to_a_worker_that_exposes_them(tmp_path: Path) -> None:
+    worker = _ClaimReportingWorker()
+    d = _claim_daemon(tmp_path, worker, _Mono())
+    d.start()
+    try:
+        assert worker.on_failure == d.note_engine_failure
+        assert worker.on_contact == d.note_engine_contact
+    finally:
+        d.stop()
+
+
+def test_a_worker_with_neither_claim_hook_is_hosted_unchanged(tmp_path: Path) -> None:
+    worker = _FakeWorker()  # no set_engine_*_handler at all
+    d = _claim_daemon(tmp_path, worker, _Mono())  # type: ignore[arg-type]
+    d.start()
+    try:
+        assert _registry(tmp_path).discover("tenant-U") is not None
+        assert worker.started == 1
+    finally:
+        d.stop()
+    assert worker.stopped == 1
+    assert _registry(tmp_path).discover("tenant-U") is None
+
+
+def test_claim_failures_past_the_bound_stop_the_daemon(tmp_path: Path) -> None:
+    """The hosted worker reports each failed claim round trip. Failures that
+    outlast the bound make the heartbeat request the daemon's stop; the
+    failures alone (no answered claim) are what starts the clock."""
+    mono = _Mono()
+    worker = _ClaimReportingWorker()
+    d = _claim_daemon(tmp_path, worker, mono, bound=100.0)
+    d.start()
+    try:
+        assert worker.on_failure is not None, "non-vacuity: the hook must be attached"
+        worker.on_failure()  # the first claim fails at t=0
+        mono.now += 99.0
+        time.sleep(0.1)  # several heartbeat ticks
+        assert not d._stop.is_set(), "99 s of a 100 s bound: no exit yet"
+        worker.on_failure()  # more failing claims keep the same clock running
+        mono.now += 2.0
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not d._stop.is_set():
+            time.sleep(0.02)
+        assert d._stop.is_set(), "the heartbeat must request the stop once failures outlast the bound"
+        assert d._left_for_unreachable_engine is True
+    finally:
+        d.stop()
+
+
+def test_an_answered_claim_clears_the_clock_before_the_bound_so_no_exit(tmp_path: Path) -> None:
+    """Failures for 90 s, then an answered claim, then failures again: 180 s of
+    failure in all, but the answered claim cleared the clock at 90 s, so the
+    second run is only 90 s old and the daemon must still be up. Without the
+    clear the first run would have crossed the 100 s bound at 100 s."""
+    mono = _Mono()
+    worker = _ClaimReportingWorker()
+    d = _claim_daemon(tmp_path, worker, mono, bound=100.0)
+    d.start()
+    try:
+        assert worker.on_failure is not None and worker.on_contact is not None
+        worker.on_failure()  # the clock starts at t=0
+        mono.now += 90.0
+        worker.on_contact()  # an answered claim: the clock is cleared
+        assert d._unreachable_since is None, "the answered claim must clear the clock"
+        worker.on_failure()  # a new failing run starts at t=90
+        mono.now += 90.0  # 180 s since the first failure, 90 s into the second run
+        time.sleep(0.1)  # several heartbeat ticks
+        assert not d._stop.is_set(), "the answered claim must have cleared the clock"
+        mono.now += 20.0  # 110 s into the second run: past the bound
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not d._stop.is_set():
+            time.sleep(0.02)
+        assert d._stop.is_set(), "the second failing run outlasted the bound and must stop the daemon"
+    finally:
+        d.stop()
+
+
+def test_stop_releases_held_claims_and_holds_no_queue_handle(tmp_path: Path) -> None:
+    """stop() releases the claims the worker still holds, and the daemon keeps
+    no queue handle of its own: the constructor takes no ``queue_factory``."""
+    worker = _ClaimReportingWorker()
+    d = _claim_daemon(tmp_path, worker, _Mono())
+    d.start()
+    d.stop()
+    assert worker.released == 1, "stop releases the worker's held claims"
+    assert [name for name in vars(d) if "queue" in name.lower()] == [], (
+        "the daemon must hold no queue handle"
+    )
+    with pytest.raises(TypeError):
+        AspectWorkerDaemon(  # type: ignore[call-arg]
+            config_dir=tmp_path, tenant="tenant-U", worker_factory=_FakeWorker,
+            queue_factory=_FakeWorker,
+        )

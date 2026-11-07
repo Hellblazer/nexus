@@ -4281,8 +4281,11 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # nexus.agent_dispatches: nexus-mtheb.4 (telemetry-018-agent-dispatches.xml),
     # one row per agent dispatch with its T1 put count; tier_writes RLS shape.
     "nexus.agent_dispatches",
-    "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
+    # nexus.canary_query_ring: RDR-230 P1.2a (nexus-4lnn1.1.2, vectors-054-
+    # canary-query-ring.xml), the recall canary's persisted query ring; ENABLE
+    # + FORCE + tenant_isolation.
+    "nexus.canary_query_ring",
     # nexus.capability_census: nexus-gjv9b PART 1 (telemetry-010-capability-
     # census.xml), replacing capability_census.jsonl. Per-session UPSERT
     # (tenant_id, session_id) with the usual ENABLE + FORCE + tenant_isolation
@@ -6369,7 +6372,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
 
     The engine refuses PostgreSQL below 17 (``event=pg_version_below_floor`` when an older server is already
     running), and an established cluster keeps whatever PostgreSQL created it; started cold from the bundle,
-    such a data directory fails earlier, in ``pg_ctl start`` ("database files are incompatible with server").
+    ``nx`` refuses such a data directory before ``pg_ctl start`` (``pg_provision.refuse_cluster_below_floor``).
     This row reads the data directory's ``PG_VERSION`` marker (no connection), names the version and the
     floor, and points at the upgrade.
 
@@ -6415,8 +6418,7 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
         detail=(
             f"the bundled cluster at {pg_data} was created by PostgreSQL {text}, and a cluster keeps the version "
             f"that created it; the engine refuses below PostgreSQL {PG_VERSION_FLOOR} "
-            "(event=pg_version_below_floor in the service log, or, started cold from the bundle, pg_ctl's "
-            "'database files are incompatible with server')"
+            "(event=pg_version_below_floor in the service log, or, started cold, a refusal before pg_ctl runs)"
         ),
         fix_suggestions=[
             f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "

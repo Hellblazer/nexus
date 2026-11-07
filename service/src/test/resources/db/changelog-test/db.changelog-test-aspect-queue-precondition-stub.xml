@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-hbnml (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): a stand-in for
+    nexus.aspect_queue_rows_unscoped() that answers 0 to the top-level SELECT aspects-005-2's PRECONDITION sends and
+    counts for real (FORCE ROW LEVEL SECURITY lifted for the count, put back after) everywhere else, which is the
+    body's own DO block. It makes "a row landed after the precondition's count" deterministic: the precondition
+    passes on a populated table and only the body's second count can keep it. Run with
+    PgContainerHelper#runSuperuserTestChangelog (its own bookkeeping table) by AspectQueueRetireLiquibaseTest on the
+    migrating role's connection; not part of any walk.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="precondition-stub" author="nexus-hbnml">
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.aspect_queue_rows_unscoped() RETURNS bigint
+LANGUAGE plpgsql
+AS $fn$
+DECLARE
+    v_rows bigint;
+BEGIN
+    IF current_query() LIKE 'SELECT nexus.aspect_queue_rows_unscoped()%' THEN
+        RETURN 0;
+    END IF;
+    ALTER TABLE nexus.aspect_extraction_queue NO FORCE ROW LEVEL SECURITY;
+    SELECT count(*) INTO v_rows FROM nexus.aspect_extraction_queue;
+    ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+    RETURN v_rows;
+END
+$fn$
+        </sql>
+    </changeSet>
+</databaseChangeLog>

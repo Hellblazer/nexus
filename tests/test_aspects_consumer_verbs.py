@@ -28,10 +28,6 @@ from nexus.commands.aspects import aspects_group
 from tests._catalog_fixture_ops import register_real_doc_id
 
 
-# The aspect queue TABLE producer is retired (nexus-bpikw step A). A test that needs
-# legacy table rows writes them inside ``tests._aspect_table_producer.table_producer()``
-# (see ``TestRequeueFailed._seed_failed``); the verb under test runs the real producer.
-
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
 # engine's POST /v1/aspects/queue/enqueue 400 -- see the identical cache in
@@ -187,13 +183,11 @@ class TestRetiredRepairVerbsRefuse:
 
 @pytest.mark.t2_tenant
 class TestRequeueFailed:
-    """`nx aspects requeue-failed` bulk-recovers terminal-failed queue rows.
+    """`nx aspects requeue-failed` bulk-revives dead ``aspects`` tasks.
 
-    Substrate (nexus-i711w): the queue is ``HttpAspectQueue`` against the
-    hermetic engine substrate (fresh tenant per test) — the SQLite
-    ``AspectExtractionQueue`` these tests used to seed died with the SQLite
-    T2 stores. Status is observed through the queue's public read surfaces
-    (``list_failed`` / ``list_pending``) instead of raw SQL.
+    Substrate: the hermetic engine substrate (fresh tenant per test). Tasks
+    are seeded through the producer and the tuple store, and status is read
+    from the tuple store's ``rd`` (claim_state ``dead`` or available).
     """
 
     @pytest.fixture
@@ -220,27 +214,34 @@ class TestRequeueFailed:
         monkeypatch.setattr(infra, "t2_index_write", _direct_index_write)
         return db_path
 
-    def _seed_failed(self, db_path: Path) -> None:
+    def _seed_dead(self, db_path: Path) -> None:
+        """Three dead tasks (x and y in knowledge__a, z in knowledge__b) and one
+        available task (ok.pdf in knowledge__a). One document per task, since a
+        task's identity is its doc_id."""
+        import json
+
         from nexus.db.t2 import T2Database
-        from tests._aspect_table_producer import table_producer
+        from nexus.db.t2.http_tuple_store import HttpTupleStore
         from tests._catalog_fixture_ops import register_real_doc_id
 
-        # The table producer is retired (nexus-bpikw step A): the seam writes the legacy
-        # rows. One document per row, since a task's identity is its doc_id.
-        with T2Database(db_path) as db, table_producer():
-            q = db.aspect_queue
-            for coll, sp in [("knowledge__a", "x.pdf"), ("knowledge__a", "y.pdf"),
-                             ("knowledge__b", "z.pdf")]:
-                q.enqueue(coll, sp, content="c", doc_id=register_real_doc_id())
-                # Claim first (pending -> in_progress) so mark_failed mirrors
-                # the worker's real state transitions on the engine.
-                claimed = q.claim_next()
-                assert claimed is not None and claimed.source_path == sp
-                q.mark_failed(coll, sp, "boom")
-            q.enqueue("knowledge__a", "ok.pdf", doc_id=_shared_doc_id())  # stays pending
+        seeded = [("knowledge__a", "x.pdf"), ("knowledge__a", "y.pdf"), ("knowledge__b", "z.pdf")]
+        with T2Database(db_path) as db:
+            for coll, sp in seeded:
+                db.aspect_queue.enqueue(coll, sp, content="c", doc_id=register_real_doc_id())
+        # Claim oldest first and kill each one, so the three are dead in order.
+        store = HttpTupleStore()
+        try:
+            for _coll, sp in seeded:
+                got = store.inp("aspects", {"queue": "aspects"}, claimant="t-seed", lease_s=60)
+                assert got is not None and json.loads(got[0].body)["source_path"] == sp
+                store.nack(got[1], "t-seed", dead=True)
+        finally:
+            store.close()
+        with T2Database(db_path) as db:
+            db.aspect_queue.enqueue("knowledge__a", "ok.pdf", content="c", doc_id=_shared_doc_id())
 
-    def _task_paths(self, db_path: Path) -> list[str]:
-        """The source paths of the ``aspects`` tuple tasks: where a re-enqueued row goes."""
+    def _paths_in(self, db_path: Path, claim_state: str | None) -> list[str]:
+        """Source paths of the ``aspects`` tasks in ``claim_state`` (None: available)."""
         import json
 
         from nexus.db.t2 import T2Database
@@ -249,74 +250,71 @@ class TestRequeueFailed:
             return sorted(
                 json.loads(t.body)["source_path"]
                 for t in db.tuples.rd("aspects", {"queue": "aspects"}, n=300)
+                if t.claim_state == claim_state
             )
 
     def _status(self, db_path: Path, source_path: str) -> str:
+        """``dead`` or ``available`` for the task with this source path, else ``<absent>``."""
+        import json
+
         from nexus.db.t2 import T2Database
+
         with T2Database(db_path) as db:
-            q = db.aspect_queue
-            if any(r.source_path == source_path for r in q.list_failed()):
-                return "failed"
-            if any(r.source_path == source_path for r in q.list_pending()):
-                return "pending"
-            return "<absent>"
+            for t in db.tuples.rd("aspects", {"queue": "aspects"}, n=300):
+                if json.loads(t.body)["source_path"] == source_path:
+                    return "dead" if t.claim_state == "dead" else "available"
+        return "<absent>"
 
     def test_dry_run_reports_without_writing(self, _queue_t2: Path) -> None:
-        self._seed_failed(_queue_t2)
+        self._seed_dead(_queue_t2)
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert res.exit_code == 0, res.output
-        assert "Would re-enqueue 3 failed row(s)" in res.output
-        # Dry-run writes nothing: the rows stay failed.
-        assert self._status(_queue_t2, "x.pdf") == "failed"
+        assert "Would revive 3 dead task(s)" in res.output
+        # Dry-run writes nothing: the dead tasks stay dead.
+        assert self._paths_in(_queue_t2, "dead") == ["x.pdf", "y.pdf", "z.pdf"]
 
-    def test_requeue_resets_failed_to_pending(self, _queue_t2: Path) -> None:
-        self._seed_failed(_queue_t2)
+    def test_requeue_revives_dead_tasks_to_available(self, _queue_t2: Path) -> None:
+        self._seed_dead(_queue_t2)
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
-        assert "Re-enqueued 3 failed row(s)" in res.output
-        # A re-enqueued row becomes a tuple task and its failed table row is deleted
-        # (nexus-5r2sc.3.10); the pending row beside them is not touched.
-        for sp in ("x.pdf", "y.pdf", "z.pdf"):
-            assert self._status(_queue_t2, sp) == "<absent>"
-        assert self._task_paths(_queue_t2) == ["x.pdf", "y.pdf", "z.pdf"]
-        assert self._status(_queue_t2, "ok.pdf") == "pending"
+        assert "Revived 3 dead task(s) to available." in res.output
+        # A revived task is available again; the available task beside them is not touched.
+        for sp in ("x.pdf", "y.pdf", "z.pdf", "ok.pdf"):
+            assert self._status(_queue_t2, sp) == "available"
+        assert self._paths_in(_queue_t2, "dead") == []
 
     def test_collection_scope(self, _queue_t2: Path) -> None:
-        self._seed_failed(_queue_t2)
+        self._seed_dead(_queue_t2)
         res = CliRunner().invoke(
             aspects_group, ["requeue-failed", "--collection", "knowledge__a"],
         )
         assert res.exit_code == 0, res.output
-        assert "Re-enqueued 2 failed row(s) in knowledge__a" in res.output
-        assert self._status(_queue_t2, "x.pdf") == "<absent>"  # knowledge__a: now a task
-        assert self._task_paths(_queue_t2) == ["x.pdf", "y.pdf"]
-        assert self._status(_queue_t2, "z.pdf") == "failed"    # knowledge__b untouched
+        assert "Revived 2 dead task(s) in knowledge__a to available." in res.output
+        assert self._status(_queue_t2, "x.pdf") == "available"  # knowledge__a: revived
+        assert self._status(_queue_t2, "y.pdf") == "available"
+        assert self._status(_queue_t2, "z.pdf") == "dead"       # knowledge__b untouched
 
     def test_limit_caps_requeue_count(self, _queue_t2: Path) -> None:
-        self._seed_failed(_queue_t2)  # 3 failed rows
+        self._seed_dead(_queue_t2)  # 3 dead tasks
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "2"])
         assert res.exit_code == 0, res.output
-        assert "Re-enqueued 2 failed row(s)" in res.output
-        # Exactly 2 of the 3 become tasks (oldest-enqueued first); 1 stays failed.
+        assert "Revived 2 dead task(s) to available." in res.output
+        # Exactly 2 of the 3 are revived; 1 stays dead.
         statuses = [self._status(_queue_t2, sp) for sp in ("x.pdf", "y.pdf", "z.pdf")]
-        assert statuses.count("<absent>") == 2
-        assert statuses.count("failed") == 1
-        assert len(self._task_paths(_queue_t2)) == 2
+        assert statuses.count("available") == 2
+        assert statuses.count("dead") == 1
 
     def test_limit_rejects_nonpositive(self, _queue_t2: Path) -> None:
-        self._seed_failed(_queue_t2)
+        self._seed_dead(_queue_t2)
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "0"])
         assert res.exit_code == 1
         assert "--limit must be a positive integer" in res.output
-        assert self._status(_queue_t2, "x.pdf") == "failed"  # nothing written
+        assert self._status(_queue_t2, "x.pdf") == "dead"  # nothing written
 
-    def test_no_failed_rows_message(self, _queue_t2: Path) -> None:
+    def test_no_dead_tasks_message(self, _queue_t2: Path) -> None:
         from nexus.db.t2 import T2Database
         with T2Database(_queue_t2) as db:
-            from tests._aspect_table_producer import table_producer
-
-            with table_producer():
-                db.aspect_queue.enqueue("knowledge__a", "only-pending.pdf", doc_id=_shared_doc_id())
+            db.aspect_queue.enqueue("knowledge__a", "only-available.pdf", doc_id=_shared_doc_id())
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
-        assert "no failed rows" in res.output
+        assert "aspects queue: no dead tasks." in res.output

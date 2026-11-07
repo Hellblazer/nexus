@@ -124,6 +124,13 @@ def validate_entity_config(config: Mapping[str, Any], source: str = "") -> None:
         raise
 
 
+def has_entity_patterns(config: Mapping[str, Any]) -> bool:
+    """True when *config*'s ``entity.collections`` names at least one glob. False for nothing configured (missing,
+    ``None`` or empty). Raises :class:`EntityConfigError` for a malformed map, as :func:`pattern_for_collection` does."""
+    entity = config.get("entity") or {}
+    return bool(_items(entity.get("collections") if isinstance(entity, Mapping) else None))
+
+
 def pattern_for_collection(collection: str, config: Mapping[str, Any] | None = None) -> re.Pattern[str] | None:
     """The entity-key regex configured for *collection* (the first glob that matches its full
     name), or ``None``: no glob matches, nothing is configured, or *collection* is a ``code__``

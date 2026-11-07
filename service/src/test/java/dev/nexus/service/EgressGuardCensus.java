@@ -153,6 +153,10 @@ final class EgressGuardCensus {
         m.put("dev/nexus/service/vectors/ChunkConstraintAdmin.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the retire-keys constraint routes' admin session"
                 + " (nexus-6pfgb.43), which adds and validates the chunk CHECKs."));
+        m.put("dev/nexus/service/db/AspectQueueDrain.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the owner-side census of the retired aspect queue table"
+                + " (nexus-hbnml), which counts every tenant's rows with FORCE ROW LEVEL SECURITY lifted in a"
+                + " transaction it rolls back."));
         m.put("dev/nexus/service/db/PoolerModeCheck.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the pooler-mode probe."));
         m.put("dev/nexus/service/db/EngineSingletonLock.java", Allow.pinned(JDBC_SITE,

@@ -1066,8 +1066,8 @@ class TestCheckMigrationState:
 # cross-walk test below enforces this via XML grep.
 _ALL_TENANT_TABLES = [
     "nexus.agent_dispatches",  # nexus-mtheb.4 (mirrors health._RLS_TENANT_TABLES)
-    "nexus.aspect_extraction_queue",
     "nexus.aspect_promotion_log",
+    "nexus.canary_query_ring",  # RDR-230 P1.2a (nexus-4lnn1.1.2, vectors-054; mirrors health._RLS_TENANT_TABLES)
     "nexus.capability_census",  # nexus-gjv9b PART 1 (mirrors health._RLS_TENANT_TABLES)
     "nexus.catalog_collections",
     "nexus.catalog_document_chunks",
@@ -1603,6 +1603,7 @@ class TestRlsTableCompleteness:
             "nexus.chash_index",  # rdr187-001-drop-chash-index.xml (RDR-187)
             "nexus.chash_alias",  # legacy-001-drop-chash-alias.xml (nexus-lgdel.l1)
             "nexus.migration_jobs",  # migration-002-tenant-pk.xml, reworked (nexus-tk070.p5b)
+            "nexus.aspect_extraction_queue",  # aspects-005-retire-aspect-queue-table.xml (nexus-hbnml)
         }
         return frozenset(found - dropped)
 

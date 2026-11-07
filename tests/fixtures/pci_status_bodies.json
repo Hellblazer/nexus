@@ -35,6 +35,27 @@
       "valid": 0, "invalid": 0, "unparsed": 0, "reindex_leftover": 0, "last_read_at": null, "expired": false, "sweep_seconds": 600,
       "this_engine": {"builder_state": "off", "building": null, "failing": null, "last_ddl_pass_at": null,
                       "pass_started_at": null, "pass_in_progress": false}
+    },
+    "holder_with_canary": {
+      "valid": 4, "invalid": 1, "unparsed": 2, "reindex_leftover": 1, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
+      "this_engine": {"builder_state": "ok", "building": 1, "failing": 0, "last_ddl_pass_at": "2026-10-10T07:30:00Z",
+                      "pass_started_at": "2026-10-10T07:58:30Z", "pass_in_progress": true,
+                      "maintenance": {"reindex": "off", "reindexing": null, "last_reindex_at": null, "reindexes": 0,
+          "canary": {"green": 1, "red": 1, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z"}}}
+    },
+    "standby_with_canary_history": {
+      "valid": 4, "invalid": 0, "unparsed": 0, "reindex_leftover": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
+      "this_engine": {"builder_state": "standby", "building": null, "failing": null, "last_ddl_pass_at": "2026-10-10T07:30:00Z",
+                      "pass_started_at": null, "pass_in_progress": false,
+                      "maintenance": {"reindex": "off", "reindexing": null, "last_reindex_at": null, "reindexes": 0,
+          "canary": {"green": 1, "red": 1, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z"}}}
+    },
+    "never_held_lock": {
+      "valid": 4, "invalid": 0, "unparsed": 0, "reindex_leftover": 0, "last_read_at": "2026-10-10T08:00:00Z", "expired": false, "sweep_seconds": 600,
+      "this_engine": {"builder_state": "standby", "building": null, "failing": null, "last_ddl_pass_at": null,
+                      "pass_started_at": null, "pass_in_progress": false,
+                      "maintenance": {"reindex": "off", "reindexing": null, "last_reindex_at": null, "reindexes": 0,
+          "canary": {"green": 0, "red": 0, "unmeasured": 0, "last_run_at": null}}}
     }
   }
 }

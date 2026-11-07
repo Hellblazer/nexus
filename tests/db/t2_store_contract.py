@@ -127,19 +127,10 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
         'list': ['limit', 'offset'],
         'upsert': ['record'],
     },
+    # nexus-hbnml: the aspect_extraction_queue table and its /v1/aspects/queue/* routes are
+    # gone; the producer is enqueue (a tuple out), the rest of the table verbs left with it.
     'aspect_queue': {
-        'claim_batch': ['limit'],
-        'claim_next': [],
         'enqueue': ['collection', 'source_path', 'content_hash', 'content', 'doc_id'],
-        'is_drained': [],
-        'list_failed': ['collection'],
-        'list_pending': ['limit'],
-        'mark_done': ['collection', 'source_path', 'doc_id'],
-        'mark_failed': ['collection', 'source_path', 'error'],
-        'mark_retry': ['collection', 'source_path', 'interval_seconds'],
-        'pending_count': [],
-        'reclaim_stale': ['timeout_seconds', 'count_attempt'],
-        'rename_collection': ['old', 'new'],
     },
     'taxonomy': {
         'assign_batch': ['collection_name', 'doc_ids', 'embeddings', 'chroma_client', 'cross_collection'],
@@ -302,7 +293,6 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
 T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
     'aspect_queue': {
         'enqueue_many': ['rows'],
-        'list_waiting': ['limit'],  # RDR-235 (nexus-5r2sc.3.6): read by the aspect-queue-tuples rung
         'tuple_counts': [],  # RDR-235 (nexus-5r2sc.3.5): nx doctor and the console
     },
     'document_aspects': {
@@ -617,18 +607,7 @@ T2_STORE_RETURNS: dict[str, dict[str, str]] = {
         'upsert': 'bool',
     },
     'aspect_queue': {
-        'claim_batch': 'list[QueueRow]',
-        'claim_next': 'QueueRow|None',
         'enqueue': 'None',
-        'is_drained': 'bool',
-        'list_failed': 'list[QueueRow]',
-        'list_pending': 'list[QueueRow]',
-        'mark_done': 'int',
-        'mark_failed': 'None',
-        'mark_retry': 'None',
-        'pending_count': 'int',
-        'reclaim_stale': 'int',
-        'rename_collection': 'int',
     },
     'taxonomy': {
         'assign_batch': 'int',

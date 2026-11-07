@@ -17,7 +17,6 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
@@ -36,12 +35,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Verifies the single transactional service-side collection delete: it purges every
  * in-Postgres lifecycle table in dependency order (registry row last, RESTRICT FKs as a
  * safety net), returns per-table counts, leaves no orphans, and is tenant-isolated via RLS.
- * Two regression anchors: nexus-tquoj (aspect_extraction_queue purged by its `collection`
- * tag, not via any doc_id-keyed cascade the fk-001 document delete would otherwise have to
- * reach through — originally proven with a doc-less NULL-doc_id row; hygiene-001 step 2
- * (nexus-tk070.p6a follow-on) makes doc_id NOT NULL, so the fixture now proves the same
- * purge-by-collection property with a second doc-rooted row instead) and nexus-cugrk
- * (taxonomy_centroids_* purged by collection — no FK to topics).
+ * One regression anchor remains: nexus-cugrk (taxonomy_centroids_* purged by collection — no FK to
+ * topics). The other, nexus-tquoj (aspect_extraction_queue purged by its `collection` tag), went with
+ * the table (nexus-hbnml): the delete no longer counts or purges it, and {@link #deleteCollection_returnsExactPerTableCounts}
+ * pins that the key is gone.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -115,7 +112,8 @@ class CatalogDeleteCollectionCascadeTest {
         assertThat(counts.get("taxonomy_centroids")).as("taxonomy_centroids (unified, cugrk, 1+1+1)").isEqualTo(3);
         assertThat(counts.get("document_aspects")).as("document_aspects (both rows doc-rooted, hygiene-001)").isEqualTo(2);
         assertThat(counts.get("document_highlights")).as("document_highlights").isEqualTo(1);
-        assertThat(counts.get("aspect_extraction_queue")).as("aspect_extraction_queue (tquoj, both rows doc-rooted, hygiene-001)").isEqualTo(2);
+        assertThat(counts).as("nexus-hbnml: the aspect queue table is retired, so the cascade has no leg for it")
+            .doesNotContainKey("aspect_extraction_queue");
         assertThat(counts.get("catalog_documents")).as("catalog_documents").isEqualTo(1);
         assertThat(counts.get("catalog_collections")).as("registry row").isEqualTo(1);
     }
@@ -139,8 +137,6 @@ class CatalogDeleteCollectionCascadeTest {
                 DOCUMENT_ASPECTS.COLLECTION.eq(COLL))).as("no orphan rows in document_aspects").isZero();
             assertThat(ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A),
                 DOCUMENT_HIGHLIGHTS.COLLECTION.eq(COLL))).as("no orphan rows in document_highlights").isZero();
-            assertThat(ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_A),
-                ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(COLL))).as("no orphan rows in aspect_extraction_queue").isZero();
             assertThat(ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A),
                 TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(COLL))).as("assignment orphans").isZero();
             assertThat(ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A),
@@ -163,12 +159,53 @@ class CatalogDeleteCollectionCascadeTest {
             // table now, not 2 in chunks_384 alone.
             assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT_B), CHUNKS.COLLECTION.eq(COLL)))
                 .as("tenant B chunks intact").isEqualTo(4);
-            assertThat(ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT_B),
-                ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(COLL))).as("tenant B queue intact").isEqualTo(2);
             assertThat(ctx.fetchCount(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT_B),
                 TAXONOMY_CENTROIDS.COLLECTION.eq(COLL))).as("tenant B centroids intact").isEqualTo(3);
             assertThat(ctx.fetchCount(TAXONOMY_META, TAXONOMY_META.TENANT_ID.eq(TENANT_B),
                 TAXONOMY_META.COLLECTION.eq(COLL))).as("tenant B taxonomy_meta intact").isEqualTo(1);
+        }
+    }
+
+    // ── nexus-hbnml: an install that KEPT the retired queue table ─────────────
+
+    /**
+     * aspects-005-2 keeps {@code nexus.aspect_extraction_queue} when it holds rows, and the engine no longer has an
+     * explicit queue DELETE in this cascade. The table's collection foreign key was ON DELETE RESTRICT, which would
+     * make the final registry DELETE fail on a leftover row naming the collection (SQLSTATE 23503) with nothing in
+     * the pre-checks able to see why. aspects-005-1 makes it ON DELETE CASCADE, so the delete succeeds and takes the
+     * collection's leftover rows with it, and leaves another collection's rows alone. The queue row here belongs to
+     * a document homed elsewhere, so the DOCUMENT cascade cannot be what removes it: only the collection foreign key
+     * can.
+     */
+    @Test @Order(50)
+    void deleteCollection_succeedsWithAKeptPopulatedQueueTable_andTakesThatCollectionsRowsOnly() throws Exception {
+        String tenant = "del-casc-kept";
+        String coll = "knowledge__del-casc-kept__voyage-context-3__v1";
+        String other = "knowledge__del-casc-kept-other__voyage-context-3__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            PgContainerHelper.insertCollection(ctx, tenant, other);
+            PgContainerHelper.insertCatalogDocument(ctx, tenant, "kept-doc-1");
+            PgContainerHelper.insertCatalogDocument(ctx, tenant, "kept-doc-2");
+            RetiredAspectQueueTable.restore(ctx);
+            RetiredAspectQueueTable.seed(ctx, tenant, coll, "kept-doc-1", "/p/1.md", "pending");
+            RetiredAspectQueueTable.seed(ctx, tenant, other, "kept-doc-2", "/p/2.md", "failed");
+            assertThat(RetiredAspectQueueTable.rows(ctx, tenant, coll)).as("premise: the row is there").isEqualTo(1);
+        }
+        try {
+            assertThat(repo.deleteCollection(tenant, coll).get("catalog_collections")).isEqualTo(1);
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(RetiredAspectQueueTable.rows(ctx, tenant, coll)).as("its row went with it").isZero();
+                assertThat(RetiredAspectQueueTable.rows(ctx, tenant, other)).as("the other collection's row stays")
+                    .isEqualTo(1);
+            }
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                RetiredAspectQueueTable.drop(DSL.using(su, SQLDialect.POSTGRES));
+            }
         }
     }
 
@@ -424,18 +461,6 @@ class CatalogDeleteCollectionCascadeTest {
                        DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
                        DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
            .values(tenant, "dc-doc-1", COLL, "file:///dc-doc-1-hl", "hi", OffsetDateTime.now())
-           .execute();
-        // aspect_extraction_queue: 2, both doc-rooted at dc-doc-1 (hygiene-001 step 2:
-        // doc_id is NOT NULL now -- see the document_aspects comment above).
-        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-           .values(tenant, COLL, "/p/q1.md", "pending", OffsetDateTime.now(), "dc-doc-1")
-           .execute();
-        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
-                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
-           .values(tenant, COLL, "/p/q2.md", "pending", OffsetDateTime.now(), "dc-doc-1")
            .execute();
     }
 

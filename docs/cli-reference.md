@@ -895,7 +895,7 @@ Aspect-extraction queue management (the async queue feeding the aspect-extractio
 nx aspects drain [--timeout SECONDS] [--poll-interval SECONDS]
 ```
 
-Stops the singleton `AspectExtractionWorker` (if running in this process), then waits until both queues are empty of active work or `--timeout` (default 30s) elapses; `--poll-interval` (default 0.1s) sets the queue-empty poll cadence. The two queues are the table side, where no pending or in-progress row may remain, and the `aspects` tuple queue, where no task may be available or claimed. Both sides are checked on every drain, because RDR-235 keeps the table and the tuple queue side by side until the old table retires. A tuple task held back by backoff counts as available, so the check is conservative. Failed rows and dead tasks do not block a drain. Use before `nx upgrade` when a `MigrationError` reports the aspect_extraction_queue is not drained. Exit 0 once drained (or already empty); exit 1 on timeout, naming the stuck-row or stuck-task count.
+Stops the singleton `AspectExtractionWorker` (if running in this process), then waits until the `aspects` tuple queue has no task available or claimed, or `--timeout` (default 30s) elapses; `--poll-interval` (default 0.1s) sets the poll cadence. A tuple task held back by backoff counts as available, so the check is conservative. Dead tasks do not block a drain. Use before `nx upgrade` when a `MigrationError` reports the aspect queue is not drained. Exit 0 once drained (or already empty); exit 1 on timeout, naming the stuck-task count.
 
 ### nx aspects gc / gc-fixtures — RETIRED (hidden from `--help`)
 
@@ -913,22 +913,20 @@ Both verbs are RETIRED and always raise a `click.UsageError` regardless of the f
 
 ### nx aspects requeue-failed
 
-Bulk re-enqueue terminal-`failed` aspect-queue rows. A row reaches `failed` after exhausting the backoff-retry ladder (RDR-163), on a non-retryable error, or when a stale reclaim finds it already at the retry cap. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb re-enqueues the failed table rows and revives the dead tasks of the `aspects` tuple queue, so the worker picks them up again. The write is daemon-routed; the failed-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
+Bulk revive the dead tasks of the `aspects` tuple queue. A task dies after exhausting the backoff-retry ladder (RDR-163), on a non-retryable error, or when the engine's lease sweep finds it at `max_attempts`. Once the root cause is fixed (e.g. restored API quota, repaired source identity), this verb writes each dead task back as available with its attempts reset and its retention clock restarted (`out` with `mode=replace` on the task's own body), so the worker picks it up again. The write is daemon-routed; the dead-backlog visibility counterpart is `nx doctor --check-aspect-queue`.
 
-It reads both sides. Each failed table row is enqueued as an `aspects` task, keyed by its `doc_id`, and the failed row is then deleted from the table, so the doctor does not count it again. A failed row with no `doc_id` cannot become a task. It is skipped, the message says to re-index the document, and the remaining rows still run. The table's in-place reset (`NX_ASPECT_QUEUE=table`) is retired (nexus-bpikw): with that value set the verb prints the retirement message and exits 1 before it reads or writes (see [Configuration](configuration.md)). On an engine older than `engine-service-v0.1.169` (no `aspects` template) a failed row cannot become a task: the verb, `--dry-run` included, says to upgrade the engine and exits 1 without writing.
-
-Dead tasks of the `aspects` tuple queue are revived too. A dead task is written back as available with its attempts reset and its retention clock restarted. An engine with no `aspects` template has no dead tasks, and the verb then reads the table alone.
+The table's failed rows are not read here: the `aspect_extraction_queue` table is retired (nexus-hbnml), and the engine moves a kept table's failed rows to dead `aspects` tasks once at start, which this verb then revives. `NX_ASPECT_QUEUE=table` is a refusal here (nexus-bpikw): with that value set the verb prints the retirement message and exits 1 before it reads or writes (see [Configuration](configuration.md)). An engine with no `aspects` template (older than `engine-service-v0.1.169`) has no dead tasks.
 
 | Flag | Description |
 |------|-------------|
-| `--collection NAME` | Only re-enqueue failed rows in this collection. For dead tasks, matches the collection in the task body. Default: all collections |
-| `--limit N` | Re-enqueue at most N items, counting failed rows and dead tasks together: failed rows first, then dead tasks, oldest first. Paces recovery of a large backlog so a burst of newly-pending rows doesn't immediately re-hammer a just-restored API quota |
-| `--dry-run` | Report the failed rows and dead tasks that would be re-enqueued without writing anything. Under `tuples`, a row with no `doc_id` is marked `[would skip: no doc_id]` |
+| `--collection NAME` | Only revive dead tasks in this collection, matched on the collection in the task body. Default: all collections |
+| `--limit N` | Revive at most N tasks, oldest first. Paces recovery of a large backlog so a burst of newly-available tasks doesn't immediately re-hammer a just-restored API quota |
+| `--dry-run` | Report the dead tasks that would be revived without writing anything |
 
-Failed rows are processed oldest-`enqueued_at`-first (enqueue order, not most-recently-failed). This is a single-operator recovery verb. It is safe to re-run, because it only touches the terminal `failed` state and dead tasks, but do not run two instances concurrently: the read and the per-row writes have no shared transaction, so two runs could re-enqueue the same rows.
+This is a single-operator recovery verb. It is safe to re-run, because it only touches dead tasks, but do not run two instances concurrently: the read and the per-task writes have no shared transaction.
 
 ```bash
-nx aspects requeue-failed                        # re-enqueue all failed rows
+nx aspects requeue-failed                        # revive all dead tasks
 nx aspects requeue-failed --collection knowledge__x
 nx aspects requeue-failed --limit 100            # pace a large backlog
 nx aspects requeue-failed --dry-run              # report only, no writes
@@ -2262,9 +2260,10 @@ Exit codes:
 | 3 | Every requested chunk is back, but at least one stays hidden from search and get: no live owner names it, reattach refused it (`superseded`), or `--no-reattach` left it. A dry run exits 3 when a real run would leave it hidden. `--json` carries the count as `hidden`. |
 | 4 | The connected engine predates the route. Upgrade it (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`). |
 | 5 | The engine refused the request or failed: a sample-only audit row, an audit row for another collection or quarantine collection, a collection that is not registered or not live, a transient 5xx; or the client hit an unexpected error. One line on stderr says which. |
-| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held a lock for more than 2 seconds, or the call lost a deadlock with another writer. The busy statement rolled back. Each quarantine collection is restored in its own transaction, so the message says whether an earlier one had already committed (`nothing_moved: false` on the wire) and names its `gc_audit` ids, which `--json` also puts in `audit_ids`; a chunk it restored reads `present` on the rerun, and a chunk kept in quarantine (a `rival`, an `indexing` or a `failed` owner) is kept again. Run the same command again. |
+| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held a lock for more than 2 seconds, or the call lost a deadlock with another writer. A real run goes in pages of at most 74 chashes (the engine's keyed ceiling) and a page is one transaction across every quarantine collection it touches, so the busy page rolled back whole: nothing of it moved, and only earlier pages are committed (their `gc_audit` ids are in the report). Against an engine that predates keyed restore, and for a dry run, each quarantine collection is restored in its own transaction, so the message says whether an earlier one had already committed (`nothing_moved: false` on the wire) and names its `gc_audit` ids, which `--json` also puts in `audit_ids`. A chunk it restored reads `present` on the rerun, and a chunk kept in quarantine (a `rival`, an `indexing` or a `failed` owner) is kept again. Run the same command again. |
+| 7 | The engine committed a page but its answer was lost and could not be read back (the request ledger holds no stored answer), so that page's counts are UNKNOWN, not zero, and later pages were not sent. `--json` carries `error.counts_unknown`. Read `nx catalog gc-audit list --operation quarantine_restore`, then run the same command again: what was restored reads `present`. |
 
-A failure on a later page (exit 4, 5 or 6) still prints the report, the totals and the `gc_audit` ids of the pages already committed, then the error; `--json` keeps its one document and adds an `error` key. The verb pages itself: chashes go in batches of 1000, an audit row by offset, a window by chash cursor. Needs the engine and the client from the same release (the route first ships in the engine that carries changeset `vectors-025`); against an older engine it exits 4.
+A failure on a later page (exit 4, 5, 6 or 7) still prints the report, the totals and the `gc_audit` ids of the pages already committed, then the error; `--json` keeps its one document and adds an `error` key. The verb pages itself: a real run takes at most 74 chashes a page (a dry run, 1000), whether the chashes are named, listed by an audit row (by offset) or found in a window (by chash cursor). If the engine refuses a page keyed because its answer would not fit the request ledger's 64 KB stored-response cap (422 `keyed_restore_body_over_cap`; nothing ran), the client sends that same page once more without the key, and a line on stderr names the page that ran that way. An unkeyed page has no replay protection. Needs the engine and the client from the same release (the route first ships in the engine that carries changeset `vectors-025`); against an older engine it exits 4.
 
 ---
 
@@ -2830,7 +2829,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 `nx memory curate` (RDR-238) prints a curation report and stores it in T2 as `<repo>/curation-report-<YYYY-MM-DD>` with a 90-day TTL (tag `curation-report`; the repo name is the primary checkout's, so a worktree reports under it). A run that selects fewer than `--files`, `--t2` and `--agents` stores `<repo>/curation-report-<YYYY-MM-DD>-<sections>` (for example `-files` or `-t2-agents`) instead, so a partial run never replaces the day's full report. It only lists: it deletes, quarantines and edits nothing, and it exits 0 whatever it finds. A section that cannot run (T2 unreachable, no memory directory) prints one `not available: <reason>` line and the others still run. The 90-day TTL puts each report on RDR-207's quarantine path; only a rolled-up row is ever reaped, so old reports stay quarantined.
 
-- `--files` reads the repository's Claude Code memory directory. The directory is found by `nexus._hook_runtime.memory_dir.memory_dir`, the function the SessionStart curation hook shares: `autoMemoryDirectory` from `.claude/settings.local.json`, `.claude/settings.json` (in the working directory, then the primary checkout) or `<config dir>/settings.json` when one holds an absolute or `~/` path to an existing directory; otherwise `<config dir>/projects/<key>/memory`, where `<config dir>` is `$CLAUDE_CONFIG_DIR` or `~/.claude` and `<key>` is the primary checkout's absolute path with every non-alphanumeric character replaced by `-`. A linked worktree reports its primary's directory; the primary is found by reading `.git` (a directory, or a `gitdir:` file and its `commondir`), with no process spawned, and git is asked only when `GIT_DIR` or `GIT_COMMON_DIR` is set or the layout is unrecognised. The section lists: files named in neither `MEMORY.md` nor `MEMORY-ondemand.md` (the two index files are never listed, and are exempt from the size check); files over 8192 bytes; index links naming a missing file; files that another file names in its frontmatter `replaces:` and that still exist (the writer should delete the old file); and **likely near-duplicates**, for you to review and never acted on. There is no rule that infers a file was replaced without saying so (Sam's decision S-7); a file declares supersession with `replaces: <slug>` in its frontmatter, and the near-duplicate list is the only help for the ones that did not. The near-duplicate measure is the Jaccard overlap of the tokens of each file's frontmatter `name` (its file name if absent) and `description`: lowercase `[a-z0-9]+` words of two or more characters minus a short stopword list; a pair is listed at overlap 0.5 or more, and a file with fewer than four tokens is not compared. The row for unread files prints `not available` until RDR-240's `memory` query exists (nexus-qo7ie.18).
+- `--files` reads the repository's Claude Code memory directory. The directory is found by `nexus._hook_runtime.memory_dir.memory_dir`, the function the SessionStart curation hook shares: `autoMemoryDirectory` from `.claude/settings.local.json`, `.claude/settings.json` (in the working directory, then the primary checkout) or `<config dir>/settings.json` when one holds an absolute or `~/` path to an existing directory; otherwise `<config dir>/projects/<key>/memory`, where `<config dir>` is `$CLAUDE_CONFIG_DIR` or `~/.claude` and `<key>` is the primary checkout's absolute path with every non-alphanumeric character replaced by `-`. A linked worktree reports its primary's directory; the primary is found by reading `.git` (a directory, or a `gitdir:` file and its `commondir`), with no process spawned, and git is asked only when `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_CEILING_DIRECTORIES` is set or the layout is unrecognised. The section lists: files named in neither `MEMORY.md` nor `MEMORY-ondemand.md` (the two index files are never listed, and are exempt from the size check); files over 8192 bytes; index links naming a missing file; files that another file names in its frontmatter `replaces:` and that still exist (the writer should delete the old file); and **likely near-duplicates**, for you to review and never acted on. There is no rule that infers a file was replaced without saying so (Sam's decision S-7); a file declares supersession with `replaces: <slug>` in its frontmatter, and the near-duplicate list is the only help for the ones that did not. The near-duplicate measure is the Jaccard overlap of the tokens of each file's frontmatter `name` (its file name if absent) and `description`: lowercase `[a-z0-9]+` words of two or more characters minus a short stopword list; a pair is listed at overlap 0.5 or more, and a file with fewer than four tokens is not compared. The row for unread files prints `not available` until RDR-240's `memory` query exists (nexus-qo7ie.18).
 - `--t2` reads every live row of the repository's T2 projects (the repo name and `<repo>_*`; one large read for a big project) and lists the rows that a later row names as replaced: a line in the later row's title or body of the form `replaces: <title>` or `supersedes <title>` (several titles separated by `,` or `;`, or in backticks), where the title matches a row of the same project exactly and is older than the row that names it. Rows carrying an audit tag from the AUDIT_TAGS table (`src/nexus/tables/audit-tags.toml`, whole-tag match) or matching its title backstop are skipped, and the count skipped is printed. A title that is only a number (`100`, `RDR-107`: an incidental number after `supersedes` names an RDR, not a row) is never a candidate, and neither is a row already tagged `superseded`. The read returns live rows only, so a quarantined row is never listed. It also prints the RDR-209 Phase 3 Step 4 census: gate records (tag `gate` or `kind:gate`, in `<repo>` and `<repo>_rdr`) older than 30 days, with no TTL, whose phase is closed. The phase is the RDR the record belongs to (its `rdr:<NNN>` tag, or the leading number of its title in `<repo>_rdr`), and "phase closed" is read as that RDR's frontmatter `status` being `closed` (a closed phase of a still-open RDR is not flagged; per-phase flagging is nexus-qo7ie.28), read from the working tree's RDR directory (`docs/rdr`, or the first `indexing.rdr_paths` entry in `.nexus.yml`). A gate record that maps to no RDR is counted and not judged.
 - `--agents` reads each `<config dir>/agent-memory/<agent>/` directory that holds a `MEMORY.md` (the reviewers' own memory). Per directory: index length (the reviewer definitions say to keep it under 40 lines, so 40 or more is flagged); entries (`- [title](file.md) ...`) whose line and linked file name no repo (one of `repo: <name>`, `learned in <name>` or `<name> repo`; a generic word such as `whole`, `this`, `any`, `git` or a language name like `Java` is not a name, so `whole repo` and `the Java repo` do not count); and four signs of concurrent-write damage, since two sessions running one reviewer edit one `MEMORY.md` and the last writer wins: a duplicate entry (an identical line, or two entries linking one file), a truncated last line (no final newline and a bullet that does not close, down to a line cut to just `-`), a dangling entry (links a file the directory lacks), and an orphan file (no index line names it).
 - `--cold` prints `not available` and the reason until RDR-238 Phase 3 Step 3.
@@ -3856,7 +3855,7 @@ nx doctor --check-engine-activity    # Live engine embed activity from GET /v1/s
 nx doctor --check-index-failures     # Surface the durable index-failures backlog (nexus-nukn3)
 ```
 
-The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reads the live service queue, not the local file. It counts two sides. The table side is `aspect_extraction_queue`: its pending rows and its failed rows. The tuple side is the `aspects` tuple queue that `NX_ASPECT_QUEUE` moves work onto (RDR-235): its available tasks count as pending, its dead tasks count as failed, and its claimed tasks are in flight and count as neither. The report prints one `aspect_extraction_queue:` line with the combined pending and failed totals. It adds a `  tuple queue (aspects): N available, N claimed (in flight, not pending), N dead` line when the tuple side has any tasks, and `  dead tuple tasks: nx tuple stats aspects` when it has dead ones. Under the failed total it lists up to 20 failed table rows with their collection, source path and retry count, then points at `nx aspects requeue-failed`. The service list endpoint does not carry `last_error`, so the failure text is in the worker logs. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring.
+The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reads the live service queue, not the local file. It reads the `aspects` tuple queue (RDR-235): its available tasks count as pending, its dead tasks count as failed, and its claimed tasks are in flight and count as neither. The report prints one `aspect queue: N pending, N failed (service backend)` line, then a `  tuple queue (aspects): N available, N claimed (in flight, not pending), N dead` line when the queue has any tasks, and `  dead tuple tasks: nx tuple stats aspects` when it has dead ones, then points at `nx aspects requeue-failed`. A queue that cannot be read prints `aspect queue: service backend unreachable (...)` and no count, never a zero. The retired `aspect_extraction_queue` table is not counted in those lines (nexus-hbnml); the engine's `GET /v1/status` reports whether it still holds rows its start-up drain could not move, and the check prints a `retired aspect_extraction_queue table` line for it: nothing when the table is gone, `present and empty` before the next engine start drops it, `UNKNOWN` when the status cannot be read or the engine predates the field, a WARN when its rows cannot be counted, and a FAIL (exit 1) with the count, the reasons and a remedy when rows are stranded (`docs/migration-runbook.md`). The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring.
 
 Exit codes. A pending backlog never fails the check. A WARN line on stderr says the worker is idle when rows are pending and `claude` is not on PATH with no `anthropic_api_key` set, and that does not change the exit code. A second WARN, with the same exit code, says rows are pending, `claude` is available and no aspect worker holds a lease: a worker exits after an hour without the engine and only the next store or index starts another, so a backlog from before an outage sits until then; it names `nx daemon aspect-worker start` as the remedy. A transport failure to the service prints `Queue depth UNKNOWN` on stderr and exits 0, so it reports neither pass nor fail. If the tuple side cannot be read, the report prints the table side's figures with `tuple queue (aspects) UNKNOWN` on stderr and no combined count, and the exit code follows the table side alone. Any failed count, meaning failed table rows plus tuple dead tasks, above zero exits 1 with a `✗ FAIL: N failed aspect-extraction row(s) in the queue.` marker on stderr, matching the other promoted supplementary checks (nexus-fylxo).
 
@@ -4567,12 +4566,12 @@ serving until a manual `stop` and `start` (nexus-86aaz).
 ### nx daemon aspect-worker start
 
 ```
-nx daemon aspect-worker start [--config-dir DIR] [--tenant TENANT] [--stale-timeout-seconds N] [--engine-unreachable-exit-seconds N]
+nx daemon aspect-worker start [--config-dir DIR] [--tenant TENANT] [--engine-unreachable-exit-seconds N]
 ```
 
 Start the aspect-worker daemon in the foreground (runs until SIGTERM/SIGINT):
 a leased, per-tenant host for the aspect-extraction loop (claim → `claude -p`
-→ upsert `document_aspects` → mark done) and the `reclaim_stale` loop — one
+→ upsert `document_aspects` → ack) — one
 more leased tier on the RDR-149 service-registry substrate (RDR-173). Rides
 a per-tenant lease, so a second `start` for the same tenant fences the
 predecessor (one owner survives).
@@ -4581,8 +4580,7 @@ predecessor (one owner survives).
 |------|-------------|
 | `--config-dir` | Config directory override (default: `~/.config/nexus/`) |
 | `--tenant` | Tenant scope for the lease (default `default`). Per-tenant only — per-host would need `BYPASSRLS`, forbidden by RDR-152 |
-| `--stale-timeout-seconds` | Reclaim staleness threshold (default `300`). MUST exceed the `claude -p` extraction budget (180s) or an in-flight row could be false-reclaimed |
-| `--engine-unreachable-exit-seconds` | Exit when the engine has not answered for this long (default `3600`; `0` turns it off; negative values are refused). The clock starts at a failed reclaim sweep and any later reclaim sweep or claim round trip that is answered clears it, so a worker whose claims work never exits on a failing reclaim route. The worker outlives `nx daemon service stop` by design, so the bound is far longer than a restart; the next enqueue spawns a new worker if the engine returns |
+| `--engine-unreachable-exit-seconds` | Exit when the engine has not answered for this long (default `3600`; `0` turns it off; negative values are refused). The clock starts at the first failed claim round trip and any later claim round trip that is answered clears it. The `--stale-timeout-seconds` flag and the daemon's reclaim sweep are gone with the aspect queue table (nexus-hbnml): a claim lives and dies by its lease, and the engine returns a lapsed one on the next claim. The worker outlives `nx daemon service stop` by design, so the bound is far longer than a restart; the next enqueue spawns a new worker if the engine returns |
 
 The worker also exits within a few seconds of its config directory being
 removed (two consecutive heartbeats that find it gone), and does not re-create it: a gate's scratch directory deleted under a
@@ -6490,9 +6488,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   contradicting one marks it `conflicted`. A contradicted facet (nexus-se11w) is recorded as covered
   with the reason `conflicted_from_contradicted` when an unread anchor supports it, and the run stays `partial` with its notice;
   it stays contradicted otherwise. The repair budget is unchanged (6 queries, 12 items). With
-  `NX_ANSWER_RESOLUTION_REPAIR=1` (off by default; RDR-147 Step 4, nexus-qpimy) the repair may instead take an
-  exact-key branch, and `repair` then adds keys, only once the branch was considered (with the switch off the
-  wire is unchanged): `resolution_entered` (the branch resolved keys in place of the semantic queries) and
+  `NX_ANSWER_RESOLUTION_REPAIR` on (the default since RDR-147 Phase 2; `0` turns it off; nexus-qpimy) the repair may instead take an
+  exact-key branch, and `repair` then adds keys, only once the branch was considered (with the switch off, or with no
+  `entity.collections` configured, the wire is unchanged): `resolution_entered` (the branch resolved keys in place of the semantic queries) and
   `resolution_reason` (why a considered branch did not enter: `confined_run`, `entity_config_error`,
   `no_pattern_for_anchor_collections` when no anchor's collection has a key pattern, or `no_key_tokens` when the
   anchors of the collections that do name none), `anchors_scanned` and `anchors_without_pattern` (how many anchors the
@@ -6744,3 +6742,64 @@ RDR (Research-Design-Review) authoring helpers.
 | `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-gate`, `rdr-fix`, `rdr-accept`, `rdr-research`, `rdr-audit`). `rdr-fix <id>` prints the latest gate's findings with their `Sites:` lists, the diff range and fix commits since the gated commit, whether a fix-check record exists for the file's tip, the pre-edit research title, and the fix rules (nexus-zbdm0). `rdr-verdict <id> <critique-title>` computes a gate's outcome from the stored critique and the derived round (issue blocks and `Ship-blocker: yes` marks counted, the larger of each self-reported and counted number used, a missing `ship_blockers` line read as `critical_count`) under `review-rounds.toml`'s rdr-gate rows, and prints the gate record to write with the `prior:` chain pre-filled (nexus-yxo2l). `rdr-audit` in default mode leads with a Gate loop health block: per gated RDR, rounds, Criticals per round from the `prior:` chain, residual count, and a flag when the loop ran past the round cap |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.
+
+---
+
+## nx ask
+
+Structured asks on the threads board (RDR-245, nexus-wc4jj.7): the mediator's tool and Sam's fallback. An ask is an `ask:` block in a session's T2 `threads` entry. It is named `<entry>/<id>`; a bare `<id>` is accepted only when exactly one entry holds it. Answers are recorded in T2 project `asks` (title `<asker session id>/<ask id>/<version>`) and mailed to `mailbox/<asker session id>` as a raw `tuple_out`. The record, batch record and mail body shapes are pinned by `tests/fixtures/asks/`.
+
+| Subcommand | Description |
+|------------|-------------|
+| `list [--json] [--all]` | Interrupt asks, then the batch, then one-line counts of quiet, conditional and answered asks (`--all` lists them), then legacy asks and needs-sam beads (a bead that a structured ask folds into carries `-> <entry>/<ask id>`; the ask stays in its own group), then lint findings, then the last 48 hours of answers. `--json` carries every parsed field of every ask with its version, the bead objects with `ask_pointers`, the lint findings and the digest |
+| `show <ref> [--json]` | Every field of one ask: numbered options with the recommendation marked, the version, the asker session, the entry age and the answer record for this version, if any |
+| `answer <ref> <n\|text> --expect VERSION [--note TEXT] [--via cli\|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]` | Answer one ask. A number picks that option; any other text is a note-only answer that authorizes no option |
+| `digest` | Every answer of the last seven days, newest first: time, `via`, Sam's words, the batch reply they came from, and the tuple id (or the `sending` / `failed` status) |
+
+### nx ask answer
+
+```
+nx ask answer ENTRY/ID N|TEXT --expect VERSION [--note TEXT] [--via cli|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]
+```
+
+Refused, with nothing recorded or sent: `--expect` differs from the ask's current version (the current text is printed); the ask has an `after:` value; the entry has no `session:` line, or one that is not a lower-case canonical UUID, or two or more entries carry the same `session:` id; a number outside `1..` the option count; a `sent` record for the same version without `--replace`; a `sending` record under 10 minutes old (even with `--replace`). A `sending` record over 10 minutes old, or a `failed` one, is retried without `--replace`. The record is written `sending` with a fresh `answer_id`, read back, and the command stops without sending if the `answer_id` read back is not its own (first record wins). It then posts the tuple and updates the record to `sent` with the tuple id, or `failed` with the error, and prints which.
+
+| Flag | Description |
+|------|-------------|
+| `--expect VERSION` | Required. The 16-hex version of the ask Sam saw |
+| `--note TEXT` | A note on a chosen option. Not allowed with a free-text reply (the reply is the note) |
+| `--via cli\|mediator` | `cli` (default): stdin must be a TTY; the note, or the text of a note-only answer, is recorded as Sam's words. `mediator`: a session relaying Sam's words; needs `--sam-words` and this session's own id (tuple-watch marker, then `NX_T1_SESSION_ID`) |
+| `--sam-words TEXT` | `--via mediator` only. The contiguous span Sam typed for this ask, 1 to 500 characters |
+| `--batch-words TEXT` | `--via mediator` only. Sam's whole reply when it covered several asks, at most 2000 characters; shown only by `digest`. Answers sent with the same words by the same mediator within 10 minutes share one `batch/<mediator session>/<YYYYMMDDTHHMMSSZ>` record |
+| `--replace` | Supersede a `sent` answer to the same version |
+
+`--via cli` mails with a sender id minted once and kept in the nexus config dir (`ask-cli-sender`); `--via mediator` mails with the mediator's own session id.
+
+### nx ask list
+
+```
+nx ask list [--json] [--all]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | One JSON object with the groups `interrupt`, `batch`, `quiet`, `conditional`, `answered`, plus `legacy`, `beads`, `beads_error`, `lint`, `unreadable` and `digest` |
+| `--all` | List the quiet, conditional and answered asks instead of only counting them |
+
+### nx ask show
+
+```
+nx ask show ENTRY/ID [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | The ask as one JSON object (every parsed field, `entry_age`, and `answer`: null when there is no record for this version, else only the closed-pattern fields `answer_id`, `choice`, `via`, `time`, `status` and `tuple_id`, or `{"unreadable": true}` when any of them does not match; Sam's words, notes and errors are never shown here) |
+
+### nx ask digest
+
+```
+nx ask digest
+```
+
+Lists every answer record of the last seven days, newest first. Takes no flags.

@@ -513,8 +513,9 @@ class HookRegistry:
         # enqueue, violating the engine's composite FK
         # aspect_extraction_queue(tenant_id, doc_id) ->
         # catalog_documents(tenant_id, tumbler) — typed 409, aspects
-        # silently lost on every CLI store put. "" persists as NULL,
-        # which the nullable FK accepts. ``doc_ids`` is intentionally
+        # silently lost on every CLI store put. (That table is retired,
+        # nexus-hbnml; the rule carries over to the ``aspects`` task, whose
+        # identity is the catalog tumbler: nonce = doc_id.) ``doc_ids`` is intentionally
         # unused here — chunk ids belong to the single/batch chains only.
         for sp, content in zip(source_paths, contents):
             self.fire_document(sp, collection, content, doc_id=catalog_doc_id, invoke=invoke)

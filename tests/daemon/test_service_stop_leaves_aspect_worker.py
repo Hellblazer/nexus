@@ -6,8 +6,8 @@ RDR-224's recorded decision (Phase 3 fix round B; Revision History: "its
 decision that `service stop` leaves it running as on POSIX"): the worker
 belongs to the store path, not to the service. It respawns on the next
 enqueue (``ensure_aspect_worker_daemon``), holds neither the engine nor
-PostgreSQL files, and idles at a bounded cadence with the stack down
-(``next_reclaim_wait``). The stop's process sweep is
+PostgreSQL files, and idles with the stack down (its claim round trips fail
+and its failure clock runs out at the engine-unreachable bound). The stop's process sweep is
 ``storage_service_stack_matcher``; this pins that its predicate never matches
 an aspect-worker command line, so a future widening of the matcher cannot turn
 the by-design survivor into a hard-kill target (and, on Windows, into a

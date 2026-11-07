@@ -8,8 +8,9 @@ LOUD at store time, observable self-healing.
   1. When a store enqueues but the leased daemon is unreachable / cannot be
      spawned, emit a structured signal with enough context (tenant, queue depth)
      to diagnose — the previously-silent store-time failure becomes observable.
-  2. When the daemon's reclaim loop RESETS a stranded in_progress row, emit a
-     structured signal so reclaim is observable, not invisible self-healing.
+  2. The daemon's start-up phase breakdown, its process age, and the spawn
+     child-died signal (the daemon's own observability; the table reclaim
+     signals went with the reclaim loop).
 
 These tests assert the structured event FIELDS, not just that 'something logged'.
 """
@@ -109,8 +110,8 @@ def test_enqueue_hook_service_mode_unreachable_emits_signal(monkeypatch) -> None
 class _CapturingLog:
     """Records structured log calls by replacing the module's ``_log`` —
     independent of structlog config and thread. Used for the daemon-module
-    signals because ``capture_logs()`` is not cross-thread (the reclaim loop runs
-    on its own thread) and the seam tests call into the daemon module directly."""
+    signals because ``capture_logs()`` is not cross-thread (the daemon's heartbeat
+    runs on its own thread) and the seam tests call into the daemon module directly."""
 
     def __init__(self) -> None:
         self.events: list[tuple[str, str, dict]] = []
@@ -126,52 +127,6 @@ class _CapturingLog:
 
     def of(self, event: str) -> list[tuple[str, str, dict]]:
         return [e for e in self.events if e[1] == event]
-
-
-def test_reclaim_reset_emits_structured_signal(tmp_path: Path, monkeypatch) -> None:
-    """When a reclaim sweep resets stranded rows, it emits a structured signal
-    carrying the tenant + count so self-healing is observable (item 2). Driven
-    via the _reclaim_once seam in the main thread."""
-    class _ResettingQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-            return 3   # reset 3 rows
-
-        def close(self) -> None: ...
-
-    cap = _CapturingLog()
-    monkeypatch.setattr(awd, "_log", cap)
-    d = AspectWorkerDaemon(
-        config_dir=tmp_path, tenant="tenant-X", worker_factory=_FakeWorker,
-        queue_factory=_ResettingQueue, reclaim_interval=0.03, stale_timeout_seconds=300,
-    )
-    d._reclaim_queue = _ResettingQueue()
-    d._reclaim_once()
-
-    reclaimed = cap.of("aspect_worker_daemon.reclaimed_stale")
-    assert reclaimed, f"no reclaim signal; got {[e[1] for e in cap.events]}"
-    level, _event, fields = reclaimed[0]
-    assert level == "info"
-    assert fields["tenant"] == "tenant-X"
-    assert fields["count"] == 3
-
-
-def test_reclaim_silent_when_nothing_stranded(tmp_path: Path, monkeypatch) -> None:
-    """A healthy sweep that resets nothing emits no reclaimed_stale event (the
-    signal means 'self-healing happened', not 'loop is alive')."""
-    class _EmptyQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-            return 0
-
-        def close(self) -> None: ...
-
-    cap = _CapturingLog()
-    monkeypatch.setattr(awd, "_log", cap)
-    d = AspectWorkerDaemon(
-        config_dir=tmp_path, tenant="t", worker_factory=_FakeWorker, queue_factory=_EmptyQueue,
-    )
-    d._reclaim_queue = _EmptyQueue()
-    d._reclaim_once()
-    assert cap.of("aspect_worker_daemon.reclaimed_stale") == []
 
 
 def test_spawn_child_died_emits_signal(tmp_path, monkeypatch) -> None:
@@ -214,33 +169,6 @@ def test_spawn_live_child_emits_no_death_signal(tmp_path, monkeypatch) -> None:
     assert cap.of("aspect_worker_daemon.spawn_child_died") == []
 
 
-def test_stop_with_undrained_rows_signals(tmp_path, monkeypatch) -> None:
-    """Item 3: a daemon stopping while it owns in_progress rows it could not
-    finish must signal that (and reset them) — the detectable worker-death case."""
-    cap = _CapturingLog()
-    monkeypatch.setattr(awd, "_log", cap)
-
-    class _UndrainedQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-            return 2   # the final sweep finds 2 abandoned in_progress rows
-
-        def close(self) -> None: ...
-
-    d = AspectWorkerDaemon(
-        config_dir=tmp_path, tenant="tenant-Z", worker_factory=_FakeWorker,
-        queue_factory=_UndrainedQueue,
-    )
-    d._reclaim_queue = _UndrainedQueue()
-    d.stop()
-
-    signalled = cap.of("aspect_worker_daemon.stopping_with_undrained_rows")
-    assert signalled, f"no undrained-on-exit signal; got {[e[1] for e in cap.events]}"
-    level, _e, fields = signalled[0]
-    assert level == "warning"
-    assert fields["count"] == 2
-    assert fields["tenant"] == "tenant-Z"
-
-
 def test_started_log_carries_a_phase_timing_breakdown(tmp_path: Path, monkeypatch) -> None:
     """nexus-1m9sb: a fullstack-container run measured ~3 minutes between the
     daemon's pid being assigned and 'aspect_worker_daemon.started' logging,
@@ -249,20 +177,13 @@ def test_started_log_carries_a_phase_timing_breakdown(tmp_path: Path, monkeypatc
     concurrent-container reproductions against the exact same image all
     completed in ~1s), so the actionable fix is observability: 'started' now
     carries a per-phase millisecond breakdown (lease publish, worker
-    construction, worker thread start, reclaim-queue construction, and the
-    total) so a recurrence is diagnosable from the log alone."""
+    construction, worker thread start, and the total) so a recurrence is diagnosable from the log alone."""
     cap = _CapturingLog()
     monkeypatch.setattr(awd, "_log", cap)
 
-    class _NoopQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-            return 0
-
-        def close(self) -> None: ...
-
     d = AspectWorkerDaemon(
         config_dir=tmp_path, tenant="tenant-timing",
-        worker_factory=_FakeWorker, queue_factory=_NoopQueue,
+        worker_factory=_FakeWorker,
     )
     d.start()
     try:
@@ -270,8 +191,7 @@ def test_started_log_carries_a_phase_timing_breakdown(tmp_path: Path, monkeypatc
         assert started, f"no started event; got {[e[1] for e in cap.events]}"
         _level, _event, fields = started[0]
         for field in (
-            "lease_publish_ms", "worker_build_ms", "worker_start_ms",
-            "queue_build_ms", "total_startup_ms",
+            "lease_publish_ms", "worker_build_ms", "worker_start_ms", "total_startup_ms",
         ):
             assert field in fields, f"{field!r} missing from started event: {fields}"
             assert isinstance(fields[field], float)
@@ -282,7 +202,6 @@ def test_started_log_carries_a_phase_timing_breakdown(tmp_path: Path, monkeypatc
         assert fields["total_startup_ms"] >= fields["lease_publish_ms"]
         assert fields["total_startup_ms"] >= fields["worker_build_ms"]
         assert fields["total_startup_ms"] >= fields["worker_start_ms"]
-        assert fields["total_startup_ms"] >= fields["queue_build_ms"]
     finally:
         d.stop()
 
@@ -303,14 +222,8 @@ def test_started_log_carries_process_age(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(awd, "_log", cap)
     monkeypatch.setattr(awd, "_process_age_ms", lambda: 1234.5)
 
-    class _NoopQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
-            return 0
-
-        def close(self) -> None: ...
-
     d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-age",
-                           worker_factory=_FakeWorker, queue_factory=_NoopQueue)
+                           worker_factory=_FakeWorker)
     d.start()
     try:
         _level, _event, fields = cap.of("aspect_worker_daemon.started")[0]

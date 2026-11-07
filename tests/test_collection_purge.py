@@ -36,7 +36,6 @@ def test_service_mode_uses_single_endpoint_and_maps_counts(
                 "topic_assignments": 3, "topics": 2, "taxonomy_meta": 1,
                 "taxonomy_centroids": 2,  # RDR-191 unified key (nexus-o8dil.19/.47)
                 "document_aspects": 4, "document_highlights": 1,
-                "aspect_extraction_queue": 7,
                 "catalog_documents": 6, "catalog_collections": 1,
             }
 
@@ -145,7 +144,6 @@ def test_service_mode_maps_legacy_per_dim_centroid_keys_as_fallback(
                 "taxonomy_centroids_384": 1, "taxonomy_centroids_768": 4,
                 "taxonomy_centroids_1024": 0,
                 "document_aspects": 0, "document_highlights": 0,
-                "aspect_extraction_queue": 0,
                 "catalog_documents": 0, "catalog_collections": 0,
             }
 

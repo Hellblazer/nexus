@@ -143,61 +143,22 @@ def _out(db: Any, doc_id: str, source: str) -> None:
 # ── Row 1: the enqueue hook ─────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("producer", ["tuples", "table"])
 def test_enqueue_of_a_sensitive_document_persists_nothing_and_logs(
-    db: Any, logs: _Log, producer: str, monkeypatch: pytest.MonkeyPatch,
+    db: Any, logs: _Log, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nexus.aspect_worker import aspect_extraction_enqueue_hook
-    from tests._aspect_table_producer import table_producer
 
     sensitive = _doc("enqueue-sensitive", sensitive=True)
     control = _doc("enqueue-control")
 
-    def fire() -> None:
-        aspect_extraction_enqueue_hook(f"/{sensitive}.md", _COLL, _SECRET, doc_id=sensitive)
-        aspect_extraction_enqueue_hook(f"/{control}.md", _COLL, "plain text", doc_id=control)
+    aspect_extraction_enqueue_hook(f"/{sensitive}.md", _COLL, _SECRET, doc_id=sensitive)
+    aspect_extraction_enqueue_hook(f"/{control}.md", _COLL, "plain text", doc_id=control)
+    queued = _task_docs(db)
 
-    if producer == "tuples":
-        fire()
-        queued = _task_docs(db)
-    else:
-        with table_producer():
-            fire()
-            rows = db.aspect_queue.claim_batch(10)
-        queued = sorted(r.doc_id for r in rows)
-        assert _SECRET not in json.dumps([r.content for r in rows]), "no content of the sensitive document persisted"
-
-    assert queued == [control], f"{producer}: only the control document is queued: {queued}"
+    assert queued == [control], f"only the control document is queued: {queued}"
     skipped = logs.named("aspect_enqueue_skipped_sensitive")
     assert [s["tumbler"] for s in skipped] == [sensitive], skipped
     assert skipped[0]["surface"] == "aspect_enqueue_hook" and skipped[0]["collection"] == _COLL
-
-
-def test_requeue_failed_deletes_a_sensitive_documents_failed_row_instead_of_queueing_it(
-    db: Any, logs: _Log, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``nx aspects requeue-failed`` reaches the queue without the hook. A failed table row of a document
-    flagged since it failed (it may still carry the document's text) is deleted, not turned into a task."""
-    from click.testing import CliRunner
-
-    from nexus.commands.aspects import aspects_group
-    from tests._aspect_table_producer import table_producer
-
-    sensitive = _doc("requeue-sensitive")
-    control = _doc("requeue-control")
-    with table_producer():
-        for path, doc in (("/s.md", sensitive), ("/c.md", control)):
-            db.aspect_queue.enqueue(_COLL, path, content=_SECRET if doc == sensitive else "plain", doc_id=doc)
-            assert db.aspect_queue.claim_next() is not None
-            db.aspect_queue.mark_failed(_COLL, path, "boom")
-    _flag(sensitive)
-
-    result = CliRunner().invoke(aspects_group, ["requeue-failed"])
-
-    assert result.exit_code == 0, result.output
-    assert _task_docs(db) == [control], f"only the control document became a task: {_task_docs(db)}"
-    assert db.aspect_queue.list_failed() == [], "the sensitive failed row is gone, not left for the doctor to count"
-    assert [s["tumbler"] for s in logs.named("aspect_enqueue_skipped_sensitive")] == [sensitive]
 
 
 def test_the_indexers_aspect_batch_never_queues_a_sensitive_document(
@@ -269,6 +230,64 @@ def test_the_enqueue_filter_drops_flagged_rows_and_fails_closed(monkeypatch: pyt
         sensitive_enqueue_filter(rows)
 
 
+def _dead(db: Any, doc_id: str, source: str) -> None:
+    """A task of *doc_id* that ran out of attempts: out, claimed, nacked dead."""
+    _out(db, doc_id, source)
+    got = db.tuples.inp(_SUB, dict(_KEYS), claimant="t-dead", lease_s=60)
+    assert got is not None and json.loads(got[0].body)["doc_id"] == doc_id, "harness: the oldest available task is this one"
+    db.tuples.nack(got[1], "t-dead", dead=True)
+
+
+def _states(db: Any) -> dict[str, str]:
+    return {json.loads(r.body)["doc_id"]: r.claim_state for r in db.tuples.rd(_SUB, dict(_KEYS), n=300)}
+
+
+def test_requeue_failed_leaves_a_dead_task_of_a_document_flagged_after_it_died_dead(db: Any, logs: _Log) -> None:
+    """A revive is an enqueue: ``nx aspects requeue-failed`` passes the dead tasks through the one enqueue
+    gate (nexus-hbnml). The flagged document's task stays dead and is named on stderr; the clear one is
+    revived. The dry run lists the skip and writes nothing."""
+    from click.testing import CliRunner
+
+    from nexus.commands.aspects import aspects_group
+
+    flagged, clear = _doc("requeue-flagged"), _doc("requeue-clear")
+    _dead(db, flagged, "/f.md")
+    _dead(db, clear, "/c.md")
+    _flag(flagged)
+
+    dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "Would revive 1 dead task(s)" in dry.output and "/c.md" in dry.output, dry.output
+    assert "Would leave 1 dead task(s): the document is flagged sensitive" in dry.output and flagged in dry.output, dry.output
+    assert _states(db) == {flagged: "dead", clear: "dead"}, "a dry run writes nothing"
+
+    result = CliRunner().invoke(aspects_group, ["requeue-failed"])
+    assert result.exit_code == 0, result.output
+    assert f"its document {flagged}" in result.output and "is flagged sensitive" in result.output, result.output
+    assert "/f.md" not in result.output and "/f.md" not in dry.output, "a flagged document's path (it can carry the title) is not printed"
+    assert "Revived 1 dead task(s) to available; left 1 dead (sensitive document)." in result.output, result.output
+    assert _states(db) == {flagged: "dead", clear: None}, "the clear task is available again (no claim state)"
+    assert [e["tumbler"] for e in logs.named("aspect_enqueue_skipped_sensitive")] == [flagged, flagged]
+
+
+def test_requeue_failed_limit_counts_revivals_not_the_flagged_tasks_ahead_of_them(db: Any, logs: _Log) -> None:
+    """``--limit`` slices after the gate: a flagged task that stays dead and sorts oldest must not fill
+    every limited run, or ``--limit 1`` would revive nothing for ever."""
+    from click.testing import CliRunner
+
+    from nexus.commands.aspects import aspects_group
+
+    flagged, clear = _doc("limit-flagged"), _doc("limit-clear")
+    _dead(db, flagged, "/lf.md")
+    _dead(db, clear, "/lc.md")
+    _flag(flagged)
+
+    result = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    assert "Revived 1 dead task(s) to available; left 1 dead (sensitive document)." in result.output, result.output
+    assert _states(db) == {flagged: "dead", clear: None}
+
+
 # ── Row 2: the worker drain after a late flag ───────────────────────────────────────────────────
 
 
@@ -334,54 +353,6 @@ def test_a_tuple_task_whose_document_became_sensitive_inside_extract_is_acked_no
     assert [s["tumbler"] for s in logs.named("aspect_worker_skipped_sensitive")] == [doc]
 
 
-def test_a_table_row_queued_before_the_flag_is_marked_done_at_drain_and_the_model_gets_nothing(
-    db: Any, model: list[dict[str, Any]], logs: _Log,
-) -> None:
-    from tests._aspect_table_producer import table_producer
-
-    sensitive = _doc("table-sensitive")
-    control = _doc("table-control")
-    with table_producer():
-        db.aspect_queue.enqueue(_COLL, "/s.md", content=_SECRET, doc_id=sensitive)
-        db.aspect_queue.enqueue(_COLL, "/c.md", content="plain", doc_id=control)
-        _flag(sensitive)
-        rows = db.aspect_queue.claim_batch(10)
-    worker = AspectExtractionWorker(poll_interval=0.1)
-    by_path = {r.source_path: r for r in rows}
-    assert set(by_path) == {"/s.md", "/c.md"}
-
-    worker._process_row(by_path["/s.md"])
-    worker._process_row(by_path["/c.md"])
-
-    assert [c["source_path"] for c in model] == ["/c.md"], "single path: the control reached the model, the sensitive row did not"
-    assert _SECRET not in json.dumps(model, default=str)
-    assert db.aspect_queue.is_drained(), "both rows left the queue; none is failed or pending"
-    assert [s["tumbler"] for s in logs.named("aspect_worker_skipped_sensitive")] == [sensitive]
-
-
-def test_a_table_batch_drops_the_flagged_row_before_the_batch_call(
-    db: Any, model: list[dict[str, Any]], logs: _Log,
-) -> None:
-    from tests._aspect_table_producer import table_producer
-
-    sensitive = _doc("batch-sensitive")
-    controls = [_doc(f"batch-control-{i}") for i in range(2)]
-    with table_producer():
-        db.aspect_queue.enqueue(_COLL, "/s.md", content=_SECRET, doc_id=sensitive)
-        for i, c in enumerate(controls):
-            db.aspect_queue.enqueue(_COLL, f"/c{i}.md", content="plain", doc_id=c)
-        _flag(sensitive)
-        rows = db.aspect_queue.claim_batch(10)
-    assert len(rows) == 3
-
-    AspectExtractionWorker(poll_interval=0.1)._process_batch(rows)
-
-    assert len(model) == 1 and model[0]["kind"] == "batch"
-    assert sorted(i[1] for i in model[0]["items"]) == ["/c0.md", "/c1.md"], "the batch holds the controls only"
-    assert _SECRET not in json.dumps(model, default=str)
-    assert db.aspect_queue.is_drained()
-
-
 # ── Rows 3 and 4: extract_aspects refuses ───────────────────────────────────────────────────────
 
 
@@ -443,29 +414,6 @@ def test_extract_aspects_batch_gives_a_flagged_document_a_refused_slot_and_sends
     assert isinstance(out[0], ExtractFail) and out[0].reason == "sensitive_document", out[0]
     assert isinstance(out[1], AspectRecord)
     assert len(llm_calls) == 1 and "plain text" in llm_calls[0] and _SECRET not in llm_calls[0]
-
-
-def test_the_worker_acks_a_row_whose_document_became_sensitive_inside_extract(
-    db: Any, logs: _Log, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The drain pre-check passed (the flag was not set yet); the extractor's own gate then refuses.
-    The refusal is a verdict on the document, so the row is dropped, never retried."""
-    from tests._aspect_table_producer import table_producer
-
-    doc = _doc("race")
-    with table_producer():
-        db.aspect_queue.enqueue(_COLL, "/r.md", content=_SECRET, doc_id=doc)
-        row = db.aspect_queue.claim_batch(10)[0]
-
-    def refuse(**kw: Any):
-        raise SensitiveDocumentRefused(doc, "aspect_extraction_cli")
-
-    monkeypatch.setattr("nexus.aspect_worker._extract_aspects", refuse)
-    monkeypatch.setattr("nexus.aspect_worker._drain_sensitive_rows", lambda rows: (list(rows), set()))
-    AspectExtractionWorker(poll_interval=0.1)._process_row(row)
-
-    assert db.aspect_queue.is_drained(), "dropped, not retried and not failed"
-    assert logs.named("aspect_worker_skipped_sensitive")
 
 
 # ── Rows 5 and 6: nx enrich aspects ─────────────────────────────────────────────────────────────

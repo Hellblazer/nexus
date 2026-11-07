@@ -25,7 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -37,13 +37,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>Pure-logic: {@link AspectHandler#sqlState23(Throwable)} detects a class-23
  *       SQLSTATE anywhere in the cause chain (jOOQ wraps the driver PSQLException),
  *       and returns null for non-class-23 / non-SQL / null inputs.</li>
- *   <li>Integration (Testcontainers): a real {@link AspectRepository} enqueue with a
- *       non-blank UNREGISTERED {@code doc_id} hits the {@code aspect_extraction_queue.doc_id}
+ *   <li>Integration (Testcontainers): a real {@link AspectRepository} upsert with a
+ *       non-blank UNREGISTERED {@code doc_id} hits the {@code document_aspects.doc_id}
  *       FK (bug nexus-ov0sw) and the handler responds 409 with the sqlstate — NOT a bare
- *       500 and NOT a silent 200. A blank/missing {@code doc_id} 400s at the boundary now
- *       (hygiene-001, nexus-tk070.p6a follow-on: {@code aspect_extraction_queue.doc_id} is
- *       NOT NULL, superseding the original nullIfBlank-to-NULL-then-200 behaviour this class
- *       used to pin).</li>
+ *       500 and NOT a silent 200. A blank {@code doc_id} 400s at the boundary (hygiene-001).
+ *       The class once drove the same mapping through {@code /queue/enqueue}; the queue table
+ *       and its routes are retired (nexus-hbnml), and the retired routes' 404 is pinned here.</li>
  * </ol>
  *
  * <p>Hermetic: embedded Postgres (Testcontainers pgvector), requires Docker. Drives the
@@ -86,13 +85,11 @@ class AspectHandlerEnqueueErrorTest {
         handler = new AspectHandler(repo);
 
         // RDR-164 P1a / RDR-204 Phase 1: document_aspects_collection_fk is a REAL,
-        // always-enforced FK now -- register every collection this suite's
-        // non-blank-doc_id enqueue tests target (the blank-doc_id tests short-circuit
-        // before ever reaching the collection FK, so they need no registration).
+        // always-enforced FK now -- register the collection the non-blank-doc_id upsert targets
+        // (the blank-doc_id test short-circuits before ever reaching the collection FK).
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(dsl, TENANT, "coll-enq-fk");
-            PgContainerHelper.insertCollection(dsl, TENANT, "coll-enqmany-ok");
         }
     }
 
@@ -143,69 +140,55 @@ class AspectHandlerEnqueueErrorTest {
     // ── Integration: handler maps the real FK violation to 409 ───────────────────
 
     @Test
-    void enqueue_unregisteredDocId_returns409_withSqlstate() throws Exception {
-        CapturingExchange ex = post("/v1/aspects/queue/enqueue",
+    void upsert_unregisteredDocId_returns409_withSqlstate() throws Exception {
+        CapturingExchange ex = post("/v1/aspects/upsert",
             "{\"collection\":\"coll-enq-fk\",\"source_path\":\"fk-src.pdf\","
-            + "\"doc_id\":\"unregistered-tumbler-zzz\"}");
+            + "\"doc_id\":\"unregistered-tumbler-zzz\",\"confidence\":0.9,"
+            + "\"extracted_at\":\"2026-01-01T00:00:00Z\",\"model_version\":\"v1\",\"extractor_name\":\"ex\"}");
         handleWithTenant(ex);
         assertThat(ex.status)
-            .as("a non-blank UNREGISTERED doc_id violates the queue FK → typed 409, not 500/200")
+            .as("a non-blank UNREGISTERED doc_id violates the document_aspects FK → typed 409, not 500/200")
             .isEqualTo(409);
         assertThat(ex.bodyString()).contains("\"sqlstate\":\"23503\"");
         // Lock the info-disclosure fix: the client body is the fixed message, never
         // the raw jOOQ SQL (which names the table/constraint). A revert would fail here.
         assertThat(ex.bodyString())
             .contains("\"error\":\"integrity constraint violation\"")
-            .doesNotContain("aspect_extraction_queue");
-    }
-
-    @Test
-    void enqueue_blankDocId_returns400() throws Exception {
-        // hygiene-001 (nexus-tk070.p6a follow-on) SUPERSEDES this test's
-        // original pin (blank -> nullIfBlank -> NULL -> 200): aspect_
-        // extraction_queue.doc_id is NOT NULL now, so AspectRepository.
-        // buildEnqueueQuery refuses a blank doc_id at the boundary, before
-        // ANY statement reaches Postgres -- a clean 400, not a class-23
-        // FK/NOT-NULL violation surfacing as a 409/500.
-        CapturingExchange ex = post("/v1/aspects/queue/enqueue",
-            "{\"collection\":\"coll-enq-ok\",\"source_path\":\"ok-src.pdf\",\"doc_id\":\"\"}");
-        handleWithTenant(ex);
-        assertThat(ex.status).as("blank doc_id must 400 now").isEqualTo(400);
-        assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
-
-        // Non-vacuity: no row must have landed at all -- the whole write is
-        // refused, not partially applied.
+            .doesNotContain("document_aspects");
         try (Connection su = pg.createConnection("")) {
-            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchExists(ASPECT_EXTRACTION_QUEUE,
-                    ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(TENANT)
-                        .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq("coll-enq-ok"))
-                        .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq("ok-src.pdf"))))
-                .as("a rejected enqueue must not land a row").isFalse();
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchExists(DOCUMENT_ASPECTS,
+                    DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT).and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("fk-src.pdf"))))
+                .as("a rejected upsert must not land a row").isFalse();
         }
     }
 
     @Test
-    void enqueue_missingDocId_returns400() throws Exception {
-        CapturingExchange ex = post("/v1/aspects/queue/enqueue",
-            "{\"collection\":\"coll-enq-missing\",\"source_path\":\"missing-src.pdf\"}");
+    void upsert_blankDocId_returns400() throws Exception {
+        CapturingExchange ex = post("/v1/aspects/upsert",
+            "{\"collection\":\"coll-enq-ok\",\"source_path\":\"ok-src.pdf\",\"doc_id\":\"\","
+            + "\"confidence\":0.9,\"extracted_at\":\"2026-01-01T00:00:00Z\",\"model_version\":\"v1\","
+            + "\"extractor_name\":\"ex\"}");
         handleWithTenant(ex);
-        assertThat(ex.status).as("missing doc_id must 400").isEqualTo(400);
+        assertThat(ex.status).as("blank doc_id must 400").isEqualTo(400);
         assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
     }
 
+    /**
+     * nexus-hbnml: the aspect_extraction_queue table is retired, and with it every {@code /v1/aspects/queue/*}
+     * route. Each answers the 404 of any unknown aspects op, on both verbs, and reaches no repository code.
+     */
     @Test
-    void enqueueMany_oneRowWithBlankDocId_returns400_abortsWholeBatch() throws Exception {
-        // buildEnqueueQuery is called per-row, unguarded by try/catch, inside
-        // enqueueMany's loop -- a blank doc_id on ANY well-formed row throws
-        // and propagates, 400-ing the WHOLE batch (not a per-row skip, unlike
-        // a blank collection/source_path).
-        CapturingExchange ex = post("/v1/aspects/queue/enqueue_many",
-            "{\"rows\":[{\"collection\":\"coll-enqmany-ok\",\"source_path\":\"a.pdf\","
-            + "\"doc_id\":\"unregistered-but-nonblank\"},"
-            + "{\"collection\":\"coll-enqmany-ok\",\"source_path\":\"b.pdf\",\"doc_id\":\"\"}]}");
-        handleWithTenant(ex);
-        assertThat(ex.status).as("any row's blank doc_id must 400 the whole batch").isEqualTo(400);
-        assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
+    void theRetiredQueueRoutes_answer404() throws Exception {
+        for (String op : new String[]{"enqueue", "enqueue_many", "claim_next", "claim_batch", "mark_done", "mark_failed",
+                "mark_retry", "reclaim_stale", "pending_count", "is_drained", "list_pending", "list_waiting",
+                "list_failed", "rename_collection", "import"}) {
+            for (String method : new String[]{"POST", "GET"}) {
+                CapturingExchange ex = new CapturingExchange(method, URI.create("/v1/aspects/queue/" + op), "{}");
+                handleWithTenant(ex);
+                assertThat(ex.status).as(method + " /v1/aspects/queue/" + op).isEqualTo(404);
+                assertThat(ex.bodyString()).contains("unknown aspects op");
+            }
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

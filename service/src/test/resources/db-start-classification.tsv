@@ -24,6 +24,8 @@ Pipeline002PerRowIdentityMigrationTest	startEmptyDatabase	WALK	walks to before p
 Catalog036EmbeddingProfileSchemaLiquibaseTest	startEmptyDatabase	WALK	its two empty-database cases need the state between catalog-036 and hygiene-002-1, and a populated pre-existing row
 TuplesBaselineSchemaLiquibaseTest	startEmptyDatabase	WALK	rolls the tuples changesets back and reapplies them, walks from empty, and cleans legacy oversized rows
 TuplesRetireLedgerLiquibaseTest	startEmptyDatabase	WALK	walks to before tuples-012-1, seeds ledger rows, look-alikes and delivery and claim-log rows in two tenants, applies it, and asserts the purge as a NOBYPASSRLS owner, FORCE RLS restored, and a second run that deletes only a new ledger row
+AspectQueueRetireLiquibaseTest	startEmptyDatabase	WALK	walks to before aspects-005-2 as a NOBYPASSRLS owner, seeds a queue row as superuser, and asserts the guarded drop on an empty table, a populated table (kept, boot continues, retried) and a throwing guard, plus the rollback shape
+AspectQueueDrainIntegrationTest	startEmptyDatabase	WALK	walks to before aspects-005-2 as a NOBYPASSRLS owner, seeds queue rows of two tenants as superuser, lets the migration keep the table, and asserts the engine-start drain's moves, dead-letters, retained rows and the next boot's drop
 StagingSchemaDropLiquibaseTest	startEmptyDatabase	WALK	walks to before staging-003, sets up one shape per test (aged rows, foreign grants, non-owner), finishes the walk and asserts the drop
 P225MigrationWalkIntegrationTest	startEmptyDatabase	WALK	runs vectors-030-1 as production does over a seeded pre-walk layout and asserts the partitioned result, its failure and resume paths
 P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-036-1 over a seeded pre-walk layout, applies the drop alone, rolls it back and compares the retired tables' catalog shape
@@ -50,6 +52,7 @@ TenantPartitionCreationTs1MeasurementIntegrationTest	startDedicated	CLUSTER_STAT
 ChashProbePlanShapeTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
 ChashVectorConcurrencyTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 3g tmpfs and 4g container
 ChunkLiveOwnersRecallExtendedIntegrationTest	startDedicated	SIZED	outgrows the default tmpfs; needs a 4g tmpfs and 6g container
+PciIndexBytesPerRowChurnMeasurementTest	startDedicated	SIZED	outgrows the default tmpfs; needs an 8g tmpfs and 12g container (70k rows of 1024 dimensions under two HNSW indexes)
 PgBouncerTenantIsolationTest	newContainer	NETWORK	attaches the Postgres container to a Docker network shared with a PgBouncer container
 PlpgsqlCheckGateTest	newContainer	IMAGE	builds its own container from a different image (plpgsql_check)
 DdlCountSwitchTest	newContainer	INFRA	tests the DDL counter's switch on the container factory's own output (tmpfs, server log, probe)
@@ -71,3 +74,4 @@ Catalog047DocumentSensitivitySchemaLiquibaseTest	startEmptyDatabase	WALK	migrate
 PartitionCopyAccessDiagExclusionIntegrationTest	startEmptyDatabase	OWNERSHIP	creates the nexus_diag role itself (declared exclusive) and reads the ACL of leaves and model partitions made after a full walk
 NoteUriBackfillMigrationTest	startEmptyDatabase	WALK	migrates to just before note-uri-001-1, seeds notes and planted twins, asserts the guard aborts changing nothing, then applies it and reads the rewrite back
 NoteUriMvvIntegrationTest	startEmptyDatabase	WALK	migrates to just before note-uri-001-1, seeds a legacy note, its aspect and highlight, an export row and a code residue row, applies the backfill, then drives the register, import and rename routes over HTTP; a control variant marks the backfill run without executing it
+CanaryQueryRingSchemaLiquibaseTest	startEmptyDatabase	WALK	migrates to just before vectors-054-1, asserts the ring table and the upsert function are absent, applies them, rolls both changesets back and reapplies

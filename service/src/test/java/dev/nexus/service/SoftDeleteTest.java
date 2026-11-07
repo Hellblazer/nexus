@@ -110,8 +110,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * <ul>
  *   <li>fk-001 CASCADE chains: deleting a catalog_documents row fires ON DELETE CASCADE to
  *       catalog_document_chunks, document_aspects (FK: fk_doc_aspects_catalog_doc),
- *       document_highlights (FK: fk_doc_highlights_catalog_doc),
- *       aspect_extraction_queue (FK: fk_aspect_queue_catalog_doc).</li>
+ *       document_highlights (FK: fk_doc_highlights_catalog_doc).
+ *       (aspect_extraction_queue, FK fk_aspect_queue_catalog_doc, was a fourth child until
+ *       nexus-hbnml dropped the table.)</li>
  *   <li>fk-002 (post-P0, RDR-191 Phase 5 pending -- NOT yet on the unified nexus.chunks
  *       as of this bead, see vectors-004-unify-chunks.xml's own S3 note):
  *       nexus.chunks(tenant_id,collection) → catalog_collections NOT VALID

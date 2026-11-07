@@ -1,0 +1,50 @@
+session: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
+
+## Release gating
+ref: nexus-aaaaa
+state: four asks open
+waiting_on: sam
+needs_sam: ask engine-deploy-go
+ask: engine-deploy-go
+asked: 2026-11-05T09:00Z
+question: Deploy engine 0.1.180 to cloud?
+context: The fix is merged. Until it deploys, the sweep cannot run.
+option: Deploy now
+option: Hold until Monday
+rec: 1
+why: The fix is verified on staging.
+reversible: yes
+blocking: yes
+after: engine 0.1.180 deploys
+by: 2026-11-07
+
+ask: already-answered
+asked: 2026-11-05T09:05Z
+question: Keep the old queue table until step C lands?
+context: Step B retires it; step C needs it for one read.
+option: Keep it
+option: Drop it now [irreversible]
+reversible: no
+blocking: yes
+by: 2026-11-06
+
+ask: stop-the-line
+asked: 2026-11-05T09:10Z
+question: Which branch should the hotfix target?
+context: The session has stopped; the hotfix cannot start without a target.
+option: develop
+option: main
+rec: 1
+why: develop is where fixes land first.
+reversible: yes
+blocking: yes
+by: 2026-11-06T08:00Z
+
+ask: tidy-label
+asked: 2026-11-05T09:15Z
+question: Rename the stale label?
+context: Cosmetic; nothing waits on it.
+option: Rename
+option: Leave it
+reversible: yes
+blocking: no

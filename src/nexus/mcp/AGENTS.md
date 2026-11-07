@@ -33,20 +33,20 @@ All three:
   1. `taxonomy_assign_batch_hook` (RDR-070) — accepts `embeddings=None` from the MCP path and fetches them from T3 inline.
   2. `manifest_write_batch_hook` (RDR-108 D2) — populates the catalog `document_chunks` manifest.
   (`chash_dual_write_batch_hook` was retired by RDR-187 — the chunks tables are the chash store now, so there is nothing left to dual-write. `install_default_hooks` in `hook_registry.py` no longer registers it.)
-- **Document-grain chain**: `aspect_extraction_enqueue_hook` (RDR-089). Defined in `aspect_worker.py`, registered via `install_default_hooks` in `hook_registry.py`. Enqueues to T2 `aspect_extraction_queue`; a daemon worker thread drains it and invokes `extract_aspects`. Async dispatch was necessary because the spike measured 26.5s median per document — blocking-inline would have been a non-starter on the ingest path.
+- **Document-grain chain**: `aspect_extraction_enqueue_hook` (RDR-089). Defined in `aspect_worker.py`, registered via `install_default_hooks` in `hook_registry.py`. Enqueues one task per document to the engine's `aspects` tuple queue; a daemon worker thread claims it and invokes `extract_aspects`. Async dispatch was necessary because the spike measured 26.5s median per document — blocking-inline would have been a non-starter on the ingest path.
 
 ### Content-sourcing contract (document-grain chain)
 
 - MCP `store_put` passes `content=<full document text>` literally — the text is in scope at the boundary.
 - CLI ingest sites pass `content=""` as the contract signal that the hook may need to read `source_path` itself.
-- `aspect_extraction_enqueue_hook` persists `content` to the queue row when non-empty so the worker has the text without re-reading from disk; CLI rows where content was not in scope rely on the worker's source-path-read fallback.
+- `aspect_extraction_enqueue_hook` accepts `content` for the hook signature and drops it: the task carries the document's identity only (RDR-235 E2), and the worker re-reads the document from T3 chunks or the source path.
 
 ### Enqueue identity & loud-failure contract (RDR-172)
 
-The `doc_id` forwarded to the enqueue is the **catalog document id (tumbler)**, not the chunk hash. `store_put` forwards `catalog_doc_id` — the tumbler returned by `catalog_store_hook` when it registers the note-backed document (RDR-172 P1.1, `mcp/core.py`). Forwarding the chunk hash was the bug `nexus-ov0sw`: in service mode the chunk hash is not a registered `catalog_documents` tumbler, so the queue's `doc_id` FK rejected it.
+The `doc_id` forwarded to the enqueue is the **catalog document id (tumbler)**, not the chunk hash. `store_put` forwards `catalog_doc_id` — the tumbler returned by `catalog_store_hook` when it registers the note-backed document (RDR-172 P1.1, `mcp/core.py`). Forwarding the chunk hash was the bug `nexus-ov0sw`.
 
-- **Blank `doc_id` → NULL.** The no-catalog case (no tumbler available) forwards `''`; the service `nullIfBlank`s it to a SQL `NULL`, which is a legitimate sentinel (no reference, no FK check) and lands a `pending` row with HTTP 200.
-- **Non-blank *unregistered* `doc_id` → typed 4xx, never silent.** A non-blank `doc_id` that is not a registered tumbler is a client bug (RF-8: no race). The service maps the resulting SQLSTATE class-23 integrity violation to a typed **409** (`{"error","sqlstate"}`) ahead of the generic 500 (RDR-172 P3.1, `AspectHandler.sqlState23`) — never a silent NULL coercion, never an opaque 500. The 409 body is sanitised (fixed message + sqlstate); the full driver detail goes to the server log only.
+- **Blank `doc_id` → no task.** The task's identity is its `doc_id` (the replace nonce), so the hook resolves a blank one through the catalog and skips the enqueue, logging `aspect_enqueue_skipped_no_doc_id`, when it cannot. The retired table accepted a blank one as NULL; the tuple queue has no such sentinel and `HttpAspectQueue.enqueue` raises `ValueError` for it.
+- **No foreign key refuses an unregistered `doc_id`.** The tuple queue checks nothing at enqueue, so a task for a document whose catalog row has not landed yet can exist; the worker's first claim nacks it once (`aspect_task_doc_not_visible_yet`, nexus-1o3ft) and a document still missing on the second is acked as dropped.
 - **Loud-failure tripwire.** The hook keeps the enqueue best-effort (never block ingest, RDR-089 P0.1), but its internal swallow would otherwise hide a failure from `hook_registry`'s recorder. It therefore persists its own `hook_failures` row (`hook_name='aspect_extraction_enqueue_hook'`, `chain='document'`) and logs `aspect_extraction_enqueue_failed` (RDR-172 P2.1). The `--fullstack` ingest E2E asserts **zero** such rows, so the silent-total-failure class cannot regress unobserved.
 
 ## Drift guard

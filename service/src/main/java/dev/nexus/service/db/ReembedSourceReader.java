@@ -20,7 +20,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.Function;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -122,23 +121,22 @@ public final class ReembedSourceReader {
     }
 
     /**
-     * The aspect, queue and highlight rows naming the source, which the source's delete takes with it. The cutover's
+     * The aspect, task and highlight rows naming the source, which the source's delete takes with it. The cutover's
      * residue check reads them; a {@code force_delete} lets them go. (The tombstoned and live-homed documents the
      * delete would also take are met earlier, as {@code kept_tombstoned} and the parity check ({@link Parity}),
      * which no flag lifts.)
      */
-    public record Residue(long aspects, long queue, long highlights, long aspectTasks) {
+    public record Residue(long aspects, long highlights, long aspectTasks) {
 
         /** The rows still naming the source: what {@code force_delete} lets the delete take. */
         public long satelliteRows() {
-            return aspects + queue + highlights + aspectTasks;
+            return aspects + highlights + aspectTasks;
         }
 
         /** A sentence for {@code last_error}: the satellite rows, by table. */
         public String describeSatellites() {
             List<String> parts = new ArrayList<>();
             if (aspects > 0) parts.add(aspects + " document_aspects row(s)");
-            if (queue > 0) parts.add(queue + " aspect_extraction_queue row(s)");
             if (aspectTasks > 0) parts.add(aspectTasks + " aspects task(s)");
             if (highlights > 0) parts.add(highlights + " document_highlights row(s)");
             return String.join(", ", parts);
@@ -149,8 +147,6 @@ public final class ReembedSourceReader {
         return scope.withTenant(tenant, ctx -> new Residue(
             ctx.fetchCount(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(source))),
-            ctx.fetchCount(ASPECT_EXTRACTION_QUEUE,
-                ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))),
             ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
                 DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))),
             // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks naming the source; the source's purge deletes them.
@@ -377,9 +373,6 @@ public final class ReembedSourceReader {
         long unmatched =
             ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
                 .and(DOCUMENT_ASPECTS.COLLECTION.eq(source)).and(DSL.not(moved.apply(DOCUMENT_ASPECTS.DOC_ID))))
-            + ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
-                .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
-                .and(DSL.not(moved.apply(ASPECT_EXTRACTION_QUEUE.DOC_ID))))
             + ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
                 .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
                 .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))))

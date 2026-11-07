@@ -233,6 +233,8 @@ public final class NexusService {
      * off.
      */
     private final ChunkReaper chunkReaper;
+    /** The /v1/vectors handler, held so Main can bind the query ring to it late (nexus-4lnn1.1.3). */
+    private final VectorHandler vectorHandler;
 
     /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
     private final Runnable reaperScheduledTask;
@@ -304,8 +306,19 @@ public final class NexusService {
      */
     private volatile java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> chunksLeavesView;
     private volatile java.util.function.Supplier<Long> chunksLeavesSweepSeconds;
+    /** The recall canary's status for {@code canary_indexes} on that route; null until bound, which omits the key. */
+    private volatile java.util.function.Supplier<dev.nexus.service.vectors.PciMaintenanceStatus> chunksLeavesCanary;
     /** nexus-6pfgb.43: the admin-connection DDL behind {@code /v1/admin/chunk-keys/add-constraints} and {@code validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
+    /**
+     * nexus-hbnml: the result of the engine-start drain of the retired aspect queue table, served by
+     * {@code GET /v1/status} as {@code aspect_queue_table_present} / {@code aspect_queue_rows_retained}. Null until
+     * the drain has run (the keys are omitted), and an engine whose drain was never bound omits them for good.
+     */
+    private volatile dev.nexus.service.db.AspectQueueDrain.Result aspectQueueDrainResult;
+    private volatile dev.nexus.service.db.AspectQueueDrain aspectQueueDrain;
+    /** The drain runs this long after boot, on the sweep thread, so it never delays the HTTP bind. */
+    static final long ASPECT_QUEUE_DRAIN_DELAY_SECONDS = 5L;
     /**
      * The sink a root credential's retire-keys sweep is recorded through ({@code gc_audit}); {@code null} makes the
      * sweep route refuse a root credential with 503 {@code audit_unavailable}. Bound to the catalog repository at
@@ -677,6 +690,7 @@ public final class NexusService {
                                 dataSource, java.time.Clock.systemUTC()),
                         this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
                         .embedPosture(() -> this.embedPosture)
+                        .aspectQueue(() -> this.aspectQueueDrainResult)
                         .testTenantResetRoute(tenantResetRoute));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
@@ -705,7 +719,8 @@ public final class NexusService {
         var chunksLeavesCtx = server.createContext(dev.nexus.service.http.ChunksLeavesHandler.PATH,
                 new dev.nexus.service.http.ChunksLeavesHandler(
                         () -> { var v = chunksLeavesView; return v == null ? null : v.get(); },
-                        () -> { var v = chunksLeavesSweepSeconds; return v == null ? null : v.get(); }));
+                        () -> { var v = chunksLeavesSweepSeconds; return v == null ? null : v.get(); },
+                        () -> { var v = chunksLeavesCanary; return v == null ? null : v.get(); }));
         chunksLeavesCtx.getFilters().addAll(authFilter);
 
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
@@ -804,9 +819,9 @@ public final class NexusService {
         // the handler answers an explicit 503 per route when its backend (pgvector
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
-        var vectorCtx = server.createContext("/v1/vectors",
-                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy,
-                        requestLedger));
+        this.vectorHandler = new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker,
+                ownerlessWritePolicy, requestLedger);
+        var vectorCtx = server.createContext("/v1/vectors", this.vectorHandler);
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
@@ -1055,6 +1070,29 @@ public final class NexusService {
         return List.copyOf(out);
     }
 
+    /**
+     * The tenants the query ring's 30-day delete visits (nexus-4lnn1.1.3): {@link #reaperTenants()} together with
+     * every tenant in {@code request_ledger_tenants}, the set ledger retention visits. If reading the registry
+     * throws, the reaper's tenants are still returned. A tenant with ring rows, no {@code service_tokens} row and no
+     * ledger row (a search writes no ledger row; only the keyed sweep routes do) is not in this list; the reconciler
+     * adds the tenants of its catalog snapshot's leaves, which reach it (nexus-4lnn1.1.7).
+     */
+    List<String> ringTenants() {
+        var tenants = new java.util.LinkedHashSet<String>(reaperTenants());
+        try {
+            tenants.addAll(requestLedger.ledgerTenants(SweepBounds.STATEMENT_TIMEOUT));
+        } catch (RuntimeException e) {
+            log.warn("event=request_ledger_tenants_list_failed; the query ring expires for the reaper tenants only "
+                    + "this pass", e);
+        }
+        return List.copyOf(tenants);
+    }
+
+    /** Bind the recall canary's query ring to the vector routes (Main, once the router's index set exists). */
+    void queryRing(dev.nexus.service.vectors.PciQueryRing ring) {
+        vectorHandler.queryRing(ring);
+    }
+
     /** The scheduled reaper, or null when none was wired. Package-private for the wiring test. */
     ChunkReaper chunkReaper() {
         return chunkReaper;
@@ -1146,8 +1184,20 @@ public final class NexusService {
      */
     public void chunksLeaves(java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> view,
                              java.util.function.Supplier<Long> sweepSeconds) {
+        chunksLeaves(view, sweepSeconds, null);
+    }
+
+    /**
+     * As above, with the recall canary's status (RDR-230 Phase 1, Sam, 2026-11-06): its per-index entries are the
+     * {@code canary_indexes} key of this operator-only route, which {@code GET /v1/status} does not carry. {@code canary}
+     * must answer from the reconciler's memory; a null supplier, or one answering null, omits the key.
+     */
+    public void chunksLeaves(java.util.function.Supplier<dev.nexus.service.vectors.LeafBloatSweep.Status> view,
+                             java.util.function.Supplier<Long> sweepSeconds,
+                             java.util.function.Supplier<dev.nexus.service.vectors.PciMaintenanceStatus> canary) {
         this.chunksLeavesView = view;
         this.chunksLeavesSweepSeconds = sweepSeconds;
+        this.chunksLeavesCanary = canary;
     }
 
     /**
@@ -1157,6 +1207,40 @@ public final class NexusService {
      */
     public void chunkConstraintAdmin(dev.nexus.service.vectors.ChunkConstraintAdmin admin) {
         this.chunkConstraintAdmin = admin;
+    }
+
+    /**
+     * Bind the engine-start drain of the retired {@code aspect_extraction_queue} table (nexus-hbnml) and schedule it
+     * once, {@value #ASPECT_QUEUE_DRAIN_DELAY_SECONDS} seconds after the call, on the sweep thread. {@code Main}
+     * calls it once with the same {@code NX_DB_ADMIN_*} values the migrator uses (the table's owner, which can count
+     * every tenant's rows). Idempotent: a boot with no table, or an empty one, does nothing but record that.
+     */
+    public void aspectQueueDrain(dev.nexus.service.db.AdminConnection admin) {
+        aspectQueueDrain(new dev.nexus.service.db.AspectQueueDrain(tenantScope, tupleRepo,
+            new dev.nexus.service.db.AspectQueueDrain.AdminCensus(admin), this::reaperTenants));
+    }
+
+    /** {@link #aspectQueueDrain(dev.nexus.service.db.AdminConnection)} with the drain supplied (tests). */
+    void aspectQueueDrain(dev.nexus.service.db.AspectQueueDrain drain) {
+        this.aspectQueueDrain = drain;
+        this.sweepScheduler.schedule(surviving("aspect_queue_drain_failed", this::runAspectQueueDrain),
+            ASPECT_QUEUE_DRAIN_DELAY_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /** Runs the bound drain now and records its result. Package-private: the scheduled task and the tests run THIS. */
+    dev.nexus.service.db.AspectQueueDrain.Result runAspectQueueDrain() {
+        var drain = aspectQueueDrain;
+        if (drain == null) {
+            return null;
+        }
+        var result = drain.run();
+        this.aspectQueueDrainResult = result;
+        return result;
+    }
+
+    /** The last drain result, or null before the drain has run (keys omitted). */
+    dev.nexus.service.db.AspectQueueDrain.Result aspectQueueDrainStatus() {
+        return aspectQueueDrainResult;
     }
 
     /**

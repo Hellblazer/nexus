@@ -1,49 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-138 T2 (nexus-troas): rename-cascade vs aspect-worker race regression suite.
+"""RDR-138 T2 (nexus-troas): rename-cascade vs complete_aspect race regression suite.
 
-This suite proves the *behavioural* guarantees the RENAME_LOCK fix (T1.1 +
-T1.2) actually delivers against a concurrently-running cascade, with exact
-assertions (``== N``, never ``>= N`` — see
-``feedback_exact_assertions_for_fixture_regression``).
+The RENAME_LOCK fix (T1.1 + T1.2) must hold against a concurrently-running cascade, with
+exact assertions (== N, never >= N).
 
-A note on scope, grounded in 150x empirical loops run while authoring this
-suite (T1 scratch ``rdr-138 nexus-troas pre-write empirical findings``):
+* complete_aspect holds RENAME_LOCK across its document_aspects upsert and its return, so a
+  cascade cannot interleave between them (TestCompleteAspectCascadeAtomicity).
+* A cascade ordered before complete_aspect leaves document_aspects drifted under the stale
+  OLD name. That is the known residue, locked in as a known state
+  (TestGap3StaleCollectionResidue).
 
-* The original canary's total-loss ``(0, 0)`` came from a LEAKED worker that
-  ``mark_done``-ed unsupported ``code__`` work it never extracted. RENAME_LOCK
-  does not (and should not) stop a *completing* worker from emptying the queue —
-  a ``claim_next`` + ``mark_done`` pair racing the cascade legitimately yields
-  ``(0, 0)`` because ``mark_done`` means "done, delete it". Layer 2's autouse
-  ``_reset_aspect_worker_singleton`` fixture removed the leaked worker from the
-  test suite; production avoids it because the worker only acts on supported
-  collections.
-
-* The verifiable loss-prevention invariant is therefore about an *in-flight*
-  (claimed, not-yet-completed) row: it must survive a concurrent rename
-  (Scenario 1, ``TestInflightRowPreservation``).
-
-* For Gap 3 the fix's real guarantee is that ``complete_aspect``'s
-  ``document_aspects.upsert`` + ``aspect_queue.mark_done`` cannot be SPLIT by a
-  cascade — when ``complete_aspect`` runs (it holds RENAME_LOCK across both
-  writes) the queue row is cleared and ``document_aspects`` lands under exactly
-  one collection (Scenario 2a, ``TestCompleteAspectCascadeAtomicity``).
-
-* The ``cascade-fully-before-complete_aspect`` ordering still drifts, because
-  ``complete_aspect`` writes ``record.collection`` (the OLD name captured at
-  claim time) after the cascade already moved everything to NEW. This is the
-  self-healing residue the RDR's own *Failure Modes* paragraph documents
-  (``reclaim_stale`` re-pends → re-extract under NEW). Scenario 2b
-  (``TestGap3StaleCollectionResidue``) locks that residue in as a KNOWN state
-  rather than hiding it, per the 2026-05-29 direction decision ("test the
-  actual guarantee + note the residue; no code change").
+The aspect queue table and its claim, mark and count verbs left with the table (nexus-hbnml),
+and the queue scenarios went with them.
 """
 from __future__ import annotations
 
 import os
-import statistics
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -52,28 +26,14 @@ import pytest
 from tests._catalog_fixture_ops import register_real_doc_id
 
 
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path. The producer's table mode is
-    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
-    ``tests/_aspect_table_producer.py``, not from the environment."""
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
-
 pytestmark = pytest.mark.t2_tenant
 
-# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
-# and document_aspects.doc_id now carry REAL FKs to
-# catalog_documents(tenant_id, tumbler) via the engine's POST
-# /v1/aspects/queue/enqueue and /v1/aspects/upsert 400s -- see the
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id carries a REAL FK to
+# catalog_documents(tenant_id, tumbler) via the engine's POST /v1/aspects/upsert 400 -- see the
 # identical cache in tests/test_document_aspects_store.py for the full
 # rationale. One real registration per test, memoized on the test's
-# freshly-minted NX_SERVICE_TOKEN. This suite's own doc_id="" fields
-# predate that constraint and are not testing doc_id semantics at all
-# (see the module docstring -- the subject here is the RENAME_LOCK race,
-# not attribution), so they get a real one rather than a special-cased
-# exemption.
+# freshly-minted NX_SERVICE_TOKEN. The subject here is the RENAME_LOCK race, not
+# attribution, so the doc is a real one rather than a special-cased exemption.
 _doc_id_cache: dict[str, str] = {}
 
 
@@ -117,25 +77,6 @@ def _aspect_fields(collection: str, source_path: str) -> dict[str, Any]:
     }
 
 
-def _queue_counts(db_path: Path, old: str, new: str) -> tuple[int, int]:
-    """Re-open a FRESH connection and count queue rows under (old, new).
-
-    A fresh connection is required: the cascade commits on its own dedicated
-    connection, and an already-open reader may hold a stale WAL snapshot.
-    Every existing rename test re-opens to verify (test_collection_rename.py).
-    """
-    with _make_db(db_path) as v:
-        aq_old = v.aspect_queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
-            (old,),
-        ).fetchone()[0]
-        aq_new = v.aspect_queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
-            (new,),
-        ).fetchone()[0]
-    return aq_old, aq_new
-
-
 def _aspect_presence(db_path: Path, old: str, new: str, src: str) -> tuple[bool, bool]:
     """(row under OLD?, row under NEW?) via the PUBLIC ``document_aspects.get``
     keyed read — substrate-neutral (RDR-155 P4b P0a'). ``(collection,
@@ -152,21 +93,6 @@ def _aspect_presence(db_path: Path, old: str, new: str, src: str) -> tuple[bool,
         )
 
 
-def _assert_queue_fully_cleared(db_path: Path) -> None:
-    """Assert the queue holds NO rows in any actionable status — public surface.
-
-    ``pending_count() == 0`` covers pending; ``is_drained()`` covers pending +
-    in_progress (rows with status != 'failed'); these tests never produce
-    failed rows, so together they pin "queue cleared" exactly on both
-    substrates.
-    """
-    with _make_db(db_path) as v:
-        assert v.aspect_queue.pending_count() == 0, "pending row left in queue"
-        assert v.aspect_queue.is_drained(), (
-            "queue not cleared by mark_done — in-flight orphan left"
-        )
-
-
 _OLD = "knowledge__old"
 _NEW = "knowledge__new"
 _SRC = "doc.md"
@@ -178,27 +104,22 @@ _SRC = "doc.md"
 class TestCompleteAspectCascadeAtomicity:
     """Scenario 2 (Gap 3 — the actual fix guarantee).
 
-    ``complete_aspect`` holds RENAME_LOCK across BOTH ``document_aspects.upsert``
-    and ``aspect_queue.mark_done``. A cascade therefore cannot interleave
-    between the two writes. When ``complete_aspect`` runs (before the cascade),
-    the queue row is cleared by ``mark_done`` (no orphan) and ``document_aspects``
-    lands under exactly one collection.
+    ``complete_aspect`` holds RENAME_LOCK across its ``document_aspects.upsert`` and its
+    return, so a cascade cannot interleave between them. When ``complete_aspect`` runs
+    (before the cascade), ``document_aspects`` lands under exactly one collection.
     """
 
-    def test_complete_before_cascade_clears_queue_and_no_drift(
+    def test_complete_before_cascade_leaves_no_drift(
         self, tmp_path: Path
     ) -> None:
         """Deterministic ordering: complete_aspect fully, then cascade.
 
-        document_aspects(OLD) + queue cleared, then cascade renames the
-        document_aspects row OLD->NEW. Final state is consistent: one
-        document_aspects row under NEW, queue empty, nothing under OLD.
+        document_aspects(OLD) is written, then the cascade renames it OLD->NEW. Final state
+        is consistent: one document_aspects row under NEW, nothing under OLD.
         """
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
-            db.aspect_queue.claim_next()
             db.complete_aspect(_aspect_fields(_OLD, _SRC))
             db.rename_collection_cascade(old=_OLD, new=_NEW)
         finally:
@@ -207,24 +128,21 @@ class TestCompleteAspectCascadeAtomicity:
         da_old, da_new = _aspect_presence(db_path, _OLD, _NEW, _SRC)
         assert not da_old, "document_aspects drifted: row left under OLD"
         assert da_new, "extraction not preserved under NEW"
-        _assert_queue_fully_cleared(db_path)
+
 
     def test_cascade_blocked_mid_complete_aspect_then_consistent(
         self, tmp_path: Path
     ) -> None:
         """A cascade cannot acquire RENAME_LOCK while complete_aspect holds it.
 
-        Instrument ``document_aspects.upsert`` to pause AFTER the upsert but
-        BEFORE ``mark_done`` (still inside the lock). A cascade thread that
-        tries to run during that window must block (cannot split the call).
-        After release, the final state is the clean complete-before-cascade
-        outcome: document_aspects under NEW, queue cleared.
+        Instrument ``document_aspects.upsert`` to pause AFTER the upsert, while
+        complete_aspect still holds the lock. A cascade thread that tries to run during
+        that window must block (cannot split the call). After release, the final state
+        is the clean complete-before-cascade outcome: document_aspects under NEW.
         """
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
-            db.aspect_queue.claim_next()
 
             mid_call = threading.Event()
             may_proceed = threading.Event()
@@ -263,7 +181,7 @@ class TestCompleteAspectCascadeAtomicity:
 
             assert cascade_blocked == [True], (
                 "cascade acquired RENAME_LOCK mid-complete_aspect — the "
-                "upsert+mark_done pair was splittable (Gap 3 open)"
+                "upsert and return were splittable (Gap 3 open)"
             )
 
             # complete_aspect ran fully; now run the (previously blocked) cascade.
@@ -275,143 +193,34 @@ class TestCompleteAspectCascadeAtomicity:
         assert (not da_old) and da_new, (
             f"document_aspects inconsistent: old={da_old} new={da_new}"
         )
-        _assert_queue_fully_cleared(db_path)
 
 
 # ── Scenario 2b: documented self-healing residue (cascade before complete) ────
 
 
 class TestGap3StaleCollectionResidue:
-    """Scenario 2b — the KNOWN residue the fix does NOT close.
+    """The stale-name residue the fix does NOT close.
 
-    Ordering ``claim(OLD) -> cascade(OLD->NEW) -> complete_aspect(collection=OLD)``:
-    ``complete_aspect`` writes ``record.collection`` which is the STALE OLD name
-    captured at claim time, after the cascade already moved everything to NEW.
-    Result: ``document_aspects`` drifts under OLD and the queue row is orphaned
-    ``in_progress`` under NEW (mark_done(OLD) misses the now-NEW row).
-
-    Per the RDR *Failure Modes* paragraph and the 2026-05-29 direction
-    decision, this is accepted as self-healing residue rather than a fix gap:
-    ``reclaim_stale`` re-pends the orphan so re-extraction runs under NEW. This
-    test locks the residue + recovery in as a KNOWN state (it is NOT hidden by
-    a weakened assertion).
+    Ordering ``cascade(OLD->NEW) -> complete_aspect(collection=OLD)``: complete_aspect writes
+    the OLD name it was given, after the cascade already moved the rows to NEW, so
+    document_aspects drifts under OLD. The concurrent case is closed by the tests above;
+    this ordering is accepted residue (2026-05-29 direction decision: test the guarantee,
+    note the residue, no code change). This test locks the residue in as a KNOWN state.
     """
 
-    def test_cascade_before_complete_drifts_then_reclaim_self_heals(
-        self, tmp_path: Path
-    ) -> None:
+    def test_cascade_before_complete_drifts_under_the_stale_name(self, tmp_path: Path) -> None:
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
-            db.aspect_queue.claim_next()
             db.rename_collection_cascade(old=_OLD, new=_NEW)
-            # complete_aspect with the stale OLD collection captured at claim.
+            # complete_aspect with the stale OLD collection, after the cascade moved on.
             db.complete_aspect(_aspect_fields(_OLD, _SRC))
-
-            # EXACT residue state (documented, not desired): document_aspects
-            # drifted under OLD; the queue orphan sits in_progress under NEW.
-            da_old, da_new = _aspect_presence(db_path, _OLD, _NEW, _SRC)
-            assert da_old and not da_new, (
-                f"unexpected document_aspects residue: old={da_old} new={da_new}"
-            )
-            assert db.aspect_queue.pending_count() == 0, (
-                "orphan should be in_progress, not pending"
-            )
-            assert not db.aspect_queue.is_drained(), (
-                "expected an in_progress orphan row under NEW"
-            )
-
-            # Public leg: no backdate surface exists, so make everything
-            # in_progress immediately stale (timeout 0). reclaimed == 1
-            # proves exactly one in_progress orphan existed; the healed
-            # pending row must carry the NEW collection.
-            reclaimed = db.aspect_queue.reclaim_stale(timeout_seconds=0)
-            assert reclaimed == 1, "reclaim_stale did not re-pend the orphan"
-
-            healed = [
-                (r.collection, "pending")
-                for r in db.aspect_queue.list_pending()
-            ]
-            assert healed == [(_NEW, "pending")], (
-                f"orphan not self-healed to (NEW, pending): {healed}"
-            )
         finally:
             db.close()
 
-
-# ── Scenario 3: throughput — rare rename does not regress claim latency ───────
-
-
-class TestRenameThroughput:
-    """Scenario 3 (throughput probe).
-
-    Renames are rare and short; claims are short. A rare rename must not
-    materially regress steady-state ``claim_next`` latency.
-
-    Soft dependency: T1.0 (nexus-2evpz) is the dedicated throughput spike whose
-    baseline numbers calibrate this assertion. Until it lands, this is a
-    deliberately generous guardrail (median-based, 6x + absolute floor) that
-    catches a catastrophic regression (e.g. the lock held across an expensive
-    operation) without flaking on CI timing noise. Median is robust to the
-    handful of claims that block on a concurrent rename.
-    """
-
-    _CLAIMS = 150
-    _RENAMES_DURING = 3  # rare, interspersed
-
-    def _median_claim_latency(
-        self, db: "T2Database", n: int, rename_every: int | None
-    ) -> float:
-        latencies: list[float] = []
-        coll = _OLD
-        for i in range(n):
-            db.aspect_queue.enqueue(coll, f"f{i}.py", content_hash="h", doc_id=_shared_doc_id())
-            t0 = time.perf_counter()
-            db.aspect_queue.claim_next()
-            latencies.append(time.perf_counter() - t0)
-            db.aspect_queue.mark_done(coll, f"f{i}.py")
-            if rename_every and i > 0 and i % rename_every == 0:
-                new = _NEW if coll == _OLD else _OLD
-                db.rename_collection_cascade(old=coll, new=new)
-                coll = new
-        return statistics.median(latencies)
-
-    def test_claim_latency_not_materially_regressed_by_rare_rename(
-        self, tmp_path: Path
-    ) -> None:
-        # Baseline: no renames.
-        base_path = tmp_path / "base" / "memory.db"
-        base_path.parent.mkdir(parents=True)
-        db = _make_db(base_path)
-        try:
-            baseline = self._median_claim_latency(
-                db, self._CLAIMS, rename_every=None
-            )
-        finally:
-            db.close()
-
-        # Contended: a few renames interspersed among the claims.
-        cont_path = tmp_path / "cont" / "memory.db"
-        cont_path.parent.mkdir(parents=True)
-        rename_every = self._CLAIMS // (self._RENAMES_DURING + 1)
-        db = _make_db(cont_path)
-        try:
-            contended = self._median_claim_latency(
-                db, self._CLAIMS, rename_every=rename_every
-            )
-        finally:
-            db.close()
-
-        # Generous guardrail: median claim latency must not blow up. The
-        # absolute floor absorbs sub-millisecond baseline jitter where a small
-        # multiplicative bound would be meaningless.
-        ceiling = baseline * 6.0 + 0.003
-        assert contended <= ceiling, (
-            f"claim latency regressed under rare rename: "
-            f"baseline median={baseline * 1e3:.3f}ms "
-            f"contended median={contended * 1e3:.3f}ms "
-            f"ceiling={ceiling * 1e3:.3f}ms"
+        da_old, da_new = _aspect_presence(db_path, _OLD, _NEW, _SRC)
+        assert da_old and not da_new, (
+            f"unexpected document_aspects residue: old={da_old} new={da_new}"
         )
 
 
@@ -443,26 +252,20 @@ class _TrackingRLock:
 
 
 class TestReadOnlyMethodsDoNotSerialize:
-    """Negative-structural gate: read-only queue methods must NOT acquire
-    rename_lock.
+    """Negative-structural gate: the census read must NOT acquire rename_lock.
 
-    pending_count / is_drained / list_pending intentionally hold only
-    self._lock — the design keeps reads unblocked while a cascade holds
-    RENAME_LOCK. This gate catches a future refactor that accidentally
-    promotes a reader into a rename-serialized participant (test-validator
-    gap, 2026-05-29).
+    tuple_counts holds no lock; it reads the engine's aspects census. This gate catches a
+    future refactor that promotes a reader into a rename-serialized participant
+    (test-validator gap, 2026-05-29).
     """
 
     def test_read_only_methods_omit_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path / "memory.db")
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
             tracking = _TrackingRLock()
             db.aspect_queue.rename_lock = tracking  # type: ignore[assignment]
 
-            db.aspect_queue.pending_count()
-            db.aspect_queue.is_drained()
-            db.aspect_queue.list_pending()
+            db.aspect_queue.tuple_counts()
 
             assert tracking.acquire_count == 0, (
                 "a read-only queue method acquired rename_lock — reads must "
@@ -474,7 +277,7 @@ class TestReadOnlyMethodsDoNotSerialize:
 
 class TestCompleteAspectReleasesLockOnError:
     """complete_aspect must release RENAME_LOCK even when a write raises
-    between the upsert and mark_done.
+    between the upsert and the return.
 
     The ``with self.RENAME_LOCK:`` block guarantees release on exception
     (Python semantics), but a future refactor to manual acquire/release could
@@ -485,8 +288,6 @@ class TestCompleteAspectReleasesLockOnError:
     def test_lock_released_after_upsert_raises(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path / "memory.db")
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
-            db.aspect_queue.claim_next()
 
             def boom(_record: Any) -> Any:
                 raise RuntimeError("upsert exploded")

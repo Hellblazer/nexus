@@ -19,8 +19,8 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds four rungs:
-`rdr192-manifest-backfill`, `aspect-queue-tuples`, `note-tags-array` and
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds three rungs:
+`rdr192-manifest-backfill`, `note-tags-array` and
 `manifest-section-labels`, each described below the table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
@@ -104,75 +104,83 @@ credential-only tenant needs no `nx upgrade` of its own
   is an attestation, not proof; the reaper's own in-engine census (nexus-2x9xa)
   is what covers that case.
 
-### The `aspect-queue-tuples` rung
+### The retired `aspect-queue-tuples` rung and the aspect queue table
 
-RDR-235 moves aspect extraction from the `aspect_extraction_queue` table to the
-engine's `aspects` tuple queue, the only producer (`NX_ASPECT_QUEUE=tuples`, or
-unset). This rung moves the rows the table already holds, so none wait for the
-table side of the worker or strand.
+RDR-235 moved aspect extraction from the `aspect_extraction_queue` table to the
+engine's `aspects` tuple queue. The `aspect-queue-tuples` rung that moved the
+table's waiting rows is retired (nexus-hbnml): the rung, the table's
+`/v1/aspects/queue/*` routes and the worker's table drain are gone, and the
+engine drops the table with Liquibase changeset `aspects-005-2`.
 
-**What flips in this release (RDR-235 Activation Step 1, nexus-lnwn1).** The
-producer default changes: with `NX_ASPECT_QUEUE` unset, the indexer, the MCP
-store path and `nx aspects requeue-failed` now write one task per document to the
-`aspects` tuple queue instead of a row in the table. The required engine rises to
-at least `engine-service-v0.1.170` (the release's pairing line names the exact
-tag), which carries the read this rung needs and the census keys `nx doctor` uses
-for the queue's stall signal. The worker that drains the tuple queue ships in this
-same release: a worker from any earlier release drains only the table, so a
-flipped producer's tasks would sit unclaimed until the template's 90-day
-retention expires them, the tuple queue would fill towards its 10,000-task cap
-(further enqueues then fail and are logged, so new documents get no aspects),
-and the old client's `nx doctor` would show an empty queue. Upgrade every host
-that runs an aspect worker before, or in the same step as, the producer hosts;
-a producer host whose only worker host is older must wait until that host is
-upgraded (the table producer is retired, see below). A single-host install needs nothing: its own worker
-is upgraded with it. After you upgrade, `nx upgrade` runs this rung once and
-moves the table's waiting rows; a stalled tuple queue shows in `nx doctor`'s
-aspects row.
+**The drop is guarded and never halts a boot.** The changeset's precondition
+counts the table's rows across ALL tenants (through a helper that lifts the
+table's row-level security for that one count, because the migrating role sees no
+row under it otherwise) and drops the table only when the count is zero; the drop
+itself counts again inside its own transaction and refuses at the first row, so a
+row that lands between the two counts is kept. With the count above zero the
+changeset is skipped, NOT recorded as run, the boot goes on, and the next boot
+evaluates it again.
 
-**Retired: `NX_ASPECT_QUEUE=table`** (nexus-bpikw, RDR-235). The producer's table
-mode is gone and there is no rollback to the table producer. The value does not
-stop ingest: the indexer, the MCP store path and the single-document hook log one
-warning per process (`aspect_queue_table_mode_retired_using_tuples`, saying to
-unset the variable) and queue the document on the tuple queue. The operator
-surfaces refuse it instead: `nx aspects requeue-failed` prints the retirement
-message and exits 1 before it reads or writes, and this rung reports itself not
-applicable and says the value is retired. A producer host whose only worker host
-is older (above) must now be upgraded in the same step. Rows the table still
-holds are still drained by the worker, moved by this rung, and listed by
-`nx doctor`; a failed row is re-enqueued as a task by `nx aspects
-requeue-failed`, which on an engine older than `engine-service-v0.1.169` says to
-upgrade the engine and exits 1 without writing.
+**An engine drains a kept table once, at start.** An install an older client left
+rows in keeps the table. Shortly after boot the engine moves its rows onto the
+`aspects` queue, each in the transaction that deletes it: `pending` and
+`in_progress` rows become tasks (a retrying row keeps its wait; the task names the
+document's current collection; a document that already has a live task keeps that
+task and the older row is deleted), `failed` rows become dead tasks that
+`nx aspects requeue-failed` revives (unless the document is flagged sensitive:
+that task stays dead). The log says `event=aspect_queue_rows_drained`
+per tenant. The NEXT engine start finds the table empty and drops it, so the
+retirement finishes with two starts. Run `nx daemon service stop`, then
+`nx daemon service start` once after the first start has logged the drain.
 
-**No rollback to the table producer.** Nothing is lost in the move: a row is
-either still in the table or already a task, and a crash between the two steps
-leaves it in both places, never in neither. An engine older than
-`engine-service-v0.1.169` has no `aspects` template and refuses the `tuples`
-producer with a message naming that release; upgrade the engine. A process that
-still has `NX_ASPECT_QUEUE=table` in its environment (an MCP server session, a
-running indexer, a shell profile) logs one warning and queues on the tuple queue;
-nothing is dropped. Unset the variable and restart those processes to silence it.
-Until then this rung and `nx aspects requeue-failed` in that environment report
-the value as retired and do nothing.
+**Rows that stay.** A row the drain cannot move is logged
+(`event=aspect_queue_rows_retained rows=N reasons=...`) and counted on
+`GET /v1/status` (`aspect_queue_table_present`, `aspect_queue_rows_retained`,
+`aspect_queue_rows_retained_reasons`; `-1` means the table is present and its rows
+could not be counted). `nx doctor --check-aspect-queue` fails with the count, the
+reasons and a remedy, and the console Aspect Queue card shows the same. The reasons:
+`body_over_cap` (a source path that makes the task body exceed 4,096 bytes),
+`unknown_status`, `tuple_space_full` (the tenant is at the `aspects` queue's
+10,000-task cap; the drain finishes after the backlog does), `no_aspects_template`
+(an engine without the `aspects` template), `schema_violation` and `error`.
+Documents whose rows stayed can be re-extracted with `nx enrich aspects <collection>`.
 
-- It applies only when `NX_ASPECT_QUEUE` is `tuples` (the default, unset
-  included; the retired `table` is reported as not applicable), the engine has the `aspects` template, and the engine answers
-  `GET /v1/aspects/queue/list_waiting` (`engine-service-v0.1.170`; older
-  engines answer 404). Any other case is reported as not applicable, nothing is
-  recorded, and the rung is detected again at each `nx upgrade`. With
-  `NX_ASPECT_QUEUE=table` it sends no request.
-- Each `pending` or `in_progress` row becomes one `aspects` task (an `out` with
-  `mode=replace`, nonce = `doc_id`, an identity body), then the table row is
-  deleted. A crash between the two leaves the row in both places; the re-run
-  replaces the same task. `pending` rows keep their wait as `delay_s` (seconds to
-  `next_retry_at` on the database clock, clamped to 0 through 7,776,000);
-  `in_progress` rows move with no delay.
-- `failed` rows stay in the table (`nx aspects requeue-failed` re-enqueues
-  them). A row with an empty `doc_id` also stays, for the table worker to drain;
-  a log line counts them.
-- Migrated rows restart at attempts 0: `retry_count` does not travel.
-- `verify()` passes only when it read the waiting rows and none can move; an
-  unreachable read fails the rung with the reason.
+**Last resort, as the table owner.** If the rows are not worth moving, delete them
+and restart the engine; the next start drops the table. The table is FORCE row-level
+security, so the delete must run as its owner with that switched off for the
+statement (the owner is the migration role, `nexus_admin` on a provisioned install,
+`NX_DB_ADMIN_USER` where set, the engine's own database user on a single-role
+install):
+
+```sql
+BEGIN;
+ALTER TABLE nexus.aspect_extraction_queue NO FORCE ROW LEVEL SECURITY;
+SELECT tenant_id, status, count(*) FROM nexus.aspect_extraction_queue GROUP BY 1, 2;
+DELETE FROM nexus.aspect_extraction_queue;   -- or add a WHERE clause to keep some rows
+ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+COMMIT;
+```
+
+The managed service held 0 rows in all five tenants when this shipped
+(nexus-bpikw census, 2026-11-03).
+
+**Producers.** `NX_ASPECT_QUEUE=table` is retired (nexus-bpikw): the indexer, the
+MCP store path and the single-document hook log one warning per process
+(`aspect_queue_table_mode_retired_using_tuples`, saying to unset the variable)
+and queue the document on the tuple queue. `nx aspects requeue-failed` refuses
+the value (exit 1, before it reads or writes). A producer host whose only worker
+host is older than the release that introduced the tuple worker must upgrade
+that host in the same step.
+
+**Workers and producers older than this release.** A client from 7.90 through 7.94
+still calls the table's routes, which now answer 404: its worker logs
+`aspect_worker_claim_failed` about once per poll interval and its daemon logs a
+failed reclaim sweep, and both go on draining the tuple queue. Upgrading the
+client ends the noise. A client older than 7.90 (or any client with
+`NX_ASPECT_QUEUE=table` before 7.95) produces to the TABLE by default and drains
+only the table: against this engine its enqueue is a 404 and its documents get no
+aspects until it is upgraded. Upgrade every host before the engine that drops the
+table is deployed.
 
 ### The `note-tags-array` rung
 
@@ -228,8 +236,7 @@ without a gate and nineteen walked the cloud catalog at once).
   run. (`manifest-section-labels` asks the engine for one count when the engine has the
   route: `--auto` then REPORTS the count, zero as converged and more as pending, and its
   `converge()` is deferred without a read or a write. An interactive `nx upgrade` does the
-  fill and records the completion.) The rungs: `manifest-section-labels`, `note-tags-array`, and the whole-table
-  fallback of `aspect-queue-tuples`. The `rdr192-manifest-backfill` census (one engine
+  fill and records the completion.) The rungs: `manifest-section-labels` and `note-tags-array`. The `rdr192-manifest-backfill` census (one engine
   scan per collection) is refused the same way in `converge()`: reported deferred, no
   census call. The version-transition callout that any `nx` command can print asks every
   `detect()` as an unattended run too. **On a managed tenant the labels, note-tags and
@@ -580,8 +587,8 @@ interrupted — the ETL paths are idempotent and re-converge on
 
 The engine refuses PostgreSQL below 17. With an older server already running,
 the service log says `event=pg_version_below_floor` and the service exits 1;
-started cold, the bundled PostgreSQL 17 refuses the data directory first
-(`pg_ctl` reports "database files are incompatible with server"). A local
+started cold, `nx` refuses before `pg_ctl` runs, naming the version the data
+directory was created by and this section. A local
 cluster keeps the PostgreSQL that created it, so a data directory from before
 the bundled PostgreSQL (for example one made by a Homebrew PostgreSQL 16) stays
 at that version until it is upgraded. `nx doctor` names it in the "Local

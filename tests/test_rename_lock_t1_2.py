@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-138 T1.2: guard all 7 queue mutators + complete_aspect with RENAME_LOCK.
+"""RDR-138 T1.2: RENAME_LOCK guards complete_aspect, and a cascade rename cannot interleave
+with it.
 
 Tests covering:
- 1. Each of the 7 queue mutators (enqueue, claim_next, claim_batch, mark_done,
-    mark_failed, mark_retry, reclaim_stale) cannot run while a cascade holds
-    RENAME_LOCK, and vice versa (mutual exclusion).
- 2. claim_batch multi-row: no self-deadlock (RLock re-entrancy for
-    claim_batch -> claim_next), correct rows claimed.
- 3. complete_aspect: the whole call (upsert + mark_done) is atomic under
-    RENAME_LOCK — a cascade cannot interleave between the upsert and mark_done.
- 4. Gap-3 ordering: cascade rename cannot interleave mid-complete_aspect.
- 5. Existing suites must remain green (verified externally).
+ 1. complete_aspect (the persist call) cannot run while a cascade holds RENAME_LOCK, and
+    a cascade cannot run while it does (mutual exclusion).
+ 2. Gap-3 ordering: a cascade rename cannot interleave mid-complete_aspect.
+ 3. Structural: complete_aspect acquires RENAME_LOCK.
+
+The aspect queue's claim verbs (claim_batch and the table mutators) left with the table
+(nexus-hbnml); their lock proofs are gone with them.
 """
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -27,21 +24,10 @@ import pytest
 from tests._catalog_fixture_ops import register_real_doc_id
 
 
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path. The producer's table mode is
-    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
-    ``tests/_aspect_table_producer.py``, not from the environment."""
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
-
 pytestmark = pytest.mark.t2_tenant
 
-# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
-# and document_aspects.doc_id now carry REAL FKs to
-# catalog_documents(tenant_id, tumbler) via the engine's POST
-# /v1/aspects/queue/enqueue and /v1/aspects/upsert 400s -- see the
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id carries a REAL FK to
+# catalog_documents(tenant_id, tumbler) via the engine's POST /v1/aspects/upsert 400 -- see the
 # identical cache in tests/test_document_aspects_store.py for the full
 # rationale. One real registration per test, memoized on the test's
 # freshly-minted NX_SERVICE_TOKEN.
@@ -63,19 +49,6 @@ def _make_db(tmp_path: Path) -> "T2Database":
     return T2Database(tmp_path / "t2.db")
 
 
-def _queue_direct_count(tmp_path: Path, *, status: str = "pending") -> int:
-    """Raw count via a direct connection — bypasses queue locks."""
-    conn = sqlite3.connect(str(tmp_path / "t2.db"))
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status = ?",
-            (status,),
-        ).fetchone()
-        return row[0] if row else 0
-    finally:
-        conn.close()
-
-
 def _probe_lock_blocked(lock: Any, hold_event: threading.Event, *, timeout: float = 0.15) -> bool:
     """Return True iff acquiring lock blocks while hold_event is set."""
     results: list[bool] = []
@@ -91,103 +64,6 @@ def _probe_lock_blocked(lock: Any, hold_event: threading.Event, *, timeout: floa
     t.start()
     t.join(timeout=timeout + 1.0)
     return results == [False]
-
-
-# ── claim_batch: multi-row, no self-deadlock, correct rows ───────────────────
-
-
-class TestClaimBatchMultiRow:
-    """claim_batch calls claim_next repeatedly under the same RENAME_LOCK.
-
-    Both are guarded by rename_lock. With RLock (reentrant), the outer
-    claim_batch hold does not deadlock the inner claim_next calls.
-    """
-
-    def test_claim_batch_returns_multiple_rows_no_deadlock(
-        self, tmp_path: Path
-    ) -> None:
-        """claim_batch claims multiple rows without deadlock.
-
-        This is the critical RLock re-entrancy test: claim_batch acquires
-        RENAME_LOCK, then each claim_next call inside also acquires it.
-        With RLock this succeeds; with plain Lock it would deadlock.
-        """
-        db = _make_db(tmp_path)
-        try:
-            # Enqueue 5 items.
-            for i in range(5):
-                db.aspect_queue.enqueue(
-                    "code__coll", f"/path/file{i}.py", f"hash{i}",
-                    doc_id=_shared_doc_id(),
-                )
-
-            result: list[Any] = []
-            exception: list[Exception] = []
-
-            def run_claim_batch() -> None:
-                try:
-                    rows = db.aspect_queue.claim_batch(limit=5)
-                    result.extend(rows)
-                except Exception as exc:
-                    exception.append(exc)
-
-            t = threading.Thread(target=run_claim_batch, daemon=True)
-            t.start()
-            t.join(timeout=5.0)  # generous timeout; deadlock = hangs forever
-
-            assert not t.is_alive(), (
-                "claim_batch deadlocked! RENAME_LOCK must be RLock (reentrant) "
-                "so claim_batch -> claim_next re-entrant acquisition does not block."
-            )
-            assert not exception, f"claim_batch raised: {exception}"
-            assert len(result) == 5, (
-                f"Expected 5 claimed rows, got {len(result)}. "
-                f"Rows: {[r.source_path for r in result]}"
-            )
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-    def test_claim_batch_correct_fifo_order(self, tmp_path: Path) -> None:
-        """claim_batch returns rows in FIFO (enqueue) order."""
-        db = _make_db(tmp_path)
-        try:
-            paths = [f"/path/file{i}.py" for i in range(3)]
-            for i, path in enumerate(paths):
-                db.aspect_queue.enqueue("code__coll", path, f"hash{i}", doc_id=_shared_doc_id())
-                # Small sleep ensures distinct timestamps for ordering.
-                time.sleep(0.001)
-
-            rows = db.aspect_queue.claim_batch(limit=3)
-            assert len(rows) == 3
-            claimed_paths = [r.source_path for r in rows]
-            assert claimed_paths == paths, (
-                f"Expected FIFO order {paths}, got {claimed_paths}"
-            )
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-    def test_claim_batch_partial_when_fewer_rows_than_limit(
-        self, tmp_path: Path
-    ) -> None:
-        """claim_batch returns fewer rows than limit when queue runs dry."""
-        db = _make_db(tmp_path)
-        try:
-            db.aspect_queue.enqueue("code__coll", "/f1.py", "h1", doc_id=_shared_doc_id())
-            db.aspect_queue.enqueue("code__coll", "/f2.py", "h2", doc_id=_shared_doc_id())
-
-            rows = db.aspect_queue.claim_batch(limit=10)
-            assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
 
 
 # ── complete_aspect atomicity under RENAME_LOCK ───────────────────────────────
@@ -225,9 +101,6 @@ class TestCompleteAspectAtomicity:
         """complete_aspect cannot run while RENAME_LOCK is held (cascade sim)."""
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue(
-                "knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id(),
-            )
 
             started = threading.Event()
             finished = threading.Event()
@@ -272,7 +145,6 @@ class TestCompleteAspectAtomicity:
         """RENAME_LOCK is released after complete_aspect returns normally."""
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             fields = self._make_aspect_record_fields()
             db.complete_aspect(fields)
 
@@ -286,19 +158,18 @@ class TestCompleteAspectAtomicity:
             except Exception:
                 pass
 
-    def test_complete_aspect_upsert_and_mark_done_are_atomic(
+    def test_complete_aspect_holds_rename_lock_through_the_upsert(
         self, tmp_path: Path
     ) -> None:
-        """RENAME_LOCK held through both upsert and mark_done.
+        """RENAME_LOCK is held through the upsert, so a probe cannot take it mid-call.
 
         Verify by instrumenting document_aspects.upsert and checking that
         RENAME_LOCK is not acquirable from a second thread mid-execution.
-        Since complete_aspect wraps the whole call in one lock, a probe
-        thread cannot acquire RENAME_LOCK between upsert and mark_done.
+        complete_aspect wraps the whole call in one lock, so a probe thread
+        cannot acquire RENAME_LOCK between the upsert and the return.
         """
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             fields = self._make_aspect_record_fields()
 
             probe_results: list[bool] = []
@@ -309,7 +180,7 @@ class TestCompleteAspectAtomicity:
 
             def slow_upsert(record: Any) -> Any:
                 result = original_upsert(record)
-                # Signal: we're between upsert and mark_done (still inside lock).
+                # Signal: the upsert is done, the call is still inside the lock.
                 mid_call_event.set()
                 # Wait for probe thread to try acquiring RENAME_LOCK.
                 may_proceed.wait(timeout=3.0)
@@ -323,11 +194,11 @@ class TestCompleteAspectAtomicity:
             t = threading.Thread(target=run_complete_aspect, daemon=True)
             t.start()
 
-            # Wait until upsert has run but mark_done hasn't yet.
+            # Wait until the upsert has run.
             mid_call_event.wait(timeout=3.0)
 
             # Probe: try to acquire RENAME_LOCK. Should FAIL because complete_aspect
-            # still holds it (still between upsert and mark_done).
+            # still holds it (still inside the call).
             got = db.RENAME_LOCK.acquire(blocking=False)
             probe_results.append(got)
             if got:
@@ -340,7 +211,7 @@ class TestCompleteAspectAtomicity:
 
             assert len(probe_results) == 1
             assert not probe_results[0], (
-                "RENAME_LOCK was acquirable between upsert and mark_done inside "
+                "RENAME_LOCK was acquirable between the upsert and the return of "
                 "complete_aspect. The whole call must be wrapped in ONE lock block "
                 "to close Gap 3."
             )
@@ -355,15 +226,12 @@ class TestCompleteAspectAtomicity:
     ) -> None:
         """Gap 3: cascade rename blocks while complete_aspect holds RENAME_LOCK.
 
-        Scenario: complete_aspect has upserted document_aspects under OLD collection
-        name. Cascade tries to rename OLD->NEW. Without the lock, cascade could
-        rename the document_aspects row BEFORE mark_done deletes the queue row,
-        leaving a document_aspects row under NEW but an aspect_queue row under OLD
-        (orphaned). With the lock, cascade must wait.
+        complete_aspect has upserted document_aspects under the OLD collection name.
+        Without the lock, a cascade could rename that row before the call returns,
+        so the call would finish under the stale name. With the lock, the cascade waits.
         """
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             fields = self._make_aspect_record_fields(
                 collection="knowledge__test", source_path="/doc.md"
             )
@@ -377,7 +245,7 @@ class TestCompleteAspectAtomicity:
 
             def slow_upsert(record: Any) -> Any:
                 result = original_upsert(record)
-                # Signal: upsert done, mark_done not yet called.
+                # Signal: upsert done, the call has not returned.
                 mid_call_event.set()
                 may_proceed.wait(timeout=3.0)
                 return result
@@ -422,8 +290,8 @@ class TestCompleteAspectAtomicity:
 
             assert cascade_blocked == [True], (
                 "Cascade rename was NOT blocked while complete_aspect held RENAME_LOCK. "
-                "Gap 3 is open: cascade can rename document_aspects between upsert "
-                "and mark_done, leaving an orphaned queue row under the old collection name."
+                "Gap 3 is open: cascade can rename document_aspects while complete_aspect "
+                "is mid-call."
             )
         finally:
             try:
@@ -478,7 +346,6 @@ class TestMutatorLockGuardStructural:
     def test_complete_aspect_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             # Track at the T2Database level (complete_aspect uses self.RENAME_LOCK).
             tracking = self._TrackingRLock()
             db.RENAME_LOCK = tracking  # type: ignore[assignment]

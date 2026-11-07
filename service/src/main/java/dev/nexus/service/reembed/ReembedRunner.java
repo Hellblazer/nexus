@@ -518,7 +518,7 @@ public final class ReembedRunner {
      *       counts and the documents to inspect in {@code last_error}. {@code --resume} re-runs the pass and this
      *       check; {@code --abort} leaves the source superseded and undeleted. {@code force_delete} does not reach
      *       it: no flag deletes a live document's only copy;</li>
-     *   <li>the <b>residue check</b>: aspect, queue and highlight rows still naming the source belong to no document
+     *   <li>the <b>residue check</b>: aspect, task and highlight rows still naming the source belong to no document
      *       the job moved, and the delete would take them. Unless {@code force_delete}, the job ends {@code done}
      *       with disposition {@code kept_residue} and the counts in {@code last_error}; with it the delete proceeds;</li>
      *   <li>marker {@code delete_started} (abort is refused from here), delete the source only if its registry row

@@ -22,33 +22,22 @@ import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
 /**
- * RDR-152 bead nexus-gmiaf.15 — repository for aspects, highlights, queue, and promotion-log.
+ * RDR-152 bead nexus-gmiaf.15 — repository for aspects, highlights and promotion-log.
  *
- * <p>Mirrors four SQLite stores in the Postgres service tier:
+ * <p>Mirrors three SQLite stores in the Postgres service tier:
  * <ul>
  *   <li>{@code document_aspects} — per-document structured aspect records (RDR-089)</li>
  *   <li>{@code document_highlights} — DEVONthink highlight/mention notes (RDR-139 Layer E)</li>
- *   <li>{@code aspect_extraction_queue} — durable async extraction queue</li>
  *   <li>{@code aspect_promotion_log} — extras→column promotion audit log</li>
  * </ul>
  *
  * <p>All methods route through {@link TenantScope#withTenant} for RLS enforcement.
  *
- * <p>Queue claim strategy: {@code claimNext} uses
- * {@code SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1} — atomically claims one
- * pending row per caller with no double-claim risk across concurrent workers.
- * This is the key contention fix that motivated RDR-152 for this store.
+ * <p>The durable extraction queue is not here: the table {@code aspect_extraction_queue} was retired
+ * (nexus-hbnml, RDR-235 step B, changeset {@code aspects-005-2}); extraction work rides the engine's
+ * {@code aspects} tuple subspace.
  */
 public final class AspectRepository {
-
-    /**
-     * Retry budget of the aspect-extraction queue (RDR-163): a failure seen at
-     * {@code retry_count >= RETRY_MAX_ATTEMPTS} is terminal. The worker applies it before
-     * calling {@code markRetry}/{@code markFailed}; {@link #reclaimStale} applies the same
-     * rule to a reclaimed row. MUST equal {@code _RETRY_MAX_ATTEMPTS} in
-     * {@code src/nexus/aspect_worker.py} (pinned by tests/test_aspect_retry_cap_parity.py).
-     */
-    public static final int RETRY_MAX_ATTEMPTS = 5;
 
     private static final Logger log = LoggerFactory.getLogger(AspectRepository.class);
 
@@ -67,7 +56,7 @@ public final class AspectRepository {
     // EXCLUDED pseudo-table fields used in ON CONFLICT DO UPDATE SET, typed via
     // DSL.excluded(Field) (nexus-mzuj9: replaces the hand-built field("EXCLUDED.x", ...)
     // raw-string fragments — jOOQ codegen now type-checks every column reference here
-    // against the generated DOCUMENT_ASPECTS / DOCUMENT_HIGHLIGHTS / ASPECT_EXTRACTION_QUEUE
+    // against the generated DOCUMENT_ASPECTS / DOCUMENT_HIGHLIGHTS
     // tables, so a Liquibase column rename fails at COMPILE time instead of at runtime).
     private static final Field<String>          EX_PROBLEM_FORMULATION    = excluded(DOCUMENT_ASPECTS.PROBLEM_FORMULATION);
     private static final Field<String>          EX_PROPOSED_METHOD        = excluded(DOCUMENT_ASPECTS.PROPOSED_METHOD);
@@ -97,27 +86,6 @@ public final class AspectRepository {
     private static final Field<String>          EX_HL_HIGHLIGHTS   = excluded(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD);
     private static final Field<String>          EX_HL_MENTIONS     = excluded(DOCUMENT_HIGHLIGHTS.MENTIONS_MD);
     private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = excluded(DOCUMENT_HIGHLIGHTS.INGESTED_AT);
-
-    // aspect_extraction_queue EXCLUDED fields
-    private static final Field<String>          EX_Q_DOC_ID          = excluded(ASPECT_EXTRACTION_QUEUE.DOC_ID);
-    private static final Field<String>          EX_Q_CONTENT_HASH    = excluded(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
-    private static final Field<String>          EX_Q_CONTENT         = excluded(ASPECT_EXTRACTION_QUEUE.CONTENT);
-    private static final Field<OffsetDateTime>  EX_Q_ENQUEUED_AT     = excluded(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT);
-    private static final Field<String>          EX_Q_LAST_ERROR      = excluded(ASPECT_EXTRACTION_QUEUE.LAST_ERROR);
-    // Complex GREATEST/LEAST/CASE fields for importQueueRow, typed via DSL.when/.otherwise
-    // and DSL.greatest/DSL.least against the EXCLUDED pseudo-table + the live column.
-    private static final Field<String>          EX_Q_STATUS_CASE =
-        when(ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress"), ASPECT_EXTRACTION_QUEUE.STATUS)
-            .otherwise(excluded(ASPECT_EXTRACTION_QUEUE.STATUS));
-    private static final Field<Integer>         EX_Q_RETRY_GREATEST =
-        greatest(excluded(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT), ASPECT_EXTRACTION_QUEUE.RETRY_COUNT);
-    private static final Field<OffsetDateTime>  EX_Q_ENQUEUED_LEAST =
-        least(excluded(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT), ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT);
-    private static final Field<OffsetDateTime>  EX_Q_ATTEMPT_GREATEST =
-        greatest(excluded(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT), ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT);
-    private static final Field<String>          EX_Q_LAST_ERROR_CASE =
-        when(excluded(ASPECT_EXTRACTION_QUEUE.STATUS).eq("failed"), excluded(ASPECT_EXTRACTION_QUEUE.LAST_ERROR))
-            .otherwise(ASPECT_EXTRACTION_QUEUE.LAST_ERROR);
 
     private final TenantScope tenantScope;
 
@@ -163,12 +131,12 @@ public final class AspectRepository {
     /**
      * RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to already
      * carry a row for {@code collection} before any document_aspects /
-     * document_highlights / aspect_extraction_queue write; fails loud
+     * document_highlights write; fails loud
      * ({@link UnregisteredCollectionException}, mapped to 422) instead of the
      * RDR-164-era stub INSERT ... ON CONFLICT DO NOTHING that used to paper over a
      * missing row with blank content_type/owner_id/embedding_model. A no-op for a
      * null collection (document_highlights.collection is NOT NULL and FK'd to
-     * catalog_collections — document_highlights_collection_fk — but the aspect/queue
+     * catalog_collections — document_highlights_collection_fk — but the aspect
      * callers already reject a blank collection before reaching here, so they never
      * pass null in practice). A caller that nne()-defaults a blank collection to ""
      * now needs that EXACT row registered, or the write fails loud — the
@@ -177,7 +145,7 @@ public final class AspectRepository {
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
         if (collection == null) return;
-        // nexus-i15oc: an aspect, highlight or queue row filed under a retired (superseded) name strands
+        // nexus-i15oc: an aspect or highlight row filed under a retired (superseded) name strands
         // exactly as a chunk does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
         CollectionRegistry.requireWritable(ctx, tenant, collection);
     }
@@ -552,7 +520,9 @@ public final class AspectRepository {
     }
 
     /**
-     * Rename collection denorm cache (mirrors DocumentAspects.rename_collection).
+     * Rename collection denorm cache (mirrors DocumentAspects.rename_collection). The unconsumed {@code aspects}
+     * tasks that name the collection follow it (nexus-hbnml: this route took over from the retired
+     * {@code /queue/rename_collection}, which was the standalone caller's way of re-homing them).
      */
     public int renameAspectCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -560,6 +530,9 @@ public final class AspectRepository {
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             // RDR-164 P1a: register the new collection before re-pointing the denorm column
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
+            // RDR-235 (nexus-5r2sc.2.6): the tuple row locks come before any document_aspects statement, the order
+            // a claim-fenced aspect write takes them in.
+            AspectTaskRefs.rewriteCollection(ctx, tenant, oldColl, newColl);
             // Collision defense: delete conflicting new-side rows first
             ctx.deleteFrom(DOCUMENT_ASPECTS)
                .where(DOCUMENT_ASPECTS.COLLECTION.eq(newColl)
@@ -1048,540 +1021,6 @@ public final class AspectRepository {
         }
     }
 
-    // ── aspect_extraction_queue ────────────────────────────────────────────────
-
-    /**
-     * Enqueue a document for extraction (INSERT OR REPLACE semantics).
-     * Re-enqueue at the same (collection, source_path) resets to pending.
-     */
-    public void enqueue(String tenant, Map<String, Object> body) {
-        tenantScope.withTenant(tenant, ctx -> {
-            buildEnqueueQuery(ctx, tenant, body).execute();
-            return null;
-        });
-    }
-
-    /**
-     * Batch-enqueue N documents for extraction in ONE round trip
-     * (nexus-nj4ch, nexus-duoak follow-up: the indexer's per-file
-     * ``aspect_extraction_enqueue_hook`` call, fired once per document
-     * boundary under the ChunkBatcher, paid one WAN round trip per
-     * document — measured ~34.7s across ~250 real inserts in this repo's
-     * own shakeout). Same {@code ctx.batch(queries).execute()} pattern as
-     * {@link CatalogRepository#updateDocumentsMany} (heterogeneous
-     * per-row ON CONFLICT DO UPDATE — a single hand-built multi-row
-     * VALUES statement was rejected there for the same reason it would be
-     * here: jOOQ's typed VALUES API needs uniform per-column types, and
-     * Postgres NULL-parameter type inference fights optional per-row
-     * fields like {@code doc_id}).
-     *
-     * <p>Each map has the same shape as {@link #enqueue}'s {@code body}.
-     * A malformed row (missing collection/source_path) is skipped rather
-     * than aborting the whole batch — ghost-class isolation, mirroring
-     * {@code register_many}/{@code update_many}'s per-doc failure
-     * tolerance; the indexer's own {@code select_config(collection) is
-     * None} gate already filters out rows that don't need enqueueing
-     * before this is ever called, so a skip here should be rare (a
-     * genuine caller bug, not a routine collection-type filter).
-     *
-     * <p><strong>A blank {@code doc_id} is NOT a per-row skip</strong>
-     * (hygiene-001, nexus-tk070.p6a follow-on): {@link #buildEnqueueQuery}
-     * throws {@code IllegalArgumentException("doc_id required")}
-     * synchronously the moment it sees one, same message as {@link
-     * #enqueue}. Unlike the collection/source_path check above — which is
-     * a per-row {@code continue} inside this method's own loop — that
-     * exception propagates straight out of {@code buildEnqueueQuery} and
-     * out of {@code enqueueMany} itself, ABORTING THE WHOLE CALL: no row
-     * built before the offending one is ever added to {@code queries},
-     * {@code ctx.batch(queries).execute()} is never reached, and rows
-     * after the offending one in the input list are never even
-     * considered. There is no all-or-nothing DB-level fallback path here
-     * either — {@code aspect_extraction_queue.doc_id}'s own NOT NULL
-     * constraint would reject a blank value just as hard if one ever did
-     * reach Postgres, but this Java-level check fires first. Every
-     * enqueue, first-time or re-enqueue, must re-supply {@code doc_id}.
-     */
-    public int enqueueMany(String tenant, List<Map<String, Object>> rows) {
-        if (rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
-            var queries = new ArrayList<org.jooq.Query>();
-            for (var row : rows) {
-                String collection = (String) row.get("collection");
-                String sourcePath = (String) row.get("source_path");
-                if (collection == null || collection.isBlank()) continue;
-                if (sourcePath == null || sourcePath.isBlank()) continue;
-                queries.add(buildEnqueueQuery(ctx, tenant, row));
-            }
-            if (!queries.isEmpty()) {
-                ctx.batch(queries).execute();
-            }
-            return queries.size();
-        });
-    }
-
-    /**
-     * Shared query-builder for {@link #enqueue} and {@link #enqueueMany} —
-     * same INSERT ... ON CONFLICT DO UPDATE shape, same
-     * {@code ensureCollectionRegistered} precondition (the caller runs it
-     * before calling this, once per row, since it must happen before the
-     * row's own INSERT within the same transaction).
-     */
-    private org.jooq.Query buildEnqueueQuery(DSLContext ctx, String tenant, Map<String, Object> body) {
-        String collection = (String) body.get("collection");
-        String sourcePath = (String) body.get("source_path");
-        if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection required");
-        if (sourcePath == null || sourcePath.isBlank()) throw new IllegalArgumentException("source_path required");
-        // hygiene-001 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
-        // is NOT NULL now (reverses fk-001-4's nullable conversion). This is a
-        // hard requirement on EVERY enqueue, not only the first: an INSERT ...
-        // ON CONFLICT DO UPDATE statement's proposed row must satisfy every
-        // NOT NULL constraint before Postgres even evaluates the conflict, so
-        // the pre-hygiene-001 "doc_id-less re-enqueue relies on COALESCE to
-        // keep the existing linkage" pattern (nexus-nyout, still documented
-        // below on the DO UPDATE arm) can no longer bind NULL at all — a
-        // re-enqueue must now re-supply the doc_id it already has.
-        String docId = (String) body.get("doc_id");
-        if (docId == null || docId.isBlank()) throw new IllegalArgumentException("doc_id required");
-        String enqueuedAt = (String) body.getOrDefault("enqueued_at",
-            OffsetDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME));
-        OffsetDateTime enqueuedAtTs = parseTs(enqueuedAt);
-
-        ensureCollectionRegistered(ctx, tenant, collection);
-        return ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
-                ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                ASPECT_EXTRACTION_QUEUE.DOC_ID,
-                ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                ASPECT_EXTRACTION_QUEUE.CONTENT,
-                ASPECT_EXTRACTION_QUEUE.STATUS,
-                ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
-                ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
-                ASPECT_EXTRACTION_QUEUE.LAST_ERROR)
-            .values(
-                tenant, collection, sourcePath,
-                docId,
-                (String) body.getOrDefault("content_hash", ""),
-                (String) body.getOrDefault("content", ""),
-                "pending", 0, enqueuedAtTs, null, null)
-            .onConflict(
-                ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
-            .doUpdate()
-            // nexus-nyout: a doc_id-less re-enqueue (blank -> NULL via
-            // nullIfBlank; e.g. collection re-embed) must not erase an
-            // existing correct tumbler — COALESCE keeps the old linkage;
-            // a real incoming tumbler still overwrites. The queue IMPORT
-            // path stays verbatim EXCLUDED.doc_id: fidelity import
-            // reproduces exported rows exactly, including blanks.
-            // hygiene-001: EX_Q_DOC_ID can no longer BE null (the boundary
-            // check above refuses a blank doc_id before this statement is
-            // even built), so this COALESCE is now vacuously EX_Q_DOC_ID —
-            // left in place rather than simplified away, since it stays
-            // correct either way and documents the pre-hygiene-001 intent.
-            .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,
-                 coalesce(EX_Q_DOC_ID, ASPECT_EXTRACTION_QUEUE.DOC_ID))
-            .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
-            .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
-            .set(ASPECT_EXTRACTION_QUEUE.STATUS,          "pending")
-            .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     0)
-            .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_AT)
-            .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
-            .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      (String) null)
-            // RDR-163 P1 (nexus-ztpt6): a re-enqueue is a fresh request — it
-            // resets retry_count to 0, so it must also clear any stale backoff
-            // (next_retry_at) left by a prior mark_retry. Otherwise the claim
-            // gate would silently hold the re-enqueued row until the old
-            // backoff elapses (up to base*2^(cap-1) seconds).
-            .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,   (OffsetDateTime) null);
-    }
-
-    /**
-     * Atomically claim the oldest pending row using FOR UPDATE SKIP LOCKED.
-     *
-     * <p>Returns the claimed row map (including status='in_progress') or empty.
-     * Concurrent callers each get a DISTINCT row — no double-claim possible.
-     */
-    public Optional<Map<String, Object>> claimNext(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            // PG atomic claim: SELECT FOR UPDATE SKIP LOCKED picks exactly one
-            // pending row, locks it, and the subsequent UPDATE is within the same
-            // transaction — zero contention between concurrent workers.
-            var rows = ctx.select(
-                    ASPECT_EXTRACTION_QUEUE.ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT,
-                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .from(ASPECT_EXTRACTION_QUEUE)
-                // RDR-163 P0 (nexus-795gv) backoff gate: a row backed off to a
-                // future next_retry_at must not be claimed early. NULL = ready now.
-                // now() is the server (DB) clock — correct for both the co-located
-                // local deployment and the cloud deployment where the worker host
-                // clock would skew against a client-stamped comparison.
-                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending")
-                    .and(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.isNull()
-                        .or(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT.le(
-                            field("now()", OffsetDateTime.class)))))
-                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc())
-                .limit(1)
-                .forUpdate().skipLocked()
-                .fetch();
-            if (rows.isEmpty()) return Optional.empty();
-
-            long id           = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.ID);
-            String collection = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.COLLECTION);
-            String sourcePath = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH);
-            String contentHash= rows.get(0).get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
-            contentHash = contentHash == null ? "" : contentHash;
-            String content    = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.CONTENT);
-            content = content == null ? "" : content;
-            int retryCount    = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT);
-            String docId      = rows.get(0).get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
-            docId = docId == null ? "" : docId;
-
-            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-            ctx.update(ASPECT_EXTRACTION_QUEUE)
-               .set(ASPECT_EXTRACTION_QUEUE.STATUS, "in_progress")
-               .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, now)
-               .where(ASPECT_EXTRACTION_QUEUE.ID.eq(id))
-               .execute();
-
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("id", id);
-            result.put("collection", collection);
-            result.put("source_path", sourcePath);
-            result.put("content_hash", contentHash);
-            result.put("content", content);
-            result.put("status", "in_progress");
-            result.put("retry_count", retryCount);
-            result.put("doc_id", docId);
-            result.put("last_attempt_at", formatTs(now));
-            return Optional.of(result);
-        });
-    }
-
-    /**
-     * Claim up to {@code limit} pending rows using repeated atomic claimNext calls.
-     */
-    public List<Map<String, Object>> claimBatch(String tenant, int limit) {
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (int i = 0; i < limit; i++) {
-            Optional<Map<String, Object>> row = claimNext(tenant);
-            if (row.isEmpty()) break;
-            out.add(row.get());
-        }
-        return out;
-    }
-
-    /**
-     * Delete the queue row on success — keyed by doc_id (preferred) or (collection, source_path).
-     */
-    public int markDone(String tenant, String docId, String collection, String sourcePath) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            if (docId != null && !docId.isBlank()) {
-                return ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
-                    .where(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId))
-                    .execute();
-            }
-            if ((collection != null && !collection.isBlank())
-                    || (sourcePath != null && !sourcePath.isBlank())) {
-                return ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
-                    .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
-                        .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
-                    .execute();
-            }
-            return 0;
-        });
-    }
-
-    /**
-     * Mark a row as failed (terminal until re-enqueued).
-     */
-    public void markFailed(String tenant, String collection, String sourcePath, String error) {
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.update(ASPECT_EXTRACTION_QUEUE)
-               .set(ASPECT_EXTRACTION_QUEUE.STATUS, "failed")
-               .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                   field("retry_count + 1", Integer.class))
-               .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,
-                   error == null ? null : error.substring(0, Math.min(error.length(), 2000)))
-               .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
-                   .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
-               .execute();
-            return null;
-        });
-    }
-
-    /**
-     * Reset a row to pending for a transient retry, backing it off for
-     * {@code intervalSeconds} (RDR-163 P1, nexus-ztpt6).
-     *
-     * <p>next_retry_at is stamped {@code now() + intervalSeconds} on the SERVER
-     * (DB) clock — the worker chooses the interval, the service stamps the
-     * absolute instant. This is the cloud clock-skew defense: the worker host is
-     * not the DB host, so a client-computed absolute timestamp would compare
-     * wrongly against the {@code now()}-based claim gate. {@code intervalSeconds
-     * = 0} means "ready immediately". retry_count is incremented (monotonic; the
-     * cap's source of truth); last_attempt_at is cleared.
-     */
-    public void markRetry(String tenant, String collection, String sourcePath, long intervalSeconds) {
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.update(ASPECT_EXTRACTION_QUEUE)
-               .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
-               .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                   field("retry_count + 1", Integer.class))
-               .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
-               .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,
-                   field("now() + make_interval(secs => ?)", OffsetDateTime.class,
-                         (double) intervalSeconds))
-               .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
-                   .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
-               .execute();
-            return null;
-        });
-    }
-
-    /** last_error written to a row that a reclaim moves to the terminal failed state. */
-    public static final String RECLAIM_CAP_ERROR = "reclaimed_stale_retry_cap_exhausted";
-
-    /**
-     * Reclaim stale in_progress rows (worker died or hung), counting each as an
-     * attempt. Equivalent to {@link #reclaimStale(String, int, boolean)} with
-     * {@code countAttempt = true}: the periodic age-based sweep.
-     */
-    public int reclaimStale(String tenant, int timeoutSeconds) {
-        return reclaimStale(tenant, timeoutSeconds, true);
-    }
-
-    /**
-     * Reclaim stale in_progress rows (worker died or hung).
-     *
-     * <p>{@code countAttempt = true} (the age-based sweep): a reclaim counts as an
-     * attempt (RDR-235 Gap 2, nexus-j67ix.2): without it a
-     * document that kills its worker every time (OOM, a kill) cycles pending ->
-     * in_progress -> pending forever and never reaches the terminal {@code failed}
-     * state RDR-163 defined. {@code retry_count} is incremented, and the row is
-     * decided by the worker's own rule: seen at {@code retry_count >= }
-     * {@link #RETRY_MAX_ATTEMPTS} it goes {@code failed} exactly as {@link #markFailed}
-     * leaves it (status, retry_count + 1, last_error; last_attempt_at and
-     * next_retry_at untouched); below the cap it returns to {@code pending} with the
-     * incremented count and last_attempt_at cleared, as before.
-     *
-     * <p>{@code countAttempt = false} (the daemon's graceful-stop sweep and the
-     * self-fault stand-down that ends in it, nexus-j67ix.3): the rows a stopping
-     * worker abandons did nothing wrong, so every stale row returns to
-     * {@code pending} with {@code retry_count} and {@code last_error} unchanged and
-     * {@code last_attempt_at} cleared. A row already at the cap goes to
-     * {@code pending}, never {@code failed}: this reclaim is not the row's fault.
-     *
-     * <p>{@code next_retry_at} is never written by any outcome (RDR-163 invariant:
-     * clearing it would bypass the backoff, bumping it would punish a crash).
-     *
-     * @return rows reclaimed, whichever way they went
-     */
-    public int reclaimStale(String tenant, int timeoutSeconds, boolean countAttempt) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(timeoutSeconds);
-            var stale = ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress")
-                .and(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT.lt(cutoff));
-            if (!countAttempt) {
-                return ctx.update(ASPECT_EXTRACTION_QUEUE)
-                    .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
-                    .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
-                    .where(stale)
-                    .execute();
-            }
-            // Every right-hand side reads the row's pre-update values (SQL UPDATE semantics),
-            // so the cap test sees the count the worker saw at claim time.
-            var atCap = ASPECT_EXTRACTION_QUEUE.RETRY_COUNT.ge(RETRY_MAX_ATTEMPTS);
-            return ctx.update(ASPECT_EXTRACTION_QUEUE)
-                .set(ASPECT_EXTRACTION_QUEUE.STATUS,
-                    when(atCap, inline("failed")).otherwise(inline("pending")))
-                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                    field("retry_count + 1", Integer.class))
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
-                    when(atCap, ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT)
-                        .otherwise(inline((OffsetDateTime) null)))
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,
-                    when(atCap, inline(RECLAIM_CAP_ERROR)).otherwise(ASPECT_EXTRACTION_QUEUE.LAST_ERROR))
-                .where(stale)
-                .execute();
-        });
-    }
-
-    /** Count pending rows. */
-    public int pendingCount(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectCount()
-               .from(ASPECT_EXTRACTION_QUEUE)
-               .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending"))
-               .fetchOne(0, Integer.class));
-    }
-
-    /**
-     * Is queue drained? (no non-failed rows).
-     */
-    public boolean isDrained(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectCount()
-               .from(ASPECT_EXTRACTION_QUEUE)
-               .where(ASPECT_EXTRACTION_QUEUE.STATUS.ne("failed"))
-               .fetchOne(0, Integer.class) == 0);
-    }
-
-    /**
-     * List pending rows, FIFO order.
-     */
-    public List<Map<String, Object>> listPending(String tenant, int limit) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var q = ctx.select(
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT,
-                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .from(ASPECT_EXTRACTION_QUEUE)
-                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("pending"))
-                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc());
-            var rows = (limit > 0 ? q.limit(limit) : q).fetch();
-            List<Map<String, Object>> out = new ArrayList<>();
-            for (var r : rows) {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("collection",   r.get(ASPECT_EXTRACTION_QUEUE.COLLECTION));
-                m.put("source_path",  r.get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH));
-                String ch = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
-                m.put("content_hash", ch == null ? "" : ch);
-                String co = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT);
-                m.put("content",      co == null ? "" : co);
-                m.put("retry_count",  r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT));
-                String di = r.get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
-                m.put("doc_id",       di == null ? "" : di);
-                out.add(m);
-            }
-            return out;
-        });
-    }
-
-    /**
-     * List the rows still waiting for a worker: {@code status IN ('pending','in_progress')},
-     * FIFO order, no content (RDR-235 Phase 1 step 3, nexus-5r2sc.3.6: the upgrade-ladder
-     * rung that moves these rows to {@code aspects} tuples reads this, and only this).
-     *
-     * <p>{@code delay_s} is the seconds until {@code next_retry_at}, computed on the
-     * DATABASE clock (the claim gate's clock, so a worker host's skew cannot move it):
-     * {@code GREATEST(0, CEIL(EXTRACT(EPOCH FROM next_retry_at - now())))}, whole seconds
-     * rounded up, 0 when {@code next_retry_at} is NULL or already past. {@code limit <= 0}
-     * means unlimited, as in {@link #listPending}. Read-only: it flips nothing, so an
-     * {@code in_progress} row a live worker holds stays exactly as it is.
-     */
-    public List<Map<String, Object>> listWaiting(String tenant, int limit) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            Field<Long> delay = field(
-                "COALESCE(GREATEST(0, CEIL(EXTRACT(EPOCH FROM ({0} - now())))), 0)::bigint",
-                Long.class, ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT);
-            var q = ctx.select(
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID,
-                    ASPECT_EXTRACTION_QUEUE.STATUS,
-                    delay)
-                .from(ASPECT_EXTRACTION_QUEUE)
-                .where(ASPECT_EXTRACTION_QUEUE.STATUS.in("pending", "in_progress"))
-                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc());
-            var rows = (limit > 0 ? q.limit(limit) : q).fetch();
-            List<Map<String, Object>> out = new ArrayList<>();
-            for (var r : rows) {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("collection",   r.get(ASPECT_EXTRACTION_QUEUE.COLLECTION));
-                m.put("source_path",  r.get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH));
-                String ch = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
-                m.put("content_hash", ch == null ? "" : ch);
-                m.put("retry_count",  r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT));
-                String di = r.get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
-                m.put("doc_id",       di == null ? "" : di);
-                m.put("status",       r.get(ASPECT_EXTRACTION_QUEUE.STATUS));
-                Long d = r.get(delay);
-                m.put("delay_s",      d == null ? 0L : d);
-                out.add(m);
-            }
-            return out;
-        });
-    }
-
-    /**
-     * List terminal-{@code failed} rows, optionally scoped to one collection
-     * (mirrors AspectExtractionQueue.list_failed). Drives the
-     * {@code nx aspects requeue-failed} bulk-recovery CLI (nexus-2c51v).
-     * doc_id is included so a re-enqueue preserves the catalog identity.
-     */
-    public List<Map<String, Object>> listFailed(String tenant, String collection) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var cond = ASPECT_EXTRACTION_QUEUE.STATUS.eq("failed");
-            if (collection != null && !collection.isBlank()) {
-                cond = cond.and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection));
-            }
-            var rows = ctx.select(
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT,
-                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .from(ASPECT_EXTRACTION_QUEUE)
-                .where(cond)
-                .orderBy(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT.asc(), ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.asc())
-                .fetch();
-            List<Map<String, Object>> out = new ArrayList<>();
-            for (var r : rows) {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("collection",   r.get(ASPECT_EXTRACTION_QUEUE.COLLECTION));
-                m.put("source_path",  r.get(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH));
-                String ch = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH);
-                m.put("content_hash", ch == null ? "" : ch);
-                String co = r.get(ASPECT_EXTRACTION_QUEUE.CONTENT);
-                m.put("content",      co == null ? "" : co);
-                m.put("retry_count",  r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT));
-                String di = r.get(ASPECT_EXTRACTION_QUEUE.DOC_ID);
-                m.put("doc_id",       di == null ? "" : di);
-                out.add(m);
-            }
-            return out;
-        });
-    }
-
-    /**
-     * Rename collection in queue (mirrors AspectExtractionQueue.rename_collection).
-     */
-    public int renameQueueCollection(String tenant, String oldColl, String newColl) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
-            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
-            // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks (available, claimed and dead) name the
-            // collection in their body; they are rewritten in this transaction, as the table rows are below. First
-            // of the statements, so the tuple row locks come before any document_aspects statement.
-            AspectTaskRefs.rewriteCollection(ctx, tenant, oldColl, newColl);
-            ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
-               .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(newColl)
-                   .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.in(
-                       select(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
-                           .from(ASPECT_EXTRACTION_QUEUE)
-                           .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldColl)))))
-               .execute();
-            return ctx.update(ASPECT_EXTRACTION_QUEUE)
-                .set(ASPECT_EXTRACTION_QUEUE.COLLECTION, newColl)
-                .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(oldColl))
-                .execute();
-        });
-    }
-
     /**
      * Rename collection denorm in document_highlights (mirrors DocumentHighlights rename_collection).
      *
@@ -1597,160 +1036,6 @@ public final class AspectRepository {
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldColl))
                 .execute();
         });
-    }
-
-    /**
-     * ETL import of a queue row — fidelity-preserving, never downgrades in_progress.
-     */
-    public int importQueueRow(String tenant, Map<String, Object> body) {
-        return tenantScope.withTenant(tenant, ctx -> doImportQueueRow(ctx, tenant, body));
-    }
-
-    /** RDR-176 P3 (Gap 1): GUC-once bulk aspect-queue import (one withTenant per batch). */
-    public int importQueueBatch(String tenant, List<Map<String, Object>> rows) {
-        if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
-            // nexus-te885.3 (completes the nexus-1usso sweep): the queue import
-            // was the last batch method still looping per-row .execute(). Same
-            // uniform invariants as every other converted importer: skip rows
-            // missing conflict-key fields; register DISTINCT collections once;
-            // dedupe intra-batch (last wins — one multi-row INSERT ... ON
-            // CONFLICT cannot affect the same row twice); chunk at
-            // MAX_BATCH_PARAMS binds; ON CONFLICT semantics transcribed
-            // verbatim from doImportQueueRow (never-downgrade STATUS CASE,
-            // GREATEST retry/attempt, LEAST enqueued_at).
-            List<Map<String, Object>> kept = new ArrayList<>();
-            for (var body : rows) {
-                if (body.get("collection") == null || body.get("source_path") == null) continue;
-                kept.add(body);
-            }
-            if (kept.isEmpty()) return 0;
-
-            var collections = new java.util.LinkedHashSet<String>();
-            for (var body : kept) collections.add((String) body.get("collection"));
-            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
-
-            var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
-            for (var body : kept) {
-                unique.put(body.get("collection") + " " + body.get("source_path"), body);
-            }
-            List<Map<String, Object>> deduped = List.copyOf(unique.values());
-
-            final int cols = 11;
-            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
-            int written = 0;
-            for (int start = 0; start < deduped.size(); start += chunkSize) {
-                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
-                var insert = ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
-                        ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                        ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                        ASPECT_EXTRACTION_QUEUE.DOC_ID,
-                        ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                        ASPECT_EXTRACTION_QUEUE.CONTENT,
-                        ASPECT_EXTRACTION_QUEUE.STATUS,
-                        ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                        ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
-                        ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
-                        ASPECT_EXTRACTION_QUEUE.LAST_ERROR);
-                for (var body : batch) {
-                    String enqueuedAt = (String) body.get("enqueued_at");
-                    String lastAttemptAt = (String) body.get("last_attempt_at");
-                    OffsetDateTime lastAttemptAtTs = lastAttemptAt != null && !lastAttemptAt.isBlank()
-                        ? parseTs(lastAttemptAt) : null;
-                    int retryCount = body.containsKey("retry_count")
-                        ? ((Number) body.get("retry_count")).intValue() : 0;
-                    insert = insert.values(
-                        tenant,
-                        (String) body.get("collection"),
-                        (String) body.get("source_path"),
-                        nullIfBlank((String) body.get("doc_id")),
-                        (String) body.getOrDefault("content_hash", ""),
-                        (String) body.getOrDefault("content", ""),
-                        (String) body.getOrDefault("status", "pending"),
-                        retryCount,
-                        parseTs(enqueuedAt),
-                        lastAttemptAtTs,
-                        (String) body.get("last_error"));
-                }
-                insert.onConflict(
-                        ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                        ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
-                    .doUpdate()
-                    // Never downgrade in_progress to pending from a stale ETL import
-                    .set(ASPECT_EXTRACTION_QUEUE.STATUS,          EX_Q_STATUS_CASE)
-                    .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     EX_Q_RETRY_GREATEST)
-                    // Preserve earliest enqueue time
-                    .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_LEAST)
-                    // Keep latest attempt timestamp
-                    .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, EX_Q_ATTEMPT_GREATEST)
-                    .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,          EX_Q_DOC_ID)
-                    .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
-                    .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
-                    .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      EX_Q_LAST_ERROR_CASE)
-                    .execute();
-                written += batch.size();
-            }
-            return written;
-        });
-    }
-
-    private int doImportQueueRow(DSLContext ctx, String tenant, Map<String, Object> body) {
-        String collection = (String) body.get("collection");
-        String sourcePath = (String) body.get("source_path");
-        if (collection == null || sourcePath == null) return 0;
-
-        String enqueuedAt = (String) body.get("enqueued_at");
-        String lastAttemptAt = (String) body.get("last_attempt_at");
-        OffsetDateTime enqueuedAtTs = parseTs(enqueuedAt);
-        OffsetDateTime lastAttemptAtTs = lastAttemptAt != null && !lastAttemptAt.isBlank()
-            ? parseTs(lastAttemptAt) : null;
-        String status = (String) body.getOrDefault("status", "pending");
-        int retryCount = body.containsKey("retry_count")
-            ? ((Number) body.get("retry_count")).intValue() : 0;
-
-        {
-            ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, collection);
-            return ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
-                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT,
-                    ASPECT_EXTRACTION_QUEUE.STATUS,
-                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                    ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
-                    ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
-                    ASPECT_EXTRACTION_QUEUE.LAST_ERROR)
-                .values(
-                    tenant, collection, sourcePath,
-                    nullIfBlank((String) body.get("doc_id")),
-                    (String) body.getOrDefault("content_hash", ""),
-                    (String) body.getOrDefault("content", ""),
-                    status, retryCount,
-                    enqueuedAtTs,
-                    lastAttemptAtTs,
-                    (String) body.get("last_error"))
-                .onConflict(
-                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
-                .doUpdate()
-                // Never downgrade in_progress to pending from a stale ETL import
-                .set(ASPECT_EXTRACTION_QUEUE.STATUS,          EX_Q_STATUS_CASE)
-                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     EX_Q_RETRY_GREATEST)
-                // Preserve earliest enqueue time
-                .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_LEAST)
-                // Keep latest attempt timestamp
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, EX_Q_ATTEMPT_GREATEST)
-                .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,          EX_Q_DOC_ID)
-                .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
-                .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      EX_Q_LAST_ERROR_CASE)
-                .execute();
-        }
     }
 
     // ── aspect_promotion_log ───────────────────────────────────────────────────
@@ -2251,8 +1536,8 @@ public final class AspectRepository {
 
     /**
      * Converts a doc_id string to null when blank or empty.
-     * Required after nexus-b7v6i: doc_id columns in document_aspects and
-     * aspect_extraction_queue are now nullable with a real FK to catalog_documents.
+     * Required after nexus-b7v6i: the document_aspects doc_id column is nullable
+     * with a real FK to catalog_documents.
      * An empty string '' would fail the FK (no catalog doc with tumbler='').
      */
     private static String nullIfBlank(String s) {

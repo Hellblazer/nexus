@@ -94,7 +94,9 @@ def test_bundle_lib_env_sets_nothing_on_windows_but_does_on_posix(tmp_path: Path
     win = _bundle_lib_env([str(exe)], {"FOO": "bar"}, platform="win32")
     posix = _bundle_lib_env([str(exe)], {"FOO": "bar"}, platform="linux")
     assert "LD_LIBRARY_PATH" not in win and win == {"FOO": "bar"}
-    assert posix["LD_LIBRARY_PATH"] == str(tmp_path / "bundle" / "lib")  # the sibling lib/ exists, so the POSIX branch does inject
+    # the sibling lib/ exists, so the POSIX branch does inject; normcase because the path is resolved and a
+    # Windows profile directory can differ in case from pytest's tmp_path (pytest-of-Sam vs pytest-of-sam)
+    assert os.path.normcase(posix["LD_LIBRARY_PATH"]) == os.path.normcase(str(tmp_path / "bundle" / "lib"))
 
 
 # ── step 5: the cluster superuser ────────────────────────────────────────────────

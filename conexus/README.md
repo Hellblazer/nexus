@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-10 agents, 39 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](https://github.com/Hellblazer/nexus/blob/main/README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+10 agents, 40 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](https://github.com/Hellblazer/nexus/blob/main/README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
 
@@ -50,7 +50,7 @@ story.
 ## What You Get
 
 - **10 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility. The three MCP-tool redirect stubs (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted (nexus-cnzei.4) — call `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` directly
-- **39 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
+- **40 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
@@ -98,6 +98,8 @@ conexus/
 │       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
 │       ├── compact_checkpoint.py      # PreCompact / PostCompact / SessionStart(compact): write down and
 │       │                              # re-inject the session's working state across a compaction
+│       ├── stop_wake_guard.py         # Stop: continue a turn once when it ends promising a later check
+│       │                              # or timed step with nothing armed to wake it
 │       ├── version_lockstep_action.py # Detached, extras-preserving reinstall the lockstep
 │       │                              # hook dispatches
 │       ├── routing/                   # PreToolUse(Bash) guards + their shared _lib.py
@@ -338,6 +340,7 @@ names each handler by its program and verb.
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/credential_print_guard.py` | Deny commands that would reveal a Claude credential: a keychain read, a `.credentials.json` read, naming a protected token variable, or reading another process's environment (RDR-219 Gap 2, no escape) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `SubagentStop` (matcher `.+`) | `hooks/scripts/nx_hook_shim.py subagent-stop-t1-nudge` | When a named agent stops and its own transcript shows no successful T1 put (an MCP `scratch` call with `action=put`, or a Bash `nx scratch put`), return `additionalContext` that gives the agent one more turn with a one-sentence request to write its findings to T1. A warning, not a veto: no `decision` key. Silent on the stop that follows its own nudge (`stop_hook_active`), when the transcript is missing or unparseable, and for harness-internal stops with no `agent_type`, which the `.+` matcher never spawns it for (nexus-mtheb.3) |
+| `Stop` | `hooks/scripts/stop_wake_guard.py` | Continue a turn once when its closing text promises work that nothing will wake: a CI or run wait, a promise to check or do something later, or a timed step, while `background_tasks` and `session_crons` are both empty and `stop_hook_active` is false. Clauses where Sam is the actor, a peer, mailbox, notification or restart is the wake, or that report past tense are dropped first. Returns `hookSpecificOutput.additionalContext` once, which continues the turn without the "Stop hook error" notice a `decision: block` shows (the text quotes the sentence and says to arm a Monitor, a background Bash until-loop, ScheduleWakeup or CronCreate, or to say who the wake is); logs every decision to `hook.log`; fails open. Only the last 600 characters are read, and a message whose last sentence addresses Sam, or waits on an approval, is allowed whole. A missing or non-list `background_tasks`/`session_crons` allows the stop. `NX_STOP_WAKE_GUARD=0` turns it off; set it in the environment of any scripted `claude -p` run that loads this plugin (a run with `--setting-sources ""` loads no plugin and needs nothing), because a one-shot run's final message would otherwise become the continuation (nexus-4cgop) |
 | `PreToolUse` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls; paired with the PermissionRequest entry below because the two events fire in different permission modes |
 | `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls |
 

@@ -333,13 +333,29 @@ here are the ones each pass found on a named page or table.
   non-alphanumeric character replaced by `-`; the primary is the parent of the
   git common directory, found by reading `.git` (a directory, or a `gitdir:`
   file and its `commondir`), and by `git rev-parse --git-common-dir` only when
-  `GIT_DIR` or `GIT_COMMON_DIR` is set or the layout is unrecognised. A missing
+  `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_CEILING_DIRECTORIES` is set or the layout is unrecognised. A missing
   directory, a non-repository or a failed fallback git call gives nothing. Near-duplicates (S-7) are file pairs whose
   frontmatter name and description tokens overlap at Jaccard 0.5 or more; files
   with fewer than 4 tokens are skipped. The `--t2` census reads "phase closed" as
   the RDR's frontmatter `status: closed`, so a closed phase of a still-open RDR
   is not flagged; per-phase flagging is nexus-qo7ie.28. Technical Design 3's
   mapping sentence is read with this entry.
+- **2026-11-05, Sam's answer on hub-linked files (nexus-qo7ie.29).** A memory
+  file counts as indexed when either index file names it, or when a memory file
+  that an index names links it with a markdown link: one hub level, no deeper,
+  and a bare file name in a hub's prose does not count. A hub link counts only
+  when it points into the memory directory (`x.md` or `./x.md`); `archive/x.md`
+  and `../x.md` name other files. On Sam's memory directory the 27 files linked
+  from `project_key_technical_facts.md` had read as unindexed; with this rule
+  the count is 0. `nx memory curate --files` applies it through
+  `nexus._hook_runtime.memory_scan.scan`, and the SessionStart check
+  (nexus-qo7ie.16, not yet built) is to call the same function. Technical
+  Design 3's "Indexed" sentence was amended to match.
+- **2026-11-06, the report title of a partial run (nexus-qo7ie.30).** As
+  built, a run that selects fewer than all three of `--files`, `--t2` and
+  `--agents` (a `--cold`-only run included) stores its report as `<repo>/curation-report-<date>-<sections>`, so it never
+  replaces that day's full report. `docs/cli-reference.md`, the command's help
+  and `report_title` said so; TD4 item 4 is amended to match.
 
 ### Critical Assumptions
 
@@ -430,8 +446,11 @@ them.
    the on-demand index file `MEMORY-ondemand.md` exists, so a repo with
    another layout never sees it. It finds the memory directory from the git
    common directory, so a linked worktree checks its primary's directory.
-   "Indexed" means named in `MEMORY.md` or `MEMORY-ondemand.md`; the two
-   index files are not themselves checked. Size is `MEMORY.md`'s bytes
+   "Indexed" means named in `MEMORY.md` or `MEMORY-ondemand.md`, or linked
+   by a markdown link from a memory file one of them names (one hub level;
+   Key Discoveries 2026-11-05); the two index files are not themselves
+   checked. The check calls `nexus._hook_runtime.memory_scan.scan`, the
+   function `nx memory curate --files` uses, so the two cannot disagree. Size is `MEMORY.md`'s bytes
    divided by 4, against `memory.index_budget_tokens` in `.nexus.yml`
    (default 1500), read by a stdlib line scan for that one key under a
    top-level `memory:` block, since the hook cannot import a YAML parser; a
@@ -440,7 +459,10 @@ them.
    we choose, plus the checks Claude Code does not make.
 4. **Curation report.** `nx memory curate [--files] [--t2] [--agents]
    [--cold] [--days N]`, printed to stdout and stored in T2 as
-   `<repo>/curation-report-<date>` with a 90-day TTL. `--days N` (default 30)
+   `<repo>/curation-report-<date>` with a 90-day TTL; a run that selects fewer
+   than all three of `--files`, `--t2` and `--agents` stores
+   `<repo>/curation-report-<date>-<sections>` (for example `-files`), so a
+   partial run never replaces the day's full report. `--days N` (default 30)
    sets the window for `--files` and `--cold`; for counts read from
    transcripts, which are kept about 30 days (inferred from file dates,
    research 9), N is capped at that span and the report prints the span it

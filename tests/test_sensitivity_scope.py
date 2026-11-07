@@ -24,6 +24,7 @@ import contextvars
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -284,18 +285,24 @@ def test_hop_3_aspect_worker_thread_enters_the_scope_per_drained_row(monkeypatch
 
     claimed: list[Any] = []
 
-    def claim() -> list[Any]:
+    def claim_batch(*, park: bool = True) -> tuple[list[Any], bool]:
+        # The tuple drain (the only drain since nexus-hbnml): one claim, then an empty queue.
         if claimed:
-            return []
+            worker._stop_event.set()
+            return [], False
         row = QueueRow(
             collection="knowledge__scope-test__minilm-l6-v2-384__v1", source_path="/tmp/x.md",
-            content_hash="h", content="body", retry_count=0,
+            content_hash="h", content="", retry_count=0,
         )
         claimed.append(row)
-        return [row]
+        return [SimpleNamespace(row=row)], False
 
-    monkeypatch.setattr(worker, "_claim_table_rows", claim)
-    monkeypatch.setattr(worker._tuple_side, "supported", lambda: False)
+    side = worker._tuple_side
+    monkeypatch.setattr(side, "supported", lambda: True)
+    monkeypatch.setattr(side, "claim_batch", claim_batch)
+    # The side's process runs its sensitivity read and completion on the engine; here it hands the
+    # claims straight to the worker's extract callback, on the loop thread, as process does.
+    monkeypatch.setattr(side, "process", lambda claims: worker._extract_tuple_rows(claims))
     monkeypatch.setattr(aw, "_extract_aspects", fake_extract)
     monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
     monkeypatch.setattr(mcp_infra, "t2_index_write", lambda fn: None)
@@ -329,8 +336,6 @@ WRAPPED_ENTRY_POINTS: dict[tuple[str, str], str] = {
     ("nexus.commands.taxonomy_cmd", "_review_auto"): "taxonomy_review_auto",
     ("nexus.commands.enrich", "enrich_aspects"): "enrich_aspects",
     ("nexus.commands.enrich", "_run_validation_sample"): "validate_sample",
-    ("nexus.aspect_worker", "AspectExtractionWorker._process_row"): "aspect_worker_drain",
-    ("nexus.aspect_worker", "AspectExtractionWorker._process_batch"): "aspect_worker_drain",
     ("nexus.aspect_worker", "AspectExtractionWorker._extract_tuple_rows"): "aspect_worker_drain",
 }
 
@@ -411,8 +416,6 @@ ROOT_HOMES: frozenset[str] = frozenset({
 REACHED_UNDER: dict[str, tuple[tuple[str, str], ...]] = {
     "nexus.aspect_extractor:_api_inner_text": (
         ("nexus.commands.enrich", "enrich_aspects"),
-        ("nexus.aspect_worker", "AspectExtractionWorker._process_row"),
-        ("nexus.aspect_worker", "AspectExtractionWorker._process_batch"),
         ("nexus.aspect_worker", "AspectExtractionWorker._extract_tuple_rows"),
     ),
     "nexus.commands.taxonomy_cmd:_generate_labels_batch": (("nexus.commands.taxonomy_cmd", "relabel_topics"),),

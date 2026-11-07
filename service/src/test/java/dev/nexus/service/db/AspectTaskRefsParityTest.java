@@ -30,15 +30,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * A <b>site</b> in {@code CatalogRepository}, {@code AspectRepository} or {@code ReembedSourceReader} is
  * <ol>
  *   <li>a statement ({@code deleteFrom}, {@code update}, {@code fetchCount}, {@code fetchExists}) on
- *       {@code ASPECT_EXTRACTION_QUEUE} that names {@code ASPECT_EXTRACTION_QUEUE.COLLECTION} in a WHERE or
- *       SET and carries no per-row key ({@code ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(...)}: the
- *       {@code (collection, source_path)} primary key addresses one row, as the worker's own
- *       {@code markDone}, {@code markFailed} and {@code markRetry} do), or</li>
+ *       {@code DOCUMENT_ASPECTS} that names {@code DOCUMENT_ASPECTS.COLLECTION} in a WHERE or
+ *       SET and carries no per-row key ({@code DOCUMENT_ASPECTS.SOURCE_PATH.eq(...)}: the
+ *       {@code (collection, source_path)} unique key addresses one row, as {@code deleteAspect} does),
+ *       or</li>
  *   <li>a loop over {@code COLLECTION_SCOPED_TABLES}.</li>
  * </ol>
- * A site is <b>covered</b> when its method also contains a call {@code AspectTaskRefs.<verb>(}. The queue's
- * own claim, ack, retry, list and import methods are not sites: none names the collection column without a
- * row key, so the scan neither lists nor exempts them.
+ * A site is <b>covered</b> when its method also contains a call {@code AspectTaskRefs.<verb>(}. The aspect
+ * repository's other methods (get, upsert, list, import) are not sites: none deletes, updates or counts by the
+ * collection column without a row key, so the scan neither lists nor exempts them. (Until nexus-hbnml the
+ * statement arm scanned the aspect_extraction_queue table; the table is gone and the tasks stand where its
+ * rows stood.)
  *
  * <p>A second rule holds the lock order the bead fixes (the tuple row lock FIRST, then
  * {@code document_aspects}, so a rename never takes the two in the opposite order to a claim-fenced aspect
@@ -47,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>Non-vacuity</h2>
  * The real source must examine at least {@link #MIN_SITES} sites, in every one of the
- * {@link #EXPECTED_METHODS}; a planted registry loop and a planted collection-keyed queue statement with no
+ * {@link #EXPECTED_METHODS}; a planted registry loop and a planted collection-keyed aspects statement with no
  * call are each reported, and a covered or row-keyed one is not.
  *
  * <h2>What it does not guarantee</h2>
@@ -62,7 +64,7 @@ class AspectTaskRefsParityTest {
 
     /** The ten census sites of the RDR, as {@code File#method}. */
     private static final TreeSet<String> EXPECTED_METHODS = new TreeSet<>(List.of(
-        "AspectRepository#renameQueueCollection",
+        "AspectRepository#renameAspectCollection",
         "CatalogRepository#completeMove",
         "CatalogRepository#deleteCollectionTxn",
         "ReembedSourceReader#residue",
@@ -76,13 +78,17 @@ class AspectTaskRefsParityTest {
     /** The non-vacuity floor: the census names ten sites. */
     private static final int MIN_SITES = 10;
 
-    private static final Pattern QUEUE_VERB = Pattern.compile(
-        "\\b(deleteFrom|update|fetchCount|fetchExists)\\s*\\(\\s*ASPECT_EXTRACTION_QUEUE\\b");
-    private static final Pattern QUEUE_COLLECTION = Pattern.compile(
-        "ASPECT_EXTRACTION_QUEUE\\s*\\.\\s*COLLECTION\\s*\\.\\s*eq\\s*\\("
-            + "|\\.set\\s*\\(\\s*ASPECT_EXTRACTION_QUEUE\\s*\\.\\s*COLLECTION\\b");
-    private static final Pattern QUEUE_ROW_KEY = Pattern.compile(
-        "ASPECT_EXTRACTION_QUEUE\\s*\\.\\s*SOURCE_PATH\\s*\\.\\s*eq\\s*\\(");
+    // nexus-hbnml: the sites were keyed on ASPECT_EXTRACTION_QUEUE until that table was retired. The tasks that
+    // replaced its rows travel with document_aspects everywhere (every site that rewrites, deletes or counts a
+    // collection's document_aspects rows must also act on that collection's tasks), so the statement scan is keyed
+    // on DOCUMENT_ASPECTS now.
+    private static final Pattern ASPECTS_VERB = Pattern.compile(
+        "\\b(deleteFrom|update|fetchCount|fetchExists)\\s*\\(\\s*DOCUMENT_ASPECTS\\b");
+    private static final Pattern ASPECTS_COLLECTION = Pattern.compile(
+        "DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\s*\\.\\s*eq\\s*\\("
+            + "|\\.set\\s*\\(\\s*DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\b");
+    private static final Pattern ASPECTS_ROW_KEY = Pattern.compile(
+        "DOCUMENT_ASPECTS\\s*\\.\\s*SOURCE_PATH\\s*\\.\\s*eq\\s*\\(");
     private static final Pattern REGISTRY_LOOP = Pattern.compile(
         "\\bfor\\s*\\([^;{}]*:\\s*COLLECTION_SCOPED_TABLES\\s*\\)"
             + "|\\bCOLLECTION_SCOPED_TABLES\\s*\\.\\s*(stream|forEach|iterator|parallelStream)\\s*\\(");
@@ -174,36 +180,36 @@ class AspectTaskRefsParityTest {
     }
 
     @Test
-    void aPlantedCollectionKeyedQueueStatementWithNoHelperCall_isReported() {
+    void aPlantedCollectionKeyedAspectsStatementWithNoHelperCall_isReported() {
         String planted = """
             class Planted {
                 int purge(DSLContext ctx, String name) {
-                    return ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
-                        .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(name)).execute();
+                    return ctx.deleteFrom(DOCUMENT_ASPECTS)
+                        .where(DOCUMENT_ASPECTS.COLLECTION.eq(name)).execute();
                 }
                 int rename(DSLContext ctx, String from, String to) {
-                    return ctx.update(ASPECT_EXTRACTION_QUEUE)
-                        .set(ASPECT_EXTRACTION_QUEUE.COLLECTION, to)
-                        .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(from)).execute();
+                    return ctx.update(DOCUMENT_ASPECTS)
+                        .set(DOCUMENT_ASPECTS.COLLECTION, to)
+                        .where(DOCUMENT_ASPECTS.COLLECTION.eq(from)).execute();
                 }
             }
             """;
         Examined e = examine("Planted", planted);
         assertThat(e.sites()).isEqualTo(2);
-        assertThat(e.uncovered()).containsExactly("Planted#purge: queue-statement", "Planted#rename: queue-statement");
+        assertThat(e.uncovered()).containsExactly("Planted#purge: aspects-statement", "Planted#rename: aspects-statement");
     }
 
     @Test
-    void aRowKeyedQueueStatement_isNotASite() {
+    void aRowKeyedAspectsStatement_isNotASite() {
         String planted = """
             class Planted {
                 int markDone(DSLContext ctx, String collection, String path) {
-                    return ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
-                        .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(collection)
-                            .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(path))).execute();
+                    return ctx.deleteFrom(DOCUMENT_ASPECTS)
+                        .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+                            .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(path))).execute();
                 }
                 int byDocOnly(DSLContext ctx, String docId) {
-                    return ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId)).execute();
+                    return ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.DOC_ID.eq(docId)).execute();
                 }
             }
             """;
@@ -218,7 +224,7 @@ class AspectTaskRefsParityTest {
             class Planted {
                 // for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) { }
                 String doc() {
-                    return "ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(x))";
+                    return "ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.COLLECTION.eq(x))";
                 }
             }
             """;
@@ -283,11 +289,11 @@ class AspectTaskRefsParityTest {
     private static List<Site> sitesOf(Method m) {
         List<Site> out = new ArrayList<>();
         String body = m.body();
-        Matcher verb = QUEUE_VERB.matcher(body);
+        Matcher verb = ASPECTS_VERB.matcher(body);
         while (verb.find()) {
             String window = statementFrom(body, verb.start());
-            if (QUEUE_COLLECTION.matcher(window).find() && !QUEUE_ROW_KEY.matcher(window).find()) {
-                out.add(new Site(m.name(), "queue-statement", verb.start()));
+            if (ASPECTS_COLLECTION.matcher(window).find() && !ASPECTS_ROW_KEY.matcher(window).find()) {
+                out.add(new Site(m.name(), "aspects-statement", verb.start()));
             }
         }
         Matcher loop = REGISTRY_LOOP.matcher(body);

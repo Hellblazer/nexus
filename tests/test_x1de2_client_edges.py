@@ -13,6 +13,7 @@ from click.testing import CliRunner
 from structlog.testing import capture_logs
 
 from nexus import aspect_worker
+from nexus.aspect_worker_tuples import TupleQueueSide
 from nexus.cli import main
 from nexus.commands import enrich
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore, _body_to_record
@@ -61,16 +62,16 @@ def test_with_doc_id_stamps_only_a_missing_identity():
     assert with_doc_id(kept, "1.2.3").doc_id == "9.9.9"
 
 
-def test_worker_completion_paths_attribute_the_queue_row():
-    """Both worker completion paths go through ``_attributed`` — a wiring
-    pin, so neither can quietly revert to the bare asdict(record)."""
-    # Scoped to the two completion methods, not the whole module, so an
+def test_worker_completion_path_attributes_the_queue_row():
+    """The worker's completion path (the tuple side's verdict, RDR-235) goes
+    through ``_attributed`` — a wiring pin, so it cannot quietly revert to the
+    bare asdict(record)."""
+    # Scoped to the one completion method, not the whole module, so an
     # unrelated edit elsewhere cannot red this pin (substantive-critic).
-    batch = inspect.getsource(aspect_worker.AspectExtractionWorker._process_batch)
-    single = inspect.getsource(aspect_worker.AspectExtractionWorker._process_row)
-    for name, src in (("_process_batch", batch), ("_process_row", single)):
-        assert "_attributed(record, row)" in src, f"{name} must stamp the queue row's doc_id"
-        assert "asdict(record))" not in src, f"{name} completes a bare, unattributed record"
+    verdict = inspect.getsource(TupleQueueSide._verdict)
+    assert "_attributed(result, row)" in verdict, "the verdict must stamp the queue row's doc_id"
+    assert "dataclasses.asdict(attributed)" in verdict, "the verdict completes the attributed record"
+    assert "asdict(record))" not in verdict, "the verdict completes a bare, unattributed record"
     row = dataclasses.make_dataclass("Row", [("doc_id", str)])("4.5.6")
     assert aspect_worker._attributed(_record(), row).doc_id == "4.5.6"
     assert aspect_worker._attributed(_record(), object()).doc_id == ""
@@ -164,16 +165,14 @@ def test_is_unattributable_false_for_non_file_routed_collection():
     assert aspect_worker._is_unattributable(rec) is False
 
 
-def test_worker_completion_paths_refuse_unattributable_rows():
-    """Wiring pin, mirroring test_worker_completion_paths_attribute_the_
-    queue_row above: both completion paths must check _is_unattributable
-    and route a positive to a terminal mark_failed(..., error=
-    "unattributable_identity") instead of completing an unfindable row."""
-    batch = inspect.getsource(aspect_worker.AspectExtractionWorker._process_batch)
-    single = inspect.getsource(aspect_worker.AspectExtractionWorker._process_row)
-    for name, src in (("_process_batch", batch), ("_process_row", single)):
-        assert "_is_unattributable(attributed)" in src, f"{name} must refuse an unattributable row"
-        assert "unattributable_identity" in src, f"{name} must mark_failed with the named reason"
+def test_worker_completion_path_refuses_unattributable_rows():
+    """Wiring pin, mirroring test_worker_completion_path_attributes_the_
+    queue_row above: the completion path must check _is_unattributable and
+    route a positive to a dead-letter with the named reason
+    ("unattributable_identity") instead of completing an unfindable row."""
+    verdict = inspect.getsource(TupleQueueSide._verdict)
+    assert "_is_unattributable(attributed)" in verdict, "the verdict must refuse an unattributable row"
+    assert "unattributable_identity" in verdict, "the verdict must dead-letter with the named reason"
 
 
 @pytest.fixture

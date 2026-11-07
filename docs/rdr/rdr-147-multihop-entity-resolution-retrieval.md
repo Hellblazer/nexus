@@ -2,7 +2,8 @@
 title: "Multi-hop entity-resolution retrieval: an exact-key resolve step and a resolution repair inside the coverage boundary"
 id: RDR-147
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-06
 resumed_date: 2026-11-03
 priority: high
 author: Hal Hildebrand
@@ -10,7 +11,7 @@ reviewed-by: self
 created: 2026-06-03
 accepted_date: 2026-11-03
 deferred_date: 2026-07-08
-deferred_reason: "All 11 tracking beads, including epic nexus-bwct4, are DEFERRED (P1/P2/P3 rungs incl. entity-linker hook, resolve operator, type-mismatch trigger, phase-review gates, E2E/MVV) as of 2026-07-08. Corrects 2026-08-18 audit finding: this deferral was visible in beads but not reflected in the RDR frontmatter, the audit's highest-value single correction."
+deferred_reason: "Historical: the June design and its 11 beads were deferred 2026-07-08; the redesign resumed 2026-11-03 (nexus-t9npq) and was accepted that day."
 related_issues: []
 ---
 
@@ -22,8 +23,8 @@ related_issues: []
 ## Revision note (2026-11-03, nexus-t9npq)
 
 This revision replaces the June 2026 design. It is a redesign, not an anchor
-refresh, and it needs a new gate before any implementation bead starts. The
-status stays `deferred`; Sam moves every lifecycle step.
+refresh, and it needed a new gate before any implementation bead started. The
+status then stayed `deferred` until Sam moved it (accepted 2026-11-03).
 
 What changed, and why:
 
@@ -133,7 +134,13 @@ step that checks whether the evidence supports each part of the question, called
 a *facet*, before the final answer is generated). Its one *repair* (a second,
 targeted retrieval for unsupported facets) runs semantic queries on the facet's
 text. For an exact-key join that repeats the embedding collision of Gap 2. The
-gap is that the repair has no exact-key path.
+gap is that the repair has no exact-key path. **As built:** the exact-key branch
+scans the coverage anchors only, not all retrieved evidence. On HERB the backend
+search-engine issue question holds customer ids in its evidence and none in its
+anchors in all 8 MVV runs of 147-research-13, -14 and -17 (8 ids in each, by their
+row files and `docs/rdr/evidence/rdr-147/herb-scorecard.json`; the attempt with no
+`claude` on PATH retrieved nothing and is not counted), and named no company in any;
+widening the scan was left out of this RDR (Sam, 2026-11-06, nexus-z938f closed).
 
 #### Gap 4: No gating; blanket iteration harms simple questions
 
@@ -413,7 +420,7 @@ the script, so recall alone does not make the answer better than the script's.
   its key, and a caller-set `entity_key` that differs from the title is read by
   nothing until the conditional linker or a meta-key filter exists
   (147-research-11).
-- [ ] **#2 A post-store batch hook can create catalog links** — **Status**: To
+- [deferred: nexus-81183] **#2 A post-store batch hook can create catalog links** — **Status**: To
   re-verify on the PG engine (Step 2, only if the linker is built). The June
   verification reasoned about the T2 daemon's `asyncio.Lock` and an `fcntl` lock
   that no longer exist. The current precedent is `fire_note_chains` firing with
@@ -462,15 +469,17 @@ the script, so recall alone does not make the answer better than the script's.
 
 ### Approach
 
-Three changes. Only the first two are on the path to the MVV.
+Three changes. Only the first two are on the path to the MVV, together with
+the routing template of Step 4 branch (c), which sends these questions to a plan
+with a coverage boundary (147-research-15, 147-research-16).
 
 1. **A `resolve` step (Gap 2).** A runner-native plan step that takes a list of
    key strings and returns the documents whose catalog title equals each one,
    exactly. Keys that match nothing and keys that match more than one document
    are reported, never dropped or guessed.
 2. **A resolution repair inside the coverage boundary (Gaps 3, 4).** When the
-   coverage boundary finds a facet unsupported and the evidence it holds
-   contains tokens that a configured *entity-key pattern* recognises (for
+   coverage boundary finds a facet unsupported and the coverage anchors it holds
+   (the evidence chunks it assessed) contain tokens that a configured *entity-key pattern* recognises (for
    example `CUST-\d{4}`), its one repair runs `resolve` on those tokens and adds
    each resolved record *joined* to the evidence item that named its key (the
    item's text, then the record's text, as one item) before the single re-check.
@@ -490,7 +499,7 @@ Three changes. Only the first two are on the path to the MVV.
    leads with a notice that it rests on an exact-key join, as the chosen option's text asks;
    when the final ledger was uncovered, the notice adds that the coverage check
    did not confirm it. The facet states stay as the re-check judged them. The gate is the signal
-   itself: an unsupported facet AND entity-key tokens in the evidence. A question
+   itself: an unsupported facet AND entity-key tokens in the coverage anchors. A question
    with no such tokens never reaches it, so simple questions are untouched
    (Beyond-Static guidance), and no second planning round, new plan dimension or
    planner prompt change is needed.
@@ -635,8 +644,8 @@ entity-ref}`. It is withdrawn. The inline planner cannot emit `filter`; the
 runner hands `filter` text items only, so tumblers do not carry through it;
 `plan_save` takes no free dimensions; and `answer_shape` already names RDR-232's
 terminal-text classifier. Step 0 also shows the filter is not needed on the issue
-lookups (hop-1 precision 0.967). A curated template is a contingency only
-(Step 4, branch c).
+lookups (hop-1 precision 0.967). The one curated template built is for routing
+(Step 4, branch c): it carries `hybrid-factual-lookup`'s steps, not June's chain.
 
 ### Existing Infrastructure Audit
 
@@ -645,6 +654,7 @@ lookups (hop-1 precision 0.967). A curated template is a contingency only
 | `resolve` step | `HttpCatalogClient.find_by_title_exact`, `resolve_many`; runner `_NON_EMBEDDING_TOOLS` | Add: a thin runner-native step over the existing exact lookup. New code (about 120 lines plus tests). |
 | Resolution repair | `CoverageBoundary.run`, `coverage_repair`, `repair_stream` | Extend: an exact-key branch inside the existing one repair, and option 1's generation rule (`coverage_outcome.decide_outcome`, the notice in `mcp/core.py`). New code (about 300 lines plus tests). |
 | Entity-key patterns and `entity_key` | `config.py` `_DEFAULTS`, `.nexus.yml`; catalog document meta | Add: config key, stamp on store_put, `classify_entity` helper (about 150 lines). |
+| Routing for a `discovery/listing` reading (Step 4 branch c) | builtin plan YAMLs; `matcher.py` category route | Add: `entity-resolution.yml` with `hybrid-factual-lookup`'s steps (105 lines), and a `cosine-only` tag the category route skips (19 lines in `matcher.py`). |
 | Graph expansion over `mentions` | `traverse` step | Reuse unchanged; it already runs as a `$ref`-seeded step. June's "extend the runner" was wrong. |
 | `mentions` links | `link_if_absent`, `upsertLink` | Reuse, conditional on Step 2. |
 | Key → artifact token match for the linker | none | Not FTS (there is no exhaustive token route). Forward pass reads the artifact's own text; reverse pass is a post-hoc generator. |
@@ -736,6 +746,8 @@ where evidence is seen.
   existing budgets.
 - (−) The coverage boundary gains a second repair path to maintain.
 - (−) Per-collection key patterns are configuration someone must write.
+- (−) The scan reads the coverage anchors only, so a question whose keys sit in
+  other retrieved chunks is still declined (the HERB backend question; Gap 3).
 - (−) If the linker is built: an extra write per mention and link maintenance on
   delete.
 
@@ -752,11 +764,19 @@ where evidence is seen.
 - **R3, the repair may not enter (Assumption #5).** Retired by measurement: the
   repair enters on q2 to q7 (147-research-7).
 - **R4, request kind.** "Find the names of companies …" is likely read as
-  `unknown` by the fixed rules and decided by the model call, likely as
-  discovery/listing. A curated lookup plan would then be ineligible
-  (`eligibility.py`). The repair does not depend on the request kind.
-  **Mitigation**: any curated template (Step 4, branch c) declares a kind
-  measured on the 7 questions.
+  `unknown` by the fixed rules and decided by the model call. Measured on
+  2026-11-06 (147-research-15): the call read `lookup` 13 times in 14, which
+  leaves only `hybrid-factual-lookup` (a coverage boundary), and once
+  `discovery/listing`, which leaves only the single-query listing templates, so
+  `document-discovery` answered with no coverage boundary and the MVV run lost a
+  question. **Mitigation**: Step 4 branch (c), a curated `discovery/listing`
+  template with the coverage-bearing body, so either reading reaches a coverage
+  boundary. Tagged `cosine-only`, it is never offered by the below-floor
+  category route; on the cosine path it wins only at or above the 0.40 floor,
+  and the FTS5 fallback, which ignores the tag, can still admit it. Accepted residual (Sam, 2026-11-06, 147-research-16): "Which documents
+  mention the customers affected?" and two borderline wordings, read as
+  `discovery/listing` or in the shadow regime, now get this template, a
+  synthesized answer instead of a document list.
 - **R5, answering from every held id may cost precision.** The evidence holds
   more customer ids than the script reads (on the issue questions, 4 to 10
   against 4 to 6). Measured with the joined items, precision was 0.9667 on the
@@ -779,7 +799,10 @@ where evidence is seen.
   merged join; the notice says so; `no_grow` keeps such answers from growing a
   plan (a library plan that answered still has its success counted, as for a
   partial answer today); the MVV reports precision split by `generated_on_join`, and the held-out
-  set counts answered outcomes as well as firings.
+  set counts answered outcomes as well as firings. Since Phase 2 the switch is on
+  by default, so the remaining guards are the notice and the `entity.collections`
+  requirement; option-1 precision is unmeasured beyond 2 of 2 (147-research-14),
+  and nexus-bwct4.4 measures it.
 
 ### Failure Modes
 
@@ -792,17 +815,20 @@ where evidence is seen.
   sees only live documents, so stale links cannot reach either; `links_from` and
   `links_to` can still show them (R8). Hard delete cascades.
 - **Recovery**: the resolution repair and the linker are each behind a switch;
-  off is today's behavior.
+  off is today's behavior. The branch (c) template has no switch: `nx plan
+  disable <id>` keeps it off on one install until a release edits its
+  description (147-research-16).
 
 ## Implementation Plan
 
 ### Prerequisites
 
 - [x] Step 0 measured and merged (nexus-3lu23; assetops-kg PR #3).
-- [ ] This revision gated (`/conexus:rdr-gate 147`) and accepted. No
+- [x] This revision gated (`/conexus:rdr-gate 147`) and accepted. No
   implementation bead starts before that.
 - [x] Critical Assumption #5 measured (Step 4 sub-step 1, 2026-11-03,
-  147-research-7): the repair enters; Step 4 takes branch (a).
+  147-research-7): the repair enters; Step 4 takes branch (a). Branch (c) was
+  rewritten as the routing fix after the 2026-11-06 MVV (147-research-15).
 
 ### Minimum Viable Validation
 
@@ -812,9 +838,13 @@ run (a plan grown from one question otherwise captures later ones,
 147-research-9), and two runs per question, the MVV gates what the exact-key join
 controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 
-- **Join completeness:** on every issue question whose evidence holds at least
-  one customer id, the answer names every company those ids resolve to (measured
-  10 of 10, 147-research-9). At most one such question may miss per run, with at
+- **Join completeness:** on every issue question whose coverage anchors hold at
+  least one entity key (the run's `anchor_key_ids` is non-empty: the domain, as
+  the harness counts it; Sam, 2026-11-06, T2
+  `nexus/rdr147-domain-decision-2026-11-06`), the answer names every company
+  those keys resolve to (measured 10 of 10, 147-research-9). A question whose
+  evidence holds ids but whose anchors hold none is outside the domain, and the
+  run reports it. At most one in-domain question may miss per run, with at
   least 4 of the 5 issue questions in the domain (Sam, 2026-11-05,
   147-research-12: the 2026-11-05 miss was the re-check's variance on the same
   joined item).
@@ -827,8 +857,10 @@ controls (Sam, 2026-11-03, superseding the F1-against-the-script bar):
 Reported, not gated: issue5 company recall and F1 beside the script's
 0.7642857142857142 (asserted exactly, as the diagnostic baseline), and precision
 split by `generated_on_join`. Hop-1
-retrieval recall, which sets the remaining gap (measured issue5 F1 0.7167), is
-separate later work.
+retrieval recall, which with the declined backend question (Gap 3) sets the
+remaining gap (issue5 F1 0.7167 on 2026-11-03; 0.500 in both runs of the final
+MVV, 147-research-17), is separate later work (nexus-io7tw, hop-1 recall; the
+backend question's scan is left out, Gap 3).
 
 The measured system is `nx_answer`, through the harness's product rung (company
 names read from `final_text` against the 10-name company universe). The script
@@ -837,14 +869,15 @@ questions are reported (recall, precision, F1) and not gated. A run that clears
 the bar only through the semantic repair, with the resolution branch not
 entering, does not satisfy the MVV: the run summary must show the resolution
 branch entered on the questions that pass. The bar as revised on 2026-11-05
-applies to a fresh run on code that carries option 1, not to the 2026-11-05
+applies to a fresh run on code that carries option 1 and branch (c), not to the 2026-11-05
 rows: the first two runs predate the bar revision, and all four predate option
 1's code.
 
 ### Benchmark Ladder — per-phase observable metrics
 
 The harness (assetops-kg `benchmark/herb_ladder.py`) writes
-`results/herb/herb-scorecard.json`; a copy is checked into nexus as the
+`results/herb/herb-scorecard.json`; a copy is checked into nexus
+(`docs/rdr/evidence/rdr-147/herb-scorecard.json`, the final MVV's) as the
 regression baseline and updated per phase PR. Each number from a deterministic
 rung (P2, P3, the E2E script) is asserted exactly, so silent drift fails; the
 `nx_answer` rung's numbers come from model calls and are asserted against their
@@ -859,7 +892,9 @@ gate thresholds, not exactly (plan T2 `nexus/plan-rdr147-2026-11-03`).
 | E2E `nx_answer` (MVV) | join completeness; company precision; recall / F1 reported | HERB ground truth | issue5 F1 0.0 | ≥ 4 of 5 issue questions in the domain, every resolved company named, at most one miss per run; per-run mean precision ≥ 0.95 over the questions whose answer names a company |
 | Aggregation (reported) | company recall / precision / F1 on agg2 | HERB ground truth | script 0.0, `nx_answer` 0.0 | reported, not gated |
 
-**Jointness, as measured.** On HERB the MVV needs: the resolution repair enters
+**Jointness, as measured.** On HERB the MVV needs: the question reaches a plan
+with a coverage boundary under either request-kind reading (Step 4 branch c,
+147-research-15) AND the resolution repair enters
 (Assumption #5) AND `resolve` returns the right records (P2) AND the joined
 items reach generation (since option 1 whether or not the re-check covers them;
 it covered 11 of 15, 147-research-13) AND the generated answer names the
@@ -917,14 +952,42 @@ a `$ref` step") is dropped: it already works.
      a named-source detection defect, fixed under RDR-232's rules as its own bead,
      before the resolution branch can be measured. This RDR does not change
      RDR-232's rule that a missing named source decides its facets.
-   - (c) Contingency, only if (a) or (b) lands and the MVV still fails because
-     hop-1 precision matters on some corpus: add `filter` to `_ALLOWED_TOOLS` and
-     its aliases, carry ids and tumblers through `filter`, and ship a curated YAML
-     plan (`strategy: entity-resolution`) whose declared answer kind is one the
-     HERB request kind can reach.
+   - (c) Routing (built after the 2026-11-06 MVV, Sam "proceed.", T2
+     `nexus/rdr147-branch-c-decision-2026-11-06`; 147-research-15). The MVV lost
+     run a because the request-kind model call read one question as
+     `discovery/listing`, and the only eligible plans for that kind were the
+     single-query templates, which never reach the coverage boundary. Ship one
+     curated builtin, `conexus/plans/builtin/entity-resolution.yml`
+     (`strategy: entity-resolution`, `verb: research`, `scope: global`, tags
+     including `builtin-template` and `cosine-only`), declaring `answer_kind: discovery/listing`, with the
+     step body of `hybrid-factual-lookup.yml` (search, traverse, fetch, rank,
+     generate), so a `discovery/listing` reading of these questions gets a plan
+     with a coverage boundary and a `lookup` reading still gets
+     `hybrid-factual-lookup`. Its match text names entity-listing requests ("Names
+     of companies that were affected by issues in the product, and the clients
+     hit by the outage. Name of the company with the most resolved bugs."); with
+     the bundled MiniLM it scores 0.474 to 0.542 on the 7 questions, above the
+     0.40 floor (147-research-16; the offline estimate before the YAML existed was 0.535
+     to 0.643, 147-research-15, and the first committed wording scored 0.414 to
+     0.545, review r1 of 7e76d5387). The
+     `cosine-only` tag keeps it out of the below-floor category route
+     (`matcher.py` `_is_cosine_only_plan`), where it stole requests that are not
+     entity listings. No golden discovery request changes plan; the accepted
+     residual is in R4.
+     Deterministic tests over the real matcher and the YAML on disk pin: for each
+     request kind (`lookup`, `discovery/listing`, `unknown`, `synthesis`, and the
+     shadow regime) the HERB questions and paraphrases reach a plan that is not a
+     single query; the golden discovery requests keep their plans; deleting the
+     YAML brings plan 7 back. The builtin count pins move from 12 to 13. The
+     earlier contingency text (`filter` in `_ALLOWED_TOOLS`, ids through
+     `filter`) is not built: its trigger, hop-1 precision, did not fire (MVV
+     precision 1.00). Then a fresh MVV run on a reseeded sandbox.
 3. **Gate condition (Gap 4).** The resolution branch fires on the HERB issue
    questions and does not fire on a held-out set of single-hop questions; count
-   both and record the counts.
+   both and record the counts. As measured, the held-out count (entered 0 of 20)
+   is structural: 12 questions had no key in their anchors and 8 never reached
+   the repair, so none had both conjuncts of the gate, and its selectivity is not
+   yet shown (close critique r2; a key-bearing held-out arm is nexus-bwct4.4).
 4. **Generation after an entered join (option 1, Sam 2026-11-05;
    147-research-13).** Added after the 2026-11-05 MVV, where the re-check
    rejected 4 of 15 entered joins: when the branch entered and merged at least
@@ -949,7 +1012,18 @@ endpoints as `traverse` does; this matters only if Step 2 ships.
 
 ### Phase 2: Operational Activation
 
-The resolution repair and the linker default off; enable on the HERB sandbox
+**Turned on 2026-11-06 for the resolution repair** (Sam, nexus-bwct4.2; the bead
+closes on develop CI):
+`NX_ANSWER_RESOLUTION_REPAIR` is on by default; `0`, `false`, `off` or `no` turns
+it off, and an unrecognised value reads as off. An install with no
+`entity.collections` configured does not consider the branch at all, so its
+repair and wire are as before RDR-147. The preconditions, as measured
+(147-research-17): the MVV green, P2 29 of 29, the single-hop held-out set
+entered 0 of 20 (structural, see Step 4 sub-step 3), and precision on `generated_on_join` answers reported with
+n = 0 in the final MVV (every entered join, 8 of 8, passed the re-check; the only live option-1
+answers are 2 of 2 correct on 2026-11-06, 147-research-14). The linker stays off.
+
+As planned: the resolution repair and the linker default off; enable on the HERB sandbox
 first. Default-on for the resolution repair requires: the MVV green, P2 = 1.0
 through `resolve`, Step 4's single-hop non-firing and answered counts recorded,
 and the MVV's precision on `generated_on_join` answers reported (the switch now
@@ -971,6 +1045,8 @@ No new external packages. New components:
 - Resolution repair branch in the coverage boundary, with option 1's generation
   rule and notice: about 300 lines plus tests.
 - Entity-key config, `entity_key` stamp and `classify_entity`: about 150 lines.
+- Step 4 branch (c): the `entity-resolution` builtin (105 lines of YAML) and
+  the `cosine-only` tag in `matcher.py` (19 lines), plus tests.
 - Entity linker, conditional: about 300 lines (forward hook, reverse generator,
   dry run).
 
@@ -1014,12 +1090,20 @@ since option 1 the MVV no longer needs it.
 
 The Minimum Viable Validation is in scope and is the Step 4 exit test: on the
 Step 0 sandbox and conditions, with grown plans disabled and two runs per
-question, the answer names every company its retrieved customer ids resolve to,
-with at least 4 of the 5 issue questions in the domain and at most one miss per
-run, at precision ≥ 0.95 over those of the 5 issue
+question, on every issue question whose coverage anchors hold an entity key the
+answer names every company those keys resolve to (Sam, 2026-11-06), with at
+least 4 of the 5 issue questions in that domain and at most one miss per run, at precision ≥ 0.95 over those of the 5 issue
 questions whose answer names a company (Sam, 2026-11-05); recall and F1 are reported beside
 the script's 0.7642857142857142. The 2 aggregation questions are reported, not gated (Sam,
 2026-11-03).
+
+**Result (147-research-17):** passed on develop 1ecf3ca6d in the one invocation
+of two runs on the final code, at the floor: 4 of 5 issue questions in the
+anchor domain per run, every one complete, precision 1.00. This bar was revised
+after earlier failing runs (Revision History); it gates the join, not retrieval:
+issue5 F1 was 0.500 in both runs against the script's 0.764, and the backend
+question stays outside the domain and declined. The two earlier 2026-11-06 runs
+on code without branch (c) passed once and lost a question to routing once.
 
 ### Cross-Cutting Concerns
 
@@ -1028,8 +1112,11 @@ the script's 0.7642857142857142. The 2 aggregation questions are reported, not g
 - **Deployment model**: client-only steps; the engine is unchanged unless a
   batch by-titles route is later needed (more than 300 tokens per call).
 - **Incremental adoption**: the resolution repair is gated on an unsupported
-  facet plus recognised key tokens, so other questions take today's path; the
-  linker is off by default.
+  facet plus recognised key tokens, so other questions take today's path; since
+  Phase 2 it is on by default, and an install with no `entity.collections`
+  configured does not consider it at all. The linker is off by default. The branch (c) template is not behind a switch:
+  entity-listing questions it wins take the multi-step plan on every install
+  that has not run `nx plan disable` on it.
 - **Memory management**: `resolve` holds one call's tokens and their manifests;
   bounded by the plan step's input.
 - Build tool compatibility, Licensing, IDE compatibility, Secret/credential
@@ -1040,8 +1127,8 @@ the script's 0.7642857142857142. The 2 aggregation questions are reported, not g
 Right-sized for a redesign of three mechanisms and the validation bar. The
 document is long because it carries measured numbers with their conditions and
 the anchors an implementer needs; the implementation itself is about 570 lines
-plus tests on the MVV path (resolve, the repair branch, entity keys), with the
-linker conditional.
+plus tests on the MVV path (resolve, the repair branch, entity keys), and about
+125 more for the branch (c) routing template, with the linker conditional.
 
 ## Revision History
 
@@ -1057,3 +1144,8 @@ linker conditional.
 - 2026-11-05: fix-check 3e08dbecd findings applied: the option 1 outcome mapping (answered shape, `no_grow`, `generated_on_join`, its own notice), the notice scoped to uncovered answers, "merged at least one" marked as this RDR's reading, stale Assumption #6 and Jointness sites, R9, the precision-evidence caveat, the fresh-run clause, sizes.
 - 2026-11-05: text brought into line with the option 1 code (69cc82790) and fix check b60dab40e: the notice leads every answer from a merged join (Sam's wording), the not-confirmed clause only when uncovered; `<n>` and `<keys>` from `joined_keys`; the answered shape only for answer text; the readers that consult `generated_on_join`.
 - 2026-11-05: option 1 review round 1 applied (nexus-irndi): the readers sentence corrected (`answer_text_class` consults `generated_on_join`; `nx answer-runs` does not, it skips a leading join line; this line corrects the history line above it, which said both consult it); "the chosen option's text" for "Sam's wording" in the Approach; the precision caveat's template-7 clause (a listing that named no company, outside the mean; 11 company-naming runs, the 4 backend-question runs named none); sub-step 4's redacted-row test scoped to a `generated_on_join` answer; the generator gets no unresolved-facets note; precision split by `generated_on_join` reported, not gated.
+- 2026-11-06: the join-completeness domain is the questions whose anchors hold a key (Sam, T2 `nexus/rdr147-domain-decision-2026-11-06`); branch (c) rewritten as the routing fix the 2026-11-06 MVV needs (Sam "proceed.", 147-research-15); R4 updated with the measured request kinds.
+- 2026-11-06: wording follows the reviewed branch (c) code (c764cc95f, standing grant 3; 147-research-16): the routing template on the MVV path, its `cosine-only` tag and shipped match text and scores, no switch, the residual Sam accepted; and the anchor domain (Sam's 2026-11-06 decision) in Scope Verification.
+- 2026-11-06: close-time critique (partial, 0 Critical, 3 Significant) answered in the text: the scan reads the coverage anchors, not all evidence, and the HERB backend question stays declined (Gap 3, Approach, Consequences); the final MVV result and its F1 (147-research-17) in Scope Verification and the ladder; the scorecard path; Phase 2 turned on (Sam, nexus-bwct4.2: on by default, silent with no entity config; the bead closes on develop CI); prerequisite and Assumption #2 checkboxes dispositioned.
+- 2026-11-06: the last two fix checks of the day (both PASS) observations applied: the backend question's 8 runs and id counts cited to their row files, the F1 gap's later-work bead scoped, Phase 2 recorded as turned on until its bead closes.
+- 2026-11-06: close critique r2 (partial, 0 Critical, 3 Significant; T2 `147-close-critique-2026-11-06-r2`): the held-out 0 of 20 marked structural and option-1 precision as unmeasured, both carried by nexus-bwct4.4 (Sam: close with the gap as a bead); the frontmatter deferral and the revision note put in the past tense.

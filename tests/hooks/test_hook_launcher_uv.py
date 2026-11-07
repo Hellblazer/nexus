@@ -100,12 +100,13 @@ def _require_uv() -> None:
 
 
 def test_the_walk_finds_the_launcher_entries() -> None:
-    """Non-vacuity: nineteen entries launch through uv: five scripts, four through
+    """Non-vacuity: twenty entries launch through uv: six scripts, four through
     the shim (the fourth is the SubagentStop T1 nudge, nexus-mtheb.3) and seven
     through the launcher (RDR-228, nexus-sv2wx.8), and three through
-    ``compact_checkpoint.py`` (nexus-3lqxv)."""
+    ``compact_checkpoint.py`` (nexus-3lqxv); the sixth script is the Stop wake guard
+    (nexus-4cgop)."""
     entries = _launcher_entries()
-    assert len(entries) == 19, [(e, _script(h)) for e, h in entries]
+    assert len(entries) == 20, [(e, _script(h)) for e, h in entries]
     assert sum(1 for _, h in entries if _script(h) == "nx_launch.py") == 7
     assert {_script(h) for _, h in entries} == {
         "nx_launch.py",
@@ -116,6 +117,7 @@ def test_the_walk_finds_the_launcher_entries() -> None:
         "credential_print_guard.py",
         "mailbox_drain.py",
         "compact_checkpoint.py",
+        "stop_wake_guard.py",
     }
 
 

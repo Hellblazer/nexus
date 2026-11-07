@@ -30,15 +30,14 @@ Routes deliberately left OUT of this sweep, and why:
   not a discovered population -- a retry re-targets the SAME known ids,
   which is the ordinary idempotent-upsert/delete shape this mixin's
   default already exists for.
-- ``HttpMemoryStore.mark_done`` / ``mark_failed`` / ``restore``,
-  ``HttpAspectQueue.mark_done`` / ``mark_failed``: single-row,
-  caller-known-target state transitions, not sweeps.
+- ``HttpMemoryStore.mark_done`` / ``mark_failed`` / ``restore``:
+  single-row, caller-known-target state transitions, not sweeps. (The
+  aspect queue's table verbs left with the table, nexus-hbnml.)
 - ``nexus/db/t2/http_tuple_store.py`` (the RDR-205 tuple space): every
   route there is a DOCUMENTED design-of-record exception (the module's
   own top-of-file docstring) -- ``in``/``inp``'s crash-after-claim
   ambiguity is already covered by the lease + sweep mechanism, so
-  retrying is deliberately safe by design, unlike ``HttpAspectQueue``'s
-  claim verbs.
+  retrying is deliberately safe by design.
 - ``HttpVectorClient``'s GC routes (``gc_quarantine_orphans`` /
   ``gc_restore_rereferenced`` / ``gc_expire_quarantine``): fixed in the
   original nexus-ll31n commit via a different mechanism
@@ -60,7 +59,6 @@ import httpx
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
-from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 from nexus.db.t2.http_centroid_store import HttpCentroidStore
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -304,14 +302,3 @@ class TestTelemetryStoreSweeps:
         _assert_idempotent_false(m)
 
 
-class TestAspectQueueSweeps:
-    @pytest.fixture()
-    def queue(self):
-        q = HttpAspectQueue(base_url=_BASE_URL, _token=_TOKEN)
-        yield q
-        q.close()
-
-    def test_reclaim_stale(self, queue: HttpAspectQueue) -> None:
-        with patch.object(queue, "_post", return_value={"reclaimed": 0}) as m:
-            queue.reclaim_stale(timeout_seconds=300)
-        _assert_idempotent_false(m)

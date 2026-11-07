@@ -182,8 +182,8 @@ count" below refers to it.
 
 | # | Surface | file:line | Sends what, where | Proposed behaviour |
 | --- | --- | --- | --- | --- |
-| 1 | Aspect enqueue hook | aspect_worker.py:1868 | full content (MCP path) into the T2 queue for later extraction | skip loudly (`aspect_enqueue_skipped_sensitive`); persist no content |
-| 2 | Aspect worker drain | aspect_worker.py:1140 `_process_row` | queued or on-disk content to the LLM | re-check at drain (the flag may be set after enqueue); drop the queue row and log the tumbler and the surface |
+| 1 | Aspect enqueue hook | aspect_worker.py:1238 `sensitive_enqueue_filter` (the one enqueue gate: the hook, `enqueue_many` and `nx aspects requeue-failed`) | a task in the `aspects` tuple subspace that carries the document's identity; the worker reads the content at drain | skip loudly (`aspect_enqueue_skipped_sensitive`); write no task |
+| 2 | Aspect worker drain | aspect_worker_tuples.py:610 `TupleQueueSide._sensitive_verdict`, the one drain gate in front of aspect_worker.py:705 `_extract_tuple_rows` | document content to the LLM | re-check each claim at drain (the flag may be set after enqueue); ack a sensitive document's task as dropped before anything is read or sent, and log the tumbler and the surface; a catalog that cannot answer sends the claim back to the retry ladder |
 | 3 | Aspect extraction, CLI leg | aspect_extractor.py:2163 `_run_claude_isolated` | document text to `claude -p` (Anthropic) | `extract_aspects` (1517) refuses the document; the root asserts the scope |
 | 4 | Aspect extraction, API leg | aspect_extractor.py:2377 `_api_inner_text` | document text to the Anthropic API or an `openai_compat` endpoint | as row 3 |
 | 5 | `nx enrich aspects` | commands/enrich.py:1670; selection `_select_entries` 1875 | drives rows 3 and 4 | skip at selection; summary reports `N sensitive skipped` |
@@ -591,8 +591,11 @@ leaves the tool. Under `flag` the hit is returned with its content and a
 `sensitive_in_aspect_eligible` (warn: a sensitive document whose
 collection has an extractor by `select_config` or already has aspect
 rows), `sensitive_with_aspects` (fail: a sensitive document that already
-has aspect rows or queued rows, so it leaked before it was flagged; the
-remedy prints `nx enrich delete --tumbler`), and
+has aspect rows, or an available or claimed task in the `aspects` tuple
+subspace, so it leaked before it was flagged; the remedy prints
+`nx enrich delete --tumbler`. A dead task is not counted, because
+`nx aspects requeue-failed` never revives it, it carries identity only,
+and retention clears it), and
 `sensitive_in_external_embedder` (warn: a sensitive document in a Voyage
 collection). On a tenant with no sensitive documents each row reports
 not-applicable, never a green pass.
@@ -957,9 +960,13 @@ None.
   count; the canary string is absent from the response.
 - **Scenario**: Doctor rows on a tenant with no sensitive documents —
   **Verify**: not-applicable, not pass.
-- **Scenario**: Aspect drain after a late flag — **Verify**: a row queued
-  before the flag was set is dropped from the queue, the log names the
-  tumbler and the surface, and no content is sent.
+- **Scenario**: Aspect drain after a late flag — **Verify**: a task queued
+  before the flag was set is acked as dropped at drain, single and batched,
+  the log names the tumbler and the surface, and no content is sent.
+- **Scenario**: Requeue after a late flag — **Verify**: `nx aspects
+  requeue-failed` leaves a flagged document's dead task dead with a stderr
+  line, the dry run lists it, and an unreadable catalog revives nothing and
+  exits 1.
 
 ## Validation
 
@@ -1104,3 +1111,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-05: Sam's rulings: the aspect drain drops a sensitive row (no skipped_sensitive status); a Voyage-profile local install refuses MCP store_put(sensitive); nx store import refuses a flagged document into a Voyage collection without --ack-external-embedder.
 - 2026-11-05: Implementation notes under Technical Design item 8 record how Phase 1 applies the catalog flag (index paths, repo and batch skips, re-embed hold-back, note re-put, dry runs, reindex). No design change.
 - 2026-11-05: Sam's ruling: Phase 1 ships alone in conexus 7.96.0 (paired with engine-service-v0.1.180), superseding the 2026-11-04 ship-together ruling; the release text claims phase 1 only.
+- 2026-11-06: census rows 1 and 2, item 10 and the Test Plan follow the aspect queue onto the tuple drain (nexus-hbnml, 3ff3041ad; follow-ups 04aa4afc5, e7bfef5e4, e47aa0e33): the one enqueue gate and the one drain gate, a dead task not counted by `sensitive_with_aspects`, and requeue-failed leaving a flagged task dead. Wording only; the behaviour is the reviewed code.

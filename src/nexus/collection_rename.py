@@ -26,14 +26,12 @@ def rename_summary_parts(counts: dict[str, int]) -> list[str]:
 
     ``aspect_tasks`` is the engine's ``aspects_tasks`` count: the unconsumed
     ``aspects`` task bodies the rename rewrites to name the new collection
-    (RDR-235). ``aspect_queue`` is ``aspect_extraction_queue``, which the
-    engine still reports until that table is dropped. Zero or absent counts
-    (an engine predating a key) print nothing. Shared by ``nx collection
+    (RDR-235). The ``aspect_extraction_queue`` count is gone with the table
+    (nexus-hbnml). Zero or absent counts (an engine predating a key) print
+    nothing. Shared by ``nx collection
     rename`` and ``nx catalog rename-collection`` so they cannot drift.
     """
     parts: list[str] = []
-    if counts.get("aspect_queue"):
-        parts.append(f"{counts['aspect_queue']} aspect queue rows")
     if counts.get("aspect_tasks"):
         parts.append(f"{counts['aspect_tasks']} aspect tasks")
     return parts
@@ -152,7 +150,6 @@ def rename_collection_data_plane(
         "tax_centroids": 0,
         "chash": 0,
         "aspects": 0,
-        "aspect_queue": 0,
         "aspect_tasks": 0,
         "highlights": 0,
         "relevance_log": 0,
@@ -217,7 +214,6 @@ def rename_collection_data_plane(
     counts["tax_centroids"] = _unified_centroids
     counts["chash"] = renamed.get("chash_index", 0)
     counts["aspects"] = renamed.get("document_aspects", 0)
-    counts["aspect_queue"] = renamed.get("aspect_extraction_queue", 0)
     # nexus-l0ai3: the unconsumed aspects task bodies the rename rewrote.
     counts["aspect_tasks"] = renamed.get("aspects_tasks", 0)
     counts["highlights"] = renamed.get("document_highlights", 0)

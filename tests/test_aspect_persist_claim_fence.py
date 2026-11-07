@@ -3,18 +3,18 @@
 """RDR-235 client half (nexus-5r2sc.3.1): ``complete_aspect`` takes a claim pair.
 
 The engine tests run against the real engine substrate, with a real task on the ``aspects`` tuple
-queue. Test Plan scenario 9 (with a claim: the write and the tuple ack happen
-and the table is untouched; without one: the write and ``mark_done`` happen and
-a queued task for that document stays queued) and scenario 4's client half (a
-lapse between the write and the ack leaves the aspect row, and the ack answers
-``ClaimNotFound``), plus the refusals of the claim fence (404, 403 twice) and the
-pair rule (one of the two is a ``ValueError``).
+queue. Test Plan scenario 9 (with a claim: the write and the tuple ack happen;
+without one: the write happens and a queued task for that document stays queued,
+because nothing consumes a task without its claim pair) and scenario 4's client
+half (a lapse between the write and the ack leaves the aspect row, and the ack
+answers ``ClaimNotFound``), plus the refusals of the claim fence (404, 403 twice)
+and the pair rule (one of the two is a ``ValueError``).
 
 VACUITY (each run red, then restored, recorded in the bead): stubbing out the
-claim branch of ``T2Database.complete_aspect`` (calling ``mark_done`` instead of
-``tuples.ack``) fails the claim-path (which also holds the RENAME_LOCK probe) and
-lapse tests; dropping the pair from ``HttpDocumentAspectsStore.upsert``'s body
-fails the refusal test, because the engine then writes unfenced and nothing raises.
+claim branch of ``T2Database.complete_aspect`` (skipping ``tuples.ack``) fails the
+claim-path (which also holds the RENAME_LOCK probe) and lapse tests; dropping the
+pair from ``HttpDocumentAspectsStore.upsert``'s body fails the refusal test,
+because the engine then writes unfenced and nothing raises.
 
 Each engine test is one scenario with several steps, folded to stay under the tenant
 ceiling (tests/storage_touch_ceiling.toml); a failed step names itself in its
@@ -37,16 +37,6 @@ from nexus.db.t2.http_tuple_store import (
     ClaimTaskMismatchError,
 )
 from tests._catalog_fixture_ops import register_real_doc_id
-
-
-@pytest.fixture(autouse=True)
-def _aspect_queue_table_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This module tests the aspect queue TABLE path. The producer's table mode is
-    retired (nexus-bpikw step A), so the table rows it needs come from the seam in
-    ``tests/_aspect_table_producer.py``, not from the environment."""
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — local: keeps the module import list as it was
-
-    use_table_producer(monkeypatch)
 
 _SUBSPACE = "aspects"
 _KEYS = {"queue": "aspects"}
@@ -119,18 +109,15 @@ def _claimed_task(db: Any, claimant: str = "W:0") -> tuple[str, str]:
 
 @pytest.mark.t2_tenant
 class TestScenario9Persist:
-    def test_with_a_claim_then_without_one_the_write_and_its_own_clear_happen(
+    def test_with_a_claim_then_without_one_the_write_happens_and_only_a_claim_consumes_a_task(
         self, tmp_path: Path,
     ) -> None:
         """Both halves of scenario 9 on one tenant (nexus-9edxe folded the two): the
-        claim path (steps named 'claim'), then the table path ('table')."""
+        claim path (steps named 'claim'), then the no-claim path ('unclaimed')."""
         db = _db(tmp_path)
         patched = pytest.MonkeyPatch()  # not the fixture: undo() must not revert the suite's own patches
         try:
             doc_id, claim_id = _claimed_task(db)
-            # A table row for the same document: the claim path must not clear it.
-            db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
-            assert db.aspect_queue.pending_count() == 1
 
             # The RENAME_LOCK probe rides BOTH real calls, the fenced upsert and the
             # ack: another thread must block on the lock during each, or a lock
@@ -173,26 +160,22 @@ class TestScenario9Persist:
             with pytest.raises(ClaimNotFoundError):  # the ack consumed the claim
                 real_ack(claim_id, "W:0")
             assert _task_rows(db) == 0, "claim: the task is consumed"
-            assert db.aspect_queue.pending_count() == 1, "claim: mark_done must not run on the claim path"
             assert probes == ["upsert", "ack"], (
                 "claim: another thread must block on RENAME_LOCK during the fenced upsert AND the ack"
             )
             patched.undo()
 
-            # Without a claim: the write and mark_done happen, and a queued task for the
-            # document stays queued (the claim path's table row is still pending: 1).
-            table_doc = register_real_doc_id(title=_stamp_title())
-            _enqueue_task(db, table_doc)
-            db.aspect_queue.enqueue(_COLLECTION, "/table.md", "h", doc_id=table_doc)
-            assert db.aspect_queue.pending_count() == 2
+            # Without a claim: the write happens, and a queued task for the document stays
+            # queued (no claim pair, so nothing consumes it).
+            unclaimed_doc = register_real_doc_id(title=_stamp_title())
+            _enqueue_task(db, unclaimed_doc)
 
-            written = db.complete_aspect({**_fields(table_doc), "source_path": "/table.md"})
+            written = db.complete_aspect({**_fields(unclaimed_doc), "source_path": "/unclaimed.md"})
 
-            assert written is True, "table: written"
-            assert _aspect_row(db, table_doc) is not None, "table: the aspect row exists"
-            assert db.aspect_queue.pending_count() == 1, "table: today's path clears its own table row only"
-            assert _task_rows(db) == 1, "table: no client can delete a task by document (F22)"
-            assert _claim(db, "W:1"), "table: and the task is still claimable"
+            assert written is True, "unclaimed: written"
+            assert _aspect_row(db, unclaimed_doc) is not None, "unclaimed: the aspect row exists"
+            assert _task_rows(db) == 1, "unclaimed: no client can delete a task by document (F22)"
+            assert _claim(db, "W:1"), "unclaimed: and the task is still claimable"
         finally:
             patched.undo()
             db.close()
@@ -227,12 +210,10 @@ class TestFenceRefusalsAndTheLapse:
 
             # 404 not found, the claim acked away.
             doc_id, claim_id = _claimed_task(db)
-            db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
             db.tuples.ack(claim_id, "W:0")
             with pytest.raises(ClaimNotFoundError):
                 db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
             assert _aspect_row(db, doc_id) is None, "a lapse by ack wrote"
-            assert db.aspect_queue.pending_count() == 1, "the table is not touched (ack lapse)"
             assert _task_rows(db) == 0
 
             # Scenario 4's client half: a lapse between the write and the ack leaves the
@@ -260,7 +241,6 @@ class TestFenceRefusalsAndTheLapse:
             with pytest.raises(ClaimNotFoundError):
                 db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
             assert _aspect_row(db, doc_id) is None, "a lapse by release wrote"
-            assert db.aspect_queue.pending_count() == 1, "the table is not touched (release lapse)"
             assert _task_rows(db) == rows_before
         finally:
             patched.undo()

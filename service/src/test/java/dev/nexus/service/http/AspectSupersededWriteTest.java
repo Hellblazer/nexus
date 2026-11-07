@@ -17,7 +17,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-i15oc: the aspect, highlight and extraction-queue writers refuse a collection name whose catalog
+ * nexus-i15oc: the aspect and highlight writers refuse a collection name whose catalog
  * row carries {@code superseded_by} with the typed 409 {@code collection_superseded} nexus-mp8ys gave the
  * chunk writers. Plain {@code requireRegistered} accepted the tombstone and stranded the rows.
  *
@@ -82,16 +82,6 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
         return b;
     }
 
-    private Map<String, Object> queueBody(Fx f, String sourcePath) {
-        Map<String, Object> b = new LinkedHashMap<>();
-        b.put("collection", f.collection());
-        b.put("source_path", sourcePath);
-        b.put("doc_id", f.docId());
-        b.put("content_hash", "h");
-        b.put("content", "c");
-        return b;
-    }
-
     private String retire(Fx f) {
         String successor = f.collection().replace("__v1", "__v2");
         assertThat(repo.supersedeCollection(TENANT, f.collection(), successor, "")).isEqualTo(1);
@@ -140,30 +130,6 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
         assertThat(aspects.getHighlight(TENANT, f.docId())).isEmpty();
     }
 
-    @Test
-    void enqueue_intoARetiredName_is409NamingTheSuccessor_andQueuesNothing() throws Exception {
-        Fx f = fixture("as-q");
-        Resp warm = post("/queue/enqueue", queueBody(f, "before.pdf"));
-        assertThat(warm.status()).as("the live write that warms the cache: %s", warm.body()).isEqualTo(200);
-        String successor = retire(f);
-
-        Resp r = post("/queue/enqueue", queueBody(f, "after.pdf"));
-
-        assertRefusal(r, f, successor);
-    }
-
-    @Test
-    void enqueueMany_intoARetiredName_is409NamingTheSuccessor() throws Exception {
-        Fx f = fixture("as-qm");
-        Resp warm = post("/queue/enqueue_many", Map.of("rows", List.of(queueBody(f, "before.pdf"))));
-        assertThat(warm.status()).as("the live write that warms the cache: %s", warm.body()).isEqualTo(200);
-        String successor = retire(f);
-
-        Resp r = post("/queue/enqueue_many", Map.of("rows", List.of(queueBody(f, "after.pdf"))));
-
-        assertRefusal(r, f, successor);
-    }
-
     // ── controls and the sites that stay plain ──────────────────────────────────
 
     @Test
@@ -173,7 +139,6 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
         assertThat(post("/upsert", aspectBody(f, "live.pdf")).status()).isEqualTo(200);
         Resp hl = post("/highlights/upsert", highlightBody(f));
         assertThat(hl.status()).as(hl.body()).isEqualTo(200);
-        assertThat(post("/queue/enqueue", queueBody(f, "live.pdf")).status()).isEqualTo(200);
         assertThat(aspects.getAspect(TENANT, f.collection(), "live.pdf")).isPresent();
         assertThat(aspects.getHighlight(TENANT, f.docId())).isPresent();
     }
@@ -209,18 +174,6 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void renameQueueOntoATombstone_reviveRoundTrip_isStillAccepted_andMovesTheRows() throws Exception {
-        Fx src = fixture("as-rn-q-src");
-        assertThat(post("/queue/enqueue", queueBody(src, "moved.pdf")).status()).isEqualTo(200);
-        Fx tomb = fixture("as-rn-q-tomb");
-        retire(tomb);
-
-        int n = aspects.renameQueueCollection(TENANT, src.collection(), tomb.collection());
-
-        assertThat(n).isEqualTo(1);
-    }
-
-    @Test
     void renameHighlightsOntoATombstone_reviveRoundTrip_isStillAccepted_andMovesTheRows() throws Exception {
         Fx src = fixture("as-rn-hl-src");
         Resp w = post("/highlights/upsert", highlightBody(src));
@@ -234,12 +187,6 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
     }
 
     // ── imports onto a tombstone: every kind stays on the plain check ───────────
-
-    private Map<String, Object> queueImportBody(Fx f, String sourcePath) {
-        Map<String, Object> b = queueBody(f, sourcePath);
-        b.put("enqueued_at", "2026-10-22T00:00:00.000000Z");
-        return b;
-    }
 
     @Test
     void importAspect_ontoATombstone_isStillAccepted() {
@@ -265,72 +212,5 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
         retire(f);
 
         assertThat(aspects.importHighlight(TENANT, highlightBody(f))).isEqualTo(1);
-    }
-
-    @Test
-    void importQueueRow_ontoATombstone_isStillAccepted() {
-        Fx f = fixture("as-imp-q");
-        retire(f);
-
-        assertThat(aspects.importQueueRow(TENANT, queueImportBody(f, "imported.pdf"))).isEqualTo(1);
-    }
-
-    @Test
-    void importQueueBatch_ontoATombstone_isStillAccepted() {
-        Fx f = fixture("as-impb-q");
-        retire(f);
-
-        assertThat(aspects.importQueueBatch(TENANT, List.of(queueImportBody(f, "imported-b.pdf")))).isEqualTo(1);
-    }
-
-    // ── reclaim_stale count_attempt: the handler-to-repository hop (nexus-j67ix.3) ──
-
-    /**
-     * nexus-j67ix.3: the repository tests call {@code reclaimStale(t, 0, false)} directly and the JSON
-     * validation test stops at the 400, so nothing else pins the one line that carries the parsed flag
-     * into the repository. This drives the route against the real database: {@code count_attempt:false}
-     * leaves {@code retry_count} alone, {@code true} and an absent key each spend one attempt. Forcing
-     * the handler to pass {@code true}, or dropping the argument, turns the first assertion red.
-     */
-    @Test
-    void reclaimStale_countAttemptFalse_reachesTheRepository_andSpendsNoAttempt() throws Exception {
-        Fx f = fixture("as-rc");
-        assertThat(post("/queue/enqueue", queueBody(f, "stop-sweep.pdf")).status()).isEqualTo(200);
-
-        claimUntilInProgress(f, "stop-sweep.pdf");
-        Resp uncounted = post("/queue/reclaim_stale", Map.of("timeout_seconds", 0, "count_attempt", false));
-        assertThat(uncounted.status()).as(uncounted.body()).isEqualTo(200);
-        assertThat(uncounted.json().get("reclaimed").asInt()).isGreaterThanOrEqualTo(1);
-        assertThat(retryCountOf(f, "stop-sweep.pdf")).as("the stop sweep spends no attempt").isZero();
-
-        claimUntilInProgress(f, "stop-sweep.pdf");
-        Resp counted = post("/queue/reclaim_stale", Map.of("timeout_seconds", 0, "count_attempt", true));
-        assertThat(counted.status()).as(counted.body()).isEqualTo(200);
-        assertThat(retryCountOf(f, "stop-sweep.pdf")).as("the age sweep spends one attempt").isEqualTo(1);
-
-        claimUntilInProgress(f, "stop-sweep.pdf");
-        Resp absent = post("/queue/reclaim_stale", Map.of("timeout_seconds", 0));
-        assertThat(absent.status()).as(absent.body()).isEqualTo(200);
-        assertThat(retryCountOf(f, "stop-sweep.pdf")).as("an absent key means counted, as an old client sends").isEqualTo(2);
-    }
-
-    /** The tenant is shared by every test in this class, so claim until THIS row is the one in progress. */
-    private void claimUntilInProgress(Fx f, String sourcePath) {
-        for (int i = 0; i < 64; i++) {
-            var claimed = aspects.claimNext(TENANT);
-            assertThat(claimed).as("setup: a pending row claims").isPresent();
-            if (f.collection().equals(claimed.get().get("collection")) && sourcePath.equals(claimed.get().get("source_path"))) {
-                return;
-            }
-        }
-        throw new AssertionError("setup: " + sourcePath + " never claimed in 64 tries");
-    }
-
-    private int retryCountOf(Fx f, String sourcePath) {
-        return aspects.listPending(TENANT, 0).stream()
-            .filter(m -> f.collection().equals(m.get("collection")) && sourcePath.equals(m.get("source_path")))
-            .map(m -> ((Number) m.get("retry_count")).intValue())
-            .findFirst()
-            .orElseThrow(() -> new AssertionError(sourcePath + " is not pending after the reclaim"));
     }
 }

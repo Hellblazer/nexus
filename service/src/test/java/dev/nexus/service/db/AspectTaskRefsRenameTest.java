@@ -276,7 +276,7 @@ class AspectTaskRefsRenameTest {
     }
 
     @Test
-    void renameThroughTheAspectQueueRoute_rewritesAllThreeTasks() {
+    void renameThroughTheAspectsRenameRoute_rewritesAllThreeTasks() {
         String tenant = freshTenant("queue-rename");
         String a = coll("a");
         String b = coll("b");
@@ -284,7 +284,7 @@ class AspectTaskRefsRenameTest {
         register(tenant, b);
         Seeded s = seedThree(tenant, a, "1.2");
 
-        aspects.renameQueueCollection(tenant, a, b);
+        aspects.renameAspectCollection(tenant, a, b);
 
         assertThreeNamed(tenant, s, b);
     }

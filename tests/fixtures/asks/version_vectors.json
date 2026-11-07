@@ -1,0 +1,195 @@
+[
+  {
+    "name": "plain",
+    "note": "the baseline: every ask-key line, stripped, in file order",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: q",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no"
+    ],
+    "expected": "6d4935c2afe5977b"
+  },
+  {
+    "name": "by_spaced_key",
+    "note": "`by :` is the by key (key normalized), so it is left out",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: q",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no",
+      "by : 2026-12-01"
+    ],
+    "expected": "6d4935c2afe5977b"
+  },
+  {
+    "name": "by_upper_key",
+    "note": "`By:` is the by key too",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: q",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no",
+      "By: 2026-12-01"
+    ],
+    "expected": "6d4935c2afe5977b"
+  },
+  {
+    "name": "by_in_the_middle",
+    "note": "by: is left out wherever it sits",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: q",
+      "by: 2026-12-01",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no"
+    ],
+    "expected": "6d4935c2afe5977b"
+  },
+  {
+    "name": "upper_case_key_is_hashed_verbatim",
+    "note": "only the key test for by: is normalized; every other line is hashed as typed, so Question: differs from question:",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "Question: q",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no"
+    ],
+    "expected": "0e02b4745aa1e4a5"
+  },
+  {
+    "name": "interior_spacing_is_verbatim",
+    "note": "interior spaces are not collapsed: `question:   q` is a different version from `question: q`",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question:   q",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no"
+    ],
+    "expected": "5f240df5cf64bcb3"
+  },
+  {
+    "name": "non_ascii_value",
+    "note": "values hash as UTF-8",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: Où est l'été ? 日本語",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no"
+    ],
+    "expected": "a459dba3ca89602f"
+  },
+  {
+    "name": "stray_non_ask_line_inside_a_block",
+    "note": "a non-ask line inside a block is a note and is not hashed",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: q",
+      "context: c",
+      "a stray line that is not an ask key",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no"
+    ],
+    "expected": "6d4935c2afe5977b"
+  },
+  {
+    "name": "updated_line_inside_a_block",
+    "note": "updated: is ignored by the parser and is not hashed",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: q",
+      "context: c",
+      "updated: 2026-11-05T12:00Z",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no"
+    ],
+    "expected": "6d4935c2afe5977b"
+  },
+  {
+    "name": "empty_after_is_hashed",
+    "note": "an empty `after:` line is an ask-key line, so it is hashed, and the ask is not conditional",
+    "via": "parse",
+    "input": [
+      "ask: v1",
+      "asked: 2026-11-05T10:00Z",
+      "question: q",
+      "context: c",
+      "option: a",
+      "option: b",
+      "reversible: yes",
+      "blocking: no",
+      "after:"
+    ],
+    "expected": "99b9c43c4f430936"
+  },
+  {
+    "name": "indent_and_trailing_space",
+    "note": "each line is stripped before hashing",
+    "via": "parse",
+    "input": [
+      "   ask: v1  ",
+      "   asked: 2026-11-05T10:00Z  ",
+      "   question: q  ",
+      "   context: c  ",
+      "   option: a  ",
+      "   option: b  ",
+      "   reversible: yes  ",
+      "   blocking: no  "
+    ],
+    "expected": "6d4935c2afe5977b"
+  },
+  {
+    "name": "ask_version_direct",
+    "note": "ask_version called on lines directly: strips each, drops by",
+    "via": "ask_version",
+    "input": [
+      "  ask: x  ",
+      "  By: later ",
+      "question: q"
+    ],
+    "expected": "bd22219199064703"
+  }
+]

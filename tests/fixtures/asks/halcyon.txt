@@ -1,0 +1,17 @@
+session: 3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17
+
+## Quarantine restore keying (RDR-222)
+ref: nexus-k9kr9, RDR-222
+state: design done; waiting on the build-or-accept choice
+waiting_on: sam
+needs_sam: ask d1105-k9kr9-keying
+ask: d1105-k9kr9-keying
+asked: 2026-11-05T10:15Z
+question: Retry-safe keying for quarantine restore: accept the gap, or build option B?
+context: The goal is retry-safe quarantine restore. Re-running a call whose response was lost already ends in the right state; only the first call's report (which chunks moved, the audit ids) is lost. If you wait, nexus-k9kr9 stays open and nothing else is held.
+option: Accept the gap and close the bead
+option: Build option B at P3 (one transaction per keyed call, engine change plus one client line) [irreversible]
+rec: 1
+why: Nothing ends up wrong today; only a report is lost on a rare failure.
+reversible: no
+blocking: no

@@ -689,8 +689,9 @@ from __future__ import annotations
 #: 2026-10-30 08:40Z, cut bead nexus-dxxwt) adds the reads the RDR-235 default
 #: (NX_ASPECT_QUEUE=tuples, nexus-lnwn1) depends on: the read-only
 #: ``GET /v1/aspects/queue/list_waiting`` (6a75d1a03, the read the
-#: ``aspect-queue-tuples`` rung moves the table's waiting rows with; a 404 on an
-#: older engine, where the rung reports not applicable) and the census
+#: ``aspect-queue-tuples`` rung moved the table's waiting rows with; a 404 on an
+#: older engine, where the rung reported not applicable; the route and the rung
+#: are both retired, nexus-hbnml, and the engine drains a kept table itself) and the census
 #: ``delayed`` and ``oldest_claimable_created_at`` keys (7470725e0, the doctor
 #: stall signal for the ``aspects`` queue). v0.1.171 adds the RDR-236 Phase 3
 #: manifest_search path (a positive ``where`` on manifest-answered keys runs
@@ -728,7 +729,15 @@ from __future__ import annotations
 #: tombstone inheritance). It also carries the root-names-the-target chunk-key
 #: sweep with its gc_audit rows (nexus-6pfgb.43). The client refuses --sensitive
 #: against an older engine, so the pin rises with it.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 180)
+#: 0.1.181 (conexus 7.97.0): pairs with engine-service-v0.1.181 (tagged on
+#: 4be9eeaa4). It carries RDR-230 Phase 1 (nexus-4lnn1): the per-collection
+#: index anchor, the canary query ring (vectors-054), the recall canary and the
+#: maintenance counts on /v1/status with canary_indexes on GET
+#: /v1/admin/chunks-leaves; and the aspect-queue table retirement (aspects-005,
+#: nexus-hbnml), which removes the /v1/aspects/queue/* routes this client no
+#: longer calls. Not additive (888057c40), so the pin rises with it and the
+#: deploy pairs with this release.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 181)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

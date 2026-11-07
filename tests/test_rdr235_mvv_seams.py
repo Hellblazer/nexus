@@ -398,7 +398,7 @@ def test_the_three_seams_the_mvv_approximated(
 
     dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run", "--collection", coll])
     assert dry.exit_code == 0, dry.output
-    assert "Would re-enqueue 1 dead task(s)" in dry.output, dry.output
+    assert "Would revive 1 dead task(s)" in dry.output, dry.output
     assert f"{_DEAD}.md" in dry.output and "attempts=1" in dry.output, dry.output
     assert [_stem(json.loads(t.body)["source_path"]) for t in _tasks(db) if t.claim_state == "dead"] == [_DEAD], (
         "a dry run revives nothing"

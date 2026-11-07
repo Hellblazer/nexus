@@ -8,7 +8,8 @@
 # automation token (RDR-219); nothing is written to the operator's ~/.claude, and no
 # token, env dump or config file is printed.
 #
-#   tests/e2e/restart-sessions/run.sh [--model sonnet] [--keep] [--scenario roll|variant|abort|gate ...]
+#   tests/e2e/restart-sessions/run.sh [--model sonnet] [--keep] [--scenario roll|variant|abort|gate|pane ...]
+#   red control for pane (nexus-8rh0u): NX_RESTART_SANDBOX_SCRIPT=<script from 2410760b9> run.sh --scenario pane (run.py header)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"

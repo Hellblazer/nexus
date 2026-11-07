@@ -36,8 +36,9 @@ import java.util.Properties;
  * {@code DROP INDEX CONCURRENTLY IF EXISTS} have no typed jOOQ form and cannot run inside a function. The text is
  * rendered by PostgreSQL ({@code format()} with {@code %I} and {@code %L}, called through {@code DSL.function}), so
  * identifiers and the collection are quoted by the server and Java concatenates none of them. Each statement
- * kind then goes out through one {@code Statement.execute(sql)} call ({@link #runBuild}, {@link #runDrop}), both
- * registered in {@code RawSqlGateTest.SANCTIONED_STATEMENTS}. Plain JDBC rather than jOOQ's {@code execute(String)}
+ * kind then goes out through one {@code Statement.execute(sql)} call ({@link #runBuild}, {@link #runDrop}, and
+ * {@code runComment} for RDR-230's {@code COMMENT ON INDEX}), each registered in
+ * {@code RawSqlGateTest.SANCTIONED_STATEMENTS}. Plain JDBC rather than jOOQ's {@code execute(String)}
  * because jOOQ parses a plain-SQL string for bind markers and braces, and a collection name may hold either.
  *
  * <p><b>Lock.</b> {@link #PCI_BUILDER_ADVISORY_LOCK_KEY} is a session advisory lock held for the whole pass, taken
@@ -93,6 +94,7 @@ public final class PciBuilderSession {
     private static final String BUILD_LOCK_TIMEOUT = "0";
     private static final String BUILD_STATEMENT_TIMEOUT = "30min";
     private static final String DROP_LOCK_TIMEOUT = "5s";
+    private static final String COMMENT_LOCK_TIMEOUT = "5s";
 
     /** The pgvector operator class lives in schema {@code nexus} (search-path-001), and the builder has no search_path. */
     private static final String OPERATOR_CLASS = "nexus.vector_cosine_ops";
@@ -103,6 +105,9 @@ public final class PciBuilderSession {
             + ") WHERE collection = %L";
 
     private static final String DROP_TEMPLATE = "DROP INDEX CONCURRENTLY IF EXISTS %I.%I";
+
+    /** RDR-230: the index's anchor is its comment. {@code %L} quotes the JSON text on the server. */
+    private static final String COMMENT_TEMPLATE = "COMMENT ON INDEX %I.%I IS %L";
 
     /** SQLSTATE: invalid_password. */
     private static final String INVALID_PASSWORD = "28P01";
@@ -508,6 +513,55 @@ public final class PciBuilderSession {
             });
         }
 
+        /**
+         * Write {@code anchor} as the comment of {@code index} on {@code leaf} (RDR-230 Technical Design 1). Only a
+         * valid, parsed index with the builder's name for this leaf is touched: the name must be
+         * {@link PciCatalog#indexName} of the leaf's model and tenant and the index's collection. Any other index, an
+         * operator's {@code pci_} index included, is {@link DdlOutcome#REJECTED} and nothing is sent. The leaf's own
+         * HNSW index is not yet identifiable ({@link PciCatalog} does not read it), so it is rejected too; the
+         * REINDEX work of RDR-230 Phase 2 extends this guard with its identification.
+         *
+         * <p>5 s lock timeout, as a drop. A comment takes a lock on the index that a long-running statement on it
+         * would hold; one that expires leaves the old comment, and the next pass writes it again (an index with no
+         * parseable anchor is adopted).
+         */
+        public DdlOutcome comment(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor) {
+            if (ended != null) {
+                return ended;
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            Objects.requireNonNull(index, "index");
+            Objects.requireNonNull(anchor, "anchor");
+            String text;
+            try {
+                if (!ownsForComment(leaf, index)) {
+                    log.warn("event=pci_ddl_rejected op=comment reason=not_builders_index name={} parsed={} valid={}",
+                        index.name(), index.parsed(), index.valid());
+                    return DdlOutcome.REJECTED;
+                }
+                text = anchor.toJson();
+            } catch (IllegalStateException e) {
+                log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
+                return DdlOutcome.REJECTED;
+            }
+            return run("comment", COMMENT_LOCK_TIMEOUT, index.name(), leaf, () -> {
+                String sql = render(COMMENT_TEMPLATE, leaf.schema(), index.name(), text);
+                runComment(sql);
+            });
+        }
+
+        private static boolean ownsForComment(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+            if (!index.parsed() || !index.valid() || !PciCatalog.isBuilderName(index.name())
+                || leaf.model() == null || leaf.tenant() == null) {
+                return false;
+            }
+            try {
+                return index.name().equals(PciCatalog.indexName(leaf.model(), leaf.tenant(), index.collection()));
+            } catch (IllegalArgumentException e) {
+                return false;
+            }
+        }
+
         /** {@link DdlOutcome#STALE} when the leftover is valid or gone now, else {@code null}: go on to the DROP. */
         private DdlOutcome staleLeftover(PciCatalog.Leaf leaf, String name) {
             Boolean valid = ctx.select(DSL.field(DSL.name("i", "indisvalid"), Boolean.class))
@@ -630,6 +684,14 @@ public final class PciBuilderSession {
         // SANCTIONED RAW (RDR-227, nexus-43ulx.16): DROP INDEX CONCURRENTLY has no typed jOOQ form and cannot run in
         // a function or a transaction block. The text is rendered by format() with %I on the server (render).
         private void runDrop(String sql) throws SQLException {
+            try (java.sql.Statement st = conn.createStatement()) {
+                st.execute(sql);
+            }
+        }
+
+        // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.1): COMMENT ON INDEX has no typed jOOQ form. The text is rendered by
+        // format() with %I/%L on the server (render), and the pass has already checked the name (ownsForComment).
+        private void runComment(String sql) throws SQLException {
             try (java.sql.Statement st = conn.createStatement()) {
                 st.execute(sql);
             }

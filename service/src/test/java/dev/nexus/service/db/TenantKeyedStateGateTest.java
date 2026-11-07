@@ -611,6 +611,21 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("ChunkReaper.tenants", "a supplier of the tenant list, re-read from service_tokens on "
                 + "every pass; the reaper keeps no copy");
             notKeyed.put("Rdr192BackfillGate.emptyTenant", "a predicate that reads PG on each call; it caches nothing");
+            notKeyed.put("NexusService.aspectQueueDrainResult", "the one-shot result of the engine-start drain of the retired "
+                + "aspect_extraction_queue table (nexus-hbnml): install-wide totals and a reason tally, no per-tenant entry");
+            notKeyed.put("NexusService.aspectQueueDrain", "the drain object bound once at boot; it keeps its state in a "
+                + "per-run tally that dies with the run");
+            notKeyed.put("StatusHandler.aspectQueue", "a supplier of the install-wide drain result; not keyed by tenant");
+            notKeyed.put("AspectQueueDrain.TENANT", "the tenant_id column of the retired queue table, a jOOQ field "
+                + "constant; no state");
+            notKeyed.put("AspectQueueDrain.Snapshot.rowsByTenant", "one census read of the retired queue table, "
+                + "returned to the run that asked and dropped with it; the drain keeps no copy");
+            notKeyed.put("AspectQueueDrain.Result.reasons", "reason to row count across the whole run; no tenant key");
+            notKeyed.put("AspectQueueDrain.fallbackTenants", "a supplier of the engine's known tenants (the reaper's), "
+                + "re-read when the census cannot run; the drain keeps no copy");
+            notKeyed.put("AspectQueueDrain.Tally.perTenant", "per-tenant counts for the log lines of ONE run, built "
+                + "and dropped inside run(); the drain runs once per boot and keeps nothing between runs");
+            notKeyed.put("AspectQueueDrain.Tally.reasons", "reason to row count for ONE run; no tenant key");
             notKeyed.put("StatusHandler.chunksTenantIsolationIntact", "a supplier of one process-wide policy check; "
                 + "not keyed by tenant");
             notKeyed.put("TokenStore.tenantCreationBound", "attempt and timeout bounds for a token insert; "
@@ -621,12 +636,30 @@ public class TenantKeyedStateGateTest {
                 + "once at construction from stateless lambdas");
             notKeyed.put("NexusService.TENANT_RESET_ROUTE_ENV", CONSTANT);
             notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
-            // CONFIG (15)
+            // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Its rows are in nexus.canary_query_ring (FORCE RLS,
+            // cascading foreign key to the collection registry); what the engine holds in memory is a short queue.
+            notKeyed.put("PciQueryRing.queue", "a bounded in-memory queue (1,024 entries) drained every 30 seconds; an "
+                + "entry for a reset tenant is skipped by the function's foreign key, so nothing outlives the reset");
+            notKeyed.put("PciQueryRing.Entry.tenant", "the tenant of one queued ring entry, immutable; dies when the "
+                + "queue is drained at the next flush");
+            notKeyed.put("PciQueryRing.validIndexes", "the router's valid-index set, shared with the repository; "
+                + "owned and evicted there");
+            notKeyed.put("PciQueryRing.dropped", "a single process-wide count of entries the full queue dropped, "
+                + "reset at each flush; not keyed by tenant");
+            notKeyed.put("PciQueryRing.seen", "a single process-wide count of admit calls, for tests; "
+                + "not keyed by tenant");
+            notKeyed.put("PciQueryRing.writer", "the writer thread handle, set once at start; tenant-independent");
+            notKeyed.put("PciQueryRingExpiry.tenants", "a supplier of the tenant list (the reaper's tenants and "
+                + "request_ledger_tenants), re-read on every pass; the expiry keeps no copy");
+            notKeyed.put("VectorHandler.queryRing", "the handle of the one query ring, bound once at boot; "
+                + "the ring keeps no per-tenant state of its own beyond its short queue");
+            // CONFIG (16)
             for (String f : List.of(
                 "Bge768Embedder.admissionGate",
                 "ChunkReaper.Settings.floorExemptCollections",
                 "HttpUtil.gzipper",
                 "NexusService.chunksLeafBloat",
+                "NexusService.chunksLeavesCanary",
                 "NexusService.chunksLeavesSweepSeconds",
                 "NexusService.chunksLeavesView",
                 "NexusService.embedPosture",
@@ -708,6 +741,7 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.afterExistencePartitionHookForTests",
                 "PgVectorRepository.afterNeedEmbedResolvedHookForTests",
                 "PgVectorRepository.afterSweepSqlHookForTests",
+                "PgVectorRepository.keyedRestoreSiblingHookForTests",
                 "RequestLedger.claimPhaseHookForTests",
                 "TaxonomyRepository.betweenOwnAndCrossPassHookForTests",
                 "TaxonomyRepository.duringOwnPassHookForTests",
@@ -951,6 +985,13 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, WAITER_LOCAL);
             }
             notKeyed.put("PciReconciler.failures", PCI_OFF);
+            // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
+            // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
+            // AnchorReads fields are one counting transaction's result, applied once it commits.
+            notKeyed.put("PciReconciler.lastStats", PCI_OFF);
+            notKeyed.put("PciReconciler.readings", PCI_OFF);
+            notKeyed.put("PciReconciler.AnchorReads.readings", PCI_OFF);
+            notKeyed.put("PciReconciler.AnchorReads.adoptions", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
             notKeyed.put("EngineSingletonLock.connection", SINGLETON_LOCK);
             notKeyed.put("EngineSingletonLock.onRegained", SINGLETON_LOCK);
@@ -958,7 +999,32 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("EngineSingletonLock.staleTerminationWait", SINGLETON_LOCK);
             notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);
             notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
+            notKeyed.put("PciCatalog.Snapshot.anchors", PCI_OFF);
             notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);
+            // nexus-4lnn1.1.4 (RDR-230): the recall canary's schedule and results, per engine in memory, lost on restart;
+            // keyed by index name (which carries the tenant's hash) and written only by the builder-lock holder's pass.
+            for (String f : List.of(
+                "PciCanarySchedule.IndexState.lastRun",
+                "PciCanarySchedule.IndexState.lastVacuumTrigger",
+                "PciCanarySchedule.IndexState.retryNotBefore",
+                "PciCanarySchedule.IndexState.latest",
+                "PciCanarySchedule.states",
+                "PciCanarySchedule.baselines",
+                "PciCanary.Target.tenant",
+                "PciCanary.Leg.hits",
+                "PciCanary.Result.redSample",
+                "PciReconciler.Tally.droppedIndexes",
+                "PciReconciler.Tally.builtTargets")) {
+                notKeyed.put(f, PCI_OFF);
+            }
+            // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the maintenance snapshot (counts on /v1/status, entries on
+            // the operator-only /v1/admin/chunks-leaves). A per-read list of at
+            // most 64 entries keyed by the opaque pci_ index name, built from the reconciler's memory for one response
+            // and dropped with it; no field of an entry names a tenant or a collection.
+            notKeyed.put("PciMaintenanceStatus.Canary.indexes", PCI_OFF);
+            // nexus-4lnn1.1.7: the reconciler's hook for the ring's 30-day delete. A stateless function handed the pass's
+            // leaf tenants for one call; the reconciler keeps no copy of them.
+            notKeyed.put("PciReconciler.ringExpiry", PCI_OFF);
             notKeyed.put("PciIndexSet.NONE", PCI_OFF);
             notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
         }

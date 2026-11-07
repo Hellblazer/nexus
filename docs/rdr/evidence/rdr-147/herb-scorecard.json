@@ -1,0 +1,1132 @@
+{
+  "rdr": "RDR-147",
+  "step": "0",
+  "baseline_e2e_company_recall_june": 0.0,
+  "k": 20,
+  "manifest": {
+    "timestamp_utc": "2026-11-02T19:07:35.347539+00:00",
+    "nx_version": "nx, version 7.94.0",
+    "engine_release_version": "0.1.175",
+    "engine_app_version": "1.0-SNAPSHOT",
+    "embedding_mode": "onnx-local",
+    "embedding_model": "bge-base-en-v15-768",
+    "service_endpoint": "127.0.0.1:53370",
+    "product": "SearchFlow",
+    "collection": "knowledge__herb-searchflow",
+    "sandbox": true,
+    "patched_rungs": {
+      "P2": {
+        "metric": "resolution_accuracy_29_members",
+        "by": "--p2-resolve",
+        "file": "p2-resolve-2026-11-06.json",
+        "timestamp_utc": "2026-11-06T15:12:55.907009+00:00",
+        "nexus_revision": "1ecf3ca6d",
+        "nexus_dist_version": "7.96.0",
+        "nx_version": "nx, version 7.96.0",
+        "engine_release_version": "0.1.180"
+      },
+      "MVV": {
+        "by": "--mvv",
+        "file": "mvv-2026-11-06.json",
+        "timestamp_utc": "2026-11-06T15:13:42.834964+00:00",
+        "verdict": "passed",
+        "nexus_revision": "1ecf3ca6d",
+        "nx_version": "nx, version 7.96.0",
+        "engine_release_version": "0.1.180",
+        "plan_service_url": "http://127.0.0.1:52477"
+      }
+    }
+  },
+  "rungs": [
+    {
+      "phase": "P1",
+      "metric": "mentions_link_recall",
+      "value": null,
+      "target": "==1.0",
+      "status": "RED"
+    },
+    {
+      "phase": "P1",
+      "metric": "mentions_link_precision",
+      "value": null,
+      "target": ">=0.95",
+      "status": "RED"
+    },
+    {
+      "phase": "P2",
+      "metric": "resolution_accuracy_29_members",
+      "value": 1.0,
+      "target": "==1.0, missing=[] ambiguous={}",
+      "status": "GREEN"
+    },
+    {
+      "phase": "P3",
+      "metric": "hop1_precision",
+      "value": 0.6904761904761905,
+      "target": ">=0.80",
+      "status": "RED"
+    },
+    {
+      "phase": "E2E-script",
+      "metric": "company_recall_all7",
+      "value": 0.4761904761904762,
+      "target": "baseline",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-script",
+      "metric": "company_precision_all7",
+      "value": 0.6904761904761905,
+      "target": "baseline",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-script",
+      "metric": "company_f1_issue5",
+      "value": 0.7642857142857142,
+      "target": "baseline",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-nx_answer",
+      "metric": "company_recall_all7",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-nx_answer",
+      "metric": "company_precision_all7",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "E2E-nx_answer",
+      "metric": "company_f1_issue5",
+      "value": 0.0,
+      "target": ">=script F1 (issue5)",
+      "status": "RED"
+    },
+    {
+      "phase": "MVV",
+      "metric": "join_completeness_both_runs",
+      "value": 1.0,
+      "target": ">=4 of 5 issue questions in the domain, at most 1 failing, both runs",
+      "status": "GREEN"
+    },
+    {
+      "phase": "MVV",
+      "metric": "precision_mean_both_runs",
+      "value": 1.0,
+      "target": ">=0.95 in both runs",
+      "status": "GREEN"
+    },
+    {
+      "phase": "MVV",
+      "metric": "heldout_branch_entered",
+      "value": 0.0,
+      "target": "report (0 entered of 20 valid of 20 asked; interpretable)",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "issue_branch_entered[a]",
+      "value": 0.8,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "issue5_recall[a]",
+      "value": 0.4066666666666666,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "issue5_f1[a]",
+      "value": 0.5,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "agg2_recall[a]",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "agg2_precision[a]",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "agg2_f1[a]",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "issue_branch_entered[b]",
+      "value": 0.8,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "issue5_recall[b]",
+      "value": 0.4066666666666666,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "issue5_f1[b]",
+      "value": 0.5,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "agg2_recall[b]",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "agg2_precision[b]",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    },
+    {
+      "phase": "MVV",
+      "metric": "agg2_f1[b]",
+      "value": 0.0,
+      "target": "report",
+      "status": "BASELINE"
+    }
+  ],
+  "p2_resolve": {
+    "accuracy": 1.0,
+    "passed": true,
+    "n_tokens": 29,
+    "n_distinct_tokens": 29,
+    "resolve_calls": 1,
+    "catalog_lookups": 29,
+    "hits": 29,
+    "wrong": [],
+    "missing": [],
+    "ambiguous": {},
+    "service_url": "http://127.0.0.1:52477",
+    "resolve_s": 0.03980412500095554,
+    "wall_s": 0.9130900419986574,
+    "nexus_revision": "1ecf3ca6d",
+    "nexus_dist_version": "7.96.0",
+    "nx_version": "nx, version 7.96.0",
+    "engine_release_version": "0.1.180",
+    "engine_app_version": "1.0-SNAPSHOT",
+    "embedding_mode": "onnx-local",
+    "embedding_model": "bge-base-en-v15-768",
+    "service_endpoint": "127.0.0.1:52477",
+    "timestamp_utc": "2026-11-06T15:12:55.907009+00:00",
+    "file": "p2-resolve-2026-11-06.json"
+  },
+  "mvv": {
+    "labels": [
+      "a",
+      "b"
+    ],
+    "runs": {
+      "a": {
+        "run_label": "a",
+        "join_completeness": {
+          "n_issue": 5,
+          "in_domain": 4,
+          "floor": 4,
+          "vacuous": false,
+          "n_invalid": 0,
+          "n_missed": 0,
+          "max_misses": 1,
+          "passed": true,
+          "verdict": "passed",
+          "reason": "",
+          "questions": [
+            {
+              "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0055",
+                "CUST-0018"
+              ],
+              "anchor_companies": [
+                "FusionTech",
+                "SmartData"
+              ],
+              "named": [
+                "fusiontech",
+                "smartdata"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0055": {
+                  "cause": "resolved",
+                  "company": "SmartData",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0018": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "FusionTech",
+                  "SmartData"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+              "in_domain": false,
+              "valid": true,
+              "resolution_entered": false,
+              "anchor_key_ids": [],
+              "anchor_companies": [],
+              "named": [],
+              "missing_companies": [],
+              "complete": false,
+              "passed": false,
+              "reason": "outside the domain: no anchor ids, but the evidence holds 8 id(s) (boundary not reached or branch not considered; plan_id=10, resolution_reason='no_key_tokens', anchors_scanned=6, anchors_without_pattern=0)",
+              "id_causes": {},
+              "domain_exclusion": {
+                "evidence_holds_ids": true,
+                "plan_id": 10,
+                "resolution_reason": "no_key_tokens",
+                "anchors_scanned": 6,
+                "anchors_without_pattern": 0
+              },
+              "resolved_only": {
+                "companies": [],
+                "missing_companies": [],
+                "complete": false
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0018"
+              ],
+              "anchor_companies": [
+                "FusionTech"
+              ],
+              "named": [
+                "fusiontech"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0018": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "FusionTech"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0049",
+                "CUST-0089",
+                "CUST-0079",
+                "CUST-0107"
+              ],
+              "anchor_companies": [
+                "ComputeWorks",
+                "DataSolutions",
+                "FusionTech"
+              ],
+              "named": [
+                "computeworks",
+                "datasolutions",
+                "fusiontech"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0049": {
+                  "cause": "resolved",
+                  "company": "DataSolutions",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0089": {
+                  "cause": "resolved",
+                  "company": "DataSolutions",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0079": {
+                  "cause": "resolved",
+                  "company": "ComputeWorks",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0107": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0115",
+                "CUST-0036"
+              ],
+              "anchor_companies": [
+                "ComputeWorks",
+                "FusionTech"
+              ],
+              "named": [
+                "computeworks",
+                "fusiontech"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0115": {
+                  "cause": "resolved",
+                  "company": "ComputeWorks",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0036": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "ComputeWorks",
+                  "FusionTech"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            }
+          ],
+          "excluded_with_evidence_ids": 1,
+          "resolved_only_completeness": {
+            "n_in_domain": 4,
+            "n_complete": 4,
+            "gated": false
+          },
+          "evidence_completeness": {
+            "n": 5,
+            "n_complete": 0,
+            "n_with_evidence": 5,
+            "questions": [
+              {
+                "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+                "n_evidence_ids": 7,
+                "evidence_companies": [
+                  "CloudSync",
+                  "DataSolutions",
+                  "FusionTech",
+                  "InnovateAI",
+                  "NextGenTech",
+                  "SmartData",
+                  "TechCorp"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "DataSolutions",
+                  "InnovateAI",
+                  "NextGenTech",
+                  "TechCorp"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+                "n_evidence_ids": 8,
+                "evidence_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "InnovateAI",
+                  "SmartData"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "InnovateAI",
+                  "SmartData"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+                "n_evidence_ids": 10,
+                "evidence_companies": [
+                  "AITransformers",
+                  "BlueWave",
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "SmartData",
+                  "TechCorp"
+                ],
+                "missing_companies": [
+                  "AITransformers",
+                  "BlueWave",
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "SmartData",
+                  "TechCorp"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+                "n_evidence_ids": 8,
+                "evidence_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "SmartData"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "SmartData"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+                "n_evidence_ids": 7,
+                "evidence_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "SmartData"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "DataSolutions",
+                  "SmartData"
+                ],
+                "complete": false
+              }
+            ],
+            "gated": false
+          }
+        },
+        "precision": {
+          "mean": 1.0,
+          "pooled": 1.0,
+          "per_question": [
+            1.0,
+            null,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "n_issue": 5,
+          "n_valid": 5,
+          "n_named": 4,
+          "n_left_out": 1,
+          "split": {
+            "generated_on_join": {
+              "n": 0,
+              "mean": null
+            },
+            "rechecked": {
+              "n": 4,
+              "mean": 1.0
+            }
+          },
+          "threshold": 0.95,
+          "passed": true,
+          "verdict": "passed"
+        },
+        "verdict": "passed",
+        "n_invalid": 0,
+        "issue_entered": 4,
+        "summary": {
+          "all7": {
+            "n": 7,
+            "recall": 0.29047619047619044,
+            "precision": 0.5714285714285714,
+            "f1": 0.35714285714285715
+          },
+          "issue5": {
+            "n": 5,
+            "recall": 0.4066666666666666,
+            "precision": 0.8,
+            "f1": 0.5
+          },
+          "agg2": {
+            "n": 2,
+            "recall": 0.0,
+            "precision": 0.0,
+            "f1": 0.0
+          }
+        },
+        "issue5_recall": 0.4066666666666666,
+        "issue5_precision": 0.8,
+        "issue5_f1": 0.5,
+        "agg2": {
+          "n": 2,
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0
+        },
+        "passed": true
+      },
+      "b": {
+        "run_label": "b",
+        "join_completeness": {
+          "n_issue": 5,
+          "in_domain": 4,
+          "floor": 4,
+          "vacuous": false,
+          "n_invalid": 0,
+          "n_missed": 0,
+          "max_misses": 1,
+          "passed": true,
+          "verdict": "passed",
+          "reason": "",
+          "questions": [
+            {
+              "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0055",
+                "CUST-0018"
+              ],
+              "anchor_companies": [
+                "FusionTech",
+                "SmartData"
+              ],
+              "named": [
+                "fusiontech",
+                "smartdata"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0055": {
+                  "cause": "resolved",
+                  "company": "SmartData",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0018": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "FusionTech",
+                  "SmartData"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+              "in_domain": false,
+              "valid": true,
+              "resolution_entered": false,
+              "anchor_key_ids": [],
+              "anchor_companies": [],
+              "named": [],
+              "missing_companies": [],
+              "complete": false,
+              "passed": false,
+              "reason": "outside the domain: no anchor ids, but the evidence holds 8 id(s) (boundary not reached or branch not considered; plan_id=10, resolution_reason='no_key_tokens', anchors_scanned=6, anchors_without_pattern=0)",
+              "id_causes": {},
+              "domain_exclusion": {
+                "evidence_holds_ids": true,
+                "plan_id": 10,
+                "resolution_reason": "no_key_tokens",
+                "anchors_scanned": 6,
+                "anchors_without_pattern": 0
+              },
+              "resolved_only": {
+                "companies": [],
+                "missing_companies": [],
+                "complete": false
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0018"
+              ],
+              "anchor_companies": [
+                "FusionTech"
+              ],
+              "named": [
+                "fusiontech"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0018": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "FusionTech"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0049",
+                "CUST-0089",
+                "CUST-0079",
+                "CUST-0107"
+              ],
+              "anchor_companies": [
+                "ComputeWorks",
+                "DataSolutions",
+                "FusionTech"
+              ],
+              "named": [
+                "computeworks",
+                "datasolutions",
+                "fusiontech"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0049": {
+                  "cause": "resolved",
+                  "company": "DataSolutions",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0089": {
+                  "cause": "resolved",
+                  "company": "DataSolutions",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0079": {
+                  "cause": "resolved",
+                  "company": "ComputeWorks",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0107": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            },
+            {
+              "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+              "in_domain": true,
+              "valid": true,
+              "resolution_entered": true,
+              "anchor_key_ids": [
+                "CUST-0115",
+                "CUST-0036"
+              ],
+              "anchor_companies": [
+                "ComputeWorks",
+                "FusionTech"
+              ],
+              "named": [
+                "computeworks",
+                "fusiontech"
+              ],
+              "missing_companies": [],
+              "complete": true,
+              "passed": true,
+              "reason": "",
+              "id_causes": {
+                "CUST-0115": {
+                  "cause": "resolved",
+                  "company": "ComputeWorks",
+                  "named": true,
+                  "dropped": []
+                },
+                "CUST-0036": {
+                  "cause": "resolved",
+                  "company": "FusionTech",
+                  "named": true,
+                  "dropped": []
+                }
+              },
+              "domain_exclusion": null,
+              "resolved_only": {
+                "companies": [
+                  "ComputeWorks",
+                  "FusionTech"
+                ],
+                "missing_companies": [],
+                "complete": true
+              }
+            }
+          ],
+          "excluded_with_evidence_ids": 1,
+          "resolved_only_completeness": {
+            "n_in_domain": 4,
+            "n_complete": 4,
+            "gated": false
+          },
+          "evidence_completeness": {
+            "n": 5,
+            "n_complete": 0,
+            "n_with_evidence": 5,
+            "questions": [
+              {
+                "question": "Find the names of companies were affected by issues in the AI Model & Search Algorithm in SearchFlow that caused decreased search accuracy and disrupted workflow?",
+                "n_evidence_ids": 7,
+                "evidence_companies": [
+                  "CloudSync",
+                  "DataSolutions",
+                  "FusionTech",
+                  "InnovateAI",
+                  "NextGenTech",
+                  "SmartData",
+                  "TechCorp"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "DataSolutions",
+                  "InnovateAI",
+                  "NextGenTech",
+                  "TechCorp"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the backend search engine of SearchFlow that prevented retrieval of important historical messages, risking loss of critical information and user dissatisfaction?",
+                "n_evidence_ids": 8,
+                "evidence_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "InnovateAI",
+                  "SmartData"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "InnovateAI",
+                  "SmartData"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the SearchFlow user interface that caused frustration due to unresponsive interactions during search result loading?",
+                "n_evidence_ids": 10,
+                "evidence_companies": [
+                  "AITransformers",
+                  "BlueWave",
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "SmartData",
+                  "TechCorp"
+                ],
+                "missing_companies": [
+                  "AITransformers",
+                  "BlueWave",
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "SmartData",
+                  "TechCorp"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the Search API of SearchFlow that posed security risks and potential data breaches?",
+                "n_evidence_ids": 8,
+                "evidence_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "SmartData"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "SmartData"
+                ],
+                "complete": false
+              },
+              {
+                "question": "Find the names of companies were affected by issues in the database management of SearchFlow that caused slow search performance and impacted productivity?",
+                "n_evidence_ids": 7,
+                "evidence_companies": [
+                  "CloudSync",
+                  "ComputeWorks",
+                  "DataSolutions",
+                  "FusionTech",
+                  "SmartData"
+                ],
+                "missing_companies": [
+                  "CloudSync",
+                  "DataSolutions",
+                  "SmartData"
+                ],
+                "complete": false
+              }
+            ],
+            "gated": false
+          }
+        },
+        "precision": {
+          "mean": 1.0,
+          "pooled": 1.0,
+          "per_question": [
+            1.0,
+            null,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "n_issue": 5,
+          "n_valid": 5,
+          "n_named": 4,
+          "n_left_out": 1,
+          "split": {
+            "generated_on_join": {
+              "n": 0,
+              "mean": null
+            },
+            "rechecked": {
+              "n": 4,
+              "mean": 1.0
+            }
+          },
+          "threshold": 0.95,
+          "passed": true,
+          "verdict": "passed"
+        },
+        "verdict": "passed",
+        "n_invalid": 0,
+        "issue_entered": 4,
+        "summary": {
+          "all7": {
+            "n": 7,
+            "recall": 0.29047619047619044,
+            "precision": 0.5714285714285714,
+            "f1": 0.35714285714285715
+          },
+          "issue5": {
+            "n": 5,
+            "recall": 0.4066666666666666,
+            "precision": 0.8,
+            "f1": 0.5
+          },
+          "agg2": {
+            "n": 2,
+            "recall": 0.0,
+            "precision": 0.0,
+            "f1": 0.0
+          }
+        },
+        "issue5_recall": 0.4066666666666666,
+        "issue5_precision": 0.8,
+        "issue5_f1": 0.5,
+        "agg2": {
+          "n": 2,
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0
+        },
+        "passed": true
+      }
+    },
+    "verdict": "passed",
+    "passed": true,
+    "join_completeness_verdict": "passed",
+    "precision_verdict": "passed",
+    "join_completeness_passed": true,
+    "precision_passed": true,
+    "script_issue5_f1": 0.7642857142857142,
+    "heldout": {
+      "asked": 20,
+      "n": 20,
+      "n_valid": 20,
+      "n_skipped": 0,
+      "n_invalid": 0,
+      "entered": 0,
+      "answered": 8,
+      "answered_on_join": 0,
+      "not_entered_reasons": {
+        "no_key_tokens": 12,
+        "not_attempted": 8
+      },
+      "interpretable": true,
+      "reasons": []
+    },
+    "run": {
+      "cap_usd": 4.0,
+      "total_cost_usd": 1.19888,
+      "cumulative_cost_usd": 2.214374,
+      "nx_answer": {
+        "total_cost_usd": 0.362803,
+        "cumulative_cost_usd": 1.378298,
+        "cap_usd": 4.0,
+        "runs_with_unknown_cost": 0,
+        "complete": true,
+        "by_run": {
+          "a": {
+            "total_cost_usd": 0.243429,
+            "cumulative_cost_usd": 1.258924,
+            "cap_usd": 4.0,
+            "runs_with_unknown_cost": 0,
+            "complete": true
+          },
+          "b": {
+            "total_cost_usd": 0.119375,
+            "cumulative_cost_usd": 1.378298,
+            "cap_usd": 4.0,
+            "runs_with_unknown_cost": 0,
+            "complete": true
+          }
+        }
+      },
+      "heldout": {
+        "total_cost_usd": 0.836076,
+        "cumulative_cost_usd": 2.214374,
+        "cap_usd": 4.0,
+        "runs_with_unknown_cost": 0,
+        "complete": true
+      },
+      "complete": true,
+      "run_id": "2026-11-06",
+      "timestamp_utc": "2026-11-06T15:13:42.834964+00:00",
+      "resumed": false,
+      "nexus_revision": "1ecf3ca6d",
+      "nx_version": "nx, version 7.96.0",
+      "engine_release_version": "0.1.180",
+      "engine_app_version": "1.0-SNAPSHOT",
+      "embedding_mode": "onnx-local",
+      "embedding_model": "bge-base-en-v15-768",
+      "service_endpoint": "127.0.0.1:52477",
+      "plan_service_url": "http://127.0.0.1:52477",
+      "product": "SearchFlow",
+      "collection": "knowledge__herb-searchflow",
+      "sandbox": true
+    },
+    "file": "mvv-2026-11-06.json"
+  }
+}

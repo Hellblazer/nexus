@@ -1,0 +1,22 @@
+session: 82180959-b94a-4da8-9878-2fdf7d8da0ca
+
+## Retire the aspect queue table (RDR-235 step B)
+ref: nexus-hbnml; resume record T2 nexus/hbnml-resume-2026-11-05; branch worktree-agent-aec98b1be7b87b75c d4418bc0c (not pushed); side worktree ../nexus-wt/linda-revive
+state: squashed, develop merged, ceilings measured; merge still incomplete (canary row-2 driver, llm-surfaces row, unreadable-catalog table tests) plus tamsin's revive-path sensitivity gate to add; review r2 dispatched on the incomplete merge
+waiting_on: me (resume from the T2 record)
+needs_sam: none
+
+## Sam's decision queue page
+ref: https://claude.ai/artifact/T8f4Dxeo9MHNz3b6yQy9Dx (db collection answers)
+state: 10 answer-today cards; linda relays answers to sessions
+waiting_on: Sam
+needs_sam: answer the page (one button takes every recommendation)
+
+## Push wrapper flags
+ref: worktree .claude/worktrees/agent-a94d723cf32c054bb 776c11772
+state: built; docs, review and push left
+waiting_on: me
+
+## RDR-236 sweep slice C
+ref: nexus-6pfgb.43 (key-retirement fix shipped into 7.96.0 / engine 0.1.180, tamsin driving)
+needs_sam: after engine 0.1.180 deploys, see cloud dry-run counts and say go

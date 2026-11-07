@@ -202,7 +202,9 @@ _ENTRY_RE = re.compile(
 # ("taxonomy_centroids", "collection") entry, so the registered list shrank
 # 18 -> 14. The floor is a parser-vacuity guard, not a completeness pin --
 # the two directional tests above are the real gate.
-_MIN_EXPECTED_ENTRIES = 14
+# 14 -> 13 (nexus-hbnml): aspects-005-2 dropped nexus.aspect_extraction_queue, whose registry entry went
+# with it; the unconsumed ``aspects`` tasks are not a table and stay outside this list (AspectTaskRefs).
+_MIN_EXPECTED_ENTRIES = 13
 
 
 def _parse_java_list() -> set[tuple[str, str]]:

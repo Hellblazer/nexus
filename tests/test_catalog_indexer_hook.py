@@ -1037,6 +1037,42 @@ class TestRunHousekeeping:
         links = cat.links_from(new_t)
         assert any(str(l.to_tumbler) == str(other_t) for l in links)
 
+    def test_rename_does_not_turn_a_link_between_the_two_entries_into_a_self_link(self, tmp_path, monkeypatch):
+        """nexus-x3bxj: a retired entry whose text matches a live one (a symlink ghost) can link to it, or be linked
+        from it. Moving those links onto the live entry would make it link to itself, so they are dropped; every
+        other link still moves."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        cat.register_owner("nexus", "repo", repo_hash="fff999")
+        owner_t = cat.owner_for_repo("fff999")
+        ghost_t = cat.register(owner_t, "ghost.md", content_type="docs", file_path="docs/ghost.md",
+                               meta={"content_hash": "abad1dea"})
+        target_t = cat.register(owner_t, "target.md", content_type="docs", file_path="docs/target.md",
+                                meta={"content_hash": "abad1dea"})
+        other_t = cat.register(owner_t, "rdr-2", content_type="rdr", file_path="docs/rdr/rdr-2.md")
+        cat.link(ghost_t, target_t, "cites", created_by="test")
+        cat.link(target_t, ghost_t, "relates", created_by="test")
+        cat.link(ghost_t, other_t, "implements", created_by="test")
+        cat.link(other_t, ghost_t, "quotes", created_by="test")
+        cat.link(ghost_t, ghost_t, "supersedes", created_by="test")  # the ghost's own self-link
+
+        _run_housekeeping(cat, owner_t, indexed_set={"docs/target.md", "docs/rdr/rdr-2.md"})
+
+        assert cat.resolve(ghost_t) is None
+        out = cat.links_from(target_t)
+        inc = cat.links_to(target_t)
+        assert not [l for l in out if str(l.to_tumbler) == str(target_t)], out
+        assert not [l for l in inc if str(l.from_tumbler) == str(target_t)], inc
+        # the ghost's self-link is not copied into a target-to-ghost or ghost-to-target link to the deleted ghost
+        # (the target's own earlier link to the ghost, "relates", stays: a delete is a tombstone)
+        assert not [l for l in out + inc if l.link_type == "supersedes"], out + inc
+        # every other link moves, outgoing and incoming
+        assert any(str(l.to_tumbler) == str(other_t) and l.link_type == "implements" for l in out)
+        assert any(str(l.from_tumbler) == str(other_t) and l.link_type == "quotes" for l in inc)
+
     def test_rename_carries_non_evidentiary_stamp_to_new_entry(self, tmp_path, monkeypatch):
         """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round
         4): a manually-stamped document survives a rename. Without this,

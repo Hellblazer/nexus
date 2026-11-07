@@ -5,12 +5,11 @@ also read the ``aspects`` tuple subspace.
 Covers the two readers that are not the drain gate (that is
 ``tests/test_aspect_drain_protocol.py``):
 
-  * ``nx aspects requeue-failed`` lists the table's failed rows PLUS the dead
-    tasks (``rd`` on ``aspects`` filtered on ``claim_state`` ``dead``, paged
-    with ``since``) and revives each dead task through ``out`` ``mode=replace``
-    (Test Plan scenarios 8 and 11, revive halves).
-  * ``_best_effort_queue_depth`` is the table's pending count plus the
-    subspace's ``available``.
+  * ``nx aspects requeue-failed`` lists the dead tasks (``rd`` on ``aspects``
+    filtered on ``claim_state`` ``dead``, paged with ``since``) and revives each
+    one through ``out`` ``mode=replace`` (Test Plan scenarios 8 and 11, revive
+    halves). The retired table's failed rows are not read (nexus-hbnml).
+  * ``_best_effort_queue_depth`` is the subspace's ``available`` count.
 
 The real-engine class boots a dead task the way production does: ``out``,
 ``inp`` and ``nack(dead=True)``. The stub classes pin what the engine cannot be
@@ -61,8 +60,8 @@ def _census(**kw) -> SubspaceCensus:
 #
 # Two journeys (nexus-9edxe folded seven engine tests into them, one tenant
 # each): the dead-task journey (paging, revive, scope, then the queue depth the
-# hook reports) and the failed-table-row journey (the verb and the doctor over
-# the table and the tuple side together). A step that needs the subspace empty
+# hook reports) and the dead-task doctor journey (the stale-table refusal, the
+# revive, and the doctor red then green). A step that needs the subspace empty
 # drains the available tasks first. Each assertion names its step; a failure in
 # an early step hides the later ones.
 
@@ -96,8 +95,8 @@ class TestRequeueFailedAgainstTheEngine:
 
     @staticmethod
     def _drain_cli() -> int:
-        """``nx aspects drain``'s exit code: 0 only when the table and the tuple side
-        are both drained."""
+        """``nx aspects drain``'s exit code: 0 only when the ``aspects`` tuple side
+        has no available or claimed task."""
         res = CliRunner().invoke(
             aspects_group, ["drain", "--timeout", "0.4", "--poll-interval", "0.05"],
         )
@@ -166,7 +165,7 @@ class TestRequeueFailedAgainstTheEngine:
         pre_dry = snapshot()
         dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert dry.exit_code == 0, dry.output
-        assert "Would re-enqueue 1 dead task(s)" in dry.output, f"step 2: {dry.output}"
+        assert "Would revive 1 dead task(s)" in dry.output, f"step 2: {dry.output}"
         assert coll in dry.output and "a.pdf" in dry.output
         assert snapshot() == pre_dry, "step 2: dry-run wrote"
 
@@ -188,7 +187,7 @@ class TestRequeueFailedAgainstTheEngine:
         pre_again = snapshot()
         again = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert again.exit_code == 0, again.output
-        assert "no failed rows" in again.output, f"step 2: {again.output}"
+        assert "no dead tasks" in again.output, f"step 2: {again.output}"
         assert snapshot() == pre_again, "step 2: an available task was touched"
         assert store.subspace_stats("aspects").available == 1
         # The drain gate (Test Plan scenario 21, drain half), on the revived task: an
@@ -216,148 +215,55 @@ class TestRequeueFailedAgainstTheEngine:
             f"step 3: b stays dead, one of a stays dead, two of a are back: {census}"
         )
 
-        # Step 4, the depth the hook reports: the tuple side alone, then both sides.
-        assert _best_effort_queue_depth() == 2, "step 4: tuples side alone"
+        # Step 4, the depth the hook reports: the available aspects tasks, then
+        # three more enqueued, which the depth counts too.
+        assert _best_effort_queue_depth() == 2, "step 4: the two revived tasks are available"
         q = HttpAspectQueue()
         try:
             for i in range(3):
                 q.enqueue("knowledge__nx235r", f"p{i}.pdf", content="c", doc_id=register_real_doc_id())
         finally:
             q.close()
-        assert _best_effort_queue_depth() == 5, "step 4: both sides"
+        assert _best_effort_queue_depth() == 5, "step 4: plus the three new tasks"
 
-    @staticmethod
-    def _failed_table_row(db, collection: str, source_path: str, doc_id: str) -> None:  # noqa: ANN001
-        from tests._aspect_table_producer import table_producer
-
-        q = db.aspect_queue
-        with table_producer():  # the table producer is retired (nexus-bpikw step A): the seam writes the row
-            q.enqueue(collection, source_path, content="c", doc_id=doc_id)
-        assert q.claim_next() is not None
-        q.mark_failed(collection, source_path, "boom")
-
-    def test_the_failed_table_row_journey_refusal_requeue_and_the_doctor(
+    def test_the_dead_task_journey_stale_table_refusal_and_the_doctor(
         self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Three steps over one tenant: a stale NX_ASPECT_QUEUE=table makes the verb
-        refuse before it reads or writes (nexus-bpikw step A), and with it unset the
-        verb reports a table failure beside a dead task and re-enqueues both; it
-        clears the failed table row and the doctor goes green; and with a legacy
-        blank-doc_id row in the listing it reports and skips that row, never aborts
-        (nexus-5r2sc.3.10 Critical 2, Test Plan scenario 23's tail)."""
+        refuse before it reads or writes (nexus-bpikw step A); with it unset the verb
+        dry-runs and then revives the dead task; and the doctor is red while a dead
+        task exists and exits 0 once the verb has revived it (Test Plan scenario 23)."""
         import click
 
         from nexus.commands.doctor import _report_aspect_queue_service
-        from nexus.db.t2 import T2Database
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
-        from nexus.db.t2.records import QueueRow
-        from tests._catalog_fixture_ops import register_real_doc_id
 
         store = HttpTupleStore()
 
-        # Step 1: a table failed row and a dead task. A stale NX_ASPECT_QUEUE=table is
-        # refused by the verb, dry run included, and nothing is read or written.
-        with T2Database(_t2) as db:
-            self._failed_table_row(db, "knowledge__a", "x.pdf", register_real_doc_id())
+        # Step 1: a dead task. A stale NX_ASPECT_QUEUE=table is refused by the verb,
+        # dry run included, and nothing is read or written.
         self._make_dead(store, "docs__nx235r-g__bge-base-en-v15-768__v1")
-        assert self._drain_cli() == 0, "step 1: drain: a failed table row and a dead task never block"
+        assert self._drain_cli() == 0, "step 1: drain: a dead task never blocks"
         monkeypatch.setenv("NX_ASPECT_QUEUE", "table")
         for args in (["requeue-failed"], ["requeue-failed", "--dry-run"]):
             refused = CliRunner().invoke(aspects_group, args)
             assert refused.exit_code == 1, f"step 1: {args}: {refused.output}"
             assert "retired" in refused.output and "nexus-bpikw" in refused.output, refused.output
-        with T2Database(_t2) as db:
-            assert len(db.aspect_queue.list_failed()) == 1, "step 1: the refusal wrote nothing"
-        assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"], "step 1: nor the tuple space"
+        assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"], "step 1: the refusal wrote nothing"
         monkeypatch.delenv("NX_ASPECT_QUEUE")
-        dry =CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
-        assert dry.exit_code == 0, dry.output
-        assert "Would re-enqueue 1 failed row(s)" in dry.output, f"step 1: {dry.output}"
-        assert "Would re-enqueue 1 dead task(s)" in dry.output, f"step 1: {dry.output}"
-        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert res.exit_code == 0, res.output
-        assert "Re-enqueued 1 failed row(s)" in res.output, f"step 1: {res.output}"
-        assert "Revived 1 dead task(s)" in res.output, f"step 1: {res.output}"
-
-        # Step 2, tuples mode, no blank row: the doctor exits 0 after the verb and a
-        # second run has nothing to do.
-        with T2Database(_t2) as db:
-            assert db.aspect_queue.claim_next() is None, "step 1 deleted its table row; none is pending"
-            self._failed_table_row(db, "knowledge__nx235rt2", "only.pdf", register_real_doc_id())
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
-        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert res.exit_code == 0, res.output
-        _report_aspect_queue_service()  # exits 0: no raise
-        again = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert again.exit_code == 0 and "no failed rows" in again.output, f"step 2: {again.output}"
-
-        # Step 3, tuples mode with a blank-doc_id row. Nothing available first, so the
-        # dead task made below is the one the claim returns.
-        self._drain(store)
-        with T2Database(_t2) as db:
-            pending_before = db.aspect_queue.pending_count()
-        good_doc = register_real_doc_id()
-        other_doc = register_real_doc_id()
-        coll = "knowledge__nx235rt"
-        with T2Database(_t2) as db:
-            self._failed_table_row(db, coll, "good.pdf", good_doc)
-            self._failed_table_row(db, coll, "sibling.pdf", other_doc)
-            # a PENDING row sharing good_doc's doc_id: deleting by doc_id would take it too
-            from tests._aspect_table_producer import table_producer
-
-            with table_producer():
-                db.aspect_queue.enqueue(coll, "pending.pdf", content="c", doc_id=good_doc)
-        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
-        # The engine refuses a table row with no doc_id, so the legacy blank row
-        # is injected into the listing (the shape an old failed row would have).
-        real_list_failed = HttpAspectQueue.list_failed
-        blank = QueueRow(collection=coll, source_path="blank.pdf", content_hash="h",
-                         content="", retry_count=0, doc_id="")
-
-        def with_blank(self, collection=None):  # noqa: ANN001, ANN202
-            return [*real_list_failed(self, collection), blank]
-
-        monkeypatch.setattr(HttpAspectQueue, "list_failed", with_blank)
-        dead_tid = self._make_dead(store, "docs__nx235rt-dead__bge-base-en-v15-768__v1")
-
-        with pytest.raises(click.exceptions.Exit):
-            _report_aspect_queue_service()  # step 3 before: red (failed rows exist)
-
         dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert dry.exit_code == 0, dry.output
-        with T2Database(_t2) as db:
-            assert len(real_list_failed(db.aspect_queue, coll)) == 2, "step 3: dry-run wrote"
-        assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"], "step 3: dry-run wrote"
-        # The preview says which row the tuples-mode run will skip, so it and
-        # the run agree (critique r2): the blank row carries the note, the
-        # others do not.
-        assert "blank.pdf" in dry.output and "[would skip: no doc_id]" in dry.output, dry.output
-        assert dry.output.count("[would skip: no doc_id]") == 1, dry.output
-
+        assert "Would revive 1 dead task(s)" in dry.output, f"step 1: {dry.output}"
+        with pytest.raises(click.exceptions.Exit):
+            _report_aspect_queue_service()  # step 1: red while the dead task exists
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
-        assert "blank.pdf" in res.output and "no doc_id" in res.output, "step 3: the blank row is reported"
-        assert "Re-enqueued 2 failed row(s)" in res.output and "skipped 1" in res.output, res.output
-        assert "Revived 1 dead task(s)" in res.output
+        assert "Revived 1 dead task(s) to available." in res.output, f"step 1: {res.output}"
 
-        with T2Database(_t2) as db:
-            left = [r.source_path for r in real_list_failed(db.aspect_queue, coll)]
-        assert left == [], f"step 3: the two re-enqueued table rows are gone: {left}"
-        with T2Database(_t2) as db:
-            assert db.aspect_queue.pending_count() == pending_before + 1, (
-                "step 3: the row is deleted by (collection, source_path): a pending sibling with the same "
-                "doc_id stays"
-            )
-        tasks = store.rd("aspects", _KEYS, n=300)
-        docs = {json.loads(t.body)["doc_id"]: t for t in tasks}
-        assert good_doc in docs and other_doc in docs, "step 3: each re-enqueued row has its task"
-        assert all(t.claim_state is None for t in tasks), "step 3: all available; the dead one is revived"
-        assert dead_tid in {t.id for t in tasks}
-
-        # A second run: only the blank row is listed, and it is reported, not retried.
+        # Step 2: the doctor is green once the dead task is revived, and a second run
+        # finds no dead task to revive.
+        _report_aspect_queue_service()  # step 2: exits 0, no raise
         again = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert again.exit_code == 0, again.output
-        assert "Re-enqueued 0 failed row(s)" in again.output and "skipped 1" in again.output, again.output
+        assert again.exit_code == 0 and "no dead tasks" in again.output, f"step 2: {again.output}"
 
 
 # ── stubs ────────────────────────────────────────────────────────────────────
@@ -411,17 +317,9 @@ def _row(i: int, state: str | None, collection: str = "c1") -> TupleRow:
 class TestRequeueWithStubs:
     @pytest.fixture
     def run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        class _Failed:
-            def __init__(self, rows):
-                self._rows = rows
-
-            def list_failed(self, collection=None):
-                return [r for r in self._rows if not collection or r.collection == collection]
-
         class _Db:
-            def __init__(self, tuples, failed):
+            def __init__(self, tuples):
                 self.tuples = tuples
-                self.aspect_queue = _Failed(failed)
 
             def __enter__(self):
                 return self
@@ -429,9 +327,9 @@ class TestRequeueWithStubs:
             def __exit__(self, *a):
                 return False
 
-        def build(tuples: _StubTuples, failed=()):
+        def build(tuples: _StubTuples):
             monkeypatch.delenv("NX_ASPECT_QUEUE", raising=False)
-            db = _Db(tuples, list(failed))
+            db = _Db(tuples)
             monkeypatch.setattr("nexus.db.t2.T2Database", lambda *a, **k: db)
             monkeypatch.setattr(
                 "nexus.commands._helpers.default_db_path", lambda: tmp_path / "t2.db",
@@ -484,102 +382,42 @@ class TestRequeueWithStubs:
         run(stub)
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert res.exit_code == 0, res.output
-        assert "Would re-enqueue 2 dead task(s)" in res.output
+        assert "Would revive 2 dead task(s)" in res.output
         assert stub.out_calls == []
 
     def test_no_dead_tasks_skips_the_scan(self, run) -> None:
         stub = _StubTuples([_row(1, None)])
         run(stub)
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert "no failed rows" in res.output
+        assert "aspects queue: no dead tasks" in res.output
         assert stub.rd_calls == 0, "the census says dead=0, so no rd scan"
 
-    @pytest.mark.parametrize("args", [["requeue-failed"], ["requeue-failed", "--dry-run"]])
-    def test_failed_rows_on_an_engine_without_the_template_say_upgrade_and_write_nothing(
-        self, run, args,
-    ) -> None:
-        """nexus-bpikw D3: a failed table row can only become an ``aspects`` task. On an
-        engine that predates the template the verb says so, naming the release, and
-        exits 1 before anything is written; the dry run says the same instead of
-        promising a re-enqueue that the real run could not do."""
-        from nexus.db.t2.records import QueueRow
-
-        failed = [QueueRow(
-            collection="knowledge__a", source_path="x.pdf", content_hash="", content="",
-            retry_count=3, doc_id="1.1.1",
-        )]
-        stub = _StubTuples([], unknown=True)
-        db = run(stub, failed)
-        writes: list[str] = []
-        db.aspect_queue.enqueue = lambda *a, **k: writes.append("enqueue")  # type: ignore[attr-defined]
-        db.aspect_queue.mark_done = lambda *a, **k: writes.append("mark_done")  # type: ignore[attr-defined]
-        res = CliRunner().invoke(aspects_group, args)
-        assert res.exit_code == 1, res.output
-        assert "engine-service-v0.1.169" in res.output and "Upgrade the engine" in res.output, res.output
-        assert "Would re-enqueue" not in res.output, "the dry run must not promise a re-enqueue"
-        assert writes == [] and stub.out_calls == [], "nothing was written"
-
-    def test_no_template_and_no_failed_rows_is_not_an_error(self, run) -> None:
-        """Only a failed table row triggers the upgrade message: without the template
-        there are no dead tasks, and nothing to say."""
+    def test_no_template_and_no_dead_tasks_is_not_an_error(self, run) -> None:
+        """An engine without the ``aspects`` template has no dead tasks, so the
+        dry run reads zero and says nothing about upgrading."""
         run(_StubTuples([], unknown=True))
         res = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert res.exit_code == 0 and "Upgrade the engine" not in res.output, res.output
 
-    def test_a_table_only_engine_with_nothing_failed(self, run) -> None:
+    def test_an_engine_without_the_template_has_no_dead_tasks(self, run) -> None:
         run(_StubTuples([], unknown=True))
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
-        assert "aspect_extraction_queue: no failed rows." in res.output
-
-    def test_limit_takes_table_rows_first_then_dead_tasks(self, run) -> None:
-        from nexus.db.t2.records import QueueRow
-
-        failed = [QueueRow(
-            collection="knowledge__a", source_path=f"f{i}.pdf", content_hash="", content="",
-            retry_count=3, doc_id=f"1.{i}.1",
-        ) for i in range(2)]
-        stub = _StubTuples([_row(5, "dead"), _row(6, "dead")])
-        db = run(stub, failed)
-        enq: list[str] = []
-        done: list[str] = []
-        db.aspect_queue.enqueue = lambda c, s, **k: enq.append(s)
-        db.aspect_queue.mark_done = lambda c, s: done.append(s)
-        res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "3"])
-        assert res.exit_code == 0, res.output
-        assert enq == ["f0.pdf", "f1.pdf"]
-        assert done == enq, "each re-enqueued table row is deleted by its own key"
-        assert len(stub.out_calls) == 1
+        assert "aspects queue: no dead tasks." in res.output
 
 
 # ── the depth hook ───────────────────────────────────────────────────────────
 
 
-class _StubQueue:
-    def __init__(self, *a, count: int = 0, exc: Exception | None = None, **k) -> None:
-        self.count, self.exc = count, exc
-
-    def pending_count(self, *, timeout=None) -> int:
-        if self.exc:
-            raise self.exc
-        return self.count
-
-    def close(self) -> None:
-        pass
-
-
 class TestQueueDepthSum:
+    """The depth the hook reports is the ``aspects`` subspace's available count."""
+
     @pytest.fixture
     def wire(self, monkeypatch: pytest.MonkeyPatch):
-        import nexus.db.t2.http_aspect_queue as aq
         import nexus.db.t2.http_tuple_store as ts
 
-        def go(*, table: int = 0, table_exc=None, available: int = 0, tuple_exc=None):
+        def go(*, available: int = 0, tuple_exc=None):
             seen: dict = {}
-
-            class Q(_StubQueue):
-                def __init__(self, *a, **k):
-                    super().__init__(count=table, exc=table_exc)
 
             class T:
                 def __init__(self, *a, **k):
@@ -594,23 +432,22 @@ class TestQueueDepthSum:
                 def close(self):
                     pass
 
-            monkeypatch.setattr(aq, "HttpAspectQueue", Q)
             monkeypatch.setattr(ts, "HttpTupleStore", T)
             return seen
 
         return go
 
-    @pytest.mark.parametrize("table, avail, want", [(4, 0, 4), (0, 3, 3), (4, 3, 7), (0, 0, 0)])
-    def test_the_depth_is_the_sum_of_both_sides(self, wire, table, avail, want) -> None:
+    @pytest.mark.parametrize("avail, want", [(0, 0), (3, 3)])
+    def test_the_depth_is_the_available_aspects_tasks(self, wire, avail, want) -> None:
         from nexus.aspect_worker import _best_effort_queue_depth
 
-        wire(table=table, available=avail)
+        wire(available=avail)
         assert _best_effort_queue_depth() == want
 
-    def test_both_calls_keep_the_two_second_cap(self, wire) -> None:
+    def test_the_read_keeps_the_two_second_cap(self, wire) -> None:
         from nexus.aspect_worker import _best_effort_queue_depth
 
-        seen = wire(table=1, available=1)
+        seen = wire(available=1)
         _best_effort_queue_depth()
         assert seen["ctor"].get("timeout") == 2.0
         assert seen["stats_kw"].get("timeout") in (None, 2.0)
@@ -622,7 +459,7 @@ class TestQueueDepthSum:
         from nexus.db.t2._refreshable_client import build_shared_t2_client
         from nexus.mcp_infra import use_shared_t2_client_for_index_run
 
-        seen = wire(table=1, available=1)
+        seen = wire(available=2)
         shared = build_shared_t2_client()
         try:
             with use_shared_t2_client_for_index_run(shared):
@@ -633,20 +470,14 @@ class TestQueueDepthSum:
         assert "timeout" not in seen["ctor"], "client= and a constructor timeout= are rejected together"
         assert seen["stats_kw"] == {"timeout": 2.0}
 
-    def test_a_table_only_engine_counts_the_tuple_side_as_zero(self, wire) -> None:
+    def test_an_engine_without_the_template_counts_as_zero(self, wire) -> None:
         from nexus.aspect_worker import _best_effort_queue_depth
 
-        wire(table=5, tuple_exc=UnknownSubspaceError("no template"))
-        assert _best_effort_queue_depth() == 5
+        wire(tuple_exc=UnknownSubspaceError("no template"))
+        assert _best_effort_queue_depth() == 0
 
-    def test_the_tuple_side_failing_otherwise_is_unknown_not_a_partial_count(self, wire) -> None:
+    def test_a_failing_read_is_unknown_not_a_partial_count(self, wire) -> None:
         from nexus.aspect_worker import _best_effort_queue_depth
 
-        wire(table=5, tuple_exc=RuntimeError("503"))
-        assert _best_effort_queue_depth() is None
-
-    def test_the_table_side_failing_is_unknown_not_a_partial_count(self, wire) -> None:
-        from nexus.aspect_worker import _best_effort_queue_depth
-
-        wire(table_exc=RuntimeError("503"), available=9)
+        wire(tuple_exc=RuntimeError("503"))
         assert _best_effort_queue_depth() is None

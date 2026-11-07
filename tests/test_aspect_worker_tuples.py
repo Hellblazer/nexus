@@ -9,16 +9,16 @@ extractor (never a model call, never a credential) and the worker's own
 (409, release, bounded), 14 worker half (an MCP note is a task with no text; the
 extractor reads it through the manifest), 15 (more than four collections, one
 park), 16 (a missing document is retried once, then acked as dropped), gate S3 (T3 unreachable is a
-retryable nack, never a drop) and the alternation of the tuple queue with the old
-table.
+retryable nack, never a drop) and a stale ``NX_ASPECT_QUEUE=table`` value, which the worker
+ignores (the table queue is retired, nexus-hbnml).
 
 THREE ENGINE JOURNEYS (nexus-9edxe round 3; they were fifteen tenant-minting tests,
 and every assertion names its step because a fold hides the steps after a failure):
 
 1. ``test_slots_parks_and_leases_on_the_engine``: S6, S15, S7a, S7b.
 2. ``test_each_verdict_reaches_the_engine_as_its_own_queue_state``: S3 then S16.
-3. ``test_task_shapes_the_old_table_and_a_retired_collection_on_the_engine``: S14,
-   the alternation (both modes), S10 (both arms).
+3. ``test_task_shapes_and_a_retired_collection_on_the_engine``: S14, the stale
+   table value (tuple tasks still drain), S10 (both arms).
 
 What runs on the fake HttpTupleStore instead, in tests/test_aspect_worker.py and with
 no tenant: the T3 and manifest transport failures (the REAL extractor and reader run),
@@ -28,7 +28,7 @@ VACUITY (each run red, then restored, recorded in the bead): see the hand-back o
 nexus-5r2sc.3.3. In short, removing the per-slot claimant fails scenario 6; the
 renewer's loop body fails 7a; the deadline guard fails 7b; the release in the 409
 arm fails 10; the infra_unavailable arm fails S3; the missing-document check
-fails 16; the table turn fails the alternation test.
+fails 16; the stale-table-value check fails when the worker reads the variable.
 """
 from __future__ import annotations
 
@@ -60,9 +60,6 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from nexus.db.t2 import T2Database
 
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
-    from tests._aspect_table_producer import use_table_producer  # noqa: PLC0415 — the table producer is retired (nexus-bpikw step A); the seam seeds its rows
-
-    use_table_producer(monkeypatch)  # each test sets "tuples" where it needs the producer
     monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
     d = T2Database(tmp_path / "t2.db")
     monkeypatch.setattr(infra, "t2_index_write", lambda fn, **kw: fn(d))
@@ -445,17 +442,17 @@ def _rename_after_claim(old: str, new: str) -> None:
         cat.rename_collection_cascade(old, new)
 
 
-def test_task_shapes_the_old_table_and_a_retired_collection_on_the_engine(
+def test_task_shapes_and_a_retired_collection_on_the_engine(
     db: Any, extracted: list[dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One journey over the task shapes and queue interplay (nexus-9edxe round 3 folded
-    scenario 14, the alternation and scenario 10; each step ends on an empty live queue,
-    scenario 10 last because its second arm leaves a dead row):
+    scenario 14, the stale table value and scenario 10; each step ends on an empty live
+    queue, scenario 10 last because its second arm leaves a dead row):
 
     - S14 worker half: an MCP note is an identity-body task with no text; the
       extractor reads it through the catalog manifest.
-    - Alternation: in tuples mode a worker drains table rows and tuple tasks both; in
-      table mode (gate S1 rollback) it still drains leftover tuple tasks.
+    - Stale value: a leftover ``NX_ASPECT_QUEUE=table`` is ignored; the worker
+      still drains the tuple tasks (gate S1 rollback).
     - S10: a 409 (the collection was renamed after the claim) releases with no attempt
       counted and the next claim carries the new name; a task that keeps answering 409
       (a retired name nothing rewrote) is nacked dead on the second.
@@ -496,26 +493,20 @@ def test_task_shapes_the_old_table_and_a_retired_collection_on_the_engine(
     assert make_catalog_reader().get_manifest(doc), "S14: and the catalog answers for it"
     assert _tasks(db) == [], "S14: the note task is consumed"
 
-    # ── alternation: both queues drain in tuples mode; table mode drains leftover tasks ──
-    _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(db, monkeypatch)
+    # ── tuple tasks drain in tuples mode, then with a stale table value ──
+    _tuple_tasks_drain_in_tuples_mode(db, monkeypatch)
     monkeypatch.setenv("NX_ASPECT_QUEUE", "table")  # a stale value: the worker ignores it
-    _a_table_mode_worker_still_drains_leftover_tuple_tasks(db, monkeypatch)
+    _a_stale_table_value_still_drains_tuple_tasks(db, monkeypatch)
 
     # ── S10: superseded ─────────────────────────────────────────────────────────
     _409_releases_and_the_next_claim_carries_the_new_name(db, monkeypatch)
     _a_task_that_keeps_answering_409_is_nacked_dead_on_the_second(db, monkeypatch)
 
 
-def _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(
+def _tuple_tasks_drain_in_tuples_mode(
     db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    table_docs = [_doc(f"alt-t{i}") for i in range(3)]
     tuple_docs = [_doc(f"alt-u{i}") for i in range(3)]
-    # Table rows first, while the flag is "table": in tuples mode the producer
-    # would write tasks instead (a producer on an older box still writes rows).
-    for i, d in enumerate(table_docs):
-        db.aspect_queue.enqueue(_COLL, f"/t{i}.md", doc_id=d)
-    assert db.aspect_queue.pending_count() == 3
     for i, d in enumerate(tuple_docs):
         _out(db, d, source=f"/u{i}.md")
     monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
@@ -533,16 +524,15 @@ def _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(
     w.start()
     try:
         _wait(
-            lambda: db.aspect_queue.pending_count() == 0
-            and _tasks(db) == []
-            and all(db.document_aspects.get_by_doc_id(d) for d in table_docs + tuple_docs),
+            lambda: _tasks(db) == []
+            and all(db.document_aspects.get_by_doc_id(d) for d in tuple_docs),
             timeout=60,
         )
     finally:
         w.stop(timeout=10)
 
 
-def _a_table_mode_worker_still_drains_leftover_tuple_tasks(
+def _a_stale_table_value_still_drains_tuple_tasks(
     db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # gate S1 rollback: a stale NX_ASPECT_QUEUE=table in the environment, tasks are on the tuple queue

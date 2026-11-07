@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-4lnn1.1.1 (RDR-230 P1.1): COMMENT ON INDEX ${schema}.${index} IS 'see the wiki', in Liquibase XML instead of a
+    Java SQL string (nexus-zrcj7: no SQL strings in Java, tests included). jOOQ has no COMMENT ON INDEX.
+
+    Gives a pci_ index a comment that is not an anchor, so a test can show the DDL half adopts it again. The text is
+    fixed here; only the two names are parameters, checked by PgContainerHelper#commentIndexNotAnAnchor. runAlways,
+    bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="index-comment-not-an-anchor" author="nexus-4lnn1.1.1" runAlways="true">
+        <sql>COMMENT ON INDEX ${schema}.${index} IS 'see the wiki'</sql>
+    </changeSet>
+</databaseChangeLog>

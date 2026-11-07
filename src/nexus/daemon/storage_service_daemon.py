@@ -2899,9 +2899,9 @@ class StorageServiceSupervisor:
             _log.debug("storage_service_pg_already_running", port=self._pg_port)
         else:
             _log.info("storage_service_starting_pg", port=self._pg_port)
-            from nexus.db.pg_provision import StartInterruptedError  # noqa: PLC0415 — deferred import — bound before the try so the except clause below can always name it
+            from nexus.db.pg_provision import PgClusterBelowFloorError, StartInterruptedError  # noqa: PLC0415 — deferred import — bound before the try so the except clauses below can always name them
             try:
-                from nexus.db.pg_provision import apply_managed_conf_before_start, discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+                from nexus.db.pg_provision import apply_managed_conf_before_start, discover_pg_binaries, refuse_cluster_below_floor, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
                 pg_data_str = self._creds.get("PG_DATA", "")
                 if not pg_data_str:
@@ -2910,6 +2910,8 @@ class StorageServiceSupervisor:
                         "Re-run 'nx init' to reprovision."
                     )
                 pgdata = Path(pg_data_str)
+                # Before binary discovery and the conf rewrite below (nexus-hck2c).
+                refuse_cluster_below_floor(pgdata)
                 bins = discover_pg_binaries()
                 # The managed postgresql.conf block is rewritten before every cold
                 # start, as provision does, so a setting added to it reaches an
@@ -2930,6 +2932,8 @@ class StorageServiceSupervisor:
                 raise
             except StartInterruptedError as exc:
                 raise readiness.ReadinessStopRequestedError(str(exc)) from exc
+            except PgClusterBelowFloorError as exc:
+                raise StorageServiceStartError(str(exc)) from exc  # self-contained: names the version and the fix
             except Exception as exc:
                 raise StorageServiceStartError(
                     f"Failed to start Postgres on port {self._pg_port}: {exc}. "

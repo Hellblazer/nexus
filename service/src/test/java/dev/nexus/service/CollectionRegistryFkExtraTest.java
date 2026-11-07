@@ -12,7 +12,6 @@ import java.sql.Connection;
 import java.time.OffsetDateTime;
 import java.util.List;
 
-import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
@@ -29,20 +28,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * the collection FK itself is Phase 5, {@link CollectionRegistryFkTest}'s territory,
  * not yet landed as of this comment), {@code chash_index}, and
  * {@code topic_assignments} to {@code catalog_collections(tenant_id, name)}. This
- * suite covers the FIVE
+ * suite covers the FOUR
  * remaining FK-eligible collection-level lifecycle tables that RDR-164 P1a wires
- * with the same NOT VALID + RESTRICT shape (changelog {@code fk-003-collection-registry-extra.xml}):
+ * with the same NOT VALID + RESTRICT shape (changelog {@code fk-003-collection-registry-extra.xml}; a fifth, on
+ * {@code aspect_extraction_queue}, died with the table, nexus-hbnml):
  *
  * <ul>
  *   <li>{@code document_aspects_collection_fk}      (collection NOT NULL)</li>
- *   <li>{@code aspect_extraction_queue_collection_fk}(collection NOT NULL)</li>
  *   <li>{@code topics_collection_fk}                (collection NOT NULL)</li>
  *   <li>{@code taxonomy_meta_collection_fk}         (collection NOT NULL, PK = (tenant_id, collection))</li>
  *   <li>{@code document_highlights_collection_fk}   (collection NULLABLE — MATCH SIMPLE, null escapes the FK)</li>
  * </ul>
  *
  * <p><strong>Scope boundary (RDR-164 P0 + P1a):</strong> P1a ships the backfill
- * (STUB-REGISTER, mirroring {@code fk-002-0-backfill-stubs}) plus these five NOT
+ * (STUB-REGISTER, mirroring {@code fk-002-0-backfill-stubs}) plus these four NOT
  * VALID FKs. {@code VALIDATE CONSTRAINT} is P1b (bead nexus-70r3c.3 sibling),
  * world-blocked on the RDR-153 production migration completing with
  * {@code summary.total_failed==0}; until then every FK row carries
@@ -62,8 +61,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * <ul>
  *   <li>document_aspects(tenant_id TEXT, collection TEXT NOT NULL, doc_id TEXT NOT NULL DEFAULT '', source_path, ...)
  *       UNIQUE (tenant_id, collection, source_path) — aspects-001-baseline.xml changeset 1</li>
- *   <li>aspect_extraction_queue(tenant_id, collection TEXT NOT NULL, doc_id TEXT NOT NULL DEFAULT '', source_path, status, ...)
- *       UNIQUE (tenant_id, collection, source_path) — aspects-001-baseline.xml changeset 5</li>
  *   <li>document_highlights(tenant_id, doc_id TEXT NOT NULL, collection TEXT NULLABLE, ...)
  *       UNIQUE (tenant_id, doc_id) — aspects-001-baseline.xml changeset 3</li>
  *   <li>topics(id BIGSERIAL PK, tenant_id, collection TEXT NOT NULL, label, doc_count, ...) — taxonomy-001-baseline.xml changeset 1</li>
@@ -77,20 +74,19 @@ class CollectionRegistryFkExtraTest {
 
     // ── Constraint names (fixed contract; fk-003 uses exactly these) ───────────
     private static final String FK_DOC_ASPECTS  = "document_aspects_collection_fk";
-    private static final String FK_ASPECT_QUEUE = "aspect_extraction_queue_collection_fk";
     private static final String FK_TOPICS       = "topics_collection_fk";
     private static final String FK_TAX_META     = "taxonomy_meta_collection_fk";
     private static final String FK_DOC_HL       = "document_highlights_collection_fk";
 
-    private static final List<String> ALL_FIVE_FK_NAMES = List.of(
-            FK_DOC_ASPECTS, FK_ASPECT_QUEUE, FK_TOPICS, FK_TAX_META, FK_DOC_HL);
+    private static final List<String> ALL_FOUR_FK_NAMES = List.of(
+            FK_DOC_ASPECTS, FK_TOPICS, FK_TAX_META, FK_DOC_HL);
 
-    /** The five FK-eligible tables in {@code ALL_FIVE_FK_NAMES} order — used to drive
+    /** The four FK-eligible tables in {@code ALL_FOUR_FK_NAMES} order — used to drive
      *  the GROUP F/G loops over typed jOOQ {@link Table} references instead of raw
      *  table-name strings, mirroring {@code CollectionRegistryFkTest}'s per-table FK
      *  bookkeeping. */
-    private static final List<Table<?>> ALL_FIVE_FK_TABLES = List.of(
-            DOCUMENT_ASPECTS, ASPECT_EXTRACTION_QUEUE, TOPICS, TAXONOMY_META, DOCUMENT_HIGHLIGHTS);
+    private static final List<Table<?>> ALL_FOUR_FK_TABLES = List.of(
+            DOCUMENT_ASPECTS, TOPICS, TAXONOMY_META, DOCUMENT_HIGHLIGHTS);
 
     private static final String TENANT_A = "crfkx-tenant-a";
     private static final String TENANT_B = "crfkx-tenant-b";
@@ -135,28 +131,6 @@ class CollectionRegistryFkExtraTest {
             assertThat(ex.getMessage())
                 .as("document_aspects_collection_fk must reject unregistered collection")
                 .containsIgnoringCase(FK_DOC_ASPECTS);
-        }
-    }
-
-    @Test @Order(11)
-    void aspectQueue_unregisteredCollection_rejected() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // hygiene-001 step 2: doc_id is NOT NULL now -- seed a real
-            // catalog-document parent so the collection FK is the sole violation.
-            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "queue-unreg-doc");
-            DataAccessException ex = assertThrows(DataAccessException.class, () ->
-                ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                        ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
-                        ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                    .values(TENANT_A, "unreg-queue-col", "/p/q.md", "pending", OffsetDateTime.now(),
-                        "queue-unreg-doc")
-                    .execute());
-            assertThat(ex.getMessage())
-                .as("aspect_extraction_queue_collection_fk must reject unregistered collection")
-                .containsIgnoringCase(FK_ASPECT_QUEUE);
         }
     }
 
@@ -282,16 +256,16 @@ class CollectionRegistryFkExtraTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP C — VALIDATED pin: after RDR-164 P1b (fk-003-validate.xml) the five FKs
+    // GROUP C — VALIDATED pin: after RDR-164 P1b (fk-003-validate.xml) the four FKs
     // are convalidated=true. The full master changelog applied by this test includes
     // P1b's gap-window reconcile + VALIDATE CONSTRAINT, so on a freshly-migrated DB
-    // (no orphan rows) all five validate cleanly.
+    // (no orphan rows) all four validate cleanly.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(30)
-    void allFiveExtraCollectionFks_existAndAreValidated() throws Exception {
+    void allFourExtraCollectionFks_existAndAreValidated() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            for (String fkName : ALL_FIVE_FK_NAMES) {
+            for (String fkName : ALL_FOUR_FK_NAMES) {
                 PgCatalogProbes.Constraint rs = PgCatalogProbes.foreignKey(
                     DSL.using(su, SQLDialect.POSTGRES), "nexus", fkName);
                 assertThat(rs)
@@ -391,7 +365,7 @@ class CollectionRegistryFkExtraTest {
     //
     // The master changelog applies the backfill against an EMPTY DB (no-op), then
     // adds the NOT VALID FKs. To exercise the backfill SQL against real orphan rows
-    // we DROP the five FKs (so orphan inserts are allowed), seed orphans, then run
+    // we DROP the four FKs (so orphan inserts are allowed), seed orphans, then run
     // the SAME backfill shape fk-003-0 ships (jOOQ typed INSERT ... SELECT DISTINCT
     // ... ON CONFLICT DO NOTHING, rendering the identical statement the changeset's
     // literal SQL specifies) and assert EXACT stub counts:
@@ -407,39 +381,31 @@ class CollectionRegistryFkExtraTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
-            // Drop the five FKs so orphan child rows can be seeded. ALTER TABLE ..
+            // Drop the four FKs so orphan child rows can be seeded. ALTER TABLE ..
             // DROP CONSTRAINT IF EXISTS has a typed jOOQ form (unlike ADD CONSTRAINT
             // .. NOT VALID / VALIDATE CONSTRAINT below, both Postgres-only DDL
             // extensions jOOQ's DSL does not model -- verified against jOOQ 3.21's
             // manual, nexus-cbo4a batch 10).
-            for (int i = 0; i < ALL_FIVE_FK_TABLES.size(); i++) {
-                ctx.alterTable(ALL_FIVE_FK_TABLES.get(i)).dropConstraintIfExists(ALL_FIVE_FK_NAMES.get(i)).execute();
+            for (int i = 0; i < ALL_FOUR_FK_TABLES.size(); i++) {
+                ctx.alterTable(ALL_FOUR_FK_TABLES.get(i)).dropConstraintIfExists(ALL_FOUR_FK_NAMES.get(i)).execute();
             }
 
             // Seed orphan rows referencing collections NOT in catalog_collections.
-            // colA referenced by 3 tables (must dedup to ONE stub). colB by queue only.
+            // colA referenced by 2 tables (must dedup to ONE stub).
             // colC by topics only. colD by taxonomy_meta only. colE (non-null) by a highlight.
             // An empty-string-collection highlight must contribute NOTHING.
             //
-            // hygiene-001 steps 1/2/3 (nexus-tk070.p6a follow-on): document_aspects.doc_id/
-            // source_uri, aspect_extraction_queue.doc_id, and document_highlights.source_uri
+            // hygiene-001 steps 1/3 (nexus-tk070.p6a follow-on): document_aspects.doc_id/
+            // source_uri and document_highlights.source_uri
             // are all NOT NULL now -- seed real catalog-document parents and supply the
             // columns so these rows insert at all; the backfill-stub SQL under test is
             // orthogonal to doc_id attribution.
             PgContainerHelper.insertCatalogDocument(ctx, T, "bf-aspect-doc");
-            PgContainerHelper.insertCatalogDocument(ctx, T, "bf-queue-doc");
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                     DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
                     DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
                 .values(T, "bf-colA", "/a/1.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/1.md")
                 .values(T, "bf-colA", "/a/2.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/2.md")
-                .execute();
-            ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                .values(T, "bf-colA", "/a/1.md", "pending", OffsetDateTime.now(), "bf-queue-doc")
-                .values(T, "bf-colB", "/b/1.md", "pending", OffsetDateTime.now(), "bf-queue-doc")
                 .execute();
             ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
                     TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
@@ -468,23 +434,22 @@ class CollectionRegistryFkExtraTest {
 
             // ── fk-003-0-backfill-stubs shape (MUST render the changeset's SQL verbatim) ──
             runBackfillStub(ctx, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, null);
-            runBackfillStub(ctx, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION, null);
             runBackfillStub(ctx, TOPICS.TENANT_ID, TOPICS.COLLECTION, null);
             runBackfillStub(ctx, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, null);
             runBackfillStub(ctx, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
                 DOCUMENT_HIGHLIGHTS.COLLECTION.isNotNull().and(DOCUMENT_HIGHLIGHTS.COLLECTION.ne("")));
 
-            // Exactly five distinct collections registered: colA, colB, colC, colD, colE.
+            // Exactly four distinct collections registered: colA, colC, colD, colE.
             assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).fetchOne(0, int.class))
-                .as("backfill must stub-register exactly 5 distinct collections (colA deduped, empty-string highlight skipped)")
-                .isEqualTo(5);
+                .as("backfill must stub-register exactly 4 distinct collections (colA deduped, empty-string highlight skipped)")
+                .isEqualTo(4);
             assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T))
-                    .and(CATALOG_COLLECTIONS.NAME.in("bf-colA", "bf-colB", "bf-colC", "bf-colD", "bf-colE"))
+                    .and(CATALOG_COLLECTIONS.NAME.in("bf-colA", "bf-colC", "bf-colD", "bf-colE"))
                     .fetchOne(0, int.class))
-                .as("the 5 expected collection names must each be registered exactly once")
-                .isEqualTo(5);
+                .as("the 4 expected collection names must each be registered exactly once")
+                .isEqualTo(4);
         }
     }
 
@@ -495,14 +460,14 @@ class CollectionRegistryFkExtraTest {
     // an unregistered collection (the gap-window orphan class) makes VALIDATE FAIL;
     // re-running the stub-register reconcile registers the collection so VALIDATE then
     // SUCCEEDS and flips convalidated=true. Self-contained per test: re-creates the FK
-    // itself (GROUP F @Order(60) dropped all five) and seeds the orphan while the FK is
+    // itself (GROUP F @Order(60) dropped all four) and seeds the orphan while the FK is
     // ABSENT (NOT VALID still enforces NEW inserts, so the orphan cannot be inserted
     // under it). Each test uses a distinct tenant so the "not registered before
     // reconcile" precondition holds independently.
     //
-    // Coverage spans ALL FIVE FKs, mirroring fk-003-validate.xml changesets
-    // fk-003-6-reconcile (the five INSERT-SELECT arms) + fk-003-7..11 (VALIDATE). The
-    // four tables beyond document_aspects have materially distinct shapes — topics
+    // Coverage spans ALL FOUR FKs, mirroring fk-003-validate.xml changesets
+    // fk-003-6-reconcile (the INSERT-SELECT arms) + fk-003-7..11 (VALIDATE). The
+    // three tables beyond document_aspects have materially distinct shapes — topics
     // (BIGSERIAL PK), taxonomy_meta (PK = (tenant_id, collection)), document_highlights
     // (NULLABLE collection + the reconcile's WHERE collection IS NOT NULL AND != ''
     // filter) — so each gets its own causal proof rather than relying on SQL similarity.
@@ -532,27 +497,6 @@ class CollectionRegistryFkExtraTest {
                         "p1b-aspects-doc", "file:///p1b/o.md")
                     .execute(),
                 () -> runBackfillStub(ctx, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, null));
-        }
-    }
-
-    @Test @Order(71)
-    void reconcileThenValidate_aspectQueue_gapWindowOrphan() throws Exception {
-        final String T = "crfkx-p1b-queue";
-        final String ORPHAN_COL = "p1b-orphan-queue";
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // hygiene-001 step 2: doc_id is NOT NULL now -- seed a real
-            // catalog-document parent so the orphan insert succeeds at all.
-            PgContainerHelper.insertCatalogDocument(ctx, T, "p1b-queue-doc");
-            assertReconcileLoadBearing(su, ctx, ASPECT_EXTRACTION_QUEUE, FK_ASPECT_QUEUE, T, ORPHAN_COL,
-                () -> ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                        ASPECT_EXTRACTION_QUEUE.COLLECTION, ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                        ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
-                        ASPECT_EXTRACTION_QUEUE.DOC_ID)
-                    .values(T, ORPHAN_COL, "/p1b/q.md", "pending", OffsetDateTime.now(), "p1b-queue-doc")
-                    .execute(),
-                () -> runBackfillStub(ctx, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION, null));
         }
     }
 
@@ -666,7 +610,7 @@ class CollectionRegistryFkExtraTest {
 
     /**
      * Drives the RDR-164 P1b reconcile→VALIDATE causal proof for one collection FK:
-     * the FK is absent (GROUP F dropped all five), an orphan row referencing an
+     * the FK is absent (GROUP F dropped all four), an orphan row referencing an
      * unregistered collection is seeded while absent, the FK is re-added NOT VALID,
      * VALIDATE FAILS on the orphan, the reconcile stub-registers the collection, and
      * VALIDATE then SUCCEEDS with convalidated=true. {@code orphanInsert} and

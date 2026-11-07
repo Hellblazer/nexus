@@ -525,51 +525,49 @@ def _drive_enqueue_hook(world: CanaryWorld) -> None:
         aspect_extraction_enqueue_hook(f"/docs/{title}.md", collection, text, doc_id=tumbler)
 
 
-@driver("nexus.aspect_worker:AspectExtractionWorker._process_row")
+@driver("nexus.aspect_worker:AspectExtractionWorker._extract_tuple_rows")
 def _drive_worker_drain(world: CanaryWorld) -> None:
-    """Census row 2. Both documents sit in the retired table queue (the drain still reads it); the
-    worker drains them one by one (``_process_row``) and as a batch (``_process_batch``). The extractor
-    the worker calls is an UNGATED recorder (it sends what it is handed to the capture), so the drain's
-    own gate is the only protection: the extractor's refusal (rows 3 and 4) is not in the way."""
-    import nexus.mcp_infra as infra  # noqa: PLC0415 - after the substrate is pinned
-    from nexus.aspect_worker import AspectExtractionWorker  # noqa: PLC0415 - as above
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 - as above
-    from tests._aspect_table_producer import table_producer  # noqa: PLC0415 - as above
+    """Census row 2. Both documents' tasks sit in the ``aspects`` tuple subspace (the only queue since
+    nexus-hbnml), written straight to the subspace so the enqueue hook's gate (row 1) is not in the
+    way. The worker's tuple side claims them and processes them one at a time, then both in one
+    batch; its sensitivity verdict runs between the claim and the extract. A task carries identity,
+    never text, so the extractor reads the document itself: the extractor the worker calls is an
+    UNGATED recorder that sends what it is handed, the source path that carries the title (and so the
+    canary string) included, so the drain's own gate is the only protection: the extractor's refusal
+    (rows 3 and 4) is not in the way."""
+    from nexus.aspect_worker import AspectExtractionWorker  # noqa: PLC0415 - after the substrate is pinned
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 - as above
 
     mp = _mp(world)
-    assert world.workdir is not None
     capture = world.capture
     mp.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
     mp.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: None)
-    db = T2Database(world.workdir / "t2.db")
+
+    def single(content: str = "", source_path: str = "", collection: str = "", **kw: Any) -> Any:
+        capture.record_llm("aspect_extract", content=content, source_path=source_path, collection=collection)
+        return _an_aspect_record(collection, source_path)
+
+    def batch(items: Any, **kw: Any) -> list[Any]:
+        capture.record_llm("aspect_extract_batch", items=[list(i) for i in items])
+        return [_an_aspect_record(i[0], i[1]) for i in items]
+
+    mp.setattr("nexus.aspect_worker._extract_aspects", single)
+    mp.setattr("nexus.aspect_worker._extract_aspects_batch", batch)
+    queue = HttpAspectQueue()
     try:
-        mp.setattr("nexus.commands._helpers.default_db_path", lambda: world.workdir / "t2.db")
-        mp.setattr(infra, "t2_index_write", lambda fn, **kw: fn(db))
-
-        def single(content: str = "", source_path: str = "", collection: str = "", **kw: Any) -> Any:
-            capture.record_llm("aspect_extract", content=content, source_path=source_path, collection=collection)
-            return _an_aspect_record(collection, source_path)
-
-        def batch(items: Any, **kw: Any) -> list[Any]:
-            capture.record_llm("aspect_extract_batch", items=[list(i) for i in items])
-            return [_an_aspect_record(i[0], i[1]) for i in items]
-
-        mp.setattr("nexus.aspect_worker._extract_aspects", single)
-        mp.setattr("nexus.aspect_worker._extract_aspects_batch", batch)
-        worker = AspectExtractionWorker(poll_interval=0.1)
-        for label in ("single", "batch"):
-            with table_producer():
-                for collection, tumbler, title, text in _pairs(world):
-                    db.aspect_queue.enqueue(collection, f"/docs/{label}/{title}.md", content=text, doc_id=tumbler)
-                rows = db.aspect_queue.claim_batch(10)
-            assert len(rows) == 2, f"harness: both documents were queued and claimed ({label}): {rows}"
-            if label == "single":
-                for row in rows:
-                    worker._process_row(row)
-            else:
-                worker._process_batch(rows)
+        for label, batch_size in (("single", 1), ("batch", 2)):
+            for collection, tumbler, title, _text in _pairs(world):
+                queue._out_task(collection, f"/docs/{label}/{title}.md", f"h-{label}", tumbler)
+            side = AspectExtractionWorker(poll_interval=0.1, batch_size=batch_size)._tuple_side
+            claimed = 0
+            while claimed < 2:
+                claims, failed = side.claim_batch(park=False)
+                assert not failed and claims, f"harness: both tasks were queued and claimed ({label}): {claimed}"
+                claimed += len(claims)
+                side.process(claims)
+            assert claimed == 2, f"harness: exactly the two tasks were claimed ({label}): {claimed}"
     finally:
-        db.close()
+        queue.close()
 
 
 # Rows 3-4 -- the extractor. -------------------------------------------------------------------

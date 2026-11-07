@@ -3,7 +3,7 @@
 """Sandbox gate for scripts/claude-restart-sessions --nx --fresh (nexus-nuyju, nexus-cmqe8, nexus-8m0ho, nexus-q4m6u).
 
 Drives real Claude Code sessions through the coordinated restart and checks every outcome,
-with nothing written to the operator's ~/.claude. Four scenarios, each in its own sandbox
+with nothing written to the operator's ~/.claude. Five scenarios, each in its own sandbox
 (``--scenario``, default all, in this order):
 
 - ``roll``: the full continuation roll. Six sessions; three restart, each told a code word:
@@ -34,6 +34,15 @@ with nothing written to the operator's ~/.claude. Four scenarios, each in its ow
   the ``/version`` stand-in answers 502, then (a second run) a version below the
   floor, with ``--engine-wait 0``. Each run must exit 2 in the foreground with the gate's
   ABORT line for that case, after one read, before any handoff is asked or anything installed.
+
+- ``pane`` (nexus-8rh0u): a ``--resume`` roll (no --nx, no handoffs) over ``rs_direct``, whose pane process
+  is claude itself (``new-window 'exec claude ...'``, no shell under it: the shape that closed six windows in
+  the 7.96.0 restart), and ``rs_alpha``, the caller, in an ordinary bash pane. Both must resume as the same
+  session ids on new processes, rs_direct in the SAME pane id and window (the exit must not close it; a
+  login shell is respawned there, remain-on-exit is released), rs_alpha last, no failure word in the log.
+  Each is told a code word first (that gives it the transcript ``claude --resume`` needs) and must still
+  answer its own word after the resume. Checked before the roll: claude really is rs_direct's pane process,
+  and rs_alpha's is a shell.
 
 Shared by every scenario:
 
@@ -97,9 +106,19 @@ file in the scratch HOME may hold any word. A negative control in ``roll``, one 
 session in the same folder with no handoff, must not know any word.
 
 Not exercised: a real cloud engine (the gate reads the stand-in), a real PyPI install, the
-operator's own marketplace remote, a restart with ``--resume`` (no scenario resumes a
-session), the ready-round check (the roll passes ``--no-ready-check``; unit tests cover it), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
+operator's own marketplace remote, a ``--resume`` roll that needs the install or a
+handoff (``pane`` resumes two sessions, no other scenario resumes any), the ready-round check (the roll passes ``--no-ready-check``; unit tests cover it), the ``ABORT: plugins are`` branch (a plugin update that leaves an old version), and
 restart()'s fallback for a handoff that went stale.
+
+Red control for ``pane`` (nexus-8rh0u): the script as it was before the fix (2410760b9) must FAIL it.
+From a checkout, in the repo root::
+
+    git show 2410760b9:scripts/claude-restart-sessions > /tmp/crs-before-8rh0u && chmod +x /tmp/crs-before-8rh0u
+    NX_RESTART_SANDBOX_SCRIPT=/tmp/crs-before-8rh0u tests/e2e/restart-sessions/run.sh --scenario pane
+
+Expected: ``RESTART SANDBOX FAILED -- 1 scenario(s) (pane)``, the log lacking ``claude is the process of
+pane`` and ``OK rs_direct``, and rs_direct's window gone. The same command without the variable must PASS.
+(A single scenario never records a pass; only all five do.)
 
 Positive controls: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script; the
 pane checks always use this checkout's reader. Against the rewritten harness (nexus-q4m6u),
@@ -116,7 +135,7 @@ Run through run.sh (it supplies the automation token, RDR-219). Prints one verdi
 that fails once a sandbox is up is a failure, exit 1); exit 2 when the token, claude or tmux
 is missing. A failed scenario's scratch HOME is kept and named.
 
-A pass of all four scenarios is recorded in ~/.local/state/claude-restart-sessions/sandbox-pass.json
+A pass of all five scenarios is recorded in ~/.local/state/claude-restart-sessions/sandbox-pass.json
 (the script's sha256 and Claude Code's version), which the script's restart gate reads (nexus-8zdbu).
 Each sandbox HOME gets its own record for the script under test, so every roll passes that gate.
 """
@@ -161,7 +180,7 @@ DRAFT_TEXT = "this is an unsent draft the restart must not clobber"
 PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" for i in range(1, 21))
 OPERATOR_HOME = Path.home()
 SANDBOX_PY = Path(__file__).resolve()
-SCENARIOS = ("roll", "variant", "abort", "gate")
+SCENARIOS = ("roll", "variant", "abort", "gate", "pane")
 #: A fresh session is settled at its prompt when idle, or in ``shell``: a session launched without the
 #: channel is told by its SessionStart guidance to wait for mail with ``nx tuple wait`` in the
 #: background, and one that does so sits at its prompt in ``shell`` (the 2026-11-02 measuring roll:
@@ -187,7 +206,9 @@ ORACLE = REPO / "scripts" / "claude-restart-sessions"
 @dataclasses.dataclass(frozen=True)
 class Spec:
     name: str
-    #: Sessions that must restart fresh, with the code word each is told ({} = told nothing).
+    #: Sessions told a code word at boot, so each has a transcript (roll, variant: they restart fresh and
+    #: must answer their word from the handoff; pane: they are RESUMED, which needs the transcript, and must
+    #: still know the word afterwards). {} = told nothing.
     words: dict[str, str]
     #: Sessions that must be left running.
     held: tuple[str, ...]
@@ -206,6 +227,11 @@ class Spec:
     install_fails: bool = False
     #: Sessions told nothing that still restart (abort: they would, were the install good).
     plain: tuple[str, ...] = ()
+    #: Sessions launched with claude as the pane's own process (``new-window 'exec claude ...'``): no shell
+    #: under it, as the 7.96.0 panes were (nexus-8rh0u). Must be in ``words`` or ``plain``.
+    direct: tuple[str, ...] = ()
+    #: A ``--resume`` roll (no --nx, no handoffs) instead of the ``--nx --fresh`` one.
+    resume: bool = False
 
     @property
     def sessions(self) -> tuple[str, ...]:
@@ -222,6 +248,8 @@ SPECS = {
                     busy=("rs_late",), release_after=("rs_alpha", "rs_image")),
     "abort": Spec("abort", {}, (), frozenset({"rs_alpha"}), plain=("rs_alpha", "rs_nochan"), install_fails=True),
     "gate": Spec("gate", {}, ("rs_alpha",), frozenset({"rs_alpha"}), engine=("502",)),
+    "pane": Spec("pane", {"rs_alpha": "HELIOTROPE", "rs_direct": "MARZIPAN"}, (), frozenset({"rs_alpha"}),
+                 direct=("rs_direct",), resume=True, wait=240),
 }
 
 
@@ -818,10 +846,14 @@ class Sandbox:
         return {v for _, args in self.descendants(pid) for v in pat.findall(args)}
 
     def start_session(self, name: str) -> None:
-        self.tmux("new-window", "-d", "-t", "rs:", "-n", name, "-c", str(self.work), "bash --noprofile --norc",
-                  check=True)
         channel = f" {CHANNEL_FLAGS}" if name in self.spec.channel else ""
         cmd = f"{self.claude} --model {self.model} --dangerously-skip-permissions{channel} -n {name}"
+        if name in self.spec.direct:
+            # claude is the pane's only process: the shape that closed six windows on 2026-11-06.
+            self.tmux("new-window", "-d", "-t", "rs:", "-n", name, "-c", str(self.work), f"exec {cmd}", check=True)
+            return
+        self.tmux("new-window", "-d", "-t", "rs:", "-n", name, "-c", str(self.work), "bash --noprofile --norc",
+                  check=True)
         self.tmux("send-keys", "-t", f"rs:{name}", "-l", cmd, check=True)
         self.tmux("send-keys", "-t", f"rs:{name}", "Enter", check=True)
 
@@ -974,6 +1006,11 @@ def roll_command(sb: Sandbox, *, rc_file: Path | None = None, extra: str = "") -
     assert sb.engine is not None
     # The roll's write-time handoff prune must not reach the operator's real /tmp (nexus-2v7da).
     prune_dir = shlex.quote(str(sb.home / "handoff-prune"))
+    if spec.resume:
+        cmd = (f"TMUX_PANE={shlex.quote(sb.pane_id(spec.caller))} NX_RESTART_PRUNE_DIR={prune_dir} "
+               f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --resume --no-update --no-ready-check "
+               f"--wait {spec.wait}" + (f" {extra}" if extra else ""))
+        return cmd + (f"; echo $? > {shlex.quote(str(rc_file))}" if rc_file is not None else "")
     cmd = (f"TMUX_PANE={shlex.quote(sb.pane_id(spec.caller))} NX_RESTART_PRUNE_DIR={prune_dir} "
            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(SCRIPT))} --nx {sb.to_version} --fresh "
            f"--repo {shlex.quote(str(sb.relrepo))} --endpoint {sb.engine.url} --engine-wait {spec.engine_wait} "
@@ -1181,7 +1218,7 @@ def watch_roll(sb: Sandbox, timeout: float, on_tick=None) -> str:
         text = sb.read_log()
         if on_tick:
             on_tick(text)
-        if "=== done:" in text or "=== ABORT" in text or "=== CRASH" in text:
+        if "=== done:" in text or "=== ABORT" in text or "=== CRASH" in text or "=== STOP" in text:
             break
         time.sleep(1)
     return sb.read_log()
@@ -1426,6 +1463,61 @@ def scenario_abort(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -
     notes.append(f"abort took {time.time() - t0:.0f}s; handoffs kept: {sorted(handoffs)}")
 
 
+def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -> None:
+    """A ``--resume`` roll over a session whose pane process is claude itself (nexus-8rh0u). Before the fix
+    the exit closed the pane and its window, the relaunch line went to a pane that was gone, and the roll
+    went on to the next session. Now the pane (same id, same window) takes a shell, the relaunch lands in
+    it, and both sessions resume as the same session ids. rs_alpha, in an ordinary bash pane, is the
+    caller and goes last. Each session is told a code word in boot() first: that writes the transcript
+    ``claude --resume`` needs (a session never prompted has none to resume), and afterwards each must still
+    answer its word."""
+    spec = sb.spec
+    before = boot(sb, failures)
+    sb.before = before
+    pane = sb.pane_id("rs_direct")
+    pane_pid = sb.tmux("display-message", "-p", "-t", pane, "#{pane_pid}").stdout.strip()
+    if pane_pid != str(before["rs_direct"].get("pid")):
+        failures.append(f"precondition: claude (pid {before['rs_direct'].get('pid')}) is not the process of pane "
+                        f"{pane} (pane_pid {pane_pid}); the scenario would not test the 7.96.0 shape")
+    alpha_pid = sb.tmux("display-message", "-p", "-t", sb.pane_id("rs_alpha"), "#{pane_pid}").stdout.strip()
+    if alpha_pid == str(before["rs_alpha"].get("pid")):
+        failures.append("precondition: rs_alpha's pane has no shell under claude; it is the control")
+    if failures:
+        return
+    t0 = time.time()
+    sb.tmux("send-keys", "-t", "rs:ctl", "-l", roll_command(sb), check=True)
+    sb.tmux("send-keys", "-t", "rs:ctl", "Enter", check=True)
+    log = watch_roll(sb, a.timeout)
+    print(f"[sandbox:{spec.name}] restart log:\n" + "\n".join("    " + ln for ln in log.splitlines()), flush=True)
+    expect = [f"rs_direct: claude is the process of pane {pane} (no shell under it); keeping the pane across the exit",
+              f"rs_direct: pane {pane} respawned with", "OK rs_direct: resumed as pid", "OK rs_alpha: resumed as pid",
+              "=== done: 2 of 2 restarted (0 fresh, 2 resumed)"]
+    lines = check_lines(log, expect, set(), failures)
+    check_caller_last(spec, lines, failures, notes)
+    if "=== STOP" in log:
+        failures.append("pane: the roll stopped on a relaunch that produced no session")
+    panes = sb.tmux("list-panes", "-a", "-F", "#{pane_id} #{window_name}").stdout.split("\n")
+    if f"{pane} rs_direct" not in panes:
+        failures.append(f"pane: pane {pane} of window rs_direct is gone ({panes})")
+    if sb.tmux("show-options", "-p", "-t", pane, "remain-on-exit").stdout.strip():
+        failures.append(f"pane: remain-on-exit is still set on {pane}")
+    for name, word in spec.words.items():
+        now = sb.wait_status(name, {"idle"}, 120)
+        was = before[name]
+        if now.get("sessionId") != was.get("sessionId") or now.get("pid") == was.get("pid"):
+            failures.append(f"{name}: not resumed as the same session on a new process (was {was.get('pid')}, "
+                            f"now {now.get('pid')}, session {was.get('sessionId')} -> {now.get('sessionId')})")
+            continue
+        # A resume brings the transcript back: the session still knows the word it was told before the roll.
+        reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
+        others = [w for n, w in spec.words.items() if n != name]
+        if word not in reply or any(w in reply for w in others):
+            failures.append(f"{name}: after the resume it answered {reply[:80]!r}, not its word {word}")
+    if str(sb.session("rs_direct").get("tmux", "")).rsplit(".", 1)[-1] != pane:
+        failures.append(f"rs_direct: resumed in {sb.session('rs_direct').get('tmux')}, not in pane {pane}")
+    notes.append(f"pane took {time.time() - t0:.0f}s; rs_direct kept {pane}")
+
+
 def run_roll(sb: Sandbox, tag: str, extra: str = "", timeout: float = 120) -> tuple[str, str]:
     """Type one roll command into the control pane and wait for its exit code; return (rc, the log it
     wrote). The rc is "none" when it did not exit within *timeout*."""
@@ -1566,7 +1658,8 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
         failures.append("gate: rs_alpha was asked for a handoff although the gate refused")
 
 
-RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario_abort, "gate": scenario_gate}
+RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario_abort, "gate": scenario_gate,
+           "pane": scenario_pane}
 
 
 def check_withdrawals(log: str, before: dict[str, dict], failures: list[str]) -> int:
@@ -1836,7 +1929,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         if sb.before:
             n = check_withdrawals(sb.read_log(), sb.before, failures)
             notes.append(f"withdrawals: {n} mailed handoff ask(s) checked against the log")
-            if n == 0 and name != "gate":  # every rolling scenario mails at least one ask: none found is a broken check
+            if n == 0 and name not in ("gate", "pane"):  # every --fresh roll mails at least one ask: none found is a broken check
                 failures.append("withdrawals: no mailed handoff ask found in the log to check")
         ok = not failures
     except Exception as exc:  # noqa: BLE001 -- a harness fault is a failed run with its reason

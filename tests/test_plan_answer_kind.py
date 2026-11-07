@@ -3,7 +3,7 @@
 
 A plan declares the kind of answer it can serve in a validated, versioned top-level ``plan_json`` field,
 never in ``dimensions`` (those are plan identity). Nothing here filters plans by kind: that is
-nexus-jypmj.2.3. These tests pin the vocabulary, the 12 builtin declarations, the tolerant decoder,
+nexus-jypmj.2.3. These tests pin the vocabulary, the 13 builtin declarations, the tolerant decoder,
 the grown-plan provenance rule, and that the declaration reaches the session cache without moving a
 single dimension or description.
 
@@ -59,13 +59,19 @@ _TABLE: dict[str, PlanAnswerKind] = {
     "document-discovery.yml": PlanAnswerKind.DISCOVERY_LISTING,
     "find-by-author.yml": PlanAnswerKind.DISCOVERY_LISTING,
     "type-scoped-search.yml": PlanAnswerKind.DISCOVERY_LISTING,
+    "entity-resolution.yml": PlanAnswerKind.DISCOVERY_LISTING,
     "debug-default.yml": PlanAnswerKind.DEBUG,
     "document-default.yml": PlanAnswerKind.AUDIT,
     "hybrid-factual-lookup.yml": PlanAnswerKind.LOOKUP,
     "review-default.yml": PlanAnswerKind.COMPARISON,
 }
 
-#: What the 12 builtins were BEFORE this bead, captured from the tree at origin/develop 4898d437d:
+#: Builtins added after the declaration shipped (RDR-147 Step 4 branch (c), nexus-irndi). They have no pre-declaration
+#: row: a library seeded by the previous release holds the other twelve, and a reseed inserts these.
+_ADDED_AFTER_DECLARATION: frozenset[str] = frozenset({"entity-resolution.yml"})
+
+#: What the 12 pre-existing builtins were BEFORE this bead, captured from the tree at origin/develop 4898d437d (the
+#: entity-resolution row is a freeze pin of its own YAML, see its comment):
 #: (canonical dimensions, sha256[:12] of the description, name, verb, scope, sha256[:12] of the
 #: canonical JSON of the YAML plan_json body). The declaration may add a key beside ``steps``; it must
 #: move none of these.
@@ -82,10 +88,15 @@ _BEFORE: dict[str, tuple[str, str, str, str, str, str]] = {
     "research-default.yml": ('{"scope":"global","strategy":"default","verb":"research"}', "8d17c00f852f", "default", "research", "global", "d7bff227acdd"),
     "review-default.yml": ('{"scope":"global","strategy":"default","verb":"review"}', "62f68754c0cd", "default", "review", "global", "21c8428f4736"),
     "type-scoped-search.yml": ('{"scope":"global","strategy":"type-scoped","verb":"research"}', "7754909a23d4", "type-scoped-search", "research", "global", "77a84d788747"),
+    # FREEZE PIN, not a develop capture (the file has no row on develop 4898d437d): the entity-resolution YAML
+    # as of fix round 1 of the nexus-irndi review, whose steps are hybrid-factual-lookup's. A change to its
+    # description, dimensions, tags or steps moves these hashes on purpose and the diff shows the edit.
+    "entity-resolution.yml": ('{"scope":"global","strategy":"entity-resolution","verb":"research"}', "ca44c80f5808", "entity-resolution", "research", "global", "57af6c5e0bd4"),
 }
 
 
-#: Per builtin, captured from the tree at origin/develop 4898d437d (the YAML blobs there run through the
+#: Per pre-existing builtin, captured from the tree at origin/develop 4898d437d (the entity-resolution row is a
+#: freeze pin of its own YAML; the YAML blobs there run through the
 #: row builder): (sha256[:12] of the tags string, sha256[:12] of the default_bindings JSON or None when the
 #: template has none, parent_dims). Literals, so a change to the YAML tags or bindings cannot hide behind a
 #: comparison of the template with itself.
@@ -102,6 +113,8 @@ _BEFORE_ROW: dict[str, tuple[str, str | None, str | None]] = {
     "research-default.yml": ('7a87d6cc0664', '7d0587b5acc4', None),
     "review-default.yml": ('2534dd636291', 'a4f389eb2c29', None),
     "type-scoped-search.yml": ('f20f6848e2a3', '7d0587b5acc4', None),
+    # FREEZE PIN, as in _BEFORE: tags now carry `cosine-only`; the bindings are hybrid-factual-lookup's.
+    "entity-resolution.yml": ('dcbdb52917d7', 'f71db903c830', None),
 }
 
 
@@ -117,7 +130,7 @@ def test_the_table_covers_every_builtin_file() -> None:
     """Non-vacuity: the parametrized tests below walk a table that is the whole shipped set."""
     on_disk = sorted(p.name for p in _BUILTIN_DIR.glob("*.yml"))
     assert on_disk == sorted(_TABLE) == sorted(_BEFORE) == sorted(_BEFORE_ROW)
-    assert len(on_disk) == 12
+    assert len(on_disk) == 13
 
 
 class TestVocabulary:
@@ -164,7 +177,7 @@ class TestBuiltinDeclarations:
         assert canonical_dimensions_json(template["dimensions"]) == dims
         assert (_h(row.query), row.name, row.verb, row.scope) == (desc_h, plan_name, verb, scope)
         tags_h, bindings_h, parent_dims = _BEFORE_ROW[name]
-        assert _h(row.tags) == tags_h, "tags are byte-identical to develop 4898d437d"
+        assert _h(row.tags) == tags_h, "tags are byte-identical to the captured literal (develop 4898d437d; entity-resolution: its freeze pin)"
         assert (_h(row.default_bindings) if row.default_bindings is not None else None) == bindings_h
         assert row.parent_dims == parent_dims
         stored = json.loads(row.plan_json)
@@ -869,7 +882,7 @@ class _FakeLibrary:
 def _pre_declaration_library() -> _FakeLibrary:
     """A library holding the 12 builtins exactly as the previous release seeded them (no declaration)."""
     lib = _FakeLibrary()
-    for name in sorted(_TABLE):
+    for name in sorted(set(_TABLE) - _ADDED_AFTER_DECLARATION):
         template = _template(name)
         template.pop("answer_kind", None)
         row = desired_row_for_template(template)
@@ -893,12 +906,14 @@ class TestSeedReconciliation:
 
         result = load_seed_directory(_BUILTIN_DIR, library=lib, reconcile=True)
 
-        assert sorted(result.updated) == sorted(_TABLE), result
-        assert not (result.inserted or result.errors or result.protected)
+        previous = sorted(set(_TABLE) - _ADDED_AFTER_DECLARATION)
+        assert sorted(result.updated) == previous, result
+        assert sorted(result.inserted) == sorted(_ADDED_AFTER_DECLARATION), "a reseed inserts only the builtin added since"
+        assert not (result.errors or result.protected)
         assert lib.deletes == [], "no row is dropped and re-inserted: the match/use counters survive"
-        assert len(lib.saves) == 12
+        assert len(lib.saves) == 13, "12 updates in place and 1 insert"
         after = {r["id"]: (r["dimensions"], r["query"], r["name"], r["verb"], r["scope"], r["tags"])
-                 for r in lib.rows.values()}
+                 for r in lib.rows.values() if r["id"] in before}
         assert after == before, "ids, dimensions, descriptions, names, verbs, scopes, tags: byte-identical"
         by_dims = {canonical_dimensions_json(_template(n)["dimensions"]): _template(n) for n in _TABLE}
         for row in lib.rows.values():
@@ -913,13 +928,17 @@ class TestSeedReconciliation:
         lib.saves.clear()
         again = load_seed_directory(_BUILTIN_DIR, library=lib, reconcile=True)
         assert lib.saves == [] and again.updated == []
-        assert sorted(again.skipped_existing) == sorted(_TABLE)
+        assert sorted(again.skipped_existing) == sorted(_TABLE)  # the 12 updated, the 1 inserted
 
     def test_the_insert_only_path_leaves_an_old_row_declaring_nothing(self) -> None:
         lib = _pre_declaration_library()
         result = load_seed_directory(_BUILTIN_DIR, library=lib, reconcile=False)
-        assert lib.saves == [] and sorted(result.skipped_existing) == sorted(_TABLE)
-        assert all(decode_answer_kind(r["plan_json"]) is PlanAnswerKind.UNKNOWN for r in lib.rows.values())
+        previous = sorted(set(_TABLE) - _ADDED_AFTER_DECLARATION)
+        assert sorted(result.skipped_existing) == previous and sorted(result.inserted) == sorted(_ADDED_AFTER_DECLARATION)
+        assert [kw["name"] for kw in lib.saves] == ["entity-resolution"], "only the new builtin is written"
+        old_rows = [r for r in lib.rows.values() if r["name"] != "entity-resolution"]
+        assert len(old_rows) == 12
+        assert all(decode_answer_kind(r["plan_json"]) is PlanAnswerKind.UNKNOWN for r in old_rows)
 
     def test_a_grown_row_at_a_builtin_description_is_still_protected(self) -> None:
         lib = _pre_declaration_library()
@@ -980,11 +999,11 @@ class TestSessionCache:
                 return [dict(r) for r in lib.rows.values()]
 
         cache = self._cache("kind-refresh")
-        assert cache.populate(_Active()) == 12
+        assert cache.populate(_Active()) == 12  # the library the previous release seeded
         ids = {r["name"] + "/" + r["verb"]: r["id"] for r in lib.rows.values()}
         lookup_id = ids["hybrid-factual-lookup/lookup"]
         assert self._meta(cache, "kind-refresh", lookup_id)["answer_kind"] == "unknown"
 
         load_seed_directory(_BUILTIN_DIR, library=lib, reconcile=True)
-        assert cache.populate(_Active()) == 12
+        assert cache.populate(_Active()) == 13  # the reseed inserted entity-resolution
         assert self._meta(cache, "kind-refresh", lookup_id)["answer_kind"] == "lookup"

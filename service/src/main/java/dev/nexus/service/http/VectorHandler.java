@@ -16,7 +16,9 @@ import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
 import dev.nexus.service.vectors.OwnerlessChunkWriteException;
 import dev.nexus.service.vectors.OwnerlessWritePolicy;
 import dev.nexus.service.vectors.OwnershipGuard;
+import dev.nexus.service.vectors.PciQueryRing;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.QueryVector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -152,6 +154,12 @@ public final class VectorHandler implements HttpHandler {
     private final OwnerlessWritePolicy ownerlessWritePolicy;
     /** RDR-222 Phase 1: null when the handler is built without a ledger; a keyed request is then refused. */
     private final KeyedSweep keyedSweep;
+    /**
+     * nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Bound late by {@link #queryRing}, because the ring
+     * needs the router's valid-index set, which Main builds after the service; {@code null} (a handler built without
+     * one, or before the bind) admits nothing.
+     */
+    private volatile PciQueryRing queryRing;
 
     /**
      * @param embedderRouter collection-aware embedder router for /embed (may be null —
@@ -206,6 +214,25 @@ public final class VectorHandler implements HttpHandler {
         this.rerankStage    = new RerankStage(reranker);
         this.ownerlessWritePolicy = ownerlessWritePolicy;
         this.keyedSweep     = requestLedger == null ? null : new KeyedSweep(requestLedger);
+    }
+
+    /**
+     * Bind the query ring that the search routes admit to ({@code /search}, {@code /search-per-collection},
+     * {@code /hybrid-search} and the four scoped routes). Idempotent.
+     */
+    public void queryRing(PciQueryRing ring) {
+        this.queryRing = ring;
+    }
+
+    /**
+     * Admit a search's vector to the query ring. Called AFTER the response has been sent, so the ring costs the
+     * search nothing; never throws ({@link PciQueryRing#admit} contains its own failures).
+     */
+    private void admitToQueryRing(String tenant, QueryVector query) {
+        PciQueryRing ring = queryRing;
+        if (ring != null) {
+            ring.admit(tenant, query);
+        }
     }
 
     @Override
@@ -385,6 +412,17 @@ public final class VectorHandler implements HttpHandler {
                 "nothing_moved", !e.somethingMoved(),
                 "audit_ids", e.auditIds(),
                 "moved_chashes", e.movedChashes())));
+        } catch (KeyedRestoreBodyOverCapException e) {
+            // nexus-k9kr9: the keyed restore's 200 body, as the ledger would store it, is over the stored-response
+            // cap. Thrown from inside the keyed transaction (the marker builds the body), so nothing moved and the
+            // ledger row reads rolled_back with this status. 422, not one of the client's retry codes: the same
+            // request builds the same body. The reason and both sizes are in the body for the operator.
+            log.warn("event=keyed_restore_body_over_cap op={} body_bytes={} cap_bytes={}", op, e.bodyBytes(), e.capBytes());
+            HttpUtil.send(exchange, 422, json(Map.of(
+                "error", KEYED_RESTORE_BODY_OVER_CAP,
+                "body_bytes", e.bodyBytes(),
+                "cap_bytes", e.capBytes(),
+                "detail", e.getMessage())));
         } catch (dev.nexus.service.db.RequestLedger.ClaimContendedException e) {
             // nexus-yye8l.20: the request ledger could not settle the key in its bounded claim rounds, because
             // other attempts kept taking or purging the row between this one's read and write. Nothing was
@@ -665,6 +703,7 @@ public final class VectorHandler implements HttpHandler {
         var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where,
                                                  includeSourceUri, chashAllow);
         sendSearchResult(ex, body, queryText, searchResult);
+        admitToQueryRing(tenant, searchResult.queryVector());
     }
 
     /**
@@ -863,6 +902,7 @@ public final class VectorHandler implements HttpHandler {
         String envelopeBody = json(envelope);
         long serializeMs = (System.nanoTime() - serializeStartNanos) / 1_000_000L;
         HttpUtil.send(ex, 200, envelopeBody);
+        admitToQueryRing(tenant, result.queryVector());
         // nexus-mz9jv: the request's total beside the search_per_collection line's split (query embed, fan-out,
         // enrich, embedding fill): repo_ms covers those, the rest of handler_ms is rerank, serialisation, the write.
         log.info("event=search_per_collection_request collections={} rows={} bytes={} repo_ms={} serialize_ms={} "
@@ -932,6 +972,7 @@ public final class VectorHandler implements HttpHandler {
         var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where,
                                                        includeSourceUri, chashAllow);
         sendSearchResult(ex, body, queryText, hybridResult);
+        admitToQueryRing(tenant, hybridResult.queryVector());
     }
 
     /**
@@ -970,6 +1011,7 @@ public final class VectorHandler implements HttpHandler {
             tenant, queryText, collections, contentType, author, year, corpus,
             subtree, where, nResults);
         sendSearchResult(ex, body, queryText, metaResult);
+        admitToQueryRing(tenant, metaResult.queryVector());
     }
 
     /**
@@ -992,6 +1034,7 @@ public final class VectorHandler implements HttpHandler {
 
         var topicResult = repo.searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults);
         sendSearchResult(ex, body, queryText, topicResult);
+        admitToQueryRing(tenant, topicResult.queryVector());
     }
 
     /**
@@ -1026,6 +1069,7 @@ public final class VectorHandler implements HttpHandler {
         var graphResult = repo.searchGraphHopWithTokens(
             tenant, queryText, seeds, collections, linkType, depth, direction, where, nResults);
         sendSearchResult(ex, body, queryText, graphResult);
+        admitToQueryRing(tenant, graphResult.queryVector());
     }
 
     /**
@@ -1067,6 +1111,7 @@ public final class VectorHandler implements HttpHandler {
         var aspectResult = repo.searchAspectScopedWithTokens(
             tenant, queryText, collections, field, pattern, minConfidence, where, nResults);
         sendSearchResult(ex, body, queryText, aspectResult);
+        admitToQueryRing(tenant, aspectResult.queryVector());
     }
 
     /**
@@ -1502,6 +1547,8 @@ public final class VectorHandler implements HttpHandler {
     static final String QUARANTINE_ROUTE = "/v1/vectors/gc/quarantine-orphans";
     static final String RESTORE_ROUTE = "/v1/vectors/gc/restore-rereferenced";
     static final String EXPIRE_ROUTE = "/v1/vectors/gc/expire-quarantine";
+    /** RDR-222 (nexus-k9kr9): the fourth keyed route, {@code /gc/quarantine-restore}. */
+    static final String QUARANTINE_RESTORE_ROUTE = "/v1/vectors/gc/quarantine-restore";
 
     /**
      * The most distinct chashes one bounded expire page takes: {@code gc_audit}'s chash ceiling, equal to the
@@ -1949,6 +1996,68 @@ public final class VectorHandler implements HttpHandler {
     static final int MAX_QUARANTINE_RESTORE_PER_CALL = 1000;
 
     /**
+     * Most chashes (or page rows, for the two cursor sources) one KEYED {@code /gc/quarantine-restore} call takes
+     * (RDR-222, bead nexus-k9kr9). A keyed call's 200 body is stored in the request ledger, whose cap is
+     * {@link KeyedSweep#STORED_RESPONSE_CAP_BYTES} (64 KB) measured as Postgres renders the jsonb; the body is one
+     * 13-field row per chash, and the cap's only cut ({@code KeyedSweep#storedResponse}) trims a {@code sample} that
+     * this body does not have. So the call is bounded instead, and a replay (or the status route) equals the
+     * first response field for field. (Not byte for byte: the first response is Jackson's compact text and the stored
+     * copy is rendered back by Postgres from jsonb, which orders keys by length and spaces them; the JSON is the same.)
+     * The bound is measured for the worst row and a reserved envelope, and nothing upstream bounds the envelope's
+     * sibling count or name length, so {@link #keyedQuarantineRestoreBody} checks the real body against the cap inside
+     * the keyed transaction and refuses an over-cap one ({@link #KEYED_RESTORE_BODY_OVER_CAP}, nothing moves).
+     *
+     * <p>MEASURED, not guessed ({@code KeyedRestoreBodySizeTest} recomputes it from the real body builder and fails if
+     * this number is not the largest that fits): one worst-case row is {@value #KEYED_RESTORE_WORST_ROW_BYTES} bytes as
+     * Postgres renders it, and the worst-case rest of the body (envelope) is reserved at
+     * {@value #KEYED_RESTORE_ENVELOPE_RESERVE_BYTES} bytes, so {@code floor((65536 - 8192) / worst row)} rows fit. The
+     * worst row has every field at its longest: a 64-hex chash, the longest outcome, reattach verdict and reason words,
+     * a 27-character UTC instant, a 64-character owner tumbler, three 10-digit integers, and the two titles at
+     * {@value #KEYED_RESTORE_TITLE_MAX_JSON_BYTES} JSON bytes each. The titles are the one field with no length bound
+     * anywhere upstream (a document title and a chunk title are free text), so a keyed body clips them to that many
+     * JSON bytes (see {@link #clipJsonBytes}); the unkeyed body is untouched. The envelope reserve covers an origin
+     * name and up to 16 quarantine siblings of up to 128 characters, 16 audit ids and the audit source object.
+     */
+    public static final int MAX_KEYED_QUARANTINE_RESTORE_CHASHES = 74;
+
+    /** A keyed restore row's {@code owner_title} and {@code chunk_title} are cut to this many JSON bytes (escapes counted). */
+    public static final int KEYED_RESTORE_TITLE_MAX_JSON_BYTES = 160;
+
+    /** The worst-case rendered size of one keyed row, as measured by {@code KeyedRestoreBodySizeTest}. */
+    static final int KEYED_RESTORE_WORST_ROW_BYTES = 773;
+
+    /** What the non-row part of a keyed body is allowed to take; {@code KeyedRestoreBodySizeTest} checks a worst-case envelope fits. */
+    static final int KEYED_RESTORE_ENVELOPE_RESERVE_BYTES = 8_192;
+
+    /** The 400 {@code error} of a keyed call that names more chashes than {@link #MAX_KEYED_QUARANTINE_RESTORE_CHASHES}. */
+    static final String KEYED_RESTORE_TOO_MANY_CHASHES = "too_many_chashes_for_keyed_restore";
+
+    /**
+     * The 422 {@code error} of a keyed call whose 200 body, measured as the ledger measures it, would be over
+     * {@link KeyedSweep#STORED_RESPONSE_CAP_BYTES}. The call is rolled back whole (nothing moved) and the key reads
+     * {@code rolled_back}; the same request would build the same body, so a resend cannot help: restore fewer
+     * chashes, or an origin with fewer or shorter-named quarantine siblings.
+     */
+    static final String KEYED_RESTORE_BODY_OVER_CAP = "keyed_restore_body_over_cap";
+
+    /** Thrown inside the keyed restore transaction when the body to store is over the ledger's cap. */
+    static final class KeyedRestoreBodyOverCapException extends RuntimeException {
+        private final int bodyBytes;
+        private final int capBytes;
+
+        KeyedRestoreBodyOverCapException(int bodyBytes, int capBytes) {
+            super(KEYED_RESTORE_BODY_OVER_CAP + ": the response is " + bodyBytes + " bytes as the request ledger renders it, "
+                + "over its " + capBytes + "-byte stored-response cap; nothing was restored. Send fewer chashes, or "
+                + "restore this origin without a key (the unkeyed form has no stored copy)");
+            this.bodyBytes = bodyBytes;
+            this.capBytes = capBytes;
+        }
+
+        int bodyBytes() { return bodyBytes; }
+        int capBytes() { return capBytes; }
+    }
+
+    /**
      * POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead nexus-2x9xa; serves
      * {@code nx t3 quarantine restore})
      *
@@ -2015,12 +2124,30 @@ public final class VectorHandler implements HttpHandler {
      * {@code nothing_moved} is true only when the trip was on the first sibling that moved anything; when it was on a
      * later one, {@code nothing_moved} is false and {@code audit_ids} / {@code moved_chashes} name what the earlier
      * siblings had already committed. Either way the same call may be sent again (a restored chash reads present).
+     *
+     * <p>KEYED FORM (RDR-222, bead nexus-k9kr9, [additive]): an {@code Idempotency-Key} header makes the call a keyed
+     * request on {@code nexus.request_ledger}, as on the three bounded sweeps. Every sibling then runs inside ONE
+     * transaction that also commits the ledger marker, under one {@code statement_timeout} budget of 25 s measured from
+     * the start of the call (before each sibling the engine sets it to what is left; {@code lock_timeout} stays 2 s), so
+     * the effect and the stored response commit together and a replay or {@code GET /v1/requests/<id>} returns the first
+     * response. A busy trip on ANY sibling, or a spent budget, rolls the whole call back: the 503 body is the one above
+     * with {@code nothing_moved} true, empty {@code audit_ids} and {@code moved_chashes}, and the ledger row reads
+     * {@code rolled_back} so the same key can be sent again. The keyed form takes at most
+     * {@link #MAX_KEYED_QUARANTINE_RESTORE_CHASHES} chashes: more than that in {@code chashes} is 400
+     * {@code too_many_chashes_for_keyed_restore} (with {@code max_chashes} and {@code requested}, nothing runs, no ledger
+     * row); {@code limit} on the {@code audit_id} and window sources is clamped to the same number (page with
+     * {@code source.next_offset} / {@code next_after}); and the two title fields of each row are cut to
+     * {@value #KEYED_RESTORE_TITLE_MAX_JSON_BYTES} JSON bytes. A dry run with a key is 400
+     * {@code idempotency_key_unsupported}. A call with no key is exactly as before.
      */
     private void handleGcQuarantineRestore(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
+        // RDR-222 (nexus-k9kr9): an Idempotency-Key makes the call a keyed request (see the javadoc above).
+        KeyedRequest keyed = keyedRequest(ex);
+        byte[] raw = readBodyBytes(ex);
+        Map<String, Object> body = parseBody(raw);
         String origin     = requireString(body, "origin_collection");
         // nexus-wbfpw.55: a "quarantine_collection" in the body is accepted and IGNORED. The engine finds the
         // sibling itself (origin name + the chunks' origin_collection tag): a client-derived name disagrees with
@@ -2029,6 +2156,10 @@ public final class VectorHandler implements HttpHandler {
         boolean dryRun = optBool(body, "dry_run", false);
         boolean reattach = optBool(body, "reattach", true);
         String actor = java.util.Objects.requireNonNullElse(optString(body, "actor"), "operator");
+        // A dry run writes nothing, so there is nothing for a key to protect, and the engine never ignores a key.
+        if (keyed != null && dryRun) {
+            refuseKey(ex, "idempotency_key_unsupported");
+        }
 
         List<String> chashes = body.get("chashes") == null ? null : requireStringList(body, "chashes");
         Object auditRaw = body.get("audit_id");
@@ -2042,21 +2173,60 @@ public final class VectorHandler implements HttpHandler {
         }
         int limit = Math.max(1, Math.min(optInt(body, "limit", MAX_QUARANTINE_RESTORE_PER_CALL),
                                          MAX_QUARANTINE_RESTORE_PER_CALL));
-
-        PgVectorRepository.QuarantineRestoreOutcome result;
-        if (chashes != null) {
-            if (chashes.size() > MAX_QUARANTINE_RESTORE_PER_CALL) {
-                throw new IllegalArgumentException("at most " + MAX_QUARANTINE_RESTORE_PER_CALL
-                    + " chashes per call, got " + chashes.size());
-            }
-            result = repo.quarantineRestore(tenant, origin, null, chashes, actor, dryRun, reattach);
-        } else if (auditRaw != null) {
-            long auditId;
+        if (chashes != null && chashes.size() > MAX_QUARANTINE_RESTORE_PER_CALL) {
+            throw new IllegalArgumentException("at most " + MAX_QUARANTINE_RESTORE_PER_CALL
+                + " chashes per call, got " + chashes.size());
+        }
+        long auditId = 0;
+        if (auditRaw != null) {
             try {
                 auditId = auditRaw instanceof Number n ? n.longValue() : Long.parseLong(auditRaw.toString());
             } catch (NumberFormatException e) {
                 throw new IllegalArgumentException("field 'audit_id' must be an integer");
             }
+        }
+
+        if (keyed != null) {
+            // The keyed form takes at most MAX_KEYED_QUARANTINE_RESTORE_CHASHES chashes so its full 200 body fits
+            // the ledger's stored-response cap and a replay is the first response (see that constant). The three
+            // sources are bounded the way each already is: a list over the cap is refused (as it is over 1000), and
+            // a page size (`limit`, which both cursor sources already clamp) is clamped to the cap, which loses
+            // nothing because the response names the cursor (next_offset / next_after) for the rest.
+            if (chashes != null && chashes.size() > MAX_KEYED_QUARANTINE_RESTORE_CHASHES) {
+                HttpUtil.send(ex, 400, json(Map.of(
+                    "error", KEYED_RESTORE_TOO_MANY_CHASHES,
+                    "max_chashes", MAX_KEYED_QUARANTINE_RESTORE_CHASHES,
+                    "requested", chashes.size())));
+                return;
+            }
+            final int keyedLimit = Math.min(limit, MAX_KEYED_QUARANTINE_RESTORE_CHASHES);
+            final long keyedAuditId = auditId;
+            final int offset = Math.max(0, optInt(body, "offset", 0));
+            final java.time.Instant since = auditRaw == null && chashes == null ? parseInstant("quarantined_since", sinceRaw) : null;
+            final java.time.Instant before = auditRaw == null && chashes == null ? parseInstant("quarantined_before", beforeRaw) : null;
+            final String after = auditRaw == null && chashes == null ? parseAfterChash(body.get("after_chash")) : null;
+            this.<PgVectorRepository.QuarantineRestoreOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_RESTORE_ROUTE, raw,
+                dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS, false,
+                marker -> {
+                    var call = PgVectorRepository.KeyedRestore.begin(marker,
+                        dev.nexus.service.db.PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS);
+                    if (chashes != null) {
+                        return repo.quarantineRestoreKeyed(tenant, origin, chashes, actor, reattach, call);
+                    } else if (auditRaw != null) {
+                        return repo.quarantineRestoreFromAuditKeyed(tenant, origin, keyedAuditId, offset, keyedLimit,
+                                                                    actor, reattach, call);
+                    }
+                    return repo.quarantineRestoreSelectedKeyed(tenant, origin, since, before, after, keyedLimit, actor,
+                                                               reattach, call);
+                },
+                out -> keyedQuarantineRestoreBody(origin, reattach, out));
+            return;
+        }
+
+        PgVectorRepository.QuarantineRestoreOutcome result;
+        if (chashes != null) {
+            result = repo.quarantineRestore(tenant, origin, null, chashes, actor, dryRun, reattach);
+        } else if (auditRaw != null) {
             int offset = Math.max(0, optInt(body, "offset", 0));
             result = repo.quarantineRestoreFromAudit(tenant, origin, null, auditId, offset, limit, actor, dryRun,
                                                      reattach);
@@ -2065,7 +2235,17 @@ public final class VectorHandler implements HttpHandler {
                 parseInstant("quarantined_since", sinceRaw), parseInstant("quarantined_before", beforeRaw),
                 parseAfterChash(body.get("after_chash")), limit, actor, dryRun, reattach);
         }
+        HttpUtil.send(ex, 200, json(quarantineRestoreBody(origin, dryRun, reattach, result, false)));
+    }
 
+    /**
+     * The 200 body of {@code /gc/quarantine-restore}. One builder for the unkeyed call and the keyed one (whose body
+     * the ledger stores), so a replay is the first response field for field. {@code clipTitles} is the keyed form's
+     * title cut ({@link #KEYED_RESTORE_TITLE_MAX_JSON_BYTES}); the unkeyed body is built exactly as it always was.
+     */
+    static Map<String, Object> quarantineRestoreBody(String origin, boolean dryRun, boolean reattach,
+                                                     PgVectorRepository.QuarantineRestoreOutcome result,
+                                                     boolean clipTitles) {
         var rows = new ArrayList<Map<String, Object>>(result.rows().size());
         for (var r : result.rows()) {
             var item = new LinkedHashMap<String, Object>();
@@ -2076,9 +2256,11 @@ public final class VectorHandler implements HttpHandler {
             item.put("reattach", r.reattach());
             item.put("attached", r.attached());
             item.put("owner", r.owner());
-            item.put("owner_title", r.ownerTitle());
+            item.put("owner_title", clipTitles ? clipJsonBytes(r.ownerTitle(), KEYED_RESTORE_TITLE_MAX_JSON_BYTES)
+                                               : r.ownerTitle());
             item.put("position", r.position());
-            item.put("chunk_title", r.chunkTitle());
+            item.put("chunk_title", clipTitles ? clipJsonBytes(r.chunkTitle(), KEYED_RESTORE_TITLE_MAX_JSON_BYTES)
+                                               : r.chunkTitle());
             item.put("reason", r.reason());
             item.put("owner_rows", r.ownerRows());
             item.put("owner_chunks", r.ownerChunks());
@@ -2117,7 +2299,48 @@ public final class VectorHandler implements HttpHandler {
         out.put("rows", rows);
         out.put("source", source);
         out.put("next_after", result.nextAfter());
-        HttpUtil.send(ex, 200, json(out));
+        return out;
+    }
+
+    /**
+     * The keyed form's body, the one the ledger stores: {@link #quarantineRestoreBody} with clipped titles, checked
+     * against {@link KeyedSweep#STORED_RESPONSE_CAP_BYTES} the way the ledger measures it. It runs in the ledger marker,
+     * inside the keyed transaction, so an over-cap body throws {@link KeyedRestoreBodyOverCapException} and the whole
+     * call rolls back: a body this route never stores over the cap (the ledger's own cut would add a {@code sample}
+     * and {@code sample_truncated} to a body that has no sample, and a replay would differ from the first response).
+     */
+    static Map<String, Object> keyedQuarantineRestoreBody(String origin, boolean reattach,
+                                                          PgVectorRepository.QuarantineRestoreOutcome result) {
+        Map<String, Object> body = quarantineRestoreBody(origin, false, reattach, result, true);
+        int bytes = KeyedSweep.pgJsonbBytes(body);
+        if (bytes > KeyedSweep.STORED_RESPONSE_CAP_BYTES) {
+            throw new KeyedRestoreBodyOverCapException(bytes, KeyedSweep.STORED_RESPONSE_CAP_BYTES);
+        }
+        return body;
+    }
+
+    /**
+     * {@code s} cut to the longest prefix whose JSON-escaped form is at most {@code maxBytes} UTF-8 bytes (null stays
+     * null). Escapes are counted at their worst: a quote or backslash is 2 bytes, any control character 6 (a six-character u-escape),
+     * anything else its UTF-8 length; a surrogate pair is never split. The cut is a function of the text alone, so the
+     * first response and the stored copy agree.
+     */
+    static String clipJsonBytes(String s, int maxBytes) {
+        if (s == null) return null;
+        int bytes = 0;
+        int i = 0;
+        while (i < s.length()) {
+            int cp = s.codePointAt(i);
+            int w = cp == '"' || cp == '\\' ? 2
+                  : cp < 0x20 ? 6
+                  : cp < 0x80 ? 1
+                  : cp < 0x800 ? 2
+                  : cp < 0x10000 ? 3 : 4;
+            if (bytes + w > maxBytes) break;
+            bytes += w;
+            i += Character.charCount(cp);
+        }
+        return i == s.length() ? s : s.substring(0, i);
     }
 
     /** An optional ISO-8601 UTC instant field of {@code /gc/quarantine-restore}: null stays null. */
