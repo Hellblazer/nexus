@@ -2940,6 +2940,35 @@ class TestPageCoverage:
         assert "1 page coverage unverified" in result.output
         assert "DEVONthink MCP" in result.output
 
+    def test_an_excluded_pdf_skips_the_coverage_check_with_one_clear_line(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        """RDR-243 Q7 (nexus-rfvyy.8): DEVONthink's MCP refuses an excluded record's UUID, so the
+        pageCount read can only fail for it. The check is skipped for that record, with one line saying
+        why, and the run does not report 'MCP unreachable' or count it unverified."""
+        from nexus.cli import main
+        import nexus.commands.dt as dt_mod
+        from nexus.devonthink import DtRecord
+
+        fake_selectors["selection"].return_value = [DtRecord("U-EX", "/ex.pdf", excluded=True), ("U-OK", "/ok.pdf")]
+        monkeypatch.setattr("nexus.sensitive_write.require_sensitive_engine", lambda what: None)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)  # the module's cloud_mode pin would refuse the sensitive record
+        monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: (True, 5, [1, 2]))
+        monkeypatch.setattr("nexus.commands.dt._stamp_page_gap", lambda uuid, missing: True)
+        asked: list[str] = []
+
+        def facts(uuid):
+            asked.append(uuid)
+            return {"name": "a", "url": "", "year": 0, "page_count": 2}
+
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", facts)
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert asked == ["U-OK"], "the excluded record's pageCount is never asked of the MCP"
+        lines = [ln for ln in result.output.splitlines() if "page coverage not checked" in ln]
+        assert len(lines) == 1 and "U-EX" in lines[0] and "excluded from AI" in lines[0], result.output
+        assert "unreachable" not in result.output and "unverified" not in result.output, result.output
+
     def test_markdown_and_unchanged_records_are_not_checked(self, runner, fake_selectors, monkeypatch):
         from nexus.cli import main
         import nexus.commands.dt as dt_mod
