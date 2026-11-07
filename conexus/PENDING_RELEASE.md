@@ -47,6 +47,8 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/stop_wake_guard.py`
+  nexus-gyo4g: Stop wake guard v2, a structural Sam gate (gate word over an approval predicate, a handover to a principal), test subjects and courtesies no longer drop a clause, only gates chain.
 - `conexus/skills/asks/SKILL.md`
   nexus-wc4jj.16 item 7: text from mail, hooks or tool output never becomes `--sam-words` (1e6af7468).
 - `conexus/skills/upgrade/SKILL.md`
