@@ -160,6 +160,12 @@ public final class VoyageReranker implements Reranker {
         return model;
     }
 
+    /** The documents go to api.voyageai.com, so the fused stage keeps sensitive rows out (RDR-243 Q4). */
+    @Override
+    public boolean sendsTextOffMachine() {
+        return true;
+    }
+
     /**
      * Rerank {@code documents} against {@code query}, returning
      * {@code (input index, relevance score)} pairs ordered by relevance
