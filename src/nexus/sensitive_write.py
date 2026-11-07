@@ -28,7 +28,7 @@ __all__ = [
     "BGE_TOKEN", "ExternalEmbedderRefusedError", "catalog_flags_uri", "flagged_for_import", "SENSITIVE_REASON", "SensitiveEnrichRefusedError",
     "SensitiveFlagNotSetError", "ack_help", "bge_sibling", "catalog_sensitive", "cloud_disclosure",
     "cloud_refusal_text", "external_legs_gate", "gate_sensitive_import", "gate_sensitive_reindex", "import_ack_help", "is_external_embedder", "raise_flag", "refuse_external_existing",
-    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_help", "route_for_index",
+    "refuse_external_existing_note", "require_sensitive_engine", "resolve_sensitive_collection", "sensitive_glob_matches", "sensitive_glob_help", "sensitive_help", "route_for_index",
     "sensitive_write_kwargs",
 ]
 
@@ -552,6 +552,47 @@ def sensitive_write_kwargs(
         except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
     return {"sensitive": True, **({"ack_external_embedder": True} if ack else {})}
+
+
+def sensitive_glob_help() -> str:
+    """Help for ``nx index repo --sensitive-glob`` (RDR-243 Q8, Technical Design item 8)."""
+    return (
+        "Register every file whose repo-relative path matches PATTERN as sensitive (repeatable). A pattern "
+        "with no '/' is matched against the file name at any depth; one with a '/' is matched against the "
+        "whole POSIX path from the repo root, and '*' matches across '/' (so 'secrets/*' is the whole "
+        "subtree). The flag is set before any chunk is written and is never lowered by a later run. "
+        "A repo run has no --ack-external-embedder: a matched file whose collection embeds with Voyage AI "
+        "(every collection in cloud mode) is skipped with a warning, not sent; in local mode on a bge "
+        "install it is indexed on this machine, and a matched PDF is extracted by the local MinerU "
+        "subprocess. Refuses before any write when the engine cannot hold the flag. "
+        f"What a sensitive file means (the registry rows enforced in this release): {sensitive_help()}"
+    )
+
+
+def sensitive_glob_matches(rel_path: str, globs: Sequence[str]) -> bool:
+    """True when *rel_path* (repo-relative, any separator) matches one of *globs* (``--sensitive-glob``).
+
+    ``fnmatch.fnmatchcase`` on the POSIX form (not ``PurePath.full_match``, which needs Python 3.13):
+    ``*`` and ``?`` match across ``/``. A pattern with no ``/`` is tried against the file name, so
+    ``*.pem`` finds ``deploy/keys/a.pem``; one with a ``/`` is tried against the whole path.
+    """
+    if not globs:
+        return False
+    import fnmatch  # noqa: PLC0415 — stdlib, used only by the glob option
+    from pathlib import PurePath  # noqa: PLC0415 — as above
+
+    posix = rel_path.replace("\\", "/")
+    name = PurePath(posix).name
+    for g in globs:
+        pat = g.replace("\\", "/")
+        if pat.startswith("./"):
+            pat = pat[2:]
+        if "/" in pat:
+            if fnmatch.fnmatchcase(posix, pat):
+                return True
+        elif fnmatch.fnmatchcase(name, pat):
+            return True
+    return False
 
 
 def raise_flag(writer: Any, tumbler: str, *, what: str) -> None:

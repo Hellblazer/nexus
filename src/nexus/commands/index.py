@@ -19,6 +19,7 @@ from nexus.config import EXTRACTOR_CHOICES
 from nexus.sensitive_write import (
     ack_help,
     route_for_index as _route_sensitive_index,
+    sensitive_glob_help,
     sensitive_help,
     sensitive_write_kwargs as _sensitive_write_kwargs,
 )
@@ -1038,10 +1039,13 @@ class _PhaseHeartbeat:
         "go to code__. GH #451."
     ),
 )
+@click.option(
+    "--sensitive-glob", "sensitive_globs", multiple=True, metavar="PATTERN", help=sensitive_glob_help(),
+)
 def index_repo_cmd(
     path: Path, frecency_only: bool, force: bool, re_embed: bool, monitor: bool,
     since_head: bool, on_locked: str, no_taxonomy: bool,
-    debug_timing: bool, corpus_choice: str,
+    debug_timing: bool, corpus_choice: str, sensitive_globs: tuple[str, ...] = (),
 ) -> None:
     """Register and immediately index a code repository at PATH.
 
@@ -1065,6 +1069,17 @@ def index_repo_cmd(
             "skips never reaches the server, so there is nothing to "
             "re-embed."
         )
+    if sensitive_globs:
+        # RDR-243 Q8: an engine that cannot hold the flag would drop it without an error, so the run
+        # refuses before any register call (and before the owner is registered below).
+        from nexus.sensitive_write import require_sensitive_engine  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+
+        if frecency_only:
+            raise click.UsageError("--sensitive-glob does nothing with --frecency-only (nothing is registered).")
+        try:
+            require_sensitive_engine("nx index repo --sensitive-glob")
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     reg = _registry()
     path = path.resolve()
@@ -1610,7 +1625,8 @@ def index_repo_cmd(
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,
-                                     client=_t2_client) or {}
+                                     client=_t2_client,
+                                     **({"sensitive_globs": tuple(sensitive_globs)} if sensitive_globs else {})) or {}
         except pdf_stack.RerunRequired:
             # nexus-2k66t.4.2: the walk found PDFs and installed the PDF stack
             # into a new generation. index_repository has released its index
