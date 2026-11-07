@@ -114,7 +114,10 @@ def hit_facts(row: Mapping[str, object]) -> tuple[bool, tuple[str, ...]]:
     """``(sensitive, owners)`` from a hit's mapping (a result's metadata, or a raw engine row)."""
     raw = row.get("sensitive_owners")
     owners = tuple(str(o) for o in raw if o) if isinstance(raw, (list, tuple)) else ()
-    return hit_is_sensitive(row.get("sensitive"), owners), owners
+    # An engine that sends no ``sensitive`` flag, and an owner lookup that failed: nothing says the hit is clean, so
+    # it is sensitive (fail closed; nexus.search_engine.OWNER_LOOKUP_FAILED_KEY).
+    unknown = row.get("_owner_lookup_failed") is True and not isinstance(row.get("sensitive"), bool)
+    return hit_is_sensitive(row.get("sensitive"), owners) or unknown, owners
 
 
 def chunk_row_facts(row_flag: object, owners: Sequence[object] | None) -> tuple[bool, tuple[str, ...]]:

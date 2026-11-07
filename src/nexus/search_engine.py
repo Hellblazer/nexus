@@ -179,6 +179,20 @@ def _positions_owner(candidates: list[dict], collection: str) -> dict | None:
     return min(pool, key=lambda c: c["doc_id"]) if pool else None
 
 
+#: Metadata key: the owner lookup that says which documents (and whether any is sensitive) hold a hit failed, so a
+#: hit the engine did not flag cannot be shown to be clean. Read by ``nexus.sensitive_output.hit_facts``.
+OWNER_LOOKUP_FAILED_KEY = "_owner_lookup_failed"
+
+
+def _mark_owner_lookup_failed(results: list[SearchResult]) -> None:
+    """RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): stamp every hit whose engine row carried no ``sensitive`` flag (an
+    engine that predates the field) with :data:`OWNER_LOOKUP_FAILED_KEY`. The output posture then treats it as
+    sensitive: "could not look" is not "clean". A hit with the engine's flag keeps it; the engine is the authority."""
+    for r in results:
+        if not isinstance(r.metadata.get("sensitive"), bool):
+            r.metadata[OWNER_LOOKUP_FAILED_KEY] = True
+
+
 def _attach_from_chash_positions(
     results: list[SearchResult], chashes: list[str], catalog: Any,
 ) -> bool:
@@ -206,8 +220,10 @@ def _attach_from_chash_positions(
         rows = lookup([c for c in chashes if c])
     except Exception:  # noqa: BLE001 — best-effort; the manifest path below still runs
         _log.debug("attach_chash_positions_failed", exc_info=True)
+        _mark_owner_lookup_failed(results)
         return False
     if not isinstance(rows, list):
+        _mark_owner_lookup_failed(results)
         return False
     by_chash: dict[str, list[dict]] = {}
     for row in rows:

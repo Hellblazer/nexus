@@ -843,7 +843,14 @@ def search_cmd(
             run = []
         if withhold:
             withheld += 1
-            click.echo(stub_line(first_sensitive_owner(owners)))
+            owner = first_sensitive_owner(owners)
+            if files_only:
+                continue  # a path list holds paths only: the row is omitted and counted below (fix r1, review minor)
+            if vimgrep:
+                # Keep the quickfix shape (path:line:col:text); the "path" names the document by tumbler.
+                click.echo(f"{owner or 'sensitive'}:1:1:{stub_line(owner)}")
+                continue
+            click.echo(stub_line(owner))
             continue
         lines = _render([r])
         if lines and not files_only:  # a path list stays pipeable: the terminal reader knows their own files
@@ -854,4 +861,5 @@ def search_cmd(
         for line in _render(run):
             click.echo(line)
     if withheld:
-        click.echo(withheld_note(withheld))
+        # A path list and a quickfix list must stay machine-readable: their count goes to stderr.
+        click.echo(withheld_note(withheld), err=files_only or vimgrep)
