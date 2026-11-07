@@ -16245,11 +16245,12 @@ async def setup(
 ) -> str:
     import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
-    # nexus-l3dkq: a cancel does not stop the thread, by design, and that costs nothing. The install
-    # itself runs in the setup script's detached process (setup_tools: "the work continues in the
-    # background"), which a cancel was never meant to stop; setup_status reads its stage. This
-    # thread only makes setup_tools._call_script calls, each bounded by run_bounded at
-    # _SCRIPT_TIMEOUT_SECONDS, so an abandoned await leaves at most one bounded call to finish.
+    # nexus-l3dkq: a cancel abandons the await, not the thread, and that is the stated limit. The
+    # thread does local reads (setup_script, usable_service and its loopback /health probe) and at
+    # most one setup_tools._call_script call, bounded by run_bounded at _SCRIPT_TIMEOUT_SECONDS. A
+    # cancel before that `start` call returns does not stop the install from starting: the install
+    # runs in the setup script's detached process ("the work continues in the background"), which
+    # setup_status reads, and the script's own lock makes a second setup call safe.
     try:
         return await asyncio.to_thread(_setup_tools.run_setup, mode, autostart, slim)
     except _setup_tools.SetupError as exc:
