@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The two doctor rows of RDR-243 Technical Design item 10 (nexus-rfvyy.6.17), shared by ``nx catalog
+"""The doctor rows of RDR-243 Technical Design item 10 (nexus-rfvyy.6.17, nexus-rfvyy.8.7), shared by ``nx catalog
 doctor`` and ``nx doctor`` so the two surfaces cannot drift apart.
 
 * ``sensitive_in_aspect_eligible`` (WARN): a sensitive document whose collection has an aspect extractor
@@ -9,6 +9,13 @@ doctor`` and ``nx doctor`` so the two surfaces cannot drift apart.
 * ``sensitive_with_aspects`` (FAIL): a sensitive document that already has an aspect row or a queued task.
   Extracted aspects are LLM output over the document's text, so this is the leaked-before-flagged case
   (RDR-243 Failure Modes); the remedy line is ``nx enrich delete --tumbler <t>``.
+
+* ``sensitive_in_external_embedder`` (WARN): a sensitive document in a collection whose embedder is an
+  external service (a Voyage model token, or a legacy name that carries none). The text of the document
+  left the machine to be embedded, or will on its next index run.
+* ``sensitivity_mcp_output`` (Day 2 Operations, Verify column): reports the active ``sensitivity.mcp_output``
+  value, ``withhold`` (the default) or ``flag``, and WARNs on ``flag`` (sensitive content reaches the session
+  model) or on a value it does not recognise. A config row, not a document row: always applicable.
 
 Each check returns one report dict::
 
@@ -40,6 +47,11 @@ FAIL = "fail"
 
 IN_ELIGIBLE = "sensitive_in_aspect_eligible"
 WITH_ASPECTS = "sensitive_with_aspects"
+IN_EXTERNAL_EMBEDDER = "sensitive_in_external_embedder"
+MCP_OUTPUT = "sensitivity_mcp_output"
+
+MCP_OUTPUT_DEFAULT = "withhold"
+MCP_OUTPUT_VALUES = frozenset({"withhold", "flag"})
 
 
 def _report(name: str, status: str, reason: str = "", total: int = 0, findings: list[dict] | None = None) -> dict:
@@ -176,6 +188,56 @@ def check_sensitive_with_aspects(
     return _report(WITH_ASPECTS, FAIL if findings else PASS, "", len(documents), findings)
 
 
+def _external_embedder(collection: str) -> str | None:
+    """The external model token a collection embeds with, or ``None`` when it embeds locally. A conformant
+    name carries its model token; a token outside :data:`nexus.corpus.LOCAL_EMBEDDING_MODELS` is Voyage. A
+    legacy name carries none and counts as Voyage (``voyage_model_for_collection`` is its only dispatch)."""
+    from nexus.corpus import (  # noqa: PLC0415 — deferred, corpus has a heavy import graph
+        LOCAL_EMBEDDING_MODELS,
+        embedding_model_for_collection_name,
+        voyage_model_for_collection,
+    )
+
+    token = embedding_model_for_collection_name(collection)
+    if token is None:
+        return voyage_model_for_collection(collection)
+    return None if token in LOCAL_EMBEDDING_MODELS else token
+
+
+def check_sensitive_in_external_embedder(*, reader: Any = None) -> dict:
+    """The WARN row: sensitive documents in a collection embedded by an external service."""
+    documents, na = _sensitive_documents(IN_EXTERNAL_EMBEDDER, reader)
+    if na is not None:
+        return na
+    findings = []
+    for d in documents:
+        model = _external_embedder(d.physical_collection)
+        if model is not None:
+            findings.append({"tumbler": str(d.tumbler), "collection": d.physical_collection,
+                             "why": f"embedded by an external service ({model})"})
+    return _report(IN_EXTERNAL_EMBEDDER, WARN if findings else PASS, "", len(documents), findings)
+
+
+def check_sensitivity_mcp_output(*, value: str | None = None) -> dict:
+    """The ``sensitivity.mcp_output`` row. *value* is injectable for tests; the default reads the merged
+    config (a key that is absent is ``withhold``, the RDR's default)."""
+    if value is None:
+        try:
+            from nexus.config import load_config  # noqa: PLC0415 — deferred, config load is CLI-startup cost
+
+            section = load_config().get("sensitivity")
+            value = section.get("mcp_output") if isinstance(section, dict) else None
+        except Exception as exc:  # noqa: BLE001 — an unreadable config is reported, never a false pass
+            _log.warning("sensitivity_doctor_config_unreadable", error=str(exc))
+            return {**_report(MCP_OUTPUT, WARN, f"the config could not be read ({type(exc).__name__}: {exc})"),
+                    "value": None}
+    active = MCP_OUTPUT_DEFAULT if value is None else str(value).strip().lower()
+    if active not in MCP_OUTPUT_VALUES:
+        return {**_report(MCP_OUTPUT, WARN, f"unrecognised value {value!r}; expected withhold or flag"), "value": active}
+    status = WARN if active == "flag" else PASS
+    return {**_report(MCP_OUTPUT, status), "value": active}
+
+
 def remedy_lines(report: dict) -> list[str]:
     """The commands that clear a ``sensitive_with_aspects`` finding, one per offending document."""
     if report["name"] != WITH_ASPECTS or report["status"] != FAIL:
@@ -187,6 +249,15 @@ def render_text(report: dict, *, limit: int = 50) -> list[str]:
     """The row as printable lines. The label, not-applicable wording and remedy lines are the same on both
     doctor surfaces because both print this."""
     name, status = report["name"], report["status"]
+    if name == MCP_OUTPUT:
+        mark = "[✓]" if status == PASS else "[!]"
+        lines = [f"{mark} {name}: {report['value']}" + (" - WARN" if status == WARN else "")]
+        if report["reason"]:
+            lines.append(f"    {report['reason']}")
+        if report["value"] == "flag":
+            lines.append("  Sensitive content is returned to the session model with a [sensitive] badge. "
+                         "Set sensitivity.mcp_output to withhold to stop that.")
+        return lines
     if status == NOT_APPLICABLE:
         return [f"[ ] {name}: not applicable - {report['reason']}"]
     total = report["sensitive_documents"]
@@ -206,6 +277,9 @@ def render_text(report: dict, *, limit: int = 50) -> list[str]:
         lines.extend(f"    {c}" for c in remedies[:limit])
         if len(remedies) > limit:
             lines.append(f"    ... and {len(remedies) - limit} more")
+    elif name == IN_EXTERNAL_EMBEDDER:
+        lines.append("  These documents' text is sent to an external embedder. Re-index them into a local-model "
+                     "collection of the same subject, or accept the exposure knowingly.")
     else:
         lines.append("  The next index run would extract aspects from these. Opt the collection out of extraction "
                      "or accept the exposure knowingly.")

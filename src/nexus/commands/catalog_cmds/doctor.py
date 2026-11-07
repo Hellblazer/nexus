@@ -165,6 +165,25 @@ _log = structlog.get_logger(__name__)
     ),
 )
 @click.option(
+    "--sensitive-in-external-embedder",
+    "sensitive_in_external_embedder",
+    is_flag=True,
+    help=(
+        "RDR-243 (nexus-rfvyy.8.7): WARN for a sensitive document in a Voyage (external-embedder) "
+        "collection. Does not change the exit status. Not applicable (never a pass) on a tenant "
+        "with no sensitive documents."
+    ),
+)
+@click.option(
+    "--sensitivity-mcp-output",
+    "sensitivity_mcp_output",
+    is_flag=True,
+    help=(
+        "RDR-243 (nexus-rfvyy.8.7): report the active sensitivity.mcp_output value (withhold or flag); "
+        "WARN when it is flag. Does not change the exit status."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -179,6 +198,8 @@ def doctor_cmd(
     visible_outside_manifest: bool,
     sensitive_in_aspect_eligible: bool,
     sensitive_with_aspects: bool,
+    sensitive_in_external_embedder: bool,
+    sensitivity_mcp_output: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -203,6 +224,7 @@ def doctor_cmd(
         or name_vs_embed_dim or store_put_integrity
         or link_coverage or visible_outside_manifest
         or sensitive_in_aspect_eligible or sensitive_with_aspects
+        or sensitive_in_external_embedder or sensitivity_mcp_output
     )
     if not any_check:
         raise click.UsageError(
@@ -210,8 +232,9 @@ def doctor_cmd(
             "--chunk-size-distribution, --chunk-text-dedup, "
             "--t3-vs-catalog, --name-vs-embed-dim, "
             "--store-put-integrity, --link-coverage, "
-            "--visible-outside-manifest, --sensitive-in-aspect-eligible, or "
-            "--sensitive-with-aspects."
+            "--visible-outside-manifest, --sensitive-in-aspect-eligible, "
+            "--sensitive-with-aspects, --sensitive-in-external-embedder, or "
+            "--sensitivity-mcp-output."
         )
 
     overall_pass = True
@@ -308,11 +331,13 @@ def doctor_cmd(
         if not report["pass"]:
             overall_pass = False
 
-    # RDR-243 (nexus-rfvyy.6.17): the two sensitivity rows. The text and the verdicts live in
+    # RDR-243 (nexus-rfvyy.6.17): the sensitivity rows. The text and the verdicts live in
     # nexus.catalog.sensitivity_doctor, which `nx doctor` prints through too. Only the FAIL row gates.
     for wanted, check in (
         (sensitive_in_aspect_eligible, "check_sensitive_in_aspect_eligible"),
         (sensitive_with_aspects, "check_sensitive_with_aspects"),
+        (sensitive_in_external_embedder, "check_sensitive_in_external_embedder"),
+        (sensitivity_mcp_output, "check_sensitivity_mcp_output"),
     ):
         if not wanted:
             continue
