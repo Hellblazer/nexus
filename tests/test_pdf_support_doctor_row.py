@@ -328,11 +328,25 @@ def test_both_opencv_builds_make_the_row_red_on_linux_and_name_the_repair(monkey
     _stack(monkeypatch, "present", "5 distributions on their pins")
     _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
     setattr_in(monkeypatch, health, "sys.platform", "linux")
+    monkeypatch.setattr(health, "_libgl_loadable", lambda: False)  # nexus-0ib6r: the red case
     row = health._check_pdf_support()[0]
     assert row.label == "PDF support" and not row.ok
     assert "opencv-python" in row.detail and "opencv-python-headless" in row.detail
     assert "libGL" in row.detail
     assert row.fix_suggestions and pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
+
+
+def test_both_opencv_builds_on_linux_with_libgl_are_a_warning_not_red(monkeypatch) -> None:
+    """nexus-0ib6r (3): with libGL.so.1 present the non-headless build loads and cv2 imports, so the
+    pair is the same warning it is on macOS and Windows, not a red row."""
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
+    setattr_in(monkeypatch, health, "sys.platform", "linux")
+    monkeypatch.setattr(health, "_libgl_loadable", lambda: True)
+    row = health._check_pdf_support()[0]
+    assert not row.ok and row.warn, row
+    assert "which this box does not have" not in row.detail
+    assert row.fix_suggestions, "a warning still names the repair"
 
 
 def test_both_opencv_builds_row_tells_the_truth_and_names_both_repairs(monkeypatch) -> None:
@@ -345,6 +359,7 @@ def test_both_opencv_builds_row_tells_the_truth_and_names_both_repairs(monkeypat
     _stack(monkeypatch, "present", "5 distributions on their pins")
     _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
     setattr_in(monkeypatch, health, "sys.platform", "linux")
+    monkeypatch.setattr(health, "_libgl_loadable", lambda: False)  # nexus-0ib6r: the red case
     row = health._check_pdf_support()[0]
     assert "did not read them" in row.detail and "keep only the headless" in row.detail
     assert len(row.fix_suggestions) == 2, row.fix_suggestions
@@ -393,5 +408,6 @@ def test_a_slim_install_does_not_report_opencv(monkeypatch) -> None:
     _stack(monkeypatch, "absent", "MinerU and torch are not installed")
     _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
     setattr_in(monkeypatch, health, "sys.platform", "linux")
+    monkeypatch.setattr(health, "_libgl_loadable", lambda: False)  # nexus-0ib6r: the red case
     (row,) = health._check_pdf_support()
     assert row.ok and not row.warn and "opencv" not in row.detail.lower()

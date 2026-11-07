@@ -2996,6 +2996,18 @@ def opencv_pair_uninstall_remedy() -> str:
     )
 
 
+def _libgl_loadable() -> bool:
+    """Whether the dynamic loader finds ``libGL.so.1``, which the non-headless OpenCV build links
+    (nexus-0ib6r). A load, not a file search: it answers what ``import cv2`` will meet."""
+    import ctypes  # noqa: PLC0415 — deferred import (startup cost), only on the two-build path
+
+    try:
+        ctypes.CDLL("libGL.so.1")
+    except OSError:
+        return False
+    return True
+
+
 def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
     """The healthy "PDF support" row, unless both OpenCV builds are installed.
 
@@ -3012,15 +3024,17 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
 
     if len(_installed_opencv_builds()) < 2:
         return HealthResult(label="PDF support", ok=True, detail=detail)
-    on_linux = sys.platform.startswith("linux")
+    # nexus-0ib6r (3): red only where `import cv2` can actually fail, a Linux box with no libGL.so.1.
+    # With libGL the non-headless build loads, so the pair is the same warning as elsewhere.
+    red = sys.platform.startswith("linux") and not _libgl_loadable()
     consequence = (
-        "On Linux the non-headless build needs libGL.so.1, so `import cv2` can fail "
-        "and PDF extraction with it"
-        if on_linux else
+        "On Linux the non-headless build needs libGL.so.1, which this box does not have, so `import cv2` "
+        "can fail and PDF extraction with it"
+        if red else
         "Both write site-packages/cv2/, so which one loads depends on install order"
     )
     return HealthResult(
-        label="PDF support", ok=False, warn=not on_linux,
+        label="PDF support", ok=False, warn=not red,
         detail=(
             f"{detail}; but both opencv-python and opencv-python-headless are installed. "
             f"{consequence}. The release's uv overrides keep only the headless build; "
