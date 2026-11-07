@@ -330,7 +330,10 @@ def _store_get_many(*, structured: bool = False, sensitives=(True, False)):
         "metadatas": [{"title": SECRET_TITLE}, {"title": "Gardening"}],
         **({"sensitives": list(sensitives)} if sensitives is not None else {}),
     }
-    with patch("nexus.doc_sensitivity.flagged_owners_of_chashes", return_value={CHASH_S: ["1.9.4", "1.2.7"]}):
+    # The structured result reads the owning documents' manifest rows (section types, source notes) from the
+    # catalog; what is pinned here is the posture, so that read answers "no owner rows" without a tenant.
+    with patch("nexus.doc_sensitivity.flagged_owners_of_chashes", return_value={CHASH_S: ["1.9.4", "1.2.7"]}), \
+         patch("nexus.mcp.core._owner_rows_by_chash", return_value={}):
         return store_get_many(ids=[CHASH_S, CHASH_C], collections=_MANY, structured=structured)
 
 
