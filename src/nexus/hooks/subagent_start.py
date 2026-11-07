@@ -489,8 +489,10 @@ def _linked_rdrs_section(task_text: str, env: dict[str, str]) -> str:
         return ""
     link_chunks: list[str] = []
     for fp in file_paths:
+        # --for-model: this text is injected into a subagent's context, so a sensitive peer is withheld whatever
+        # the environment marker says (RDR-243 Phase 3 fix r1, nexus-rfvyy.8).
         raw = _run_captured(
-            nx_argv("catalog", "links-for-file", fp), env=env, timeout=30
+            nx_argv("catalog", "links-for-file", "--for-model", fp), env=env, timeout=30
         )
         matched = [ln for ln in raw.splitlines() if _ARROW_LINE_RE.match(ln)]
         if matched:

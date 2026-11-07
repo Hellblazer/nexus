@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 __all__ = [
-    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "cli_output_posture", "first_sensitive_owner", "hit_is_sensitive",
+    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "chunk_row_facts", "cli_output_posture", "first_sensitive_owner", "hit_is_sensitive",
     "mcp_output_posture", "mcp_output_setting", "posture_of", "present_document_rows", "present_entries", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
 ]
 
@@ -115,6 +115,18 @@ def hit_facts(row: Mapping[str, object]) -> tuple[bool, tuple[str, ...]]:
     raw = row.get("sensitive_owners")
     owners = tuple(str(o) for o in raw if o) if isinstance(raw, (list, tuple)) else ()
     return hit_is_sensitive(row.get("sensitive"), owners), owners
+
+
+def chunk_row_facts(row_flag: object, owners: Sequence[object] | None) -> tuple[bool, tuple[str, ...]]:
+    """``(sensitive, sensitive owner tumblers)`` of one T3 chunk row a read tool is about to print (nexus-rfvyy.8).
+
+    *row_flag* is the engine's ``sensitive`` field for the row; *owners* are the catalog's LIVE owner entries of the
+    chunk. ``None`` for *owners* means the catalog could not be read: "could not look" is not "no owner", so the row
+    is sensitive (the document view treats an unreadable catalog the same way)."""
+    if owners is None:
+        return True, ()
+    flagged = tuple(str(getattr(o, "tumbler", "")) for o in owners if getattr(o, "sensitive", False) is True)
+    return hit_is_sensitive(row_flag, flagged), flagged
 
 
 def stub_line(tumbler: str = "") -> str:
