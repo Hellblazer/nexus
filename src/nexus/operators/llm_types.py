@@ -13,6 +13,8 @@ make on ``dispatch`` globals keep working.
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -151,15 +153,46 @@ class OperatorOutputError(OperatorError):
 
 
 
+_ERROR_TYPE_SHAPE = re.compile(r"[a-z_]{1,40}")
+
+
+def safe_error_type(raw: object) -> str | None:
+    """*raw* when it has the shape of a provider error-type token
+    (``rate_limit_error``, ``overloaded_error``), else ``None``.
+
+    The type is chosen by the server, or by a proxy in front of it, and rides
+    into exception messages and log lines; only a short lowercase token
+    passes, so it cannot carry a key, a newline or an instruction
+    (nexus-1wqz1)."""
+    if isinstance(raw, str) and _ERROR_TYPE_SHAPE.fullmatch(raw):
+        return raw
+    return None
+
+
+def request_id_tag(raw: object) -> str | None:
+    """A fixed-length tag for a provider request id, ``None`` when there is no
+    id. The id is server-chosen text, so only ``rid-`` plus twelve hex digits
+    of its SHA-256 is kept: stable, so one id always logs as one tag, and
+    quoting the original id to the provider still lets support match it
+    (nexus-1wqz1)."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    return "rid-" + hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
 class OperatorAPIError(OperatorError):
     """A direct-API backend (``anthropic``, ``openai_compat``) got an HTTP error
     or lost the connection (nexus-2k66t.3 P2).
 
     ``status`` is the HTTP status, ``None`` for a connection failure.
-    ``error_type`` is the provider's ``error.type`` when the body had one.
-    ``request_id`` is the provider's request id when sent. The message is built
-    from these and the provider's own error message, never from request
-    headers, so it cannot carry the API key.
+    ``error_type`` is the provider's ``error.type`` when the body had one and
+    it passed :func:`safe_error_type`. ``request_id`` is the provider's request
+    id as :func:`request_id_tag` (a hash, never the server's text). The message
+    is built from these and the provider's own error message (scrubbed), never
+    from request headers, so it cannot carry the API key.
 
     :attr:`transient` is the one place that says which failures a retry can
     cure (429, 529, 5xx, a lost connection): the backend's own transport retry

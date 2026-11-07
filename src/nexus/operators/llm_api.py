@@ -57,6 +57,7 @@ from nexus.operators.llm_types import (
     OperatorOutputError,
     OperatorTimeoutError,
     record_usage,
+    request_id_tag,
 )
 
 _log = structlog.get_logger(__name__)
@@ -734,7 +735,7 @@ class ApiBackend:
                                 "endpoint of this API?",
                                 status=resp.status_code, retryable=False,
                             )
-                        stream.request_id = resp.headers.get("request-id") or resp.headers.get("x-request-id")
+                        stream.request_id = request_id_tag(resp.headers.get("request-id") or resp.headers.get("x-request-id"))
                         async for ev in iter_sse(resp.aiter_lines()):
                             first_event.set()
                             stream.feed(ev)

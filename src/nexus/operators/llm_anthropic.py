@@ -45,7 +45,7 @@ from nexus.operators.llm_api import (
 )
 from nexus.operators.llm_backend import BackendStatus, DispatchRequest
 from nexus.operators.llm_models import ModelPrice, price_for, supports_forced_tool_choice
-from nexus.operators.llm_types import OperatorAPIError, OperatorError
+from nexus.operators.llm_types import OperatorAPIError, OperatorError, request_id_tag, safe_error_type
 from nexus.operators.model_tiers import resolve_api_model
 
 ANTHROPIC_API_URL: str = "https://api.anthropic.com"
@@ -144,10 +144,13 @@ class _AnthropicStream(StreamState):
             err = data.get("error") or {}
             etype = str(err.get("type") or "error")
             message = self._scrub(str(err.get("message") or ""))[:300]
+            # The type is server-chosen: the status lookup uses it raw, the
+            # message and the attribute only a token-shaped one.
+            safe = safe_error_type(etype) or "error"
             raise OperatorAPIError(
-                f"anthropic: the stream carried an {etype} event: {message}",
+                f"anthropic: the stream carried an {safe} event: {message}",
                 status=_ERROR_EVENT_STATUS.get(etype, 400),
-                error_type=etype,
+                error_type=safe,
                 request_id=self.request_id,
             )
 
@@ -315,7 +318,7 @@ class AnthropicBackend(ApiBackend):
     def _http_error(self, status: int, headers: httpx.Headers, body: bytes) -> OperatorAPIError:
         etype: str | None = None
         message = ""
-        request_id = headers.get("request-id")
+        raw_request_id = headers.get("request-id")
         try:
             parsed = json.loads(body.decode("utf-8", errors="replace"))
         except ValueError:
@@ -323,9 +326,10 @@ class AnthropicBackend(ApiBackend):
         if isinstance(parsed, dict):
             err = parsed.get("error")
             if isinstance(err, dict):
-                etype = str(err.get("type")) if err.get("type") else None
+                etype = safe_error_type(err.get("type"))
                 message = self._scrub(str(err.get("message") or ""))[:300]
-            request_id = request_id or parsed.get("request_id")
+            raw_request_id = raw_request_id or parsed.get("request_id")
+        request_id = request_id_tag(raw_request_id)
         text = f"anthropic API error {status}"
         if etype:
             text += f" ({etype})"

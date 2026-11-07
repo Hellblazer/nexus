@@ -46,7 +46,7 @@ from nexus.operators.llm_api import (
 )
 from nexus.operators.llm_backend import BackendStatus, DispatchRequest
 from nexus.operators.llm_models import ModelPrice
-from nexus.operators.llm_types import OperatorAPIError, OperatorError
+from nexus.operators.llm_types import OperatorAPIError, OperatorError, request_id_tag, safe_error_type
 
 _log = structlog.get_logger(__name__)
 
@@ -86,7 +86,7 @@ class _OpenAIStream(StreamState):
             if isinstance(err, dict):
                 code = err.get("code")
                 message = self._scrub(str(err.get("message") or ""))[:300]
-                etype = str(err.get("type")) if err.get("type") else None
+                etype = safe_error_type(err.get("type"))
             else:
                 code, message, etype = None, self._scrub(str(err))[:300], None
             status = code if isinstance(code, int) and 400 <= code <= 599 else 500
@@ -365,7 +365,7 @@ class OpenAICompatBackend(ApiBackend):
         if isinstance(parsed, dict):
             err = parsed.get("error", parsed.get("detail"))
             if isinstance(err, dict):
-                etype = str(err.get("type")) if err.get("type") else None
+                etype = safe_error_type(err.get("type"))
                 message = str(err.get("message") or "")
             elif err:
                 message = str(err)
@@ -381,7 +381,7 @@ class OpenAICompatBackend(ApiBackend):
             text,
             status=status,
             error_type=etype,
-            request_id=headers.get("x-request-id"),
+            request_id=request_id_tag(headers.get("x-request-id")),
             retry_after=parse_retry_after(headers.get("retry-after")),
         )
 
