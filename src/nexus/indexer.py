@@ -5679,10 +5679,8 @@ def _run_index(
                     # chunks (same mechanism as the candidate_files zero-byte
                     # guard below) and would otherwise still reach
                     # indexed_for_catalog, minting an unclearable phantom.
-                    # RDR files are markdown text by construction (unlike
-                    # candidate_files' arbitrary extensions), so a zero-byte
-                    # check alone suffices here — no binary-content sniff
-                    # needed.
+                    # nexus-nawd0: a .md name does not make the file UTF-8
+                    # text, so the binary-content sniff below runs here too.
                     _md_size: int | None = None
                     try:
                         _md_size = md_file.stat().st_size
@@ -5695,6 +5693,22 @@ def _run_index(
                             continue
                     except OSError:
                         pass  # defer to per-file path
+                    # nexus-nawd0: intrastate's a6-dot-derivability.md held a
+                    # broken UTF-8 sequence 8 KB in; it registered, then the
+                    # prose indexer's strict read failed every run. The sniff
+                    # reads the whole file here, not its default 64 KB prefix:
+                    # RDRs are small, and a bad byte past the prefix fails the
+                    # same read. A warning, since a whole RDR leaves search.
+                    if looks_like_binary_content(
+                        md_file, sample_bytes=max(_md_size or 0, 65536),
+                    ):
+                        skipped_unchunkable.append((md_file, "binary_content"))
+                        _log.warning(
+                            "unchunkable_binary_content_rdr_skipped",
+                            path=str(md_file),
+                            reason="not valid UTF-8 text",
+                        )
+                        continue
                     # nexus-5j8fp: whitespace-only text chunks to nothing too.
                     if (
                         _md_size is not None
