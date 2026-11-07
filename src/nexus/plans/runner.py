@@ -1262,10 +1262,12 @@ def _is_named(tool: str, names: tuple[str, ...]) -> bool:
     return tool in names or (tool.startswith("mcp__") and tool.endswith(tuple(f"__{n}" for n in names)))
 
 
-def _is_operator(tool: str) -> bool:
-    """*tool* names an operator step (bare, ``operator_*`` or ``mcp__...__``-prefixed): contiguous operators bundle."""
-    bare = tool.rsplit("__", 1)[-1] if tool.startswith("mcp__") else tool
-    return bare in _OPERATOR_TOOL_MAP or bare in _OPERATOR_RESOLVED_TOOLS
+def _feeds_next_in_bundle(step: dict[str, Any]) -> bool:
+    """Whether *step* hands its output to the next step inside one bundle, by :func:`segment_steps`' own rule: a
+    bundleable operator that is not a witness (a ``check`` or ``verify`` ends its bundle, so the step after it runs
+    without that output). Assumes default bundling (``plan_run(bundle_operators=True)``, every production caller)."""
+    name = _extract_tool_name(step)
+    return _is_operator_tool(name) and not _is_witness_tool(name)
 
 
 def _blank(value: Any) -> bool:
@@ -1281,8 +1283,9 @@ def find_operator_arg_defect(plan: "str | dict[str, Any] | None") -> tuple[int, 
     the matcher and ``nx plan hygiene``). Three defects, in step order:
 
     * a verify step with no non-blank ``claim`` (the host never invents one);
-    * a verify step with neither ``ids`` nor ``evidence`` that does not follow an operator step (nothing to check
-      the claim against; after an operator, a bundle hands it that step's output as its evidence);
+    * a verify step with neither ``ids`` nor ``evidence`` that does not directly follow a non-witness operator step
+      (nothing to check the claim against; after such a step, a bundle hands it that step's output as its evidence;
+      a check or verify ends its bundle, so a verify after one gets nothing);
     * a check step with no non-blank ``check_instruction`` (the claim or question it checks).
 
     A claim or instruction counts only as a non-blank string (``$stepN.text`` is one); evidence counts as a
@@ -1304,7 +1307,7 @@ def find_operator_arg_defect(plan: "str | dict[str, Any] | None") -> tuple[int, 
         if not isinstance(tool, str):
             after_operator = False
             continue
-        follows_operator, after_operator = after_operator, _is_operator(tool)
+        follows_operator, after_operator = after_operator, _feeds_next_in_bundle(step)
         args = step.get("args")
         args = args if isinstance(args, dict) else {}
         if _is_named(tool, _VERIFY_TOOL_NAMES):

@@ -268,6 +268,14 @@ _DEFECTS = [
         (BUNDLED, None),  # the bundle hands verify the extract step's output (review r1 I1)
         ({"steps": [{"tool": "search", "args": {}}, {"tool": "extract", "args": {}},
                     {"tool": "search", "args": {}}, {"tool": "verify", "args": {"claim": "x"}}]}, 3),
+        # review r2 N1: a witness ends its bundle, so a verify after a check or a verify gets no output
+        ({"steps": [{"tool": "search", "args": {}}, {"tool": "extract", "args": {}},
+                    {"tool": "check", "args": {"check_instruction": "x"}}, {"tool": "verify", "args": {"claim": "x"}}]}, 3),
+        ({"steps": [{"tool": "search", "args": {}}, {"tool": "check", "args": {"check_instruction": "x"}},
+                    {"tool": "verify", "args": {"claim": "x"}}]}, 2),
+        # review r2 N4: an mcp__-prefixed operator feeds the bundle too
+        ({"steps": [{"tool": "search", "args": {}}, {"tool": "mcp__plugin_conexus_nexus__operator_extract", "args": {}},
+                    {"tool": "verify", "args": {"claim": "x"}}]}, None),
         ({"steps": [{"tool": "verify", "args": {"claim": "x", "evidence": ["a", "b"]}}]}, None),
         ({"steps": [{"tool": "verify", "args": {"claim": "x", "evidence": []}}]}, 0),
         ("not json", None),

@@ -394,8 +394,8 @@ def _embedded_step_ref(m: Match) -> tuple[str, str] | None:
 
 
 def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
-    """Report plans excluded for an unsubstitutable ``$stepN.field`` in a step arg, or for a
-    verify step with no claim (``ref`` ``verify``).
+    """Report plans excluded for an unsubstitutable ``$stepN.field`` in a step arg, or for an
+    operator step missing an author-supplied argument (``ref`` ``operator_arg``).
 
     INFO and drained exactly like :func:`_log_reserved_drops`; the row is neither rewritten nor
     deleted, and ``nx plan hygiene`` reports it.

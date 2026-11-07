@@ -10434,7 +10434,8 @@ from a retrieval step; the runner hydrates them and keeps each item's source.
         assertion to test and is REQUIRED: a verify step with ids and no
         claim fails the plan, it is never filled in for you. Its evidence is
         `ids` (or `evidence` text, or the output of the operator step right
-        before it); a verify step with none of these fails the plan too.
+        before it, unless that step is a check or verify); a verify step with
+        none of these fails the plan too.
       - Output: {verified, reason, evidence: [same items as check],
         rejected, requires_review, citations}.
 

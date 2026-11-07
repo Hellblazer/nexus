@@ -4110,9 +4110,9 @@ nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N | -
 ```
 
 Tabulates plans: id, origin, verb, scope, use count, last used, name. Origin is
-heuristic (`builtin` when tags include `builtin-template`; `grown` when
-`project == 'personal'` with empty tags; `user` otherwise; nexus-7bwe tracks an
-explicit origin column). `--include-disabled` also shows soft-disabled rows,
+read from the row's tag tokens and its answer-kind declaration (nexus-7bwe):
+`grown` for the `grown` tag, a grown declaration, or the legacy shape (project
+`personal`, no tags); `builtin` for the `builtin-template` tag; `user` otherwise. `--include-disabled` also shows soft-disabled rows,
 marked `[D]`. `--json` emits the same fields as a JSON array. Default limit 50.
 See § `nx plan show` below for what `use count` actually counts.
 
