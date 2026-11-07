@@ -139,7 +139,7 @@ BGE = "knowledge__loc__bge-base-en-v15-768__v1"
 MINILM = "knowledge__loc__minilm-l6-v2-384__v1"
 
 
-def test_external_embedder_warns_on_a_sensitive_document_in_a_voyage_collection() -> None:
+def test_external_embedder_warns_on_a_sensitive_document_in_a_voyage_collection(cloud_mode) -> None:
     report = sd.check_sensitive_in_external_embedder(
         reader=_Reader([_doc("1.1.1", VOYAGE), _doc("1.1.2", VOYAGE, sensitive=False)]))
     assert report["status"] == sd.WARN
