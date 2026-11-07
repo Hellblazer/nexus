@@ -286,4 +286,46 @@ class TupleDelayedVisibilityHttpTest {
         assertThat(post("/v1/tuples/rdp", Map.of("subspace", sub, "keys_pattern", pat))
                 .get("tuples").size()).as("nothing written").isZero();
     }
+
+    /** nexus-14xl5: one rule on the wire for the four whole-second fields. A fraction (1.5) and an
+     *  integer beyond long range (2^64+60, which used to wrap to 60) are each a 400 naming the field,
+     *  never a silent truncation or wrap, on every route that reads lease_s, ttl_seconds, delay_s or
+     *  retry_after_s. */
+    @Test
+    void aFractionalOrOutOfRangeWholeSecondsField_isRefusedWith400_namingTheField() throws Exception {
+        String q = newQueue();
+        String sub = "queue/" + q;
+        Map<String, String> pat = Map.of("queue", q);
+        Object[] bad = {1.5, new java.math.BigInteger("18446744073709551676")};
+        for (Object value : bad) {
+            Map<String, Object> outDelay = outBody(q, "n-w1");
+            outDelay.put("delay_s", value);
+            Map<String, Object> outTtl = outBody(q, "n-w2");
+            outTtl.put("ttl_seconds", value);
+            Map<String, Object> ackReplyTtl = Map.of("claim_id", "c", "claimant", "w", "reply", Map.of(
+                    "subspace", sub, "keys", Map.of("queue", q), "dims", Map.of("from", "consumer"),
+                    "body", "r", "ttl_seconds", value));
+            Object[][] cases = {
+                {"/v1/tuples/out", outDelay, "delay_s"},
+                {"/v1/tuples/out", outTtl, "ttl_seconds"},
+                {"/v1/tuples/ack", ackReplyTtl, "reply.ttl_seconds"},
+                {"/v1/tuples/nack", Map.of("claim_id", "c", "claimant", "w", "retry_after_s", value),
+                        "retry_after_s"},
+                {"/v1/tuples/inp", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "lease_s", value),
+                        "lease_s"},
+                {"/v1/tuples/in", Map.of("subspace", sub, "keys_pattern", pat, "claimant", "w", "lease_s", value),
+                        "lease_s"},
+                {"/v1/tuples/renew", Map.of("claim_id", "c", "claimant", "w", "lease_s", value), "lease_s"},
+            };
+            for (Object[] c : cases) {
+                var r = send((String) c[0], c[1]);
+                String field = (String) c[2];
+                assertThat(r.statusCode()).as("%s %s=%s: %s", c[0], field, value, r.body()).isEqualTo(400);
+                assertThat(MAPPER.readTree(r.body()).get("error").asText()).as("%s %s=%s", c[0], field, value)
+                        .startsWith(field + " must be a whole number");
+            }
+        }
+        assertThat(post("/v1/tuples/rdp", Map.of("subspace", sub, "keys_pattern", pat))
+                .get("tuples").size()).as("nothing written").isZero();
+    }
 }
