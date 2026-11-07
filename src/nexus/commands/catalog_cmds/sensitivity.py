@@ -147,10 +147,24 @@ def sensitive_cmd(
         writer.close()
 
     changed = sum(1 for d in documents if d["changed"])
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): a topic built before the flag keeps a label computed from the document,
+    # and the Knowledge Map and the MCP cluster headers print it. Replace it now; `discover --force` rebuilds it.
+    relabelled: list[int] | None = None
+    topic_error = ""
+    if flag and changed:
+        from nexus import sensitive_topics  # noqa: PLC0415 - command-local import
+
+        try:
+            relabelled = sensitive_topics.withhold_after_flag(cat, [d["tumbler"] for d in documents if d["changed"]])
+        except Exception as exc:  # noqa: BLE001 - the flag is set; say the topics were not relabelled and how to finish
+            topic_error = f"{type(exc).__name__}: {exc}"[:300]
     if as_json:
-        click.echo(json.dumps(
-            {"sensitive": flag, "matched": len(documents), "changed": changed, "documents": documents}, indent=2,
-        ))
+        out = {"sensitive": flag, "matched": len(documents), "changed": changed, "documents": documents}
+        if relabelled is not None:
+            out["topics_relabelled"] = relabelled
+        if topic_error:
+            out["topics_error"] = topic_error
+        click.echo(json.dumps(out, indent=2))
         return
     already = len(documents) - changed
     verb = "Flagged sensitive" if flag else "Cleared"
@@ -159,6 +173,17 @@ def sensitive_cmd(
     for d in documents:
         if d["changed"]:
             click.echo(f"  {d['tumbler']}")
+    if relabelled:
+        from nexus.sensitive_topics import REDISCOVER_HINT  # noqa: PLC0415 - command-local import
+
+        click.echo(f"{len(relabelled)} topic(s) hold chunks of these documents. {REDISCOVER_HINT}")
+    if topic_error:
+        click.echo(
+            f"Warning: the topics holding these documents could not be relabelled ({topic_error}). A topic built "
+            "before the flag may still print a label computed from them: run `nx taxonomy discover --force "
+            "<collection>`.",
+            err=True,
+        )
 
 
 def register(group: click.Group) -> None:

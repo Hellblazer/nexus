@@ -28,6 +28,9 @@ _COLL_B = "knowledge__sensB__bge-base-en-v15-768__v1"
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, t2_service_env):
     monkeypatch.setenv("NX_NO_TELEMETRY", "1")
+    # RDR-243 Phase 3: `catalog list` withholds a sensitive row under Claude Code (Q2); these tests read the rows.
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
 
 
 @pytest.fixture
