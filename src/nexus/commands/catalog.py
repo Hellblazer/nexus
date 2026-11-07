@@ -557,15 +557,9 @@ def _hidden_link_endpoints(cat: "CatalogReader", presented: "DocumentRows", tumb
     """The documents an edge of the shown card must not describe: the shown document when it is withheld, and under a
     withhold every other endpoint whose catalog row is sensitive (its span text and its edge ``meta`` are content).
     A flag read that fails hides every endpoint (fail closed)."""
-    hidden = set(presented.hidden)
-    if posture == "withhold":
-        from nexus import doc_sensitivity  # noqa: PLC0415 — deferred, the module reaches the catalog factory
+    from nexus.sensitive_output import hidden_endpoints  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
-        try:
-            hidden |= doc_sensitivity.flagged(tumblers, cat=cat)
-        except doc_sensitivity.SensitivityUnknown:
-            hidden |= tumblers
-    return frozenset(hidden)
+    return hidden_endpoints(cat, presented.hidden, tumblers, posture=posture)
 
 
 def _show_document(cat: "CatalogReader", entry, as_json: bool) -> None:

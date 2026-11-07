@@ -13,7 +13,7 @@ from pydantic import Field
 
 from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
-from nexus.sensitive_output import DocumentRows, present_entries, withheld_edges
+from nexus.sensitive_output import DocumentRows, hidden_endpoints, present_entries, withheld_edges
 from nexus.mcp_infra import (
     get_catalog_writer as _get_catalog_writer,
     get_recent_search_traces as _get_recent_search_traces,
@@ -340,8 +340,12 @@ def catalog_show(
         # links_from/links_to return list[CatalogLink] (SQLite) or list[dict] (service mode).
         links_from = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_from(entry.tumbler)]
         links_to = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_to(entry.tumbler)]
-        d["links_from"] = withheld_edges(links_from, presented.hidden)
-        d["links_to"] = withheld_edges(links_to, presented.hidden)
+        # One rule for every edge this server returns: an edge touching a withheld document, the shown one or a
+        # neighbour, loses its `meta` (nexus-rfvyy.8 fix r1).
+        ends = {str(l.get("to")) for l in links_from} | {str(l.get("from")) for l in links_to}
+        hidden = hidden_endpoints(cat, presented.hidden, ends)
+        d["links_from"] = withheld_edges(links_from, hidden)
+        d["links_to"] = withheld_edges(links_to, hidden)
         d.update(presented.keys())
         return d
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
@@ -722,9 +726,11 @@ def catalog_links(
         # RDR-243 Phase 3 (nexus-rfvyy.1): a sensitive node is its stub; the edges keep both tumblers, the type
         # and the spans, and an edge that touches a withheld node loses its `meta`.
         presented = _present_entries(cat, list(result["nodes"]))
+        edge_dicts = [e.to_dict() for e in result["edges"]]
+        ends = {str(e.get("from")) for e in edge_dicts} | {str(e.get("to")) for e in edge_dicts}
         return {
             "nodes": presented.rows,
-            "edges": withheld_edges([e.to_dict() for e in result["edges"]], presented.hidden),
+            "edges": withheld_edges(edge_dicts, hidden_endpoints(cat, presented.hidden, ends)),
             **presented.keys(),
         }
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
@@ -770,6 +776,9 @@ def catalog_link_query(
         links = links[:limit]
         # link_query returns list[CatalogLink] (SQLite) or list[dict] (service mode).
         result = [l if isinstance(l, dict) else l.to_dict() for l in links]
+        # An edge touching a withheld document loses its `meta`, as in `show` and `links` (nexus-rfvyy.8 fix r1).
+        ends = {str(l.get("from")) for l in result} | {str(l.get("to")) for l in result}
+        result = withheld_edges(result, hidden_endpoints(cat, (), ends))
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
