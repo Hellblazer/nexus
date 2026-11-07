@@ -13,6 +13,7 @@ import pytest
 
 from nexus import _locking
 from nexus.indexer import _clear_stale_lock, _same_file, _sweep_stale_locks
+from tests._module_seam import setattr_in
 
 
 def _hold(lock: Path) -> int:
@@ -111,7 +112,7 @@ def test_a_skip_caller_retries_once_through_a_sweeps_probe(tmp_path: Path, monke
         real_lock_file(f, blocking=blocking)
 
     monkeypatch.setattr(ix, "lock_file", probed_once)
-    monkeypatch.setattr(ix.time, "sleep", lambda s: None)
+    setattr_in(monkeypatch, ix, "time.sleep", lambda s: None)
     held = ix._acquire_repo_lock(lock, "skip")
     assert held is not None and calls["n"] == 2
     held.close()

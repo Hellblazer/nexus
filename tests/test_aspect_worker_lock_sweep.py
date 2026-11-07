@@ -77,10 +77,9 @@ def test_a_worker_holds_its_lock_from_write_until_remove(tmp_path: Path) -> None
 def test_an_idempotent_start_keeps_the_held_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     aw._write_worker_lock(tmp_path)
     fd = aw._worker_lock_fd
-    closed: list[int] = []
-    real_close = os.close
-    monkeypatch.setattr(os, "close", lambda n: (closed.append(n), real_close(n))[1])
+    relocked: list[int] = []
+    real_lock_fd = _locking.lock_fd
+    monkeypatch.setattr(_locking, "lock_fd", lambda n, **kw: (relocked.append(n), real_lock_fd(n, **kw))[1])
     aw._write_worker_lock(tmp_path)
-    monkeypatch.setattr(os, "close", real_close)
-    assert fd not in closed  # not closed and reopened: no gap for a sweep
+    assert relocked == []  # not closed, reopened and locked again: no gap for a sweep
     assert aw._worker_lock_fd == fd
