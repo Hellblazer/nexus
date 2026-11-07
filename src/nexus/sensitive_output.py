@@ -31,8 +31,8 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 __all__ = [
-    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "first_sensitive_owner", "hit_is_sensitive",
-    "mcp_output_posture", "mcp_output_setting", "posture_of", "present_document_rows", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
+    "BADGE", "DocumentRows", "McpOutput", "McpOutputSetting", "cli_output_posture", "first_sensitive_owner", "hit_is_sensitive",
+    "mcp_output_posture", "mcp_output_setting", "posture_of", "present_document_rows", "present_entries", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
 ]
 
 McpOutput = Literal["withhold", "flag"]
@@ -188,8 +188,17 @@ def stub_document_row(row: Mapping[str, object]) -> dict:
     return stub
 
 
+def cli_output_posture() -> McpOutput:
+    """The posture of CLI output (RDR-243 Q2, decided): ``withhold`` when the process was started by Claude Code
+    (what its Bash tool reads reaches the session model), ``flag`` (content with a badge) in a terminal. The config
+    key ``sensitivity.mcp_output`` is the MCP tools' and does not move this."""
+    from nexus.session import started_by_claude_code  # noqa: PLC0415 - deferred, keeps this module's load light
+
+    return "withhold" if started_by_claude_code() else "flag"
+
+
 def present_document_rows(
-    rows: Sequence[Mapping[str, object]], *, extra_sensitive: Iterable[str] = (),
+    rows: Sequence[Mapping[str, object]], *, extra_sensitive: Iterable[str] = (), posture: McpOutput | None = None,
 ) -> DocumentRows:
     """Apply the output posture to a page of catalog document rows (``CatalogEntry.to_dict()`` shape).
 
@@ -197,17 +206,40 @@ def present_document_rows(
     (the caller's fail-closed legs: an alias of a flagged canonical, a flag lookup that failed). The config is
     read only when the page holds a sensitive row, so a clean page is returned as it came. Under ``withhold`` each
     such row becomes :func:`stub_document_row`; under ``flag`` it is returned whole with ``sensitive: true`` and a
-    ``badge``, and the result says the reader clause applies."""
+    ``badge``, and the result says the reader clause applies. *posture* names the posture; ``None`` reads the MCP
+    tools' (``sensitivity.mcp_output``), and the CLI passes :func:`cli_output_posture`."""
     extra = {str(t) for t in extra_sensitive}
     flags = [r.get("sensitive") is True or str(r.get("tumbler", "")) in extra for r in rows]
     if not any(flags):
         return DocumentRows([dict(r) for r in rows])
-    if mcp_output_posture() == "flag":
+    if (posture or mcp_output_posture()) == "flag":
         shown = [{**r, "sensitive": True, "badge": BADGE} if f else dict(r) for r, f in zip(rows, flags)]
         return DocumentRows(shown, shown_sensitive=True)
     shown = [stub_document_row(r) if f else dict(r) for r, f in zip(rows, flags)]
     hidden = frozenset(str(r.get("tumbler", "")) for r, f in zip(rows, flags) if f)
     return DocumentRows(shown, withheld=sum(flags), hidden=hidden)
+
+
+def present_entries(cat: Any, entries: Sequence[Any], *, posture: McpOutput | None = None) -> DocumentRows:
+    """*entries* (``CatalogEntry`` objects) as the reader is to see them under *posture* (``None``: the MCP tools').
+
+    A sensitive document's title, path, URI, author and bibliographic fields are content, so a withheld row is the
+    kept columns plus ``withheld``, in the same slot. The flag is the row's own ``sensitive`` column. A merged
+    duplicate (``alias_of``) carries its own, unset, flag while the canonical holds the content, so an alias is
+    asked about once, following the alias; when that read fails the alias is withheld (fail closed)."""
+    aliases = [
+        str(e.tumbler) for e in entries
+        if getattr(e, "alias_of", "") and getattr(e, "sensitive", False) is not True
+    ]
+    extra: set[str] = set()
+    if aliases:
+        from nexus import doc_sensitivity  # noqa: PLC0415 - deferred: the module reaches the catalog factory
+
+        try:
+            extra = doc_sensitivity.flagged(aliases, cat=cat)
+        except doc_sensitivity.SensitivityUnknown:
+            extra = set(aliases)
+    return present_document_rows([e.to_dict() for e in entries], extra_sensitive=extra, posture=posture)
 
 
 def withheld_edges(edges: Iterable[Mapping[str, object]], hidden: frozenset[str]) -> list[dict]:

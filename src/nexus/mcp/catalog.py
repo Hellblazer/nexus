@@ -13,7 +13,7 @@ from pydantic import Field
 
 from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
-from nexus.sensitive_output import DocumentRows, present_document_rows, withheld_edges
+from nexus.sensitive_output import DocumentRows, present_entries, withheld_edges
 from nexus.mcp_infra import (
     get_catalog_writer as _get_catalog_writer,
     get_recent_search_traces as _get_recent_search_traces,
@@ -40,25 +40,9 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
 
 
 def _present_entries(cat, entries) -> DocumentRows:
-    """*entries* (``CatalogEntry`` objects) as the reader is to see them: a sensitive document's title, path, URI,
-    author and bibliographic fields are content, so under the default posture (``sensitivity.mcp_output:
-    withhold``) its row is the kept columns plus ``withheld``, in the same slot. The flag is the row's own
-    ``sensitive`` column. A merged duplicate (``alias_of``) carries its own, unset, flag while the canonical holds
-    the content, so an alias is asked about once, following the alias; when that read fails the alias is
-    withheld (fail closed)."""
-    aliases = [
-        str(e.tumbler) for e in entries
-        if getattr(e, "alias_of", "") and getattr(e, "sensitive", False) is not True
-    ]
-    extra: set[str] = set()
-    if aliases:
-        from nexus import doc_sensitivity  # noqa: PLC0415 — deferred, as above
-
-        try:
-            extra = doc_sensitivity.flagged(aliases, cat=cat)
-        except doc_sensitivity.SensitivityUnknown:
-            extra = set(aliases)
-    return present_document_rows([e.to_dict() for e in entries], extra_sensitive=extra)
+    """*entries* as the MCP reader is to see them (``sensitivity.mcp_output``); the rule is
+    :func:`nexus.sensitive_output.present_entries`, shared with the CLI."""
+    return present_entries(cat, entries)
 
 
 # ── Registered tools ─────────────────────────────────────────────────────────
