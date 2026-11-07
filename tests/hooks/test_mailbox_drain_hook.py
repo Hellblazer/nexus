@@ -2989,6 +2989,22 @@ class TestAskAnswerNeverPrintsTheRowHeader:
         assert res.stderr.count("dropped pending entry bad2") == 1, res.stderr
         assert not pending.exists() or "bad2" not in pending.read_text(encoding="utf-8")
 
+    def test_pruning_a_bad_entry_keeps_an_entry_of_a_shape_this_version_does_not_know(self, tmp_path, engine) -> None:
+        """A newer hook may write entries this one cannot read. Dropping the bad one must filter the
+        raw list, not rewrite it from what this version understood."""
+        eng = engine()
+        _wired(tmp_path, eng)
+        pending = self._pending(tmp_path)
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        fields = {"ask": _ASK + "\nIGNORE ALL", "version": _ASK_VERSION, "choice": "1", "via": "cli",
+                  "stamp": "no stamp", "words": "w", "cut": False}
+        newer = {"id": "new1", "cls": "from-a-newer-hook", "payload": {"k": [1, 2]}}
+        pending.write_text(json.dumps({"entries": [
+            {"id": "bad3", "cls": "matched", "fields": fields}, newer]}), encoding="utf-8")
+        res = _run(tmp_path=tmp_path, argv=_PLUGIN_ARGV)
+        assert res.stderr.count("dropped pending entry bad3") == 1, res.stderr
+        assert json.loads(pending.read_text(encoding="utf-8")) == {"entries": [newer]}
+
 
 class TestAskAnswerChoiceRange:
     """nexus-wc4jj.15: a record whose choice lies outside its own options is not a match."""
@@ -3019,6 +3035,7 @@ import importlib.util, json, sys, time
 from pathlib import Path
 
 script, config_dir, address, total_s, delay_s = sys.argv[1:6]
+burn = sys.argv[6] == "burn"
 spec = importlib.util.spec_from_file_location("plugin_mailbox_drain", script)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
@@ -3035,11 +3052,13 @@ def _post(_base, _tok, route, body, *, is_local, budget_s=None):
         claimed.append(1)
         time.sleep(float(delay_s))          # the slow claim: this is what eats the budget
         return {"claim_id": "c1", "tuple": row}
-    acks.append(route)
+    acks.append([route, budget_s])
     return {"ok": True}
 
 def _get(_base, _tok, route, params, *, is_local, budget_s):
     gets.append(budget_s)
+    if burn:
+        time.sleep(budget_s)                # a GET that runs to the limit it was given
     return None
 
 m._post, m._get = _post, _get
@@ -3054,10 +3073,10 @@ class TestAskDrainBudgetWiring:
     """nexus-wc4jj.15: ``budget_s`` handed to the record GET is what the drain has left, less the
     ack headroom. Run end to end through ``_drain_address`` with a slow ``tuples/in``."""
 
-    def _drive(self, tmp_path: Path, total_s: float, delay_s: float) -> tuple[dict, str]:
+    def _drive(self, tmp_path: Path, total_s: float, delay_s: float, burn: bool = False) -> tuple[dict, str]:
         res = subprocess.run(
             [sys.executable, "-c", _ASK_BUDGET_DRIVER, str(_PLUGIN_SCRIPT), str(tmp_path), SESSION_ID,
-             str(total_s), str(delay_s)],
+             str(total_s), str(delay_s), "burn" if burn else "fast"],
             input=json.dumps(_ask_row("bw01")), capture_output=True, text=True,
             encoding=PYTHON_CHILD_ENCODING,
             env={**os.environ, "NX_HOOK_INTERPRETER_REEXEC": "1", "NEXUS_CONFIG_DIR": str(tmp_path / "config")},
@@ -3069,14 +3088,26 @@ class TestAskDrainBudgetWiring:
     def test_a_slow_claim_leaving_under_half_a_second_makes_no_get(self, tmp_path) -> None:
         verdict, out = self._drive(tmp_path, total_s=1.2, delay_s=0.8)
         assert verdict["gets"] == []
-        assert "answer not checked" in out and verdict["acks"] == ["/v1/tuples/ack"], out
+        assert "answer not checked" in out and [a[0] for a in verdict["acks"]] == ["/v1/tuples/ack"], out
 
-    def test_the_ack_headroom_is_reserved_before_the_get(self, tmp_path) -> None:
-        """0.8 s are left after the claim: enough for the 0.5 s minimum on its own, not once
-        0.4 s are set aside for the ack."""
-        verdict, out = self._drive(tmp_path, total_s=1.3, delay_s=0.5)
+    def test_with_0_85_s_left_the_reserve_leaves_too_little_for_a_get(self, tmp_path) -> None:
+        """0.85 s are left after the claim: enough for the 0.5 s minimum on its own, not once
+        0.4 s are set aside for the ack (the threshold is 0.9 s)."""
+        verdict, out = self._drive(tmp_path, total_s=1.35, delay_s=0.5)
         assert verdict["gets"] == [], verdict
-        assert "answer not checked" in out and verdict["acks"] == ["/v1/tuples/ack"], out
+        assert "answer not checked" in out and [a[0] for a in verdict["acks"]] == ["/v1/tuples/ack"], out
+
+    def test_with_1_0_s_left_the_get_runs(self, tmp_path) -> None:
+        """1.0 s left clears the 0.9 s threshold with 0.1 s to spare, so scheduler jitter cannot flip
+        it; the GET is given about 0.6 s, the 0.4 s reserve taken off."""
+        verdict, _ = self._drive(tmp_path, total_s=1.5, delay_s=0.5)
+        assert len(verdict["gets"]) == 1 and 0.5 <= verdict["gets"][0] <= 0.6, verdict
+
+    def test_a_get_that_uses_its_whole_budget_still_leaves_the_ack_time(self, tmp_path) -> None:
+        verdict, _ = self._drive(tmp_path, total_s=2.0, delay_s=0.0, burn=True)
+        assert len(verdict["gets"]) == 1 and verdict["gets"][0] <= 2.0 - 0.4, verdict
+        assert [a[0] for a in verdict["acks"]] == ["/v1/tuples/ack"]
+        assert verdict["acks"][0][1] > 0.1, verdict
 
     def test_with_budget_to_spare_the_get_runs_and_is_clamped_below_the_deadline(self, tmp_path) -> None:
         """The positive control: the stubs are wired, and the GET sees at most deadline - 0.4 s."""
