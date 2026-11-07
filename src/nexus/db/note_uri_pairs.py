@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,11 @@ _NUL = "\0"
 _COLUMNS = ("tenant_id", "chroma_row", "nx_note_row", "source_uri")
 
 _FALLBACK_ROLE = "postgres"
+
+#: The TCP probe gets this many single-shot tries, this far apart, before the port is called closed: one missed
+#: loopback accept on a loaded or EDR-filtered Windows box must not hard-fail the halted-engine case.
+_PROBE_TRIES = 3
+_PROBE_PAUSE_S = 0.5
 
 #: ``run(argv, env)`` returns psql's stdout and raises :class:`subprocess.CalledProcessError` on a failure.
 PsqlRun = Callable[[Sequence[str], "dict[str, str]"], str]
@@ -167,6 +173,15 @@ def _start_advice(local_install: bool) -> str:
         "This install is configured for a managed service, so this cluster is a leftover on disk, not the one "
         "that serves you: there is nothing to start."
     )
+
+
+def _probe(accepting: Callable[[str, int], bool], port: int) -> bool:
+    for n in range(_PROBE_TRIES):
+        if accepting("127.0.0.1", port):
+            return True
+        if n + 1 < _PROBE_TRIES:
+            time.sleep(_PROBE_PAUSE_S)
+    return False
 
 
 def _not_accepting(port: int, local_install: bool) -> NoteUriPairsError:
@@ -287,7 +302,7 @@ def list_note_uri_pairs(
     try:
         tried.append(bootstrap_superuser(platform=platform, identity=identity))
         # A refused connection is decided here, before psql, so that no message text has to be read for it.
-        if not (accepting if accepting is not None else _port_accepting)("127.0.0.1", port):
+        if not _probe(accepting if accepting is not None else _port_accepting, port):
             raise _not_accepting(port, local_install)
         try:
             stdout = attempt(tried[0], PAIR_SQL)

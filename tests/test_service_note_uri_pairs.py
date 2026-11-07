@@ -302,6 +302,20 @@ def test_a_port_nothing_listens_on_is_decided_before_psql_runs(tmp_path):
     assert rec.calls == [], "psql ran against a port that was already known to be closed"
 
 
+def test_a_slow_first_accept_is_probed_again_before_the_port_is_called_closed(tmp_path, monkeypatch):
+    # A loaded or EDR-filtered Windows box can miss one 0.3 s loopback accept (confirm review, non-blocker 1).
+    monkeypatch.setattr("nexus.db.note_uri_pairs._PROBE_PAUSE_S", 0.0)
+    cfg = _config_dir(tmp_path)
+    answers = iter([False, True])
+    rec = Recorder()
+    _list(cfg, tmp_path, rec, accepting=lambda h, p: next(answers))
+    assert rec.calls, "one missed accept was taken as a closed port"
+    probes: list[int] = []
+    with pytest.raises(NoteUriPairsError, match="not accepting connections"):
+        _list(cfg, tmp_path, Recorder(), accepting=lambda h, p: probes.append(p) or False)
+    assert len(probes) == 3, f"a closed port is probed exactly three times, not {len(probes)}"
+
+
 def test_the_start_advice_is_local_installs_only(tmp_path):
     cfg = _config_dir(tmp_path)
     with pytest.raises(NoteUriPairsError) as local:
