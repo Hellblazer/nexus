@@ -41,12 +41,14 @@ public interface Reranker {
     }
 
     /**
-     * Whether {@link #rerank} sends the documents' text to another machine (nexus-rfvyy.8.4, RDR-243 Q4). True
-     * only for {@link VoyageReranker}; the local cross-encoder runs in this process and sends nothing, so it
-     * stays false. The fused rerank stage keeps sensitive rows out of a reranker for which this is true.
+     * Whether {@link #rerank} sends the documents' text to another machine (nexus-rfvyy.8.4, RDR-243 Q4). The
+     * default is TRUE, so a reranker that does not say otherwise (a future remote one) is kept away from sensitive
+     * rows; fail-open would send them. {@link VoyageReranker} is true; the local cross-encoder runs in this process
+     * and overrides this to false. The fused rerank stage keeps sensitive rows out of a reranker for which this
+     * is true.
      */
     default boolean sendsTextOffMachine() {
-        return false;
+        return true;
     }
 
     /**

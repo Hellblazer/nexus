@@ -123,6 +123,12 @@ public final class CrossEncoderReranker implements Reranker {
         return failed == null || !failed.equals(fingerprint());
     }
 
+    /** The cross-encoder scores in this process (ONNX Runtime) and sends no text to another machine (RDR-243 Q4). */
+    @Override
+    public boolean sendsTextOffMachine() {
+        return false;
+    }
+
     /** Size and mtime of both artifacts, or null when either cannot be read. */
     private String fingerprint() {
         try {
