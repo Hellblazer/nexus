@@ -43,6 +43,7 @@ import java.util.function.Supplier;
  *  "vector_search_chash_allow_supported":true,
  *  "catalog_sensitivity_supported":true,
  *  "vector_sensitivity_exclude_supported":true,
+ *  "rerank_sensitive_exclusion_supported":true,
  *  "route_b_manifest_keys_supported":true,
  *  "route_c_manifest_keys_supported":true,
  *  "schema_latest_id":"vectors-002",
@@ -492,6 +493,23 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * RDR-243 Phase 3 fix r1 (critic S5) capability advertisement: does the fused rerank stage keep rows with a live
+     * sensitive owner out of a reranker that sends text to another machine (the Voyage reranker, and any reranker
+     * that does not declare otherwise), hold them out of the scored set, and merge them back into their vector
+     * slots (nexus-rfvyy.8.4)?
+     *
+     * <p>An independent flag, and the only evidence: an engine without the change reranks every candidate it is
+     * handed through Voyage, sensitive rows included, and answers 200 with the same envelope. A client whose search
+     * may return sensitive rows ({@code sensitivity="include"}) reads this flag before it sends {@code rerank} and
+     * goes without rerank when it is absent. Always present, always {@code true} on an engine carrying the change.
+     * Cloud clients see it only once the public conexus edge allowlists it (paired conexus work, the
+     * {@code vector_sensitivity_exclude_supported} precedent).
+     */
+    static void appendRerankSensitiveExclusionCapabilityField(StringBuilder body) {
+        body.append(",\"rerank_sensitive_exclusion_supported\":true");
+    }
+
+    /**
      * nexus-qpt52 capability advertisement (RDR-236 Phase 3, the route (b) dispatch the Phase 4 sweep precondition
      * reads, RDR-236 line 1760): does every route (b) search ({@code POST /v1/vectors/search-metadata-scoped},
      * {@code /search-aspect-scoped}, {@code /search-graph-hop}) answer a {@code where} on EVERY key {@code
@@ -728,6 +746,8 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogSensitivityCapabilityField(body);
         // nexus-rfvyy.7.4 (RDR-243 Phase 2): sensitivity=exclude on every chunk-text route, sensitive on each row.
         appendVectorSensitivityExcludeCapabilityField(body);
+        // RDR-243 Phase 3 fix r1 (S5): the fused rerank stage withholds sensitive rows from an off-machine reranker.
+        appendRerankSensitiveExclusionCapabilityField(body);
         // nexus-qpt52: route (b) answers every stage-answered key and operator per owning document.
         appendRouteBManifestKeysCapabilityField(body);
         // nexus-u9dc5: route (c), the get routes, answers the same keys per owning document.

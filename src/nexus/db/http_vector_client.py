@@ -4199,6 +4199,66 @@ class HttpVectorClient:
         self._sensitivity_exclude_fetched_at = _monotonic()
         return flag
 
+    #: RDR-243 Phase 3 fix r1 (critic S5): the longest a real ``GET /version`` answer is trusted for the rerank
+    #: capability. Only a real answer (true or false) is held, as for :meth:`supports_sensitivity_exclude`.
+    _RERANK_SENSITIVE_TTL_S: float = 300.0
+    _rerank_sensitive_flag: bool | None = None
+    _rerank_sensitive_fetched_at: float | None = None
+
+    def supports_rerank_sensitive_exclusion(self) -> bool:
+        """Does the engine keep sensitive rows out of the reranker when the reranker sends text to another
+        machine (``GET /version``'s ``rerank_sensitive_exclusion_supported``)? Only a JSON ``true`` counts.
+
+        An engine without it reranks every candidate it is handed through Voyage, sensitive rows included, so a
+        search that may return sensitive rows (``sensitivity="include"``) must not ask it to rerank. A failed
+        or non-object ``/version`` answer is ``False`` for this call and is NOT cached: the safe direction is no
+        rerank, and an outage must not be remembered as the engine's answer."""
+        fetched = self._rerank_sensitive_fetched_at
+        if (
+            self._rerank_sensitive_flag is not None and fetched is not None
+            and _monotonic() - fetched < self._RERANK_SENSITIVE_TTL_S
+        ):
+            return self._rerank_sensitive_flag
+        try:
+            info = _get("/version", tenant=self._tenant, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — any failure to ask is "could not show the engine withholds"
+            _log.warning("rerank_sensitive_exclusion_probe_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+            return False
+        if not isinstance(info, dict):
+            return False
+        flag = info.get("rerank_sensitive_exclusion_supported") is True
+        self._rerank_sensitive_flag = flag
+        self._rerank_sensitive_fetched_at = _monotonic()
+        return flag
+
+    def _rerank_permitted(self, rerank: bool, sensitivity: Sensitivity, rerank_meta_out: dict | None) -> bool:
+        """The *rerank* flag a search may actually send (RDR-243 Phase 3 fix r1, critic S5).
+
+        A search with ``sensitivity="exclude"`` returns no sensitive rows, so the reranker can never be handed
+        one: *rerank* stands. A search with ``"include"`` may return them, and an engine that does not report
+        ``rerank_sensitive_exclusion_supported`` would send their text to Voyage: the search then goes without
+        rerank, and *rerank_meta_out* says so as a degrade (the caller surfaces it like any other), never a
+        silent drop."""
+        if not rerank or sensitivity == "exclude":
+            return rerank
+        if self.supports_rerank_sensitive_exclusion():
+            return True
+        _log.warning("rerank_dropped_engine_cannot_withhold_sensitive_rows")
+        if rerank_meta_out is not None:
+            rerank_meta_out.update({
+                "degraded": True,
+                "stale_engine": True,
+                "error": (
+                    "rerank not requested: this search may return sensitive documents and the engine does not "
+                    "report rerank_sensitive_exclusion_supported, so it would send their text to the Voyage "
+                    "reranker; results are in vector order. `nx upgrade` converges the local engine (managed "
+                    "cloud: server upgrade pending)"
+                ),
+                "model": None,
+                "retry_after_seconds": None,
+            })
+        return False
+
     def _require_sensitivity_exclude(self) -> None:
         """Raise :class:`SensitivityExcludeUnavailable` unless the engine is shown to filter. Never falls back."""
         if not self.supports_sensitivity_exclude():
@@ -4308,6 +4368,7 @@ class HttpVectorClient:
             "n_results": n_results,
         }
         self._stamp_sensitivity(body, sensitivity)
+        rerank = self._rerank_permitted(rerank, sensitivity, rerank_meta_out)
         if where:
             body["where"] = where
         if include_source_uri:
@@ -4436,6 +4497,7 @@ class HttpVectorClient:
             "n_results": n_results,
         }
         self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
+        rerank = self._rerank_permitted(rerank, sensitivity, rerank_meta_out)  # Phase 3 fix r1 (S5): see search()
         if where:
             body["where"] = where
         if include_source_uri:
@@ -4604,6 +4666,7 @@ class HttpVectorClient:
             "limit": limit,
         }
         self._stamp_sensitivity(body, sensitivity)  # RDR-243 Phase 2: see search()
+        rerank = self._rerank_permitted(rerank, sensitivity, rerank_meta_out)  # Phase 3 fix r1 (S5): see search()
         finite: dict[str, float] = {}
         for name, value in (thresholds or {}).items():
             if name in collection_names and value is not None and math.isfinite(value):

@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class RerankStageTest {
 
     /** Scripted reranker: returns a fixed result or throws. */
-    private static final class FakeReranker implements Reranker {
+    private static class FakeReranker implements Reranker {
         List<Scored> result;
         RuntimeException failure;
         String lastQuery;
@@ -433,5 +433,53 @@ class RerankStageTest {
 
         Map<String, Object> cut = stage.applyUnion("q", primary, List.of(row("x1", "x1", 0.7)), 2, null, 1000);
         assertThat(results(cut)).extracting(r -> r.get("id")).containsExactly("x1", "v1");
+    }
+
+    // ── RDR-243 Phase 3 fix r1 (code review M5): a reranker that never declares itself is off-machine ──
+
+    private static Map<String, Object> sensitiveRow(String id, String content, double distance) {
+        Map<String, Object> r = row(id, content, distance);
+        r.put("sensitive", true);
+        return r;
+    }
+
+    @Test
+    void aRerankerThatDoesNotOverrideSendsTextOffMachine_isNeverHandedASensitiveRow_throughApply() {
+        // FakeReranker overrides nothing but modelToken and rerank: the interface default (true) must hold it.
+        var fake = new FakeReranker();
+        assertThat(fake.sendsTextOffMachine()).as("the premise: it does not declare itself local").isTrue();
+        fake.result = List.of(new Reranker.Scored(1, 0.9), new Reranker.Scored(0, 0.2));
+        Map<String, Object> env = new RerankStage(fake).apply("q",
+            new ArrayList<>(List.of(row("a", "plain a", 0.1), sensitiveRow("s", "SECRET s", 0.2), row("b", "plain b", 0.3))),
+            null);
+
+        assertThat(fake.lastDocuments).containsExactly("plain a", "plain b");
+        assertThat(String.join("|", fake.lastDocuments)).doesNotContain("SECRET");
+        // the held row keeps its vector slot (index 1); the scored rows fill the others, best first
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactly("b", "s", "a");
+    }
+
+    @Test
+    void aRerankerThatDoesNotOverride_isNeverHandedASensitiveRow_throughApplyUnion() {
+        var scorer = new TableReranker(Map.of("v1", 0.4, "x1", 0.9));
+        assertThat(scorer.sendsTextOffMachine()).isTrue();
+        Map<String, Object> env = new RerankStage(scorer).applyUnion("q",
+            List.of(row("v1", "v1", 0.1), sensitiveRow("sv", "SECRET vector", 0.2)),
+            List.of(row("x1", "x1", 0.7), sensitiveRow("sx", "SECRET lexical", 0.8)), null, null, 1000);
+
+        assertThat(scorer.calls).containsExactly(List.of("v1"), List.of("x1"));
+        assertThat(scorer.calls.toString()).doesNotContain("SECRET");
+        assertThat(results(env)).extracting(r -> r.get("id")).containsExactlyInAnyOrder("v1", "sv", "x1", "sx");
+    }
+
+    @Test
+    void aRerankerThatSaysItStaysLocal_stillScoresSensitiveRows_soTheHoldIsTheDeclarationsDoing() {
+        var local = new FakeReranker() {
+            @Override public boolean sendsTextOffMachine() { return false; }
+        };
+        local.result = List.of(new Reranker.Scored(0, 0.9), new Reranker.Scored(1, 0.2));
+        new RerankStage(local).apply("q",
+            new ArrayList<>(List.of(row("a", "plain a", 0.1), sensitiveRow("s", "SECRET s", 0.2))), null);
+        assertThat(local.lastDocuments).containsExactly("plain a", "SECRET s");
     }
 }

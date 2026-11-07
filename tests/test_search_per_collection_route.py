@@ -113,6 +113,10 @@ class _FakeEngine:
         return {"id": rid, "content": f"text {rid}", "distance": dist, "collection": col}
 
     def _request(self, method, path, *, tenant, timeout, body):
+        if method == "GET" and path == "/version":
+            # A current engine. The capability read behind a rerank with sensitivity="include" (RDR-243 Phase 3
+            # fix r1) is not a search request, so it is answered here and not recorded in ``calls``.
+            return {"vector_sensitivity_exclude_supported": True, "rerank_sensitive_exclusion_supported": True}
         self.calls.append((path, body))
         if path == _ROUTE:
             if self.on_route is not None:
