@@ -63,7 +63,7 @@ def test_row_counts_per_class_are_pinned():
         "CHUNK": 2,
         "DOCUMENT": 25,
         "POSITION": 7,
-        "ROW": 7,
+        "ROW": 8,
         "LEGACY": 12,
         "NOT_ROW": 4,
     }
@@ -149,7 +149,7 @@ def test_bypass_prefixes_equal_the_write_path_exemption():
 
 def test_row_keys_are_the_engine_written_quarantine_keys():
     assert ckm.keys_of("ROW") == frozenset(
-        {"quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at"}
+        {"quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at", "quarantine_expires_at"}
     )
 
 

@@ -44,7 +44,7 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
     static final String ROOT = "tok-root-chunk-keys-0123456789abcdef01";
     static final String MODEL = "minilm-l6-v2-384";
     static final List<String> ROW_KEYS =
-        List.of("origin_collection", "quarantined_at", "quarantined_by", "reaper_quarantined_at");
+        List.of("origin_collection", "quarantine_expires_at", "quarantined_at", "quarantined_by", "reaper_quarantined_at");
     static final String TAXONOMY_PREFIX = "taxonomy" + "_".repeat(2);
 
     protected NexusService service;

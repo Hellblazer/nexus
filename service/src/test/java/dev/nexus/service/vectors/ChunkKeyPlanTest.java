@@ -19,8 +19,8 @@ import java.util.List;
  */
 class ChunkKeyPlanTest {
 
-    private static final List<String> ROW = List.of("origin_collection", "quarantined_at", "quarantined_by",
-        "reaper_quarantined_at");
+    private static final List<String> ROW = List.of("origin_collection", "quarantine_expires_at", "quarantined_at",
+        "quarantined_by", "reaper_quarantined_at");
     private static final String TAXONOMY = "taxonomy" + "_".repeat(2);
     private static final List<String> PAIR = List.of("quarantined_by", "quarantined_at");
 

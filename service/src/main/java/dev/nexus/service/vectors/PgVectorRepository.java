@@ -6633,8 +6633,25 @@ FROM scope s
                                                               Double floorFraction, Integer floorMinChunks,
                                                               boolean force) {
         return quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit,
-            rowLimit, floorFraction, floorMinChunks, force, dimForCollection(tenant, collection),
-            LedgerMarker.none());
+            rowLimit, floorFraction, floorMinChunks, force, null);
+    }
+
+    /**
+     * nexus-alsq3: as above, with the client's retention. A non-null {@code quarantineExpiresAt}
+     * ({@code yyyy-MM-ddTHH:mm:ssZ}) is written by {@code nexus.gc_quarantine_orphans_floored} (vectors-056) as the
+     * metadata key {@code quarantine_expires_at} on the rows this call moved, and the engine's expiry of client-moved
+     * knowledge quarantine then waits for the later of its own retention and that instant. Null writes nothing. The
+     * floor may be absent (null {@code floorFraction}) and the stamp still ride the call: the wrapper takes no gate of
+     * its own and judges nothing, and the move is the unbounded or bounded base function untouched.
+     */
+    public QuarantineFlooredOutcome quarantineOrphansFloored(String tenant, String collection,
+                                                              String quarantineCollection, String quarantinedAt,
+                                                              int sampleLimit, Integer rowLimit,
+                                                              Double floorFraction, Integer floorMinChunks,
+                                                              boolean force, String quarantineExpiresAt) {
+        return quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit,
+            rowLimit, floorFraction, floorMinChunks, force, quarantineExpiresAt,
+            dimForCollection(tenant, collection), LedgerMarker.none());
     }
 
     /**
@@ -6647,6 +6664,17 @@ FROM scope s
                                                               Double floorFraction, Integer floorMinChunks,
                                                               boolean force, int dim,
                                                               LedgerMarker<QuarantineFlooredOutcome> marker) {
+        return quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit,
+            rowLimit, floorFraction, floorMinChunks, force, null, dim, marker);
+    }
+
+    /** The keyed route's form with the client's retention (nexus-alsq3); see the form above. */
+    public QuarantineFlooredOutcome quarantineOrphansFloored(String tenant, String collection,
+                                                              String quarantineCollection, String quarantinedAt,
+                                                              int sampleLimit, Integer rowLimit,
+                                                              Double floorFraction, Integer floorMinChunks,
+                                                              boolean force, String quarantineExpiresAt, int dim,
+                                                              LedgerMarker<QuarantineFlooredOutcome> marker) {
         return tenantScope.withTenant(tenant, ctx -> {
             if (rowLimit != null) {
                 PgSession.setStatementAndLockBounds(ctx,
@@ -6655,7 +6683,7 @@ FROM scope s
             }
             var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS_FLOORED.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit,
-                    floorFraction, floorMinChunks, force))
+                    floorFraction, floorMinChunks, force, quarantineExpiresAt))
                .fetchOne();
             runAfterSweepSqlHook();
             JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE);

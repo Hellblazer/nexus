@@ -1481,6 +1481,15 @@ public final class VectorHandler implements HttpHandler {
      * request had no floor, else {@code {"given": true, "fraction": f, "min_chunks": n, "force": b}}. An
      * older engine ignores the fields and its response has no {@code floor} key, which is how a client
      * detects that it was never guarded. A request without a floor takes the unchanged path.
+     *
+     * <p>CLIENT RETENTION STAMP (nexus-alsq3, vectors-056), optional and additive. A request may carry
+     * {@code quarantine_expires_at}, an absolute instant {@code yyyy-MM-ddTHH:mm:ssZ} (the shape of
+     * {@code quarantined_at}); anything else, or a non-string, is a 400. The engine writes it as the metadata key
+     * {@code quarantine_expires_at} on the rows that call moved, and its expiry of client-moved knowledge quarantine
+     * then waits for the later of its own retention and that instant. It rides every form: with a floor it goes to
+     * {@code gc_quarantine_orphans_floored} as the floor does; WITHOUT a floor it goes to the same function with no
+     * floor (which judges nothing and calls the move untouched), and the response keeps the floor-less shape. An
+     * older engine ignores the field and expires at its own retention; it says nothing in its response either way.
      */
     private void handleGcQuarantineOrphans(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1519,22 +1528,30 @@ public final class VectorHandler implements HttpHandler {
         // nexus-wbfpw.52: the optional fraction floor. Absent floor_fraction means NO floor and the unchanged
         // path below; the response still echoes {"given": false} so a client can tell this engine knows the field.
         FloorRequest floor = resolveFloor(body);
-        if (floor.given()) {
+        // nexus-alsq3: the client's retention stamp. A malformed one is a 400 and nothing runs.
+        final String expiresAt = resolveQuarantineExpiresAt(body);
+        if (floor.given() || expiresAt != null) {
+            // The stamp is written by the floored function, so a request that carries one goes there with or without a
+            // floor. Without a floor the function judges nothing and the response keeps the floor-less shape.
+            final boolean withFloor = floor.given();
             if (keyed != null) {
-                // The keyed floored form is the bounded one (222-research-14): a floor with no row_limit is not.
+                // The keyed form is the bounded one (222-research-14): no row_limit is not.
                 if (rowLimit <= 0) { refuseKey(ex, "idempotency_key_unsupported"); }
                 final int limit = rowLimit;
                 final int dim = keyedDim(ex, keyed, repo, tenant, collection, QUARANTINE_ROUTE, raw);
                 this.<PgVectorRepository.QuarantineFlooredOutcome>runKeyed(ex, keyed, tenant, QUARANTINE_ROUTE, raw,
                     dev.nexus.service.db.PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS, true,
                     marker -> repo.quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt,
-                        sampleLimit, limit, floor.fraction(), floor.minChunks(), floor.force(), dim, marker),
-                    out -> flooredQuarantineBody(out, limit, floor));
+                        sampleLimit, limit, floor.fraction(), floor.minChunks(), floor.force(), expiresAt, dim, marker),
+                    out -> withFloor ? flooredQuarantineBody(out, limit, floor)
+                                     : unflooredQuarantineBody(out, limit, floor));
                 return;
             }
             var out = repo.quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt,
-                sampleLimit, rowLimit > 0 ? rowLimit : null, floor.fraction(), floor.minChunks(), floor.force());
-            HttpUtil.send(ex, 200, json(flooredQuarantineBody(out, rowLimit, floor)));
+                sampleLimit, rowLimit > 0 ? rowLimit : null, floor.fraction(), floor.minChunks(), floor.force(),
+                expiresAt);
+            HttpUtil.send(ex, 200, json(withFloor ? flooredQuarantineBody(out, rowLimit, floor)
+                                                  : unflooredQuarantineBody(out, rowLimit, floor)));
             return;
         }
 
@@ -1590,6 +1607,39 @@ public final class VectorHandler implements HttpHandler {
             "remaining", bounded.remaining(),
             "row_limit", rowLimit,
             "floor", floor.echo());
+    }
+
+    /**
+     * The body of a floor-less call that rode the floored function only to carry the retention stamp (nexus-alsq3):
+     * the same keys as the bounded or unbounded floor-less form, so a stamp changes nothing a client reads.
+     */
+    static Map<String, Object> unflooredQuarantineBody(PgVectorRepository.QuarantineFlooredOutcome out,
+                                                       int rowLimit, FloorRequest floor) {
+        if (rowLimit > 0) {
+            return boundedQuarantineBody(new PgVectorRepository.QuarantineBoundedOutcome(
+                out.moved(), out.sample(), out.remaining() == null ? 0L : out.remaining()), rowLimit, floor);
+        }
+        return Map.of("moved", out.moved(), "sample", out.sample(), "floor", floor.echo());
+    }
+
+    /** Fixed-width UTC instant, the shape {@code quarantined_at} has and the engine compares as text. */
+    private static final java.util.regex.Pattern QUARANTINE_STAMP =
+        java.util.regex.Pattern.compile("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+
+    /**
+     * The optional {@code quarantine_expires_at} of {@code gc/quarantine-orphans} (nexus-alsq3): absent or JSON null is
+     * none; a present value must be a string of the form {@code yyyy-MM-ddTHH:mm:ssZ}, else a 400, never a stamp
+     * silently dropped (a retention that vanishes is the failure this field exists to prevent). Pinned by
+     * {@code GcQuarantineExpiresAtRouteTest}.
+     */
+    static String resolveQuarantineExpiresAt(Map<String, Object> body) {
+        Object raw = body.get("quarantine_expires_at");
+        if (raw == null) return null;
+        if (!(raw instanceof String str) || !QUARANTINE_STAMP.matcher(str).matches()) {
+            throw new IllegalArgumentException(
+                "quarantine_expires_at must be a string of the form yyyy-MM-ddTHH:mm:ssZ, got: " + raw);
+        }
+        return str;
     }
 
     /** The body of the floored quarantine form, bounded when {@code rowLimit > 0}. */

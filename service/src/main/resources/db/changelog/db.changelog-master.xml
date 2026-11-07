@@ -2091,6 +2091,17 @@
     <include file="db/changelog/vectors-055-sensitivity-exclude.xml"/>
 
     <!--
+        Bead nexus-alsq3 (RDR-192 residue): the client's quarantine retention stamped on each row at move time.
+        vectors-056-1 gives nexus.gc_quarantine_orphans_floored a trailing p_quarantine_expires_at text DEFAULT NULL (the
+        ten-argument signature is dropped; NULL writes nothing) and stamps the rows the call moved with metadata
+        quarantine_expires_at; vectors-056-2 makes nexus.reaper_expire_client_quarantine expire a row at the later of the
+        engine's retention and that stamp (a row without one keeps the engine's retention); see the included file's own
+        header. Function definitions and one grant only, no DATA EFFECT. After vectors-055, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/vectors-056-gc-quarantine-expires-at.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

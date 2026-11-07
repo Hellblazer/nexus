@@ -115,7 +115,7 @@ domain = [
   "frecency_score", "frecency_computed_at", "source_agent", "session_id", "catalog_doc_id", "content_hash",
   "section_title", "section_type", "page_number",
   "line_start", "line_end", "chunk_start_char", "chunk_end_char",
-  "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at",
+  "quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at", "quarantine_expires_at",
   "last_written_at", "retention", "collection",
   "chunk_type", "doc_id", "chunk_index", "chunk_count", "source_path", "store_type", "corpus",
   "git_meta", "git_project_name", "git_branch", "git_commit_hash", "git_remote_url",
@@ -242,7 +242,7 @@ emit = { class = "POSITION", kind = "metadata-key", on_row = "allowed", home = "
 
 [[row]]
 id = "quarantine-keys"
-match = { key = ["quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at"] }
+match = { key = ["quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at", "quarantine_expires_at"] }
 emit = { class = "ROW", kind = "metadata-key", on_row = "engine", home = "the row; refused from a client write; quarantined_by implies quarantined_at (CHECK); the quarantine-* bypass prefix stays exempt from the allow-list", remedy = "R6", moved_by = "stays; CHECK phase 4; restore fix 6pfgb.40" }
 
 [[row]]
