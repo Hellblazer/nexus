@@ -309,7 +309,10 @@ _PHASE_HEADING = re.compile(r"^#{2,4}\s+Phase\s+0*(\d+[a-z]?)(?![.\d])\b(.*)$", 
 #: The close marker: a parenthetical or a dash-led CLOSED, SHIPPED, DONE or COMPLETE, as the phase-review-gate
 #: close step writes it (``### Phase 3 (CLOSED, 2026-11-06)``) and rdr-222 and rdr-227 already do. A marker word in
 #: the heading's own title (``Phase 2: Complete the migration``) is not one.
-_PHASE_CLOSED_MARK = re.compile(r"(?:\(|[—–]|\s-)\s*(?:closed|shipped|done|complete)\b", re.IGNORECASE)
+_PHASE_CLOSED_MARK = re.compile(
+    r"(?:\(\s*(?:closed|shipped|done|complete)\b(?=\s*(?:[,;)]|with\b|\d{4}-))"   # (CLOSED, ...) (shipped with X)
+    r"|(?:[—–]|\s-)\s*(?:closed|shipped|done|complete)\b(?=\s*(?:$|[,;(]|\d{4}-)))",  # — done 2026-10-09
+    re.IGNORECASE)
 
 
 def _phases_of(title: str) -> list[str]:

@@ -11,6 +11,8 @@ verb imports them); they run against real tmp git repositories and tmp directori
 """
 from __future__ import annotations
 
+import re
+
 import inspect
 import json
 import os
@@ -996,11 +998,28 @@ def test_closed_phases_read_from_phase_headings(tmp_path: Path) -> None:
         "### Phase 3 (CLOSED, 2026-11-06)\n"
         "#### Phase 4: Measure (decides the approach) — done 2026-10-09\n"
         "### Phase 6: closed vocabularies table\n"            # title words again
+        "### Phase 7 — Complete the migration\n"             # a dash-led title word
+        "### Phase 9 (Done criteria)\n"                       # a parenthetical title word
+        "### Phase 12 - Complete the migration\n"            # a spaced-hyphen title word
+        "### Phase 13: wire x (done in v2)\n"                 # a later parenthetical that is title text
+        "### Phase 14 – Closed vocabularies\n"
+        "### Phase 10 (CLOSED)\n"
+        "### Phase 11 — complete\n"
         "Phase 7 closed in prose is not a heading.\n"
         "# Phase 8 (CLOSED) at the top level is a title, not a phase\n")
     (rdr / "rdr-223-b.md").write_text("---\nstatus: draft\n---\n### Phase 1: plan\n")
-    assert mc.closed_phase_numbers(tmp_path) == {"245": {"0", "1a", "3", "4"}}
+    assert mc.closed_phase_numbers(tmp_path) == {"245": {"0", "1a", "3", "4", "10", "11"}}
     assert mc.closed_phase_numbers(tmp_path / "no-such-root") == {}
+
+
+def test_the_phase_review_gate_close_step_writes_the_marker_the_census_reads() -> None:
+    """The skill's step 5 and the census regexes must agree, or a closed phase is never seen."""
+    skill = (Path(__file__).resolve().parents[1] / "conexus" / "skills" / "phase-review-gate" / "SKILL.md").read_text()
+    form = re.search(r"`(### Phase N \(CLOSED, YYYY-MM-DD\)[^`]*)`", skill)
+    assert form, "phase-review-gate no longer names the heading marker"
+    heading = form.group(1).replace("N", "3", 1).replace("YYYY-MM-DD", "2026-11-06")
+    h = mc._PHASE_HEADING.match(heading)
+    assert h and h.group(1) == "3" and mc._PHASE_CLOSED_MARK.search(h.group(2)), heading
 
 
 @pytest.mark.parametrize(("title", "phases"), [

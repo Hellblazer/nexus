@@ -414,7 +414,8 @@ review bead, not the skill alone.
    close step is visible. A phase is closed when its RDR's status is `closed`,
    or when its own phase heading carries the close marker the
    `phase-review-gate` close step writes (`### Phase N (CLOSED, YYYY-MM-DD)`);
-   a record's phase is the `-p<N>` / `-phase-<N>` piece of its title
+   a record's phases are the `-p<N>` / `-phase-<N>` pieces of its title, and
+   each must be closed (a sub-phase such as 3a is closed when Phase 3 is)
    (nexus-qo7ie.28, 2026-11-06).
 
 Test: a seeded closed phase with three gate records gets one T3 pointer
