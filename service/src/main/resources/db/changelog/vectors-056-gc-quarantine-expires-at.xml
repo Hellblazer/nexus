@@ -196,24 +196,20 @@ BEGIN
     -- from another call or another batch is not in this call's set and is not touched. Same transaction as the
     -- move, under the same sweep gate. A victim whose DELETE lost the last-write recheck stays live but its copy is
     -- already in the sibling carrying this call's quarantined_at, so it is stamped like the rest.
+    -- The statement is dynamic because the temp table does not exist until the base function runs: a static
+    -- reference is an error to plpgsql_check (PlpgsqlCheckGateTest holds every routine outside vectors-030 to no
+    -- errors). The table name is one of two constants, never caller text; the values go through USING.
     IF p_quarantine_expires_at IS NOT NULL AND COALESCE(v_moved, 0) > 0 THEN
-        IF p_row_limit IS NULL THEN
-            UPDATE nexus.chunks c
-               SET metadata = COALESCE(c.metadata, '{}'::jsonb)
-                              || jsonb_build_object('quarantine_expires_at', p_quarantine_expires_at)
-              FROM _wbfpw16_victim v
-             WHERE c.tenant_id  = p_tenant_id
-               AND c.collection = p_quarantine_collection
-               AND c.chash      = v.chash;
-        ELSE
-            UPDATE nexus.chunks c
-               SET metadata = COALESCE(c.metadata, '{}'::jsonb)
-                              || jsonb_build_object('quarantine_expires_at', p_quarantine_expires_at)
-              FROM _a6mon_victim v
-             WHERE c.tenant_id  = p_tenant_id
-               AND c.collection = p_quarantine_collection
-               AND c.chash      = v.chash;
-        END IF;
+        EXECUTE format(
+            'UPDATE nexus.chunks c
+                SET metadata = COALESCE(c.metadata, ''{}''::jsonb)
+                               || jsonb_build_object(''quarantine_expires_at'', $1)
+               FROM %I v
+              WHERE c.tenant_id  = $2
+                AND c.collection = $3
+                AND c.chash      = v.chash',
+            CASE WHEN p_row_limit IS NULL THEN '_wbfpw16_victim' ELSE '_a6mon_victim' END)
+        USING p_quarantine_expires_at, p_tenant_id, p_quarantine_collection;
     END IF;
 
     RETURN QUERY SELECT v_moved, v_sample, v_remaining, false, v_reapable, v_total;
