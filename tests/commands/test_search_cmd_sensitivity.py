@@ -88,7 +88,7 @@ def _assert_nothing_leaks(out: str) -> None:
 
 
 @pytest.mark.parametrize("marker", ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"])
-@pytest.mark.parametrize("flags", [[], ["--content"], ["--compact"], ["--vimgrep"], ["-A", "2"]])
+@pytest.mark.parametrize("flags", [[], ["--content"], ["--compact"], ["-A", "2"]])
 def test_claude_code_withholds_in_every_text_format(run_search, monkeypatch, marker, flags) -> None:
     monkeypatch.setenv(marker, "1")
     result = run_search(*flags)
@@ -100,13 +100,28 @@ def test_claude_code_withholds_in_every_text_format(run_search, monkeypatch, mar
     assert PLAIN_BODY in out, "the non-sensitive hit still prints"
 
 
+def test_claude_code_withholds_vimgrep_in_the_quickfix_shape(run_search, monkeypatch) -> None:
+    """Fix r1 (review minor): the stub keeps ``path:line:col:text`` (the path names the document by tumbler) and the
+    count goes to stderr, so a quickfix reader sees only parseable lines."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    result = run_search("--vimgrep")
+    assert result.exit_code == 0, result.output
+    stub = next(ln for ln in result.stdout.splitlines() if stub_line(OWNER) in ln)
+    assert stub == f"{OWNER}:1:1:{stub_line(OWNER)}"
+    assert all(ln.count(":") >= 3 for ln in result.stdout.splitlines()), result.stdout
+    assert withheld_note(1) in result.stderr and withheld_note(1) not in result.stdout
+    _assert_nothing_leaks(result.stdout)
+    assert PLAIN_BODY in result.stdout
+
+
 def test_claude_code_withholds_files_listing(run_search, monkeypatch) -> None:
+    """Fix r1 (review minor): a path list holds paths only; the sensitive row is omitted and counted on stderr."""
     monkeypatch.setenv("CLAUDECODE", "1")
     result = run_search("--files")
     assert result.exit_code == 0, result.output
-    assert stub_line(OWNER) in result.stdout and withheld_note(1) in result.stdout
+    assert result.stdout.splitlines() == ["public/notes.md"]
+    assert withheld_note(1) in result.stderr
     _assert_nothing_leaks(result.stdout)
-    assert "public/notes.md" in result.stdout
 
 
 def test_claude_code_withholds_under_bat(run_search, monkeypatch) -> None:
