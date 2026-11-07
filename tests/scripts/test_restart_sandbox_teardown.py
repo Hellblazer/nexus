@@ -356,6 +356,39 @@ def test_without_an_nx_the_engine_is_not_asked_but_local_checks_still_run(run, t
     assert len(out) == 1 and "still running" in out[0]
 
 
+def test_fewer_leases_than_live_sessions_is_a_finding(run, tmp_path) -> None:
+    """One session's lease read is not the others': every live session owns an nx-mcp and a lease."""
+    out = _findings(run, tmp_path, base=_base(run, sessions=3), expect=True)
+    assert out == ["teardown unexamined for 2 session(s): 3 live session(s) but only 1 T1 session lease(s) "
+                   "were published or readable"]
+    assert _findings(run, tmp_path, base=_base(run, sessions=1), expect=True) == []
+    assert _findings(run, tmp_path, base=_base(run, sessions=3), expect=False) == []
+
+
+def test_the_baseline_counts_the_live_sessions(run, tmp_path, monkeypatch) -> None:
+    sb = run.Sandbox(tmp_path, "nx-rs-test-td", "claude", "sonnet", run.SPECS["gate"])
+    sb.real_nx = ""
+    monkeypatch.setattr(run.Sandbox, "entries", lambda self: [{"sessionId": "a"}, {"sessionId": "b"}])
+    base = run.read_baseline(sb, True)
+    assert base.sessions == 2 and base.sids == {"a", "b"}
+
+
+def test_cleanup_with_a_session_that_published_no_lease_is_not_a_pass(run, tmp_path, monkeypatch) -> None:
+    """Two live sessions, one lease: the second session's teardown was never looked at."""
+    monkeypatch.setattr(run.Sandbox, "entries", lambda self: [{"sessionId": SID}, {"sessionId": "ffffffff-2"}])
+    dirty, _, _, _ = _cleanup(run, monkeypatch, tmp_path)
+    assert dirty == ["teardown unexamined for 1 session(s): 2 live session(s) but only 1 T1 session lease(s) "
+                     "were published or readable"]
+
+
+def test_the_teardown_wait_is_at_least_the_worst_case_and_cleanup_uses_it(run) -> None:
+    """flush 5 s + revoke 5 s run serially, plus telemetry and the name release: 10 s is too short."""
+    assert run.TEARDOWN_WAIT_S >= 20
+    assert run.wait_for_exit.__defaults__[0] == run.TEARDOWN_WAIT_S
+    text = RUN_PY.read_text(encoding="utf-8")
+    assert "wait_for_exit(nx_mcp, TEARDOWN_WAIT_S)" in text
+
+
 def test_a_baseline_that_could_not_be_read_is_a_finding(run, tmp_path) -> None:
     out = _findings(run, tmp_path, base=_base(run, errors=["T1 session probes not read before the kill: OSError: x"]))
     assert out == ["T1 session probes not read before the kill: OSError: x"]
@@ -584,6 +617,26 @@ def test_main_exits_unverified_and_records_no_pass_when_the_teardown_was_not_jud
     out = capsys.readouterr().out
     assert code == 2 and recorded == []
     assert "RESTART SANDBOX UNVERIFIED -- nx-mcp's teardown was not judged" in out
+    assert "RESTART SANDBOX PASSED" not in out  # the verdict line itself must not say PASSED
+    assert out.startswith("RESTART SANDBOX UNVERIFIED -- ")
+
+
+def test_a_keep_run_is_unverified_not_a_pass(run, tmp_path, monkeypatch) -> None:
+    """--keep skips cleanup(), the only place the teardown is judged: the scenario passes, the run is
+    unverified, so main() exits 2 and records nothing."""
+    home = tmp_path / "kept"
+    home.mkdir()
+    monkeypatch.setattr(run.tempfile, "mkdtemp", lambda prefix="": str(home))
+    monkeypatch.setattr(run.Sandbox, "setup", lambda self, crs: None)
+    monkeypatch.setattr(run.Sandbox, "entries", lambda self: [])
+    monkeypatch.setattr(run, "RUNNERS", {"gate": lambda sb, crs, a, failures, notes: None})
+    monkeypatch.setattr(run, "footprint_before", lambda: {})
+    run.UNVERIFIED.clear()
+    args = types.SimpleNamespace(keep=True, model="sonnet")
+    ok, failures, _ = run.run_scenario("gate", "claude", args, None)
+    assert ok and failures == []
+    assert len(run.UNVERIFIED) == 1 and run.UNVERIFIED[0].startswith("gate: --keep skips cleanup")
+    run.UNVERIFIED.clear()
 
 
 def test_main_still_fails_a_failed_scenario_and_passes_a_judged_one(run, monkeypatch) -> None:

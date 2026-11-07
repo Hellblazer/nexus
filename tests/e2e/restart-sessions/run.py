@@ -152,9 +152,11 @@ nx-mcp chain, so it shows the mechanism and not that nx-mcp's group is the pane'
 real sandbox run shows that. Its unit test runs it with the rest of the suite.
 
 Run through run.sh (it supplies the automation token, RDR-219). Prints one verdict line,
-``RESTART SANDBOX PASSED`` or ``RESTART SANDBOX FAILED``, and exits 0 or 1 (a precondition
-that fails once a sandbox is up is a failure, exit 1); exit 2 when the token, claude or tmux
-is missing. A failed scenario's scratch HOME is kept and named.
+``RESTART SANDBOX PASSED``, ``RESTART SANDBOX FAILED`` or ``RESTART SANDBOX UNVERIFIED``, and exits 0,
+1 or 2 (a precondition that fails once a sandbox is up is a failure, exit 1). Exit 2 is unverified:
+the token, claude or tmux is missing, or every scenario passed but nx-mcp's teardown was not judged
+(the installed nx predates 7.97.0 or its version is unreadable, or ``--keep`` skipped cleanup); no pass is
+recorded for it. A failed scenario's scratch HOME is kept and named.
 
 A pass of all five scenarios is recorded in ~/.local/state/claude-restart-sessions/sandbox-pass.json
 (the script's sha256 and Claude Code's version), which the script's restart gate reads (nexus-8zdbu).
@@ -2011,6 +2013,7 @@ class Baseline:
     sids: set[str] = dataclasses.field(default_factory=set)  #: session ids that could hold a directory lease
     directory: tuple[list[str], list[str]] | None = None  #: (leases held, rows not read) before the kill
     errors: list[str] = dataclasses.field(default_factory=list)  #: what could not be read: each a finding
+    sessions: int = 0  #: live sessions (``sb.entries()``) when the baseline was read: each owns an nx-mcp
 
 
 def read_baseline(sb: Sandbox, supported: bool, *, run=None, sleep=None, clock=None,
@@ -2031,7 +2034,9 @@ def read_baseline(sb: Sandbox, supported: bool, *, run=None, sleep=None, clock=N
         b.leases = read_t1_leases(sb.nexus_config)
 
     def sids() -> None:
-        b.sids = {str(d.get("sessionId", "")) for d in [*sb.entries(), *sb.before.values()] if d} - {""}
+        live = sb.entries()
+        b.sessions = len(live)
+        b.sids = {str(d.get("sessionId", "")) for d in [*live, *sb.before.values()] if d} - {""}
 
     attempt("T1 session leases", leases)
     attempt("session ids", sids)
@@ -2067,6 +2072,9 @@ def engine_teardown_findings(*, nx: str, names: list[str], base: Baseline, env: 
                 f"teardown did not finish, or it was not hung up: {a[:100]}" for p, a in stragglers]
     if expect and not base.leases:
         out.append("teardown unexamined: sessions ran but no T1 session lease was published or readable")
+    elif expect and len(base.leases) < base.sessions:
+        out.append(f"teardown unexamined for {base.sessions - len(base.leases)} session(s): {base.sessions} live "
+                   f"session(s) but only {len(base.leases)} T1 session lease(s) were published or readable")
     if not exited and (expect or base.leases):
         out.append(f"teardown unexamined: {len(base.leases)} T1 session lease(s) were published but no nx-mcp "
                    f"process was found to wait for")
@@ -2262,6 +2270,8 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                     ok = False
             else:
                 sb.watch.stop()
+                # --keep skips cleanup(), the only place the teardown is judged: not a pass (nexus-iz8ub)
+                UNVERIFIED.append(f"{name}: --keep skips cleanup, which is where nx-mcp's teardown is judged")
             sb.close_servers()
             if not a.keep:
                 for f in claude_session_files(full):  # Claude Code's own per-session temp files
@@ -2664,7 +2674,8 @@ def main() -> int:
         results[name] = (ok, len(failures))
     bad = [n for n, (ok, _) in results.items() if not ok]
     total = sum(n for _, n in results.values())
-    verdict = "RESTART SANDBOX FAILED" if bad else "RESTART SANDBOX PASSED"
+    verdict = ("RESTART SANDBOX FAILED" if bad else
+               "RESTART SANDBOX UNVERIFIED" if UNVERIFIED else "RESTART SANDBOX PASSED")
     print(f"{verdict} -- {len(chosen)} scenario(s) ({', '.join(chosen)}), {total} failure(s)"
           + (f" in {', '.join(bad)}" if bad else "") + f", {time.time() - t0:.0f}s", flush=True)
     if UNVERIFIED:  # nexus-iz8ub: the teardown was not judged, so neither a pass nor a recorded one
