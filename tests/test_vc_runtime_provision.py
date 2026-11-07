@@ -631,6 +631,35 @@ def test_a_stale_base_only_vcrt_is_topped_up_without_rewriting_its_base_pair(
     assert _gap(cfg, system) is None
 
 
+def test_a_top_up_beside_an_older_base_pair_records_the_mix(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-1oexm (1): the base pair stays (a loaded DLL cannot be replaced), so the directory now
+    holds two redistributable versions. The sidecar says so: the tag each placed DLL came from, and
+    the base-pair DLLs whose bytes differ from that tag's bundle."""
+    where = _put_dlls(cfg / "vcrt")
+    for n in _DLLS:
+        (where / n).write_bytes(b"EARLIER-" + n.encode())
+    net = _new_bundle(monkeypatch)
+    r = _ensure(cfg, system, net, tag="engine-service-v9.9.2")
+    assert r.status == "provisioned", r.detail
+    meta = json.loads((where / "vcrt.meta.json").read_text())
+    assert meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"}
+    assert meta["mixed_base"] == {"tag": "engine-service-v9.9.2", "differ": sorted(_DLLS)}
+
+
+def test_a_top_up_beside_the_same_base_pair_records_no_mix(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    where = _put_dlls(cfg / "vcrt")
+    for n in _DLLS:
+        (where / n).write_bytes(_BODY[n])  # the very bytes the bundle carries
+    net = _new_bundle(monkeypatch)
+    assert _ensure(cfg, system, net, tag="engine-service-v9.9.2").status == "provisioned"
+    meta = json.loads((where / "vcrt.meta.json").read_text())
+    assert "mixed_base" not in meta and meta["dll_tags"] == {_ATOMIC_WAIT: "engine-service-v9.9.2"}
+
+
 def test_an_older_bundle_is_fetched_once_per_pinned_tag_not_on_every_call(
     cfg: Path, tmp_path: Path, net: _Net,
 ) -> None:

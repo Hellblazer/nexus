@@ -1250,14 +1250,24 @@ def _top_up_pdf_runtime(
             digests = _extract_vc_runtime(
                 asset, stage, _vcrt.VC_RUNTIME_DLLS, optional=_vcrt.PDF_ONLY_DLLS,
             )
+            differ: list[str] = []
             if all(n in digests for n in _vcrt.PDF_ONLY_DLLS):
                 for n in _vcrt.PDF_STACK_DLLS:
                     if not (dest_dir / n).is_file():
                         _atomic_copy(stage / n, dest_dir / n, executable=False)
                         placed[n] = digests[n]
+                    elif n in digests and compute_sha256(dest_dir / n) != digests[n]:
+                        differ.append(n)
         if not sidecar.get("tag"):
             sidecar = _provenance(tag, name, digest, asset_url, installed_by)
         sidecar["dlls"] = {**(sidecar.get("dlls") or {}), **placed}
+        # nexus-1oexm (1): a DLL already here stays (a loaded one cannot be replaced), so a top-up can
+        # leave two redistributable versions in one directory, which Microsoft's app-local rule does
+        # not want. Record which tag each placed DLL came from and which kept ones differ from it.
+        sidecar["dll_tags"] = {**(sidecar.get("dll_tags") or {}), **{n: tag for n in placed}}
+        if placed and differ:
+            sidecar["mixed_base"] = {"tag": tag, "differ": sorted(differ)}
+            _log.warning("vc_runtime_mixed_versions", tag=tag, differ=sorted(differ), dir=str(dest_dir))
         sidecar[_PDF_DLL_CHECKED_KEY] = tag
         try:
             _atomic_write_json(dest_dir / _VCRT_SIDECAR_NAME, sidecar)
