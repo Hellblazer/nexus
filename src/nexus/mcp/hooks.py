@@ -267,7 +267,7 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
                 "The dispatch's task text. Pattern-matched to decide whether catalog, phase-gate, operator or code-navigation context is worth its bytes."
             ),
             "cwd": (
-                "The starting subagent's working directory (nexus-13mbx). The Preflight row is given when it lies in a checkout carrying the preflight script, so a worktree-isolated agent gets the row from its own worktree."
+                "The starting subagent's working directory. The Preflight row is given when it lies in a checkout carrying the preflight script, so a worktree-isolated agent gets the row from its own worktree."
             ),
         },
         summary=(
