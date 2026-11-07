@@ -127,6 +127,19 @@ class TestLayerTwoCensus:
         assert "verified 1" in out and "assumed 1" in out and "unclassified 1" in out, out
         assert "HIGH RISK" in out and "[seq 2]" in out, out
 
+    def test_an_acknowledged_assumption_is_listed_as_acknowledged_not_high_risk(self):
+        # The census told the author to record acknowledged: true, then ignored it.
+        rows = [
+            {"title": "209-research-1", "content": "rdr_id: 209\nseq: 1\nclassification: assumed\n"
+                "verification_method: docs_only\nfinding: open one\n"},
+            {"title": "209-research-2", "content": "rdr_id: 209\nseq: 2\nclassification: assumed\n"
+                "verification_method: docs_only\nfinding: acked one\nacknowledged: true\n"},
+        ]
+        out = "\n".join(rdr_mod._layer2_census_lines(rows, "209"))
+        assert "[seq 1] open one (docs_only) HIGH RISK" in out
+        assert "[seq 2] acked one (docs_only) acknowledged" in out
+        assert "[seq 2] acked one (docs_only) HIGH RISK" not in out
+
     def test_research_add_records_classification_and_method(self, monkeypatch):
         fake = _FakeT2ResearchClient()
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)

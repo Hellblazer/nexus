@@ -2588,6 +2588,7 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
     by_class: Counter[str] = Counter()
     by_method: Counter[str] = Counter()
     high_risk: list[str] = []
+    acknowledged: list[str] = []
     for seq, content in research:
         cls = (_preamble_parse_t2_field(content, "classification") or "").strip().lower() or "unclassified"
         method = (
@@ -2598,7 +2599,10 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
         by_method[method] += 1
         if cls == "assumed" and method in ("docs_only", "unstated"):
             finding = (_preamble_parse_t2_field(content, "finding") or "").strip()
-            high_risk.append(f"  [seq {seq}] {finding[:120]} ({method}) HIGH RISK")
+            if (_preamble_parse_t2_field(content, "acknowledged") or "").strip().lower() == "true":
+                acknowledged.append(f"  [seq {seq}] {finding[:120]} ({method}) acknowledged")
+            else:
+                high_risk.append(f"  [seq {seq}] {finding[:120]} ({method}) HIGH RISK")
     lines = [
         f"**Layer 2 (assumption audit)**: {len(research)} research records; "
         + ", ".join(f"{k} {v}" for k, v in sorted(by_class.items()))
@@ -2613,6 +2617,10 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
         lines.append("Assumed findings with no evidence beyond documents:")
         lines.extend(high_risk)
         lines.append("Verify or remove each before Layer 3, or record `acknowledged: true` on it.")
+    if acknowledged:
+        # The acknowledgement the line above asks for, honoured: these go on to Layer 3 as open items.
+        lines.append("Assumed findings acknowledged as open (they pass to Layer 3 as such):")
+        lines.extend(acknowledged)
     lines.append("")
     return lines
 
