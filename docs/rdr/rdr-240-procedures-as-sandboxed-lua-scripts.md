@@ -283,7 +283,9 @@ schema.
    Step 3, the step its residual S4 names, builds it to this format. The
    spike's reader (`static_check.py` lines 238-245) scans three lines; the
    port reads four. The parser also refuses a header byte outside printable
-   ASCII, as the static check's `bytes` rule does for the whole file.
+   ASCII or tab; the static check's `bytes` rule allows printable ASCII,
+   tab, CR and LF in the whole file, and the header's lines are split
+   before the check.
    RDR-242's `run_script` calls it on the bytes it read, before the static
    check, which takes the grants from it and cross-checks them against the
    bytecode (its rules `verb-unknown`, `verb-ungranted` and
@@ -294,19 +296,25 @@ schema.
    requirements on `run_script` beyond RDR-242's Technical Design 4, which
    lists only the name, root and static-check refusals; they are recorded on
    nexus-mdbds with its residual S4.
-2. **Runner.** One Python function, `run_procedure(name, args)`, fills the
-   reserved arguments, calls RDR-242's `run_script(name, args)` and returns
-   its JSON result. It reads no file. The argument check runs inside
+2. **Runner.** One Python function, `run_procedure(name, args)`, calls
+   RDR-242's `run_script(name, args)` and returns its JSON result. It reads
+   no file and checks nothing itself. The argument check runs inside
    `run_script` (Technical Design 1) and refuses with the kind `args`,
    naming the argument: an argument the header does not name, a missing
    required argument, or a JSON value of the wrong type (an `integer` is a
    JSON number with no fractional part). Two argument names are reserved,
    because the sandbox has no clock and no verb returns the repo (RDR-242
    Technical Design 7 and 10, `nexus_rdr/240-research-6`): `now`, the host's
-   UTC time as an ISO 8601 string, and `repo`, the base name of the caller's
-   git top-level directory, absent outside a repo. A header that declares
-   either gets it from `run_procedure`, and a caller that passes either is
-   refused there with the kind `args`. RDR-242 owns the rest: the lookup,
+   UTC time as an ISO 8601 string, and `repo`, the worktree-stable repo name
+   that `nx rdr` already uses for `<repo>_rdr` (the main checkout's
+   basename through `nexus.repo_identity._resolve_main_repo`, as
+   `_gate_repo_name` in `src/nexus/commands/rdr.py` lines 1040-1056 does,
+   so a linked worktree gives the main checkout's name), absent outside a
+   repo. `run_script`, which holds the parsed header, adds each reserved
+   value only when the header declares it, and refuses with the kind `args`
+   a caller that passes either; this is a third requirement on
+   `run_script`, recorded on nexus-mdbds with the two of Technical Design 1.
+   The clock it reads is injectable, so a test fixes `now`. RDR-242 owns the rest: the lookup,
    the name rule, the static check, the grants, the limits, and the errors
    (`ScriptError`, `ScriptLimitError`, `ScriptWorkerError`,
    `ScriptBusyError`), which `run_procedure` passes through unchanged. No
@@ -348,7 +356,7 @@ schema.
      for one day or one hour.
 5. **`transcripts`.** Queries, each a function in the script with a fixture
    test, called with the argument object `{query, since, until, project}`
-   (`since` and `until` UTC dates, `until` defaulting to the reserved `now`
+   (`since` and `until` UTC dates or timestamps, `until` defaulting to the reserved `now`
    of Technical Design 2, `project` a
    Claude Code project directory name or `all`). Rows of `memory`, `tools`
    and `loads` carry a session id, a name, a count, a last-use time and a
@@ -377,20 +385,31 @@ schema.
    (RDR-242 Technical Design 11), and the per-session rows of `memory`,
    `tools` and `loads` over 30 days are larger than that (inferred, not
    measured, from about 5,000 sessions; round-1 gate critique C1). So the
-   result is paged by whole days: a run adds days while its rows stay under
-   768 KB and returns `{rows, truncated_records, next_since}`, where
-   `next_since` is the first day it did not cover and is absent once the
-   window is done. The caller runs the procedure again with `since` set to
-   `next_since` and the same `until`, and joins the pages: per-session rows
-   concatenate, and `violations` rows (a rule, a count, a main-session
-   count) sum by rule. `nx memory curate`'s 30-day call is then a loop of
-   runs. RDR-238 leaves this interface's shape to this RDR's gate (its lines
+   result is paged: a run adds whole days while its rows stay under 768 KB
+   and returns `{rows, truncated_records, until, next_since}`. `until` is the
+   value the run used, the reserved `now` when the caller gave none, so the
+   caller can repeat it. `next_since` is where the next page starts, a UTC
+   date or, after a day split into hours, a timestamp, and it is absent once
+   the window is done. The caller runs the procedure again with `since` set
+   to `next_since` and the returned `until`, and joins the pages: per-session
+   rows (`memory`, `tools`, `loads`) concatenate; the keyed rows of the other
+   four sum by key (`violations` by rule, its main-session count included;
+   `agents` by agent type and model; `skills` by skill; `procedures` by
+   procedure); `truncated_records` sums. The sandbox has no JSON encoder, so
+   the script estimates a row's size as twice the byte length of its strings
+   plus 16 bytes a field; the 256 KB between 768 KB and RDR-242's 1 MB cap is
+   the margin for a low estimate, and an estimate low by more than that
+   fails the run with RDR-242's `ScriptLimitError("result")`, never a short
+   page. `nx memory curate`'s 30-day call has to loop on `next_since`.
+   RDR-238 leaves this interface's shape to this RDR's gate (its lines
    518-520, `nexus_rdr/240-research-6`); its argument object and row shapes
-   are unchanged. A day whose rows alone pass 768 KB is split into hours,
-   and an hour that still does not fit fails the run with the kind
-   `result-window`, naming the hour, never with a short count. A day whose
-   verb result does not fit (A2) fails the run with RDR-242's error and is
-   never counted as zero.
+   are unchanged, and the loop is recorded on RDR-238's bead (nexus-qo7ie)
+   as a requirement on `nx memory curate`. A day whose rows alone pass
+   768 KB is split into hours, and an hour that still does not fit ends the
+   run with a Lua error whose message starts `result-window:` and names the
+   hour; it arrives as RDR-242's `ScriptError`, never as a short count. A day
+   whose verb result does not fit (A2) fails the run with RDR-242's error
+   and is never counted as zero.
 6. **`gate_record`.** Covers the review agents' gate records in T2 project
    `<repo>`, the ones the RDR-209 rollup reads. It does not cover the RDR
    gate flow's records in `<repo>_rdr` (`<id>-gate-critique-<date>-r<N>`,
@@ -415,9 +434,10 @@ schema.
 7. **`research_add`.** Arguments `rdr`, `classification`, `method`,
    `finding` and the reserved `repo`. Checks `classification` and `method`
    against a checked table, `src/nexus/tables/rdr-research-vocab.toml`, read
-   with `tables.get`; the vocabulary is today a Python constant
-   (`_RESEARCH_METHODS`, `src/nexus/commands/rdr.py` line 2555), and it moves
-   to the table, which `nx rdr` then reads too. Reads the RDR's existing
+   with `tables.get`; the vocabulary is today two Python constants
+   (`_RESEARCH_CLASSIFICATIONS` and `_RESEARCH_METHODS`,
+   `src/nexus/commands/rdr.py` lines 2554-2555), and both move to the
+   table, which `nx rdr` then reads too. Reads the RDR's existing
    research titles with `memory.list`, takes the next sequence number, and
    returns `{project, title, content}` for `<repo>_rdr/<id>-research-<seq>`
    in the record format the gate
@@ -560,8 +580,10 @@ run than to reread. Skills stay the target for procedures that need judgment.
   the table on a protected path (its residual S3, on nexus-mdbds); without
   that the worker aborts and the error is `ScriptWorkerError`.
 - A day or hour whose rows pass the 768 KB page bound: a day is split into
-  hours, and an hour that still does not fit fails with the kind
-  `result-window`, naming it.
+  hours, and an hour that still does not fit ends the run with a Lua error
+  whose message starts `result-window:` and names it (RDR-242's
+  `ScriptError`). A page whose real size passes the 1 MB cap despite the
+  estimate fails with `ScriptLimitError("result")`.
 - One session's record over 1 MB: cut and marked `truncated`, counted in
   the query's result.
 - Two `research_add` runs for one RDR at once: the same sequence number,
@@ -576,8 +598,8 @@ run than to reread. Skills stay the target for procedures that need judgment.
 - [ ] RDR-242's read-only runtime landed: `run_script`, the worker, the
       static check and the version 1 verbs (its Phases 1 to 3), with
       `run_script` calling the header parser, which RDR-242's Phase 3 Step 3
-      builds to this RDR's format (Technical Design 1), so neither plan
-      waits on the other.
+      builds to this RDR's format (Technical Design 1), so the parser does
+      not wait on this RDR's Phase 1.
 - [x] RDR-238 accepted (this RDR does not depend on its implementation).
 
 ### Minimum Viable Validation
@@ -591,8 +613,8 @@ JSON.
 
 #### Step 1: Runner, library roots and `transcripts`
 
-`run_procedure`, both front doors, the reserved arguments, the header
-fixture tests against RDR-242's parser, and the `transcripts` queries with
+`run_procedure`, both front doors, the header and reserved-argument
+fixture tests against RDR-242's `run_script`, and the `transcripts` queries with
 their paging, each with a fixture test. Then the A2 spike, on the laptop
 over its own transcripts for the last 30 days, run through `run_procedure`
 so RDR-242's limits apply. It records:
@@ -620,8 +642,8 @@ allows timestamps), and the spike runs again. A missed time line, or a fit
 line still missed at one hour, comes back to this RDR and to RDR-242
 before any query ships, with two of the remedies RDR-242's residual S3
 names: a page-by-page verb, or a larger memory limit for a named procedure.
-A page line missed is a `result-window` failure, and comes back the same
-way. Done when the spike passes and RDR-238's research 2, 4 and 5 can be
+A page line missed (a `result-window:` error or RDR-242's result limit)
+comes back the same way. Done when the spike passes and RDR-238's research 2, 4 and 5 can be
 re-derived from the queries.
 
 #### Step 2: `preflight`
@@ -634,9 +656,12 @@ matches what was run or should have been.
 
 #### Step 1: `research_add`
 
-The script, the `rdr-research` skill's examples (run the procedure, read the
-title back, write the record with `memory_put`), and the bare-argument
-form's refusal.
+The checked table `rdr-research-vocab.toml` with both research constants
+moved into it, `nx rdr` reading it, and its entry in `tables.get`'s
+name-to-file map (RDR-242 Phase 3 Step 1); the script; the `rdr-research`
+skill's examples (run the procedure, read the title back, write the record
+with `memory_put`); and the bare-argument form's refusal, shipped in the
+later package release that Cross-Cutting Concerns orders.
 
 #### Step 2: `gate_record`
 
@@ -679,7 +704,9 @@ None of its own. `lupa>=2.8,<3`, which RDR-242 adds.
   (an unknown key, a missing required one, `1.5` for an `integer`) are each
   refused with the kind `args` before any worker starts; a caller passing
   `now` or `repo` is refused; a header declaring them receives the host's
-  values; an undeclared verb call fails naming the verb.
+  values (a fixed clock in the test), and one that does not receive neither;
+  run from a linked worktree, `repo` is the main checkout's name; an
+  undeclared verb call fails naming the verb.
 - Front doors: a lint that `procedure_run` and `nx run` call
   `run_procedure` and nothing else.
 - Transcripts: each query against a fixture transcript with known counts; a
@@ -689,8 +716,9 @@ None of its own. `lupa>=2.8,<3`, which RDR-242 adds.
   fixture spanning three days makes three verb calls; a session spanning
   midnight is counted once, on its start day; a fixture whose rows pass
   768 KB returns `next_since`, and the joined pages equal the counts of the
-  same fixture in one window; a single hour over the page bound fails with
-  `result-window`.
+  same fixture counted outside the sandbox in one pass; a page that ends
+  mid-day returns a timestamp `next_since`; a single hour over the page
+  bound fails with a `result-window:` error.
 - Preflight: each change class against a fixture diff; the result contains
   commands and the runner executes none.
 - Research add: a finding containing `;`, backticks and `$(...)` returned,
@@ -737,7 +765,8 @@ keeps its argument object and row shapes. Its result is paged, because
 RDR-242 caps a run's result at 1 MB: the caller loops on `next_since` and
 joins the pages (Technical Design 5). RDR-238 leaves that shape to this
 RDR's gate (its lines 518-520), so the paging needs no change to RDR-238's
-text, and `nx memory curate` is built to loop.
+text; the loop is a requirement on `nx memory curate`, recorded on
+RDR-238's bead (nexus-qo7ie).
 
 ### Assumption Verification
 
@@ -758,9 +787,10 @@ text, and `nx memory curate` is built to loop.
   `src/nexus/lua_runtime/` does not exist (checked 2026-11-07).
 - The header form follows the spike's comment-line reader
   (`scripts/spikes/rdr242-lua-sandbox/static_check.py` lines 238-245,
-  `nexus_rdr/240-research-5`), extended from one key to four and from three
-  lines to four. The parser, `nexus.lua_runtime.header.parse`, and the
-  `header` and `args` refusal kinds inside `run_script` are requirements on
+  `nexus_rdr/240-research-5`), changed from two keys (`grants`, `expect`)
+  to four and from three lines to four. The parser,
+  `nexus.lua_runtime.header.parse`, the `header` and `args` refusal kinds
+  and the reserved-argument fill inside `run_script` are requirements on
   RDR-242's Phase 3 Step 3 beyond its Technical Design 4, recorded on
   nexus-mdbds.
 - The sandbox has no clock and no verb returns a repo name (RDR-242
@@ -828,3 +858,4 @@ keep a caller write until a write verb exists, rather than adding one here.
 | 2026-11-07 | Revised to RDR-242 as accepted: no write verb, so `gate_record` and `research_add` return their record for the caller to write (A1 settled on its fallback); the header is a four-line comment block this RDR owns, with one parser that RDR-242's `run_script` calls (residual S4); queries call `transcripts.sessions` a day at a time, records over 1 MB are cut, bodies are assistant text only, and the A2 spike gains a memory-fit pass line (residual S3); Finalization Gate written. |
 | 2026-11-07 | Gate round 1 — BLOCKED (1 Critical, 4 Significant, 1 ship-blocker(s)); commit `9c293bc45`; critique `nexus_rdr/240-gate-critique-2026-11-07-r1`. |
 | 2026-11-07 | Round-1 fixes: the transcript result is paged by whole days under RDR-242's 1 MB result cap (`next_since`), with a page line in the A2 spike (C1); the header parser and the `header` and `args` refusal kinds live in RDR-242's `run_script`, built by its Phase 3 Step 3 (S1); reserved `now` and `repo` arguments, `preflight` returns commands and lives in the nexus repo root (S2); `gate_record` covers the review agents' records only, kind `fix-check` (S3); sessions belong to their start window, records carry deferred tools and error flags (S4). |
+| 2026-11-07 | Fix-check repairs (fix check `nexus_rdr/240-fix-check-5aea31c79` failed on one row): reserved `repo` is the worktree-stable repo name, and `run_script` fills `now` and `repo` only when the header declares them; `next_since` may be a timestamp and the result echoes `until`; rows are sized by a stated estimate under 768 KB; `result-window:` is a Lua error message, not a kind; join rules for every query; the research vocabulary's plan step. |
