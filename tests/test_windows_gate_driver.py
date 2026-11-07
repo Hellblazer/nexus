@@ -1025,6 +1025,30 @@ def test_the_account_step_and_the_run_as_wrapper_keep_their_guarantees() -> None
     assert "NTAccount($env:COMPUTERNAME, $runAs)), 'Read', 'Allow'" in recv
 
 
+def test_the_quiet_guest_policies_are_set_before_the_account_exists() -> None:
+    """nexus-y3y8d: about 400 MiB of each warm cycle was the standard user's first sign-in fetching
+    OneDrive, Widgets, Start menu content and Edge's background work, none of which the gate asked
+    for. Machine policy set before the account is created stops them, and the default user's
+    OneDriveSetup Run entry (the per-user installer a new profile inherits) is removed."""
+    std = _read("stduser.ps1")
+    code = "\n".join(_code_lines(std))
+    wanted = (
+        r"Policies\Microsoft\Windows\OneDrive' -Name DisableFileSyncNGSC -Value 1",
+        r"Policies\Microsoft\Dsh' -Name AllowNewsAndInterests -Value 0",
+        r"Policies\Microsoft\Windows\CloudContent' -Name DisableWindowsConsumerFeatures -Value 1",
+        r"Policies\Microsoft\Windows\CloudContent' -Name DisableCloudOptimizedContent -Value 1",
+        r"Policies\Microsoft\Edge' -Name StartupBoostEnabled -Value 0",
+        r"Policies\Microsoft\Edge' -Name BackgroundModeEnabled -Value 0",
+        r"reg.exe delete 'HKU\NXG_DEFAULT\Software\Microsoft\Windows\CurrentVersion\Run' /v OneDriveSetup /f",
+    )
+    for line in wanted:
+        assert line in code, line
+    made = code.index("Add-LocalGroupMember")
+    assert all(code.index(line) < made for line in wanted), "each one must precede the account's creation"
+    # the default hive is loaded under one name and always unloaded
+    assert code.index("reg.exe load 'HKU\\NXG_DEFAULT'") < code.index("reg.exe unload 'HKU\\NXG_DEFAULT'") < made
+
+
 # ---- --no-admin-git ----------------------------------------------------------
 
 

@@ -127,6 +127,26 @@ try {
         New-Item -Force -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' | Out-Null
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name DisablePrivacyExperience -Value 1 -Type DWord
         Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableFirstLogonAnimation -Value 0 -Type DWord
+        # nexus-y3y8d: the first sign-in fetched about 400 MiB the gate never asked for (OneDrive,
+        # Widgets, Start menu content, Edge's background work). Machine policy set before the account
+        # exists stops it, and the default user's OneDriveSetup Run entry, which every new profile
+        # inherits, is removed so the per-user OneDrive installer never starts.
+        foreach ($k in 'OneDrive', 'CloudContent') { New-Item -Force -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\$k" | Out-Null }
+        foreach ($k in 'Dsh', 'Edge') { New-Item -Force -Path "HKLM:\SOFTWARE\Policies\Microsoft\$k" | Out-Null }
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -Name DisableFileSyncNGSC -Value 1 -Type DWord
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name AllowNewsAndInterests -Value 0 -Type DWord
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name DisableWindowsConsumerFeatures -Value 1 -Type DWord
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -Name DisableCloudOptimizedContent -Value 1 -Type DWord
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name StartupBoostEnabled -Value 0 -Type DWord
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name BackgroundModeEnabled -Value 0 -Type DWord
+        & reg.exe load 'HKU\NXG_DEFAULT' 'C:\Users\Default\NTUSER.DAT' | Out-Null
+        try {
+            & reg.exe delete 'HKU\NXG_DEFAULT\Software\Microsoft\Windows\CurrentVersion\Run' /v OneDriveSetup /f 2>&1 | Out-Null
+        } finally {
+            [gc]::Collect()
+            & reg.exe unload 'HKU\NXG_DEFAULT' | Out-Null
+        }
+        "quiet-guest policy set (OneDrive, Widgets, Start content, Edge background; default-user OneDriveSetup removed)"
         if ($appLocker -ne 'no') {
             # AppLocker's own default rules (the ones "Create Default Rules" makes), all four collections enforced.
             $everyone = 'UserOrGroupSid="S-1-1-0" Action="Allow"'; $admins = 'UserOrGroupSid="S-1-5-32-544" Action="Allow"'
