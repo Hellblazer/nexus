@@ -749,6 +749,10 @@ def _restart_skip_text(reason: str, pid: object) -> str:
             "refused": "this run's restart limit is spent or the spawn policy forbids a restart",
             "no-pid": "its pid is not recorded",
             "unreadable": "the process behind that pid could not be identified, so nothing was stopped",
+            "other-namespace": (
+                "it runs in another PID namespace, so it cannot be stopped from here "
+                "(`nx mineru stop --force` clears its record)"
+            ),
         }.get(reason, "no restart happened")
         head = f"not replacing it (pid {pid}): {why}"
     return f"{head}; later pages run in a subprocess for now."
@@ -2902,7 +2906,9 @@ class PDFExtractor:
         from nexus._mineru_pid import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _pid_file_path,
             is_process_alive,
+            pid_file_from_other_namespace,
             read_pid_file,
+            recorded_server_alive,
         )
         from nexus._mineru_spawn import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _HEALTH_POLL_INTERVAL,
@@ -2926,6 +2932,21 @@ class PDFExtractor:
                     info is not None
                     and replace_pid is not None
                     and info["pid"] == replace_pid
+                    and pid_file_from_other_namespace(info)
+                    and recorded_server_alive(info)
+                ):
+                    # nexus-dyfsw: the broken server runs in another PID namespace. Its pid
+                    # names nothing here, so it cannot be stopped from here, and spawning a
+                    # second server beside it is what the pid file exists to prevent. Signal
+                    # nothing, keep the file; `nx mineru stop --force` clears the record.
+                    _log.warning("mineru_replace_pid_other_namespace", pid=replace_pid)
+                    self._restart_skipped = "other-namespace"
+                    return False
+                if (
+                    info is not None
+                    and replace_pid is not None
+                    and info["pid"] == replace_pid
+                    and not pid_file_from_other_namespace(info)
                     and is_process_alive(replace_pid)
                 ):
                     # nexus-x3m8e: the registered server is the broken one;
@@ -2955,7 +2976,7 @@ class PDFExtractor:
                                      pid=replace_pid)
                     _pid_file_path().unlink(missing_ok=True)
                     info = None
-                if info is not None and is_process_alive(info["pid"]):
+                if info is not None and recorded_server_alive(info):
                     # A concurrent trigger already restarted — probe it below. The caller's
                     # progress line says another process did it (nexus-tr1rj.26).
                     port = info["port"]

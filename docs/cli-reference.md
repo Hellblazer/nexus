@@ -5386,8 +5386,12 @@ Start a persistent `mineru-api` FastAPI process for PDF extraction. Stores PID f
 ### nx mineru stop
 
 ```
-nx mineru stop
+nx mineru stop [--force]
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Clear the PID file even when the server cannot be stopped from here (it runs in another PID namespace that shares the config directory, or its process could not be identified). Nothing is signalled for such a server |
 
 Stop the running MinerU server: SIGTERM, then SIGKILL after 10s, sent to
 the PID file's whole process group — MinerU's multiprocessing workers and
@@ -5401,6 +5405,17 @@ line cannot be read at all — a `ps` timeout reads the same as a vanished
 process — `stop` signals nothing and keeps the PID file rather than risk
 orphaning a server that is still ours; re-run `nx mineru stop`, or signal
 the group yourself.
+
+The PID file records the PID namespace it was written from (`pid_ns`, Linux),
+as the service leases do (nexus-dyfsw). A file from another namespace that
+shares the config directory (a container sharing `HOME`) names a PID that
+means nothing here, so it is never signalled and is judged by its server: a
+`/health` body that carries the MinerU counters (`processing_tasks` and
+`queued_tasks`), or a `started_at` under 120 s old (the server may still be
+loading models). Such a server that is up makes `stop` exit 1 and keep the
+file, and `nx mineru start` report it running instead of starting a second
+one; `nx mineru stop --force` clears the record. A file from this namespace, or
+one with no `pid_ns`, is judged by PID alone, whatever answers on its port.
 
 ### nx mineru status
 

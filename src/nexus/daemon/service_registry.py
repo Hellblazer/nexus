@@ -2115,10 +2115,17 @@ def own_pid_namespace() -> str | None:
         return None
 
 
-def _pid_ns_field() -> dict[str, str]:
-    """``{"pid_ns": <id>}`` for a lease payload where the id can be read, else nothing (nexus-dyfsw)."""
+def pid_ns_field() -> dict[str, str]:
+    """``{"pid_ns": <id>}`` for a record's payload where the id can be read, else nothing (nexus-dyfsw).
+
+    A lease payload and the MinerU pid file both stamp their publisher with it, and
+    :func:`payload_from_other_pid_namespace` reads it back.
+    """
     ns = own_pid_namespace()
     return {"pid_ns": ns} if ns else {}
+
+
+_pid_ns_field = pid_ns_field
 
 
 def lease_holder_invisible(
@@ -2155,7 +2162,16 @@ def lease_from_other_pid_namespace(record: LeaseRecord) -> bool:
     lease through a shared directory), is other: its pids mean nothing here. A Linux reader that
     cannot read its own namespace keeps the old rule.
     """
-    theirs = record.payload.get("pid_ns")
+    return payload_from_other_pid_namespace(record.payload)
+
+
+def payload_from_other_pid_namespace(payload: Mapping[str, Any]) -> bool:
+    """:func:`lease_from_other_pid_namespace` for any record that carries a ``pid_ns`` field.
+
+    The MinerU pid file is such a record (nexus-dyfsw site 3); it reads the same rule rather than
+    keeping a copy of it.
+    """
+    theirs = payload.get("pid_ns")
     if not theirs:
         return False
     ours = own_pid_namespace()

@@ -40,8 +40,11 @@ def _pid_file_path() -> Path:
 # commands/. Re-exported under the legacy private names so CLI code
 # inside this module keeps working unchanged.
 from nexus._mineru_pid import (  # noqa: E402
+    clear_pid_file_if,
     is_process_alive as _is_process_alive,
+    pid_file_from_other_namespace,
     read_pid_file as _read_pid_file,
+    recorded_server_alive,
 )
 
 # nexus-1qdb9 review M1: the spawn core moved to ``nexus._mineru_spawn``
@@ -101,7 +104,7 @@ def start(port: int) -> None:
     with registry.election(_SPAWN_SCOPE):
         # Check if already running
         info = _read_pid_file()
-        if info is not None and _is_process_alive(info["pid"]):
+        if info is not None and recorded_server_alive(info):
             click.echo(f"MinerU server already running (PID {info['pid']}, port {info['port']})")
             return
 
@@ -115,7 +118,6 @@ def start(port: int) -> None:
     if proc is None:
         click.echo("Error: mineru-api not found on PATH. Install MinerU first.", err=True)
         raise click.exceptions.Exit(1)
-    pid_path = _pid_file_path()
 
     # Poll /health until ready
     url = f"http://127.0.0.1:{port}/health"
@@ -123,7 +125,9 @@ def start(port: int) -> None:
     healthy = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            pid_path.unlink(missing_ok=True)
+            # Only our own record: another process may have started a server since the
+            # election was released (nexus-dyfsw).
+            clear_pid_file_if(proc.pid)
             click.echo(
                 f"Error: mineru-api process exited unexpectedly "
                 f"(port {port} may be in use). Check with: lsof -i :{port}",
@@ -140,7 +144,7 @@ def start(port: int) -> None:
         time.sleep(_HEALTH_POLL_INTERVAL)
 
     if not healthy:
-        pid_path.unlink(missing_ok=True)
+        clear_pid_file_if(proc.pid)
         click.echo(
             f"Error: health check timeout after {_HEALTH_TIMEOUT_SECONDS}s. "
             f"If this is the first start, MinerU may be downloading models (~2-3 GB). "
@@ -163,7 +167,16 @@ def start(port: int) -> None:
 
 
 @mineru_group.command()
-def stop() -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Clear the PID file even when the server cannot be stopped from here: it runs in another "
+        "PID namespace that shares this config directory, or its process could not be identified. "
+        "Nothing is signalled for such a server; stop it where it runs."
+    ),
+)
+def stop(force: bool) -> None:
     """Stop the MinerU API server."""
     # nexus-c7odl (critique 60ed904e): the read-then-kill runs under the
     # same election as every spawner — otherwise a stop racing a concurrent
@@ -176,10 +189,10 @@ def stop() -> None:
 
     registry = ServiceRegistry(dir=nexus_config_dir(), tier=MINERU_TIER)
     with registry.election(_SPAWN_SCOPE):
-        _stop_under_election()
+        _stop_under_election(force=force)
 
 
-def _stop_under_election() -> None:
+def _stop_under_election(*, force: bool = False) -> None:
     info = _read_pid_file()
     pid_path = _pid_file_path()
 
@@ -188,6 +201,30 @@ def _stop_under_election() -> None:
         return
 
     pid = info["pid"]
+
+    if pid_file_from_other_namespace(info):
+        # nexus-dyfsw: the pid was minted in another PID namespace that shares this config
+        # directory. It names nothing here, so nothing is signalled whatever runs under that
+        # number locally. Deleting the file of a server that is still up lets a second one start,
+        # so the file goes only when the server is gone (judged on its port) or on --force.
+        if force:
+            pid_path.unlink(missing_ok=True)
+            click.echo(
+                f"MinerU PID file cleared (PID {pid} is from another PID namespace; "
+                "nothing was signalled, and a server still running there keeps running)"
+            )
+            return
+        if recorded_server_alive(info):
+            click.echo(
+                f"MinerU server (PID {pid}, port {info.get('port')}) runs in another PID "
+                "namespace; not signalling and keeping the PID file. Stop it where it runs, "
+                "or clear the record with: nx mineru stop --force",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
+        click.echo(f"MinerU server not running (stale PID {pid} from another PID namespace)")
+        pid_path.unlink(missing_ok=True)
+        return
 
     # Check if process is alive
     if not _is_process_alive(pid):
@@ -201,6 +238,13 @@ def _stop_under_election() -> None:
     from nexus._mineru_spawn import classify_server_pid  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     identity = classify_server_pid(pid)
+    if identity == "unreadable" and force:
+        pid_path.unlink(missing_ok=True)
+        click.echo(
+            f"MinerU PID file cleared (PID {pid}'s command line could not be read; "
+            f"nothing was signalled: kill -TERM -{pid} if it is still ours)"
+        )
+        return
     if identity == "unreadable":
         # An empty read is inconclusive (a slow process-table read looks the
         # same as a vanished process), and deleting the pid file on it would
@@ -279,10 +323,11 @@ def status() -> None:
     pid = info["pid"]
     port = info["port"]
 
-    if not _is_process_alive(pid):
+    if not recorded_server_alive(info):
         click.echo(f"MinerU server not running (stale PID {pid})")
         pid_path.unlink(missing_ok=True)
         return
+    foreign = pid_file_from_other_namespace(info)
 
     # Check /health
     url = f"http://127.0.0.1:{port}/health"
@@ -308,7 +353,9 @@ def status() -> None:
             # work. Read those faults instead of trusting the 200.
             from nexus._mineru_health import diagnose_server  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-            faults = diagnose_server(pid, data, info=info)
+            # A server in another PID namespace has a pid and a filesystem this process cannot
+            # read: its cwd, semaphores and paths are not ours to judge (nexus-dyfsw).
+            faults = [] if foreign else diagnose_server(pid, data, info=info)
             if faults:
                 lines = "\n".join(f"  - {fault}" for fault in faults)
                 click.echo(

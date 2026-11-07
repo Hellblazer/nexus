@@ -543,8 +543,8 @@ def _read_live_mineru_port_full() -> tuple[int | None, MineruSkewInfo | None]:
     # legacy private names.
     try:
         from nexus._mineru_pid import (  # noqa: PLC0415 — circular-dep avoidance (_mineru_pid)
-            is_process_alive,
             read_pid_file,
+            recorded_server_alive,
         )
     except Exception:  # noqa: BLE001 — best-effort PID probe; any import/read failure degrades to None
         return None, None
@@ -555,7 +555,9 @@ def _read_live_mineru_port_full() -> tuple[int | None, MineruSkewInfo | None]:
     port = info.get("port")
     if not isinstance(pid, int) or not isinstance(port, int):
         return None, None
-    if not is_process_alive(pid):
+    # nexus-dyfsw: a pid file from another PID namespace is judged by the server on its port,
+    # not by a pid this process cannot see.
+    if not recorded_server_alive(info):
         return None, None
 
     # nexus-yq3vk: IDENTITY, not just existence. The pid file is shared by every
