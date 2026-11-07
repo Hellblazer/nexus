@@ -6853,9 +6853,18 @@ class HttpVectorClient:
             raise
         ids = result.get("ids", []) or []
         metas = result.get("metadatas", []) or []
+        flags = result.get("sensitives")
+        flags = flags if isinstance(flags, list) else []
         return [
-            {"id": doc_id, **(meta if isinstance(meta, dict) else {})}
-            for doc_id, meta in zip(ids, metas)
+            {
+                "id": doc_id,
+                **(meta if isinstance(meta, dict) else {}),
+                # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): the engine's flag for this row, set AFTER the metadata so a
+                # chunk row can never speak for it; none when the engine sent none (an older engine), and the display
+                # then asks the catalog and treats an unreadable catalog as sensitive.
+                **({"sensitive": flags[i] is True} if i < len(flags) else {}),
+            }
+            for i, (doc_id, meta) in enumerate(zip(ids, metas))
         ]
 
     def update_source_path(
