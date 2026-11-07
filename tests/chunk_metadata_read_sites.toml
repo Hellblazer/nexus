@@ -295,3 +295,14 @@ page_number = 1
 section_title = 1
 section_type = 1
 title = 1
+
+# nexus-l8o33: the one-time rung that copies a chunk row's line and character span onto the manifest rows it is exact
+# for (a chash with one manifest row). A LEGACY read of the four POSITION keys, and of indexed_at and title for the same
+# attribution guards as the label rung; all go with the keys at Phase 4.
+[sites."src/nexus/upgrade_ladder/rungs/manifest_span_fill.py::_spans_from_chunk_row"]
+chunk_end_char = 1
+chunk_start_char = 1
+indexed_at = 1
+line_end = 1
+line_start = 1
+title = 1

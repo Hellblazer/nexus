@@ -40,6 +40,11 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
+# 5344 -> 5345 (nexus-l8o33, 2026-11-06): +1 t2_service_env test, tests/upgrade/test_legacy_rows_walk_substrate.py::
+# test_the_walk_fills_exactly_the_manifest_spans_a_chunk_row_is_exact_for. It seeds chunk rows and manifest rows on the real engine and
+# compares the engine's own null_span_rows (the retire-keys dry run) before and after the production walk; a fake cannot prove the
+# engine's definition of the count or the append's span and label upsert. The 40 rung-level tests in test_manifest_span_fill_rung.py
+# mint no tenant.
 # 5129 -> 5352 (nexus-rfvyy.6.21, 2026-11-05): +223. RDR-243 Phase 1 adds 223 tenant-minting tests (the new gate, write-verb, import and engine-flag test files), each needing a real catalog,
 # because the subject is the sensitivity flag on a catalog row and every gate reads it from that row. Measured on chas (lab-l, `uv run pytest -n auto`, sweep on, report mode) at 2d9e932a1: 5348 of 43627,
 # plus the 4 tests of tests/test_doc_indexer.py (TestIndexPdfDryRunNeverTouchesCatalog and the incremental dry run) that the same run showed touching the catalog without a tenant (a dry run now reads the flag,
@@ -48,7 +53,7 @@
 # test_import_catalog_flag_gate 8, test_sensitivity_unreadable_catalog 8, test_enrich_delete_tumbler 7, test_doctor_sensitivity_rows 5, test_reindex_sensitive_gate 5,
 # test_sensitive_store_put_existing_voyage 5, test_doc_sensitivity_flagged 2, test_catalog_sensitivity_client 1 (219 in all), and the 4 dry-run tests above.
 # None of the new files can run over a stub catalog: a stub would carry the flag by construction and prove nothing about the row the engine keeps one-way.
-provisioned_tests = 5344
+provisioned_tests = 5345
 tolerance_tests = 0
 # 5338 -> 5344 (nexus-12ml0, 2026-11-06): +6, tests/test_catalog_indexer_hook.py 39 -> 45 (c933be23f, the rename link transfer: spans, two renamed entries, a swept orphan in both orders, and both directions of a link to an entry retired in an earlier run), which landed without its ceiling line. Each needs the real engine: three of the defects are its dangling-endpoint refusal (HTTP 400), which a stub catalog does not raise. develop CI at bf5bd04ea measured provisioned=5344 (run 42303516282); scripts/tenant_delta.py --base 79c87966e reads +6.
 # 5337 -> 5338 (nexus-x3bxj, 2026-11-06): +1, tests/test_catalog_indexer_hook.py 38 -> 39 (a6d779ed6 / b4b6f6a68, the rename link transfer pin), which landed without its ceiling line. develop CI at b4fbe72c2 measured provisioned=5338 (run 42257210541); scripts/tenant_delta.py --base 1ecf3ca6d (measured 5355) reads -17 = 5338.

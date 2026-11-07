@@ -19,9 +19,9 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds three rungs:
-`rdr192-manifest-backfill`, `note-tags-array` and
-`manifest-section-labels`, each described below the table. Everything else in `nx upgrade` is precondition work:
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds four rungs:
+`rdr192-manifest-backfill`, `note-tags-array`,
+`manifest-section-labels` and `manifest-span-fill`, each described below the table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
 |---|---|
@@ -236,7 +236,7 @@ without a gate and nineteen walked the cloud catalog at once).
   run. (`manifest-section-labels` asks the engine for one count when the engine has the
   route: `--auto` then REPORTS the count, zero as converged and more as pending, and its
   `converge()` is deferred without a read or a write. An interactive `nx upgrade` does the
-  fill and records the completion.) The rungs: `manifest-section-labels` and `note-tags-array`. The `rdr192-manifest-backfill` census (one engine
+  fill and records the completion.) The rungs: `manifest-section-labels`, `manifest-span-fill` (it has no engine count, so `--auto` reads nothing and calls it not applicable) and `note-tags-array`. The `rdr192-manifest-backfill` census (one engine
   scan per collection) is refused the same way in `converge()`: reported deferred, no
   census call. The version-transition callout that any `nx` command can print asks every
   `detect()` as an unattended run too. **On a managed tenant the labels, note-tags and
@@ -305,6 +305,39 @@ re-index of its document is the only later path.
   empty tenant converges having examined 0 documents, and says so. The rung is not
   applicable when no catalog is available or the engine has no
   `/manifest/chash_positions` route.
+
+### The `manifest-span-fill` rung
+
+The retire-keys sweep deletes the four span keys from the chunk rows (`line_start`, `line_end`,
+`chunk_start_char`, `chunk_end_char`); the manifest's span columns (`line_start`, `line_end`, `char_start`,
+`char_end`) are then the only copy. A manifest row written without a span (the orphan backfill writes NULL on
+purpose) has NULL columns where its chunk row still holds one, and the engine counts it in `null_span_rows`.
+This rung copies the chunk row's span onto those rows where it is exact (nexus-l8o33), before the sweep. It is
+independent of `manifest-section-labels` (that rung is recorded once and reads converged for good, so it cannot
+run a second pass), and shares its rule and guards:
+
+- **The rule.** The chash has exactly one live manifest row in the tenant, that row is this one, and no tombstoned
+  document holds it. A span is a property of one position in one file: a chunk shared by two rows holds the span of
+  whichever wrote last, so every shared row stays NULL. Orphan-minted documents (`meta.backfill_from` is
+  `t3_orphan`) are skipped. The chunk row's `indexed_at` and `title` must be attributable to the document, as for
+  labels.
+- **Column by column, fill-only.** Only a column that is NULL on the manifest row is written. A column the manifest
+  already holds is never sent; a stored value that differs from the chunk row's is counted ("differ from the chunk
+  row on a column already set") and left. A chunk value of 0 is "not recorded" (`make_chunk_metadata` writes 0 for
+  it) and is not copied: the engine's `null_span_rows` still counts such a row because the key is present, so the
+  count can stay above zero with nothing left to copy. The summary names those rows as "chunk span not recorded".
+- **Labels are untouched.** The only write route (`append_manifest_many`) rewrites a row's labels from the request,
+  so the rung sends the labels and `labels_written` it read just before the write, unchanged. A label written in
+  the window between the scan and the write is carried, not reverted. The document's `indexed_at` is written back
+  after each batch, as for labels.
+- **Detect.** Converged from the recorded completion. Otherwise the dry run (a scan with no write). Unattended
+  (`--auto`) against a managed service it reads nothing and is not applicable; the interactive `nx upgrade` scans,
+  fills, verifies and records. Run it before `nx t3 retire-keys --apply`, then take the dry run's `null_span_rows`
+  and accept only what the summary accounts for (shared, deleted holder, orphan-minted, not recorded).
+- **Reading the result.** The recorded detail counts rows with a complete span, rows with a NULL column, rows
+  filled, and the rows left NULL with the reason (shared with another document, repeated inside the document,
+  also held by a deleted document, orphan-minted, chunk missing, chunk with no span key, chunk span not recorded,
+  chunk row not attributable, changed meanwhile, write failed).
 
 ### Restoring chunks the reaper quarantined
 

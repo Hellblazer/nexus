@@ -43,7 +43,7 @@ Both are safe to run unprompted.
 
 ## What the walk asks
 
-Nothing, today. The ladder's rungs (`manifest_section_labels`, `note_tags_array`,
+Nothing, today. The ladder's rungs (`manifest_section_labels`, `manifest_span_fill`, `note_tags_array`,
 `rdr192_manifest_backfill`) either finish or DEFER: a deferred rung stays pending and holds back the rungs that depend on it, the walk
 goes on to the rungs that do not, and it retries on a later run (`nx doctor`'s `Upgrade ladder` row says "REPEATEDLY DEFERRED:" once one keeps deferring).
 No rung rolls back, so there is no rollback to choose.

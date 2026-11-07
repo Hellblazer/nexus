@@ -19,6 +19,8 @@ deletion). What remains:
    the walk.
 3. :data:`RUNG_RDR192_MANIFEST_BACKFILL` → :data:`RUNG_MANIFEST_SECTION_LABELS`
    — section labels fills the legacy rows the backfill adds (nexus-dfemn).
+4. :data:`RUNG_RDR192_MANIFEST_BACKFILL` → :data:`RUNG_MANIFEST_SPAN_FILL`
+   — the span fill reads the same rows, for the same reason (nexus-l8o33).
 
 Package/engine/process are STATELESS preconditions (RDR-185 Constraints):
 re-derived from ON-DISK state at every invocation, converged before the
@@ -26,9 +28,9 @@ ladder walks (wired in P3, nexus-n7u38.23) — they are NOT rungs and never
 appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
-:data:`RUNG_ORDER` holds three rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
-:data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`). One
-depends on another: section labels waits on the RDR-192 backfill, whose rows it fills. The walk follows the edges
+:data:`RUNG_ORDER` holds four rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
+:data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`, :data:`RUNG_MANIFEST_SPAN_FILL`). Two
+depend on another: section labels and the span fill wait on the RDR-192 backfill, whose rows they fill. The walk follows the edges
 (nexus-dfemn): a deferred rung holds back only the rungs with an edge from it.
 Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
 in :data:`HARD_EDGES`; the order is validated against the edges at
@@ -80,6 +82,11 @@ RUNG_NOTE_TAGS_ARRAY = "note-tags-array"
 #: it has a hard edge from the RDR-192 backfill, whose legacy rows it fills (see :data:`HARD_EDGES`).
 RUNG_MANIFEST_SECTION_LABELS = "manifest-section-labels"
 
+#: RDR-236 (nexus-l8o33): copy a chunk row's line and character span onto the manifest rows with a NULL span column
+#: whose chash has exactly one live manifest row in the tenant, before the retire-keys sweep deletes the chunk row's
+#: span keys. Fill-only per column; the same hard edge as the label rung, for the same reason.
+RUNG_MANIFEST_SPAN_FILL = "manifest-span-fill"
+
 #: Stateless preconditions — NOT rungs (see module docstring).
 PRECONDITION_PACKAGE = "precondition:package"
 PRECONDITION_ENGINE = "precondition:engine"
@@ -94,7 +101,7 @@ ALL_RUNGS = "*"
 #: fails immediately rather than walking in a wrong order. Empty from
 #: nexus-lgdel.l1 (which retired chash-rekey) until nexus-wbfpw.41.
 RUNG_ORDER: tuple[str, ...] = (
-    RUNG_RDR192_MANIFEST_BACKFILL, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS,
+    RUNG_RDR192_MANIFEST_BACKFILL, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL,
 )
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
@@ -104,6 +111,9 @@ HARD_EDGES: tuple[tuple[str, str], ...] = (
     # The section-labels rung fills the legacy manifest rows the RDR-192 backfill adds, and once recorded it reads
     # converged for good, so it must not run while the backfill is deferred (nexus-dfemn review r1).
     (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS),
+    # The span fill reads the manifest rows the backfill adds (NULL spans by design, RDR-236 A4) and, once recorded,
+    # reads converged for good, so it must not run while the backfill is deferred (nexus-l8o33).
+    (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SPAN_FILL),
 )
 
 #: RQ2 edges 4–5 (chunk-identity / embedder-era co-residency inside the
@@ -254,6 +264,10 @@ def default_registry() -> LadderRegistry:
         ManifestSectionLabelsRung,
     )
 
+    from nexus.upgrade_ladder.rungs.manifest_span_fill import (  # noqa: PLC0415 — deferred; keeps registry import cheap and avoids a cycle
+        ManifestSpanFillRung,
+    )
+
     return LadderRegistry((
-        Rdr192ManifestBackfillRung(), NoteTagsArrayRung(), ManifestSectionLabelsRung(),
+        Rdr192ManifestBackfillRung(), NoteTagsArrayRung(), ManifestSectionLabelsRung(), ManifestSpanFillRung(),
     ))

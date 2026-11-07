@@ -246,6 +246,7 @@ nexus-11x9o
 nexus-121ke
 nexus-12gb
 nexus-12m77
+nexus-12ml0
 nexus-12pyx
 nexus-12pyx.1
 nexus-12v7c
@@ -608,6 +609,7 @@ nexus-2k66t.2.11
 nexus-2k66t.2.12
 nexus-2k66t.2.13
 nexus-2k66t.2.14
+nexus-2k66t.2.15
 nexus-2k66t.2.2
 nexus-2k66t.2.3
 nexus-2k66t.2.4
@@ -839,6 +841,7 @@ nexus-3pfj0
 nexus-3pfj0.1
 nexus-3piej
 nexus-3ppub
+nexus-3qhls
 nexus-3ra9h
 nexus-3ra9h.1
 nexus-3rprg
@@ -1837,6 +1840,7 @@ nexus-71988
 nexus-71gw2
 nexus-71gw2.1
 nexus-71kc
+nexus-72tlj
 nexus-7365x
 nexus-7365x.1
 nexus-73cj9
@@ -2185,6 +2189,7 @@ nexus-8qat
 nexus-8qdpe
 nexus-8qnuk
 nexus-8rgaj
+nexus-8rh0u
 nexus-8rs05
 nexus-8rze1
 nexus-8s30b
@@ -2895,6 +2900,7 @@ nexus-bwct4
 nexus-bwct4.1
 nexus-bwct4.2
 nexus-bwct4.3
+nexus-bwct4.4
 nexus-bwlwl
 nexus-bwulw
 nexus-bwulw.1
@@ -4260,6 +4266,7 @@ nexus-gy317
 nexus-gy3vq
 nexus-gynt2
 nexus-gynt2.1
+nexus-gyo4g
 nexus-gzk
 nexus-gzqvg
 nexus-gzqvg.1
@@ -5306,6 +5313,7 @@ nexus-l7nib
 nexus-l7uwn
 nexus-l828
 nexus-l84aj
+nexus-l8o33
 nexus-l8xnz
 nexus-l8ybx
 nexus-l9hd8
@@ -5942,6 +5950,7 @@ nexus-nqqrr
 nexus-nqsa7
 nexus-nqt6b
 nexus-nqt6b.1
+nexus-nrqqk
 nexus-nrxs9
 nexus-nsh
 nexus-nsh.1
@@ -6816,6 +6825,7 @@ nexus-rcoze
 nexus-rcoze.1
 nexus-rd7ba
 nexus-re3nm
+nexus-reaia
 nexus-rehf
 nexus-remh4
 nexus-reskd
@@ -6864,6 +6874,10 @@ nexus-rfvyy.7.12
 nexus-rfvyy.7.13
 nexus-rfvyy.7.14
 nexus-rfvyy.7.15
+nexus-rfvyy.7.16
+nexus-rfvyy.7.17
+nexus-rfvyy.7.18
+nexus-rfvyy.7.19
 nexus-rfvyy.7.2
 nexus-rfvyy.7.3
 nexus-rfvyy.7.4
@@ -7237,6 +7251,7 @@ nexus-spwp2
 nexus-sq50c
 nexus-sr6ov
 nexus-srck
+nexus-srecp
 nexus-srt1m
 nexus-srt1m.1
 nexus-ss5mu
@@ -7807,6 +7822,7 @@ nexus-upes
 nexus-upg3s
 nexus-upg3s.1
 nexus-uq3xs
+nexus-uq4gy
 nexus-uq8a4
 nexus-uqiyo
 nexus-uqq9z
@@ -7916,6 +7932,7 @@ nexus-v5hb
 nexus-v5lk3
 nexus-v6za0
 nexus-v6za0.1
+nexus-v75nw
 nexus-v7jt
 nexus-v7mn
 nexus-v80f2
@@ -8291,6 +8308,10 @@ nexus-wc4jj.1
 nexus-wc4jj.10
 nexus-wc4jj.11
 nexus-wc4jj.12
+nexus-wc4jj.13
+nexus-wc4jj.14
+nexus-wc4jj.15
+nexus-wc4jj.16
 nexus-wc4jj.2
 nexus-wc4jj.3
 nexus-wc4jj.4
