@@ -74,6 +74,34 @@ def test_a_bare_path_without_a_uri_is_denied_by_its_own_spelling() -> None:
     assert set(r.deny_rules) == {"Read(//abs/one.md)", "Read(./docs/two.md)"}
 
 
+@pytest.mark.parametrize(
+    "doc",
+    [
+        pytest.param(_file("/C:/Users/a/notes/s.md"), id="file-uri-drive-letter"),
+        pytest.param(_file("/c:/Users/a/notes/s.md"), id="file-uri-lowercase-drive"),
+        pytest.param(_Doc(file_path="C:\\Users\\a\\notes\\s.md"), id="bare-backslash-path"),
+        pytest.param(_Doc(file_path="C:/Users/a/notes/s.md"), id="bare-forward-slash-path"),
+    ],
+)
+def test_a_windows_drive_letter_path_is_written_in_the_documented_posix_form(doc) -> None:
+    """Claude Code normalises ``C:\\Users\\alice`` to ``/c/Users/alice`` before matching and documents
+    ``Read(//c/...)`` for it (code.claude.com/docs/en/permissions, "Where a pattern anchors"). ``Read(//C:/...)``
+    or ``Read(./C:/...)`` matches nothing, so the dispatch would have shipped a rule that denies nothing."""
+    r = sp.file_tool_restriction(reader=_Reader([doc]))
+    assert r.deny_rules == ("Read(//c/Users/a/notes/s.md)",)
+    assert not r.drop_file_tools
+
+
+def test_a_windows_path_with_a_comma_is_denied_by_its_safe_directory_in_the_same_form() -> None:
+    r = sp.file_tool_restriction(reader=_Reader([_file("/C:/papers/Smith, 2020.pdf")]))
+    assert r.deny_rules == ("Read(//c/papers/**)",)
+
+
+def test_a_windows_path_with_only_the_drive_above_it_is_denied_by_the_drive_like_any_top_level_directory() -> None:
+    r = sp.file_tool_restriction(reader=_Reader([_file("/C:/a,b.pdf")]))
+    assert r.deny_rules == ("Read(//c/**)",) and not r.drop_file_tools
+
+
 def test_gitignore_metacharacters_in_a_path_are_escaped() -> None:
     r = sp.file_tool_restriction(reader=_Reader([_file("/h/a [x]*?.md")]))
     assert r.deny_rules == ("Read(//h/a \\[x\\]\\*\\?.md)",)

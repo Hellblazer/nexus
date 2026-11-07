@@ -13,6 +13,9 @@ that read files like Grep and Glob", a best-effort statement; ``Grep(path)`` and
 path rules and draw a startup warning). Path form: ``Read(//abs/path)`` for an absolute path (a single leading
 slash anchors at the settings source, not the filesystem root), ``Read(./rel)`` relative to the child's working
 directory, ``Read(//dir/**)`` for a whole directory; gitignore syntax, so ``\\ * ? [ ]`` are escaped.
+On Windows Claude Code normalises ``C:\\Users\\alice`` to ``/c/Users/alice`` before matching and documents
+``Read(//c/Users/**)`` for it, so a drive-letter location (``file:///C:/...``, ``C:\\...``) is written that way
+(:func:`_posix_drive_path`); the text after the drive letter keeps its case, which the docs do not address.
 Sources: https://code.claude.com/docs/en/permissions (Read and Edit), /cli-reference (--disallowedTools).
 
 **Bound.** At most :data:`MAX_DENY_RULES` (100) rules. Over that, one rule per parent directory of the
@@ -25,6 +28,7 @@ Glob from the child by name. Nothing is cached: the flag is one-way and can be s
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -71,17 +75,35 @@ def _is_safe(path: str) -> bool:
     return not any(c in _UNSAFE or ord(c) < 32 for c in path)
 
 
+_DRIVE = re.compile(r"^/?([A-Za-z]):(?=[\\/]|$)")
+
+
+def _posix_drive_path(path: str) -> str:
+    """``/C:/Users/a`` or ``C:\\Users\\a`` as ``/c/Users/a``, the form Claude Code matches on Windows; ``""`` when
+    *path* carries no drive letter."""
+    m = _DRIVE.match(path)
+    if m is None:
+        return ""
+    return "/" + m.group(1).lower() + path[m.end():].replace("\\", "/")
+
+
 def _locator(entry: Any) -> str:
     """The local path an entry's source lives at, as ``/abs/path`` or ``./rel/path``; ``""`` for none.
 
-    ``file:///abs`` source URIs are taken verbatim after the scheme, as ``search_engine._local_source_path`` does.
-    Any other scheme is not a file and is skipped. An entry with no URI falls back to its ``file_path``."""
+    ``file:///abs`` source URIs are taken verbatim after the scheme, as ``search_engine._local_source_path`` does,
+    except that a drive-letter path becomes Claude Code's POSIX form (``/c/...``). Any other scheme is not a file
+    and is skipped. An entry with no URI falls back to its ``file_path``."""
     uri = getattr(entry, "source_uri", "") or ""
     if isinstance(uri, str) and uri:
-        return uri[len("file://"):] if uri.startswith("file:///") else ""
+        if not uri.startswith("file:///"):
+            return ""
+        path = uri[len("file://"):]
+        return _posix_drive_path(path) or path
     fp = getattr(entry, "file_path", "") or ""
     if not isinstance(fp, str) or not fp or "://" in fp:
         return ""
+    if drive := _posix_drive_path(fp):
+        return drive
     if fp.startswith("/"):
         return fp
     return "./" + fp[2:] if fp.startswith("./") else "./" + fp
