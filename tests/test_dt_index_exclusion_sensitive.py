@@ -51,14 +51,100 @@ def test_the_third_field_marks_a_record_excluded_and_a_legacy_line_does_not(monk
     assert [r.excluded for r in recs] == [True, False, False]
 
 
-def test_an_unreadable_property_fails_open_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An older DEVONthink has no such property: the record is not excluded, the batch is not lost, and the
-    warning names the record (a silent false would hide a DT 4 read failure)."""
+@pytest.fixture(autouse=True)
+def _fresh_version_cache():
+    """The DEVONthink major version is cached per process; no test inherits another's."""
+    dt_mod._reset_dt_major_version()
+    yield
+    dt_mod._reset_dt_major_version()
+
+
+def _major(monkeypatch: pytest.MonkeyPatch, major: int) -> None:
+    monkeypatch.setattr(dt_mod, "_dt_major_version", lambda: major)
+
+
+def test_an_unreadable_property_on_dt4_fails_closed_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEVONthink 4 has the property, so "?" is a read failure (a transient AppleScript error, an
+    unreadable ancestor group), not 'nothing to honour': the record is treated as excluded, the batch is
+    not lost, and the warning names the record."""
+    _darwin(monkeypatch, "U1\t/a.md\t?\nU2\t/b.md\t0\n")
+    _major(monkeypatch, 4)
+    with capture_logs() as logs:
+        recs = dt_mod._dt_selection()
+    assert [r.excluded for r in recs] == [True, False]
+    assert any(e["event"] == "dt_exclusion_unreadable_fail_closed" and e["uuid"] == "U1" for e in logs), logs
+
+
+def test_an_unreadable_property_before_dt4_reads_not_excluded_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DEVONthink before 4 has no such property: nothing to honour, the record is not excluded, and the
+    log line names it."""
     _darwin(monkeypatch, "U1\t/a.md\t?\n")
+    _major(monkeypatch, 3)
     with capture_logs() as logs:
         recs = dt_mod._dt_selection()
     assert [r.excluded for r in recs] == [False]
     assert any(e["event"] == "dt_exclusion_unreadable" and e["uuid"] == "U1" for e in logs), logs
+
+
+def test_an_unreadable_property_with_an_unknown_version_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _darwin(monkeypatch, "U1\t/a.md\t?\n")
+    _major(monkeypatch, 0)  # the version read failed or did not parse
+    assert [r.excluded for r in dt_mod._dt_selection()] == [True]
+
+
+def test_the_version_is_read_once_and_only_when_a_property_is_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
+    scripts: list[str] = []
+
+    def fake(script: str, timeout: int) -> str:
+        scripts.append(script)
+        return "4.4.2\n" if script.endswith("return version") else "U1\t/a.md\t?\nU2\t/b.md\t?\n"
+
+    monkeypatch.setattr("nexus.devonthink._run_osascript", fake)
+    dt_mod._reset_dt_major_version()
+    try:
+        assert [r.excluded for r in dt_mod._dt_selection()] == [True, True]
+        assert [r.excluded for r in dt_mod._dt_selection()] == [True, True]
+        assert sum(1 for sc in scripts if sc.endswith("return version")) == 1, "read once per process"
+
+        scripts.clear()
+        dt_mod._reset_dt_major_version()
+        monkeypatch.setattr("nexus.devonthink._run_osascript", lambda sc, timeout: scripts.append(sc) or "U1\t/a.md\t0\n")
+        dt_mod._dt_selection()
+        assert len(scripts) == 1, "every property readable: no version read"
+    finally:
+        dt_mod._reset_dt_major_version()
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        pytest.param("4.4.2\n", 4, id="dt4"),
+        pytest.param("3.9.5", 3, id="dt3"),
+        pytest.param("", 0, id="empty-is-unknown"),
+        pytest.param("beta", 0, id="unparseable-is-unknown"),
+    ],
+)
+def test_the_major_version_parse(monkeypatch: pytest.MonkeyPatch, reply: str, expected: int) -> None:
+    monkeypatch.setattr("nexus.devonthink._run_osascript", lambda sc, timeout: reply)
+    dt_mod._reset_dt_major_version()
+    try:
+        assert dt_mod._dt_major_version() == expected
+    finally:
+        dt_mod._reset_dt_major_version()
+
+
+def test_a_version_read_that_raises_is_unknown_and_unknown_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(sc: str, timeout: int) -> str:
+        raise dt_mod.DTNotAvailableError("not running")
+
+    monkeypatch.setattr("nexus.devonthink._run_osascript", boom)
+    dt_mod._reset_dt_major_version()
+    try:
+        assert dt_mod._dt_major_version() == 0
+        assert dt_mod._unreadable_means_excluded("U1") is True
+    finally:
+        dt_mod._reset_dt_major_version()
 
 
 def test_a_path_with_a_tab_keeps_its_tab(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,8 +202,50 @@ def test_the_uuid_selector_probes_the_exclusion_after_resolving(monkeypatch: pyt
 def test_the_uuid_probe_reads_false_for_a_record_that_is_not_excluded(monkeypatch: pytest.MonkeyPatch) -> None:
     _darwin(monkeypatch, "0")
     assert dt_mod._dt_record_excluded("U9") is False
-    _darwin(monkeypatch, "?")
-    assert dt_mod._dt_record_excluded("U9") is False
+    _darwin(monkeypatch, "1")
+    assert dt_mod._dt_record_excluded("U9") is True
+
+
+@pytest.mark.parametrize("reply", ["?", "", "\n", "garbage"], ids=["unreadable", "empty", "blank", "other"])
+def test_the_uuid_probe_never_returns_false_silently_on_an_unanswered_read(
+    monkeypatch: pytest.MonkeyPatch, reply: str,
+) -> None:
+    """An unreadable property or an empty osascript reply is not an answer: DEVONthink 4 fails closed
+    (excluded), before 4 reads not excluded, and the log line is written either way."""
+    _darwin(monkeypatch, reply)
+    _major(monkeypatch, 4)
+    with capture_logs() as logs:
+        assert dt_mod._dt_record_excluded("U9") is True
+    assert any(e["event"] == "dt_exclusion_unreadable_fail_closed" and e["uuid"] == "U9" for e in logs), logs
+
+    _major(monkeypatch, 3)
+    with capture_logs() as logs:
+        assert dt_mod._dt_record_excluded("U9") is False
+    assert any(e["event"] == "dt_exclusion_unreadable" and e["uuid"] == "U9" for e in logs), logs
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda: dt_mod._dt_selection(), id="selection"),
+        pytest.param(lambda: dt_mod._dt_tag_records("t"), id="tag"),
+        pytest.param(lambda: dt_mod._dt_group_records("/G"), id="group"),
+        pytest.param(lambda: dt_mod._dt_smart_group_records("S"), id="smart-group"),
+        pytest.param(lambda: dt_mod._dt_record_excluded("U9"), id="uuid-probe"),
+    ],
+)
+def test_every_script_walks_the_ancestor_groups(monkeypatch: pytest.MonkeyPatch, call) -> None:
+    """A record inside an excluded group inherits the exclusion: the script reads the flag of every
+    ancestor (``parents``, walked up), and a failed ancestor read is "?" (so DT 4 fails closed), never "0"."""
+    scripts: list[str] = []
+    _darwin(monkeypatch, "U1\t/a.md\t1\n", scripts)
+    call()
+    script = scripts[0]
+    assert "parents of" in script and "repeat while" in script, script
+    assert f"({_PROP} of theGroup) is true" in script, script
+    assert "root of (database of theGroup)" in script, "the walk stops at the database root instead of reading its parents"
+    walk = script[script.index("parents of"):]
+    assert 'then set theExcl to "?"' in walk, "a failed ancestor read must set the unreadable mark"
 
 
 # --------------------------------------------------------------------------- #
