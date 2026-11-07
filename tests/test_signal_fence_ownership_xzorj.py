@@ -12,8 +12,8 @@ on chas named exactly:
 * a reparented, scrubbed member of a process group whose live leader is the session's (the macOS guest driver's
   fake ``sleep``): rule B.
 
-Then ``fail`` (the default) turns any foreign signal into a failed session, with the signal still sent unchanged;
-``report`` and ``off`` are the downgrades. The negative control plants a foreign signal and must go red.
+Then ``fail`` turns any foreign signal into a failed session, with the signal still sent unchanged; ``report`` (the
+default until develop CI with the two rules reads zero foreign) lists only, and ``off`` removes the fence. The negative control plants a foreign signal and must go red.
 """
 from __future__ import annotations
 
@@ -183,24 +183,16 @@ def test_rule_b_does_not_claim_a_member_of_a_foreign_group(tmp_path) -> None:
     """A live foreign leader (detached, scrubbed, naming nothing of ours) with a reparented member in its group: the
     member is foreign, because rule B asks whether the leader is the session's."""
     _not_pid1_root()
-    pidfile = tmp_path / "foreign-member.pid"
-    member_code = (
-        "import os, subprocess; "
-        f"p = subprocess.Popen({_SLEEP!r}, env={_SCRUBBED!r}); "
-        f"open({str(pidfile)!r}, 'w').write(str(p.pid)); os._exit(0)"
-    )
-    leader_code = (
-        "import subprocess, sys, time; "
-        f"subprocess.Popen([sys.executable, '-c', {member_code!r}], env={_SCRUBBED!r}).wait(); time.sleep(60)"
-    )
-    # The leader's own argv names the member's pid file under our tmp_path, which rule A would claim: hand it the
-    # code through stdin-free argv that names nothing of ours by writing the pid file outside the basetemp.
     outside = Path(tempfile.mkdtemp(dir=os.environ.get("NX_TEST_TMP_ORIG") or "/tmp"))
     try:
         if Path(fence._basetemp()) in outside.resolve().parents:
             pytest.skip("no directory outside the basetemp to plant in")
         pidfile = outside / "member.pid"
-        member_code = member_code.replace(str(tmp_path / "foreign-member.pid"), str(pidfile))
+        member_code = (
+            "import os, subprocess; "
+            f"p = subprocess.Popen({_SLEEP!r}, env={_SCRUBBED!r}); "
+            f"open({str(pidfile)!r}, 'w').write(str(p.pid)); os._exit(0)"
+        )
         leader_code = (
             "import subprocess, sys, time; "
             f"subprocess.Popen([sys.executable, '-c', {member_code!r}], env={_SCRUBBED!r}).wait(); time.sleep(60)"
@@ -323,14 +315,15 @@ def test_a_session_that_already_failed_keeps_its_own_exit_status(pytester) -> No
 def test_a_nested_session_reports_and_leaves_its_parents_verdict_alone(pytester) -> None:
     """A pytest a test spawns inherits the marker and root; its own count must not fail the exit code the parent
     test asserts, so it runs in report mode."""
-    pytester.makepyfile(test_inner=_PLANTED.replace("int(os.environ[fence.ROOT_ENV])", "os.getpid()"))
+    # The planted target is the parent of the root it inherits (the outer test's worker's parent): foreign to it.
+    pytester.makepyfile(test_inner=_PLANTED)
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv(fence.MODE_ENV, "fail")
         mp.setenv(fence.ROOT_ENV, str(os.getpid()))  # this session's root: the inner one is nested
         mp.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
         result = pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider")
-    assert result.ret == pytest.ExitCode.OK
-    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): *"])
+    assert result.ret == pytest.ExitCode.OK, "a nested session's foreign count must not fail the exit code"
+    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): signals=1 own=0 foreign=1 *"])
 
 
 @_linux_fence
@@ -341,3 +334,53 @@ def test_the_default_is_report_until_the_ci_measurement_reads_zero(pytester) -> 
     result = _inner(pytester, _PLANTED, None)
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): signals=1 own=0 foreign=1 *"])
+
+
+def test_every_session_start_reaper_opens_the_sanctioned_scope() -> None:
+    """The reapers that signal an earlier, dead session's leftovers on purpose: removing the scope from any of them
+    would make the fence read their kills foreign (a pool host after an aborted run). Structural, so it runs on
+    every platform."""
+    import inspect  # noqa: PLC0415
+
+    import tests._engine_substrate as es  # noqa: PLC0415
+    import tests.conftest as cf  # noqa: PLC0415
+
+    for fn in (es.sweep_stale_substrate_clusters, es.sweep_integration_owner_records):
+        assert getattr(fn, "__wrapped__", None) is not None or "sanctioned" in inspect.getsource(fn), fn.__name__
+        src = inspect.getsource(inspect.getmodule(fn))
+        assert f'@_signal_fence.sanctioned(' in src.split(f"def {fn.__name__}(")[0].rsplit("\n\n\n", 1)[-1], fn.__name__
+    assert "_signal_fence.sanctioned(" in inspect.getsource(cf._drain_stale_tmp_run)
+    assert "_signal_fence.sanctioned(" in inspect.getsource(cf._reap_leaked_test_daemons)
+
+
+def test_the_basetemp_is_read_never_created() -> None:
+    """Reading the basetemp must not make it: getbasetemp() before tests/_tmp_root.py moves TMPDIR would pin the run's
+    tmp to the wrong disk."""
+
+    class _Factory:
+        _basetemp = None
+
+        def getbasetemp(self):  # pragma: no cover — the fence must never call it
+            raise AssertionError("the fence created the basetemp")
+
+    class _Config:
+        _tmp_path_factory = _Factory()
+
+    saved = (fence._config, fence._basetemp_cache)
+    try:
+        fence._config, fence._basetemp_cache = _Config(), None
+        assert fence._basetemp() == ""
+        assert fence._basetemp_cache is None, "an absent basetemp is read again next time, not cached"
+    finally:
+        fence._config, fence._basetemp_cache = saved
+
+
+@_linux_fence
+@pytest.mark.parametrize("shape", ["-I{bt}/include", "file://{bt}/x", "({bt}/x)", "[{bt}/x]", "a,{bt}/x"])
+def test_rule_a_reads_a_path_in_the_common_argv_shapes(tmp_path, shape) -> None:
+    _not_pid1_root()
+    pid = _detached(tmp_path, [*_SLEEP, shape.format(bt=fence._basetemp())], _SCRUBBED)
+    try:
+        assert _verdict(pid) == ("own", pid)
+    finally:
+        _reap(pid)

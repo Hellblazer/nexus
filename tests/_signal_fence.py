@@ -34,7 +34,7 @@ measurement before the rules saw 18 foreign signals of 6162, all false positives
 children that left the process tree with a scrubbed environment, every one naming the test's box in its argv or
 environment (rule A claims all 18 on the diagnostic run; rule B covers a reparented member of a group we lead, which
 that run's members happened to name in their environment too). ``report`` lists them and leaves the exit status
-alone; ``off`` installs nothing (``NX_TEST_SIGNAL_FENCE``; case-insensitive; any other value means ``fail``). A
+alone; ``off`` installs nothing (``NX_TEST_SIGNAL_FENCE``; case-insensitive; any other value means the default). A
 nested pytest session (one a test spawns: it inherits the root's marker) runs in ``report``, so the outermost session
 alone owns the verdict.
 
@@ -111,9 +111,12 @@ def sanctioned(reason: str):
     """Signals sent inside this scope on this thread are counted ``sanctioned``, never ``foreign``: the session-start
     reapers (the stale-daemon reaper, the stale-substrate sweep, the stale-run drain) deliberately signal processes a
     dead earlier session left behind, after their own identity checks (a stale root, a dead lock). *reason* names the
-    caller in a recorded event."""
+    caller for a reader of the code; nothing records it. A blanket: a wrong target inside the scope (a pid reused
+    since the reaper's process listing) also reads sanctioned, so the reaper's own argv and lock checks are the guard
+    there. Usable as a decorator (every caller of the function is then
+    covered). Per thread: a reaper that signals from another thread opens its own scope there."""
+    del reason
     _sanction.depth = getattr(_sanction, "depth", 0) + 1
-    _sanction.reason = reason
     try:
         yield
     finally:
@@ -183,9 +186,14 @@ def _names_basetemp(pid: int, basetemp: str) -> bool:
     tree no other session's process can name). A path boundary, so ``pytest-0x`` is not inside ``pytest-0``."""
     if not basetemp:
         return False
-    # Anchored at both ends: the path starts a field or follows '=', ':', a space or a quote, and is followed by '/',
-    # ':', a space, a quote or the end; so /scratch/tmp/pytest-of-u/pytest-0 and pytest-0x do not match.
-    pattern = re.compile(rb"(?:^|[=: '\"])" + re.escape(basetemp.rstrip("/").encode()) + rb"(?:$|[/: '\"])")
+    # Anchored at both ends: the path starts a field or follows '=', ':', a space, a quote, '(', '[', ',', 'file://' or a
+    # one-letter flag ('-I'), and is followed by '/', ':', a space, a quote, ')', ']', ',' or the end; so
+    # /scratch/tmp/pytest-of-u/pytest-0 and pytest-0x do not match.
+    pattern = re.compile(
+        rb"(?:^|[=: '\"(\[,]|file://|^-[A-Za-z]| -[A-Za-z])"
+        + re.escape(basetemp.rstrip("/").encode())
+        + rb"(?:$|[/: '\")\],])"
+    )
     for name in ("cmdline", "environ"):
         try:
             raw = Path(f"/proc/{pid}/{name}").read_bytes()
@@ -202,18 +210,22 @@ def owned(pid: int, *, root: int, token: str, basetemp: str = "") -> bool | None
     or environment names a path inside *basetemp*. ``None`` when it is gone."""
     if _stat(pid) is None:
         return None
-    seen: set[int] = set()
-    cur = pid
-    while cur not in seen:
-        if cur == root:
-            return True
-        if cur <= 1:
+    for _attempt in range(2):  # an ancestor that exits mid-walk reparents the chain: walk it once more
+        seen: set[int] = set()
+        cur, vanished = pid, False
+        while cur not in seen:
+            if cur == root:
+                return True
+            if cur <= 1:
+                break
+            seen.add(cur)
+            st = _stat(cur)
+            if st is None:
+                vanished = True
+                break
+            cur = st[0]
+        if not vanished:
             break
-        seen.add(cur)
-        st = _stat(cur)
-        if st is None:
-            break
-        cur = st[0]
     if _has_token(pid, token) or _names_basetemp(pid, basetemp):
         return True
     return None if _stat(pid) is None else False  # gone mid-read: not classified, never foreign

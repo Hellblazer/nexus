@@ -250,7 +250,7 @@ naming the test, call site, signal and target program. Fix the kill (identity-ch
 `tests/_child_process.kill_if_identity`), or make the target name its own tmp_path (rule A). A deliberate signal to
 an earlier, dead session's leftovers (a session-start reaper) goes inside `with _signal_fence.sanctioned("<who>"):`
 and counts `sanctioned`. `NX_TEST_SIGNAL_FENCE=report` lists only, `fail` fails, `off` removes it (any other value means the default). A child pytest session a test spawns runs in report mode, so its count never fails the exit code the
-parent asserts; it is not counted in the parent's line. The ownership tests skip when pytest is pid 1 of its
+parent asserts; it is not counted in the parent's line, and neither are a crashed xdist worker's counts. The ownership tests skip when pytest is pid 1 of its
 namespace (every orphan reparents to it there).
 
 ## Bytes written and DDL per run (nexus-sz651)
