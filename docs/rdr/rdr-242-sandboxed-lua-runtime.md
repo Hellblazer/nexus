@@ -1,5 +1,5 @@
 ---
-title: "Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First"
+title: "A Sandboxed Lua Runtime over the Nexus Surface: Client-Side, Read-Only First"
 id: RDR-242
 type: Architecture
 status: draft
@@ -12,7 +12,7 @@ related_issues: ["nexus-mdbds.1", "nexus-mdbds"]
 related_rdrs: [RDR-239, RDR-240, RDR-110, RDR-111, RDR-205]
 ---
 
-# RDR-242: Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First
+# RDR-242: A Sandboxed Lua Runtime over the Nexus Surface: Client-Side, Read-Only First
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -21,10 +21,14 @@ Provenance. Stage 3 of the scriptable tuple space (epic nexus-mdbds),
 pulled ahead of stage 2 (declarative auras) on 2026-10-31 at Sam's direction,
 because procedures move to Lua and RDR-240 needs a runtime to run them in.
 Stage 1, the tuple-space dictionary (RDR-239), shipped and closed on
-2026-11-02. RDR-240 cannot be accepted before this RDR is (its assumption
+2026-11-03. RDR-240 cannot be accepted before this RDR is (its assumption
 A1). Rewritten on 2026-11-03 at Sam's direction (bead nexus-mdbds.1): no
 arbitrary Lua at run time; a script runs only after it is registered,
-checked, trial-run and approved by Sam.
+checked, trial-run and approved by Sam. On 2026-11-07 Sam withdrew the
+approval design of that rewrite, a hardware SSH key touched at the laptop
+(`nexus_rdr/242-research-30`). Approval moves to its own document
+(Technical Design 1), and until it exists version 1 runs only scripts
+reviewed like source (Technical Design 2).
 
 ## Problem Statement
 
@@ -41,7 +45,9 @@ answers it. The second is whether a given script should run at all; a
 sandbox cannot answer that, because it treats every script the same. The
 scripts will often be written by agents, and an agent can be steered by text
 it read. So the first version is client-side, reads only, reaches only what
-the host names, and runs only scripts Sam has read and approved.
+the host names, and runs only scripts that ship in a procedure library and
+are reviewed and committed like any source file. Approval of other scripts
+by Sam is the subject of a later document (Technical Design 1).
 
 ### Enumerated gaps to close
 
@@ -77,9 +83,11 @@ others past 60 s and 20 s, with the hook never firing (A2,
 
 RDR-240's `gate_record` and `research_add` write one T2 record. Read-only
 first means the runtime ships with no write verbs, but it must say how a write
-is granted later (declared when the script is registered, named per verb,
-covered by the approval, refused otherwise) so that the read-only version
-does not have to be redesigned when the first write arrives.
+is granted later (declared by the script, named per verb, covered by an
+approval, refused otherwise) so that the read-only version does not have to
+be redesigned when the first write arrives. The approval that covers a write
+is the later document's (Technical Design 1); until it exists, no write verb
+ships.
 
 #### Gap 5: Nothing decides which scripts may run
 
@@ -92,7 +100,11 @@ Discoveries lists three found by the probes) is a defence that failed. There
 is no record of which scripts exist, who wrote them, what they may call,
 whether anyone has read them, or how to stop one. Sam's direction (2026-11-03):
 no arbitrary Lua; scripts are registered, evaluated, approved by Sam only, and
-then run.
+then run. On 2026-11-07 Sam withdrew the hardware-key approval that direction
+had been designed around (`nexus_rdr/242-research-30`). This RDR now closes
+Gap 5 for version 1 by origin alone: a run takes a name from a procedure
+library, never source (Technical Design 2). Registration and approval, which
+close it for scripts outside the libraries, move to their own document.
 
 ## Relationship to Prior RDRs
 
@@ -101,17 +113,15 @@ then run.
   callable only for a subspace whose template the dictionary describes.
 - RDR-240 (draft): the first consumer. Its Technical Design item 4 lists
   the host verbs it needs; its A1 depends on this RDR's write-grant rule.
-  This rewrite changes one of its premises: a procedure file in a library
-  root is what a registration reads, not what a run reads, and
-  `run_procedure(name, args)` resolves the name to its approved version
-  (Technical Design 8) before it calls `run_script`. RDR-240 needs that edit
-  before its gate; this RDR does not make it.
+  Its premise stands as written: a run reads a procedure file from one of
+  its two library roots (its Technical Design 1). The edit the 2026-11-03
+  rewrite asked of RDR-240 (a library file as what a registration reads) is
+  withdrawn with the registry (Technical Design 1).
 - RDR-110 (abandoned): the semantic tuple space was scrapped for building
   for every consumer at once. This RDR builds for one consumer (RDR-240) and
   adds verbs only when a named consumer needs them.
-- RDR-111, RDR-205: the tuple space and the mailbox, whose read verbs a
-  later script may be granted. The tuple space is also the rejected home for
-  the registry (Alternative 7).
+- RDR-205 (closed): the tuple space and the mailbox, whose read verbs a
+  later script may be granted.
 
 ## Context
 
@@ -135,28 +145,27 @@ sandbox stays as the second layer. Approval is by Sam only, through a CLI
 verb whose credential no other principal holds, at least while the runtime
 is read-only.
 
+Sam's direction (2026-11-07, `nexus_rdr/242-research-30`), on the
+hardware-key approval designed for that: "note I have *no* access to the
+laptop touch id. anything that requires these changes are not a good idea at
+this point and likely need a *lot* more thought given how I work". And: "wrt
+'deliberate yes' there are on all the devices I use, as they are all ios.
+however, each is specific to the device and not the shell". He approved the
+split that followed ("looks good"): the approval layer leaves this RDR for
+its own document (Technical Design 1); the sandbox, the worker process, the
+static check, the read-only verbs and the limits stay.
+
 ### Technical Environment
 
 - Python 3.12+ client (`nx` CLI and the MCP server), shipped on PyPI as
   `conexus`, installed by `uv` on macOS (arm64), Linux (x86_64, arm64) and
   native Windows.
-- Scripts run in a worker process the client starts, one per run and per
-  trial; the verbs run in the client (Technical Design 9 and 12,
-  `nexus_rdr/242-research-29`). The registry lives in the engine
-  (Java, PG 17 through Liquibase), as every new persistent state does under
-  the NO-SQLITE rule; Technical Design 2 says why it is an engine table and
-  not T2 memory or a tuple subspace.
-- The engine already distinguishes principals: `RequestContext.Principal`
-  carries the tenant, the session and a server-assigned scope (`root`,
-  `tenant`, `mint`, `data`; `service/src/main/java/dev/nexus/service/http/RequestContext.java`,
-  read 2026-11-03). The registry records the registrant from it, never from
-  a value the client asserts.
+- Scripts run in a worker process the client starts, one per run; the
+  verbs run in the client (Technical Design 5, 6 and 9,
+  `nexus_rdr/242-research-29`). This RDR adds no engine table and no engine
+  route.
 - No Lua dependency today (`lupa` is absent from `pyproject.toml` and
-  `uv.lock`, checked 2026-11-02). `cryptography` 50.0.2 is in `uv.lock` as a
-  transitive dependency (checked 2026-11-03); this RDR makes it direct.
-- OpenSSH's `ssh-keygen` (10.3p1 on the laptop, 2026-11-03) signs and
-  verifies SSHSIG signatures. It is needed only where Sam approves; runs
-  verify in-process.
+  `uv.lock`, checked 2026-11-02).
 
 ## Research Findings
 
@@ -190,7 +199,10 @@ Open questions the research had to settle before a design is written:
    disagree with Lua's?
 8. Registry and approval (added 2026-11-03). Where the registry lives, what
    makes an approval unforgeable, and what a revocation, an edit or a
-   swapped source does to a run.
+   swapped source does to a run. Withdrawn from this RDR on 2026-11-07, with
+   the registration and approval parts of question 5 (Technical Design 1);
+   the findings below that answer it are kept as a record for the approval
+   document.
 
 ### Key Discoveries
 
@@ -335,7 +347,9 @@ Registry and static-check spikes of 2026-11-03 (`static_check.py`,
   approval after it does not bring it back; a trial with a verb call that has
   no fixture, and a trial whose output has the wrong shape, are recorded and
   the approval refuses them; a static failure is recorded and the trial is
-  not run.
+  not run. This finding and the next serve the approval layer withdrawn on
+  2026-11-07 (Technical Design 1); they are kept as a record, and nothing in
+  this RDR builds on them.
 - Verified: an SSHSIG signature made by `ssh-keygen -Y sign` with an
   Ed25519 key, in namespace `nexus-script-approval`, verifies in-process with `cryptography`
   in about 40 lines, and agrees with `ssh-keygen -Y verify`. Not verified: a
@@ -347,6 +361,18 @@ Registry and static-check spikes of 2026-11-03 (`static_check.py`,
   to call a nil value (field 'list')" and `git.diff_names(...)` with "attempt
   to index a nil value (global 'git')"; a backend exception reaches the script
   as a string.
+
+Worker probes of 2026-11-07 (`nexus_rdr/242-research-32`; `lupa` 2.8,
+CPython 3.13.5, macOS arm64; Linux and Windows not probed):
+
+- Verified: on macOS, `resource.setrlimit(RLIMIT_AS, ...)` raises
+  "ValueError current limit exceeds maximum limit", so a worker that sets it
+  unguarded fails to start. `RLIMIT_CPU` holds: a child that set it to
+  (2, 3) and spun ended by SIGXCPU after 2.02 s.
+- Verified: a child started as `sys.executable -I` with an empty
+  environment, `cwd` set and `close_fds=True` imported `lupa.lua54`, built a
+  `LuaRuntime` with a 64 MB `max_memory` and evaluated `1+1`, in 20 to 29 ms
+  over three runs.
 
 What the probes force on any design: PUC Lua 5.4; host-side compile in mode
 `"t"` and a refusal of any chunk that starts with byte 27 (ESC); plain
@@ -377,50 +403,48 @@ interpreter's process, because the hook cannot interrupt one pattern match
   the same subject with 6 repetitions did not return in 60 s;
   `("a"):rep(30):find(("a?"):rep(30) .. ("a"):rep(30) .. "c")` did not
   return in 20 s. The hook never fired. A pattern match allocates nothing, so
-  `max_memory` cannot stop it. The overrun is unbounded, so every run and
-  every trial runs in a worker process whose kill timer enforces wall time
-  (Technical Design 9 and 14, Alternative 2). Status for wall time: the kill
+  `max_memory` cannot stop it. The overrun is unbounded, so every run
+  runs in a worker process whose kill timer enforces wall time
+  (Technical Design 6 and 11, Alternative 2). Status for wall time: the kill
   timer is not built; the worker-process tests in the Test Plan verify it.
 - A3: The read verbs RDR-240 needs can be served from the client without
   new engine routes. Verification: map each verb to an existing client call.
   Status: no engine route is needed for the verbs, but four of the seven need
-  new client code (transcripts, both git verbs, tables by name). The registry
-  does need engine routes (Technical Design 2).
+  new client code (transcripts, both git verbs, tables by name).
 - A4: The static check reads bytecode whose layout and opcode numbering stay
   fixed within the pinned `lupa` range. Verification: the calibration test in
   the suite fails on any change. Status: holds for `lupa` 2.8; the Lua 5.4
   patch release it bundles is not recorded, because `lupa` exposes only
   `(5, 4)`.
-- A5: Sam has, or will get, a hardware-held SSH key that signs only after a
-  touch, and its signature verifies in the client and in the engine.
-  Verification: enroll it and approve one script on the laptop; one engine
-  test per key type. Status: not run; which hardware is Sam's call (Open
-  Questions).
-- A6: No agent and no MCP principal can produce a valid approval.
-  Verification: the credential tests in the Test Plan. Status: argued in
-  Technical Design 7, not tested.
-- A7: The engine can verify SSHSIG signatures in Java (the JDK has Ed25519
-  and ECDSA P-256). Status: assumed; no Java code written.
+- A5, A6 and A7 no longer apply (2026-11-07, `nexus_rdr/242-research-30`).
+  They were: A5, Sam has a hardware-held SSH key that signs only after a
+  touch; A6, no agent and no MCP principal can produce a valid approval; A7,
+  the engine can verify SSHSIG signatures in Java. Each one is a premise of
+  the hardware-key approval layer, and that layer is withdrawn: this RDR
+  builds no approval credential, no SSHSIG verifier and no approve route, so
+  nothing in it rests on them. Sam has no access to the laptop's Touch ID,
+  which also refutes the premise of A5. The approval document states its own
+  assumptions (Technical Design 1).
 
 ## Proposed Solution
 
 ### Approach
 
-Two layers. The first decides whether a script runs: a registry in the
-engine holds every script version, each one checked and trial-run when it is
-registered, and only a version Sam has approved with a signature from a key
-held in hardware can run. The second bounds what a running script can do:
-one Python function runs one Lua 5.4 script in a fresh, empty interpreter
-inside a worker process with OS memory and CPU limits and a kill timer, and
-returns plain JSON, with only the granted verbs in its environment and every
-limit enforced by the host from outside the script. Each verb call is a
-round trip to the parent (`nexus_rdr/242-research-29`).
+Two layers. The first decides whether a script runs. In version 1 that is
+decided by origin: a run names a procedure in one of RDR-240's two library
+roots, whose files are reviewed and committed like any source file, and the
+static check passes it before every run. Approval by Sam, for scripts from
+anywhere else, is replaced by a later document (Technical Design 1). The
+second layer bounds what a running script can do: one Python function runs
+one Lua 5.4 script in a fresh, empty interpreter inside a worker process with
+OS memory and CPU limits and a kill timer, and returns plain JSON, with only
+the granted verbs in its environment and every limit enforced by the host
+from outside the script. Each verb call is a round trip to the parent
+(`nexus_rdr/242-research-29`).
 
-A run never takes source. `run_script(name, sha256, args)` names a
-registered version; the runner fetches it, checks that its bytes hash to the
-pinned sha256, verifies Sam's signature over that hash and its grants,
-checks it again, and runs it. An edit is a new hash and a new pending
-version. The first version has no write verb.
+A run never takes source. `run_script(name, args)` names a procedure; the
+runner reads its file from a library root, checks it, and runs it. The first
+version has no write verb.
 
 The surface is built for one consumer. Version 1 carries exactly the read
 verbs RDR-240's first four procedures need (its Technical Design item 4).
@@ -430,72 +454,48 @@ grant rule.
 
 ### Technical Design
 
-The lifecycle of a script version:
-
-```
-register --> evaluate --> pending --(Sam signs)--> approved --(Sam signs)--> revoked
-(any principal) (static check   (runs refused)     (runs allowed)           (terminal)
-                 + trial run,
-                 recorded)
-```
-
-1. Script versions. A version is identified by its name and the sha256 of
-   its exact source bytes. Names match `[a-z][a-z0-9_]{0,63}`. A version
-   carries: the source; its sha256; the declared grants (verb names); the
-   fixtures for its trial run; its output shape; optional limits, each lower
-   than the defaults; the registrant; the time of registration; the
-   evaluation reports; and the checker version that wrote them. Approval and
-   revocation are events about a version, never fields anyone can set.
-2. Registry. Three engine tables, created by a Liquibase changeset and
-   served by `/v1/scripts` routes, each scoped to the tenant:
-   - `script_versions`: one row per (tenant, name, sha256), inserted once and
-     never updated. Registering the same bytes again is a no-op. The
-     registrant columns come from the authenticated principal (tenant,
-     session, scope); the `agent` attribution the client sends, as
-     `memory_put` does, is stored as informational only.
-   - `script_events`: append-only rows (tenant, name, sha256, kind
-     `approve` or `revoke`, the signed payload, the signature, the key
-     fingerprint, the time). The engine inserts a row only when the signature
-     verifies against the tenant's enrolled key and the payload names that
-     row's version; it refuses every other insert, whatever the principal's
-     scope.
-   - `script_approver`: the tenant's enrolled public key (Technical Design 7).
-
-   There is no update or delete route for any of the three. A version's state
-   is derived, never stored: revoked if any revoke event exists for it,
-   approved if a verified approve event exists and no revoke does, pending
-   otherwise. The read routes return the derived state with the approving
-   key's fingerprint and the event time, which is what `nx script show`
-   prints as approver and approved_at. A tenant holds at most 100 pending
-   versions; past that, registration is refused, so an agent in a loop cannot
-   flood Sam's queue.
-
-   Why an engine table: T2 memory is written and deleted by every agent
-   through `memory_put` and `memory_delete`, so a revocation stored there
-   could be removed and the state would be whatever the last writer left. A
-   tuple subspace is worse for a record: `tuple_in` consumes a tuple, so any
-   principal with tuple access could take a revocation out of the space. A
-   table with no update or delete route is the one form where append-only is
-   enforced below every client principal, and the NO-SQLITE rule already puts
-   new persistent state in PG through the engine.
-3. Registration. `nx script register <file> --name N --grants a,b
-   --fixtures F.json --shape S.json [--limits L.json]`, or the same fields
-   from RDR-240's procedure header. The client computes the sha256, runs the
-   evaluation (items 4 and 5), and posts the version with both reports. No MCP
-   tool registers in this RDR; whether agents register through RDR-240's front
-   doors is RDR-240's decision. Registration is open to any principal of the
-   tenant, because a pending version can do nothing.
-4. Static check. The checker never parses Lua. It compiles the source with
-   Lua 5.4's own `load(src, "=script", "t", {})` in a throwaway runtime,
-   dumps the function with `string.dump` (debug information kept), reads the
-   binary chunk, and walks every function prototype. It refuses on the first
+1. Approval. Replaced: approval by a device-held passkey
+   (WebAuthn on Sam's iOS devices, Face ID), to be designed in its own
+   document; nothing is built for approval until then. The direction, and no
+   more: a pending approval shows on a page Sam opens on the device; the
+   passkey signs a challenge built from the script's exact bytes and grants,
+   and the engine checks it against the enrolled passkey; no shell, agent or
+   MCP principal holds the key. Withdrawn from this RDR with the hardware-key
+   layer on 2026-11-07 (`nexus_rdr/242-research-30`): the script registry,
+   its three engine tables and `/v1/scripts` routes, registration, the trial
+   run on fixtures, the `nx script` verbs (`register`, `list`, `show`,
+   `approve`, `revoke`, `enroll`), the SSHSIG approval credential (a
+   hardware-held key, a touch, enrollment, rotation, the operator reset),
+   SSHSIG verification in Java and in the client, and `resolve(name) ->
+   sha256`. The approval document decides which of them it keeps.
+2. What a run needs in version 1. With no approval layer, a run needs three
+   things. The script is a file in one of RDR-240's two library roots,
+   `src/nexus/procedures/` (ships in the package) or `.nexus/procedures/` in
+   a repo (RDR-240 Technical Design 1), and those files are "written by hand,
+   reviewed and committed like any source file" (RDR-240, its RDR-190 row;
+   `nexus_rdr/242-research-31`). The caller names it, and no run path takes
+   source: "The runtime takes no source from a tool argument", as this RDR's
+   2026-11-02 draft said. And the static check of item 3 passes it, in the
+   worker, before it runs. Its grants are the host verbs its header names
+   (RDR-240 Technical Design 1). No registered, unapproved script can run,
+   because there is no registry. Residual: an agent that can write to
+   `.nexus/procedures/` in a checkout can run a file nobody has reviewed yet.
+   Version 1 bounds that only by the sandbox and the read-only verbs, whose
+   worst case is a read the caller could already make. Approval (item 1) is
+   what closes it, and a write verb waits for it.
+3. Static check. The checker never parses Lua. It compiles the source with
+   Lua 5.4's own `load(src, "=script", "t", {})` in a throwaway `LuaRuntime`
+   inside the run's worker process (item 6), before the script's own runtime
+   is built, so no Lua parser runs in the client's process. It dumps the
+   function with `string.dump` (debug information kept), reads the binary
+   chunk, and walks every function prototype. It refuses on the first
    violation, naming the rule and the line:
 
    | Rule | Refuses | Why |
    | --- | --- | --- |
-   | `binary`, `bytes`, `size` | a first byte of 27; any byte outside printable ASCII, tab, CR and LF; source over 64 KB | no bytecode; Sam reads exactly what will run, with no homoglyph or control character hiding text |
+   | `binary`, `bytes`, `size` | a first byte of 27; any byte outside printable ASCII, tab, CR and LF; source over 64 KB | no bytecode; a reviewer reads exactly what will run, with no homoglyph or control character hiding text |
    | `parse` | source Lua 5.4 does not compile in mode `"t"` | |
-   | `global` | a global read outside the allowlist (the base functions and libraries of item 10, and the granted verb namespaces) | `load`, `loadstring`, `dofile`, `require`, `debug`, `getmetatable`, `setmetatable`, `rawset`, `rawget`, `collectgarbage`, `coroutine` in version 1, `_G` |
+   | `global` | a global read outside the allowlist (the base functions and libraries of item 7, and the granted verb namespaces) | `load`, `loadstring`, `dofile`, `require`, `debug`, `getmetatable`, `setmetatable`, `rawset`, `rawget`, `collectgarbage`, `coroutine` in version 1, `_G` |
    | `global-write` | any global assignment, `function f()` included | a script cannot plant or replace a name; it uses locals |
    | `env` | `_ENV` read or written as a value, indexed, or declared as a local | no dynamic global access |
    | `ns-value` | a library or verb namespace used other than as `ns.member` | no alias (`local m = memory`), no iteration (`pairs(string)`), no overwrite (`memory.get = f`) |
@@ -511,128 +511,128 @@ register --> evaluate --> pending --(Sam signs)--> approved --(Sam signs)--> rev
    other parser reads differently cannot hide a call, because the checker sees
    what Lua compiled. Where Lua's code generation leaves the forms above (over
    255 constants in one function), the script is refused, not passed (Key
-   Discoveries). The check runs at registration, again at approval, and again
-   before every run, so a stricter checker refuses an old approval. A
-   dynamic index on a value the checker cannot type (`s[k]` on a local
-   string) passes; the second layer covers it.
-5. Trial run. Registration declares one or more fixtures, each an argument
-   object and the canned response for every verb call the script makes on
-   it, keyed by verb and arguments. The trial runs the script in the real
-   sandbox (items 9 to 15), in a worker process like every run, with a
-   dispatcher that serves only those
-   responses, so an unapproved script never reads live data. A verb call
-   with no fixture fails the trial, naming the call. The result must match
-   the declared output shape, a small closed language: `string`, `number`,
-   `boolean`, an array of one shape, or an object with exactly the listed keys
-   and a shape for each. The limits apply. Each fixture's outcome is recorded
-   on the version.
-6. Approval and revocation. `nx script approve <name> <sha256>` fetches the
-   version, prints its source (line-numbered), grants, shape, fixtures,
-   limits and a diff against the latest approved version of the same name,
-   then re-runs the static check and the trial itself; it never trusts the
-   stored reports, which any registrant could have written. If both pass, it
-   builds the payload, the canonical JSON of the kind, tenant, name, sha256,
-   sorted grants, output shape, limits and checker version, and asks
-   `ssh-keygen -Y sign -n nexus-script-approval` to sign it with the enrolled
-   key, which waits for Sam's touch. It posts the event; the engine verifies
-   it and inserts it. `nx script revoke <name> <sha256>` signs a revoke
-   payload the same way. A revocation is terminal for that sha256: approving
-   it again is refused, so a replayed old approval cannot revive it, and Sam
-   re-registers a changed file instead. The verbs refuse to run without a
-   terminal (a speed bump for an agent's Bash tool; the touch is the gate).
-   `nx script list` and `nx script show` read the registry and need no key.
-7. The approval credential. The approver key is an OpenSSH key whose private
-   half lives in hardware and signs only after a physical touch: a FIDO2
-   security key generated with `ssh-keygen -t ed25519-sk -O verify-required`
-   (touch and PIN per signature), or a Secure Enclave key held by an SSH
-   agent that asks for Touch ID on every use. The private half never exists
-   as a file, an environment variable or a token.
-   - Enrollment. `nx script enroll <public-key>` posts the public key with a
-     signature over the enrollment payload made by that key (proof of
-     possession, so one touch). The engine accepts it only when the tenant
-     has no enrolled key and only from the `root` scope. A second enrollment
-     is refused, naming the enrolled fingerprint.
-   - Rotation. A new key is enrolled by a payload signed by the current key.
-   - Loss. A lost key is cleared by an operator statement run on the
-     engine's database, documented in the runbook, never by an HTTP route.
-   - Verification. The engine verifies every event before inserting it. The
-     runner verifies again before every run, against the enrolled key it
-     fetches, and does not trust the engine's derived state. For a FIDO2 key
-     both verifiers require the user-presence flag, and the user-verified
-     flag when the key was enrolled with `verify-required`.
-
-   Why no agent can reach it: there is nothing to read. No MCP tool
-   approves, and no module under `src/nexus/mcp/` imports the signer. The
-   engine accepts an approval from any principal, the root token's included,
-   only when its signature verifies, so holding a token gains nothing. An
-   agent with a shell can run `nx script approve` or `ssh-keygen -Y sign`, and
-   the key then waits for a touch Sam did not ask for.
-8. Running. `nexus.lua_runtime.run_script(name, sha256, args, limits=None)
-   -> JSON value` fetches the version and its events, and refuses, naming the
-   reason, when: the version is not registered; the source's sha256 is not
-   the pinned one; no approve event verifies against the enrolled key for
-   exactly this name, sha256, grants, shape and limits; any revoke event
-   exists (fail closed, verified or not); or the static check fails today.
-   Otherwise it builds the sandbox with only the version's grants and limits
-   (lowered further by the caller's `limits`, never raised), runs it in a
-   worker process (item 9), and checks the result against the declared shape. `resolve(name) -> sha256`
-   returns the most recently approved, unrevoked version of a name, for
-   RDR-240's `run_procedure`. Source is never a parameter of any run path.
-9. Runtime. `lupa.lua54` (PUC Lua 5.4) through `lupa>=2.8,<3`. LuaJIT is
+   Discoveries). The check runs before every run, so a stricter checker
+   refuses a script an older one passed. A dynamic index on a value the
+   checker cannot type (`s[k]` on a local string) passes; the second layer
+   covers it.
+4. Running. `nexus.lua_runtime.run_script(name, args, limits=None) -> JSON
+   value` finds the name in the two library roots, refusing a repo name that
+   shadows a shipped one (RDR-240 Technical Design 1), and reads the file. It
+   refuses, naming the reason, when the name is in neither root or the static
+   check fails. Otherwise it builds the sandbox with only the header's grants
+   and the limits of item 11 (lowered by the caller's `limits`, never
+   raised), and runs it in a worker process (item 6). Source is never a
+   parameter of any run path.
+5. Runtime. `lupa.lua54` (PUC Lua 5.4) through `lupa>=2.8,<3`. LuaJIT is
    never loaded: its count hook skips compiled code and `lupa` cannot cap
-   its memory (Key Discoveries). Every run and every trial runs in its own
-   worker process, a child the client starts and ends with the run. The
-   worker holds one `LuaRuntime`, discarded with the process, so no state
-   carries from one script to the next. Constructed with
+   its memory (Key Discoveries). Every run runs in its own worker process
+   (item 6). The worker holds one script `LuaRuntime`, discarded with the
+   process, so no state carries from one script to the next. Constructed with
    `register_eval=False`, `register_builtins=False`,
    `unpack_returned_tuples=False`, `max_memory` set, and an
-   `attribute_filter` that refuses every attribute access. The parent sets
-   OS limits on the worker for CPU time and memory, and holds a kill timer
-   at the wall-time limit (item 14). The in-process hook and `max_memory`
-   stay as the inner layer. The worker is needed because one pattern match
-   is one instruction and ran unbounded in-process
-   (`nexus_rdr/242-research-29`). macOS does not enforce `RLIMIT_AS`
-   (Alternative 2), so there `max_memory` is the memory limit. Native
-   Windows has no `RLIMIT_*` (inferred, not read: Python's `resource`
-   module is Unix only), so Phase 1 Step 2 chooses its CPU and memory
-   limits; the kill timer needs no OS limit. The static check uses a
-   separate runtime in the client that only compiles; compiling runs
-   nothing.
-10. Environment. Built by host Lua code that runs before the script and
-    is then dropped. The script's environment is a new table holding copies
-    of: the safe base functions (`assert`, `error`, `ipairs`, `next`,
-    `pairs`, `select`, `tonumber`, `tostring`, `type`, `rawequal`,
-    `rawlen`), a guarded `pcall` (item 14), `string` without `dump`, `table`,
-    `math`, `utf8`, and the granted verbs. The string metatable's `__index`
-    is replaced by the same reduced `string` table, so `("").dump` is nil.
-    `coroutine` is absent in version 1. When a consumer needs it, it comes
-    only as host wrappers: `create` and `wrap` both arm the hook on each new
-    thread, and `resume` is guarded like `pcall` (Key Discoveries). The real
-    `_G` is wiped once the environment is built.
-11. Loading. The host refuses source whose first byte is 27 (a binary
-    chunk), then compiles it with `load(src, name, "t", env)`. The source is
-    the registered version's, after the pin and signature checks of item 8.
-12. Verbs. One Python dispatcher, `dispatch(verb, args) -> result`, is the
-    only Python object that crosses into Lua. A host chunk loaded with an
-    environment holding only that dispatcher builds one Lua function per
-    granted verb; a verb the version was not granted has no function, so the
-    script cannot name it, and the dispatcher also refuses it by name. The
-    script cannot read those functions' upvalues, since `debug` is absent.
-    Arguments are plain values (string, number, boolean, nil); results are
-    plain values or tables the host builds, so no Python object, proxy or
-    closure reaches the script. The dispatcher never raises into Lua: it
-    catches every exception and returns an error value, and the verb function
-    raises a Lua error carrying that message as a string. Otherwise `pcall`
-    hands the script the Python exception itself, a host object
-    (`design_probe.py`, case `exc_attr`: the refuse-all filter held, and only
-    `tostring` worked, but the rule must not rest on the filter alone).
-    The dispatcher lives in the worker, and the verbs run in the parent, so
-    each verb call is a round trip to the parent: the worker sends the verb
-    name and its arguments as JSON over a pipe, and the parent runs the verb
-    and sends back JSON (`nexus_rdr/242-research-29`). The parent refuses an
-    ungranted verb by name as well. In a trial the parent serves only the
-    fixture responses (item 5).
-13. Version 1 verbs (read-only). `memory.get(project, title)`,
+   `attribute_filter` that refuses every attribute access. The in-process
+   hook and `max_memory` are the inner layer; the worker's OS limits and the
+   parent's kill timer are the outer one. The worker is needed because one
+   pattern match is one instruction and ran unbounded in-process
+   (`nexus_rdr/242-research-29`).
+6. Worker process. Every run gets its own worker, a child the client starts
+   and ends with the run. The worker contains crashes and runaway time, not
+   an escape: it runs as the client's OS user, so native code that escapes
+   Lua has that user's reach, less what the start below removes. The
+   contract:
+   - Start. `subprocess.Popen([sys.executable, "-I", "-m",
+     "nexus.lua_runtime.worker"])`, never `fork` or `multiprocessing`
+     (inferred, not read: a fork of the threaded MCP server copies its
+     state and its held locks). `-I` ignores `PYTHON*` variables and the
+     user site. The environment is empty, with only `SYSTEMROOT` added on
+     native Windows (`nexus_rdr/242-research-32` for macOS, `-34` for
+     Windows), so no tenant token or key reaches the worker. `close_fds=True`;
+     stdin and stdout are the pipe, and stderr goes to a pipe of which the
+     parent keeps the first 64 KB for the crash error. The working directory
+     is the platform temp directory (`tempfile.gettempdir()`), never the
+     caller's checkout. The worker sets its own OS limits first, then reads
+     nothing and runs nothing until the parent's first frame, which the
+     parent sends after any limit it sets from outside (the Windows job).
+   - Frames. Each message is a length-prefixed JSON frame. The worker sends
+     at most 64 KB per frame (a verb name and plain arguments); the parent
+     sends at most 64 MB (a verb result; the same bound as `max_memory`,
+     since a larger value cannot be held in Lua). A frame over its cap, a
+     frame that is not valid JSON of the expected form, or a 10,001st verb
+     call in one run ends the run with `ScriptWorkerError`. The parent checks
+     every verb call before it runs it: the verb is granted, and each
+     argument has the type the verb table gives it, and the count.
+   - OS limits. CPU time: the wall-time limit plus 5 s (soft) and plus 10 s
+     (hard), as `RLIMIT_CPU` on Linux and macOS and a per-process time limit
+     of the job on Windows. Memory: 1 GiB, as `RLIMIT_AS` on Linux and a
+     per-process memory limit of the job on Windows, above the 64 MB
+     `max_memory` so that Python, `lupa` and one 64 MB frame fit. On macOS
+     `setrlimit(RLIMIT_AS)` raises `ValueError` (`nexus_rdr/242-research-32`),
+     so the worker sets it in a `try`, and `max_memory` is the only memory
+     bound there. Any other failure to set a limit ends the run with
+     `ScriptWorkerError` before the source is read.
+   - Wall time. The parent's kill timer starts when the parent starts the
+     worker, so worker start counts. The timer runs in its own thread,
+     independent of the parent's run loop, so it fires while the parent is
+     inside a verb. Verb time counts toward wall time: each verb call gets
+     the remaining budget as its timeout (the HTTP timeout of a T2 read, the
+     `timeout` of a git subprocess). When the timer kills the worker during
+     a verb, the parent abandons the verb and discards its result; version
+     1's verbs only read, so nothing is left half done.
+   - Parent death. On Linux and macOS a worker that is running Lua is ended
+     by its CPU limit, and a worker waiting on the pipe reads end of file and
+     exits, so nothing more is needed (`nexus_rdr/242-research-32`: SIGXCPU
+     on macOS). On native Windows the parent puts the worker in a Job Object
+     with kill-on-close and holds the job's only handle, so the OS ends the
+     worker when the parent dies (inferred, not read;
+     `nexus_rdr/242-research-34`).
+   - Concurrency. One client process (the `nx` CLI, or one MCP server) runs
+     at most 4 workers at once. A fifth `run_script` fails at once with
+     `ScriptBusyError` and does not wait. The memory a client process can
+     commit to workers is then at most four times the memory limit.
+   - Ends. The parent maps how the worker ended to one error:
+
+     | Worker end | How the parent knows | Error |
+     | --- | --- | --- |
+     | the script returned | a result frame, then exit 0 | none |
+     | an inner limit (instructions, `max_memory`, stack, result) | a limit frame naming it, then exit 0 | `ScriptLimitError(limit, value)` |
+     | the kill timer | the timer thread recorded that it killed the worker | `ScriptLimitError("wall_time", limit)` |
+     | the OS CPU limit | SIGXCPU on Linux and macOS, with the timer not fired; on Windows the job reports its time limit (inferred, not read) | `ScriptLimitError("cpu_time", limit)` |
+     | the OS memory limit | the worker caught `MemoryError` and exited with code 3 | `ScriptLimitError("memory", limit)` |
+     | anything else: another signal (SIGSEGV, SIGABRT, SIGKILL), another exit code, end of file with no result frame, a bad frame | none of the above | `ScriptWorkerError`, carrying the exit status or signal and the first 64 KB of stderr |
+7. Environment. Built by host Lua code that runs before the script and
+   is then dropped. The script's environment is a new table holding copies
+   of: the safe base functions (`assert`, `error`, `ipairs`, `next`,
+   `pairs`, `select`, `tonumber`, `tostring`, `type`, `rawequal`,
+   `rawlen`), a guarded `pcall` (item 11), `string` without `dump`, `table`,
+   `math`, `utf8`, and the granted verbs. The string metatable's `__index`
+   is replaced by the same reduced `string` table, so `("").dump` is nil.
+   `coroutine` is absent in version 1. When a consumer needs it, it comes
+   only as host wrappers: `create` and `wrap` both arm the hook on each new
+   thread, and `resume` is guarded like `pcall` (Key Discoveries). The real
+   `_G` is wiped once the environment is built.
+8. Loading. The host refuses source whose first byte is 27 (a binary
+   chunk), then compiles it with `load(src, name, "t", env)`. The source is
+   the library file item 4 read, after the static check of item 3.
+9. Verbs. One Python dispatcher, `dispatch(verb, args) -> result`, is the
+   only Python object that crosses into Lua. A host chunk loaded with an
+   environment holding only that dispatcher builds one Lua function per
+   granted verb; a verb the script was not granted has no function, so the
+   script cannot name it, and the dispatcher also refuses it by name. The
+   script cannot read those functions' upvalues, since `debug` is absent.
+   Arguments are plain values (string, number, boolean, nil); results are
+   plain values or tables the host builds, so no Python object, proxy or
+   closure reaches the script. The dispatcher never raises into Lua: it
+   catches every exception and returns an error value, and the verb function
+   raises a Lua error carrying that message as a string. Otherwise `pcall`
+   hands the script the Python exception itself, a host object
+   (`design_probe.py`, case `exc_attr`: the refuse-all filter held, and only
+   `tostring` worked, but the rule must not rest on the filter alone).
+   The dispatcher lives in the worker, and the verbs run in the parent, so
+   each verb call is a round trip to the parent: the worker sends the verb
+   name and its arguments as JSON over a pipe, and the parent runs the verb
+   and sends back JSON (`nexus_rdr/242-research-29`). The parent refuses an
+   ungranted verb by name as well, and checks its arguments (item 6).
+10. Version 1 verbs (read-only). `memory.get(project, title)`,
     `memory.list(project)`, `memory.search(query, project, limit)`,
     `transcripts.sessions(since, until, project, bodies)`,
     `git.diff_names(base)`, `git.diff_stat(base)`, `tables.get(name)`. Each
@@ -642,19 +642,22 @@ register --> evaluate --> pending --(Sam signs)--> approved --(Sam signs)--> rev
     (Key Discoveries, A3). `transcripts.sessions` never returns message
     bodies unless `bodies` is true. A write verb, when one ships, is a
     separate entry in the verb table, granted only when declared and covered
-    by Sam's signature like any other grant.
-14. Limits. Defaults, each lowered by the version's declared limits or the
-    caller and never raised:
+    by an approval (item 1); none ships before that document.
+11. Limits. Defaults, each lowered by the caller and never raised:
     - instructions: 50 million, counted by a hook every 10,000 instructions;
     - memory: 64 MB (`max_memory`), with an OS memory limit on the worker
-      where the OS enforces one (item 9);
-    - CPU time: an OS limit on the worker (item 9);
-    - wall time: 30 s, enforced by the parent's kill timer, which ends the
-      worker at the limit even inside one C call the hook cannot interrupt,
-      such as a pattern match (`nexus_rdr/242-research-29`). The same hook
-      also checks it against a host clock captured in its closure, so a
-      script that is still executing Lua instructions stops with the named
-      error before the timer fires;
+      where the OS enforces one (item 6);
+    - CPU time: an OS limit on the worker, the wall-time limit plus 5 s
+      (item 6);
+    - wall time: 60 s, enforced by the parent's kill timer (item 6), which
+      ends the worker at the limit even inside one C call the hook cannot
+      interrupt, such as a pattern match (`nexus_rdr/242-research-29`). The
+      hook also checks a host clock captured in its closure, as an inner
+      layer; whichever of the two ends the run, the error names `wall_time`.
+      The default is 60 s, not 30 s, because RDR-240's A2 holds its 30-day
+      transcript query to "under a minute" (`nexus_rdr/242-research-31`),
+      and 30 s would kill a run that meets it. A runaway then holds a worker
+      for 60 s, and the cap of item 6 bounds how many do;
     - result: 1 MB of JSON and 32 levels of nesting, checked while the host
       walks the returned value.
 
@@ -664,53 +667,50 @@ register --> evaluate --> pending --(Sam signs)--> approved --(Sam signs)--> rev
     overflow. Together they stop the two `pcall` escapes the probes found. A
     run that hits a limit fails with `ScriptLimitError(limit, value)`; the
     host maps a `LuaMemoryError`, and a `LuaError` raised by the rearmed hook
-    in the host's own wrapper, to it. The parent maps a worker it killed at
-    the wall-time limit, or one ended by an OS limit, to the same error
-    naming that limit, so a pathological pattern fails with an error and
-    never hangs the MCP server or the CLI (Gap 3).
-15. Results. The host walks the returned Lua value into JSON types itself
+    in the host's own wrapper, to it. The parent maps every other way a
+    worker ends by the table of item 6, so a pathological pattern fails with
+    an error and never hangs the MCP server or the CLI (Gap 3).
+12. Results. The host walks the returned Lua value into JSON types itself
     (nil, boolean, number, string, array-like and string-keyed tables). A
     function, a userdata or a table with mixed keys fails the run with a named
     error. The walk runs in the worker, which sends the JSON to the parent
     over the pipe. The caller never receives a `lupa` proxy.
-16. Public surface. `run_script` and `resolve` (item 8), and the registry
-    client behind the `nx script` verbs (`register`, `list`, `show`,
-    `approve`, `revoke`, `enroll`). RDR-240's `run_procedure` calls `resolve`
-    and `run_script`. Neither the CLI nor MCP runs a script directly in this
-    RDR.
+13. Public surface. `run_script` (item 4). RDR-240's `run_procedure` calls
+    it. Neither the CLI nor MCP runs a script directly in this RDR, and the
+    `nx script` verbs are withdrawn with the registry (item 1).
 
 ### Decision Rationale
 
 A sandbox can only limit what a script reaches. Whether a script should run
 is a judgement about its purpose, and Sam's direction is that he makes it.
-A registry with a content pin turns that judgement into something the host
-can check: the bytes that run are the bytes Sam read, under the grants he
-read. A signature from a key held in hardware makes the approval something
-no other principal can produce, rather than a state that any principal with
-the right token could set. The engine table makes revocation stick, because
-nothing can delete it.
+The hardware-key approval designed for that does not fit how Sam works
+(`nexus_rdr/242-research-30`), so this RDR builds no approval and leaves it
+to its own document (Technical Design 1). Until then the judgement is the
+one every source file already gets: a script runs only from a procedure
+library, reviewed and committed like code (Technical Design 2).
 
 The static check reads Lua's own bytecode so that it cannot be fooled by a
 grammar difference, and it fails closed where the bytecode changes form. It
-catches the escape classes before anyone is asked to approve, which keeps
-Sam's review to purpose and grants. The trial run shows that the script does
-something with plausible inputs without touching live data.
+catches the escape classes before a script runs, which keeps a reviewer's
+reading to purpose and grants.
 
 Lua 5.4 is the only candidate the probes could hold to the instruction,
 memory and result limits from outside the script, and `lupa` ships it as a
 wheel for every platform conexus supports. No in-process measure holds wall
 time: one pattern match is one instruction, and it ran 10.56 s, and past
 60 s and 20 s in two other cases, with the hook never firing and nothing for
-`max_memory` to stop (`nexus_rdr/242-research-29`). So every run and every
-trial runs in a worker process with OS memory and CPU limits and a kill
-timer, as Sam chose on 2026-11-07; the in-process hook stays as the inner
-layer and the error that names the limit.
+`max_memory` to stop (`nexus_rdr/242-research-29`). So every run runs in a
+worker process with OS memory and CPU limits and a kill timer, as Sam chose
+on 2026-11-07; the in-process hook stays as the inner layer and the error
+that names the limit.
 Passing only plain values across the boundary removes the three leaks the
 probes found (host-object attributes, a pre-built closure, table proxies) by
-construction rather than by filtering. Approved-only source and no write verb
-make version 1's worst case a read, by a script Sam approved, of something
-the caller could already read, so an interpreter bug in Lua is a denial of
-service, not a data change.
+construction rather than by filtering. Library-only source and no write verb
+make version 1's worst case a read of something the caller could already
+read. An interpreter bug that crashes or hangs is a denial of service, and
+the worker contains it. An escape into native code is not contained: it runs
+as the client's OS user with the worker's scrubbed start (Technical Design
+6), and only reviewed source and the read-only surface stand against it.
 
 ## Alternatives Considered
 
@@ -724,8 +724,8 @@ service, not a data change.
 stopped unless the JIT is off for the whole runtime; `lupa` cannot cap its
 memory on 64-bit; absent from every macOS wheel.
 
-**Reason for rejection:** two of the four limits fail, and the platform the
-project runs on daily has no LuaJIT wheel.
+**Reason for rejection:** two of the limits fail (instructions and memory),
+and the platform the project runs on daily has no LuaJIT wheel.
 
 ### Alternative 2: A worker process per script (chosen)
 
@@ -733,13 +733,16 @@ project runs on daily has no LuaJIT wheel.
 (`RLIMIT_AS`, `RLIMIT_CPU`, a kill on timeout), with the in-process hooks
 kept inside it.
 
-**Pros:** survives interpreter bugs that corrupt memory; limits enforced by
-the OS, including during a long C call, which the in-process hook cannot
-interrupt.
+**Pros:** contains crashes and runaway time, not an escape: a worker
+that crashes or hangs ends alone, and the OS enforces its limits during a
+long C call, which the in-process hook cannot interrupt. Native code that
+escapes Lua still runs as the client's OS user (Technical Design 6).
 
-**Cons:** a process start per run; no `RLIMIT_AS` enforcement on macOS; the
-verbs still run in the parent, so every verb call is an IPC round trip.
-Neither cost is measured.
+**Cons:** a process start per run; on macOS `setrlimit(RLIMIT_AS)` raises
+`ValueError`, so `max_memory` is the only memory bound there
+(`nexus_rdr/242-research-32`); the verbs still run in the parent, so every
+verb call is an IPC round trip. Phase 1 Step 2 measures both costs against a
+pass line.
 
 **Why chosen:** the in-process option alone cannot enforce wall time. The
 gate round 1 probe (`nexus_rdr/242-research-29`; `lupa` 2.8, Lua 5.4, count
@@ -750,7 +753,8 @@ memory cap cannot stop it. The draft deferred this alternative until the
 overrun proved large; it is unbounded. Sam chose it on 2026-11-07 (ask
 `rdr242-c1-runtime`, "Worker process (Recommended)"): every script, the
 trial included, runs in a worker process with OS memory and CPU limits and a
-kill timer, and each verb call becomes a round trip to the parent.
+kill timer, and each verb call becomes a round trip to the parent. The
+trial left this RDR with the approval layer (Technical Design 1).
 
 ### Alternative 3: Starlark, WebAssembly or embedded JavaScript
 
@@ -786,7 +790,11 @@ whatever the caller passes; and a file an agent wrote under a prompt
 injection runs the same as one Sam wrote.
 
 **Reason for rejection:** Sam (2026-11-03): no arbitrary Lua. A script runs
-only after it is registered, evaluated and approved by Sam.
+only after it is registered, evaluated and approved by Sam. Version 1
+(Technical Design 2) still reads a library file, but it takes a name and
+never source, takes the grants from the file's header and not from the
+caller, and runs the static check first. Registration and approval of
+scripts from elsewhere wait for the approval document (Technical Design 1).
 
 ### Alternative 6: Approval by an agent or by a token
 
@@ -801,8 +809,9 @@ A token is a value; every agent running as Sam's user can read Sam's files
 and environment, and an MCP client that holds it can replay it.
 
 **Reason for rejection:** Sam chose approval by Sam only (option (a),
-2026-11-03), through a credential no other principal holds. Only a key that
-needs a physical act per signature meets that.
+2026-11-03), through a credential no other principal holds. The
+hardware SSH key designed to meet that is withdrawn; a passkey on Sam's own
+device is the direction the approval document takes (Technical Design 1).
 
 ### Alternative 7: The registry in T2 memory or a tuple subspace
 
@@ -815,7 +824,8 @@ tuples in a `scripts` subspace, with no engine change.
 tuple, so a revocation could be removed and the version would run again.
 
 **Reason for rejection:** append-only has to be enforced below the client
-principals (Technical Design 2).
+principals. The registry, and this rejection with it, moves to the approval
+document (Technical Design 1).
 
 ### Alternative 8: A static check over a Python Lua parser
 
@@ -837,65 +847,57 @@ calibration test guards (A4).
 ### Consequences
 
 - A new runtime dependency, `lupa`, with a native extension in every
-  install; `cryptography` becomes a direct dependency.
-- Engine work: a changeset, three tables, the `/v1/scripts` routes, and
-  SSHSIG verification in Java.
-- Every new script and every edit waits for Sam. That is the point, and it
-  is also a queue; the pending cap bounds it.
+  install.
+- No engine work: no table, no route, no engine release.
+- Every new script and every edit is a source change, reviewed and committed
+  like code. Until the approval document lands, nothing else adds a script.
 - A script with over 255 constants in one function is refused; it splits
   into functions.
 - Scripts are slower than LuaJIT would be; RDR-240's A2 (a 30-day transcript
-  query under a minute) is measured against Lua 5.4 in the worker process.
-- Every run and every trial starts a worker process, and every verb call is
-  a round trip to the parent (Alternative 2). Neither cost is measured.
+  query under a minute) is measured against Lua 5.4 in the worker process,
+  and the 60 s wall-time default is set to meet it (Technical Design 11).
+- Every run starts a worker process, and every verb call is a round trip to
+  the parent (Alternative 2). Phase 1 Step 2 measures both against a pass
+  line.
 - Every new verb is Python code with a test, reviewed like any other API.
 
 ### Risks and Mitigations
 
 The threat model names who might try what, and what stops them.
 
-- A prompt-injected agent, with MCP tools and possibly a shell. It can
-  register a hostile script, which stays pending. It cannot approve: no MCP
-  tool approves, the engine accepts no event without a valid signature, and
-  the key needs a touch. With a shell it can start `nx script approve` or
-  `ssh-keygen -Y sign`; the key waits for a touch Sam did not ask for. It can
-  ask Sam to approve something; Sam reads the source, grants, shape and diff
-  that `nx script approve` prints before the touch. Residual: Sam approving a
-  script whose purpose he misread.
-- A compromised MCP client holding a tenant token. It can call any route its
-  token's scope allows, the registry's included: it can register (pending,
-  capped at 100) and read. It cannot approve, revoke, enroll a key while one
-  is enrolled, or edit or delete a version or an event, because no route
-  does those without the enrolled key's signature.
-- A malicious registrant. It writes a script that looks harmless and is
-  not. The static check refuses every escape class before Sam sees it; the
-  approval signs exactly the bytes, grants, shape and limits Sam read; an
-  edit is a new pending version; a source or grant swapped in the database
-  fails the pin or the signature. Non-ASCII and control bytes are refused,
-  so the source prints as it runs. A forged "passed" report changes nothing,
-  since approval and every run re-run the checks.
-- An approved script that misbehaves at run time, on inputs the trial did not
+- A prompt-injected agent, with MCP tools and possibly a shell. Through
+  MCP it can only name a procedure that is already in a library and pass it
+  arguments; no run path takes source. With write access to a checkout it
+  can add a file under `.nexus/procedures/` and run it before anyone reviews
+  it (Technical Design 2). Version 1 bounds that by the sandbox and the
+  read-only verbs; the approval document is what closes it. Residual: a
+  reviewer merging a script whose purpose they misread.
+- A compromised MCP client holding a tenant token. It gains nothing new
+  here: `run_script` runs only library files, with read verbs that reach
+  what the token can already read.
+- A malicious author. It writes a script that looks harmless and is not.
+  The static check refuses every escape class before the script runs, and
+  the file goes through the same review as any source change. Non-ASCII and
+  control bytes are refused, so the source a reviewer reads is the source
+  that runs.
+- A reviewed script that misbehaves at run time, on inputs its tests did not
   cover or through a class the static check cannot see (a dynamic index on a
   string). The sandbox bounds it: only the granted verbs exist, all reads in
   version 1; every limit holds from outside, with the hook rearm, the
-  guarded `pcall` and the worker's kill timer; the result is walked and
-  capped; and the output must match
-  the declared shape. Its worst case is a read of what the caller could
-  already read, or a run that fails on a limit. Data a verb returns may carry
-  text that steers the agent reading the result; that is the same exposure
+  guarded `pcall` and the worker's kill timer; and the result is walked and
+  capped. Its worst case is a read of what the caller could already read,
+  or a run that fails on a limit. Data a verb returns may carry text that
+  steers the agent reading the result; that is the same exposure
   `memory_get` has today, and this RDR does not change it.
 - An agent with a shell running as Sam's OS user, on a local install. It can
-  run any code without Lua, and it can edit the local engine's database
-  directly, including the enrolled key. The registry does not and cannot stop
-  that; what it guarantees is that no script runs through `run_script` unless
-  its exact bytes and grants carry a signature from the hardware key, and a
-  replaced key shows up as a new fingerprint on every `nx script show`. In
-  cloud mode the tables live in the managed engine, out of the laptop's
-  reach.
+  run any code without Lua. The runtime gives it nothing it lacks, and does
+  not try to stop it.
 - A Lua interpreter bug escapes the sandbox (Redis shipped one in 2015,
-  bytecode through `loadstring`). Mitigation: approved-only source, no write
-  verbs, a pinned `lupa` range raised deliberately, and the worker process
-  of Alternative 2 for every run and every trial.
+  bytecode through `loadstring`). Mitigation: library-only source reviewed
+  like code, no write verbs, and a pinned `lupa` range raised deliberately.
+  The worker process contains a crash or a hang, not an escape: native code
+  that escapes runs as the client's OS user, with the worker's empty
+  environment and closed descriptors (Technical Design 6).
 - A `lupa` release changes defaults or the bytecode layout. Mitigation: the
   escape suite and the checker's calibration test run in the normal PR suite
   and fail on any new global or any opcode change.
@@ -906,10 +908,7 @@ The threat model names who might try what, and what stops them.
   pattern match allocates nothing, so the memory cap cannot stop it.
   Mitigation: the parent's kill timer ends the worker at the wall-time limit
   and the run fails with `ScriptLimitError` naming it; the OS CPU limit
-  backs the timer (Technical Design 9 and 14).
-- A hardware-key signature fails to verify in one of the two verifiers.
-  Mitigation: Phase 2 Step 1 tests each enrolled key type in both before any
-  script is approved.
+  backs the timer (Technical Design 6 and 11).
 - Native Windows install fails. Mitigation: Phase 1 Step 1 installs it
   on qwent's Windows side before anything else lands.
 
@@ -920,49 +919,50 @@ The threat model names who might try what, and what stops them.
 #### Step 1: Dependency
 
 Add `lupa>=2.8,<3`; install on macOS arm64, Linux x86_64 (chas) and native
-Windows (qwent) and run one script on each, in a worker process.
+Windows (qwent), and on each run a one-line script through a bare child
+process (`python -I -c` that imports `lupa.lua54` and evaluates one
+expression). The worker is built in Step 2.
 
-#### Step 2: Runtime, loading, results and limits
+#### Step 2: The worker process
 
-`src/nexus/lua_runtime/` with Technical Design items 9 to 12, 14 and 15
-(the guarded `pcall` and the hook rearm included), and the escape, limit and
-worker-process tests, with no verbs yet and a test-only entry point that
-takes source. The worker process comes in this step: one child per run and
-per trial, its OS CPU and memory limits on each platform (native Windows
-included), the parent's kill timer at the wall-time limit, and the pipe over
-which each verb call is a round trip to the parent and the result comes
-back as JSON. The pathological patterns of A2 (`nexus_rdr/242-research-29`)
-are tests here, not a measurement left open.
+`src/nexus/lua_runtime/` with the worker of Technical Design 6: its start
+(interpreter, empty environment, closed descriptors, working directory, the
+first-frame wait), the frame caps and the call count, the parent's argument
+check, the OS CPU and memory limits on each platform (the macOS `RLIMIT_AS`
+call in a `try`), the kill-timer thread and the per-verb remaining budget,
+the parent-death bound per platform, the cap of 4 workers, and the table of
+worker ends, each with its test. No Lua script runs yet beyond a one-line
+fixture.
 
-### Phase 2: The registry and approval
+The same step measures the worker's cost on each of the three platforms:
+the median of 20 worker starts (from the spawn to the worker's first ready
+frame, `lupa` imported), and the round trip of a 1 MB and a 50 MB verb
+result (the parent encodes it, the worker decodes it into a Lua table). The
+pass line: a start of at most 500 ms; a 1 MB round trip of at most 100 ms;
+a 50 MB round trip of at most 5 s. The step also records whether the 50 MB
+table fits under the 64 MB `max_memory`, because RDR-240's 30-day
+transcript query depends on that answer. A missed line comes back to this
+RDR before Step 3 starts.
 
-#### Step 1: Engine tables, routes and verification
+#### Step 3: Runtime, loading, results and limits
 
-The Liquibase changeset for `script_versions`, `script_events` and
-`script_approver`; the `/v1/scripts` routes with no update or delete; the
-pending cap; SSHSIG verification in Java for `ssh-ed25519`,
-`sk-ssh-ed25519` and `ecdsa-sha2-nistp256` keys; enrollment from the `root`
-scope only, once, and rotation signed by the current key; the operator reset
-documented in the runbook.
+Technical Design items 5, 7, 8, 9, 11 and 12 (the guarded `pcall` and the
+hook rearm included), inside the Step 2 worker, with the escape and limit
+tests, no verbs yet, and a test-only entry point that takes source. The
+pathological patterns of A2 (`nexus_rdr/242-research-29`) are tests here,
+not a measurement left open.
 
-#### Step 2: Static check and trial
+#### Step 4: Static check
 
-The bytecode reader with its calibration test, the rules of Technical
-Design 4, the fixture dispatcher and the shape check of item 5, ported from
-`scripts/spikes/rdr242-lua-sandbox/static_check.py` and `registry_probe.py`.
+The bytecode reader with its calibration test and the rules of Technical
+Design 3, ported from `scripts/spikes/rdr242-lua-sandbox/static_check.py`,
+running in the worker before the script's runtime is built.
 
-#### Step 3: CLI and the run path
+### Phase 2: Approval (replaced)
 
-`nx script register`, `list`, `show`, `approve`, `revoke` and `enroll`;
-in-process SSHSIG verification in the client; `run_script(name, sha256,
-args)` and `resolve(name)` replacing the test-only entry point.
+Replaced (Technical Design 1). Nothing is built for approval in this RDR.
 
-#### Step 4: Enrollment and the first approval
-
-Sam enrolls his key and approves one fixture script on the laptop; it runs
-on macOS, chas and qwent.
-
-### Phase 3: The read verbs
+### Phase 3: The read verbs and the run path
 
 #### Step 1: Memory and tables
 
@@ -973,12 +973,17 @@ name-to-file map.
 
 `git.diff_names`, `git.diff_stat` and `transcripts.sessions`.
 
+#### Step 3: The run path
+
+`run_script(name, args)` over the two library roots (Technical Design 2
+and 4), replacing the test-only entry point.
+
 ### Phase 4: Hand-off
 
 #### Step 1: RDR-240's runner on the run path
 
-RDR-240's runner calls `resolve` and `run_script`; this RDR closes when its
-first procedure, registered and approved, runs through it.
+RDR-240's runner calls `run_script`; this RDR closes when its first
+procedure, a reviewed file in a library root, runs through it.
 
 ## Test Plan
 
@@ -991,28 +996,14 @@ first procedure, registered and approved, runs through it.
   `coroutine.create` and `coroutine.wrap`, an ungranted, unknown, dynamic or
   aliased verb, an unused grant, non-ASCII and control bytes, a binary chunk,
   and over 255 constants). The calibration test fails on any change to the
-  bytecode layout or opcode numbering.
-- Registry and run gate: an unregistered version, a pending version, a
-  revoked version, an edited version (new sha256), a source swapped under an
-  approved sha256, grants widened after approval, and an approval signed by a
-  key other than the enrolled one are each refused by `run_script`, naming the
-  reason; an old approval replayed after a revocation does not revive it; the
-  engine refuses an unsigned or wrongly signed event, a second enrollment, and
-  every update or delete, from a `root` principal too.
-- Evaluation: a trial with a verb call that has no fixture, and a trial whose
-  output has the wrong shape, are recorded on the version, and
-  `nx script approve` refuses them after re-running both itself; a static
-  failure is recorded and the trial is not run; a stored report forged as
-  "passed" does not change what approval or a run decides.
+  bytecode layout or opcode numbering. The check runs in the worker, never in
+  the calling process.
+- Run path: a name in neither library root, a repo name that shadows a
+  shipped one, and a file that fails the static check are each refused by
+  `run_script`, naming the reason; no public run function takes source.
 - Grants at run time: with the static check bypassed through the test-only
   entry point, a call to an ungranted verb fails naming it, a namespace with no
   grant is absent, and the dispatcher refuses an ungranted verb by name.
-- The approval credential: no module under `src/nexus/mcp/` imports the
-  signer, and no MCP tool's name or description offers approval (a lint);
-  `nx script approve` from a subprocess with no terminal, the way an agent's
-  Bash tool runs it, refuses at once and posts nothing; a signing attempt with
-  the hardware key present but not touched times out and posts nothing (a
-  hand test on the laptop, recorded on its bead, since CI has no key).
 - Escape suite (ported from `scripts/spikes/rdr242-lua-sandbox/`): every
   global listed in Key Discoveries is nil; `("").dump` is nil and so is a
   run-time-built `dump` key on a string; a binary chunk is refused before
@@ -1024,19 +1015,29 @@ first procedure, registered and approved, runs through it.
   instruction limit; a loop that swallows the limit with `pcall`, and `pcall`
   recursion to the C-stack limit, both stop; the guarded `pcall` still
   catches an ordinary error; `string.rep` and table growth stop on the memory
-  limit; unbounded recursion fails with a stack overflow; a loop that sleeps
-  through a verb stops on wall time; a 2 MB result and 40-deep nesting stop
-  on the result cap. Each asserts the limit named in the error. When
-  `coroutine` is granted, loops inside `create` and `wrap` threads stop, and
-  `resume` cannot swallow a limit.
+  limit; unbounded recursion fails with a stack overflow; a verb call that
+  outlasts the remaining budget stops the run on wall time, the verb gets the
+  remaining budget as its timeout, and the parent discards its result; a 2 MB
+  result and 40-deep nesting stop on the result cap. Each asserts the limit
+  named in the error. When `coroutine` is granted, loops inside `create` and
+  `wrap` threads stop, and `resume` cannot swallow a limit.
 - Worker process: each pathological pattern of A2
   (`nexus_rdr/242-research-29`), `("a"):rep(200):find(("a*"):rep(6) .. "b")`
   and `("a"):rep(30):find(("a?"):rep(30) .. ("a"):rep(30) .. "c")`, is
   killed at the wall-time limit and fails with an error naming it, and the
-  calling process is still serving afterwards; a trial of unapproved source
-  runs in the worker, never in the calling process; a verb call reaches the
-  parent as a round trip and its result returns as JSON; an ungranted verb
-  sent over the pipe is refused by the parent by name.
+  calling process is still serving afterwards; a verb call reaches the parent
+  as a round trip and its result returns as JSON; an ungranted verb, and a
+  verb argument of the wrong type, sent over the pipe are refused by the
+  parent by name. The worker's environment is empty (on Windows it holds
+  only `SYSTEMROOT`), it holds no descriptor but its three pipes, and its
+  working directory is the temp directory. A frame over each cap, a
+  malformed frame and a 10,001st verb call each end the run with
+  `ScriptWorkerError`. Each row of the worker-end table of Technical Design 6
+  yields its error: a timer kill, SIGXCPU, a `MemoryError` exit, a SIGSEGV
+  the test sends, and end of file with no result. On macOS the `RLIMIT_AS`
+  `ValueError` is caught and the run proceeds under `max_memory`. A worker
+  whose parent is killed ends within its CPU limit (Linux, macOS) or at once
+  (the Windows job). A fifth concurrent run fails with `ScriptBusyError`.
 - Isolation: a global set by one run is absent in the next.
 - Verbs: each verb against the real T2 store (engine substrate) and a
   real git repository in a temp directory; `transcripts.sessions` against
@@ -1048,12 +1049,10 @@ first procedure, registered and approved, runs through it.
 
 ## Open Questions for Sam
 
-- Which hardware holds the approver key: a FIDO2 security key, or the
-  laptop's Secure Enclave through an SSH agent that asks for Touch ID? The
-  design takes either; the verifiers need the type enrolled.
-- Does `nx script revoke` need the key too? The design says yes, so an agent
-  cannot revoke Sam's scripts. The cost is that stopping a script needs the
-  key at hand.
+- The approval design: approval by a device-held passkey (WebAuthn on
+  Sam's iOS devices, Face ID), in its own document (Technical Design 1). Until
+  it exists, version 1 runs only reviewed library files and ships no write
+  verb.
 
 ## Finalization Gate
 
@@ -1061,32 +1060,39 @@ first procedure, registered and approved, runs through it.
 
 No contradictions found between the research findings, the design and the
 plan. Each constraint in "What the probes force on any design" has a design
-item: PUC Lua 5.4 only (Technical Design 9); compile in mode `"t"` and refuse
-byte 27 (items 4 and 11); plain values in and a host-walked, capped
-conversion out (items 12, 14 and 15); no host object and no pre-built
-closure in the environment (items 10 and 12); no `coroutine` in version 1,
-and wrappers for both `create` and `wrap` when it comes (item 10); the
-guarded `pcall` and the rearming hook (item 14); the result cap (item 14);
-and a static check over Lua's own bytecode (item 4). The cases of
-`registry_probe.py` match the refusals of item 8 and the registry cases of
-the Test Plan.
+item: PUC Lua 5.4 only (Technical Design 5); compile in mode `"t"` and refuse
+byte 27 (items 3 and 8); plain values in and a host-walked, capped
+conversion out (items 9, 11 and 12); no host object and no pre-built
+closure in the environment (items 7 and 9); no `coroutine` in version 1,
+and wrappers for both `create` and `wrap` when it comes (item 7); the
+guarded `pcall` and the rearming hook (item 11); the result cap (item 11);
+a static check over Lua's own bytecode (item 3); and a kill timer outside
+the interpreter's process (items 6 and 11).
 
-Three places were read for conflict and agree. The dynamic index on a
-string passes the static check in Key Discoveries, and Technical Design 4
-says so and gives it to the second layer. Wall time is a default limit in
-item 14, and A2 records that one long C call overruns the hook without bound
-(`nexus_rdr/242-research-29`); item 14 enforces wall time with the worker's
-kill timer of item 9 and Alternative 2, which Phase 1 Step 2 builds and
-tests. The registry probe ran against an in-memory stand-in, so it
-shows the shape of the state rules, not the engine's enforcement of them;
-that enforcement is Phase 2 Step 1 and rests on A6 and A7.
+Four places were read for conflict and agree. The dynamic index on a
+string passes the static check in Key Discoveries, and Technical Design 3
+says so and gives it to the second layer. Wall time: A2 records that one
+long C call overruns the hook without bound (`nexus_rdr/242-research-29`);
+item 11 enforces wall time with the kill timer of item 6, which runs in its
+own thread, so verb time counts and a slow verb cannot hold it off; the
+hook's clock is an inner layer that reports the same limit, with no claim
+about which of the two fires first. The 60 s default of item 11 meets
+RDR-240's A2 ("under a minute", `nexus_rdr/242-research-31`). Phase 1 Step
+1 runs a bare child process and needs nothing Step 2 builds. The registry
+probe's findings serve the approval layer withdrawn on 2026-11-07 and bind
+nothing here (Technical Design 1).
 
 ### Assumption Verification
 
-Research records: 28 in T2, `nexus_rdr/242-research-1` to `-28`, one for
-each of the 21 Key Discoveries (1 to 21) and one for each of A1 to A7 (22
-to 28). By class: 22 verified (20 by spike, 2 by source search), 1
-documented (prior art, docs only), 5 assumed.
+Research records: 34 in T2, `nexus_rdr/242-research-1` to `-34`: one for
+each of the 21 Key Discoveries of 2026-11-02 and 2026-11-03 (1 to 21), one
+for each of A1 to A7 (22 to 28), the gate round 1 measurement of A2 (29),
+Sam's scope change of 2026-11-07 (30), the source text for the version 1
+run rule and the related frontmatter (31), the macOS worker probes (32), the
+worker facts taken without a probe (33), and the census for this fix round
+(34). By class: 26 verified (22 by spike, 4 by source search), 2
+documented, 6 assumed. Record 23 says A2's overrun is not measured; record
+29 measured it, and the RDR follows 29.
 
 Verified: A3, by a code read of each verb's nearest client call. A4, for
 `lupa` 2.8 only: the calibration passed there, no other release in
@@ -1103,19 +1109,16 @@ Open, not resolved:
   fired). The in-process hook cannot hold wall time; the worker's kill timer
   does, and it is not built. Phase 1 Step 2 builds it and its tests. The
   instruction and memory limits hold for Lua 5.4 by spike.
-- A5: not run, and it waits on the first Open Question (which hardware holds
-  the key). The FIDO2 variant (`PROTOCOL.u2f`) was not read and its verifier
-  is not written. Phase 2 Step 1 tests each key type in both verifiers;
-  Phase 2 Step 4 enrolls the key and approves one script.
-- A6: argued in Technical Design 7, not tested. The credential tests of the
-  Test Plan test it; the untouched-key case is a hand test on the laptop,
-  since CI has no key.
-- A7: no Java code exists. Phase 2 Step 1 writes and tests it.
+- The worker facts of record 33 (Linux `RLIMIT_AS`, the Windows job and its
+  limits, `SYSTEMROOT`, end of file on parent death): assumed, not probed.
+  Phase 1 Step 2 tests each one on its platform.
 
-A5, A6 and A7 are recorded as assumed with docs-only evidence, so the
-Layer 2 census lists them as high risk. None of the three can be verified
-before the hardware question is answered and Phase 2 code exists. They are
-not marked acknowledged; that is Sam's call at the gate.
+A5, A6 and A7 no longer apply (`nexus_rdr/242-research-30`). They were
+premises of the hardware-key approval layer, and this RDR no longer builds
+it. Records 26 to 28 carry Sam's acknowledgement of 2026-11-07 (ask
+`rdr242-assumptions`); the Layer 2 census still lists them as assumed. A1
+and A2 (records 22 and 23) are assumed and not acknowledged, so the census
+lists them too.
 
 #### API Verification
 
@@ -1123,95 +1126,84 @@ not marked acknowledged; that is Sam's call at the gate.
 | --- | --- | --- |
 | `LuaRuntime(register_eval, register_builtins, unpack_returned_tuples, attribute_filter, max_memory)` | `lupa` 2.8, `lupa.lua54` | Spike |
 | `load(src, name, "t", env)`, `string.dump`, `debug.sethook` count hook | Lua 5.4 bundled in `lupa` 2.8 | Spike |
-| SSHSIG verification of an `ssh-ed25519` signature | `cryptography` | Spike |
-| `ssh-keygen -Y sign`, `ssh-keygen -Y verify` | OpenSSH 10.3p1 | Spike |
-| SSHSIG for `sk-` keys (flags and counter) | OpenSSH `PROTOCOL.u2f` | Not verified (not read) |
-| Ed25519 and ECDSA P-256 verification | JDK | Docs Only (A7) |
+| `resource.setrlimit(RLIMIT_AS)` raises `ValueError`; `RLIMIT_CPU` ends a child with SIGXCPU | CPython 3.13, macOS | Spike (`nexus_rdr/242-research-32`) |
+| `subprocess` start with `-I`, an empty environment and `close_fds=True` | CPython 3.13, macOS | Spike (`nexus_rdr/242-research-32`) |
+| `RLIMIT_AS` on Linux; Job Object kill-on-close, time and memory limits | Linux; Win32 | Not verified (inferred, `nexus_rdr/242-research-33`) |
 | `db.resolve_title`, `db.list_entries`, `db.search` | nexus T2 store | Source Search |
 | `load_packaged_table` | `nexus.tables` | Source Search |
 
 ### Scope Verification
 
-The five gaps map to deliverables. Gap 1 to Technical Design 9 to 11 and
-Phase 1. Gap 2 to items 12 and 13 and Phase 3. Gap 3 to items 14 and 15,
-the worker process and kill timer of item 9, and Phase 1 Step 2. Gap 4 to the end of item 13 and the grant checks of items 6
-and 8: a write verb is its own entry in the verb table, granted only when
-declared and covered by Sam's signature, and version 1 ships none. Gap 5 to
-items 1 to 8 and Phase 2.
+The five gaps map to deliverables. Gap 1 to Technical Design 5, 7 and 8 and
+Phase 1. Gap 2 to items 9 and 10 and Phase 3. Gap 3 to items 11 and 12, the
+worker process and kill timer of item 6, and Phase 1 Steps 2 and 3. Gap 4
+to the end of item 10: a write verb is its own entry in the verb table,
+granted only when declared and covered by an approval, and version 1 ships
+none. Gap 5 to items 2 and 4 for version 1 (a run takes a library name,
+never source) and to item 1 for the rest, which is the approval document's.
 
 The RDR has no section headed Minimum Viable Validation. The end-to-end
-proof in scope is Phase 2 Step 4: Sam enrolls his key and approves one
-fixture script on the laptop, and it runs on macOS, chas and qwent. The
-close condition is Phase 4: RDR-240's first procedure, registered and
-approved, runs through `resolve` and `run_script`. Both are in scope, not
-deferred. Phase 2 Step 4 cannot run until the first Open Question is
-answered.
+proof in scope is Phase 4: RDR-240's first procedure, a reviewed file in a
+library root, runs through `run_script`. It is in scope, not deferred.
 
-Out of scope as written: write verbs, tuple-space verbs (the aura stage of
-nexus-mdbds), `coroutine`, and an MCP tool that registers. The worker
-process of Alternative 2 is in scope (`nexus_rdr/242-research-29`).
-RDR-240's edit to its own premise (a procedure
-file is what a registration reads) belongs to RDR-240, which cannot be
-accepted before this RDR is.
+Out of scope as written: approval and everything Technical Design 1 lists,
+write verbs, tuple-space verbs (the aura stage of nexus-mdbds), and
+`coroutine`. The worker process of Alternative 2 is in scope
+(`nexus_rdr/242-research-29`).
 
 ### Cross-Cutting Concerns
 
 - **Versioning**: `lupa>=2.8,<3`, raised deliberately. The calibration test
   and the escape suite fail on a bytecode layout change or a new global. The
-  checker version is in the signed payload and the check re-runs before
-  every run, so a stricter checker refuses an old approval. The bundled Lua
-  5.4 patch release is not recorded (A4).
+  check re-runs before every run, so a stricter checker refuses a script an
+  older one passed. The bundled Lua 5.4 patch release is not recorded (A4).
 - **Build tool compatibility**: `lupa` installs from wheels with no
   compiler on the platforms checked; native Windows is open (A1).
-  `cryptography` becomes a direct dependency.
 - **Licensing**: `lupa` 2.8's package metadata says "MIT style" (read
   2026-11-07). The license of the bundled Lua was not read for this
   response.
 - **Deployment model**: scripts run in a worker process started by the
-  client (the `nx` CLI or the MCP server), one per run and per trial; the
-  verbs run in the client (Technical Design 9 and 12). The registry needs a
-  Liquibase changeset, three tables and the `/v1/scripts` routes, so it
-  rides an engine-service release. The RDR does not say what `nx script` prints against an engine without those
-  routes; that is left to implementation.
+  client (the `nx` CLI or the MCP server), one per run; the verbs run in the
+  client (Technical Design 6 and 9). There is no engine change, so nothing
+  rides an engine-service release.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: nothing runs a script until RDR-240's
-  `run_procedure` calls `resolve` and `run_script`; neither the CLI nor MCP
-  runs one directly (item 16). The phases land the sandbox, the registry and
-  the verbs separately.
-- **Secret/credential lifecycle**: the approver key is generated in
-  hardware and never exists as a file, an environment variable or a token.
-  Enrollment is once, from the `root` scope, with proof of possession;
-  rotation is signed by the current key; a lost key is cleared by an
-  operator statement in the runbook (Technical Design 7). Which hardware is
-  the first Open Question; whether revocation needs the key is the second.
+  `run_procedure` calls `run_script`; neither the CLI nor MCP runs one
+  directly (item 13). The phases land the worker, the sandbox, the static
+  check and the verbs separately.
+- **Secret/credential lifecycle**: N/A in this RDR, which holds no
+  credential. The worker starts with an empty environment, so no tenant
+  token reaches it (item 6). The approval credential is the approval
+  document's (item 1).
 - **Memory management**: one `LuaRuntime` per run, in its own worker
-  process, discarded with it; a 64 MB `max_memory` cap, with an OS memory
-  limit on the worker where the OS enforces one (not `RLIMIT_AS` on macOS); a result cap of 1 MB of JSON and 32 levels,
+  process, discarded with it; a 64 MB `max_memory` cap, with a 1 GiB OS
+  memory limit on the worker on Linux and Windows and none on macOS, where
+  `setrlimit(RLIMIT_AS)` raises (`nexus_rdr/242-research-32`); at most 4
+  workers per client process; a result cap of 1 MB of JSON and 32 levels,
   checked while the host walks the value. The 200 MB string returned with no
   cap is why the result cap is the host's.
-- **Tenancy**: all three tables are scoped to the tenant; the registrant
-  comes from the authenticated principal; a tenant holds at most 100 pending
-  versions.
-- **Day 2 operations**: the three tables have no update or delete route, so
-  rows accumulate; the RDR states no retention for old versions or events.
-  The one manual operation is the operator reset of a lost key.
+- **Tenancy**: the verbs read T2 through the caller's own client, so a
+  script reads only what its caller's tenant can (inferred, not read); this
+  RDR adds no tenant-scoped state.
+- **Day 2 operations**: none. The runtime stores nothing, and a worker
+  leaves nothing behind.
 
 ### Proportionality
 
-The RDR is about 1,150 lines for two layers: a sandbox and a registry with
-signed approval. The registry exists because of Sam's direction of
-2026-11-03, the sandbox because of Gaps 1 and 3. Research Findings is the
-longest part because it records 21 probe findings; each one forced a
-design item or is cited by one. Version 1 is built for one consumer: seven
-read verbs, no write, no `coroutine`. The worker process adds a process
-start per run and a round trip per verb call, both unmeasured; it is there
-because no in-process measure holds wall time (`nexus_rdr/242-research-29`).
-The largest cost is engine work (a
-changeset, three tables, routes and SSHSIG in Java); Alternative 7 rejects
-the cheaper store for a stated reason. Two sections could be trimmed before
-locking: the Investigation list repeats questions the Key Discoveries
-answer, and Alternative 4 is a pointer to RDR-240. Neither is trimmed here,
-since this preparation changes no design text.
+The RDR is about 1,240 lines for one layer: a sandbox in a worker process,
+with a static check and seven read verbs. Approval, the other layer of the
+2026-11-03 rewrite, moved out on 2026-11-07 (Technical Design 1). The
+sandbox exists because of Gaps 1 and 3. Research Findings is the longest
+part because it records 23 probe findings; each one forced a design item, is
+cited by one, or is kept as a record for the approval document. Version 1 is
+built for one consumer: seven read verbs, no write, no `coroutine`. The
+worker process adds a process start per run and a round trip per verb call,
+measured against a pass line in Phase 1 Step 2; it is there because no
+in-process measure holds wall time (`nexus_rdr/242-research-29`). Two
+sections could be trimmed before locking: the Investigation list repeats
+questions the Key Discoveries answer, and Alternative 4 is a pointer to
+RDR-240. Neither is trimmed in this fix round, which changes only what the
+scope change and the round 2 findings named.
 
 ## References
 
@@ -1219,8 +1211,6 @@ since this preparation changes no design text.
 - `docs/rdr/rdr-239-tuple-space-dictionary.md`
 - `docs/rdr/rdr-240-procedures-as-sandboxed-lua-scripts.md`
 - `scripts/spikes/rdr242-lua-sandbox/` (probes, corpus and outputs)
-- OpenSSH `PROTOCOL.sshsig` (the signature format; verified against
-  `ssh-keygen` 10.3p1) and `PROTOCOL.u2f` (the FIDO2 variant; not read)
 
 ## Revision History
 
@@ -1241,4 +1231,18 @@ since this preparation changes no design text.
   responses written, plan steps re-headed to the template grammar (no design
   change).
 - 2026-11-07: Gate round 1 — BLOCKED (1 Critical, 7 Significant, 1 ship-blocker(s)); commit `d2ccb784e`; critique `nexus_rdr/242-gate-critique-2026-11-07-r1`.
+- 2026-11-07: gate round 1 fix for C1 (commit `a2ac4a885`, Sam's choice of
+  the worker process): every run and every trial in a worker process with OS
+  memory and CPU limits and a kill timer; Alternative 2 chosen.
 - 2026-11-07: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `a2ac4a885`; critique `nexus_rdr/242-gate-critique-2026-11-07-r2`.
+- 2026-11-07: post-gate fix round, Sam's choice "fix round, then accept".
+  Scope change at Sam's direction (`nexus_rdr/242-research-30`): the
+  hardware-SSH-key approval layer, the registry, the trial run and the
+  `nx script` verbs withdrawn and marked replaced by a device-held passkey
+  design in its own document (Technical Design 1); version 1 runs only
+  reviewed library files (Technical Design 2); A5 to A7 no longer apply;
+  Phase 2 replaced; retitled to the 2026-11-02 title. Round 2's S1 to S4
+  fixed: the worker contract (Technical Design 6), wall time across verb
+  calls, the 60 s default against RDR-240's A2, the Phase 1 cost
+  measurement, Phase 1 Step 1 on a bare child process, and the static
+  check in the worker. Technical Design renumbered 1 to 13.
