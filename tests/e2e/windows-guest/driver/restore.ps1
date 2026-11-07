@@ -81,11 +81,19 @@ Restore-VMSnapshot -VMName $vm -Name $cp -Confirm:$false -ErrorAction Stop
 "restored to $cp at $((Get-Date).ToUniversalTime().ToString('o'))"
 # The restored configuration (no NIC in the checkpoint) can become visible late: sample it for 15 s first.
 for ($i = 0; $i -lt 5; $i++) { "nic count ${i}x3s after the restore = $(Nics)"; Start-Sleep 3 }
-EnsureNic 'after the restore, VM Off'
+# nexus-y3y8d: with quieting on, the guest boots OFFLINE. The quiet block below runs over PowerShell Direct,
+# which needs no network, and the adapter connects to the Default Switch only after it applied: in the
+# 2026-11-07 attribution 213 MiB (Edge's self-update alone 78 MiB) left in the 40 s before the block ran.
+$offline = $Cache -eq 'yes'
+if ($offline) {
+    if ((Nics) -eq 0) { Add-VMNetworkAdapter -VMName $vm -ErrorAction Stop }
+    Disconnect-VMNetworkAdapter -VMName $vm -ErrorAction Stop
+    "nic count $(Nics), disconnected until the quiet block applies"
+} else { EnsureNic 'after the restore, VM Off' }
 Start-VM -Name $vm -ErrorAction Stop
 "started at $((Get-Date).ToUniversalTime().ToString('o'))"
 Start-Sleep 5
-EnsureNic 'after Start-VM'
+if (-not $offline) { EnsureNic 'after Start-VM' }
 # nexus-bpzt7 (Sam, 2026-10-15): every restore is a fresh Windows that starts its own update downloads, on a
 # host shared with other work. Unless -Cache no, the first time the guest answers over PowerShell Direct:
 # stop and disable Windows Update, its orchestrator and Delivery Optimization, set the policies that keep
@@ -108,17 +116,25 @@ $quietBlock = {
         $start = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$n" -ErrorAction SilentlyContinue).Start
         "quiet-updates: $n " + (Get-Service -Name $n).Status + " start=$start"
     }
+    # Edge's own updater (EdgeUpdate, not Windows Update) fetched 78 MiB on 2026-11-07. Edge stable only:
+    # WebView2, which Claude Code's window uses, keeps its updates.
+    New-Item -Force 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' | Out-Null
+    Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Update{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}' 0 -Type DWord
     try { Set-MpPreference -SignatureScheduleDay 8 -SignatureUpdateInterval 0 -SignatureDisableUpdateOnStartupWithoutEngine $true -ErrorAction Stop; 'quiet-updates: Defender signature updates off' }
     catch { "quiet-updates: Defender signature updates not changed: $($_.Exception.Message)" }
     'quiet-updates: applied at ' + (Get-Date).ToUniversalTime().ToString('o')
 }
 $quieted = $Cache -ne 'yes'
 if ($quieted) { "quiet-updates: not with -Cache $Cache" }
-$ok = $false
+$ok = $false; $connected = $false
 for ($i = 0; $i -lt 60; $i++) {
     if ($i -gt 0 -and ($i % 6) -eq 0 -and (Nics) -eq 0) { EnsureNic "in the network wait, iteration $i" }
     try {
         if (-not $quieted) { Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop $quietBlock; $quieted = $true }
+        if ($offline -and -not $connected) {
+            Connect-VMNetworkAdapter -VMName $vm -SwitchName 'Default Switch' -ErrorAction Stop; $connected = $true
+            "nic connected to the Default Switch after the quiet block, at $((Get-Date).ToUniversalTime().ToString('o'))"
+        }
         # HEAD only: https://pypi.org/simple/ is the whole package index (47 MB on 2026-10-15), and a GET that
         # timed out was fetched again every 5 s; one slow boot spent about 0.9 GB here (nexus-bpzt7).
         $r = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop { try { (Invoke-WebRequest https://pypi.org/simple/ -Method Head -UseBasicParsing -TimeoutSec 10).StatusCode } catch { 0 } }
