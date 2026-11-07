@@ -277,8 +277,7 @@ class TestSnMarketplace:
 
             if client_version_of(source.get("ref", "")) is None:
                 offenders.append(
-                    f"sn source.ref {source.get('ref')!r} is neither v<X.Y.Z> nor "
-                    "plugin-v<X.Y.Z>-<n> (RDR-197 invariant R)"
+                    f"sn source.ref {source.get('ref')!r} is not the client form v<X.Y.Z>"
                 )
         plugin_json = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
         if "version" not in sn_entry:

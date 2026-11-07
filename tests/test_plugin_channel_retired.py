@@ -63,14 +63,38 @@ EXEMPT_FILES = (
     # Asserts the skill's fast-lane section carries none of them, so it must
     # name them.
     "tests/scripts/test_release_skill_fast_lane.py",
-    # The drift test's release window (condition d) and its channel helpers
-    # still read the cut BRANCH NAME ``plugin-release/{version}-{n}``. Nothing
-    # produces such a branch any more, so the window never opens; deleting that
-    # machinery is its own change (the RDR-197 invariants are pinned by these
-    # three files), and only that one spelling is exempt here.
-    "scripts/plugin_channel.py",
-    "tests/test_plugin_channel.py",
-    "tests/test_plugin_release_drift_ledger.py",
+)
+
+#: Symbols pruned from the anchored-tag machinery (nexus-rbmja.9): none may
+#: appear in scripts/plugin_channel.py or in any tracked file outside the
+#: record locations above. ``assert_tag_visibility``, ``TagVisibilityError``,
+#: ``GitCommandError`` and ``client_version_of`` are NOT here: the eligibility
+#: script still uses them. The Phase 2 guard went with the anchored code
+#: (``phase2_in_play`` was False at the last client tag, v7.97.0, and RDR-228
+#: Phase 2 shipped in v7.81.0 and every client tag since).
+PRUNED_SYMBOLS = (
+    "format_plugin_tag",
+    "parse_plugin_tag",
+    "_PLUGIN_TAG_RE",
+    "next_plugin_tag_number",
+    "is_cut_branch_for",
+    "current_branch_name",
+    "cut_head_sha",
+    "wheel_surface_offenders",
+    "NEVER_DELIVERED_PREFIXES",
+    "_head_is_plugin_tag",
+    "INVARIANT R",
+    "INVARIANT W",
+    "Sunset trigger",
+    "PHASE2_GUARDED",
+    "PHASE2_SAFE_ALONE",
+    "PHASE2_MARKER",
+    "PHASE1_LAUNCHER",
+    "PHASE1_LAUNCH_FILES",
+    "phase2_in_play",
+    "phase2_guarded_paths",
+    "phase2_deferral_check",
+    "_phase2_armed_by",
 )
 
 MIN_SCANNED = 3000
@@ -81,7 +105,9 @@ def is_exempt(rel: str) -> bool:
 
 
 def scan(
-    files: Iterable[str], read: Callable[[str], str]
+    files: Iterable[str],
+    read: Callable[[str], str],
+    names: tuple[str, ...] = RETIRED_NAMES,
 ) -> tuple[int, list[str]]:
     """(files scanned, offenders). *read* returns a file's text and may raise
     ``OSError``; an exempt file is neither scanned nor counted."""
@@ -96,7 +122,7 @@ def scan(
             offenders.append(f"{rel}: unreadable ({exc})")
             continue
         scanned += 1
-        offenders += [f"{rel}: {name}" for name in RETIRED_NAMES if name in text]
+        offenders += [f"{rel}: {name}" for name in names if name in text]
     return scanned, offenders
 
 
@@ -121,6 +147,30 @@ def test_no_tracked_file_names_a_retired_script() -> None:
     scanned, offenders = scan(_tracked(), _read)
     assert scanned >= MIN_SCANNED, f"scan covered {scanned} files, expected at least {MIN_SCANNED}"
     assert not offenders, "retired plugin-channel names still referenced:\n" + "\n".join(offenders)
+
+
+def test_no_tracked_file_names_a_pruned_symbol() -> None:
+    """The anchored-tag helpers and the Phase 2 guard are gone from every
+    tracked file, scripts/plugin_channel.py included (nexus-rbmja.9)."""
+    scanned, offenders = scan(_tracked(), _read, PRUNED_SYMBOLS)
+    assert scanned >= MIN_SCANNED, f"scan covered {scanned} files, expected at least {MIN_SCANNED}"
+    assert not offenders, "pruned symbols still referenced:\n" + "\n".join(offenders)
+
+
+def test_plugin_channel_is_scanned_for_the_pruned_symbols() -> None:
+    """The scan above must reach the module itself: it is not an exempt file."""
+    assert not is_exempt("scripts/plugin_channel.py")
+    assert (REPO / "scripts/plugin_channel.py").is_file()
+
+
+@pytest.mark.parametrize("name", PRUNED_SYMBOLS)
+def test_scan_reports_each_pruned_symbol_in_a_planted_file(name: str) -> None:
+    """Mutation: drop a name from PRUNED_SYMBOLS, or ignore the names argument."""
+    scanned, offenders = scan(
+        ["scripts/x.py"], {"scripts/x.py": f"call {name}()"}.__getitem__, PRUNED_SYMBOLS
+    )
+    assert scanned == 1
+    assert offenders == [f"scripts/x.py: {name}"]
 
 
 # ---- the scan itself: positive controls ---------------------------------------

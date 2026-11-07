@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
 import re
-import subprocess
 import tomllib
 from pathlib import Path
 
@@ -9,12 +8,7 @@ import yaml
 import pytest
 from packaging.requirements import Requirement
 
-from plugin_channel import (
-    assert_tag_visibility,
-    cut_head_sha,
-    parse_plugin_tag,
-    wheel_surface_offenders,
-)
+from plugin_channel import client_version_of
 
 pytestmark = pytest.mark.lint
 
@@ -1201,11 +1195,8 @@ class TestMarketplaceVersion:
 
     def test_marketplace_source_ref_matches_pyproject(self) -> None:
         """nexus-mkj6u, extended by RDR-197 P1b (nexus-a2wmi.3): each
-        plugin's source.ref is judged under invariant R, per plugin --
-        the client form 'v{pv}', or the anchored form
-        'plugin-v{pv}-{n}' with a clean tag-anchored wheel-surface proof
-        (scripts/plugin_channel.py's docstring owns invariant R and the
-        anchoring rule; this test cites them, it does not restate them).
+        plugin's source.ref is judged on its own, per plugin --
+        the client form 'v{pv}' (the anchored form is retired).
         Pinning the plugin source to a tag decouples main commits from
         marketplace publication; CI enforces this per-plugin parity so a
         partial or malformed bump can't ship.
@@ -1221,9 +1212,7 @@ class TestMarketplaceVersion:
                 f"marketplace.json '{plugin['name']}' source.source must be "
                 f"'git-subdir' for tag-pinned releases, got {source.get('source')!r}"
             )
-            _assert_ref_valid_for_plugin(
-                plugin["name"], source.get("ref", ""), pv, cwd=REPO_ROOT
-            )
+            _assert_ref_valid_for_plugin(plugin["name"], source.get("ref", ""), pv)
 
     def test_plugin_source_path_exists_in_repo(self) -> None:
         """nexus-mkj6u: marketplace.json plugins[].source.path must point
@@ -1429,215 +1418,62 @@ class TestMarketplaceVersion:
         assert m.group(1) == pv, f"uv.lock {m.group(1)!r} != pyproject.toml {pv!r}"
 
 
-# ── RDR-197 P1b (nexus-a2wmi.3): per-plugin source.ref parity ───────────────
+# ── per-plugin source.ref parity (RDR-197 P1b, nexus-a2wmi.3; the anchored
+# form pruned by nexus-rbmja.9) ────────────────────────────────────────────
 #
-# Invariant R and the anchoring rule live in scripts/plugin_channel.py's
-# module docstring; this section cites them, it does not restate them.
-# The channel is stateless: no counter file is read or written anywhere
-# below (RDR amended by 874bd681c).
+# Each plugin's ref is judged on its own, never as a quantifier across
+# plugins. Under the plugin-only fast lane the only accepted shape is the
+# client tag ``v{pyproject version}``; the anchored ``plugin-vX.Y.Z-n`` form
+# is retired and nothing produces it.
 
 
-def _resolve_ref_or_head(ref: str, *, cwd: Path) -> str:
-    """The proof's target: *ref* itself when it resolves as a tag, else the
-    cut PR's head commit before the tag exists (``plugin_channel.cut_head_sha``:
-    the pull_request payload's head sha in CI — HEAD there is the synthetic
-    merge ref — and HEAD on the cut branch). Per the ANCHORING rule: never
-    a merge base, never a branch that tracks ongoing development.
-    """
-    probe = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-        cwd=cwd, capture_output=True, text=True,
-    )
-    if probe.returncode == 0:
-        return ref
-    return cut_head_sha(cwd=cwd)
-
-
-def _assert_ref_valid_for_plugin(
-    plugin_name: str, ref: str, pv: str, *, cwd: Path
-) -> None:
-    """Invariant R, judged for ONE plugin's ref alone -- never a quantifier
-    across plugins. Accepts the client form unchanged, or the anchored
-    form when its shape parses, its version matches *pv*, and the
-    tag-anchored wheel-surface proof (base client tag to the plugin's
-    anchored tag when it resolves, else HEAD) is clean.
-    """
+def _assert_ref_valid_for_plugin(plugin_name: str, ref: str, pv: str) -> None:
+    """One plugin's ref must be the client tag for pyproject version *pv*."""
     client_form = f"v{pv}"
     if ref == client_form:
         return
-    parsed = parse_plugin_tag(ref)
-    assert parsed is not None, (
-        f"marketplace.json '{plugin_name}' source.ref {ref!r} matches "
-        f"neither accepted shape: the client form {client_form!r}, nor "
-        f"the anchored form 'plugin-v{pv}-<n>' (n >= 1, no leading zero)"
+    version = client_version_of(ref)
+    assert version is not None, (
+        f"marketplace.json '{plugin_name}' source.ref {ref!r} is not the "
+        f"client form {client_form!r} (the anchored plugin-v<X.Y.Z>-<n> form "
+        f"is retired)"
     )
-    version, _n = parsed
     assert version == pv, (
-        f"marketplace.json '{plugin_name}' source.ref {ref!r} anchors "
+        f"marketplace.json '{plugin_name}' source.ref {ref!r} names "
         f"version {version!r}, which != pyproject.toml {pv!r}"
     )
-    # Blind-checkout sentinel BEFORE the proof (review finding, a2wmi.6):
-    # in a checkout that never fetched the base client tag the diff below
-    # would fail as an opaque GitCommandError; the sentinel names the real
-    # cause and the remedy. Today ci.yml's lint job checks out with
-    # fetch-depth 0, but that is that workflow's choice, not a guarantee.
-    assert_tag_visibility(pv, cwd=cwd)
-    target = _resolve_ref_or_head(ref, cwd=cwd)
-    offenders = wheel_surface_offenders(client_form, target, cwd=cwd)
-    assert offenders == [], (
-        f"marketplace.json '{plugin_name}' source.ref {ref!r} touches "
-        f"wheel-surface paths outside the channel allowlist: {offenders}"
-    )
-
-
-def _channel_git(*args: str, cwd: Path) -> None:
-    subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
-    )
-
-
-def _channel_repo(tmp_path: Path, version: str) -> Path:
-    """A tmp git repo tagged ``v{version}`` at its seed commit -- the base
-    client tag every anchored-form proof diffs against. Mirrors the
-    fixture style in tests/test_plugin_channel.py's ``_make_repo``.
-    """
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _channel_git("init", "-q", "-b", "main", cwd=repo)
-    _channel_git("config", "user.email", "test@test.invalid", cwd=repo)
-    _channel_git("config", "user.name", "test", cwd=repo)
-    (repo / "seed").write_text("seed\n", encoding="utf-8")
-    _channel_git("add", "seed", cwd=repo)
-    _channel_git("commit", "-q", "-m", "seed", cwd=repo)
-    _channel_git("tag", f"v{version}", cwd=repo)
-    return repo
-
-
-def _channel_cut(repo: Path, tag: str, paths: list[str]) -> None:
-    """Commit content at *paths* and tag the result *tag*: a clean or
-    dirty anchored cut depending on whether *paths* sit inside the channel
-    allowlist (scripts/plugin_channel.py's ALLOWED_PREFIXES/DENIED_PREFIXES).
-    """
-    for rel in paths:
-        target = repo / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("cut content\n", encoding="utf-8")
-        _channel_git("add", rel, cwd=repo)
-    _channel_git("commit", "-q", "-m", "cut", cwd=repo)
-    _channel_git("tag", tag, cwd=repo)
 
 
 _PARITY_VERSION = "9.9.9"
 
 
 class TestSourceRefPerPluginParity:
-    """RDR-197 P1b (nexus-a2wmi.3), steps 7-12: the mixed-state truth
-    table's parity row (bead .4's table), covered against synthetic
-    marketplace refs and tmp git repos rather than the real (today
-    all-client-form) marketplace.json.
-    """
+    """The parity row of the ref table, against synthetic refs rather than
+    the real marketplace.json."""
 
     VERSION = _PARITY_VERSION
 
-    def test_mixed_state_anchored_conexus_client_sn_passes(
-        self, tmp_path: Path
-    ) -> None:
-        """Step 7 -- S2/S3: conexus anchored plugin-v{pv}-1 with a clean
-        proof, sn client form v{pv}. This is the cut-PR state and the
-        post-cut develop state; a rule written as a quantifier across all
-        refs (e.g. "every ref must share one shape") rejects this state,
-        which is exactly why invariant R is judged per plugin.
-        """
-        repo = _channel_repo(tmp_path, self.VERSION)
-        _channel_cut(repo, f"plugin-v{self.VERSION}-1", ["conexus/skills/ok.md"])
-        _assert_ref_valid_for_plugin(
-            "conexus", f"plugin-v{self.VERSION}-1", self.VERSION, cwd=repo
-        )
-        _assert_ref_valid_for_plugin("sn", f"v{self.VERSION}", self.VERSION, cwd=repo)
-
-    def test_both_anchored_independent_sequence_numbers_pass(
-        self, tmp_path: Path
-    ) -> None:
-        """Step 8: two plugins anchored at independent sequence numbers --
-        the sixth truth-table cell bead .4 hands off to this bead. Nothing
-        cross-checks one plugin's n against another's, so conexus can hold
-        the higher number while sn holds the lower.
-        """
-        repo = _channel_repo(tmp_path, self.VERSION)
-        _channel_cut(repo, f"plugin-v{self.VERSION}-1", ["conexus/skills/a.md"])
-        _channel_cut(repo, f"plugin-v{self.VERSION}-2", ["sn/commands/b.md"])
-        _assert_ref_valid_for_plugin(
-            "conexus", f"plugin-v{self.VERSION}-2", self.VERSION, cwd=repo
-        )
-        _assert_ref_valid_for_plugin(
-            "sn", f"plugin-v{self.VERSION}-1", self.VERSION, cwd=repo
-        )
+    def test_the_client_form_passes_for_each_plugin(self) -> None:
+        _assert_ref_valid_for_plugin("conexus", f"v{self.VERSION}", self.VERSION)
+        _assert_ref_valid_for_plugin("sn", f"v{self.VERSION}", self.VERSION)
 
     @pytest.mark.parametrize(
-        "ref", [f"plugin-v{_PARITY_VERSION}-0", f"plugin-v{_PARITY_VERSION}-01"]
+        "ref",
+        [
+            f"plugin-v{_PARITY_VERSION}-1",  # the retired anchored form
+            f"plugin-v{_PARITY_VERSION}-0",
+            f"v{_PARITY_VERSION}\n",
+            _PARITY_VERSION,
+            "",
+        ],
     )
-    def test_zero_and_zero_padded_sequence_numbers_are_rejected(
-        self, tmp_path: Path, ref: str
-    ) -> None:
-        """Step 9: n=0 and a leading-zero n are shape failures -- rejected
-        by parse_plugin_tag's own ``[1-9]\\d*`` before any git call."""
+    def test_any_other_shape_is_rejected(self, ref: str) -> None:
         with pytest.raises(AssertionError):
-            _assert_ref_valid_for_plugin("conexus", ref, self.VERSION, cwd=tmp_path)
+            _assert_ref_valid_for_plugin("conexus", ref, self.VERSION)
 
-    def test_anchored_ref_for_a_different_version_is_rejected(
-        self, tmp_path: Path
-    ) -> None:
-        """Step 10: the anchored form parses but names a version other
-        than pyproject's -- rejected before any proof is attempted."""
-        with pytest.raises(AssertionError):
-            _assert_ref_valid_for_plugin(
-                "conexus", "plugin-v1.2.3-1", self.VERSION, cwd=tmp_path
-            )
-
-    def test_anchored_ref_touching_src_nexus_is_rejected(
-        self, tmp_path: Path
-    ) -> None:
-        """Step 11: shape and version both pass, but the range from the
-        base client tag to the anchored tag touches src/nexus/ -- off-
-        allowlist wheel content, so the proof fails."""
-        repo = _channel_repo(tmp_path, self.VERSION)
-        _channel_cut(repo, f"plugin-v{self.VERSION}-1", ["src/nexus/cli.py"])
-        with pytest.raises(AssertionError):
-            _assert_ref_valid_for_plugin(
-                "conexus", f"plugin-v{self.VERSION}-1", self.VERSION, cwd=repo
-            )
-
-    def test_all_client_form_state_passes(self, tmp_path: Path) -> None:
-        """Step 12 -- S1/S4: every plugin at the client form v{pv}, the
-        pre-cut and post-client-release states. No git call happens: the
-        client-form branch returns before any tag lookup."""
-        _assert_ref_valid_for_plugin(
-            "conexus", f"v{self.VERSION}", self.VERSION, cwd=tmp_path
-        )
-        _assert_ref_valid_for_plugin("sn", f"v{self.VERSION}", self.VERSION, cwd=tmp_path)
-
-    def test_anchored_ref_in_a_blind_checkout_names_the_cause(
-        self, tmp_path: Path
-    ) -> None:
-        """R1 review finding (a2wmi.6): a checkout that never fetched the
-        base client tag must fail as TagVisibilityError naming the fetch
-        remedy, not as an opaque diff failure. Dormant until a real cut
-        PR meets such a checkout, which is exactly when an opaque error
-        would cost the most."""
-        from plugin_channel import TagVisibilityError
-
-        repo = tmp_path / "blind"
-        repo.mkdir()
-        _channel_git("init", "-q", "-b", "main", cwd=repo)
-        _channel_git("config", "user.email", "test@test.invalid", cwd=repo)
-        _channel_git("config", "user.name", "test", cwd=repo)
-        (repo / "seed").write_text("seed\n", encoding="utf-8")
-        _channel_git("add", "seed", cwd=repo)
-        _channel_git("commit", "-q", "-m", "seed", cwd=repo)
-        with pytest.raises(TagVisibilityError, match="blind to tags"):
-            _assert_ref_valid_for_plugin(
-                "conexus", f"plugin-v{self.VERSION}-1", self.VERSION, cwd=repo
-            )
+    def test_a_client_ref_for_a_different_version_is_rejected(self) -> None:
+        with pytest.raises(AssertionError, match="which != pyproject.toml"):
+            _assert_ref_valid_for_plugin("conexus", "v1.2.3", self.VERSION)
 
 
 #: The release boundary at which ``PINNED_SERVICE_TAG`` must become non-None.

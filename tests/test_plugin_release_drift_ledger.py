@@ -266,8 +266,7 @@ def _require_or_skip() -> None:
         # an inconclusive probe fails closed under the require flag.
         # Probe the refs ACTUALLY PINNED, per plugin — never a
         # reconstructed "v" + pyproject string, which checks the wrong
-        # ref the moment any plugin pins the anchored form (site 3,
-        # nexus-a2wmi.4).
+        # ref the moment a plugin pins an older client tag.
         confirmations = {
             _remote_confirms_tag_absent(ref)
             for ref in set(_pinned_refs().values())
@@ -357,71 +356,35 @@ def test_every_marketplace_plugin_has_a_surface() -> None:
 
 
 def plugin_in_release_window(plugin: str, ref: str) -> bool:
-    """Per-plugin release window (invariant W — nexus-a2wmi.4, RDR-197).
+    """Per-plugin release window, judged for ONE plugin's pinned ref alone.
 
-    Invariant W's four conditions and the reasoning behind them live in
-    scripts/plugin_channel.py's module docstring; this predicate
-    implements them per plugin, never quantified across refs — on a cut
-    PR one plugin is anchored with its tag not yet cut while the other
-    still pins the client tag, and a quantifier is satisfied by neither
-    branch.
+    The window is "the tag this branch is about to cut does not exist yet":
+    the ref is ``v<pyproject version>`` and does not resolve. A ref that
+    resolves is never a window (nothing is pending), and any other
+    unresolvable ref is not one either, so a missing tag stays RED. The
+    anchored ``plugin-vX.Y.Z-n`` form is retired (nexus-rbmja.8, .9) and
+    reads as not-a-window like any other shape.
 
-    CLIENT form (``v<pyproject version>``): the window is "tag not yet
-    cut" — the pre-existing whole-checkout contract, now judged per
-    plugin. Its known dangling-tag hole is accepted (scope note, bead
-    .1); the closer applies to the anchored path only.
-
-    ANCHORED form: all four conditions of invariant W — shape valid for
-    the CURRENT version (a); n equal to next_plugin_tag_number, which
-    establishes tag visibility first and raises TagVisibilityError on a
-    blind checkout (b); upstream-confirmed tag absence, fail-closed on
-    an inconclusive probe (c); and the checkout being the cut branch
-    itself (d). A plugin whose tag resolves is never in a window.
+    Its known dangling-tag hole is accepted: a cut that merges and whose
+    tag is never pushed keeps the ledger-EMPTY contract in force until the
+    next client release.
     """
-    from plugin_channel import (
-        is_cut_branch_for,
-        next_plugin_tag_number,
-        parse_plugin_tag,
-    )
-
-    version = _pyproject_version()
     if _git("rev-parse", "--verify", f"{ref}^{{commit}}").returncode == 0:
         return False  # the tag exists: nothing is pending, no window
-    if ref == f"v{version}":
-        return True  # client window: this branch cuts that very tag
-    parsed = parse_plugin_tag(ref)
-    if parsed is None or parsed[0] != version:  # condition (a)
-        return False
-    _, n = parsed
-    if n != next_plugin_tag_number(version, cwd=REPO_ROOT):  # condition (b)
-        return False
-    if _remote_confirms_tag_absent(ref) is not True:  # condition (c), fail-closed
-        return False
-    return is_cut_branch_for(version, n, cwd=REPO_ROOT)  # condition (d)
+    return ref == f"v{_pyproject_version()}"
 
 
 def _in_release_window() -> bool:
     """Whole-checkout composite, ONLY for _require_or_skip's tagless path.
 
     The tagless branch asks "is this tagless checkout explainable as a
-    release window" — a checkout-level question, so it composes the
-    per-plugin predicate over every pin. A TagVisibilityError from an
-    anchored pin in a fully tagless checkout reads as "not a window"
-    here; _require_or_skip then fails loudly under the require flag and
-    skips locally, which is this file's documented taglessness contract.
-    Every other check asks plugin_in_release_window directly, where the
-    sentinel's raise PROPAGATES (S6: a blind checkout must never produce
-    a green channel verdict).
+    release window" -- a checkout-level question, so it composes the
+    per-plugin predicate over every pin.
     """
-    from plugin_channel import TagVisibilityError
-
-    try:
-        return all(
-            plugin_in_release_window(name, ref)
-            for name, ref in _pinned_refs().items()
-        )
-    except TagVisibilityError:
-        return False
+    return all(
+        plugin_in_release_window(name, ref)
+        for name, ref in _pinned_refs().items()
+    )
 
 
 def test_every_pinned_ref_is_a_real_tag() -> None:
@@ -447,38 +410,6 @@ def _declared_paths_for(plugin: str) -> set[str]:
         for path in _declared_paths()
         if any(path.startswith(prefix) for prefix in SURFACE_BY_PLUGIN[plugin])
     }
-
-
-def _pending_declarations(
-    declared: set[str], deferred: set[str], *, at_pinned_plugin_tag: bool
-) -> set[str]:
-    """The declarations the stale-entry check holds to "must still differ".
-
-    At the pinned plugin tag's own checkout (the tag workflow's run) the
-    cut held deferred paths back to the previous tree's content, so they
-    cannot differ from the tag that held them back; they are pending, not
-    shipped (nexus-sv2wx.13). Everywhere else every declaration counts.
-    """
-    return declared - deferred if at_pinned_plugin_tag else set(declared)
-
-
-def _head_is_plugin_tag(ref: str) -> bool:
-    """True when *ref* is an anchored plugin tag and HEAD is its commit.
-
-    A client tag does not qualify: a client release ships deferred entries,
-    so at its checkout they are stale like any other.
-    """
-    from plugin_channel import parse_plugin_tag
-
-    if parse_plugin_tag(ref) is None:
-        return False
-    head = _git("rev-parse", "--verify", "HEAD^{commit}")
-    tag = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
-    return (
-        head.returncode == 0
-        and tag.returncode == 0
-        and head.stdout.strip() == tag.stdout.strip()
-    )
 
 
 def _deferred_declared_paths() -> set[str]:
@@ -560,10 +491,7 @@ def test_the_ledger_has_no_stale_entries() -> None:
                 f"test_every_drifted_file_is_declared_in_the_ledger)."
             )
             continue
-        declared |= _pending_declarations(
-            _declared_paths_for(plugin), deferred,
-            at_pinned_plugin_tag=_head_is_plugin_tag(ref),
-        )
+        declared |= _declared_paths_for(plugin)
         drifted |= set(_drifted_paths(plugin, ref))
 
     stale = sorted(declared - drifted)
@@ -574,292 +502,6 @@ def test_the_ledger_has_no_stale_entries() -> None:
         + "\n\nRemove them. A ledger of already-shipped changes is "
         "indistinguishable from a ledger of pending ones."
     )
-
-
-def test_deferred_entries_are_pending_only_at_the_pinned_plugin_tag() -> None:
-    """The tag workflow's checkout IS the pin, so a held-back deferred entry
-    cannot differ from it; anywhere else a deferred entry with no drift is
-    stale like any other (nexus-sv2wx.13, found by the cut rehearsal)."""
-    declared = {"conexus/a.py", "conexus/b.py"}
-    deferred = {"conexus/b.py"}
-    assert _pending_declarations(
-        declared, deferred, at_pinned_plugin_tag=True
-    ) == {"conexus/a.py"}
-    assert _pending_declarations(
-        declared, deferred, at_pinned_plugin_tag=False
-    ) == declared
-
-
-def test_a_client_tag_checkout_is_not_a_plugin_tag_checkout() -> None:
-    """A client release ships deferred entries, so its checkout keeps them
-    under the stale check. Judged before HEAD is even read."""
-    assert _head_is_plugin_tag("v7.78.0") is False
-    assert _head_is_plugin_tag("plugin-v9.9.9-1") is False  # no such tag
-
-
-def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them() -> None:
-    """RDR-228 Phase 2's plugin parts never ride a plugin-only cut (nexus-sv2wx.13).
-
-    The check `plugin_ledger.phase2_deferral_check` implements,
-    run here against the tree being landed, so a Phase 2 bead that files its
-    entry under "Awaiting" fails on develop the day it lands, not at cut
-    time. It has nothing to check while `conexus/launch/nx_setup.py` is not
-    in the tree or the pinned tag already carries it; the fixture tests
-    (TestPhase2DeferralGuard) prove the refusal.
-    """
-    _require_or_skip()
-    from plugin_ledger import phase2_deferral_check
-
-    ref = _pinned_refs()["conexus"]
-    if plugin_in_release_window("conexus", ref):
-        return  # the pin IS this branch's content; deferral is judged by the cut
-    phase2_deferral_check(REPO_ROOT, ref, "HEAD", _ledger_text())
-
-
-def _covers(entries: object, path: str) -> bool:
-    """*path* is an entry, or under an entry that ends in ``/``."""
-    return any(
-        path == entry or (entry.endswith("/") and path.startswith(entry))
-        for entry in entries  # type: ignore[attr-defined]
-    )
-
-
-def _uncovered(changed: list[str], guarded: list[str], safe: object) -> list[str]:
-    """Changed paths the Phase 2 guard neither holds nor lists as safe alone."""
-    return [p for p in changed if not _covers(guarded, p) and not _covers(safe, p)]
-
-
-#: The prefixes of PHASE2_SAFE_ALONE that are text the model reads, and what the
-#: scan under them looks for (case-insensitive, any file, changed or not).
-_TEXT_PREFIXES = ("conexus/skills/", "conexus/agents/", "conexus/resources/")
-_PHASE2_NAMES = (
-    r"nx_setup|nx_launch|nx_standin|_cli_lookup|_exec_path|nx_hook_shim|version_lockstep_hook|setup_status"
-    r"|/conexus:setup|__setup\b"
-)
-
-
-def _text_prefix_hits(tree: str, repo: pathlib.Path = REPO_ROOT) -> list[str]:
-    """``path:line`` of every line under the safe-alone text prefixes in *tree* that names a Phase 2 name.
-
-    ``git grep`` over the tree, so it reads what the checkout holds (CI's is a depth-1 one) and not the
-    working copy. Exit 1 is no match; anything else above 1 is an error, not a clean scan.
-    """
-    proc = subprocess.run(
-        ["git", "grep", "-n", "-I", "-i", "-E", _PHASE2_NAMES, tree, "--", *_TEXT_PREFIXES],
-        cwd=repo, capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode in (0, 1), f"git grep failed:\n{proc.stderr}"
-    return [line.removeprefix(f"{tree}:") for line in proc.stdout.splitlines()]
-
-
-def _defined_names(source: str) -> set[str]:
-    """Top-level names a Python module defines, by line shape (no import)."""
-    return {
-        a or b
-        for a, b in re.findall(r"^(?:def|class)\s+(\w+)|^(\w+)\s*[:=]", source, re.M)
-    }
-
-
-def _phase2_modules(guarded: object, launch_paths: list[str]) -> dict[str, str]:
-    """Module name -> path of every Python module a safe-alone file must not call ahead of the pin: the ``.py``
-    entries of the guard and every module under ``conexus/launch/`` (the guard names that directory by prefix,
-    so a list built from its ``.py`` entries alone would miss ``nx_setup``, ``nx_launch`` and ``nx_standin``)."""
-    return {
-        pathlib.PurePosixPath(p).stem: p
-        for p in [*guarded, *launch_paths]  # type: ignore[misc]
-        if p.endswith(".py")
-    }
-
-
-def _unsafe_imports(
-    path: str, source: str, modules: dict[str, str], pin_source: object, ref: str,
-) -> list[str]:
-    """Why *path*, a file listed as safe alone, would break if shipped without the guarded modules: it imports
-    one the pin lacks, or calls a name in one that the pin's copy does not define. *pin_source* maps a module
-    path to its text at the pin, or None when the pin lacks it."""
-    problems: list[str] = []
-    for stem, module_path in modules.items():
-        from_names = {
-            n.strip()
-            for group in re.findall(rf"^\s*from\s+{re.escape(stem)}\s+import\s+([\w, ]+)", source, re.M)
-            for n in group.split(",") if n.strip()
-        }
-        if not from_names and not re.search(rf"^\s*import\s+{re.escape(stem)}\b", source, re.M):
-            continue  # a file name in a docstring is not a use
-        used = from_names | set(re.findall(rf"\b{re.escape(stem)}\.(\w+)", source))
-        if not used:
-            problems.append(f"{path} imports {stem} and uses nothing in it")
-            continue
-        at_pin = pin_source(module_path)  # type: ignore[operator]
-        if at_pin is None:
-            problems.append(
-                f"{path} is listed as safe alone but imports {stem}, and "
-                f"{module_path} is absent at {ref}: shipped alone it raises ImportError"
-            )
-            continue
-        missing = used - _defined_names(at_pin)
-        if missing:
-            problems.append(
-                f"{path} is listed as safe alone but calls {stem}.{sorted(missing)}, "
-                f"which {ref} lacks: shipped alone it raises AttributeError"
-            )
-    return problems
-
-
-def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() -> None:
-    """The Phase 2 guard names every shared file Phase 2 changes (nexus-sv2wx.22).
-
-    The guard holds a path back only if it is on the list, and the deferral
-    entry in the ledger is the only other thing between a plugin-only cut and
-    a Phase 2 file shipping alone: move a bullet to "Awaiting" and the cut
-    ships ``nx_hook_shim.py`` without the ``_cli_lookup.cannot_start`` it
-    calls. So while Phase 2 is in the tree and the pinned tag lacks it,
-    every ``conexus/`` path that differs from the pin is computed from git
-    here and must be guarded (``PHASE2_GUARDED``, plus the launcher's callers
-    while the pin lacks the launcher) or named in ``PHASE2_SAFE_ALONE`` with
-    a reason. A new plugin file on develop in that window fails until someone
-    decides which; that is the rule, not a defect.
-
-    The pin is the reference, as in the test above, and a missing pin fails
-    (or skips on a genuinely tagless checkout, under the file's one
-    taglessness rule, `_require_or_skip`).
-    """
-    _require_or_skip()
-    from plugin_ledger import (
-        PHASE2_GUARDED,
-        PHASE2_SAFE_ALONE,
-        phase2_guarded_paths,
-        phase2_in_play,
-    )
-
-    ref = _pinned_refs()["conexus"]
-    if plugin_in_release_window("conexus", ref):
-        return  # the pin IS this branch's content; nothing differs from it
-    assert _git("rev-parse", "--verify", "-q", ref).returncode == 0, (
-        f"the pinned ref {ref!r} does not resolve, so which conexus/ paths "
-        "changed is UNKNOWN, not none"
-    )
-    if not phase2_in_play(REPO_ROOT, ref, "HEAD"):
-        return  # Phase 2 is not in the tree, or the pin already carries it
-    proc = _git("diff", "--name-only", "--no-renames", ref, "HEAD", "--", "conexus/")
-    assert proc.returncode == 0, f"git diff against {ref} failed:\n{proc.stderr}"
-    changed = sorted(p for p in proc.stdout.splitlines() if p.strip())
-    assert "conexus/launch/nx_setup.py" in changed, (
-        "Phase 2 is in play (the marker is in HEAD, absent from the pin) yet "
-        "the diff does not list it: the diff is not measuring what the guard does"
-    )
-
-    guarded = phase2_guarded_paths(REPO_ROOT, ref)
-    uncovered = _uncovered(changed, guarded, PHASE2_SAFE_ALONE)
-    assert not uncovered, (
-        "these conexus/ paths differ from the pin and are neither on "
-        "PHASE2_GUARDED nor in PHASE2_SAFE_ALONE (scripts/plugin_ledger.py), "
-        "so a plugin-only cut could ship them without the Phase 2 files they "
-        "need. Guard each, or list it with the reason it stands alone:\n  "
-        + "\n  ".join(uncovered)
-    )
-
-    # A safe-alone entry is a decision with a stated reason, never a path the
-    # guard also holds (the list would then mean nothing).
-    for path, reason in PHASE2_SAFE_ALONE.items():
-        assert reason.strip() and len(reason.split()) >= 5, f"{path}: no real reason"
-        assert not _covers(PHASE2_GUARDED, path), (
-            f"{path} is on PHASE2_GUARDED and in PHASE2_SAFE_ALONE"
-        )
-
-    # The one claim a reason makes that git can check: a Python file listed as
-    # safe alone calls no name of a guarded module that the pin lacks. That is
-    # the failure the guard exists for (a caller shipped without its callee).
-    launch = _git("ls-tree", "-r", "--name-only", "HEAD", "--", "conexus/launch/")
-    assert launch.returncode == 0, f"git ls-tree failed:\n{launch.stderr}"
-    modules = _phase2_modules(PHASE2_GUARDED, launch.stdout.splitlines())
-    for path in (p for p in changed if _covers(PHASE2_SAFE_ALONE, p) and p.endswith(".py")):
-        problems = _unsafe_imports(
-            path,
-            _git("show", f"HEAD:{path}").stdout,
-            modules,
-            lambda module_path: (r.stdout if (r := _git("show", f"{ref}:{module_path}")).returncode == 0 else None),
-            ref,
-        )
-        assert not problems, "\n".join(problems)
-
-    # The prefixes safe alone because they are text the model reads: no file
-    # under them names a Phase 2 file or the setup command. A hit means the
-    # text calls something a plugin-only cut may not ship; guard it instead.
-    prefixes = [p for p in PHASE2_SAFE_ALONE if p.startswith(_TEXT_PREFIXES)]
-    assert sorted(prefixes) == sorted(_TEXT_PREFIXES), "the text prefixes left PHASE2_SAFE_ALONE"
-    hits = _text_prefix_hits("HEAD")
-    assert not hits, (
-        "files under the safe-alone text prefixes name a Phase 2 file or the "
-        "setup command, so they are not safe alone (guard the path in "
-        "PHASE2_GUARDED in scripts/plugin_ledger.py, or take the name "
-        "out of the text):\n  " + "\n  ".join(hits)
-    )
-
-
-def test_the_coverage_rule_names_a_path_taken_off_the_guard() -> None:
-    """The rule above is not vacuous: removing one guarded path reports it."""
-    from plugin_ledger import PHASE2_GUARDED, PHASE2_SAFE_ALONE
-
-    changed = [
-        "conexus/hooks/scripts/_cli_lookup.py",
-        "conexus/hooks/scripts/nx_hook_shim.py",
-        "conexus/launch/nx_setup.py",
-        "conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
-    ]
-    assert _uncovered(changed, list(PHASE2_GUARDED), PHASE2_SAFE_ALONE) == []
-    without = [p for p in PHASE2_GUARDED if not p.endswith("/_cli_lookup.py")]
-    assert _uncovered(changed, without, PHASE2_SAFE_ALONE) == [
-        "conexus/hooks/scripts/_cli_lookup.py"
-    ]
-    assert _uncovered(changed + ["conexus/hooks/scripts/new_one.py"],
-                      list(PHASE2_GUARDED), PHASE2_SAFE_ALONE) == [
-        "conexus/hooks/scripts/new_one.py"
-    ]
-
-
-def test_the_import_check_covers_the_launch_modules_the_guard_names_by_prefix() -> None:
-    """The gap: the module list came from the ``.py`` entries of PHASE2_GUARDED, which names ``conexus/launch/``
-    only as a prefix, so a safe-alone file importing ``nx_setup`` was not checked at all."""
-    from plugin_ledger import PHASE2_GUARDED
-
-    launch = ["conexus/launch/nx_launch.py", "conexus/launch/nx_setup.py", "conexus/launch/nx_standin.py"]
-    assert "nx_setup" not in _phase2_modules(PHASE2_GUARDED, [])  # the old list
-    modules = _phase2_modules(PHASE2_GUARDED, launch)
-    assert {"nx_setup", "nx_launch", "nx_standin", "_cli_lookup"} <= set(modules)
-    source = "from nx_setup import setup_dir\nx = 1\n"
-    pin = {"conexus/launch/nx_launch.py": "def main(): pass\n"}  # a pin without nx_setup.py
-    problems = _unsafe_imports("conexus/hooks/scripts/new.py", source, modules, pin.get, "v7.79.0")
-    assert len(problems) == 1 and "nx_setup.py is absent at v7.79.0" in problems[0]
-    pin["conexus/launch/nx_setup.py"] = "def other(): pass\n"  # present, without the name used
-    assert "setup_dir" in _unsafe_imports("x.py", source, modules, pin.get, "v7.79.0")[0]
-    pin["conexus/launch/nx_setup.py"] = "def setup_dir(): pass\n"
-    assert _unsafe_imports("x.py", source, modules, pin.get, "v7.79.0") == []
-
-
-def test_the_text_prefix_scan_catches_a_name_in_a_skill_and_misses_a_clean_one(tmp_path: pathlib.Path) -> None:
-    """The scan is not vacuous: in a throwaway repo a skill, an agent and a resource that name a Phase 2 name
-    are reported, a clean skill is not, and a name outside the three prefixes is not looked at."""
-    def run(*args: str) -> None:
-        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
-
-    run("init", "-q")
-    run("config", "user.email", "t@example.invalid")
-    run("config", "user.name", "t")
-    run("config", "commit.gpgsign", "false")
-    for rel, text in {
-        "conexus/skills/a/SKILL.md": "Call setup_status first.\n",
-        "conexus/skills/b/SKILL.md": "Nothing about the launcher here.\n",
-        "conexus/agents/c.md": "See /conexus:setup.\n",
-        "conexus/resources/d.md": "run nx_launch\n",
-        "conexus/commands/e.md": "setup_status is allowed here\n",
-    }.items():
-        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / rel).write_text(text, encoding="utf-8")
-    run("add", ".")
-    run("commit", "-q", "-m", "x")
-    hits = sorted(line.split(":")[0] for line in _text_prefix_hits("HEAD", tmp_path))
-    assert hits == ["conexus/agents/c.md", "conexus/resources/d.md", "conexus/skills/a/SKILL.md"]
 
 
 # --- the skip/require mechanism is itself tested ----------------------------
@@ -1057,24 +699,13 @@ class TestTheCIWiringItself:
         return matches[0]
 
     def test_the_fetch_step_fetches_all_tags(self) -> None:
-        """RDR-197 (nexus-a2wmi.4): the BASE CLIENT TAG must be fetched even
-        when no pinned ref names it (the both-anchored state) — it is the
-        blind-checkout sentinel and the wheel-surface proof's range base."""
+        """The tag list must not be empty on this runner: ``_has_any_tags``
+        reads it to tell a checkout that fetched tags from a tagless one."""
         assert "git fetch --depth=1 --tags --force origin" in self._fetch_step()["run"], (
-            "the explicit shallow --tags fetch is gone: in the both-anchored "
-            "state the base client tag is never fetched, the sentinel raises, "
-            "and every anchored evaluation goes dark (S6 for every plugin)."
+            "the explicit shallow --tags fetch is gone: a checkout with no "
+            "tags reads as tagless and every drift test fails on the require "
+            "flag instead of checking drift."
         )
-
-    def test_the_fetch_step_fetches_the_pr_head_sha(self) -> None:
-        """The proof's fallback target on a cut PR is the PR head commit;
-        actions/checkout resolves the merge ref at depth 1, so the head sha
-        must be fetched explicitly, guarded to pull_request events."""
-        step = self._fetch_step()
-        env = step.get("env", {})
-        assert "PR_HEAD_SHA" in env, "the PR head sha env plumbing is gone"
-        assert "github.event_name == 'pull_request'" in str(env["PR_HEAD_SHA"])
-        assert 'git fetch --depth=1 origin "$PR_HEAD_SHA"' in step["run"]
 
     def test_the_fetch_step_no_longer_tolerates_the_anchored_shape(self) -> None:
         """The anchored plugin-v<version>-<n> channel is retired
@@ -1091,274 +722,17 @@ class TestTheCIWiringItself:
         )
 
 
-# ---------------------------------------------------------------------------
-# RDR-197 (nexus-a2wmi.1): the tag-anchored wheel-surface proof.
-#
-# A plugin cut ships plugin-tree content ONLY. The proof diffs the base
-# client tag against the cut's target (the anchored tag when it resolves,
-# else the cut PR's head commit — the ANCHORING rule in
-# scripts/plugin_channel.py's docstring) and fails on any path outside the
-# channel allowlist. Never a merge base as target (the fork point carries
-# none of the cut's content — vacuous proof), never a development branch's
-# HEAD (reports offenders the cut never shipped).
-# ---------------------------------------------------------------------------
-
-
-def _proof_target(name: str, ref: str) -> str:
-    """ANCHORING rule, per plugin: the anchored tag when it resolves; else,
-    INSIDE the plugin's release window, the cut PR's head commit
-    (``plugin_channel.cut_head_sha`` — the pull_request payload's head sha
-    in CI, HEAD on the cut branch; shared with test_plugin_structure.py's
-    proof so the merge-ref defect R1 caught cannot recur in one alone);
-    else the unresolvable ref itself, so ``wheel_surface_offenders`` raises
-    rather than passing silently (a missing tag outside the window is a
-    blind checkout, never a free pass)."""
-    from plugin_channel import cut_head_sha
-
-    if _git("rev-parse", "--verify", f"{ref}^{{commit}}").returncode == 0:
-        return ref
-    if plugin_in_release_window(name, ref):
-        return cut_head_sha(cwd=REPO_ROOT)
-    return ref
-
-
-def test_plugin_tag_leaves_wheel_surface_untouched() -> None:
-    """For every plugin pinned at an anchored ref, the range from the base
-    client tag to the proof target carries no deliverable path outside the
-    channel (NEVER_DELIVERED_PREFIXES excluded — plugin_channel's OFFENDERS
-    paragraph).
-
-    Target: :func:`_proof_target` (the anchored tag; inside the window, the
-    cut PR's head commit via ``plugin_channel.cut_head_sha``). The a2wmi.12 spike's
-    first cut branch failed here with "unknown revision" because this test
-    diffed against the tag unconditionally.
-
-    Passes trivially while no plugin is pinned anchored (today's steady
-    state); the fixture arm below and TestProofTarget are the non-vacuity
-    proofs of the mechanism, so that pass is honest, not a masked gate.
-    """
-    from plugin_channel import parse_plugin_tag, wheel_surface_offenders
-
-    # Same taglessness contract as every sibling: ci.yml's pytest shards check
-    # out shallow with NO tags (nexus-dhs30), so on a cut PR an anchored pin
-    # would send _proof_target through invariant W's blind-checkout sentinel
-    # and raise TagVisibilityError there. The dedicated drift-ledger job (tags
-    # fetched, require flag set) is where this proof is binding; the shards
-    # skip it, as they skip the rest of this module. Found on the first real
-    # cut PR (#1495), which the rehearsal's tag-fetching PR-CI leg could not
-    # see; the rehearsal now runs this module in the shard shape too.
-    _require_or_skip()
-    anchored = {
-        name: parsed
-        for name, ref in _pinned_refs().items()
-        if (parsed := parse_plugin_tag(ref)) is not None
-    }
-    if not anchored:
-        # PASS, not skip: with no anchored pin there is genuinely nothing
-        # to prove, and the fixture arm below is the non-vacuity backstop.
-        # The gate workflow hard-fails on ANY skip (nexus-05m1i vacuity
-        # belt), so a skip here turned develop red on the first CI run.
-        return
-    for name, (version, n) in sorted(anchored.items()):
-        ref = f"plugin-v{version}-{n}"
-        target = _proof_target(name, ref)
-        offenders = wheel_surface_offenders(f"v{version}", target, cwd=REPO_ROOT)
-        assert offenders == [], (
-            f"plugin {name}'s cut {ref} (proof target {target}) touches "
-            f"wheel-surface paths: {offenders}. A plugin cut may never alter "
-            f"wheel content."
-        )
-
-
-class TestProofTarget:
-    """The fallback branch of the proof, exercised directly: no plugin is
-    pinned anchored in the steady state, so the real-repo test above only
-    ever walks its trivial path — these pin the rule itself. The head-sha
-    resolution (pull_request payload vs HEAD) is plugin_channel.cut_head_sha's,
-    tested in tests/test_plugin_channel.py::TestCutHeadSha."""
-
-    REF = "plugin-v9.9.0-1"
-
-    @pytest.fixture(autouse=True)
-    def _stub_world(self, monkeypatch: pytest.MonkeyPatch):
-        import plugin_channel
-
-        module = sys.modules[__name__]
-        self.tag_resolves = False
-
-        def fake_git(*args: str) -> subprocess.CompletedProcess[str]:
-            if args[:2] == ("rev-parse", "--verify"):
-                rc = 0 if self.tag_resolves else 1
-                return subprocess.CompletedProcess(args, rc, stdout="", stderr="")
-            raise AssertionError(f"unexpected git call {args}")
-
-        monkeypatch.setattr(module, "_git", fake_git)
-        self.in_window = True
-        monkeypatch.setattr(
-            module, "plugin_in_release_window", lambda name, ref: self.in_window
-        )
-        monkeypatch.setattr(plugin_channel, "cut_head_sha", lambda *, cwd=None: "cut-head-sha")
-
-    def test_a_resolving_tag_is_the_target(self) -> None:
-        self.tag_resolves = True
-        assert _proof_target("conexus", self.REF) == self.REF
-
-    def test_in_the_window_the_target_is_the_cut_head(self) -> None:
-        assert _proof_target("conexus", self.REF) == "cut-head-sha"
-
-    def test_outside_the_window_a_missing_tag_stays_unresolvable(self) -> None:
-        """Never a silent pass: the unresolvable ref goes to
-        wheel_surface_offenders, which raises GitCommandError."""
-        self.in_window = False
-        assert _proof_target("conexus", self.REF) == self.REF
-
-
-def _cut_fixture_repo(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
-    """A repo with a tagged base and a cut commit that violates the surface.
-
-    Returns (repo, cut head sha). The proof target is the resolved head
-    sha — the cut PR's head commit per the anchoring rule — never a bare
-    HEAD and never a merge base.
-    """
-    repo = tmp_path / "cutrepo"
-    repo.mkdir()
-
-    def run(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
-        )
-
-    run("init", "-q", "-b", "main")
-    run("config", "user.email", "test@test.invalid")
-    run("config", "user.name", "test")
-    (repo / "seed").write_text("seed\n", encoding="utf-8")
-    run("add", "seed")
-    run("commit", "-q", "-m", "seed")
-    run("tag", "v0.0.1")
-    for rel in (
-        "src/nexus/cli.py",
-        "conexus/plans/builtin/x.yml",
-        "conexus/skills/ok.md",
-        "sn/commands/ok.md",
-        # Never-delivered ride-alongs (NEVER_DELIVERED_PREFIXES): a test,
-        # a script, a doc and a workflow in the range are NOT offenders.
-        "tests/test_ok.py",
-        "scripts/tool.py",
-        "docs/note.md",
-        ".github/workflows/w.yml",
-    ):
-        target = repo / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("cut content\n", encoding="utf-8")
-        run("add", rel)
-    run("commit", "-q", "-m", "cut")
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return repo, head
-
-
-def test_the_wheel_surface_proof_reports_offenders(tmp_path: pathlib.Path) -> None:
-    """Non-vacuity arm: a range carrying wheel content MUST fail the proof.
-
-    src/nexus/cli.py is off-allowlist outright; conexus/plans/builtin/x.yml
-    is inside the allowlist prefix but carved out by DENIED_PREFIXES (it is
-    wheel package data). Empty DENIED_PREFIXES and this test fails — the
-    designed falsification. The fixture's tests/, scripts/, docs/ and
-    .github/ files are in the same range and must NOT be reported: empty
-    NEVER_DELIVERED_PREFIXES and this test fails the other way.
-    """
-    from plugin_channel import wheel_surface_offenders
-
-    repo, cut_sha = _cut_fixture_repo(tmp_path)
-    offenders = wheel_surface_offenders("v0.0.1", cut_sha, cwd=repo)
-    assert offenders == ["conexus/plans/builtin/x.yml", "src/nexus/cli.py"]
-
-
-def test_the_proof_raises_when_the_target_does_not_resolve(
-    tmp_path: pathlib.Path,
-) -> None:
-    """An unresolvable ref is an unknown answer, never an empty offender list."""
-    from plugin_channel import GitCommandError, wheel_surface_offenders
-
-    repo, _ = _cut_fixture_repo(tmp_path)
-    with pytest.raises(GitCommandError):
-        wheel_surface_offenders("v0.0.1", "does-not-resolve", cwd=repo)
-
-
-def test_no_caller_passes_a_merge_base_as_the_proof_target() -> None:
-    """No caller in this repo hands wheel_surface_offenders a merge-base
-    target. A merge base is only ever a range BASE; as a target the proof
-    is vacuous (the fork point carries none of the cut's content).
-
-    Scans the realistic caller surfaces — tests/, scripts/ (python, via
-    ast so docstrings do not false-positive) and .github/workflows/ (text
-    lines) — and fails if any call's target argument mentions a merge
-    base. Non-vacuity: asserts the scan saw at least one python call site
-    (this file has two above).
-    """
-    import ast
-
-    violations: list[str] = []
-    python_call_sites = 0
-    for directory in ("tests", "scripts"):
-        for path in sorted((REPO_ROOT / directory).rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                func = node.func
-                name = (
-                    func.attr
-                    if isinstance(func, ast.Attribute)
-                    else getattr(func, "id", "")
-                )
-                if name != "wheel_surface_offenders":
-                    continue
-                python_call_sites += 1
-                target: ast.expr | None = None
-                if len(node.args) >= 2:
-                    target = node.args[1]
-                for keyword in node.keywords:
-                    if keyword.arg == "target_ref":
-                        target = keyword.value
-                rendered = ast.unparse(target) if target is not None else ""
-                if "merge" in rendered.lower():
-                    violations.append(f"{path}: target {rendered!r}")
-    workflows = REPO_ROOT / ".github" / "workflows"
-    if workflows.is_dir():
-        for path in sorted(workflows.glob("*.yml")):
-            for line_number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), start=1
-            ):
-                if (
-                    "wheel_surface_offenders" in line or "plugin_channel" in line
-                ) and ("merge-base" in line or "merge_base" in line):
-                    violations.append(f"{path}:{line_number}: {line.strip()}")
-    assert python_call_sites >= 1, (
-        "the scan recognised zero wheel_surface_offenders call sites — the "
-        "scan itself is broken, which is not a pass"
-    )
-    assert not violations, violations
-
-
 class TestPerPluginDriftScoping:
     """RDR-197 (nexus-a2wmi.14): drift is judged per plugin, ref by ref.
 
-    After a conexus-only cut, sn's ref still points at the older client
-    tag. Diffing that older ref against HEAD over the FLATTENED surface
-    returns the conexus files the cut just shipped; the cut emptied the
-    ledger, so those paths read as undeclared drift and the contract
-    fails on develop — caused by the channel working correctly. The fix
-    is scoping each plugin's diff to its own surface, and these tests pin
-    it from both directions: the cut must not fail the other plugin, and
-    scoping must not blind the check to that plugin's genuine drift.
-
-    This is row 4 / state S3 of the mixed-state truth table (bead .4).
+    When one plugin's ref moves to a newer client tag and its sibling's
+    still points at the older one, diffing the older ref against HEAD over
+    the FLATTENED surface returns the files the newer ref just shipped; the
+    release emptied the ledger, so those paths read as undeclared drift and
+    the contract fails on develop. The fix is scoping each plugin's diff to
+    its own surface, and these tests pin it from both directions: the move
+    must not fail the other plugin, and scoping must not blind the check to
+    that plugin's genuine drift.
     """
 
     SN_PROBE = "sn/hooks/probe.py"
@@ -1371,14 +745,14 @@ class TestPerPluginDriftScoping:
         *,
         sn_drift: bool,
     ) -> pathlib.Path:
-        """A repo one conexus cut past the shared client tag.
+        """A repo whose conexus pin is one client tag past sn's.
 
         History: baseline (tag v9.9.0, both plugins pinned there) → the
-        conexus cut (a conexus/hooks/ change + conexus's pin advanced to
-        plugin-v9.9.0-1, tagged) → post-cut develop (a conexus/commands/
-        change, DECLARED in the ledger; with *sn_drift*, an UNDECLARED
-        sn/hooks/ change too). The production test functions then run
-        against this world via the module globals.
+        conexus release (a conexus/hooks/ change + conexus's pin advanced
+        to v9.9.1, tagged) → later develop (a conexus/commands/ change,
+        DECLARED in the ledger; with *sn_drift*, an UNDECLARED sn/hooks/
+        change too). The production test functions then run against this
+        world via the module globals.
         """
         repo = tmp_path / "cutworld"
         repo.mkdir()
@@ -1423,21 +797,21 @@ class TestPerPluginDriftScoping:
         run("commit", "-q", "-m", "baseline")
         run("tag", "v9.9.0")
 
-        write("conexus/hooks/hook.py", "v2 shipped by the cut\n")
-        write(".claude-plugin/marketplace.json", marketplace("plugin-v9.9.0-1"))
+        write("conexus/hooks/hook.py", "v2 shipped by the release\n")
+        write(".claude-plugin/marketplace.json", marketplace("v9.9.1"))
         run("add", ".")
-        run("commit", "-q", "-m", "conexus cut 1")
-        run("tag", "plugin-v9.9.0-1")
+        run("commit", "-q", "-m", "conexus release")
+        run("tag", "v9.9.1")
 
-        write("conexus/commands/cmd.md", "v2 post-cut work\n")
+        write("conexus/commands/cmd.md", "v2 later work\n")
         write(
             "conexus/PENDING_RELEASE.md",
-            "# Pending\n- `conexus/commands/cmd.md`: post-cut change (fixture)\n",
+            "# Pending\n- `conexus/commands/cmd.md`: later change (fixture)\n",
         )
         if sn_drift:
             write(cls.SN_PROBE, "v2 UNDECLARED\n")
         run("add", ".")
-        run("commit", "-q", "-m", "post-cut develop")
+        run("commit", "-q", "-m", "later develop")
 
         module = sys.modules[__name__]
         monkeypatch.setattr(module, "REPO_ROOT", repo)
@@ -1449,13 +823,13 @@ class TestPerPluginDriftScoping:
         )
         return repo
 
-    def test_a_conexus_only_cut_reports_no_failure_for_sn(
+    def test_a_newer_conexus_pin_reports_no_failure_for_sn(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The channel working correctly must not turn develop red.
+        """A release that moves one plugin's pin must not turn develop red.
 
         Restore the flattened-surface diff and this fails: sn's older ref
-        picks up the cut's conexus files as undeclared drift.
+        picks up the release's conexus files as undeclared drift.
         """
         self._cut_world(tmp_path, monkeypatch, sn_drift=False)
         test_every_drifted_file_is_declared_in_the_ledger()
@@ -1537,7 +911,7 @@ class TestDeferralExemptsTheReleaseWindow:
             module, "MARKETPLACE", repo / ".claude-plugin" / "marketplace.json"
         )
         monkeypatch.setattr(module, "LEDGER", repo / "conexus" / "PENDING_RELEASE.md")
-        # The window predicate itself is exercised in TestAnchoredWindow-
+        # The window predicate itself is exercised in TestReleaseWindow-
         # Behaviour below; here it is forced True so both tests isolate
         # the exemption, the thing actually under test.
         monkeypatch.setattr(module, "plugin_in_release_window", lambda name, ref: True)
@@ -1564,26 +938,19 @@ class TestDeferralExemptsTheReleaseWindow:
 
 
 # ---------------------------------------------------------------------------
-# RDR-197 (nexus-a2wmi.4): window semantics — invariant W per plugin.
-# The four conditions and the anchoring rule live in
-# scripts/plugin_channel.py's docstring; nothing below restates them.
+# The release window, per plugin.
 # ---------------------------------------------------------------------------
 
 
-class TestAnchoredWindowBehaviour:
-    """plugin_in_release_window, one condition isolated per test.
+class TestReleaseWindowBehaviour:
+    """plugin_in_release_window, one case per test.
 
     Mirrors TestTaglessBehaviour's monkeypatch style: every collaborator
-    is stubbed except the condition under test, so a failure names the
-    condition rather than the fixture.
+    is stubbed except the condition under test.
     """
-
-    REF = "plugin-v9.9.0-1"
 
     @pytest.fixture(autouse=True)
     def _stub_world(self, monkeypatch: pytest.MonkeyPatch):
-        import plugin_channel
-
         module = sys.modules[__name__]
         monkeypatch.setattr(module, "_pyproject_version", lambda: "9.9.0")
         # Tag does not resolve locally (the window's precondition).
@@ -1592,62 +959,13 @@ class TestAnchoredWindowBehaviour:
             "_git",
             lambda *args: subprocess.CompletedProcess(args, 1, stdout="", stderr=""),
         )
-        monkeypatch.setattr(module, "_remote_confirms_tag_absent", lambda ref: True)
-        monkeypatch.setattr(
-            plugin_channel, "next_plugin_tag_number", lambda v, *, cwd=None: 1
-        )
-        monkeypatch.setattr(
-            plugin_channel, "is_cut_branch_for", lambda v, n, *, cwd=None: True
-        )
         self.monkeypatch = monkeypatch
         self.module = module
 
-    def test_all_four_conditions_grant_the_window(self) -> None:
-        assert plugin_in_release_window("conexus", self.REF) is True
-
-    def test_a_resolving_tag_is_never_a_window(self) -> None:
-        self.monkeypatch.setattr(
-            self.module,
-            "_git",
-            lambda *args: subprocess.CompletedProcess(args, 0, stdout="ok", stderr=""),
-        )
-        assert plugin_in_release_window("conexus", self.REF) is False
-
-    def test_condition_a_wrong_version_refused(self) -> None:
-        assert plugin_in_release_window("conexus", "plugin-v9.8.0-1") is False
-
-    def test_condition_b_number_mismatch_refused(self) -> None:
-        import plugin_channel
-
-        self.monkeypatch.setattr(
-            plugin_channel, "next_plugin_tag_number", lambda v, *, cwd=None: 2
-        )
-        assert plugin_in_release_window("conexus", self.REF) is False
-
-    def test_condition_c_upstream_present_refused(self) -> None:
-        self.monkeypatch.setattr(
-            self.module, "_remote_confirms_tag_absent", lambda ref: False
-        )
-        assert plugin_in_release_window("conexus", self.REF) is False
-
-    def test_condition_c_inconclusive_probe_fails_closed(self) -> None:
-        self.monkeypatch.setattr(
-            self.module, "_remote_confirms_tag_absent", lambda ref: None
-        )
-        assert plugin_in_release_window("conexus", self.REF) is False
-
-    def test_condition_d_wrong_branch_refused(self) -> None:
-        import plugin_channel
-
-        self.monkeypatch.setattr(
-            plugin_channel, "is_cut_branch_for", lambda v, n, *, cwd=None: False
-        )
-        assert plugin_in_release_window("conexus", self.REF) is False
-
-    def test_client_form_window_is_tag_absence(self) -> None:
+    def test_the_client_form_with_no_tag_is_a_window(self) -> None:
         assert plugin_in_release_window("sn", "v9.9.0") is True
 
-    def test_client_form_with_existing_tag_is_no_window(self) -> None:
+    def test_the_client_form_with_an_existing_tag_is_no_window(self) -> None:
         self.monkeypatch.setattr(
             self.module,
             "_git",
@@ -1655,19 +973,24 @@ class TestAnchoredWindowBehaviour:
         )
         assert plugin_in_release_window("sn", "v9.9.0") is False
 
+    def test_a_missing_tag_for_another_version_is_no_window(self) -> None:
+        """A ref that is not the tag this branch cuts stays RED, not exempt."""
+        assert plugin_in_release_window("conexus", "v9.8.0") is False
+
+    def test_the_retired_anchored_form_is_no_window(self) -> None:
+        assert plugin_in_release_window("conexus", "plugin-v9.9.0-1") is False
+
 
 class TestReleaseWindowComposite:
-    """The composite _in_release_window's REAL try/except body (R1 review
-    finding, a2wmi.6): every other test stubs the composite itself, so its
-    TagVisibilityError-to-False conversion had no direct coverage. Only
-    the per-plugin predicate is stubbed here — the body under test runs."""
+    """The composite _in_release_window, with only the per-plugin predicate
+    stubbed so the composition under test runs."""
 
     def _pins(self, monkeypatch, predicate) -> None:
         module = sys.modules[__name__]
         monkeypatch.setattr(
             module,
             "_pinned_refs",
-            lambda: {"conexus": "plugin-v9.9.0-1", "sn": "v9.9.0"},
+            lambda: {"conexus": "v9.9.0", "sn": "v9.8.0"},
         )
         monkeypatch.setattr(module, "plugin_in_release_window", predicate)
 
@@ -1676,38 +999,14 @@ class TestReleaseWindowComposite:
         assert _in_release_window() is True
 
     def test_one_unwindowed_composes_to_false(self, monkeypatch) -> None:
-        self._pins(monkeypatch, lambda name, ref: ref != "v9.9.0")
+        self._pins(monkeypatch, lambda name, ref: ref != "v9.8.0")
         assert _in_release_window() is False
-
-    def test_a_blind_checkout_reads_as_not_a_window(self, monkeypatch) -> None:
-        """TagVisibilityError converts to False HERE ONLY — the tagless
-        path, where _require_or_skip then fails loudly under the require
-        flag and skips locally. Everywhere else the sentinel's raise
-        propagates (S6)."""
-        from plugin_channel import TagVisibilityError
-
-        def blind(name: str, ref: str) -> bool:
-            raise TagVisibilityError("base client tag does not resolve")
-
-        self._pins(monkeypatch, blind)
-        assert _in_release_window() is False
-
-    def test_any_other_exception_propagates(self, monkeypatch) -> None:
-        """The conversion is scoped to TagVisibilityError alone; a broader
-        except would silently misread real git failures as not-a-window."""
-
-        def broken(name: str, ref: str) -> bool:
-            raise RuntimeError("unrelated failure")
-
-        self._pins(monkeypatch, broken)
-        with pytest.raises(RuntimeError, match="unrelated failure"):
-            _in_release_window()
 
 
 def test_the_tagless_probe_targets_the_pinned_refs(monkeypatch) -> None:
-    """Site 3 (nexus-a2wmi.4): the upstream probe checks the refs ACTUALLY
-    pinned, never a reconstructed "v" + pyproject string — which checks
-    the wrong ref the moment any plugin pins the anchored form."""
+    """The upstream probe checks the refs ACTUALLY pinned, never a
+    reconstructed "v" + pyproject string, which checks the wrong ref the
+    moment a plugin pins an older client tag."""
     module = sys.modules[__name__]
     probed: list[str] = []
     monkeypatch.delenv(_REQUIRE_ENV, raising=False)
@@ -1716,7 +1015,7 @@ def test_the_tagless_probe_targets_the_pinned_refs(monkeypatch) -> None:
     monkeypatch.setattr(
         module,
         "_pinned_refs",
-        lambda: {"conexus": "plugin-v9.9.0-1", "sn": "v9.9.0"},
+        lambda: {"conexus": "v9.9.0", "sn": "v9.8.0"},
     )
 
     def recording(ref: str) -> bool:
@@ -1725,259 +1024,4 @@ def test_the_tagless_probe_targets_the_pinned_refs(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "_remote_confirms_tag_absent", recording)
     _require_or_skip()  # window confirmed: returns
-    assert sorted(probed) == ["plugin-v9.9.0-1", "v9.9.0"]
-
-
-# ---------------------------------------------------------------------------
-# The mixed-state truth table (bead .4 step 8): one case per cell.
-# Row 1 (parity) lives in tests/test_plugin_structure.py (bead .3); row 7
-# (workflow bash tolerance) is the wiring tests on TestTheCIWiringItself.
-# Everything else runs here against fixture worlds. States:
-#   S1 pre-cut · S2 cut-PR (clean / dirty / far-future-n) · S3 post-cut
-#   develop · S4 post-client-release · S5 dangling (the closer's state) ·
-#   S6 blind checkout (stray tag fetched, base client tag absent).
-# ---------------------------------------------------------------------------
-
-
-def _channel_state(
-    state: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> dict:
-    pv = "9.10.0" if state == "S4" else "9.9.0"
-    repo = tmp_path / "world"
-    repo.mkdir()
-
-    def run(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
-        ).stdout.strip()
-
-    def write(rel: str, content: str) -> None:
-        target = repo / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-
-    def marketplace(conexus_ref: str) -> str:
-        return json.dumps(
-            {
-                "plugins": [
-                    {
-                        "name": "conexus",
-                        "source": {"source": "git-subdir", "ref": conexus_ref},
-                    },
-                    {
-                        "name": "sn",
-                        "source": {"source": "git-subdir", "ref": f"v{pv}"},
-                    },
-                ]
-            }
-        )
-
-    n = 7 if state == "S2far" else 1
-    anchored_ref = f"plugin-v{pv}-{n}"
-
-    run("init", "-q", "-b", "main")
-    run("config", "user.email", "test@test.invalid")
-    run("config", "user.name", "test")
-    write("conexus/hooks/hook.py", "v1\n")
-    write("conexus/commands/cmd.md", "v1\n")
-    write("sn/hooks/probe.py", "v1\n")
-    write(
-        ".claude-plugin/marketplace.json",
-        marketplace(anchored_ref if state == "S6" else f"v{pv}"),
-    )
-    write("conexus/PENDING_RELEASE.md", "# Pending\n")
-    write("pyproject.toml", f'[project]\nname = "w"\nversion = "{pv}"\n')
-    run("add", ".")
-    run("commit", "-q", "-m", "baseline")
-    if state == "S6":
-        run("tag", "unrelated-old-tag")  # SOME tags visible; the base is not
-    else:
-        run("tag", f"v{pv}")
-
-    pr_head: str | None = None
-    if state in ("S2", "S2dirty", "S2far", "S3", "S5"):
-        run("checkout", "-q", "-b", f"plugin-release/{pv}-{n}")
-        write("conexus/hooks/hook.py", "v2 shipped by the cut\n")
-        write(".claude-plugin/marketplace.json", marketplace(anchored_ref))
-        if state == "S2dirty":
-            write("src/nexus/cli.py", "wheel content in the cut\n")
-        run("add", ".")
-        run("commit", "-q", "-m", "conexus cut")
-        pr_head = run("rev-parse", "HEAD")
-    if state == "S3":
-        run("tag", anchored_ref)
-    if state in ("S3", "S5"):
-        run("checkout", "-q", "main")
-        run("merge", "-q", "--ff-only", f"plugin-release/{pv}-{n}")
-    if state == "S3":
-        write("conexus/commands/cmd.md", "v2 post-cut work\n")
-        write(
-            "conexus/PENDING_RELEASE.md",
-            "# Pending\n- `conexus/commands/cmd.md`: post-cut change (fixture)\n",
-        )
-        write("src/nexus/offwheel.py", "develop accumulation off the allowlist\n")
-        run("add", ".")
-        run("commit", "-q", "-m", "post-cut develop")
-
-    module = sys.modules[__name__]
-    monkeypatch.setattr(module, "REPO_ROOT", repo)
-    monkeypatch.setattr(
-        module, "MARKETPLACE", repo / ".claude-plugin" / "marketplace.json"
-    )
-    monkeypatch.setattr(module, "LEDGER", repo / "conexus" / "PENDING_RELEASE.md")
-    monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
-    # No real origin in a fixture world; condition (c) is stubbed CONFIRMED
-    # so the other conditions are what each cell isolates. Condition (c)'s
-    # own behaviour is TestAnchoredWindowBehaviour's.
-    monkeypatch.setattr(module, "_remote_confirms_tag_absent", lambda ref: True)
-    monkeypatch.setenv(_REQUIRE_ENV, "1")  # S6 must be LOUD, never a local skip
-    return {"repo": repo, "pv": pv, "n": n, "pr_head": pr_head, "ref": anchored_ref}
-
-
-def _cell_r2_window(state: str, world: dict) -> None:
-    from plugin_channel import TagVisibilityError
-
-    refs = _pinned_refs()
-    if state == "S2":
-        assert plugin_in_release_window("conexus", refs["conexus"]) is True
-        assert plugin_in_release_window("sn", refs["sn"]) is False
-    elif state == "S2far":
-        # Condition (b): next is 1, the ref names 7. Delete (b) and this
-        # cell grants a window to a nonexistent future tag.
-        assert plugin_in_release_window("conexus", refs["conexus"]) is False
-    elif state == "S5":
-        assert plugin_in_release_window("conexus", refs["conexus"]) is False
-    elif state == "S6":
-        with pytest.raises(TagVisibilityError):
-            plugin_in_release_window("conexus", refs["conexus"])
-    else:  # S1, S3, S4: every tag resolves, no plugin is in a window
-        for name, ref in refs.items():
-            assert plugin_in_release_window(name, ref) is False, (name, ref)
-
-
-def _cell_r3_real_tag(state: str, world: dict) -> None:
-    from plugin_channel import TagVisibilityError
-
-    if state == "S5":
-        with pytest.raises(AssertionError, match="does not exist"):
-            test_every_pinned_ref_is_a_real_tag()
-    elif state == "S6":
-        with pytest.raises(TagVisibilityError):
-            test_every_pinned_ref_is_a_real_tag()
-    else:
-        test_every_pinned_ref_is_a_real_tag()
-
-
-def _cell_r45_ledger_contract(state: str, world: dict) -> None:
-    from plugin_channel import TagVisibilityError
-
-    if state == "S5":
-        with pytest.raises(AssertionError, match="drift is UNKNOWN"):
-            test_every_drifted_file_is_declared_in_the_ledger()
-    elif state == "S6":
-        with pytest.raises(TagVisibilityError):
-            test_every_drifted_file_is_declared_in_the_ledger()
-    else:
-        test_every_drifted_file_is_declared_in_the_ledger()
-        test_the_ledger_has_no_stale_entries()
-
-
-def _cell_r8_proof(state: str, world: dict) -> None:
-    from plugin_channel import GitCommandError, wheel_surface_offenders
-
-    base = f"v{world['pv']}"
-    repo = world["repo"]
-    if state in ("S2", "S2far"):
-        # Target: the cut PR's HEAD COMMIT (the tag does not exist yet).
-        assert wheel_surface_offenders(base, world["pr_head"], cwd=repo) == []
-    elif state == "S2dirty":
-        # Changing this target to a merge base returns [] (the fork point
-        # carries none of the cut) and this cell fails — by design.
-        assert wheel_surface_offenders(base, world["pr_head"], cwd=repo) == [
-            "src/nexus/cli.py"
-        ]
-    elif state == "S3":
-        # Target: the anchored tag — a fixed historical range that stays
-        # empty no matter what develop accumulates (the fixture's post-cut
-        # commit adds src/nexus/offwheel.py; a development-HEAD target
-        # would report it and this cell would fail — by design).
-        assert wheel_surface_offenders(base, world["ref"], cwd=repo) == []
-    elif state == "S5":
-        with pytest.raises(GitCommandError):
-            wheel_surface_offenders(base, world["ref"], cwd=repo)
-    elif state == "S6":
-        with pytest.raises(GitCommandError):
-            wheel_surface_offenders(base, world["ref"], cwd=repo)
-    # S1 / S4: no anchored ref — the proof does not gate.
-
-
-def _cell_r9_admission(state: str, world: dict) -> None:
-    from plugin_channel import (
-        current_branch_name,
-        next_plugin_tag_number,
-        parse_plugin_tag,
-    )
-
-    repo = world["repo"]
-    ref = world["ref"]
-    parsed = parse_plugin_tag(ref)
-    assert parsed == (world["pv"], world["n"])  # condition (a)
-    assert next_plugin_tag_number(world["pv"], cwd=repo) == world["n"]  # (b)
-    # Condition (c) is the stubbed upstream probe (see _channel_state).
-    branch = current_branch_name(cwd=repo)
-    if state == "S2":
-        assert branch == f"plugin-release/{world['pv']}-{world['n']}"  # (d)
-        assert plugin_in_release_window("conexus", ref) is True
-    else:  # S5: conditions a-c hold and ONLY the branch fails
-        assert branch == "main"
-        assert plugin_in_release_window("conexus", ref) is False
-
-
-_TRUTH_TABLE_CELLS = [
-    ("r2-window-S1", "S1", _cell_r2_window),
-    ("r2-window-S2", "S2", _cell_r2_window),
-    ("r2-window-S2far", "S2far", _cell_r2_window),
-    ("r2-window-S3", "S3", _cell_r2_window),
-    ("r2-window-S4", "S4", _cell_r2_window),
-    ("r2-window-S5", "S5", _cell_r2_window),
-    ("r2-window-S6", "S6", _cell_r2_window),
-    ("r3-real-tag-S1", "S1", _cell_r3_real_tag),
-    ("r3-real-tag-S2", "S2", _cell_r3_real_tag),
-    ("r3-real-tag-S3", "S3", _cell_r3_real_tag),
-    ("r3-real-tag-S4", "S4", _cell_r3_real_tag),
-    ("r3-real-tag-S5", "S5", _cell_r3_real_tag),
-    ("r3-real-tag-S6", "S6", _cell_r3_real_tag),
-    ("r45-ledger-S1", "S1", _cell_r45_ledger_contract),
-    ("r45-ledger-S2", "S2", _cell_r45_ledger_contract),
-    ("r45-ledger-S3", "S3", _cell_r45_ledger_contract),
-    ("r45-ledger-S4", "S4", _cell_r45_ledger_contract),
-    ("r45-ledger-S5", "S5", _cell_r45_ledger_contract),
-    ("r45-ledger-S6", "S6", _cell_r45_ledger_contract),
-    ("r8-proof-S2", "S2", _cell_r8_proof),
-    ("r8-proof-S2dirty", "S2dirty", _cell_r8_proof),
-    ("r8-proof-S3", "S3", _cell_r8_proof),
-    ("r8-proof-S5", "S5", _cell_r8_proof),
-    ("r8-proof-S6", "S6", _cell_r8_proof),
-    ("r9-admission-S2", "S2", _cell_r9_admission),
-    ("r9-admission-S5", "S5", _cell_r9_admission),
-]
-
-
-@pytest.mark.parametrize(
-    ("state", "check"),
-    [pytest.param(state, check, id=cell_id) for cell_id, state, check in _TRUTH_TABLE_CELLS],
-)
-def test_mixed_state_truth_table(
-    state: str,
-    check,
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One case per cell of the RDR-197 mixed-state truth table (bead .4).
-
-    Row 6 (probe target) is test_the_tagless_probe_targets_the_pinned_refs;
-    row 10 (blind-checkout loudness) is the S6 column of rows 2, 3, 4/5
-    and 8 — every one of them raises rather than reporting green.
-    """
-    world = _channel_state(state, tmp_path, monkeypatch)
-    check(state, world)
+    assert sorted(probed) == ["v9.8.0", "v9.9.0"]

@@ -70,17 +70,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Fetch exactly the pinned release tags
-        env:
-          # The wheel-surface proof's target inside a release window is the
-          # PR's HEAD COMMIT (plugin_channel.cut_head_sha). actions/checkout
-          # resolves the merge ref at depth 1 on pull_request, so the head
-          # sha is not in the checkout unless fetched explicitly.
-          PR_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
         run: |
           set -euo pipefail
-          # The channel's checks need MORE than the pinned refs when a ref is
-          # absent: the BASE CLIENT TAG (blind-checkout sentinel and the
-          # wheel-surface proof's range base).
+          # All tags, not only the pinned ones: the drift test reads the tag
+          # list to tell a checkout that fetched tags from a tagless one.
           # NOT `fetch-tags: true` on the checkout: release.yml:58-65 records
           # that a depth-1 checkout's fetch-tags does NOT deliver tags
           # (release.yml chose fetch-depth: 0, unaffordable here — see the
@@ -88,9 +81,6 @@ jobs:
           # to deliver the tag objects in practice, widen THIS fetch and
           # record which form was needed.
           git fetch --depth=1 --tags --force origin
-          if [ -n "${PR_HEAD_SHA:-}" ]; then
-            git fetch --depth=1 origin "$PR_HEAD_SHA"
-          fi
           refs=$(python3 -c "
           import json
           d = json.load(open('.claude-plugin/marketplace.json'))
