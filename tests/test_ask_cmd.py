@@ -13,6 +13,7 @@ import contextlib
 import json
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -73,6 +74,8 @@ class FakeT2:
         self.get_alls: list[str] = []
         #: Called on every put to a ``batch/`` title (the test says whether the lock is held).
         self.on_batch_put: Any = None
+        #: ``"sending-error"``: a put of a ``sending`` record that carries an error raises (the unknown-outcome update).
+        self.fail_put_of = ""
 
     def add(self, project: str, title: str, content: str, stamp: str = ENTRY_STAMP) -> None:
         self.projects.setdefault(project, {})[title] = {"title": title, "content": content, "timestamp": stamp}
@@ -86,6 +89,10 @@ class FakeT2:
         return self.projects.get(project, {}).get(title)
 
     def put(self, project: str, title: str, content: str, tags: str = "", **_kw: Any) -> int:
+        if self.fail_put_of == "sending-error" and project == "asks" and not title.startswith("batch/"):
+            rec = json.loads(content)
+            if rec.get("status") == "sending" and rec.get("error"):
+                raise RuntimeError("T2 unreachable")
         if project == "asks" and not title.startswith("batch/") and self.fail_settle > 0:
             if json.loads(content).get("status") != "sending":
                 self.fail_settle -= 1
@@ -128,10 +135,13 @@ class World:
         self.answer_id = "5c1e9a7f0b2d4a83"
         self.lock_held = False
         self.lock_entries = 0
+        self.lock_error: Exception | None = None
         self.t2.add("threads", "halcyon", text("halcyon.txt"))
 
     @contextlib.contextmanager
     def lock(self):
+        if self.lock_error is not None:
+            raise self.lock_error
         assert not self.lock_held, "the answer lock is not re-entrant"
         self.lock_held = True
         self.lock_entries += 1
@@ -998,17 +1008,48 @@ def test_list_takes_an_answered_ask_off_the_bead_it_was_folded_into() -> None:
 
 # --- review follow-ups (nexus-wc4jj.14) ---------------------------------------------------------------
 
+def _status_error(code: int = 500) -> httpx.HTTPStatusError:
+    return httpx.HTTPStatusError("boom", request=httpx.Request("POST", "http://x"), response=httpx.Response(code))
+
+
+def _read_timeout_then_connect_error() -> Exception:
+    """What a retry layer leaves behind: the retry's ConnectError, with the first attempt's ReadTimeout (which may
+    have committed) in ``__context__``."""
+    try:
+        try:
+            raise httpx.ReadTimeout("read timed out")
+        except httpx.ReadTimeout:
+            raise httpx.ConnectError("refused on the retry") from None
+    except httpx.ConnectError as exc:
+        assert isinstance(exc.__context__, httpx.ReadTimeout)
+        return exc
+
+
+def _wrapped_by_cause() -> Exception:
+    try:
+        try:
+            raise httpx.RemoteProtocolError("dropped")
+        except httpx.RemoteProtocolError as inner:
+            raise RuntimeError("tuple_out failed") from inner
+    except RuntimeError as exc:
+        return exc
+
+
 AMBIGUOUS = [
-    httpx.ReadTimeout("read timed out"),
-    httpx.WriteTimeout("write timed out"),
-    httpx.ReadError("connection reset"),
-    httpx.RemoteProtocolError("server disconnected without a response"),
-    ConnectionResetError("reset by peer"),
-    TimeoutError("timed out"),
+    pytest.param(_read_timeout_then_connect_error(), id="read-timeout-then-connect-error-in-context"),
+    pytest.param(_wrapped_by_cause(), id="remote-protocol-error-as-cause"),
+    pytest.param(_status_error(502), id="http-502"),
+    pytest.param(_status_error(504), id="http-504"),
+    pytest.param(httpx.ReadTimeout("read timed out"), id="read-timeout"),
+    pytest.param(httpx.WriteTimeout("write timed out"), id="write-timeout"),
+    pytest.param(httpx.ReadError("connection reset"), id="read-error"),
+    pytest.param(httpx.RemoteProtocolError("server disconnected without a response"), id="remote-protocol-error"),
+    pytest.param(ConnectionResetError("reset by peer"), id="connection-reset"),
+    pytest.param(TimeoutError("timed out"), id="timeout-error"),
 ]
 
 
-@pytest.mark.parametrize("exc", AMBIGUOUS, ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize("exc", AMBIGUOUS)
 def test_an_ambiguous_tuple_out_leaves_the_record_sending_and_says_the_outcome_is_unknown(
     world: World, exc: Exception
 ) -> None:
@@ -1017,7 +1058,9 @@ def test_an_ambiguous_tuple_out_leaves_the_record_sending_and_says_the_outcome_i
     assert r.exit_code != 0
     assert "outcome unknown" in r.output and "left at sending" in r.output and "do not re-run" in r.output
     rec = world.t2.record()
-    assert (rec["status"], rec["tuple_id"], rec["error"]) == ("sending", None, None)
+    assert (rec["status"], rec["tuple_id"]) == ("sending", None)
+    assert rec["error"].startswith("outcome unknown: ")
+    assert (rec["answer_id"], rec["time"]) == ("5c1e9a7f0b2d4a83", "2026-11-05T20:15:03Z")  # unchanged
     # the retry guard is the sending rule: refused inside ten minutes, even with --replace
     world.tuples.fail_with = None
     r = world.run(*mediator_args("--replace"))
@@ -1030,15 +1073,18 @@ def test_an_ambiguous_tuple_out_leaves_the_record_sending_and_says_the_outcome_i
     assert world.t2.record()["status"] == "sent" and world.t2.record()["answer_id"] == "bbbbbbbbbbbbbbbb"
 
 
-def _status_error() -> httpx.HTTPStatusError:
-    return httpx.HTTPStatusError("boom", request=httpx.Request("POST", "http://x"), response=httpx.Response(500))
-
-
 @pytest.mark.parametrize(
     "exc",
-    [httpx.ConnectError("refused"), httpx.ConnectTimeout("connect timed out"), ValueError("body too large"),
-     RuntimeError("tuple_out refused"), _status_error()],
-    ids=lambda e: type(e).__name__,
+    [
+        pytest.param(httpx.ConnectError("refused"), id="connect-error"),
+        pytest.param(httpx.ConnectTimeout("connect timed out"), id="connect-timeout"),
+        pytest.param(ValueError("body too large"), id="value-error"),
+        pytest.param(RuntimeError("tuple_out refused"), id="runtime-error"),
+        pytest.param(_status_error(500), id="http-500"),
+        pytest.param(_status_error(503), id="http-503-pre-forward"),
+        pytest.param(_status_error(400), id="http-400"),
+        pytest.param(_status_error(404), id="http-404"),
+    ],
 )
 def test_a_tuple_out_that_certainly_never_committed_is_marked_failed(world: World, exc: Exception) -> None:
     world.tuples.fail_with = exc
@@ -1363,13 +1409,42 @@ def test_live_lock_serializes_holders_and_creates_the_lock_file(tmp_path: Path, 
     assert (tmp_path / "ask-answer.lock").exists()
 
 
-def test_live_lock_that_cannot_open_its_file_is_a_click_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_lock_that_cannot_open_its_file_proceeds_unlocked_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     blocker = tmp_path / "file"
     blocker.write_text("x")
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(blocker))  # the config dir is a file: mkdir fails
-    with pytest.raises(click.ClickException, match="cannot open the answer lock"):
+    ran = []
+    with live_lock():
+        ran.append(1)
+    assert ran == [1]
+    assert "cannot open the answer lock" in capsys.readouterr().err
+
+
+def test_live_lock_gives_up_after_its_deadline_instead_of_waiting_for_a_hung_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    inside, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
         with live_lock():
-            pass
+            inside.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert inside.wait(5)
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="answer lock"):
+            with live_lock(timeout=0.3):
+                pass
+        assert time.monotonic() - started < 3
+    finally:
+        release.set()
+        t.join(5)
 
 
 def test_a_windows_style_permission_error_on_the_sender_file_is_a_click_error(
@@ -1384,3 +1459,61 @@ def test_a_windows_style_permission_error_on_the_sender_file_is_a_click_error(
     with pytest.raises(click.ClickException, match="cannot keep the cli sender id"):
         default_cli_sender()
     assert [p.name for p in tmp_path.iterdir()] == []  # the temp file is removed
+
+
+# --- review round 2 ------------------------------------------------------------------------------------
+
+
+def test_the_record_is_sent_before_the_batch_record_is_touched(world: World) -> None:
+    seen: list[str] = []
+    world.t2.on_batch_put = lambda title: seen.append(world.t2.record()["status"])
+    assert world.run(*mediator_args("--batch-words", "Yes to both")).exit_code == 0
+    assert seen == ["sent"]
+
+
+@pytest.mark.parametrize("error", [TimeoutError("the answer lock is held"), RuntimeError("lock broke")])
+def test_a_lock_that_cannot_be_taken_warns_and_the_answer_still_ends_sent(world: World, error: Exception) -> None:
+    world.lock_error = error
+    r = world.run(*mediator_args("--batch-words", "Yes to both"))
+    assert r.exit_code == 0, r.output
+    assert f"warning: the batch record batch/{MEDIATOR}/" in r.output and "was not updated" in r.output
+    assert world.t2.record()["status"] == "sent"
+    assert [t for t in world.t2.projects["asks"] if t.startswith("batch/")] == []
+
+
+def test_a_lock_that_cannot_be_taken_after_an_ambiguous_send_still_leaves_sending_with_the_error(world: World) -> None:
+    world.lock_error = TimeoutError("the answer lock is held")
+    world.tuples.fail_with = httpx.ReadTimeout("read timed out")
+    r = world.run(*mediator_args("--batch-words", "Yes to both"))
+    assert r.exit_code != 0 and "outcome unknown" in r.output and "was not updated" in r.output
+    assert world.t2.record()["status"] == "sending"
+
+
+def test_an_ambiguous_send_whose_record_update_fails_twice_still_exits_with_the_message(world: World) -> None:
+    world.tuples.fail_with = httpx.ReadTimeout("read timed out")
+    world.t2.fail_put_of = "sending-error"
+    r = world.run(*mediator_args())
+    assert r.exit_code != 0 and "outcome unknown" in r.output
+    assert world.t2.record()["error"] is None  # the first `sending` record stands
+
+
+def test_show_list_and_digest_show_an_outcome_unknown_record(world: World) -> None:
+    world.tuples.fail_with = httpx.ReadTimeout("read timed out")
+    world.run(*mediator_args())
+    world.tuples.fail_with = None
+    show = world.run("show", REF)
+    assert "outcome unknown" in show.output and "read timed out" not in show.output  # free text is not passed on
+    data = json.loads(world.run("show", REF, "--json").stdout)["answer"]
+    assert data["status"] == "sending" and data["outcome_unknown"] is True
+    out = world.run("list").output
+    line = next(ln for ln in out.splitlines() if f"halcyon/{ASK_ID}" in ln and VERSION in ln)
+    assert "[answer sending: outcome unknown]" in line
+    digest = world.run("digest").output
+    assert "[sending: outcome unknown: read timed out]" in digest
+
+
+def test_show_json_has_no_outcome_unknown_key_for_an_ordinary_sending_record(world: World) -> None:
+    world.t2.add("asks", TITLE, text("answer_record_v1_sending.json"))
+    data = json.loads(world.run("show", REF, "--json").stdout)["answer"]
+    assert "outcome_unknown" not in data
+    assert "outcome unknown" not in world.run("show", REF).output

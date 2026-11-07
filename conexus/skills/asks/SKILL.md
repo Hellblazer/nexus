@@ -48,7 +48,7 @@ A `reversible: yes` ask whose option text reads as irreversible (a delete, a tag
    `nx ask answer ENTRY/ID N --expect VERSION --via mediator --sam-words "the user's words for this ask"`.
    `N` is the option number; for a note-only answer pass the text instead (the user's word, such as `hold`). When one reply covered several asks, add `--batch-words "the whole reply"` (at most 2000 characters) to each call. Each record gets only the words for its own ask (at most 500 characters); the whole reply goes to a batch record that only `nx ask digest` shows.
    A note-only text that starts with `-` is read as an option; put the options first and `--` before the two positionals: `nx ask answer --expect VERSION --via mediator --sam-words "..." -- ENTRY/ID "-text"`.
-6. Report what was sent and any refusal or `failed` status, name the asks left alone, and stop. `outcome unknown` (record left at `sending`) is not `failed`: the mail may have arrived; report it and do not re-run.
+6. Report what was sent and any refusal or `failed` status, name the asks left alone, and stop. `outcome unknown` (record left at `sending`) is not `failed`: the mail may have arrived. Report it and do not re-run. A re-send is refused for 10 minutes and allowed after that, only with the user's fresh confirmation. Offer to mail the asker a clarifying peer message (does it already show the answer?) first.
 
 ## Refusals
 

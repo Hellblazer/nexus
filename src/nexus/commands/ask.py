@@ -19,6 +19,7 @@ import re
 import secrets
 import shutil
 import sys
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -131,12 +132,18 @@ def live_beads() -> BeadsResult:
     return run_bd_needs_sam()
 
 
+LOCK_WAIT = 5.0  #: seconds ``live_lock`` waits for a holder before giving up
+
+
 @contextlib.contextmanager
-def live_lock() -> Iterator[None]:
+def live_lock(timeout: float = LOCK_WAIT) -> Iterator[None]:
     """Exclusive advisory lock (``nexus._locking``) on ``ask-answer.lock`` in the nexus config dir.
 
     It serializes the read-modify-write of a batch record across ``nx ask answer`` processes on this machine.
-    A holder that dies releases it (the OS drops the lock with the descriptor).
+    A holder that dies releases it (the OS drops the lock with the descriptor). Waits at most ``timeout`` seconds,
+    then raises ``TimeoutError``: a hung holder must not stall a process whose mail already went out. A lock file
+    that cannot be opened is a warning, not a failure: the block runs unlocked, since a lost batch record costs
+    more than the narrow race the lock closes.
     """
     from nexus import config as _nx_config  # noqa: PLC0415 -- deferred: CLI startup cost
     from nexus._locking import lock_fd, unlock_fd  # noqa: PLC0415 -- deferred: CLI startup cost
@@ -146,9 +153,19 @@ def live_lock() -> Iterator[None]:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
     except OSError as exc:
-        raise click.ClickException(f"cannot open the answer lock at {path}: {exc}") from exc
+        click.echo(_out(f"warning: cannot open the answer lock at {path}: {exc}; continuing without it"), err=True)
+        yield
+        return
     try:
-        lock_fd(fd, blocking=True)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                lock_fd(fd, blocking=False)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"the answer lock {path} is held by another process") from None
+                time.sleep(0.05)
         try:
             yield
         finally:
@@ -452,7 +469,11 @@ def _answer_mark(records: dict[str, dict[str, Any]], ask: Ask) -> str:
     status = _answer_status(records, ask)
     if status in ("", "sent"):
         return ""
-    return "answer record unreadable" if status == "unreadable" else f"answer {status}"
+    if status == "unreadable":
+        return "answer record unreadable"
+    if status == "sending" and _is_outcome_unknown(_json_obj(records[answer_title(ask)])):
+        return "answer sending: outcome unknown"
+    return f"answer {status}"
 
 
 def _answer_status(records: dict[str, dict[str, Any]], ask: Ask) -> str:
@@ -579,10 +600,20 @@ def _list_json(classes: Any, merged: Any, beads: BeadsResult, findings: Any, dig
 
 
 _ANSWER_STATUS = frozenset({"sending", "sent", "failed"})
+#: The start of the ``error`` of a record left at ``sending`` because the ``tuple_out`` outcome is unknown.
+OUTCOME_UNKNOWN = "outcome unknown: "
 _VIA = re.compile(rf"cli|mediator:{_UUID}")
 _ISO_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})")
 _HEX16 = re.compile(r"[0-9a-f]{16}")
 _TUPLE_ID = re.compile(r"[0-9a-f-]{1,64}")
+
+
+def _is_outcome_unknown(rec: dict[str, Any] | None) -> bool:
+    """A ``sending`` record whose ``error`` says the ``tuple_out`` outcome is unknown (the CLI's own prefix)."""
+    if rec is None:
+        return False
+    error = rec.get("error")
+    return rec.get("status") == "sending" and isinstance(error, str) and error.startswith(OUTCOME_UNKNOWN)
 
 
 def _closed_answer(rec: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -605,7 +636,10 @@ def _closed_answer(rec: dict[str, Any] | None) -> dict[str, Any] | None:
     )
     if not ok:
         return None
-    return {"answer_id": answer_id, "choice": choice, "via": via, "time": when, "status": status, "tuple_id": tuple_id}
+    closed = {"answer_id": answer_id, "choice": choice, "via": via, "time": when, "status": status, "tuple_id": tuple_id}
+    if _is_outcome_unknown(rec):
+        closed["outcome_unknown"] = True  # a flag derived from the CLI's own prefix; the free text stays behind
+    return closed
 
 
 # --- show -------------------------------------------------------------------------------------------
@@ -665,6 +699,8 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
     elif answer is not None:
         choice = "none" if answer["choice"] is None else answer["choice"]
         out.append(f"answer: {answer['status']} at {answer['time']} via {answer['via']} (choice {choice})")
+        if answer.get("outcome_unknown"):
+            out.append("outcome unknown: the mail may have been delivered; a re-send is refused for 10 minutes")
     _say("\n".join(out))
 
 
@@ -743,17 +779,31 @@ def _batch_title_for(s: Seams, mediator: str, words: str, now: datetime) -> tupl
 
 def _outcome_unknown(exc: BaseException) -> bool:
     """True when the failed ``tuple_out`` may still have committed: the request went out and the answer was lost
-    (a read or write timeout, a dropped connection, a half-read response).
+    (a read or write timeout, a dropped connection, a half-read response, a 502 or 504 from the edge).
 
-    A refusal the engine answered (an HTTP status, a typed tuple error), a client pre-check, and a connect
+    The whole exception chain is read (``__cause__`` and ``__context__``): a retry layer that saw a ReadTimeout
+    and then failed to connect raises the ConnectError with the ReadTimeout behind it, and the first attempt may
+    have committed. Any ambiguous link makes the outcome unknown. A refusal the engine answered (a typed tuple
+    error, a 4xx, a 500 or a 503, which the edge sends before it forwards), a client pre-check, and a connect
     failure or timeout (nothing was sent) are definite: the mail was not posted.
     """
     import httpx  # noqa: PLC0415 -- deferred: CLI startup cost
 
     never_sent = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError, httpx.UnsupportedProtocol)
-    if isinstance(exc, httpx.TransportError):
-        return not isinstance(exc, never_sent)
-    return isinstance(exc, (TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError))
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if isinstance(link, httpx.HTTPStatusError):
+            if link.response.status_code in (502, 504):
+                return True
+        elif isinstance(link, httpx.TransportError):
+            if not isinstance(link, never_sent):
+                return True
+        elif isinstance(link, (TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return True
+        link = link.__cause__ or link.__context__
+    return False
 
 
 def _join_batch(s: Seams, batch_title: str, batch_words: str, via: str, answer_title_: str, now: datetime) -> None:
@@ -933,8 +983,9 @@ def answer_cmd(
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: the failure is recorded on the answer and printed
         error = f"{type(exc).__name__}: {exc}" if not str(exc) else str(exc)
         if _outcome_unknown(exc):
-            # The mail may be posted: the record stays `sending` (the drain hook accepts it with the mail's answer id)
-            # and the ten-minute rule is the only retry path.
+            # The mail may be posted: the record stays `sending` (the drain hook accepts it with the mail's answer id,
+            # choice and via) and the ten-minute rule is the only retry path. The error says why it is still sending.
+            settle("sending", None, f"{OUTCOME_UNKNOWN}{error}")
             join_batch()
             click.echo(
                 _out(f"outcome unknown: {error}; the mail may have been delivered; answer record left at sending; "
@@ -945,8 +996,9 @@ def answer_cmd(
         note = "" if settle("failed", None, error) else "; the answer record was not updated and is left at sending"
         click.echo(_out(f"failed: {error}{note}"), err=True)
         ctx.exit(1)
+    settled = settle("sent", str(tuple_id), None)  # the answer's state first; only the batch title waits
     join_batch()
-    if not settle("sent", str(tuple_id), None):
+    if not settled:
         click.echo(
             _out(f"mail sent (tuple {tuple_id}); answer record left at sending; do not re-run"), err=True,
         )

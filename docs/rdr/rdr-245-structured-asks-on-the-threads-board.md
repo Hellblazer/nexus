@@ -415,7 +415,9 @@ clock and the answer records. The first rule that applies wins:
 2. **Answered**: a record with status `sent` exists for the current version.
    Shown as "answered, not yet picked up" until the session removes the block.
    A record for an older version, a `failed` one, or a `sending` one does not
-   count.
+   count; that includes a `sending` record whose `error` begins `outcome
+   unknown: ` (the mail may have arrived, but only the asker's drain hook can
+   say so).
 3. **Interrupt**: `blocking: yes`. When the entry is greyed (older than
    `STALE_AFTER`), it stays interrupt-class and is marked "entry N h old",
    since a blocked session writes nothing.
@@ -507,7 +509,13 @@ and refused otherwise.
   quiet, conditional and answered asks (`--all` expands them), then legacy
   asks and needs-sam beads, then lint findings and the last 48 hours of the
   digest. Text is one ask per line, truncated to the terminal width;
-  `--json` carries every parsed field and the version.
+  `--json` carries every parsed field and the version. `nx ask list --json`
+  is one object: the groups `interrupt`, `batch`, `quiet`, `conditional` and
+  `answered`, each a list of ask objects (every parsed field, `group`,
+  `mark`, and `answer_status`: `""`, `sending`, `sent`, `failed` or
+  `unreadable`), then `legacy`, `beads`, `beads_error`, `lint`, `unreadable`,
+  `digest` (the last 48 hours) and `digest_skipped` (titles of `asks` rows
+  the digest could not read).
 - `nx ask show <entry>/<id> [--json]`: every field, numbered options with the
   recommendation marked, version, asker session and entry age.
 - `nx ask answer <entry>/<id> <n|free text> --expect <version>`: a number
@@ -568,7 +576,18 @@ the asker's `session:` id, and per `via`:
 
    `choice: none` marks a note-only answer.
 5. It updates the record to `sent` with the tuple id, or `failed` with the
-   error, and prints which.
+   error, and prints which. When the `tuple_out` outcome is unknown (the
+   request went out and the reply was lost: a read or write timeout, a
+   dropped connection, a half-read response, a 502 or 504 from the edge, in
+   any link of the exception chain), the mail may have been posted, so the
+   record stays `sending` with `error: "outcome unknown: <reason>"` and the
+   command says so and exits non-zero. A refusal the engine answered (a 4xx,
+   a 500, a 503, a typed tuple error), a client pre-check or a connect failure
+   is `failed`. The 10-minute rule is the only retry path for an unknown
+   outcome: a re-send is refused for 10 minutes, and after that goes out with
+   a new `answer_id`. The batch record, when there is one, is written after
+   the mail and the `sent` update, under a lock on `ask-answer.lock` in the
+   nexus config dir; a `failed` answer never joins it.
 6. Delivery uses the existing paths: channel push, `nx tuple wait`, or the
    drain hook at the session's next prompt.
 7. The session re-reads its entry, acts or confirms with Sam, then deletes the
@@ -927,7 +946,10 @@ refuses an ask with `after:`.
   mark an ask answered; `by:` only sorts.
 - CLI: `--expect` mismatch, `after:`, and a `sent` record without
   `--replace` are refused; a `sending` record under 10 minutes is refused and
-  one over 10 minutes retried, as is a `failed` one; read-back loss sends
+  one over 10 minutes retried, as is a `failed` one; a `tuple_out` with an
+  unknown outcome leaves the record `sending` with `outcome unknown: ` in
+  `error` (the 10-minute rule is the only retry path), while a refusal the
+  engine answered marks it `failed`; read-back loss sends
   nothing; a bare ambiguous id is refused and `<entry>/<id>` accepted;
   `--via cli` is refused without a TTY on stdin and records its note as
   `sam_words`; `--via mediator` is refused without `--sam-words`, over 500
@@ -1107,6 +1129,7 @@ dependency, no new surface, no second parser.
 - 2026-11-05: Gate round 2 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `271f4614c`; critique `nexus_rdr/245-gate-critique-2026-11-05-r2`.
 - 2026-11-05: Gate round 3 — PASSED (1 Critical, 4 Significant, 0 ship-blocker(s)); commit `b5b14ac9e`; critique `nexus_rdr/245-gate-critique-2026-11-05-r3`.
 - 2026-11-05: Accept, round-3 residual dispositions: residual 1 fixed in `1ab2edf7a` (fix check `nexus_rdr/245-fix-check-f33454580`); residual S1 to `nexus-wc4jj.1`; S2 to `nexus-wc4jj.2`; S3 to `nexus-wc4jj.3`; S4 to `nexus-wc4jj.4` (Phase 1).
+- 2026-11-07: wording amendment to match reviewed code (`nexus-wc4jj.14`). A `tuple_out` with an unknown outcome leaves the answer record `sending` with `error: "outcome unknown: ..."`, and the 10-minute rule is its only retry path; `nx ask list --json` shape stated; the batch record is written after the mail, under a lock.
 - 2026-11-06: wording amendment to match reviewed code (`nexus-wc4jj.16`). The mediator's own-id resolution names all three tiers (marker, `NX_T1_SESSION_ID`, `NX_SESSION_ID`) and the UUID check on the environment tiers, as `resolve_default_from` and `resolve_env_session_id` do.
 - 2026-11-07: wording amendment to match reviewed code (`nexus-wc4jj.13`). Parser precedence rule 2 and the Step 5 convention text: an `ask:` line opens a block only when an ask-level line follows it; a lone `ask:` is legacy prose; a bad-id or split block is an unopened ask shown on the board.
 - 2026-11-07: wording amendment to match reviewed code (`nexus-2egi7`, `nexus-wc4jj.15`): per-block end-line code, ask GET headroom, choice range.
