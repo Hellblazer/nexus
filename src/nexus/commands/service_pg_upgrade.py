@@ -58,14 +58,16 @@ def _nx_service(verb: str, config_dir: Path) -> int:
     help="Do the upgrade: stop the service and the old server, move the data directory to <data>.old, "
     "initdb, pg_upgrade --check, pg_upgrade, start the service, then update_extensions.sql and "
     "vacuumdb --all --analyze-in-stages. Any failure after the move removes the new directory and "
-    "moves the original back. <data>.old is kept.",
+    "moves the original back. <data>.old is kept. "
+    "This command is not yet run against a real pre-17 cluster; copy the data directory first.",
 )
 @click.option("--config-dir", "config_dir_str", default=None, help="Config directory override.")
 def pg_upgrade_cmd(old_bin: Path, check_only: bool, do_apply: bool, config_dir_str: str | None) -> None:
     """Upgrade a local cluster made by PostgreSQL below 17 to the bundle's PostgreSQL 17.
 
     With neither flag this is a dry run: it validates the cluster and --old-bin, prints the steps, and
-    changes nothing. Linux and macOS only.
+    changes nothing. Linux and macOS only. Not yet run against a real pre-17 cluster; copy the data
+    directory first.
     """
     if check_only and do_apply:
         raise click.UsageError("--check-only and --apply are separate modes: give one")

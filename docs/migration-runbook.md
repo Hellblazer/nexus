@@ -693,9 +693,10 @@ directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 
 `nx daemon service pg-upgrade --old-bin <bin dir>` does all of this for you: with no
 other flag it prints the plan and changes nothing, `--check-only` runs
-`pg_upgrade --check` against a temporary cluster, and `--apply` upgrades with a
-rollback on any failure (see `docs/cli-reference.md`). The manual steps below are
-the same procedure, and the way to recover by hand.
+`pg_upgrade --check` against the real cluster with a temporary new one, and `--apply`
+upgrades with a rollback on any failure (see `docs/cli-reference.md`). The command is
+not yet run against a real pre-17 cluster; copy the data directory first. The manual
+steps below are the same procedure, and the way to recover by hand.
 
 Save the block as a script and run it with `bash <file>`; do not paste it into
 a shell. Steps 2 to 4 end the script with `exit 1` when they fail (step 2

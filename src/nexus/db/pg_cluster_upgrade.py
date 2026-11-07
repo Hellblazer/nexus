@@ -10,6 +10,8 @@ The design of record is the runbook section "A local cluster older than PostgreS
 * the superuser password reaches ``pg_upgrade``, ``psql`` and ``vacuumdb`` as ``PGPASSWORD`` in the CHILD's
   environment only: never argv, never output, never a log, and never the service's environment;
 * any failure after the data directory is moved aside removes the new directory and moves the original back.
+  An interrupt (Ctrl-C, SIGTERM, SIGHUP) first kills and reaps the running child's process group, so the
+  rollback never runs while ``pg_upgrade`` or a postmaster it started can still write.
 
 Three modes, in increasing reach: :meth:`ClusterUpgrade.dry_run` changes nothing and prints the plan;
 :meth:`ClusterUpgrade.check_only` runs ``initdb`` into a temporary directory (never the real data directory)
@@ -23,13 +25,17 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import structlog
 
 from nexus.db.pg_provision import (
     _INITDB_TIMEOUT_S,
@@ -38,12 +44,16 @@ from nexus.db.pg_provision import (
     SUPERUSER_PASS_KEY,
     PgBinaries,
     PgBinaryNotFoundError,
+    PgRootUserError,
     _initdb_argv,
     _read_credentials,
     _run,
     bootstrap_superuser,
     discover_pg_binaries,
+    refuse_root,
 )
+
+_log = structlog.get_logger(__name__)
 
 #: Backstops, not budgets: a large cluster's ``pg_upgrade`` and ``vacuumdb --analyze-in-stages`` take hours.
 _PG_UPGRADE_TIMEOUT_S: float = 6 * 3600.0
@@ -51,13 +61,30 @@ _VACUUMDB_TIMEOUT_S: float = 6 * 3600.0
 _PSQL_FOLLOWUP_TIMEOUT_S: float = 3600.0
 _PG_CTL_STATUS_TIMEOUT_S: float = 60.0
 
-#: ``pg_ctl status`` exits 0 for a running server and 3 for none.
+#: ``pg_ctl status`` exits 0 for a running server, 3 for none and 4 for a data directory it cannot read.
 _PG_CTL_RUNNING = 0
 _PG_CTL_NOT_RUNNING = 3
+_PG_CTL_DOWN = frozenset({3, 4})
 
 _RUNBOOK = (
     "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md "
     "(section 'A local cluster older than PostgreSQL 17')"
+)
+
+#: The limit of what is known about this command. Shown in the help, the docs, the dry run and before the move.
+#: Remove it once the command has run against a real pre-17 cluster.
+UNTESTED_NOTE = "not yet run against a real pre-17 cluster; copy the data directory first"
+
+#: What a failure before the data directory moves leaves behind (the service and the old server are stopped first).
+_NOT_MOVED = (
+    "The data directory was not moved. The storage service and the old server may be stopped: "
+    "`nx daemon service start` starts the service again."
+)
+
+#: The work directory keeps pg_upgrade's logs, which include the globals dump with the roles' password hashes.
+_WORKDIR_HASH_NOTE = (
+    "It can hold the roles' SCRAM password hashes (not the password itself): delete it once you have read the logs "
+    "or the upgrade is confirmed."
 )
 
 #: ``verb`` is ``"stop"`` or ``"start"``; the callable runs ``nx daemon service <verb>`` and returns its exit code.
@@ -74,6 +101,56 @@ class PgUpgradeFailed(Exception):
 
 class _StepFailed(Exception):
     """One external step failed (internal; carries the scrubbed tail of its output)."""
+
+
+class _Interrupted(KeyboardInterrupt):
+    """A termination signal delivered during ``--apply``, raised so the run unwinds through the rollback."""
+
+
+_FATAL_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name))
+
+
+@contextlib.contextmanager
+def _interrupts_raise() -> Iterator[None]:
+    """For the block: SIGINT, SIGTERM and SIGHUP raise :class:`_Interrupted` in the main thread.
+
+    A signal whose disposition is already "ignore" is left alone (``nohup`` asked for exactly that).
+    Off the main thread ``signal.signal`` refuses, and the block runs without handlers.
+    """
+    def handler(signum: int, _frame: object) -> None:
+        raise _Interrupted(signal.Signals(signum).name)
+
+    saved: dict[int, object] = {}
+    for sig in _FATAL_SIGNALS:
+        try:
+            if signal.getsignal(sig) == signal.SIG_IGN:
+                continue
+            saved[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):
+            break
+    try:
+        yield
+    finally:
+        for sig, previous in saved.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, previous if previous is not None else signal.SIG_DFL)  # type: ignore[arg-type]
+
+
+@contextlib.contextmanager
+def _interrupts_held() -> Iterator[None]:
+    """For the block: SIGINT, SIGTERM and SIGHUP are ignored, so a rollback cannot be cut in half."""
+    saved: dict[int, object] = {}
+    for sig in _FATAL_SIGNALS:
+        try:
+            saved[sig] = signal.signal(sig, signal.SIG_IGN)
+        except (ValueError, OSError):
+            break
+    try:
+        yield
+    finally:
+        for sig, previous in saved.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, previous if previous is not None else signal.SIG_DFL)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -125,6 +202,14 @@ def _tool_major(tool: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _absolute(path: Path) -> Path:
+    """*path* made absolute against the caller's cwd, without following symlinks.
+
+    pg_upgrade runs from a work directory, so a relative path handed on would resolve there.
+    """
+    return Path(os.path.abspath(path))
+
+
 def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = True) -> UpgradePlan:
     """Validate everything that can be validated without changing anything; raise :class:`PgUpgradeRefused`.
 
@@ -132,8 +217,14 @@ def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = Tr
     """
     if sys.platform == "win32":
         raise PgUpgradeRefused(f"this upgrade is for Linux and macOS; see {_RUNBOOK}")
+    try:
+        refuse_root()
+    except PgRootUserError as exc:
+        raise PgUpgradeRefused(str(exc)) from None
     from nexus.health import PG_VERSION_FLOOR  # noqa: PLC0415 — deferred, heavy module; this command only
 
+    config_dir = _absolute(config_dir)
+    old_bin = _absolute(old_bin)
     creds_path = config_dir / CREDENTIALS_FILENAME
     try:
         creds = _read_credentials(creds_path)
@@ -142,7 +233,7 @@ def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = Tr
             f"no readable {CREDENTIALS_FILENAME} in {config_dir} ({type(exc).__name__}): "
             "there is no nx-managed local cluster here to upgrade"
         ) from None
-    pgdata = Path(creds.get("PG_DATA") or (config_dir / "postgres"))
+    pgdata = _absolute(Path(creds.get("PG_DATA") or (config_dir / "postgres")))
     try:
         version_text = (pgdata / "PG_VERSION").read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
@@ -178,7 +269,7 @@ def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = Tr
 
     pgdata_old = pgdata.with_name(pgdata.name + ".old")
     if require_no_old_dir and os.path.lexists(pgdata_old):
-        raise PgUpgradeRefused(_old_dir_text(pgdata, pgdata_old))
+        raise PgUpgradeRefused(_old_dir_text(pgdata, pgdata_old) + " Nothing was changed.")
 
     return UpgradePlan(
         config_dir=config_dir,
@@ -195,7 +286,7 @@ def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = Tr
 
 def _old_dir_text(pgdata: Path, pgdata_old: Path) -> str:
     return (
-        f"{pgdata_old} exists and is the pre-upgrade cluster: keep it, nothing was changed. "
+        f"{pgdata_old} exists and is the pre-upgrade cluster: keep it. "
         "If the service never ran on the new cluster (an earlier attempt failed), back out: remove the "
         f"new {pgdata}, then `mv {pgdata_old} {pgdata}`, and run this again. If the service has run on the "
         f"new cluster, the upgrade already succeeded: keep both and do not run this again. See {_RUNBOOK}."
@@ -206,6 +297,8 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
     """The steps ``--apply`` would take, in order, as printable lines."""
     old_ctl, new = plan.old_bin / "pg_ctl", plan.new_bins.bin_dir
     return [
+        f"NOTE: this command is {UNTESTED_NOTE} ({plan.pgdata}).",
+        "",
         f"cluster      {plan.pgdata} (PostgreSQL {plan.cluster_major}, superuser {plan.os_user})",
         f"old bin      {plan.old_bin}",
         f"new bin      {new} (the bundle)",
@@ -220,14 +313,16 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
         "  5. pg_upgrade --check, then the real pg_upgrade (the password, "
         + ("from pg_credentials, " if plan.password else "none recorded, ")
         + "goes in the child's environment only)",
-        f"     any failure from step 3 on: remove the new {plan.pgdata}, mv {plan.pgdata_old} back",
+        f"     any failure from step 3 on: stop the child and any server, remove the new {plan.pgdata}, "
+        f"mv {plan.pgdata_old} back",
         "  6. nx daemon service start",
-        "  7. psql -f update_extensions.sql (when pg_upgrade wrote one), then vacuumdb --all --analyze-in-stages, "
-        "both over TCP",
+        "  7. psql -f update_extensions.sql (when pg_upgrade wrote one; it says whether it found one), then "
+        "vacuumdb --all --analyze-in-stages, both over TCP",
         f"  8. keep {plan.pgdata_old}; say how to remove it once the service has run",
         "",
-        "--check-only runs initdb into a temporary directory and pg_upgrade --check against it; the real "
-        "data directory is only read, as pg_upgrade --check reads it.",
+        "--check-only runs initdb into a temporary directory and pg_upgrade --check against it. pg_upgrade --check "
+        "starts and stops the old server on the real data directory and does not modify it, so the old server "
+        "must not be running.",
         "Nothing was changed. Re-run with --check-only to test it, or --apply to upgrade.",
     ]
 
@@ -249,6 +344,7 @@ class ClusterUpgrade:
         self.plan = plan
         self.say = say
         self.service = service
+        self._moved = False
 
     # ── helpers ────────────────────────────────────────────────────────────
 
@@ -263,10 +359,22 @@ class ClusterUpgrade:
         text = self._scrub(f"{done.stdout or ''}{done.stderr or ''}").strip()
         return "\n".join(text.splitlines()[-lines:])
 
-    def _step(self, what: str, argv: list[str], *, timeout: float, cwd: Path | None = None, secret: bool = False) -> subprocess.CompletedProcess:
-        """Run one command; raise :class:`_StepFailed` (with scrubbed output) on a nonzero exit, timeout or spawn failure."""
+    def _service(self, verb: str) -> int:
+        """Run the service callable; an exception from it is a nonzero exit, with the type named."""
         try:
-            done = _run(argv, check=False, timeout=timeout, cwd=cwd, env=self._env(secret=secret))
+            return self.service(verb, self.plan.config_dir)
+        except Exception as exc:  # noqa: BLE001 — a timeout or spawn failure is a failed verb, not a crash
+            _log.error("pg_upgrade_service_verb_raised", verb=verb, error=type(exc).__name__)
+            self.say(f"`nx daemon service {verb}` raised {type(exc).__name__}")
+            return 1
+
+    def _step(self, what: str, argv: list[str], *, timeout: float, cwd: Path | None = None, secret: bool = False) -> subprocess.CompletedProcess:
+        """Run one command; raise :class:`_StepFailed` (with scrubbed output) on a nonzero exit, timeout or spawn failure.
+
+        An interrupt kills and reaps the child's process group before it propagates.
+        """
+        try:
+            done = _run(argv, check=False, timeout=timeout, cwd=cwd, env=self._env(secret=secret), kill_on_interrupt=True)
         except subprocess.TimeoutExpired:
             raise _StepFailed(f"{what} did not finish within {timeout:.0f} s") from None
         except OSError as exc:
@@ -276,13 +384,24 @@ class ClusterUpgrade:
         return done
 
     def _server_state(self, pg_ctl: Path, data: Path) -> int:
-        done = _run([str(pg_ctl), "-D", str(data), "status"], check=False, timeout=_PG_CTL_STATUS_TIMEOUT_S,
-                    env=self._env(secret=False))
+        """``pg_ctl status``'s exit code; a status that cannot run is a :class:`_StepFailed`."""
+        try:
+            done = _run([str(pg_ctl), "-D", str(data), "status"], check=False, timeout=_PG_CTL_STATUS_TIMEOUT_S,
+                        env=self._env(secret=False))
+        except Exception as exc:  # noqa: BLE001 — timeout, spawn failure, root: all mean "state unknown"
+            raise _StepFailed(f"`{pg_ctl} -D {data} status` could not run ({type(exc).__name__})") from None
         return done.returncode
 
     def _stop_server(self, pg_ctl: Path, data: Path, *, mode: str) -> None:
         if self._server_state(pg_ctl, data) == _PG_CTL_RUNNING:
             self._step(f"{pg_ctl} stop", [str(pg_ctl), "-D", str(data), "-m", mode, "stop"], timeout=_PG_CTL_WAIT_TIMEOUT_S)
+
+    def _is_down(self, pg_ctl: Path, data: Path) -> bool:
+        """True only when ``pg_ctl status`` confirms no server runs there; unknown counts as not down."""
+        try:
+            return self._server_state(pg_ctl, data) in _PG_CTL_DOWN
+        except _StepFailed:
+            return False
 
     def _upgrade_argv(self, old_data: Path, new_data: Path, *, check: bool) -> list[str]:
         p = self.plan
@@ -307,7 +426,10 @@ class ClusterUpgrade:
         """initdb into a temporary directory and ``pg_upgrade --check`` against it; the temporary directory goes."""
         p = self.plan
         old_ctl = p.old_bin / "pg_ctl"
-        state = self._server_state(old_ctl, p.pgdata)
+        try:
+            state = self._server_state(old_ctl, p.pgdata)
+        except _StepFailed as exc:
+            raise PgUpgradeRefused(f"{exc}: cannot tell whether a server runs on {p.pgdata}. Nothing was changed.") from None
         if state == _PG_CTL_RUNNING:
             raise PgUpgradeRefused(
                 f"a server is running on {p.pgdata}: stop it with `{old_ctl} -D {p.pgdata} -m fast stop` "
@@ -315,7 +437,10 @@ class ClusterUpgrade:
             )
         if state != _PG_CTL_NOT_RUNNING:
             raise PgUpgradeRefused(f"`{old_ctl} -D {p.pgdata} status` exited {state}: cannot tell whether a server runs there")
-        workdir = _short_tempdir()
+        try:
+            workdir = _short_tempdir()
+        except OSError as exc:
+            raise PgUpgradeRefused(f"could not make a temporary directory under {SHORT_TMP_ROOT} ({exc.strerror})") from None
         try:
             new_data = workdir / "data"
             try:
@@ -325,58 +450,68 @@ class ClusterUpgrade:
                            timeout=_PG_UPGRADE_TIMEOUT_S, cwd=workdir, secret=True)
             except _StepFailed as exc:
                 raise PgUpgradeFailed(
-                    f"{exc}\nNothing was changed in {p.pgdata}. If it reports an encoding or locale mismatch, the old "
+                    f"{exc}\n{p.pgdata} was not modified (pg_upgrade --check starts and stops the old server on it, "
+                    f"and changes nothing). If it reports an encoding or locale mismatch, the old "
                     f"cluster was made with other options; see {_RUNBOOK}."
                 ) from None
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
-        self.say(f"pg_upgrade --check passed. The temporary cluster is removed and {p.pgdata} was not changed.")
+        self.say(f"pg_upgrade --check passed. The temporary cluster is removed and {p.pgdata} was not modified.")
 
     def apply(self) -> None:
         p = self.plan
-        old_ctl = p.old_bin / "pg_ctl"
         if p.port is None:
             raise PgUpgradeRefused(f"{CREDENTIALS_FILENAME} has no PG_PORT: the follow-up steps could not reach the new cluster")
+        with _interrupts_raise():
+            try:
+                workdir = _short_tempdir()
+            except OSError as exc:
+                raise PgUpgradeRefused(
+                    f"could not make a work directory under {SHORT_TMP_ROOT} ({exc.strerror}): nothing was changed"
+                ) from None
+            self._apply(workdir)
 
-        self.say("stopping the storage service")
-        if self.service("stop", p.config_dir) != 0:
-            raise PgUpgradeRefused("`nx daemon service stop` failed: nothing was changed")
-        self.say(f"stopping the old server with {old_ctl}")
+    def _apply(self, workdir: Path) -> None:
+        p = self.plan
+        self.say(f"NOTE: this command is {UNTESTED_NOTE} ({p.pgdata}).")
         try:
-            self._stop_server(old_ctl, p.pgdata, mode="fast")
-        except _StepFailed as exc:
-            raise PgUpgradeRefused(f"{exc}\nNothing was changed.") from None
-        if self._server_state(old_ctl, p.pgdata) != _PG_CTL_NOT_RUNNING:
-            raise PgUpgradeRefused(
-                f"a server still runs on {p.pgdata} (a service manager such as brew services or systemd may restart "
-                "it: stop it there). Nothing was changed."
-            )
-        if os.path.lexists(p.pgdata_old):
-            raise PgUpgradeRefused(_old_dir_text(p.pgdata, p.pgdata_old))
-
-        try:
-            os.rename(p.pgdata, p.pgdata_old)
-        except OSError as exc:
-            raise PgUpgradeFailed(f"could not move {p.pgdata} to {p.pgdata_old} ({exc.strerror}): nothing was changed") from None
-        self.say(f"moved {p.pgdata} to {p.pgdata_old}")
-
-        workdir = _short_tempdir()
-        try:
+            self._stop_and_move()
             self._upgrade(workdir)
         except BaseException as exc:
+            # The rename may have landed with the flag not yet set (an interrupt in between): the directory
+            # layout says so too. A refusal has the original in place and a pre-existing .old, so it cannot match.
+            moved = self._moved or (not os.path.lexists(p.pgdata) and os.path.lexists(p.pgdata_old))
+            if not moved:
+                shutil.rmtree(workdir, ignore_errors=True)
+                if isinstance(exc, (PgUpgradeRefused, PgUpgradeFailed)):
+                    raise
+                if isinstance(exc, _StepFailed):
+                    raise PgUpgradeRefused(f"{exc}\n{_NOT_MOVED}") from None
+                if isinstance(exc, Exception):
+                    self._log_unexpected(exc)
+                    raise PgUpgradeRefused(f"the upgrade stopped on {type(exc).__name__}\n{_NOT_MOVED}") from None
+                self.say(f"interrupted ({exc}). {_NOT_MOVED}")
+                raise
             outcome = self._rollback(workdir)
             if isinstance(exc, _StepFailed):
                 raise PgUpgradeFailed(f"{exc}\n{outcome}") from None
             if isinstance(exc, Exception):
+                self._log_unexpected(exc)
                 raise PgUpgradeFailed(f"the upgrade stopped on {type(exc).__name__}\n{outcome}") from None
-            self.say(outcome)
+            self.say(f"interrupted ({exc}). {outcome}")
             raise
-        problems = self._finish(workdir)
+        try:
+            problems = self._finish(workdir)
+        except Exception as exc:  # noqa: BLE001 — pg_upgrade succeeded: whatever else breaks, the upgrade stands
+            self._log_unexpected(exc)
+            problems = [f"the follow-up steps stopped on {type(exc).__name__}"]
+        except BaseException as exc:
+            self.say(f"interrupted ({exc}). {self._in_place_text(workdir)}\n"
+                     "Start the service (`nx daemon service start`) and run vacuumdb --all --analyze-in-stages by hand.")
+            raise
         if problems:
             raise PgUpgradeFailed(
-                "pg_upgrade succeeded and the upgraded cluster is in place at "
-                f"{p.pgdata}, but a follow-up step failed:\n" + "\n".join(problems) +
-                f"\nThe pre-upgrade cluster is kept at {p.pgdata_old}. Work directory kept: {workdir}"
+                f"{self._in_place_text(workdir)}\nA follow-up step failed:\n" + "\n".join(problems)
             )
         shutil.rmtree(workdir, ignore_errors=True)
         self.say("")
@@ -387,6 +522,40 @@ class ClusterUpgrade:
                  f"back, remove it by hand: rm -rf {p.pgdata_old}")
 
     # ── apply internals ────────────────────────────────────────────────────
+
+    def _log_unexpected(self, exc: BaseException) -> None:
+        """A bug in this code reaches the user as a type name; the traceback goes to the log."""
+        _log.error("pg_upgrade_unexpected_exception", error=type(exc).__name__, exc_info=exc)
+
+    def _in_place_text(self, workdir: Path) -> str:
+        p = self.plan
+        return (
+            f"pg_upgrade succeeded and the upgraded cluster is in place at {p.pgdata}. "
+            f"The pre-upgrade cluster is kept at {p.pgdata_old}. Work directory kept: {workdir}\n{_WORKDIR_HASH_NOTE}"
+        )
+
+    def _stop_and_move(self) -> None:
+        """Stop the service and the old server, then move the data directory aside. Raises before the move on any problem."""
+        p = self.plan
+        old_ctl = p.old_bin / "pg_ctl"
+        self.say("stopping the storage service")
+        if self._service("stop") != 0:
+            raise PgUpgradeRefused("`nx daemon service stop` failed: the data directory was not touched")
+        self.say(f"stopping the old server with {old_ctl}")
+        self._stop_server(old_ctl, p.pgdata, mode="fast")
+        if self._server_state(old_ctl, p.pgdata) != _PG_CTL_NOT_RUNNING:
+            raise PgUpgradeRefused(
+                f"a server still runs on {p.pgdata} (a service manager such as brew services or systemd may restart "
+                f"it: stop it there). {_NOT_MOVED}"
+            )
+        if os.path.lexists(p.pgdata_old):
+            raise PgUpgradeRefused(f"{_old_dir_text(p.pgdata, p.pgdata_old)}\n{_NOT_MOVED}")
+        try:
+            os.rename(p.pgdata, p.pgdata_old)
+        except OSError as exc:
+            raise PgUpgradeFailed(f"could not move {p.pgdata} to {p.pgdata_old} ({exc.strerror}). {_NOT_MOVED}") from None
+        self._moved = True
+        self.say(f"moved {p.pgdata} to {p.pgdata_old}")
 
     def _upgrade(self, workdir: Path) -> None:
         p = self.plan
@@ -400,19 +569,39 @@ class ClusterUpgrade:
                    timeout=_PG_UPGRADE_TIMEOUT_S, cwd=workdir, secret=True)
 
     def _rollback(self, workdir: Path) -> str:
-        """Remove the new data directory and move the original back; return what happened, in a sentence or two."""
+        """Remove the new data directory and move the original back; return what happened, in a sentence or two.
+
+        Signals are ignored for the duration: a rollback cut in half is worse than one that finishes.
+        """
+        with _interrupts_held():
+            return self._rollback_held(workdir)
+
+    def _rollback_held(self, workdir: Path) -> str:
         p = self.plan
         self.say("failed: rolling back")
-        # A failed pg_upgrade can leave a server it started; stop it before the directory goes.
-        for pg_ctl, data in ((p.new_bins.pg_ctl, p.pgdata), (p.old_bin / "pg_ctl", p.pgdata_old)):
+        # A failed pg_upgrade can leave a server it started. Stop it before the directory goes: the new one with
+        # `immediate` (it is discarded), the ORIGINAL with `fast` (`immediate` leaves it needing crash recovery).
+        running: list[tuple[Path, Path]] = []
+        for pg_ctl, data, mode in ((p.new_bins.pg_ctl, p.pgdata, "immediate"), (p.old_bin / "pg_ctl", p.pgdata_old, "fast")):
             with contextlib.suppress(Exception):
-                self._stop_server(pg_ctl, data, mode="immediate")
+                self._stop_server(pg_ctl, data, mode=mode)
+            if not self._is_down(pg_ctl, data):
+                running.append((pg_ctl, data))
         # pg_upgrade keeps its logs inside the new directory (PostgreSQL 15 and later); save them first.
         logs = p.pgdata / "pg_upgrade_output.d"
         with contextlib.suppress(OSError, shutil.Error):
             if logs.is_dir():
                 shutil.copytree(logs, workdir / "pg_upgrade_output.d")
-        kept = f" The work directory with pg_upgrade's logs is kept: {workdir}"
+        kept = f" The work directory with pg_upgrade's logs is kept: {workdir}\n{_WORKDIR_HASH_NOTE}"
+        if running:
+            stops = "; ".join(f"`{ctl} -D {data} -m fast stop`" for ctl, data in running)
+            where = " and ".join(str(data) for _, data in running)
+            return (
+                f"ROLLBACK INCOMPLETE: a server may still be running on {where} (it did not stop, or `pg_ctl status` "
+                f"could not confirm it is down), so nothing was removed or moved back. Your original cluster is at "
+                f"{p.pgdata_old}. Stop the server ({stops}), remove the new {p.pgdata}, then "
+                f"`mv {p.pgdata_old} {p.pgdata}`.{kept}"
+            )
         try:
             if os.path.lexists(p.pgdata):
                 shutil.rmtree(p.pgdata)
@@ -433,27 +622,46 @@ class ClusterUpgrade:
             f"The service is stopped and cannot start a PostgreSQL below 17; fix the cause and run this again.{kept}"
         )
 
+    def _find_update_extensions(self, workdir: Path) -> Path | None:
+        """pg_upgrade writes ``update_extensions.sql`` into its cwd; PostgreSQL 15 and later may keep it with its logs."""
+        direct = workdir / "update_extensions.sql"
+        if direct.is_file():
+            return direct
+        logs = self.plan.pgdata / "pg_upgrade_output.d"
+        with contextlib.suppress(OSError):
+            for found in sorted(logs.rglob("update_extensions.sql")):
+                if found.is_file():
+                    return found
+        return None
+
     def _finish(self, workdir: Path) -> list[str]:
         """Start the service and run pg_upgrade's follow-ups; return the problems (empty on success)."""
         p = self.plan
         problems: list[str] = []
+        host = ["-h", "127.0.0.1", "-p", str(p.port), "-U", p.os_user]
+        update = self._find_update_extensions(workdir)
+        psql_argv = [str(p.new_bins.psql), "-w", *host, "-d", "postgres", "-f", str(update)] if update else None
+        vacuum_argv = [str(p.vacuumdb), "-w", *host, "--all", "--analyze-in-stages"]
         # The password lives only in each child's env below; the service starts from a clean one.
         self.say("starting the storage service")
-        if self.service("start", p.config_dir) != 0:
-            problems.append("`nx daemon service start` failed: start it, then run the two follow-ups below by hand")
-        host = ["-h", "127.0.0.1", "-p", str(p.port), "-U", p.os_user]
-        if (workdir / "update_extensions.sql").is_file():
-            self.say("update_extensions.sql")
+        if self._service("start") != 0:
+            by_hand = [shlex.join(a) for a in (psql_argv, vacuum_argv) if a]
+            problems.append(
+                "`nx daemon service start` failed: start it, then run these by hand, with PGPASSWORD set to the "
+                "superuser password from pg_credentials (set it without printing it):\n  " + "\n  ".join(by_hand)
+            )
+        if psql_argv:
+            self.say(f"pg_upgrade wrote {update}: running it")
             try:
-                self._step("psql update_extensions.sql",
-                           [str(p.new_bins.psql), "-w", *host, "-d", "postgres", "-f", "update_extensions.sql"],
-                           timeout=_PSQL_FOLLOWUP_TIMEOUT_S, cwd=workdir, secret=True)
+                self._step("psql update_extensions.sql", psql_argv, timeout=_PSQL_FOLLOWUP_TIMEOUT_S, cwd=workdir, secret=True)
             except _StepFailed as exc:
                 problems.append(str(exc))
+        else:
+            self.say(f"pg_upgrade wrote no update_extensions.sql (looked in {workdir} and {p.pgdata}/pg_upgrade_output.d): "
+                     "if a later query fails on an extension function, run ALTER EXTENSION <name> UPDATE in that database")
         self.say("vacuumdb --all --analyze-in-stages")
         try:
-            self._step("vacuumdb", [str(p.vacuumdb), "-w", *host, "--all", "--analyze-in-stages"],
-                       timeout=_VACUUMDB_TIMEOUT_S, cwd=workdir, secret=True)
+            self._step("vacuumdb", vacuum_argv, timeout=_VACUUMDB_TIMEOUT_S, cwd=workdir, secret=True)
         except _StepFailed as exc:
             problems.append(str(exc))
         return problems

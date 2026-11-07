@@ -4540,6 +4540,11 @@ with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
 It is the scripted form of "A local cluster older than PostgreSQL 17" in
 [the migration runbook](migration-runbook.md). Linux and macOS only.
 
+**Not yet run against a real pre-17 cluster; copy the data directory first.**
+The command is tested against fake PostgreSQL binaries only. Until a real run
+exists, take a copy of the data directory (`cp -a <data> <copy>`) before
+`--apply`; the dry run and `--apply` both print this reminder.
+
 `--old-bin` is the `bin/` directory of the PostgreSQL that created the cluster;
 its `pg_ctl --version` must match the cluster's `PG_VERSION`. If that PostgreSQL
 is gone, install the same major version first. A cluster already at 17 or newer,
@@ -4550,12 +4555,13 @@ Without a mode flag the command changes nothing: it validates the cluster and
 `--old-bin` and prints every step `--apply` would take. `--check-only` runs
 `initdb` into a temporary directory (never the real data directory) with the
 options nx creates its own clusters with, runs `pg_upgrade --check` against the
-real cluster, and removes the temporary directory; the old server must not be
-running. `--apply` stops the service, stops the old server with the old
+real cluster (it starts and stops the old server on it and does not modify it),
+and removes the temporary directory; the old server must not be running. `--apply` stops the service, stops the old server with the old
 `pg_ctl` and checks it is down, moves the data directory to `<data>.old`, runs
 `initdb` (`--auth=trust` for the upgrade; the next service start converts it to
 `scram-sha-256`), `pg_upgrade --check` and `pg_upgrade`, starts the service, then
-runs `update_extensions.sql` (when `pg_upgrade` wrote one) and
+runs `update_extensions.sql` (it looks in its work directory and under
+`<new data>/pg_upgrade_output.d`, and says whether it found one) and
 `vacuumdb --all --analyze-in-stages` over TCP.
 
 The superuser password from `pg_credentials` reaches `pg_upgrade`, `psql` and
@@ -4563,7 +4569,13 @@ The superuser password from `pg_credentials` reaches `pg_upgrade`, `psql` and
 line, in the output or in a log, and never in the service's environment. Any
 failure after the data directory has moved removes the new directory and moves
 the original back; `pg_upgrade`'s logs are kept in a work directory the message
-names. After a success the pre-upgrade cluster stays at `<data>.old`: remove it
+names. That directory can hold the roles' SCRAM password hashes (not the
+password): delete it once you have read the logs. Ctrl-C, SIGTERM and SIGHUP
+during `--apply` stop the running `pg_upgrade` (and any server it started) first,
+then roll back; the rollback stops the original cluster's server with
+`-m fast`, checks that no server runs, and prints `ROLLBACK INCOMPLETE` with the
+manual steps when it cannot finish. On Linux, an old PostgreSQL from a
+distribution may not start under the bundle's libraries; the command rolls back. After a success the pre-upgrade cluster stays at `<data>.old`: remove it
 by hand once the service has run and your data reads back. Check the result with
 `nx doctor` ("Local PostgreSQL version" passes, "Local PostgreSQL authentication"
 shows `scram-sha-256`).
@@ -4571,7 +4583,7 @@ shows `scram-sha-256`).
 | Flag | Description |
 |------|-------------|
 | `--old-bin PATH` | Required. The `bin/` of the PostgreSQL that created the cluster. |
-| `--check-only` | `initdb` into a temporary directory and `pg_upgrade --check` against it; changes nothing. |
+| `--check-only` | `initdb` into a temporary directory and `pg_upgrade --check` against the real cluster (starts and stops the old server, modifies nothing). |
 | `--apply` | Do the upgrade; rolls back on any failure after the move. |
 | `--config-dir PATH` | Config directory override. |
 

@@ -735,8 +735,12 @@ def _run(
     env: dict | None = None,
     cwd: str | os.PathLike[str] | None = None,
     timeout: float,
+    kill_on_interrupt: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess, raising on non-zero exit when *check* is True.
+
+    *kill_on_interrupt* reaches ``run_bounded`` only when True: an interrupt then kills
+    and reaps the child's group before it propagates (the pg-upgrade command, nexus-j738q).
 
     *cwd* is for the pg_upgrade command (``nx daemon service pg-upgrade``),
     which writes its follow-up scripts into the directory it runs from.
@@ -795,6 +799,7 @@ def _run(
             env=_bundle_lib_env(cmd, env),
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
+            **({"kill_on_interrupt": True} if kill_on_interrupt else {}),
         )
     except subprocess.TimeoutExpired as exc:
         # Rebuild rather than mutate: TimeoutExpired.cmd is what str() reads.

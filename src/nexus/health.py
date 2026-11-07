@@ -6445,7 +6445,9 @@ def _check_local_pg_version(config_dir: Path | None = None) -> list[HealthResult
             "(event=pg_version_below_floor in the service log, or, started cold, a refusal before pg_ctl runs)"
         ),
         fix_suggestions=[
-            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} with pg_upgrade (Linux and macOS): "
+            f"upgrade the cluster to the bundle's PostgreSQL {PG_VERSION_FLOOR} (Linux and macOS): "
+            "`nx daemon service pg-upgrade --old-bin <bin dir of the PostgreSQL that made it>` (a dry run; "
+            "--apply upgrades), or by hand: "
             "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md (section 'A local cluster older than PostgreSQL 17')",
         ],
     )]
