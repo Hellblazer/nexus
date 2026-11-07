@@ -141,6 +141,25 @@ class TestPlanList:
         assert "grown-x" in result.output
         assert "research-default" not in result.output
 
+    def test_list_origin_grown_matches_the_shape_the_grow_path_writes(
+        self, runner: CliRunner, plan_db: T2Database,
+    ) -> None:
+        """nexus-7bwe: _nx_answer_plan_grow tags ``ad-hoc,grown`` under the session's project, which the old
+        heuristic labelled ``user``; a ``builtin-template`` substring inside another token is not builtin."""
+        _seed_plan_row(
+            plan_db, name="grown-in-project", query="g", verb="research",
+            scope="personal", project="ART", tags="ad-hoc,grown",
+        )
+        _seed_plan_row(
+            plan_db, name="not-builtin", query="n", verb="research",
+            tags="my-builtin-templates",
+        )
+        result = runner.invoke(main, ["plan", "list", "--origin", "grown"])
+        assert result.exit_code == 0, result.output
+        assert "grown-in-project" in result.output and "not-builtin" not in result.output
+        result = runner.invoke(main, ["plan", "list", "--origin", "builtin"])
+        assert "not-builtin" not in result.output
+
     def test_list_name_substring(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
@@ -399,3 +418,24 @@ def test_plan_reseed_insert_only_opts_out(runner, monkeypatch):
     assert result.exit_code == 0, result.output
     assert seen["reconcile"] is False
     assert "--insert-only" in result.output
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"tags": "ad-hoc,grown", "project": "ART"}, "grown"),
+        ({"tags": "", "project": "personal"}, "grown"),
+        ({"tags": "", "project": "ART", "plan_json": json.dumps(
+            {"steps": [], "answer_kind": {"version": 1, "kind": "synthesis", "provenance": "grown", "route": "heuristic"}})},
+         "grown"),
+        ({"tags": "builtin-template,rdr-098", "project": ""}, "builtin"),
+        ({"tags": "builtin-template,grown", "project": ""}, "grown"),
+        ({"tags": "my-builtin-templates", "project": ""}, "user"),
+        ({"tags": "research", "project": "ART"}, "user"),
+        ({"tags": None, "project": None, "plan_json": "not json"}, "user"),
+    ],
+)
+def test_classify_origin_reads_tag_tokens_and_the_declaration(row, expected) -> None:
+    from nexus.commands.plan import _classify_origin
+
+    assert _classify_origin(row) == expected

@@ -24,23 +24,31 @@ import click
 
 
 def _classify_origin(row: dict) -> str:
-    """Heuristic origin label. nexus-7bwe tracks adding an explicit
-    ``origin`` column to the plans T2 table so this stops inferring from
-    tags + project; deferred until a cross-session origin-filter
-    reliability complaint drives the change.
+    """The row's origin label, read from what the writers stamp (nexus-7bwe).
 
-    - ``builtin``  — tags carry the ``builtin-template`` token (seeded
-      from ``conexus/plans/builtin/*.yml`` by ``nx catalog setup``).
-    - ``grown``    — ``project=='personal'`` with no recognisable user
-      tag, the shape ``_nx_answer_plan_grow`` produces.
-    - ``user``     — anything else (called via ``plan_save`` MCP tool
-      or written by an ad-hoc skill).
+    - ``grown``    the ``grown`` tag token (``_nx_answer_plan_grow`` writes ``ad-hoc,grown`` under the
+      session's project) or a grown answer-kind declaration in ``plan_json``; and the legacy grown shape,
+      ``project=='personal'`` with no tags.
+    - ``builtin``  the ``builtin-template`` tag token (seeded from the shipped templates).
+    - ``user``     anything else (``plan_save`` or an ad-hoc skill).
+
+    Tags are read as comma tokens, as the eligibility gate reads them; a grown token wins over the builtin
+    one, as it does there.
     """
+    from nexus.plans.answer_kind import decode_declaration  # noqa: PLC0415 — command-local import
+    from nexus.plans.eligibility import BUILTIN_TAG, GROWN_TAG  # noqa: PLC0415 — command-local import
+
     tags = row.get("tags") or ""
-    if "builtin-template" in tags:
+    tokens = {t.strip() for t in tags.split(",") if t.strip()} if isinstance(tags, str) else set()
+    try:
+        grown_declared = decode_declaration(row.get("plan_json")).provenance == "grown"
+    except Exception:  # noqa: BLE001 — an unreadable plan_json labels by tags alone
+        grown_declared = False
+    if GROWN_TAG in tokens or grown_declared:
+        return "grown"
+    if BUILTIN_TAG in tokens:
         return "builtin"
-    project = row.get("project") or ""
-    if project == "personal" and not tags:
+    if (row.get("project") or "") == "personal" and not tokens:
         return "grown"
     return "user"
 
@@ -202,7 +210,7 @@ def hygiene_cmd(apply_: bool) -> None:
     "--origin",
     type=click.Choice(["builtin", "grown", "user"], case_sensitive=False),
     default=None,
-    help="Filter by inferred origin (heuristic; nexus-7bwe tracks an explicit origin column).",
+    help="Filter by origin, read from the row's tags and its answer-kind declaration.",
 )
 @click.option(
     "--name",
@@ -236,9 +244,10 @@ def list_cmd(
     """Tabulate plans in the library.
 
     \b
-    Origin is heuristic (nexus-7bwe tracks the explicit ``origin`` column):
-      - ``builtin``  tags include ``builtin-template``
-      - ``grown``    project=='personal' AND empty tags
+    Origin is read from the row's tags and its answer-kind declaration:
+      - ``grown``    the ``grown`` tag, a grown declaration, or the legacy
+                     shape (project ``personal``, no tags)
+      - ``builtin``  the ``builtin-template`` tag
       - ``user``     everything else
 
     Examples:
@@ -259,7 +268,7 @@ def list_cmd(
     finally:
         lib.close()
 
-    # Apply post-filters in Python so the heuristic origin filter
+    # Apply post-filters in Python so the origin filter
     # doesn't leak into the storage layer (where it doesn't exist).
     filtered = []
     for r in rows:
