@@ -636,6 +636,55 @@ class TestApplyJob:
             self._run(post, get, clock=clock, on_interrupt=lambda job_id: True)
         assert posts.count(self.CANCEL) == 1, "asked once; the second interrupt does not ask again"
 
+    def test_a_job_the_engine_lost_after_a_cancel_was_asked_is_never_started_again(self) -> None:
+        """nexus-v75nw S1: Ctrl-C then cancel, then the poll finds the job gone (engine restart or expiry). A restart
+        here would recount and sweep the rest of the tenant after the operator said stop."""
+        clock, post, _, posts = self._interrupting(1)
+        gets = {"n": 0}
+
+        def get(path, **kw):
+            gets["n"] += 1
+            if gets["n"] >= 2:
+                raise VectorServiceError("404", code=404, reason="sweep_job_not_found")
+            return self._running("sweeping", 1000, 1000)
+
+        with pytest.raises(hv.ChunkKeysJobLeftRunning) as err:
+            self._run(post, get, clock=clock, on_interrupt=lambda job_id: True)
+
+        assert err.value.reason == "sweep_job_gone_after_cancel" and err.value.job_id == self.JOB
+        assert "not started again" in str(err.value)
+        assert posts == ["/v1/admin/chunk-keys/sweep", self.CANCEL], "one start, one cancel: no second apply start"
+
+    def test_a_cancel_post_that_finds_the_job_gone_is_not_a_reason_to_start_it_again(self) -> None:
+        clock, _, get, posts = self._interrupting(1)
+
+        def post(path, body, **kw):
+            posts.append(path)
+            if path == self.CANCEL:
+                raise VectorServiceError("404", code=404, reason="sweep_job_not_found")
+            return self._started()
+
+        with pytest.raises(hv.ChunkKeysJobLeftRunning) as err:
+            self._run(post, get, clock=clock, on_interrupt=lambda job_id: True)
+
+        assert err.value.reason == "sweep_job_gone_after_cancel"
+        assert posts == ["/v1/admin/chunk-keys/sweep", self.CANCEL]
+
+    def test_ctrl_c_inside_the_cancel_post_prints_the_job_id_and_leaves_it(self) -> None:
+        clock, _, get, posts = self._interrupting(1)
+
+        def post(path, body, **kw):
+            posts.append(path)
+            if path == self.CANCEL:
+                raise KeyboardInterrupt
+            return self._started()
+
+        with pytest.raises(hv.ChunkKeysJobLeftRunning) as err:
+            self._run(post, get, clock=clock, on_interrupt=lambda job_id: True)
+
+        assert err.value.job_id == self.JOB and self.JOB in str(err.value), "not a raw KeyboardInterrupt"
+        assert err.value.reason == "sweep_job_left_running"
+
     def test_a_dry_run_that_is_interrupted_is_left_running_too(self) -> None:
         clock = TestDryRunJob.Clock()
         real = clock.sleep
@@ -928,6 +977,14 @@ class TestCli:
         assert result.exit_code == rk.EXIT_FAILED
         assert "j-left" in result.output and "still running in the engine" in result.output
         assert "Run the same command again to join it" in result.output
+
+    def test_a_job_lost_after_a_cancel_is_reported_with_its_id_and_exits_failed(self) -> None:
+        client = FakeClient(_dry_report())
+        client.apply_job_results = [hv.ChunkKeysJobLeftRunning("j-gone", "apply", gone=True)]
+        result = _run(client, "--tenant", TENANT, "--apply")
+        assert result.exit_code == rk.EXIT_FAILED
+        assert "j-gone" in result.output and "not started again" in result.output
+        assert "batches it committed are kept" in result.output
 
     def test_a_lost_apply_job_is_not_called_a_dry_run_and_says_the_batches_are_kept(self) -> None:
         client = FakeClient(_dry_report())

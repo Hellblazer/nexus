@@ -56,6 +56,7 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
     void restoreTheEnginesOwnSweep() {
         release.countDown();
         service.chunkKeysSweepForTests(null);
+        service.chunkKeysCredentialLiveForTests(null);
     }
 
     private static Map<String, Object> legacy(Map<String, Object> keyed) {
@@ -258,7 +259,7 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
         assertThat(ended.path("body").path("tenant").asText()).isEqualTo(t);
     }
 
-    // ---- the dry run's continuation: the apply goes straight to the batches ------------------------------------
+    // ---- helpers for the apply tests: a counting census and a job read to its end ---------------------------------
 
     /** The engine's sweep with a census reader that counts its calls and never waits: one instance, so one key. */
     private AtomicInteger countingSweep() {
@@ -510,7 +511,7 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
     }
 
     @Test
-    void aCancelBeforeTheFirstBatchStopsTheApplyWithNothingSwept_andRecordsCancelledInTheOutcomeRow() throws Exception {
+    void aCancelDuringTheFirstCallsCountStopsTheCount_nothingIsCountedOrSwept_andTheOutcomeRowSaysCancelled() throws Exception {
         String t = "ap-cancel";
         tenantWithRows(t, 5);
         AtomicBoolean entered = slowCount();
@@ -532,7 +533,8 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
         assertThat(body.path("cancelled").asBoolean()).isTrue();
         assertThat(body.path("done").asBoolean()).isFalse();
         assertThat(body.path("rows_swept").asLong()).isZero();
-        assertThat(body.path("remaining_rows").asLong()).as("the rows still to sweep, from the count").isEqualTo(5);
+        assertThat(body.path("calls").asInt()).as("the first call never finished its count").isZero();
+        assertThat(body.path("remaining_rows").isNull()).as("the count was stopped, so no rows were counted").isTrue();
         assertThat(retiredRowCount(t, conformant(t))).isEqualTo(5);
         assertThat(phases(t)).containsExactly("started", "finished");
         try (Connection su = pg.createConnection("")) {
@@ -656,6 +658,8 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
             assertThat(apply.path("body").path("cancelled").asBoolean()).isFalse();
             assertThat(apply.path("body").path("done").asBoolean()).isFalse();
             assertThat(apply.path("body").path("rows_swept").asLong()).isZero();
+            assertThat(apply.path("body").path("remaining_rows").isNull())
+                .as("the cap ended the count itself: nothing was counted").isTrue();
             assertThat(retiredRowCount(t, conformant(t))).as("no batch ran past the cap").isEqualTo(4);
 
             release = new CountDownLatch(1);
@@ -753,6 +757,185 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
         assertThat(rest.done()).as("the token the stopped call returned takes up where it stopped").isTrue();
         assertThat(rest.rowsSwept()).isEqualTo(4);
         assertThat(retiredRowCount(tenant, conformant(tenant))).isZero();
+    }
+
+    // ---- C3: a jobs route with no id is a 404 ------------------------------------------------------------------
+
+    @Test
+    void aJobsRouteWithNoIdIs404_notA500_whateverTheMethod() throws Exception {
+        String token = tenantWithRows("ap-noid", 1);
+        slowCount();
+        String id = json(sweep(token, plan("async", true))).path("job_id").asText();
+        assertThat(get(JOBS + id, token).statusCode()).as("positive control: the route answers for a real id").isEqualTo(200);
+
+        assertThat(post("/v1/admin/chunk-keys/sweep/jobs/cancel", token, Map.of()).statusCode()).as("POST .../jobs/cancel").isEqualTo(404);
+        assertThat(post("/v1/admin/chunk-keys/sweep/jobs//cancel", token, Map.of()).statusCode()).as("POST .../jobs//cancel").isEqualTo(404);
+        assertThat(get("/v1/admin/chunk-keys/sweep/jobs/cancel", token).statusCode()).as("GET .../jobs/cancel").isEqualTo(404);
+        assertThat(get("/v1/admin/chunk-keys/sweep/jobs/", token).statusCode()).as("GET .../jobs/").isEqualTo(404);
+        release.countDown();
+        pollUntilEnded(token, id);
+    }
+
+    // ---- C1: the starter's credential is looked up again, at the count's stages and at each batch boundary -------
+
+    private String secondTenantToken(String tenant) throws Exception {
+        String raw = "tok-tenant-b-" + tenant + "-0123456789abcdef012345";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), raw, tenant,
+                "tenant-token-b", "tenant", null, null);
+        }
+        return raw;
+    }
+
+    @Test
+    void aRevokedCredentialStopsTheApplyDuringTheCount_throughTheRealRevokeRoute() throws Exception {
+        String t = "ap-revoke";
+        String starter = tenantWithRows(t, 4);
+        String reader = secondTenantToken(t);   // the same tenant, to read the job once the starter's token is gone
+        AtomicBoolean entered = slowCount();
+        String id = json(sweep(starter, plan("dry_run", false, "async", true))).path("job_id").asText();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (!entered.get() && System.nanoTime() < deadline) Thread.sleep(10);
+
+        HttpResponse<String> revoked = post("/v1/service-tokens/revoke", ROOT,
+            Map.of("selector", dev.nexus.service.db.TokenHashing.sha256Hex(starter)));
+        assertThat(json(revoked).path("revoked").asBoolean()).as(revoked.body()).isTrue();
+        assertThat(get(JOBS + id, starter).statusCode()).as("the starter's token is dead").isEqualTo(401);
+        release.countDown();
+
+        JsonNode ended = pollUntilEnded(reader, id);
+        assertThat(ended.path("state").asText()).isEqualTo("done");
+        assertThat(ended.path("body").path("stopped").asText()).isEqualTo("credential_revoked");
+        assertThat(ended.path("body").path("cancelled").asBoolean()).isFalse();
+        assertThat(ended.path("body").path("done").asBoolean()).isFalse();
+        assertThat(ended.path("body").path("rows_swept").asLong()).isZero();
+        assertThat(retiredRowCount(t, conformant(t))).as("nothing was swept on a dead credential").isEqualTo(4);
+    }
+
+    // ---- a stop that arrives in call 2 or later of the job loop, with rows already swept ------------------------
+
+    /** An apply of a 6-row tenant, one batch a call, held at the first credential lookup made once 2 rows are swept. */
+    private final class HeldApply {
+        final String tenant;
+        volatile String id;
+        volatile boolean live = true;
+        final CountDownLatch reached = new CountDownLatch(1);
+        final CountDownLatch go = new CountDownLatch(1);
+        private final AtomicBoolean armed = new AtomicBoolean();
+
+        HeldApply(String tenant) throws Exception {
+            this.tenant = tenant;
+            tenantWithRows(tenant, 6);
+            service.chunkKeysCredentialLiveForTests(hash -> {
+                String mine = id;
+                ChunkKeysSweepJobs.Job job = mine == null ? null : service.chunkKeysJobsForTests().find(mine);
+                if (job != null && job.rowsSwept() >= 2 && armed.compareAndSet(false, true)) {
+                    reached.countDown();
+                    try {
+                        go.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return live;
+            });
+            HttpResponse<String> started = sweep(ROOT, plan("tenant", tenant, "dry_run", false, "async", true,
+                "batch_size", 1, "max_batches", 1));
+            assertThat(started.statusCode()).as(started.body()).isEqualTo(202);
+            id = json(started).path("job_id").asText();
+            assertThat(reached.await(30, TimeUnit.SECONDS)).as("two rows were swept and the job reached a boundary").isTrue();
+            assertThat(poll(ROOT, id).path("rows_swept").asLong()).as("held after two whole batches").isEqualTo(2);
+        }
+
+        JsonNode endedBody() throws Exception {
+            go.countDown();
+            JsonNode ended = pollUntilEnded(ROOT, id);
+            assertThat(ended.path("state").asText()).isEqualTo("done");
+            return ended.path("body");
+        }
+
+        void assertTwoRowsSweptAndRecorded(JsonNode body, String stopped) throws Exception {
+            assertThat(body.path("stopped").asText()).isEqualTo(stopped);
+            assertThat(body.path("done").asBoolean()).isFalse();
+            assertThat(body.path("rows_swept").asLong()).as("the two whole batches that ran before the stop").isEqualTo(2);
+            assertThat(body.path("batches").asInt()).isEqualTo(2);
+            assertThat(body.path("remaining_rows").asLong()).isEqualTo(4);
+            assertThat(retiredRowCount(tenant, conformant(tenant))).as("the store holds what the batches swept").isEqualTo(4);
+            try (Connection su = pg.createConnection("")) {
+                JsonNode counts = MAPPER.readTree(DSL.using(su, SQLDialect.POSTGRES).select(GC_AUDIT.DETAILS).from(GC_AUDIT)
+                    .where(GC_AUDIT.TENANT_ID.eq(tenant)).and(GC_AUDIT.OPERATION.eq("retire_keys_sweep"))
+                    .and(DSL.condition("details->>'phase' = 'finished'")).orderBy(GC_AUDIT.ID.desc()).limit(1).fetchOne()
+                    .get(GC_AUDIT.DETAILS).data()).path("counts");
+                assertThat(counts.path("rows_swept").asLong()).as("the outcome row records the rows swept").isEqualTo(2);
+                assertThat(counts.path("stopped").asText()).isEqualTo(stopped);
+            }
+        }
+    }
+
+    @Test
+    void aCancelInCallThreeStopsTheApplyAtThatBoundary_withTheRowsSweptRecorded_andARootCancelWritesItsOwnAuditRow() throws Exception {
+        HeldApply held = new HeldApply("ap-late-cancel");
+
+        HttpResponse<String> cancel = post(JOBS + held.id + "/cancel", ROOT, Map.of());
+        assertThat(cancel.statusCode()).as(cancel.body()).isEqualTo(200);
+        assertThat(json(cancel).path("cancel_accepted").asBoolean()).isTrue();
+        assertThat(json(cancel).path("cancel_audit_id").asLong()).as("the cancel row's id is answered").isPositive();
+        JsonNode body = held.endedBody();
+
+        held.assertTwoRowsSweptAndRecorded(body, "cancelled");
+        assertThat(body.path("cancelled").asBoolean()).isTrue();
+        assertThat(phases(held.tenant)).containsExactly("started", "cancel_requested", "finished");
+        try (Connection su = pg.createConnection("")) {
+            var row = DSL.using(su, SQLDialect.POSTGRES).select(GC_AUDIT.ACTOR, GC_AUDIT.DETAILS).from(GC_AUDIT)
+                .where(GC_AUDIT.TENANT_ID.eq(held.tenant)).and(GC_AUDIT.OPERATION.eq("retire_keys_sweep"))
+                .and(DSL.condition("details->>'phase' = 'cancel_requested'")).fetchOne();
+            assertThat(row.get(GC_AUDIT.ACTOR)).as("names the cancelling credential by a hash prefix, never the secret")
+                .startsWith("root:").doesNotContain(ROOT);
+            assertThat(MAPPER.readTree(row.get(GC_AUDIT.DETAILS).data()).path("job_id").asText()).isEqualTo(held.id);
+        }
+    }
+
+    @Test
+    void aTenantCredentialsCancelWritesNoAuditRow_onlyARootOnesDoes() throws Exception {
+        String t = "ap-nocancel-row";
+        String token = tenantWithRows(t, 3);
+        slowCount();
+        String id = json(sweep(token, plan("dry_run", false, "async", true))).path("job_id").asText();
+
+        HttpResponse<String> cancel = post(JOBS + id + "/cancel", token, Map.of());
+
+        assertThat(json(cancel).path("cancel_accepted").asBoolean()).as("positive control: the cancel took").isTrue();
+        assertThat(json(cancel).has("cancel_audit_id")).isFalse();
+        assertThat(phases(t)).as("a tenant credential's sweep is not in gc_audit at all").isEmpty();
+        release.countDown();
+        pollUntilEnded(token, id);
+    }
+
+    @Test
+    void theWallClockCapInCallThreeStopsTheApplyAtThatBoundary_withTheRowsSweptRecorded() throws Exception {
+        HeldApply held = new HeldApply("ap-late-cap");
+        try {
+            service.chunkKeysJobsForTests().maxRuntimeForTests(Duration.ofMillis(1));
+            assertThat(get(JOBS + held.id, ROOT).body()).contains("\"stopping\":\"wall_clock_cap\"");
+            JsonNode body = held.endedBody();
+
+            held.assertTwoRowsSweptAndRecorded(body, "wall_clock_cap");
+            assertThat(body.path("cancelled").asBoolean()).isFalse();
+        } finally {
+            service.chunkKeysJobsForTests().maxRuntimeForTests(ChunkKeysSweepJobs.MAX_RUNTIME);
+        }
+    }
+
+    @Test
+    void aRevokedCredentialInCallThreeStopsTheApplyAtThatBoundary_withTheRowsSweptRecorded() throws Exception {
+        HeldApply held = new HeldApply("ap-late-revoke");
+
+        held.live = false;   // the credential stops resolving while the job sits at the boundary
+        JsonNode body = held.endedBody();
+
+        held.assertTwoRowsSweptAndRecorded(body, "credential_revoked");
+        assertThat(body.path("cancelled").asBoolean()).isFalse();
     }
 
     // ---- C7: the refusals before the 202, Busy over HTTP, the root join, accept and batch_size ----------------------

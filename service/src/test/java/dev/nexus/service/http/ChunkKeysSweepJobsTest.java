@@ -298,10 +298,13 @@ class ChunkKeysSweepJobsTest {
         jobs.shutdown();
         jobs = new ChunkKeysSweepJobs(now::get, Duration.ofMinutes(30), 64, 2, 2, Duration.ofHours(4));
         CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch taken = new CountDownLatch(1);
         Started running = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            taken.countDown();
             release.await(20, TimeUnit.SECONDS);
             return ok("t");
         });
+        assertThat(taken.await(20, TimeUnit.SECONDS)).as("the cap clock runs from the moment a worker takes the job").isTrue();
 
         now.addAndGet(Duration.ofHours(4).toMillis() - 1);
         assertThat(running.job().stopReason()).as("one millisecond inside the cap").isNull();
@@ -311,6 +314,56 @@ class ChunkKeysSweepJobsTest {
         assertThat(running.job().stopReason()).as("an explicit cancel is named before the cap").isEqualTo("cancelled");
         jobs.evictTenant("t");
         assertThat(running.job().stopReason()).as("a tenant reset is named first").isEqualTo("evicted");
+        release.countDown();
+    }
+
+    @Test
+    void aQueuedJobsCapClockStartsWhenItRuns_notWhenItWasQueued() throws Exception {
+        jobs.shutdown();
+        // one worker: the second job waits in the queue while the first holds it
+        jobs = new ChunkKeysSweepJobs(now::get, Duration.ofMinutes(30), 64, 1, 2, Duration.ofHours(4));
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch firstTaken = new CountDownLatch(1);
+        CountDownLatch secondTaken = new CountDownLatch(1);
+        Started first = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            firstTaken.countDown();
+            release.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        });
+        assertThat(firstTaken.await(20, TimeUnit.SECONDS)).isTrue();
+        Started second = jobs.start("u", "u", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            secondTaken.countDown();
+            Thread.sleep(200);
+            return ok("u");
+        });
+
+        now.addAndGet(Duration.ofHours(5).toMillis());
+        assertThat(first.job().stopReason()).as("the first has run 5 h").isEqualTo("wall_clock_cap");
+        assertThat(second.job().stopReason()).as("the second has only waited 5 h: its clock has not started").isNull();
+        assertThat(second.job().state()).isEqualTo(State.RUNNING);
+        release.countDown();
+        assertThat(secondTaken.await(20, TimeUnit.SECONDS)).isTrue();
+        assertThat(second.job().stopReason()).as("it started now").isNull();
+        await(() -> second.job().state() == State.DONE);
+    }
+
+    @Test
+    void aStopTheWorkFindsForItselfIsNamed_afterACancelOrEvictionAndBeforeTheCap() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch taken = new CountDownLatch(1);
+        Started running = jobs.start("t", "t", false, ChunkKeysSweepJobs.Kind.APPLY, "fp", (job, stage) -> {
+            taken.countDown();
+            release.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        });
+        assertThat(taken.await(20, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(running.job().stopReason()).isNull();
+        running.job().stopFor("credential_revoked");
+        running.job().stopFor("something_else");
+        assertThat(running.job().stopReason()).as("the first reason stays").isEqualTo("credential_revoked");
+        running.job().requestCancel();
+        assertThat(running.job().stopReason()).as("an asked cancel is named first").isEqualTo("cancelled");
         release.countDown();
     }
 

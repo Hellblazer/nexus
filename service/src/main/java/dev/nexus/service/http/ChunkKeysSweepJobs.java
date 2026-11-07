@@ -35,7 +35,8 @@ import java.util.function.LongSupplier;
  * {@link #QUEUE} more wait; a start past that is refused ({@link Busy}, 503) rather than queued without end. One
  * tenant has at most one running job, dry run or apply: a second start with the same request is handed the running
  * job, and one with a different request is refused ({@link Conflict}) until it ends. A job stops by itself at
- * {@link #MAX_RUNTIME} of wall clock: the work asks {@link Job#stopReason()} at its own boundaries (a stage of a dry
+ * {@link #MAX_RUNTIME} of wall clock from the moment a worker takes it up (time in the queue does not count; with
+ * {@link #MAX_RUNNING} workers, a long apply can hold one for hours while queued jobs wait): the work asks {@link Job#stopReason()} at its own boundaries (a stage of a dry
  * run, a batch of an apply), so a job is never cut mid-batch.
  *
  * <p><b>Tenant state.</b> A job holds its tenant's counts, so the registry is tenant-keyed state: {@link
@@ -103,7 +104,10 @@ public final class ChunkKeysSweepJobs {
         Outcome run(Job job, Consumer<String> stage) throws Exception;
     }
 
-    /** Thrown by the work of a dry run when its job was told to stop (the cap, or the tenant reset) at a stage boundary. */
+    /**
+     * Thrown by the work of a job when it was told to stop (the cap, a cancel, a revoked credential or the tenant reset)
+     * at a stage boundary of a count: a dry run's, or the count an apply's first call makes. Nothing is swept by then.
+     */
     public static final class Stopped extends RuntimeException {
         private final String reason;
 
@@ -120,7 +124,7 @@ public final class ChunkKeysSweepJobs {
     /** No thread and no queue place is free. */
     public static final class Busy extends RuntimeException {
         Busy() {
-            super("the engine is already running or holding the most dry-run jobs it takes; retry shortly");
+            super("the engine is already running or holding the most sweep jobs it takes; retry shortly");
         }
     }
 
@@ -155,10 +159,14 @@ public final class ChunkKeysSweepJobs {
         private final String fingerprint;
         private final Kind kind;
         private final long startedMs;
+        /** When a worker thread took the job up, or -1 while it is queued: the wall-clock cap runs from here. */
+        private volatile long runStartedMs = -1;
         private final LongSupplier clockMs;
-        private final long maxRuntimeMs;
+        private volatile long maxRuntimeMs;
         /** Set by {@link #requestCancel}: the apply stops at its next batch boundary. */
         private volatile boolean cancelRequested;
+        /** Set by {@link #stopFor}: a stop the work found for itself (a revoked credential); the first one stays. */
+        private volatile String stopCause;
         /** The apply's progress so far, written by its worker and read by a poll; -1 remaining means not known yet. */
         private volatile int batches;
         private volatile long rowsSwept;
@@ -204,8 +212,21 @@ public final class ChunkKeysSweepJobs {
         }
 
         /**
+         * Asks the job to stop at its next boundary for a reason the work found itself (the starter's credential was
+         * revoked or expired: {@code credential_revoked}). The first reason set stays; a cancel or an eviction that is
+         * already asked is reported first by {@link #stopReason()}.
+         */
+        public void stopFor(String reason) {
+            if (stopCause == null) {
+                stopCause = reason;
+            }
+        }
+
+        /**
          * Why the work should stop at its next boundary, or null: {@code evicted} (the tenant reset dropped the job),
-         * {@code cancelled} (its starter asked), or {@code wall_clock_cap} ({@link #MAX_RUNTIME} since the start).
+         * {@code cancelled} (its starter asked), the reason the work gave {@link #stopFor} (such as {@code
+         * credential_revoked}), or {@code wall_clock_cap} ({@link #MAX_RUNTIME} since a worker took the job up: a job
+         * that waits in the queue has not started its cap clock).
          */
         public String stopReason() {
             if (evicted) {
@@ -214,7 +235,12 @@ public final class ChunkKeysSweepJobs {
             if (cancelRequested) {
                 return "cancelled";
             }
-            return clockMs.getAsLong() - startedMs >= maxRuntimeMs ? "wall_clock_cap" : null;
+            String cause = stopCause;
+            if (cause != null) {
+                return cause;
+            }
+            long run = runStartedMs;
+            return run >= 0 && clockMs.getAsLong() - run >= maxRuntimeMs ? "wall_clock_cap" : null;
         }
 
         /** The worker's publication of an apply's progress: batches run, rows swept (both over the whole job) and rows left. */
@@ -241,7 +267,7 @@ public final class ChunkKeysSweepJobs {
             return id;
         }
 
-        /** The tenant the dry run counts. */
+        /** The tenant the job counts (a dry run) or sweeps (an apply). */
         public String tenant() {
             return tenant;
         }
@@ -305,9 +331,12 @@ public final class ChunkKeysSweepJobs {
             });
     }
 
-    /** Test seam (nexus-v75nw): the wall-clock cap of the jobs started from now on; a job already running keeps its own. */
-    public void maxRuntimeForTests(Duration maxRuntime) {
+    /** Test seam (nexus-v75nw): the wall-clock cap of the jobs started from now on and of those held now, running or queued. */
+    public synchronized void maxRuntimeForTests(Duration maxRuntime) {
         this.maxRuntime = maxRuntime;
+        for (Job j : jobs.values()) {
+            j.maxRuntimeMs = maxRuntime.toMillis();
+        }
     }
 
     /** The clock in use, so a status answer's {@code elapsed_ms} reads the same one the jobs were stamped with. */
@@ -359,6 +388,7 @@ public final class ChunkKeysSweepJobs {
     private void run(Job job, JobWork work) {
         Outcome outcome;
         State end;
+        job.runStartedMs = clockMs.getAsLong();
         try {
             outcome = work.run(job, s -> job.stage = s);
             end = outcome.httpStatus() == 200 ? State.DONE : State.FAILED;

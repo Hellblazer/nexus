@@ -332,6 +332,8 @@ public final class NexusService {
     private final dev.nexus.service.http.ChunkKeysSweepJobs chunkKeysJobs = new dev.nexus.service.http.ChunkKeysSweepJobs();
     /** Test seam: when set, the chunk-keys routes use this sweep instead of the one built over the vector repository. */
     private volatile dev.nexus.service.vectors.ChunkKeySweep chunkKeysSweepForTests;
+    /** Test seam (nexus-v75nw): when set, replaces the credential lookup an apply job makes at each boundary. */
+    private volatile java.util.function.Predicate<String> chunkKeysCredentialLiveForTests;
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
@@ -846,7 +848,10 @@ public final class NexusService {
                         () -> chunkConstraintAdmin,
                         tokenStore::listKnownTenants,
                         () -> chunkKeysAudit,
-                        chunkKeysJobs));
+                        chunkKeysJobs,
+                        // A job looks its starter's credential up again at each batch boundary, as the auth filter does.
+                        hash -> chunkKeysCredentialLiveForTests != null ? chunkKeysCredentialLiveForTests.test(hash)
+                                : tokenCache.resolve(hash).isPresent()));
         chunkKeysCtx.getFilters().addAll(authFilter);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
@@ -1267,6 +1272,14 @@ public final class NexusService {
      */
     void chunkKeysSweepForTests(dev.nexus.service.vectors.ChunkKeySweep sweep) {
         this.chunkKeysSweepForTests = sweep;
+    }
+
+    /**
+     * Test seam (nexus-v75nw): replaces the credential lookup an apply job makes at each boundary (it is given the
+     * bearer's hash), so a test can hold the job at a boundary; null restores the token cache's.
+     */
+    void chunkKeysCredentialLiveForTests(java.util.function.Predicate<String> live) {
+        this.chunkKeysCredentialLiveForTests = live;
     }
 
     /** Test seam (nexus-v75nw): the registry the asynchronous dry runs live in, to run the tenant reset's evictor. */
