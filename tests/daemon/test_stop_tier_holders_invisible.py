@@ -79,7 +79,7 @@ def test_publish_records_the_publishers_namespace(tmp_path: Path) -> None:
 def test_a_linux_lease_read_where_there_are_no_pid_namespaces_is_other(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # macOS or Windows reading a Linux container's lease through a shared directory.
     monkeypatch.setattr(sr, "own_pid_namespace", lambda: None)
-    monkeypatch.setattr(sr.sys, "platform", "darwin")
+    monkeypatch.setattr(sr, "_platform_has_pid_namespaces", lambda: False)
     registry = _publish(tmp_path, at=time.time())
     assert _stop(tmp_path).invisible == (_PID,)
     assert len(registry.records()) == 1
@@ -87,7 +87,7 @@ def test_a_linux_lease_read_where_there_are_no_pid_namespaces_is_other(tmp_path:
 
 def test_a_linux_reader_that_cannot_read_its_namespace_keeps_the_old_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sr, "own_pid_namespace", lambda: None)
-    monkeypatch.setattr(sr.sys, "platform", "linux")
+    monkeypatch.setattr(sr, "_platform_has_pid_namespaces", lambda: True)
     registry = _publish(tmp_path, at=time.time())
     assert _stop(tmp_path).invisible == ()
     assert registry.records() == []

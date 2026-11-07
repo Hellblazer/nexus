@@ -2160,8 +2160,13 @@ def lease_from_other_pid_namespace(record: LeaseRecord) -> bool:
         return False
     ours = own_pid_namespace()
     if ours is None:
-        return not sys.platform.startswith("linux")
+        return not _platform_has_pid_namespaces()
     return theirs != ours
+
+
+def _platform_has_pid_namespaces() -> bool:
+    """Linux has PID namespaces; macOS and Windows do not (a test seam, so no test patches sys.platform)."""
+    return sys.platform.startswith("linux")
 
 
 def stop_tier_holders(
