@@ -87,7 +87,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       paged to, a narrower filter or a different query is how to reach them, and the rows that remain are
  *       the same on every call (the lookup orders occurrences by {@code doc_id}, then position). Each owner
  *       the cap keeps still carries its own labels; the {@code shared} decision is taken over EVERY holder
- *       before the cap, so a capped hit is not mistaken for an unshared one.</li>
+ *       before the cap, so a capped hit is not mistaken for an unshared one. The cap counts owners that PASS
+ *       the filter, not owners walked. It applies to this stage only, which a search runs when its {@code where}
+ *       names a label key or a document key (route (a)); route (b) (metadata-scoped, graph-hop, aspect-scoped and
+ *       {@code manifest_search_*} reads) returns one row per owner and is not capped.</li>
  *   <li>The caller's limit applies after expansion and de-duplication, never before.</li>
  * </ul>
  *
@@ -325,7 +328,10 @@ final class ManifestLabelStage {
      * searchPerCollection}): every hit the stage receives may come back as at most {@link #MAX_OWNERS_PER_HIT}
      * rows, so the output cannot outgrow {@code hits * MAX_OWNERS_PER_HIT}. It is {@link #apply}'s {@code limit}
      * for such a list, in place of the {@link Integer#MAX_VALUE} that said "no cut"; saturating, so a hit count
-     * near the int range cannot wrap negative and cut everything.
+     * near the int range cannot wrap negative and cut everything. This is a derived invariant of the owner cap,
+     * not an independent control: {@link #apply} cannot emit more than this many rows from that many hits, so the
+     * bound never binds, and no test fails if the call site passes {@link Integer#MAX_VALUE} again (the unit test
+     * pins the arithmetic only).
      */
     static int expansionBound(int hits) {
         return (int) Math.min(Integer.MAX_VALUE, (long) Math.max(hits, 0) * MAX_OWNERS_PER_HIT);

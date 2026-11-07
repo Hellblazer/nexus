@@ -562,8 +562,18 @@ critiqued once before Sam's gate decision (T2
   same on every call); the owners past it are dropped from that response, not
   paged to. Five keeps every shared-chunk case the tests pin (two owners) and
   the few real ones (a copied section, a vendored file), and leaves a page of
-  ten room for other hits. The lexical extras are cut at
-  `expansionBound(hits received) = hits * 5`, not at no limit. The `shared`
+  ten room for other hits. The cap applies to route (a) only, the stage that
+  runs when a search's `where` names a label key or a document key
+  (`section_*`, `page_number`, `title`, `author`, `content_type`, `tags`,
+  `bib_*` ...). Route (b) (metadata-scoped, graph-hop, aspect-scoped and
+  `manifest_search_*` reads) returns one row per owner and is NOT capped, so a
+  reader of link expansion is not looking at a capped list. The cap counts the
+  owners that PASS the filter, so a document-key read naming owner 7 of 10 still
+  finds it. The lexical extras are cut at
+  `expansionBound(hits received) = hits * 5`, not at no limit; that bound is a
+  derived invariant of the cap (the stage cannot emit more than hits times the
+  cap, so the bound never binds), not an independent control, and no test
+  fails if the call site goes back to `Integer.MAX_VALUE`. The `shared`
   flag is still decided over every holder before the cap. The class javadoc's
   settled semantics (a hit passes once per owning document) now carry the cap.
   Changing the constant changes what a response drops and nothing else. Not
