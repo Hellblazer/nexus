@@ -7,6 +7,9 @@ The contract these tests pin:
   input) exits 0 with nothing on stdout; the block is ``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": ...}}`` (no "Stop hook error" notice, unlike ``decision: block``);
 - a Sam-actor clause, a peer or restart as the wake, and a past-tense report are dropped; a CI or run
   wait, a promise to do something later and a timed step are the three classes that block;
+- the Sam gate is structural (a gate word governing an approval predicate, or Sam himself), pinned by the
+  table-driven ``_CORPUS`` below: SAM-ACTOR rows stay at 0 blocked, TRUE rows block, and approval words used
+  as test subjects, courtesies to Sam and unrelated CI waits after an approval word are not dropped (nexus-gyo4g);
 - a hand-labelled sample of real turn ends (``tests/fixtures/stop_wake_guard_sample.json``, 168 rows
   from the 2026-10-21..11-05 transcripts) replays with ZERO Sam-actor rows blocked, every true row
   blocked, and a small bound on blocked peer-wake and past-tense rows;
@@ -173,9 +176,7 @@ def test_timed_class_has_its_own_match() -> None:
 # --- what is dropped ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
+_SAM_ACTOR_TEXTS = [
         "Say go and I'll start the runs.",
         "If you want, I'll start on 1 and 2 now.",
         "Waiting for your go on the tag.",
@@ -201,8 +202,10 @@ def test_timed_class_has_its_own_match() -> None:
         "Cutting the tag is Sam's call. I'll check CI after it publishes.",
         "Standing by for the green light; then I'll push.",
         "I'll pick this up when a decision comes.",
-    ],
-)
+]
+
+
+@pytest.mark.parametrize("text", _SAM_ACTOR_TEXTS)
 def test_sam_actor_is_never_blocked(text: str) -> None:
     verdict = swg.evaluate_text(text)
     assert verdict.block is False, verdict
@@ -329,6 +332,149 @@ def test_bullets_and_newlines_split_sentences() -> None:
 
 def test_curly_apostrophes_are_normalised() -> None:
     assert swg.evaluate_text("I’ll check the build later.").block is True
+
+
+# --- the measurement corpus (nexus-gyo4g) ----------------------------------------------------------
+#
+# Every row is (group, text, blocks). The groups are the bead's own: the missed gate phrases (N1), an
+# approval word used as a test subject (N2), a trailing courtesy to Sam (N3), the chain hole (N4), and the
+# live block seen in hook.log. SAM-ACTOR rows must stay at 0 blocked; TRUE rows must block. The older
+# parametrised cases above are folded in by ``_CORPUS`` so one table holds the whole measurement.
+
+#: N1: the gate is structural (a gate word governing an approval predicate), not a closed word list.
+_N1_GATED = [
+    "I'll merge once it is cleared.",
+    "Release is on hold until it is cleared; I'll cut it afterwards.",
+    "I'll push once someone gives the word.",
+    "I'll proceed once the request is granted.",
+    "The question is open. I'll continue once it is settled.",
+    "I'll push after the sign off lands.",
+    "Hold for the nod. I'll push after.",
+    "I'll run the migration when it is cleared for release.",
+    "I'll push the tag once it's been signed off.",
+    "Waiting on the sign off. I'll push afterwards.",
+    "Whenever the operator greenlights, I'll push the tag.",
+    "I'll push the tag when the release is greenlit.",
+    "Once cleared by the operator, I'll push.",
+    "I'll proceed as soon as the operator says so.",
+    "I'll push once permitted.",
+    "I'll push the tag when told to.",
+    "I'll push the tag once we have the nod.",
+    "Release cut awaits the OK. I'll run it then.",
+    "The tag goes out when the human okays it, and I'll verify the publish after.",
+    "I'll merge once it is signed-off.",
+    "I'll push when Sam okays it.",
+    "I'll cut the release when the user gives the go-ahead.",
+]
+#: N2: an approval word that is only the subject of a test, a log or a workflow is not a gate.
+_N2_TEST_SUBJECTS = [
+    "I'll rerun the approval-flow tests once the build finishes.",
+    "I'll check the permission tests once the shards finish.",
+    "I'll check whether the ack handling test passes once the shards finish.",
+    "I'll look at the decision-log test result when the suite completes.",
+    "I'll check the authorization tests when the run finishes.",
+    "I'll check the run once it finishes, then look at the consent banner.",
+    "I'll rebuild the go build once the shards finish.",
+    "I'll verify the decision log later.",
+    "I'll check the approval workflow run once it finishes.",
+]
+#: N3: a courtesy to Sam closes the message without asking him anything; the promise before it stands.
+_N3_COURTESY = [
+    "I'll check the CI result once the shards finish. I'll keep you posted.",
+    "I'll check the CI result once the shards finish, and update you.",
+    "I'll check the CI result once the shards finish. Will report back to Sam.",
+    "I'll check the CI result once the shards finish. Thanks for your patience.",
+    "I'll check the CI result once the shards finish. See you then.",
+    "I'll check the CI result once the shards finish. If anything fails, you will hear from me.",
+]
+#: N4: a clause that merely names an approval, or Sam, does not chain to an unrelated CI wait.
+_N4_UNCHAINED = [
+    "Fixed the decision table bug. Once the shards finish, I'll check CI.",
+    "Pushed the fix; Sam can review. After the shards finish, I'll check CI.",
+    "I changed the ack handling. Then I'll check the CI result once the shards finish.",
+    "Approved by the reviewer. Then I'll check the CI result once the shards finish.",
+    "The permission tests pass. Next, I'll check CI once the shards finish.",
+    "I'll push after the reviewer approves.",
+    "I'll merge the PR after the backlog is cleared.",
+]
+#: Observed in ~/.config/nexus/logs/hook.log on 2026-11-07 (a live block).
+_LIVE_BLOCKS = ["The nine lane beads close once CI on develop shows my parts green."]
+#: Messages that end on Sam: a question, an imperative, or a gate on his approval.
+_ENDS_ON_SAM = [
+    "I'll check the CI result once the shards finish. Which option do you want?",
+    "I'll check the CI result once the shards finish. Say go and I'll tag.",
+    "I'll check the CI result once the shards finish. Waiting on Sam for the tag.",
+    "I'll check the CI result once the shards finish. The tag is Sam's call.",
+    "I'll check the CI result once the shards finish. Let me know if you want the tag.",
+    "I'll check the CI result once the shards finish. If you want, I'll start on the next bead.",
+]
+
+_CLASS_CASES = [
+    "Develop CI is running on 1bd583657. I'll read the verdict once when it finishes.",
+    "The planner is still running.",
+    "Once both are green I commit the three files by explicit path.",
+    "The PyPI publish run is still in progress.",
+    "I'll check again later and close the bead if everything is green.",
+    "Next I claim the bead and read develop CI on the tip.",
+    "Moving on to the epic gate.",
+    "The listing flap is next unless you'd rather I take something else.",
+    "After it publishes (about 40 to 60 minutes), I'll run the battery.",
+    "Closing the bake after 2026-10-26 13:46Z.",
+    "I will retry in 25 minutes.",
+    "I'll check the CI result once the shards finish.",
+]
+
+_CORPUS: list[tuple[str, str, bool]] = (
+    [("SAM-ACTOR", t, False) for t in _SAM_ACTOR_TEXTS + _N1_GATED + _ENDS_ON_SAM]
+    + [("N2-test-subject", t, True) for t in _N2_TEST_SUBJECTS]
+    + [("N3-courtesy", t, True) for t in _N3_COURTESY]
+    + [("N4-unchained", t, True) for t in _N4_UNCHAINED]
+    + [("TRUE", t, True) for t in _CLASS_CASES + _LIVE_BLOCKS]
+)
+
+
+@pytest.mark.parametrize(("group", "text", "blocks"), _CORPUS, ids=[f"{g}-{i}" for i, (g, _, _) in enumerate(_CORPUS)])
+def test_corpus_row(group: str, text: str, blocks: bool) -> None:
+    verdict = swg.evaluate_text(text)
+    assert verdict.block is blocks, (group, text, verdict)
+
+
+def test_corpus_sam_actor_group_stays_at_zero_blocked_and_is_not_vacuous() -> None:
+    sam = [(t, swg.evaluate_text(t)) for g, t, _ in _CORPUS if g == "SAM-ACTOR"]
+    assert len(sam) >= 50
+    assert [t for t, v in sam if v.block] == []
+    counts = Counter(g for g, _, _ in _CORPUS)
+    assert counts["N2-test-subject"] >= 9 and counts["N3-courtesy"] >= 6 and counts["N4-unchained"] >= 7 and counts["TRUE"] >= 12
+
+
+@pytest.mark.parametrize("text", _N1_GATED)
+def test_a_gate_on_an_approval_is_gated_in_the_reminder_too(text: str) -> None:
+    """The reminder never tells the model to 'do it now' for a gate clause outside the CI-wait class."""
+    clause = next(c for c in swg.clauses(text) if swg.is_sam_gated(c))
+    for cls in (swg.CLASS_PROMISE, swg.CLASS_TIMED):
+        assert "do it" not in swg.block_reason(cls, clause), (cls, clause)
+
+
+def test_reminder_keeps_do_it_for_a_plain_ci_wait_and_a_plain_promise() -> None:
+    assert "do it" in swg.block_reason(swg.CLASS_CI_WAIT, "I'll check the CI result once the shards finish.")
+    assert "do it" in swg.block_reason(swg.CLASS_PROMISE, "I'll check the build later.")
+    assert "do it" not in swg.block_reason(swg.CLASS_PROMISE, "I'll rebase after the merge.")
+
+
+def test_a_denied_run_state_resets_the_chain_but_a_status_sentence_does_not() -> None:
+    """Review r2 N4. 'No suite is still running' matches the CI class and is denied: it ends what hung from the Sam
+    clause. A sentence that matches no class stays transparent (fixture sel3-25 pins that: a status line sits
+    between 'hand you the tag command' and 'After it publishes')."""
+    gate = "Once you give it, I'll push the tag. "
+    assert swg.evaluate_text(gate + "No suite is still running. After the shards finish, I'll check CI.").block is True
+    assert swg.evaluate_text(gate + "The planner is idle. After the shards finish, I'll check CI.").block is False
+
+
+def test_final_sam_is_set_only_for_a_question_an_imperative_or_an_approval_gate() -> None:
+    for text in ("Thanks for your patience.", "See you then.", "I'll keep you posted.", "Your fix is in."):
+        assert swg.evaluate_text("I'll check the build later. " + text).final_sam is False, text
+    for text in ("Which one?", "Say go.", "Waiting on Sam for the tag.", "Once you approve, I'll push."):
+        assert swg.evaluate_text("I'll check the build later. " + text).block is False, text
 
 
 # --- the reason -----------------------------------------------------------------------------------
