@@ -283,6 +283,11 @@ class PgVectorManifestOwnerCapTest {
         assertThat(docsOf(rows, T)).containsExactly(docB(target));
         assertThat(rows).as("no other owner carries that title").allSatisfy(
             r -> assertThat(r.get("doc_id")).isEqualTo(docB(target)));
+        // One owner passes but ten hold T: 'shared' is decided over every holder before the cap, so the row's
+        // chunk-row span (another writer's) is still dropped. Deciding it over passing owners would keep it.
+        assertThat(rows.stream().filter(r -> T.equals(r.get("id"))).toList())
+            .as("shared over all holders, not over the one passing owner")
+            .allSatisfy(r -> assertThat(r).doesNotContainKey("line_start"));
     }
 
     @Test
