@@ -9,17 +9,27 @@ records, mail bodies and entries come from ``tests/fixtures/asks/``.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import click
+import httpx
 import pytest
 from click.testing import CliRunner
 
-from nexus.commands.ask import Seams, ask_group, default_cli_sender
+import nexus.commands._helpers as helpers
+import nexus.commands.ask as ask
+import nexus.console.routes.threads as routes
+import nexus.db.t2.http_tuple_store as hts
+import nexus.tuple_directory as td
+from tests._module_seam import setattr_in
+from nexus.commands.ask import LiveT2, Seams, ask_group, default_cli_sender, live_lock
 from nexus.console.threads import Bead, BeadsResult, answer_title, parse_session
 
 FIXTURES = Path(__file__).parent / "fixtures" / "asks"
@@ -59,14 +69,20 @@ class FakeT2:
         self.lose_to: dict[str, Any] | None = None
         #: The next N puts of a non-``sending`` answer record (the settle puts) raise.
         self.fail_settle = 0
+        self.gets: list[tuple[str, str]] = []
+        self.get_alls: list[str] = []
+        #: Called on every put to a ``batch/`` title (the test says whether the lock is held).
+        self.on_batch_put: Any = None
 
     def add(self, project: str, title: str, content: str, stamp: str = ENTRY_STAMP) -> None:
         self.projects.setdefault(project, {})[title] = {"title": title, "content": content, "timestamp": stamp}
 
     def get_all(self, project: str, **_kw: Any) -> list[dict[str, str]]:
+        self.get_alls.append(project)
         return list(self.projects.get(project, {}).values())
 
     def get(self, project: str, title: str, **_kw: Any) -> dict[str, str] | None:
+        self.gets.append((project, title))
         return self.projects.get(project, {}).get(title)
 
     def put(self, project: str, title: str, content: str, tags: str = "", **_kw: Any) -> int:
@@ -74,6 +90,8 @@ class FakeT2:
             if json.loads(content).get("status") != "sending":
                 self.fail_settle -= 1
                 raise RuntimeError("T2 unreachable")
+        if project == "asks" and title.startswith("batch/") and self.on_batch_put is not None:
+            self.on_batch_put(title)
         self.add(project, title, content, NOW.strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.puts.append((project, title, json.loads(content) if project == "asks" else content))
         if project == "asks" and self.lose_to is not None and not title.startswith("batch/"):
@@ -88,8 +106,11 @@ class FakeTuples:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail_with: Exception | None = None
+        self.on_call: Any = None
 
     def __call__(self, subspace: str, keys: dict[str, str], dims: dict[str, str], body: str, nonce: str) -> str:
+        if self.on_call is not None:
+            self.on_call()
         if self.fail_with is not None:
             raise self.fail_with
         self.calls.append({"subspace": subspace, "keys": keys, "dims": dims, "body": body, "nonce": nonce})
@@ -105,7 +126,19 @@ class World:
         self.now = NOW
         self.beads = BeadsResult(())
         self.answer_id = "5c1e9a7f0b2d4a83"
+        self.lock_held = False
+        self.lock_entries = 0
         self.t2.add("threads", "halcyon", text("halcyon.txt"))
+
+    @contextlib.contextmanager
+    def lock(self):
+        assert not self.lock_held, "the answer lock is not re-entrant"
+        self.lock_held = True
+        self.lock_entries += 1
+        try:
+            yield
+        finally:
+            self.lock_held = False
 
     def seams(self) -> Seams:
         return Seams(
@@ -117,6 +150,7 @@ class World:
             beads=lambda: self.beads,
             cli_sender=lambda: CLI_SENDER,
             answer_id=lambda: self.answer_id,
+            lock=self.lock,
         )
 
     def run(self, *args: str, columns: int | None = None):
@@ -153,6 +187,7 @@ def test_fixture_version_is_what_the_parser_computes(world: World) -> None:
 def test_expect_mismatch_is_refused_and_the_current_text_is_printed(world: World) -> None:
     r = world.run("answer", REF, "1", "--expect", "0000000000000000", "--via", "mediator", "--sam-words", "x")
     assert r.exit_code != 0
+    assert f"--expect 0000000000000000 is not the current version {VERSION}" in r.output
     assert VERSION in r.output and "0000000000000000" in r.output
     assert "Retry-safe keying for quarantine restore" in r.output
     assert "Accept the gap and close the bead" in r.output
@@ -244,6 +279,7 @@ def test_a_bare_id_held_by_two_entries_is_refused_naming_both(world: World) -> N
     other_entry(world)
     r = world.run("answer", ASK_ID, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x")
     assert r.exit_code != 0
+    assert f"{ASK_ID!r} is held by more than one entry; name one of:" in r.output
     assert f"halcyon/{ASK_ID}" in r.output and f"linda/{ASK_ID}" in r.output
     untouched(world)
 
@@ -332,12 +368,14 @@ def test_via_cli_refuses_mediator_only_options(world: World) -> None:
     for extra in (("--sam-words", "x"), ("--batch-words", "y")):
         r = world.run(*cli_args(*extra))
         assert r.exit_code != 0
+        assert "--sam-words and --batch-words are for --via mediator" in r.output
     untouched(world)
 
 
 def test_a_note_with_a_note_only_answer_is_refused(world: World) -> None:
     r = world.run(*cli_args("--note", "extra", reply="hold"))
     assert r.exit_code != 0
+    assert "--note adds a note to a chosen option; a free-text reply is already the note" in r.output
     untouched(world)
 
 
@@ -348,7 +386,7 @@ def test_via_mediator_needs_sam_words(world: World) -> None:
     r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator")
     assert r.exit_code != 0 and "--sam-words" in r.output
     r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "   ")
-    assert r.exit_code != 0
+    assert r.exit_code != 0 and "--via mediator needs --sam-words" in r.output
     untouched(world)
 
 
@@ -380,7 +418,7 @@ def test_via_mediator_without_an_own_session_is_refused(world: World) -> None:
 def test_via_mediator_with_a_session_that_is_not_a_uuid_is_refused(world: World) -> None:
     world.session = "not-a-uuid"
     r = world.run(*mediator_args())
-    assert r.exit_code != 0
+    assert r.exit_code != 0 and "did not resolve to a UUID" in r.output
     untouched(world)
 
 
@@ -688,7 +726,8 @@ def test_show_json_is_the_ask_with_version_age_and_answer(world: World) -> None:
 
 
 def test_show_of_an_unknown_ask_is_refused(world: World) -> None:
-    assert world.run("show", "halcyon/nope").exit_code != 0
+    r = world.run("show", "halcyon/nope")
+    assert r.exit_code != 0 and "no ask 'halcyon/nope' on the board" in r.output
 
 
 def test_show_of_an_ambiguous_bare_id_is_refused(world: World) -> None:
@@ -955,3 +994,393 @@ def test_list_takes_an_answered_ask_off_the_bead_it_was_folded_into() -> None:
     w.t2.add("asks", TITLE, json.dumps({**js("answer_record_v1.json"), "status": "sent"}))
     after = next(ln for ln in w.run("list").output.splitlines() if "nexus-k9kr9" in ln)
     assert f"halcyon/{ASK_ID}" not in after
+
+
+# --- review follow-ups (nexus-wc4jj.14) ---------------------------------------------------------------
+
+AMBIGUOUS = [
+    httpx.ReadTimeout("read timed out"),
+    httpx.WriteTimeout("write timed out"),
+    httpx.ReadError("connection reset"),
+    httpx.RemoteProtocolError("server disconnected without a response"),
+    ConnectionResetError("reset by peer"),
+    TimeoutError("timed out"),
+]
+
+
+@pytest.mark.parametrize("exc", AMBIGUOUS, ids=lambda e: type(e).__name__)
+def test_an_ambiguous_tuple_out_leaves_the_record_sending_and_says_the_outcome_is_unknown(
+    world: World, exc: Exception
+) -> None:
+    world.tuples.fail_with = exc
+    r = world.run(*mediator_args())
+    assert r.exit_code != 0
+    assert "outcome unknown" in r.output and "left at sending" in r.output and "do not re-run" in r.output
+    rec = world.t2.record()
+    assert (rec["status"], rec["tuple_id"], rec["error"]) == ("sending", None, None)
+    # the retry guard is the sending rule: refused inside ten minutes, even with --replace
+    world.tuples.fail_with = None
+    r = world.run(*mediator_args("--replace"))
+    assert r.exit_code != 0 and "send in progress" in r.output
+    assert world.tuples.calls == []
+    # past ten minutes the existing dead-send rule retries it, with a fresh answer id
+    world.now = NOW + timedelta(minutes=11)
+    world.answer_id = "bbbbbbbbbbbbbbbb"
+    assert world.run(*mediator_args()).exit_code == 0
+    assert world.t2.record()["status"] == "sent" and world.t2.record()["answer_id"] == "bbbbbbbbbbbbbbbb"
+
+
+def _status_error() -> httpx.HTTPStatusError:
+    return httpx.HTTPStatusError("boom", request=httpx.Request("POST", "http://x"), response=httpx.Response(500))
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [httpx.ConnectError("refused"), httpx.ConnectTimeout("connect timed out"), ValueError("body too large"),
+     RuntimeError("tuple_out refused"), _status_error()],
+    ids=lambda e: type(e).__name__,
+)
+def test_a_tuple_out_that_certainly_never_committed_is_marked_failed(world: World, exc: Exception) -> None:
+    world.tuples.fail_with = exc
+    r = world.run(*mediator_args())
+    assert r.exit_code != 0 and "failed:" in r.output and "outcome unknown" not in r.output
+    assert world.t2.record()["status"] == "failed"
+
+
+def test_a_failed_answer_leaves_no_batch_record_and_no_batch_title(world: World) -> None:
+    world.tuples.fail_with = RuntimeError("tuple_out refused: no such address")
+    r = world.run(*mediator_args("--batch-words", "Yes to both"))
+    assert r.exit_code != 0
+    assert [t for t in world.t2.projects["asks"] if t.startswith("batch/")] == []
+    assert world.t2.record()["batch_title"] is None
+
+
+def test_a_failed_answer_does_not_enter_an_existing_batch_record(world: World) -> None:
+    other_entry(world)
+    words = "Yes to both"
+    assert world.run(*mediator_args("--batch-words", words)).exit_code == 0
+    batch = next(t for t in world.t2.projects["asks"] if t.startswith("batch/"))
+    world.tuples.fail_with = RuntimeError("no such address")
+    world.now = NOW + timedelta(minutes=2)
+    r = world.run("answer", f"linda/{ASK_ID}", "1", "--expect", VERSION, "--via", "mediator",
+                  "--sam-words", "yes", "--batch-words", words)
+    assert r.exit_code != 0
+    assert json.loads(world.t2.projects["asks"][batch]["content"])["answer_titles"] == [TITLE]
+
+
+def test_an_ambiguous_answer_is_in_the_batch_record_because_its_mail_may_have_arrived(world: World) -> None:
+    world.tuples.fail_with = httpx.ReadTimeout("read timed out")
+    world.run(*mediator_args("--batch-words", "Yes to both"))
+    batch = next(t for t in world.t2.projects["asks"] if t.startswith("batch/"))
+    assert json.loads(world.t2.projects["asks"][batch]["content"])["answer_titles"] == [TITLE]
+    assert world.t2.record()["batch_title"] == batch
+
+
+def test_the_batch_record_is_written_after_the_mail_and_inside_the_lock(world: World) -> None:
+    order: list[str] = []
+    world.t2.on_batch_put = lambda title: order.append(f"batch-put lock={world.lock_held} mails={len(world.tuples.calls)}")
+    assert world.run(*mediator_args("--batch-words", "Yes to both")).exit_code == 0
+    assert order == ["batch-put lock=True mails=1"]
+    assert world.lock_entries == 1
+
+
+def test_an_answer_without_batch_words_never_takes_the_lock(world: World) -> None:
+    assert world.run(*mediator_args()).exit_code == 0
+    assert world.lock_entries == 0
+
+
+def test_the_batch_join_rereads_the_record_so_a_title_added_in_between_is_kept(world: World) -> None:
+    """Two parallel answers: the other process joins the batch between our title choice and our join."""
+    words = "Yes to both"
+    batch = f"batch/{MEDIATOR}/20261105T201503Z"
+
+    def batch_json(titles: list[str]) -> str:
+        return json.dumps({"batch_words": words, "via": f"mediator:{MEDIATOR}",
+                           "time": "2026-11-05T20:15:03Z", "answer_titles": titles})
+
+    world.t2.add("asks", batch, batch_json(["first/x/1"]))
+    # the other writer lands after our title choice and before our join (the mail goes out in between)
+    world.tuples.on_call = lambda: world.t2.add("asks", batch, batch_json(["first/x/1", "second/y/2"]))
+    assert world.run(*mediator_args("--batch-words", words)).exit_code == 0
+    titles = json.loads(world.t2.projects["asks"][batch]["content"])["answer_titles"]
+    assert titles == ["first/x/1", "second/y/2", TITLE]
+
+
+# --- show: repeated, bad_values, lines; list: answer state -----------------------------------------
+
+DEFECTIVE = (
+    "session: 3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17\n\n## Defective\n"
+    "ask: defect-one\nasked: 2026-11-05T10:15Z\nquestion: Which one?\ncontext: Because.\n"
+    "option: A\noption: B\nrec: banana\nwhy: first\nwhy: second\nreversible: maybe\nblocking: no\nblocking: yes\n"
+)
+
+
+def test_show_prints_repeated_bad_values_and_the_raw_lines() -> None:
+    w = World()
+    w.t2.add("threads", "defective", DEFECTIVE)
+    r = w.run("show", "defective/defect-one")
+    assert r.exit_code == 0, r.output
+    ask = parse_session("defective", DEFECTIVE).threads[0].asks[0]
+    assert ask.repeated and ask.bad_values  # the fixture really is defective
+    assert f"repeated: {', '.join(ask.repeated)} (given more than once; the first one counts)" in r.output
+    assert f"bad values: {', '.join(ask.bad_values)}" in r.output
+    assert "lines:" in r.output
+    for line in ask.lines:
+        assert f"  {line}" in r.output
+
+
+def test_show_of_a_clean_ask_has_no_repeated_or_bad_values_lines_but_prints_its_lines(world: World) -> None:
+    r = world.run("show", REF)
+    assert "repeated:" not in r.output and "bad values:" not in r.output
+    assert "  question: Retry-safe keying for quarantine restore" in r.output
+
+
+@pytest.mark.parametrize("status", ["sending", "failed"])
+def test_list_text_marks_an_ask_whose_answer_is_sending_or_failed(status: str) -> None:
+    w = listing_world()
+    w.t2.add("asks", TITLE, json.dumps({**js("answer_record_v1.json"), "status": status}))
+    r = w.run("list")
+    line = next(ln for ln in r.output.splitlines() if f"halcyon/{ASK_ID}" in ln and VERSION in ln)
+    assert f"[answer {status}]" in line
+    data = json.loads(w.run("list", "--json").stdout)
+    assert {a["ref"]: a["answer_status"] for a in data["batch"]}[f"halcyon/{ASK_ID}"] == status
+
+
+def test_list_text_marks_an_unreadable_answer_record_and_leaves_an_unanswered_ask_unmarked() -> None:
+    w = listing_world()
+    w.t2.add("asks", TITLE, "not json")
+    out = w.run("list").output
+    assert "[answer record unreadable]" in next(ln for ln in out.splitlines() if f"halcyon/{ASK_ID}" in ln and VERSION in ln)
+    assert "[answer" not in next(ln for ln in out.splitlines() if "classes/stop-the-line" in ln)
+
+
+# --- list: one read of the asks project ------------------------------------------------------------
+
+
+def test_list_reads_the_asks_project_once_and_never_gets_a_record_per_ask() -> None:
+    w = listing_world()
+    assert w.run("list").exit_code == 0
+    assert w.t2.get_alls.count("asks") == 1
+    assert [g for g in w.t2.gets if g[0] == "asks"] == []
+
+
+# --- digest: records it cannot read are counted and named -------------------------------------------
+
+
+def test_digest_names_the_records_it_skips() -> None:
+    w = World()
+    w.t2.add("asks", f"{OTHER_SESSION}/a-new/0000000000000001", json.dumps({**js("answer_record_v1.json"), "time": "2026-11-05T18:00:00Z"}))
+    w.t2.add("asks", f"{OTHER_SESSION}/broken/0000000000000002", "{not json")
+    w.t2.add("asks", "stray title", json.dumps({"x": 1}))
+    w.t2.add("asks", f"batch/{MEDIATOR}/20261105T201500Z", "also not json")
+    w.t2.add("asks", f"{OTHER_SESSION}/no-time/0000000000000003", json.dumps({**js("answer_record_v1.json"), "time": "garbage"}),
+             stamp="not a stamp")
+    for args in (("digest",), ("list",)):
+        out = w.run(*args).output
+        assert "skipped 4 rows in T2 project asks" in out, (args, out)
+        for title in (f"{OTHER_SESSION}/broken/0000000000000002", "stray title",
+                      f"batch/{MEDIATOR}/20261105T201500Z", f"{OTHER_SESSION}/no-time/0000000000000003"):
+            assert title in out
+    assert json.loads(w.run("list", "--json").stdout)["digest_skipped"] == sorted([
+        f"{OTHER_SESSION}/broken/0000000000000002", "stray title", f"batch/{MEDIATOR}/20261105T201500Z",
+        f"{OTHER_SESSION}/no-time/0000000000000003"])
+
+
+def test_digest_with_only_skipped_records_still_says_so() -> None:
+    w = World()
+    w.t2.add("asks", "stray title", "x")
+    out = w.run("digest").output
+    assert "no answers in the last 7 days" in out and "skipped 1 row in T2 project asks" in out
+
+
+def test_digest_does_not_count_an_old_unreadable_record_or_report_when_all_is_readable() -> None:
+    w = World()
+    w.t2.add("asks", "stray title", "x", stamp="2026-10-01T00:00:00Z")  # older than the window
+    assert "skipped" not in w.run("digest").output
+    assert "skipped" not in listing_world().run("digest").output
+
+
+def test_digest_skipped_titles_are_shown_without_control_characters() -> None:
+    w = World()
+    w.t2.add("asks", "stray\x1b[31m title", "x")
+    no_controls(w.run("digest").output)
+
+
+# --- free text that starts with a dash ---------------------------------------------------------------
+
+
+def test_a_free_text_reply_starting_with_a_dash_needs_the_double_dash(world: World) -> None:
+    r = world.run("answer", REF, "-hold", "--expect", VERSION, "--via", "mediator", "--sam-words", "hold")
+    assert r.exit_code != 0  # click reads -hold as an option
+    r = world.run("answer", "--expect", VERSION, "--via", "mediator", "--sam-words", "hold", "--", REF, "-hold until Monday")
+    assert r.exit_code == 0, r.output
+    assert world.t2.record()["note"] == "-hold until Monday"
+
+
+# --- display: Unicode format characters --------------------------------------------------------------
+
+
+def test_bidi_and_zero_width_characters_are_stripped_from_display_text() -> None:
+    w = World()
+    w.t2.add("threads", "halcyon", text("halcyon.txt").replace("Retry-safe keying", "Retry‮safe​ keying"))
+    for args in (("list",), ("show", REF)):
+        out = w.run(*args).output
+        assert "‮" not in out and "​" not in out
+        assert "Retrysafe keying" in out
+
+
+# --- the live seams ----------------------------------------------------------------------------------
+
+
+class _Stdin:
+    def __init__(self, tty: bool | Exception, fileno: int | Exception = 0) -> None:
+        self._tty, self._fileno = tty, fileno
+
+    def isatty(self) -> bool:
+        if isinstance(self._tty, Exception):
+            raise self._tty
+        return self._tty
+
+    def fileno(self) -> int:
+        if isinstance(self._fileno, Exception):
+            raise self._fileno
+        return self._fileno
+
+
+def test_live_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    setattr_in(monkeypatch, ask, "sys.stdin", _Stdin(False))
+    assert ask.live_tty() is None
+    for boom in (AttributeError("no isatty"), ValueError("closed file")):
+        setattr_in(monkeypatch, ask, "sys.stdin", _Stdin(boom))
+        assert ask.live_tty() is None
+    setattr_in(monkeypatch, ask, "sys.stdin", _Stdin(True))
+    setattr_in(monkeypatch, ask, "os.ttyname", lambda fd: "/dev/ttys009", raising=False)
+    assert ask.live_tty() == "/dev/ttys009"
+    setattr_in(monkeypatch, ask, "os.ttyname", lambda fd: (_ for _ in ()).throw(OSError("no name")), raising=False)
+    assert ask.live_tty() == "tty"  # a TTY with no name (Windows) is still a TTY
+
+
+def test_live_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(td, "resolve_default_from", lambda: MEDIATOR)
+    assert ask.live_session() == MEDIATOR
+
+    def nothing() -> str:
+        raise RuntimeError("no session id resolves")
+
+    monkeypatch.setattr(td, "resolve_default_from", nothing)
+    assert ask.live_session() == ""  # a refusal upstream, never a traceback
+
+
+def test_live_tuple_out_is_a_raw_out_with_the_nonce(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    class FakeStore:
+        def out(self, subspace: str, keys: dict[str, str], dims: dict[str, str], body: str, *, nonce: str) -> str:
+            seen.update(subspace=subspace, keys=keys, dims=dims, body=body, nonce=nonce)
+            return TUPLE_ID
+
+    monkeypatch.setattr(hts, "HttpTupleStore", FakeStore)
+    got = ask.live_tuple_out("mailbox/x", {"to": "x"}, {"kind": "reply"}, "body\n", "n-1")
+    assert got == TUPLE_ID
+    assert seen == {"subspace": "mailbox/x", "keys": {"to": "x"}, "dims": {"kind": "reply"}, "body": "body\n", "nonce": "n-1"}
+
+
+def test_live_beads_delegates_to_the_console_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = BeadsResult(())
+    monkeypatch.setattr(routes, "run_bd_needs_sam", lambda: sentinel)
+    assert ask.live_beads() is sentinel
+
+
+def test_live_t2_opens_a_handle_per_call_and_passes_keywords(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class Memory:
+        def get_all(self, **kw: Any) -> list[dict[str, str]]:
+            calls.append(("get_all", kw))
+            return [{"title": "t"}]
+
+        def get(self, **kw: Any) -> dict[str, str]:
+            calls.append(("get", kw))
+            return {"title": kw["title"]}
+
+        def put(self, **kw: Any) -> int:
+            calls.append(("put", kw))
+            return 1
+
+    opened: list[int] = []
+
+    @contextlib.contextmanager
+    def handle():
+        opened.append(1)
+
+        class Db:
+            memory = Memory()
+
+        yield Db()
+
+    monkeypatch.setattr(helpers, "t2_handle", handle)
+    t2 = LiveT2()
+    assert t2.get_all("asks") == [{"title": "t"}]
+    assert t2.get("asks", "x") == {"title": "x"}
+    t2.put("asks", "x", "{}", tags="ask-answer")
+    assert calls == [
+        ("get_all", {"project": "asks"}),
+        ("get", {"project": "asks", "title": "x"}),
+        ("put", {"project": "asks", "title": "x", "content": "{}", "tags": "ask-answer"}),
+    ]
+    assert len(opened) == 3
+
+
+def test_live_lock_serializes_holders_and_creates_the_lock_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    log: list[str] = []
+    inside = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with live_lock():
+            log.append("a-in")
+            inside.set()
+            release.wait(5)
+            log.append("a-out")
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert inside.wait(5)
+
+    def second() -> None:
+        with live_lock():
+            log.append("b-in")
+
+    t2 = threading.Thread(target=second)
+    t2.start()
+    t2.join(0.3)
+    assert log == ["a-in"]  # b is blocked while a holds the lock
+    release.set()
+    t.join(5)
+    t2.join(5)
+    assert log == ["a-in", "a-out", "b-in"]
+    assert (tmp_path / "ask-answer.lock").exists()
+
+
+def test_live_lock_that_cannot_open_its_file_is_a_click_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(blocker))  # the config dir is a file: mkdir fails
+    with pytest.raises(click.ClickException, match="cannot open the answer lock"):
+        with live_lock():
+            pass
+
+
+def test_a_windows_style_permission_error_on_the_sender_file_is_a_click_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
+    def denied(src: Any, dst: Any) -> None:
+        raise PermissionError("[WinError 5] Access is denied")
+
+    setattr_in(monkeypatch, ask, "os.replace", denied)
+    with pytest.raises(click.ClickException, match="cannot keep the cli sender id"):
+        default_cli_sender()
+    assert [p.name for p in tmp_path.iterdir()] == []  # the temp file is removed
