@@ -16,6 +16,7 @@ import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
+from nexus.sensitive_output import tumbler_order_key
 from nexus.sensitivity import ReadSensitivity
 from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
     DISPLAY_SOURCE_PATH_KEY,
@@ -230,6 +231,16 @@ def _attach_from_chash_positions(
     for r, chash, match in plan:
         # nexus-sis0m.5: every document holding the chash, for the title.
         r.metadata["_owner_doc_ids"] = list(dict.fromkeys(c["doc_id"] for c in by_chash[chash]))
+        # RDR-243 Phase 3 (nexus-rfvyy.8.2): EVERY live owner the route flags sensitive, not just the chosen one's
+        # flag. A chash held by a sensitive and a plain document still names the sensitive one here, and the output
+        # posture takes the lowest of them for its stub line. Stamped only when there is one, so a clean page's
+        # metadata is what it was. The engine's own per-hit ``sensitive`` field stays the authority on whether the
+        # hit is sensitive; this says which documents.
+        sensitive_owners = sorted(
+            {c["doc_id"] for c in by_chash[chash] if c.get("sensitive") is True}, key=tumbler_order_key,
+        )
+        if sensitive_owners:
+            r.metadata["sensitive_owners"] = sensitive_owners
         if not r.metadata.get("doc_id"):
             r.metadata["doc_id"] = match["doc_id"]
             r.metadata[DOC_ID_INFERRED_KEY] = True

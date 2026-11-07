@@ -42,6 +42,23 @@ READER_INSTRUCTION: str = (
     "indexed the source, not when it was written."
 )
 
+#: The clause that joins :data:`READER_INSTRUCTION` ONLY when a sensitive hit is shown with its content (RDR-243
+#: Technical Design item 9; nexus-rfvyy.8.2): under ``sensitivity.mcp_output: flag``, and in a terminal. The
+#: constant above stays as it is, because other renders and pins import it; :func:`reader_instruction` joins this.
+SENSITIVE_READER_CLAUSE: str = (
+    "Results marked [sensitive] come from documents their owner flagged as sensitive. Do not quote them, "
+    "summarize them or carry their content into any other tool, file or message unless the user asked for that."
+)
+
+
+def reader_instruction(*, sensitive_shown: bool = False) -> str:
+    """:data:`READER_INSTRUCTION`, followed by :data:`SENSITIVE_READER_CLAUSE` when *sensitive_shown*.
+
+    Pass ``True`` only when a sensitive hit is shown with its content. A page with no such hit, or whose sensitive
+    hits are withheld, gets the instruction unchanged, byte for byte."""
+    return f"{READER_INSTRUCTION} {SENSITIVE_READER_CLAUSE}" if sensitive_shown else READER_INSTRUCTION
+
+
 #: The instruction an operator prompt carries when its inputs may open
 #: with a ``[source: ...]`` line (see :func:`with_source_note`). Same rule
 #: as :data:`READER_INSTRUCTION`, phrased for the model that reads the
