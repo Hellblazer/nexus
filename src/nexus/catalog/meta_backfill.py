@@ -24,7 +24,7 @@ decides, per document, which keys the catalog may take from those rows, and noth
   the key holds no non-empty string (``""``, null, a number): the table CHECK of nexus-6pfgb.44 reads those as
   absent, so they are filled too. A ``put_at`` of ``""`` on an entry with no TTL is the retraction and stays.
   KNOWN GAP: a TOMBSTONED note is never listed or updated here (the engine refuses to update a tombstone), so
-  a tombstoned entry with a TTL and no ``put_at`` is stamped by the operator step in the runbook of that CHECK.
+  a tombstoned entry with a TTL and no ``put_at`` is left to the remedies in the tombstoned-violators section of that CHECK's runbook (prose; the backfill does not stamp it).
 * **Indexed documents**: ``source_format`` (nexus-6pfgb.23, Sam's option A) is DERIVED from the entry's own
   ``content_type`` and ``file_path`` by :func:`~nexus.catalog.indexed_meta.catalog_source_format`, the copy of
   the engine's ``nexus.catalog_source_format``, so it reads no chunk row and needs no ownership: a pair the

@@ -98,7 +98,8 @@ public final class AdminDdlSession implements AutoCloseable {
     private final DSLContext ctx;
     private boolean locked;
 
-    private AdminDdlSession(Settings settings, Connection conn) {
+    /** Package-private so a test can hand it a connection that fails where a real one rarely does. */
+    AdminDdlSession(Settings settings, Connection conn) {
         this.settings = settings;
         this.conn = conn;
         this.ctx = DSL.using(conn, SQLDialect.POSTGRES);
@@ -288,30 +289,63 @@ public final class AdminDdlSession implements AutoCloseable {
         guard(ownerStatementTimeout);   // the migration walk refused; lock_timeout and statement_timeout bounded
         try {
             conn.setAutoCommit(false);
-            try {
-                ddl("ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY", List.of(settings.schema(), settings.table()));
-                return read.apply(ctx);
-            } catch (DataAccessException e) {
-                if (QUERY_CANCELED.equals(e.sqlState())) {
-                    throw new Refused(503, "read_timeout",
-                        "the table-wide read of " + settings.tableLabel() + " took longer than "
-                            + ownerStatementTimeout + " under the table lock it needs as the table owner, and was "
-                            + "stopped; nothing was changed. Run it in a quiet window, or point NX_DB_ADMIN_* at a "
-                            + "superuser or BYPASSRLS role, which needs no lock");
-                }
-                throw e;
-            } finally {
-                conn.rollback();   // FORCE ROW LEVEL SECURITY is back: the ALTER was part of this transaction
-            }
         } catch (SQLException e) {
             throw refusal(e);
-        } finally {
-            try {
-                conn.setAutoCommit(true);
-            } catch (SQLException e) {
-                log.warn("event=admin_ddl_autocommit_restore_failed run={} cause=\"{}\"", settings.runLabel(),
-                    e.toString());
+        }
+        // from here a transaction is open (the ALTER is part of it), and every exit ends it with endUnforcedRead
+        T result;
+        try {
+            ddl("ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY", List.of(settings.schema(), settings.table()));
+            result = read.apply(ctx);
+        } catch (DataAccessException e) {
+            RuntimeException thrown = e;
+            if (QUERY_CANCELED.equals(e.sqlState())) {
+                thrown = new Refused(503, "read_timeout",
+                    "the table-wide read of " + settings.tableLabel() + " took longer than "
+                        + ownerStatementTimeout + " under the table lock it needs as the table owner, and was "
+                        + "stopped; nothing was changed. Run it in a quiet window, or point NX_DB_ADMIN_* at a "
+                        + "superuser or BYPASSRLS role, which needs no lock");
             }
+            endUnforcedRead(thrown);
+            throw thrown;
+        } catch (RuntimeException | Error e) {
+            endUnforcedRead(e);
+            throw e;
+        }
+        endUnforcedRead(null);
+        return result;
+    }
+
+    /**
+     * End the owner path's transaction: the rollback puts FORCE ROW LEVEL SECURITY back. If the rollback itself
+     * fails, the connection is CLOSED, never returned to autocommit: {@code setAutoCommit(true)} on a live
+     * connection COMMITS the open transaction, which would leave the table NO FORCE. Closing makes the server abort
+     * it (the precedent is {@code AspectQueueDrain.AdminCensus}). The rollback failure never masks {@code inFlight}:
+     * it is attached to it as suppressed; with nothing in flight it is the refusal.
+     */
+    private void endUnforcedRead(Throwable inFlight) {
+        try {
+            conn.rollback();
+        } catch (SQLException e) {
+            log.warn("event=admin_ddl_rollback_failed run={} cause=\"{}\" connection=closed", settings.runLabel(),
+                e.toString());
+            try {
+                conn.close();
+            } catch (SQLException closeFailure) {
+                log.debug("event=admin_ddl_close_failed run={} cause=\"{}\"", settings.runLabel(),
+                    closeFailure.toString());
+            }
+            if (inFlight == null) {
+                throw refusal(e);
+            }
+            inFlight.addSuppressed(e);
+            return;
+        }
+        try {
+            conn.setAutoCommit(true);
+        } catch (SQLException e) {
+            log.warn("event=admin_ddl_autocommit_restore_failed run={} cause=\"{}\"", settings.runLabel(),
+                e.toString());
         }
     }
 

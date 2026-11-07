@@ -53,8 +53,9 @@ import java.util.Objects;
  * <ul>
  *   <li><i>Fail safe (the CHECK counts less than the reader)</i>: a digit string Python's {@code int()} takes and the
  *       regular expression does not, namely digits with underscores ({@code "1_0"}), non-ASCII decimal digits
- *       (Arabic-Indic, full-width), and Unicode whitespace around the digits (a no-break space; the expression's
- *       {@code \s} is ASCII whitespace and, for the rest, the database locale's); and a JSON number that
+ *       (Arabic-Indic, full-width), and whitespace around the digits that Python strips and the expression does not
+ *       (a no-break space; {@code \x1c} to {@code \x1f} and {@code \x85}; the expression's {@code \s} is ASCII
+ *       whitespace and, for the rest, the database locale's); and a JSON number that
  *       {@code json.loads} rounds up to 1.0 ({@code 0.99999999999999999999}) while the stored numeric is below 1.
  *       Such an entry is not counted, so it can never be frozen; {@code clock_start} falls back to
  *       {@code indexed_at} for it, which expires it late and never early.</li>

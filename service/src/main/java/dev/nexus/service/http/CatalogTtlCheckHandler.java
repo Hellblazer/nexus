@@ -33,7 +33,8 @@ import java.util.function.Supplier;
  * sends them, after the Phase 4 Step 2c paired cut and the backfill that stamps {@code put_at}.
  *
  * <pre>
- *   POST /v1/admin/catalog-ttl-check/census    read only: per tenant, the entries that carry a TTL and those the
+ *   POST /v1/admin/catalog-ttl-check/census    changes no data (as the table owner it holds a table lock for the
+ *                                              scan, see below): per tenant, the entries that carry a TTL and those the
  *                                              CHECK would refuse
  *   POST /v1/admin/catalog-ttl-check/add       the CHECK, NOT VALID; refused while any tenant has a violator
  *   POST /v1/admin/catalog-ttl-check/validate  VALIDATE CONSTRAINT; refused while any tenant has a violator
@@ -59,8 +60,11 @@ import java.util.function.Supplier;
  * warning naming the tenants. DATA EFFECT of validate: none.
  *
  * <p><b>Synchronous.</b> The census (up to 10 minutes) and validate (up to 30) answer when they finish. The public
- * edge times a request out after about 30 seconds; the engine carries on and finishes, and a retry meanwhile is
- * answered 409 {@code constraint_run_in_progress} (add and validate hold the run lock; the census holds none).
+ * edge times a request out after about 30 seconds and the engine carries on. Add and validate count BEFORE they take
+ * the run lock, so a retry is answered 409 {@code constraint_run_in_progress} only once the constraint statement is
+ * running; a retry during the count runs a second count (a superuser or BYPASSRLS role in parallel; the table owner
+ * waits behind the first count's table lock and is answered 503 {@code lock_timeout} after 5 seconds). The census
+ * holds no run lock.
  *
  * <p>Nothing in the engine schedules or calls these routes; {@code NexusService} mounts the handler and {@code Main}
  * binds the admin connection.
@@ -173,8 +177,8 @@ public final class CatalogTtlCheckHandler implements HttpHandler {
     /**
      * The count again, after the ADD: the survey and the ADD are two statements with no lock between them, so a
      * writer that stored a TTL with no put_at in that window left an entry the new CHECK now freezes. The CHECK
-     * refuses every later such write, so this count is final. A failure to take it does not undo the ADD, and the
-     * answer says so.
+     * refuses every later such write, so this count is final. A failure to take it, of any kind, does not undo the ADD, and
+     * the answer says so ({@code violating_after_add} null, a warning that the constraint is in place).
      */
     private void countAfterAdd(Map<String, Object> out, CatalogTtlCheckAdmin admin) {
         try {
@@ -185,13 +189,22 @@ public final class CatalogTtlCheckHandler implements HttpHandler {
                 out.put("warning", "the constraint was added, but " + after.violatingTotal() + " entr"
                     + (after.violatingTotal() == 1 ? "y" : "ies") + " with a TTL and no put_at appeared between the "
                     + "count and the add (see violators_after_add). They are frozen: they cannot be updated or "
-                    + "tombstoned until a put_at is stamped on them. Stamp them (the backfill, or the runbook's "
-                    + "operator step for a tombstone), then count again before validate");
+                    + "tombstoned until a put_at is stamped on them. Stamp them (the backfill, or the "
+                    + "remedies in the runbook's tombstoned-violators section), then count again before validate");
             }
-        } catch (AdminDdlSession.Refused e) {
+        } catch (RuntimeException e) {
+            // any failure, not only a refusal: the ADD has landed, so the answer must say so (a DataAccessException
+            // from the second survey, a lock timeout behind an owner census, a read error)
+            String why;
+            if (e instanceof AdminDdlSession.Refused r) {
+                why = r.reason() + "): " + r.getMessage();
+            } else {
+                log.error("event=catalog_ttl_check_count_after_add_failed error={}", e.getMessage(), e);
+                why = "internal_error): see the engine log";
+            }
             out.put("violating_after_add", null);
-            out.put("warning", "the constraint was added, but the count after it could not be taken ("
-                + e.reason() + "): " + e.getMessage() + ". Run the census to see whether an entry was frozen");
+            out.put("warning", "the constraint was added, but the count after it could not be taken (" + why
+                + ". Run the census to see whether an entry was frozen");
         }
     }
 

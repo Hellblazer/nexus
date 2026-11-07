@@ -392,36 +392,47 @@ class CatalogTtlCheckRoutesIntegrationTest extends ChunkKeysTestBase {
 
     @Test
     @Order(39)
-    void aCountAfterTheAddThatCannotBeTakenDoesNotHideTheAdd() throws Exception {
-        stampAll();
-        AtomicInteger counts = new AtomicInteger();
-        service.catalogTtlCheckAdmin(new CatalogTtlCheckAdmin(
-                new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
-            @Override
-            public List<TenantCensus> census() {
-                if (counts.incrementAndGet() > 1) {
-                    throw new AdminDdlSession.Refused(503, "admin_probe_undercount", "the second count is refused");
+    void aCountAfterTheAddThatCannotBeTakenDoesNotHideTheAdd_whateverTheFailure() throws Exception {
+        // a refusal, and a bare database error (a lock timeout behind an owner census, a read error): the ADD landed
+        // either way, so both answer 200 with the constraint in place and violating_after_add unknown
+        for (RuntimeException failure : List.of(
+                new AdminDdlSession.Refused(503, "admin_probe_undercount", "the second count is refused"),
+                new DataAccessException("the second count failed: lock timeout"))) {
+            stampAll();
+            AtomicInteger counts = new AtomicInteger();
+            service.catalogTtlCheckAdmin(new CatalogTtlCheckAdmin(
+                    new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
+                @Override
+                public List<TenantCensus> census() {
+                    if (counts.incrementAndGet() > 1) {
+                        throw failure;
+                    }
+                    return super.census();
                 }
-                return super.census();
-            }
-        });
-        try {
-            HttpResponse<String> r = add(ROOT);
+            });
+            try {
+                HttpResponse<String> r = add(ROOT);
 
-            assertThat(r.statusCode()).as("the add landed, so the answer is 200, not the count's 503: " + r.body())
-                .isEqualTo(200);
-            JsonNode body = json(r);
-            assertThat(body.path("constraint").path("action").asText()).isEqualTo("added");
-            assertThat(body.has("violating_after_add")).isTrue();
-            assertThat(body.path("violating_after_add").isNull()).isTrue();
-            assertThat(body.path("warning").asText()).contains("admin_probe_undercount").contains("census");
-            assertThat(admin().state().present()).isTrue();
-        } finally {
-            service.catalogTtlCheckAdmin(admin());
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENTS)
-                    .dropConstraintIfExists(DSL.name(CatalogTtlCheckAdmin.CONSTRAINT)).execute();
+                assertThat(r.statusCode()).as("the add landed, so the answer is 200, not a 5xx: " + r.body())
+                    .isEqualTo(200);
+                JsonNode body = json(r);
+                assertThat(body.path("constraint").path("action").asText()).isEqualTo("added");
+                assertThat(body.has("violating_after_add")).isTrue();
+                assertThat(body.path("violating_after_add").isNull()).isTrue();
+                assertThat(body.path("warning").asText()).contains("the constraint was added").contains("census");
+                if (failure instanceof AdminDdlSession.Refused) {
+                    assertThat(body.path("warning").asText()).contains("admin_probe_undercount");
+                } else {
+                    assertThat(body.path("warning").asText()).contains("engine log");
+                }
+                assertThat(admin().state().present()).isTrue();
+            } finally {
+                service.catalogTtlCheckAdmin(admin());
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENTS)
+                        .dropConstraintIfExists(DSL.name(CatalogTtlCheckAdmin.CONSTRAINT)).execute();
+                }
             }
         }
     }
