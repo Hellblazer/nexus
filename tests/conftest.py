@@ -113,6 +113,15 @@ def pytest_configure(config):
         uv run pytest                          # quiet (WARNING)
         uv run pytest --log-level=DEBUG        # full debug output
     """
+    # Regroup path arguments so a directory revisited in the list keeps its conftest.py (pytest 9.1.1
+    # drops tests/daemon/conftest.py's fixtures for `tests/daemon/a.py tests/b.py tests/daemon/c.py`).
+    # tests/_arg_grouping.py; NX_TEST_KEEP_ARG_ORDER=1 keeps the order as typed.
+    if os.environ.get("NX_TEST_KEEP_ARG_ORDER") != "1":
+        from tests._arg_grouping import group_args_by_directory  # noqa: PLC0415 — deferred, only an argument list needs it
+
+        grouped = group_args_by_directory(list(config.args))
+        if grouped != list(config.args):
+            config.args[:] = grouped
     # nexus-kyujr: basetemp and TMPDIR on tmpfs inside a lab-run grant, decided once
     # by the controller BEFORE it spawns workers (they inherit the environment).
     # First, so everything below (the cluster log, the fenced home) follows TMPDIR.
