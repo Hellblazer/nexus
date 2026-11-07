@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 import structlog
 
+from nexus.db import data_token
 from nexus.db.data_token import DataTokenManager
 
 URL = "http://127.0.0.1:9999"
@@ -61,3 +62,16 @@ def test_without_a_mint_tenant_the_event_names_the_callers_tenant(tmp_path: Path
     with structlog.testing.capture_logs() as captured:
         _manager(tmp_path, "", seen).bearer_for(URL, "default")
     assert _minted(captured)["minted_for"] == "default"
+
+
+def test_the_unguarded_mint_path_names_the_mint_tenant_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The path taken when the mint lock cannot be opened logs its own data_token_minted."""
+    def refuse(*a: Any, **k: Any) -> int:
+        raise PermissionError("no lock")
+
+    monkeypatch.setattr(data_token, "_open_mint_lock_logged", refuse)
+    seen: list[dict] = []
+    with structlog.testing.capture_logs() as captured:
+        _manager(tmp_path, "gate-xr789", seen).bearer_for(URL, "default")
+    assert any(e["event"] == "data_token_mint_lock_unavailable" for e in captured)
+    assert _minted(captured)["minted_for"] == "gate-xr789"
