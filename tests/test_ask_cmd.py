@@ -1035,9 +1035,36 @@ def _wrapped_by_cause() -> Exception:
         return exc
 
 
+def _cause_only() -> Exception:
+    """A cause with no context: raised outside any except block, so only ``__cause__`` links back."""
+    inner = httpx.RemoteProtocolError("dropped")
+    outer = RuntimeError("tuple_out failed")
+    outer.__cause__ = inner
+    outer.__suppress_context__ = True
+    return outer
+
+
+def _context_behind_a_definite_cause() -> Exception:
+    """The ambiguous link is the context while the cause is definite: both links must be read."""
+    outer = RuntimeError("wrapped")
+    outer.__cause__ = httpx.ConnectError("refused")
+    outer.__context__ = httpx.ReadTimeout("read timed out")
+    return outer
+
+
+def _a_cycle() -> Exception:
+    """A hand-built cycle: the walk must end."""
+    a, b = RuntimeError("a"), RuntimeError("b")
+    a.__context__, b.__context__ = b, a
+    return a
+
+
 AMBIGUOUS = [
     pytest.param(_read_timeout_then_connect_error(), id="read-timeout-then-connect-error-in-context"),
     pytest.param(_wrapped_by_cause(), id="remote-protocol-error-as-cause"),
+    pytest.param(_cause_only(), id="cause-only-no-context"),
+    pytest.param(_context_behind_a_definite_cause(), id="ambiguous-context-behind-a-definite-cause"),
+    pytest.param(_status_error(503), id="http-503-a-gateway-retry-can-hide-a-504"),
     pytest.param(_status_error(502), id="http-502"),
     pytest.param(_status_error(504), id="http-504"),
     pytest.param(httpx.ReadTimeout("read timed out"), id="read-timeout"),
@@ -1081,7 +1108,6 @@ def test_an_ambiguous_tuple_out_leaves_the_record_sending_and_says_the_outcome_i
         pytest.param(ValueError("body too large"), id="value-error"),
         pytest.param(RuntimeError("tuple_out refused"), id="runtime-error"),
         pytest.param(_status_error(500), id="http-500"),
-        pytest.param(_status_error(503), id="http-503-pre-forward"),
         pytest.param(_status_error(400), id="http-400"),
         pytest.param(_status_error(404), id="http-404"),
     ],
@@ -1517,3 +1543,9 @@ def test_show_json_has_no_outcome_unknown_key_for_an_ordinary_sending_record(wor
     data = json.loads(world.run("show", REF, "--json").stdout)["answer"]
     assert "outcome_unknown" not in data
     assert "outcome unknown" not in world.run("show", REF).output
+
+
+def test_the_outcome_walk_ends_on_a_cycle_and_reads_it_as_definite() -> None:
+    from nexus.commands.ask import _outcome_unknown
+
+    assert _outcome_unknown(_a_cycle()) is False

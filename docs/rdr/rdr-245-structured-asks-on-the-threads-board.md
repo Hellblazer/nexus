@@ -578,11 +578,13 @@ the asker's `session:` id, and per `via`:
 5. It updates the record to `sent` with the tuple id, or `failed` with the
    error, and prints which. When the `tuple_out` outcome is unknown (the
    request went out and the reply was lost: a read or write timeout, a
-   dropped connection, a half-read response, a 502 or 504 from the edge, in
-   any link of the exception chain), the mail may have been posted, so the
+   dropped connection, a half-read response, a 502, 503 or 504 from the edge,
+   in any link of the exception chain; a 503 counts because the client's
+   gateway retry can turn a 504 into a bare 503), the mail may have been
+   posted, so the
    record stays `sending` with `error: "outcome unknown: <reason>"` and the
    command says so and exits non-zero. A refusal the engine answered (a 4xx,
-   a 500, a 503, a typed tuple error), a client pre-check or a connect failure
+   a 500, a typed tuple error), a client pre-check or a connect failure
    is `failed`. The 10-minute rule is the only retry path for an unknown
    outcome: a re-send is refused for 10 minutes, and after that goes out with
    a new `answer_id`. The batch record, when there is one, is written after

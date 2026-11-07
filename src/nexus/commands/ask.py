@@ -779,30 +779,34 @@ def _batch_title_for(s: Seams, mediator: str, words: str, now: datetime) -> tupl
 
 def _outcome_unknown(exc: BaseException) -> bool:
     """True when the failed ``tuple_out`` may still have committed: the request went out and the answer was lost
-    (a read or write timeout, a dropped connection, a half-read response, a 502 or 504 from the edge).
+    (a read or write timeout, a dropped connection, a half-read response, a 502, 503 or 504 from the edge).
 
     The whole exception chain is read (``__cause__`` and ``__context__``): a retry layer that saw a ReadTimeout
     and then failed to connect raises the ConnectError with the ReadTimeout behind it, and the first attempt may
-    have committed. Any ambiguous link makes the outcome unknown. A refusal the engine answered (a typed tuple
-    error, a 4xx, a 500 or a 503, which the edge sends before it forwards), a client pre-check, and a connect
-    failure or timeout (nothing was sent) are definite: the mail was not posted.
-    """
+    have committed. Any ambiguous link makes the outcome unknown. A 503 counts as ambiguous too: the client's own
+    gateway retry re-sends a 502/503/504 outside its except block, so a 504 followed by a 503 reaches here as a
+    bare 503 with no chain. A refusal the engine answered (a typed tuple error, a 4xx, a 500), a client
+    pre-check, and a connect failure or timeout (nothing was sent) are definite: the mail was not posted. The one
+    residual is a 504 the gateway retry follows with a 500 or 4xx, which reads as definite."""
     import httpx  # noqa: PLC0415 -- deferred: CLI startup cost
 
     never_sent = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError, httpx.UnsupportedProtocol)
     seen: set[int] = set()
-    link: BaseException | None = exc
-    while link is not None and id(link) not in seen:
+    stack: list[BaseException] = [exc]
+    while stack:
+        link = stack.pop()
+        if id(link) in seen:
+            continue
         seen.add(id(link))
         if isinstance(link, httpx.HTTPStatusError):
-            if link.response.status_code in (502, 504):
+            if link.response.status_code in (502, 503, 504):
                 return True
         elif isinstance(link, httpx.TransportError):
             if not isinstance(link, never_sent):
                 return True
         elif isinstance(link, (TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
             return True
-        link = link.__cause__ or link.__context__
+        stack.extend(x for x in (link.__cause__, link.__context__) if x is not None)
     return False
 
 
