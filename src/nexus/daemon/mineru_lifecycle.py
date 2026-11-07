@@ -200,8 +200,8 @@ def ensure_mineru_running(
     proc = None
     try:
         from nexus._mineru_pid import (  # noqa: PLC0415 — deferred import
-            is_process_alive,
             read_pid_file,
+            recorded_server_alive,
         )
         from nexus._mineru_spawn import (  # noqa: PLC0415 — deferred import
             _find_free_port,
@@ -219,8 +219,8 @@ def ensure_mineru_running(
             # pid file is written before health passes, so liveness — not
             # health — is the in-flight signal).
             info = read_pid_file()
-            if info is not None and is_process_alive(info["pid"]):
-                pass  # someone's server is up or warming — just wait below
+            if info is not None and recorded_server_alive(info):
+                pass  # someone's server is up or warming (its pid may be in another namespace) — wait below
             else:
                 port = get_mineru_configured_fixed_port() or _find_free_port()
                 proc = spawn_server_process(port)

@@ -41,6 +41,8 @@ def _pid_file_path() -> Path:
 # inside this module keeps working unchanged.
 from nexus._mineru_pid import (  # noqa: E402
     is_process_alive as _is_process_alive,
+    recorded_server_alive,
+    server_answers,
     read_pid_file as _read_pid_file,
 )
 
@@ -101,7 +103,7 @@ def start(port: int) -> None:
     with registry.election(_SPAWN_SCOPE):
         # Check if already running
         info = _read_pid_file()
-        if info is not None and _is_process_alive(info["pid"]):
+        if info is not None and recorded_server_alive(info):
             click.echo(f"MinerU server already running (PID {info['pid']}, port {info['port']})")
             return
 
@@ -191,6 +193,15 @@ def _stop_under_election() -> None:
 
     # Check if process is alive
     if not _is_process_alive(pid):
+        if server_answers(info):
+            # nexus-dyfsw: a server whose pid this process cannot see (another PID namespace
+            # sharing this config dir) still answers; its pid file is not stale.
+            click.echo(
+                f"MinerU server on port {info.get('port')} answers, but PID {pid} is not visible from here "
+                "(another PID namespace?); not stopped. Stop it from where it runs.",
+                err=True,
+            )
+            raise SystemExit(1)
         click.echo(f"MinerU server not running (stale PID {pid})")
         pid_path.unlink(missing_ok=True)
         return
@@ -279,7 +290,7 @@ def status() -> None:
     pid = info["pid"]
     port = info["port"]
 
-    if not _is_process_alive(pid):
+    if not _is_process_alive(pid) and not server_answers(info):
         click.echo(f"MinerU server not running (stale PID {pid})")
         pid_path.unlink(missing_ok=True)
         return
