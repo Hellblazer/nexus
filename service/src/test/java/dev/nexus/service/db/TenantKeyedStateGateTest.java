@@ -529,6 +529,7 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("ChunkKeysSweepJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
                 + "job that holds it is evicted under ChunkKeysSweepJobs.jobs");
             notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
+            notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
             notKeyed.put("ChunkKeysSweepJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
                 + "settable by a test): no tenant's data");
             for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
