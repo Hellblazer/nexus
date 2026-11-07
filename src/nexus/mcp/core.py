@@ -3751,6 +3751,7 @@ def _search_render(
 
         lines: list[str] = [reader_instruction(sensitive_shown=posture.shown_sensitive)]
         current_cluster: str | None = None
+        _tainted_headers = _headers_naming_withheld_rows(page, posture)
         for _idx, r in enumerate(page):
             if posture.withheld(_idx):
                 # RDR-243 Phase 3: the hit's slot holds one line and nothing else of it (no cluster label, title,
@@ -3761,6 +3762,9 @@ def _search_render(
             # Topic grouping sets _topic_label, Ward clustering
             # _cluster_label; a header prints for either (critique, 29fab0df4).
             cluster_label = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
+            if cluster_label in _tainted_headers:
+                # RDR-243 Phase 3 (nexus-rfvyy.1): the header is, or may be, derived from a withheld row beside it.
+                cluster_label = _WITHHELD_HEADER
             if clustered and cluster_label and cluster_label != current_cluster:
                 if current_cluster is not None:
                     lines.append("")  # blank separator between clusters
@@ -5983,6 +5987,32 @@ class _OutputPosture:
         return {}
 
 
+#: What a cluster header reads when its label is, or may be, derived from a withheld row.
+_WITHHELD_HEADER = "label withheld"
+
+
+def _headers_naming_withheld_rows(page: list, posture: _OutputPosture) -> frozenset[str]:
+    """The cluster-header labels a text render must not print because a withheld row names, or may name, them.
+
+    A Ward cluster (``_cluster_label``) is labelled by its best member's catalog title, path or id, so the label
+    that equals a withheld row's own is that title. A topic label (``_topic_label``) comes from the taxonomy, built
+    from the topic's members: until topic terms leave sensitive members out, a topic with a withheld row on the
+    page is treated as derived from it. Empty unless the posture is withholding."""
+    if not posture.withholding:
+        return frozenset()
+    tainted: set[str] = set()
+    for i, r in enumerate(page):
+        if not posture.withheld(i):
+            continue
+        meta = r.metadata or {}
+        derived = meta.get("_display_title") or meta.get("_display_path") or r.id
+        if meta.get("_cluster_label") and meta["_cluster_label"] == derived:
+            tainted.add(derived)
+        if meta.get("_topic_label") and not meta.get("_cluster_label"):
+            tainted.add(meta["_topic_label"])
+    return frozenset(tainted)
+
+
 def _sensitive_reader_clause() -> str:
     from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
@@ -7579,7 +7609,22 @@ def store_list(
         from nexus.catalog import store_hook as _store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
         owner_map = _store_hook.live_owner_entries(col_name, [e.get("id", "") for e in page])
+        # RDR-243 Phase 3 (nexus-rfvyy.1): a sensitive note's title is content. A chunk is sensitive when the row says
+        # so or a live owner the catalog flags holds it (the read store_get does); a withheld chunk's line is the
+        # stub in the same slot, and the page says how many.
+        _page_facts: list[_HitFacts] = []
         for e in page:
+            _owners = tuple(
+                str(getattr(o, "tumbler", ""))
+                for o in ((owner_map or {}).get(e.get("id", ""), ()))
+                if getattr(o, "sensitive", False) is True
+            )
+            _page_facts.append((_hit_is_sensitive(e.get("sensitive"), _owners), _owners, str(e.get("id", ""))))
+        posture = _OutputPosture.for_facts(_page_facts)
+        for _idx, e in enumerate(page):
+            if posture.withheld(_idx):
+                lines.append(f"  {posture.stub(_idx)}")
+                continue
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
             shown = _store_hook.note_display(
                 None if owner_map is None else owner_map.get(doc_id, []),
@@ -7588,7 +7633,12 @@ def store_list(
             )
             title = shown.title[:40]
             tag_str = f"  [{shown.tags}]" if shown.tags else ""
-            lines.append(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}")
+            badge = f"  {_SENSITIVE_BADGE}" if posture.flagged(_idx) else ""
+            lines.append(f"  {doc_id}  {title:<40}  {shown.ttl:<24}  {shown.indexed}{tag_str}{badge}")
+        if posture.shown_sensitive:
+            lines.insert(1, _sensitive_reader_clause())
+        if _withheld_line := posture.note_line():
+            lines.append(_withheld_line)
         shown_end = offset + len(page)
         # A full page is the live signal that more rows may follow; the stored
         # total can exceed the live rows and point at an empty page. "Full" is
@@ -7643,7 +7693,15 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
             f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
             "A split note appears as one row per piece."
         )
+    # RDR-243 Phase 3 (nexus-rfvyy.1): a sensitive document's title and handle are content; its row is the stub.
+    # The listing is sorted by title, so a stub left in place would show where its title falls among the others;
+    # the sensitive rows go last (a stable sort keeps the title order within each group).
+    docs = sorted(docs, key=lambda d: d.sensitive)
+    posture = _OutputPosture.of([doc.key if doc.sensitive else None for doc in docs])
     for i, doc in enumerate(docs, 1):
+        if posture.withheld(i - 1):
+            lines.append(f"  {i:3d}. {posture.stub(i - 1)}")
+            continue
         # The full content-hash (RDR-180) is the doc_id that store_get
         # accepts. Surfaced whole so the list -> get flow round-trips; see
         # DocumentListing.handle.
@@ -7651,7 +7709,12 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         # nexus-6pfgb.13: the document's own index date (the catalog column); a chunk-keyed row with no
         # catalog document shows its chunk row's.
         indexed = (doc.indexed_at or doc.entry.get("indexed_at") or "")[:10]
-        lines.append(f"  {i:3d}. {doc.handle}  {title:<50}  {doc.chunks:>4} chunks  {indexed}")
+        badge = f"  {_SENSITIVE_BADGE}" if posture.flagged(i - 1) else ""
+        lines.append(f"  {i:3d}. {doc.handle}  {title:<50}  {doc.chunks:>4} chunks  {indexed}{badge}")
+    if posture.shown_sensitive:
+        lines.insert(1, _sensitive_reader_clause())
+    if _withheld_line := posture.note_line():
+        lines.append(_withheld_line)
     return _cap_text_result("\n".join(lines), "store_list")
 
 
