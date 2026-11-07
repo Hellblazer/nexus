@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
+import org.jooq.impl.SQLDataType;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -29,6 +30,10 @@ import java.util.regex.Pattern;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
+import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
+import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_FLOORED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -136,13 +141,20 @@ class VectorSensitivityRouteParityTest {
     static Set<String> chunkTextRelations(PostgreSQLContainer<?> pg, String schema) throws Exception {
         Set<String> out = new TreeSet<>();
         try (Connection su = pg.createConnection("")) {
-            var rows = DSL.using(su, SQLDialect.POSTGRES).fetch(
-                "select c.relname from pg_catalog.pg_class c "
-                + "join pg_catalog.pg_namespace n on n.oid = c.relnamespace "
-                + "join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attname = 'chunk_text' "
-                + "and not a.attisdropped "
-                + "where n.nspname = ? and c.relkind in ('r', 'p', 'v', 'm', 'f')", schema);
-            for (var r : rows) out.add(r.get("relname", String.class));
+            Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(relname)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                    .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_attribute")).as("a"))
+                    .on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("c", "oid")))
+                        .and(DSL.field(DSL.name("a", "attname"), String.class).eq("chunk_text"))
+                        .and(DSL.field(DSL.name("a", "attisdropped"), Boolean.class).eq(false)))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+                .and(DSL.field(DSL.name("c", "relkind"), String.class).in("r", "p", "v", "m", "f"))
+                .fetch();
+            for (var r : rows) out.add(r.get(relname));
         }
         return out;
     }
@@ -162,16 +174,24 @@ class VectorSensitivityRouteParityTest {
         String relationRegex = "\\m(" + String.join("|", relations) + ")\\M";
         List<FnSig> out = new ArrayList<>();
         try (Connection su = pg.createConnection("")) {
-            var rows = DSL.using(su, SQLDialect.POSTGRES).fetch(
-                "select p.proname, pg_get_function_arguments(p.oid) as args, pg_get_function_result(p.oid) as res "
-                + "from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid = p.pronamespace "
-                + "where n.nspname = ? and p.prokind in ('f', 'p') and ("
-                + "pg_get_functiondef(p.oid) ~ '\\mchunk_text\\M' or pg_get_functiondef(p.oid) ~ ? "
-                + "or coalesce(pg_get_function_result(p.oid), '') ~ ?) order by 1, 2",
-                schema, relationRegex, relationRegex);
+            Field<String> name = DSL.field(DSL.name("p", "proname"), String.class);
+            Field<Object> oid = DSL.field(DSL.name("p", "oid"), Object.class);
+            Field<String> args = DSL.function("pg_get_function_arguments", String.class, oid);
+            Field<String> result = DSL.function("pg_get_function_result", String.class, oid);
+            Field<String> def = DSL.function("pg_get_functiondef", String.class, oid);
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(name, args.as("args"), result.as("res"))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                    .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("p", "pronamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+                .and(DSL.field(DSL.name("p", "prokind"), String.class).in("f", "p"))
+                .and(def.likeRegex("\\mchunk_text\\M").or(def.likeRegex(relationRegex))
+                    .or(DSL.coalesce(result, "").likeRegex(relationRegex)))
+                .orderBy(name, args)
+                .fetch();
             for (var r : rows) {
-                out.add(new FnSig(r.get("proname", String.class), r.get("args", String.class),
-                                  r.get("res", String.class)));
+                out.add(new FnSig(r.get(name), r.get("args", String.class), r.get("res", String.class)));
             }
         }
         return out;
@@ -238,17 +258,24 @@ class VectorSensitivityRouteParityTest {
             .isFalse();
     }
 
-    private void withProbeSchema(String probe, List<String> statements, ThrowingRunnable body) throws Exception {
-        try (Connection su = pg.createConnection(""); var st = su.createStatement()) {
-            st.execute("drop schema if exists " + probe + " cascade");
-            st.execute("create schema " + probe);
-            for (String sql : statements) st.execute(sql);
+    /**
+     * Create a fresh throwaway schema, plant functions in it through a {@code PgContainerHelper.plantCensusProbe*}
+     * helper (jOOQ has no CREATE FUNCTION), run {@code body}, and drop the schema again.
+     */
+    private void withProbeSchema(String probe, Planter plant, ThrowingRunnable body) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            dsl.dropSchemaIfExists(DSL.name(probe)).cascade().execute();
+            dsl.createSchema(DSL.name(probe)).execute();
+            plant.plant(su, probe);
         }
         try {
             body.run();
         } finally {
-            try (Connection su = pg.createConnection(""); var st = su.createStatement()) {
-                st.execute("drop schema if exists " + probe + " cascade");
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSL.using(su, SQLDialect.POSTGRES).dropSchemaIfExists(DSL.name(probe)).cascade().execute();
             }
         }
     }
@@ -256,13 +283,13 @@ class VectorSensitivityRouteParityTest {
     @FunctionalInterface
     private interface ThrowingRunnable { void run() throws Exception; }
 
+    @FunctionalInterface
+    private interface Planter { void plant(Connection su, String schema) throws Exception; }
+
     @Test
     void aFunctionThatReturnsChunkTextUnderAnotherColumnNameIsCaughtByTheDefinitionScan() throws Exception {
         String probe = "census_probe";
-        withProbeSchema(probe, List.of(
-            "create function " + probe + ".leak(p text) returns table(chash bytea, body text) "
-            + "language plpgsql as $f$ begin return query select c.chash, c.chunk_text from nexus.chunks c; "
-            + "end $f$"), () -> {
+        withProbeSchema(probe, PgContainerHelper::plantCensusProbeLeak, () -> {
             List<FnSig> byShape = textFunctionsFromPgProc(pg, probe);
             List<FnSig> byDefinition = functionsMentioningChunkText(pg, probe, "nexus");
             assertThat(names(byShape)).as("the planted function returns chunk text as 'body': the shape matcher misses it")
@@ -276,12 +303,7 @@ class VectorSensitivityRouteParityTest {
     @Test
     void aFunctionThatReturnsAWholeChunkRowWithoutNamingTheColumnIsCaughtByTheRelationScan() throws Exception {
         String probe = "census_probe_rel";
-        withProbeSchema(probe, List.of(
-            "create function " + probe + ".setof_leak(p text) returns setof nexus.chunks "
-            + "language sql as $f$ select * from nexus.chunks $f$",
-            "create function " + probe + ".star_leak(p text) returns table(chash bytea, n bigint) "
-            + "language sql as $f$ select c.chash, 1::bigint from nexus.chunks c $f$",
-            "create function " + probe + ".unrelated(p text) returns int language sql as $f$ select 1 $f$"), () -> {
+        withProbeSchema(probe, PgContainerHelper::plantCensusProbeRel, () -> {
             List<FnSig> byDefinition = functionsMentioningChunkText(pg, probe, "nexus");
             assertThat(names(byDefinition))
                 .as("setof nexus.chunks and a select over the chunk table are both seen, no chunk_text written")
@@ -293,11 +315,7 @@ class VectorSensitivityRouteParityTest {
     @Test
     void overloadsAreSeparateEntriesAndOneClassifiedOverloadDoesNotCoverTheOther() throws Exception {
         String probe = "census_probe_ovl";
-        withProbeSchema(probe, List.of(
-            "create function " + probe + ".twin(p text) returns table(chash bytea, body text) language sql as $f$ "
-            + "select c.chash, c.chunk_text from nexus.chunks c $f$",
-            "create function " + probe + ".twin(p int) returns table(chash bytea, body text) language sql as $f$ "
-            + "select c.chash, c.chunk_text from nexus.chunks c $f$"), () -> {
+        withProbeSchema(probe, PgContainerHelper::plantCensusProbeOverloads, () -> {
             List<FnSig> byDefinition = functionsMentioningChunkText(pg, probe, "nexus");
             assertThat(byDefinition).as("both overloads are listed").hasSize(2);
             Map<String, Classified> onlyText = Map.of("twin(p text)",
@@ -311,9 +329,7 @@ class VectorSensitivityRouteParityTest {
     @Test
     void aClassifiedEntryWhoseFunctionIsGoneOrChangedItsResultIsReported() throws Exception {
         String probe = "census_probe_stale";
-        withProbeSchema(probe, List.of(
-            "create function " + probe + ".kept(p text) returns table(chash bytea, body text) language sql as $f$ "
-            + "select c.chash, c.chunk_text from nexus.chunks c $f$"), () -> {
+        withProbeSchema(probe, PgContainerHelper::plantCensusProbeKept, () -> {
             List<FnSig> byDefinition = functionsMentioningChunkText(pg, probe, "nexus");
             Map<String, Classified> classified = Map.of(
                 "kept(p text)", new Classified("TABLE(chash bytea, n bigint)", Exposure.NO_TEXT, "pinned as a count"),
@@ -1099,31 +1115,38 @@ class VectorSensitivityRouteParityTest {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             // the victim predicate itself: owned chunks are not reapable, in either owner state; the orphans are
             for (var e : text.entrySet()) {
-                int reapable = ((Number) dsl.fetchValue(
-                    "select count(*) from nexus.chunk_is_reapable(?, ?, ?::bytea, "
-                    + "(select c.last_written_at from nexus.chunks c where c.tenant_id = ? and c.collection = ? "
-                    + "and c.chash = ?::bytea))",
-                    tenant, origin, "\\x" + hexOf(e.getValue()), tenant, origin, "\\x" + hexOf(e.getValue())))
-                    .intValue();
+                byte[] chash = HexFormat.of().parseHex(hexOf(e.getValue()));
+                Field<OffsetDateTime> writtenAt = DSL.field(DSL.select(CHUNKS.LAST_WRITTEN_AT).from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(origin)).and(CHUNKS.CHASH.eq(chash)));
+                int reapable = dsl.fetchCount(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
+                    DSL.val(tenant), DSL.val(origin), DSL.val(chash), writtenAt,
+                    DSL.castNull(SQLDataType.INTERVAL))));
                 assertThat(reapable).as("reapable(%s)", e.getKey()).isEqualTo(e.getKey().startsWith("orphan") ? 1 : 0);
             }
             Set<String> orphanHexes = new TreeSet<>();
             for (String k : List.of("orphan-1", "orphan-2", "orphan-3")) orphanHexes.add(hexOf(text.get(k)));
             Set<String> seen = new TreeSet<>();
             String at = "2026-11-06T00:00:00Z";
-            List<String> sweeps = List.of(
-                "select moved, sample::text as sample from nexus.gc_quarantine_orphans_bounded(384, ?, ?, ?, ?, 20, 1)",
-                "select moved, sample::text as sample from nexus.gc_quarantine_orphans_floored(384, ?, ?, ?, ?, 20, 1, null, null, false)",
-                "select moved, sample::text as sample from nexus.gc_quarantine_orphans(384, ?, ?, ?, ?, 20)");
+            Map<String, org.jooq.Record2<Long, org.jooq.JSONB>> sweeps = new LinkedHashMap<>();
+            sweeps.put("gc_quarantine_orphans_bounded", dsl.select(GC_QUARANTINE_ORPHANS_BOUNDED.MOVED,
+                GC_QUARANTINE_ORPHANS_BOUNDED.SAMPLE).from(GC_QUARANTINE_ORPHANS_BOUNDED.call(
+                    384, tenant, origin, quarantine, at, 20, 1)).fetchOne());
+            sweeps.put("gc_quarantine_orphans_floored", dsl.select(GC_QUARANTINE_ORPHANS_FLOORED.MOVED,
+                GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE).from(GC_QUARANTINE_ORPHANS_FLOORED.call(
+                    384, tenant, origin, quarantine, at, 20, 1, null, null, false)).fetchOne());
+            sweeps.put("gc_quarantine_orphans", dsl.select(GC_QUARANTINE_ORPHANS.MOVED,
+                GC_QUARANTINE_ORPHANS.SAMPLE).from(GC_QUARANTINE_ORPHANS.call(
+                    384, tenant, origin, quarantine, at, 20)).fetchOne());
             int swept = 0;
-            for (String sql : sweeps) {
-                var row = dsl.fetchOne(sql, tenant, origin, quarantine, at);
+            for (var sweep : sweeps.entrySet()) {
+                String fn = sweep.getKey();
+                var row = sweep.getValue();
                 assertThat(row).isNotNull();
-                String sample = row.get("sample", String.class);
-                assertThat(row.get("moved", Long.class)).as(sql).isPositive();
+                String sample = row.value2().data();
+                assertThat(row.value1()).as(fn).isPositive();
                 for (var e : text.entrySet()) {
                     if (e.getKey().startsWith("owned")) {
-                        assertThat(sample).as("%s: the sample must not name %s", sql, e.getKey())
+                        assertThat(sample).as("%s: the sample must not name %s", fn, e.getKey())
                             .doesNotContain(hexOf(e.getValue())).doesNotContain(e.getValue());
                     }
                 }
@@ -1134,8 +1157,7 @@ class VectorSensitivityRouteParityTest {
             }
             assertThat(swept).as("non-vacuity: the three sweeps moved and sampled the three orphans").isEqualTo(3);
             assertThat(seen).as("every sampled chunk was an orphan").containsExactlyInAnyOrderElementsOf(orphanHexes);
-            long left = ((Number) dsl.fetchValue(
-                "select count(*) from nexus.chunks where tenant_id = ? and collection = ?", tenant, origin)).longValue();
+            long left = dsl.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(origin)));
             assertThat(left).as("both owned chunks, the live and the tombstoned sensitive owner's, were not moved")
                 .isEqualTo(2L);
         }
