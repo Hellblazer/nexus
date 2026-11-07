@@ -679,10 +679,6 @@ def raise_flag(writer: Any, tumbler: str, *, what: str) -> None:
         # A document flagged after it was indexed may sit in topics whose label was computed from it (RDR-243
         # Phase 3 fix r1, nexus-rfvyy.8): replace that label now, as `nx catalog sensitive` does. Best effort: the
         # flag is set and the write may proceed; the log names a topic that could not be relabelled.
-        try:
-            from nexus import sensitive_topics  # noqa: PLC0415 - deferred: only a late flag needs it
+        from nexus import sensitive_topics  # noqa: PLC0415 - deferred: only a late flag needs it
 
-            sensitive_topics.withhold_after_flag(writer, [tumbler])
-        except Exception as exc:  # noqa: BLE001 - never block the write on the topic bookkeeping
-            _log.warning("sensitive_topics_not_relabelled", tumbler=tumbler, error=f"{type(exc).__name__}: {exc}"[:200],
-                         hint="run `nx taxonomy discover --force <collection>`")
+        sensitive_topics.withhold_after_flag_best_effort(writer, [tumbler], source="raise_flag")

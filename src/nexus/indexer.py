@@ -1838,6 +1838,12 @@ def _catalog_hook(
                     continue
                 if sensitive_confirmed is not None:
                     sensitive_confirmed.update(p for p, _ in _page)
+                # An existing document indexed before the glob matched may sit in topics labelled from its text
+                # (RDR-243 Phase 3 fix r3, nexus-rfvyy.8, N1): relabel them, best effort and logged, as
+                # raise_flag does.
+                from nexus import sensitive_topics  # noqa: PLC0415 - deferred: only a late flag needs it
+
+                sensitive_topics.withhold_after_flag_best_effort(writer, [t for _, t in _page], source="index repo --sensitive-glob")
 
         # Pass 1b: batch-update the CHANGED existing docs (nexus-xedhp,
         # duoak.11 follow-up). A HEAD bump flips every doc's stored head_hash
