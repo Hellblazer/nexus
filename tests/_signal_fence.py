@@ -1,36 +1,37 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The test session's signal fence, report mode (nexus-xzorj item 3).
+"""The test session's signal fence (nexus-xzorj item 3).
 
 Phases A and B of nexus-xzorj converted every raw kill site the reviewers found: a pid held only as a number is
 never signalled. This is the backstop for the sites nobody has found yet. On a shared pool user (chas and qwent
 ``nxtest``), hand runs share one PID namespace (labrun_559 measured it 2026-11-07, nexus-b323n), so a stale or
 fabricated pid can name another session's process, and a ``killpg`` of it can stop another job's whole group.
 
-In every test process ``os.kill`` and ``os.killpg`` are wrapped. A signal is sent unchanged; before it is, its
-target is classified:
+In every test process ``os.kill`` and ``os.killpg`` are wrapped. A signal is always sent unchanged; before it is,
+its target is classified:
 
 * **own**: the target, or for a group its leader (else any live member), descends from the session's root pytest
-  process, or carries the session's environment marker (``NX_TEST_SIGNAL_FENCE_TOKEN``, which every child
-  inherits unless its environment is scrubbed);
+  process; or carries the session's environment marker (``NX_TEST_SIGNAL_FENCE_TOKEN``, which every child inherits
+  unless its environment is scrubbed); or (rule A) names a path inside this session's pytest basetemp in its argv or
+  environment (a detached test run carries the test's box in HOME and the like); or, for a single process, (rule B)
+  belongs to a process group whose live leader is the session's;
 * **foreign**: anything else, including ``kill(-1, ...)`` and a group no member of which is ours;
 * a probe (signal 0) and a target whose ``/proc/<pid>/stat`` is gone (it exited) are not classified; a target whose
-  environment cannot be read (another user's process) and that does not descend from the root is foreign. Under
+  environment cannot be read (another user's process) is judged by its ancestry and argv alone. Under
   ``hidepid=2`` another user's process has no readable ``stat`` and reads as unclassified.
 
-The identity (root pid and marker) is captured once per process at configure, so a test that edits or clears
-``os.environ`` changes nothing here. Each foreign event names the test (or the session phase), the call site, the
-signal, the target and its program name (argv[0]'s basename up to its first space: never the separate arguments,
-though a process that rewrote its title can show a title word); the summary groups repeats.
-Expected false positives: a child reparented away from the session whose environment was scrubbed (``env={...}``)
-carries no marker and reads as foreign.
+The identity (root pid, marker, basetemp) is read once per process, so a test that edits or clears ``os.environ``
+changes nothing here. Each foreign event names the test (or the session phase), the call site, the signal, the
+target and its program name (argv[0]'s basename up to its first space: never the separate arguments, though a
+process that rewrote its title can show a title word); the summary groups repeats.
 
-Report mode records every foreign signal and the terminal summary (grep ``signal fence (report mode``) counts and
-lists them, from every xdist worker. The bead's next step is measurement: a develop CI run counts the false positives (the dry
-probe flagged reparented children with scrubbed environments), and only a measured zero would justify refusing.
+``fail`` mode (the default, Sam's choice 2026-11-07, halcyon/xzorj-alerting): a session that saw any foreign signal
+exits failed and its summary says why (grep ``signal fence (``); the first CI measurement before the two rules saw
+18 foreign signals of 6162, all false positives of the two classes the rules now claim. ``report`` lists them and
+leaves the exit status alone; ``off`` installs nothing (``NX_TEST_SIGNAL_FENCE``).
 
 Linux only: it reads ``/proc`` and spawns nothing (the posix_spawn census stays as it is). macOS has no ``/proc``,
-the laptop is not a shared pool user, and Windows has no process groups. ``NX_TEST_SIGNAL_FENCE=off`` turns it off.
+the laptop is not a shared pool user, and Windows has no process groups.
 """
 from __future__ import annotations
 
@@ -59,6 +60,8 @@ _current_test = "session setup"
 #: change what the fence counts as the session's.
 _root = 0
 _token = ""
+_config: pytest.Config | None = None
+_basetemp_cache: str | None = None
 _events: list[dict[str, Any]] = []
 #: Distinct foreign events by (test, call, signal, site), deduplicated as they are recorded, so one repeating test
 #: cannot fill the list; ``repeats`` counts the rest. The counts are exact whatever the cap.
@@ -69,9 +72,32 @@ _RELAY_FILES = frozenset({"subprocess.py", "_signal_fence.py"})
 _counts = {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0}
 
 
+def mode() -> str:
+    """``fail`` (the default: a session that saw any foreign signal exits failed), ``report`` (listed, exit status
+    unchanged) or ``off``. The signal itself is sent unchanged in every mode."""
+    value = os.environ.get(MODE_ENV, "fail").strip().lower()
+    return value if value in ("fail", "report", "off") else "fail"
+
+
+def _basetemp() -> str:
+    """The session's pytest basetemp: the controller's on every xdist worker (a worker's own is
+    ``<controller's>/popen-gwN``). Empty when there is none to read."""
+    global _basetemp_cache
+    if _basetemp_cache is None:
+        try:
+            factory = getattr(_config, "_tmp_path_factory", None)
+            bt = factory.getbasetemp().resolve() if factory is not None else None
+            if bt is not None and os.environ.get("PYTEST_XDIST_WORKER") and bt.name.startswith("popen-gw"):
+                bt = bt.parent
+            _basetemp_cache = str(bt) if bt is not None else ""
+        except Exception:  # noqa: BLE001 — rule A is then off, never an error
+            _basetemp_cache = ""
+    return _basetemp_cache
+
+
 def active() -> bool:
     """Whether the fence runs in this process: Linux with ``/proc``, and not switched off."""
-    return sys.platform.startswith("linux") and Path("/proc/self/stat").exists() and os.environ.get(MODE_ENV) != "off"
+    return sys.platform.startswith("linux") and Path("/proc/self/stat").exists() and mode() != "off"
 
 
 def _stat(pid: int) -> tuple[int, int] | None:
@@ -106,8 +132,28 @@ def _cmdline(pid: int) -> str:
     return Path(argv0.decode("utf-8", "replace")).name.split(" ", 1)[0][:60]  # a rewritten title can hold spaces
 
 
-def owned(pid: int, *, root: int, token: str) -> bool | None:
-    """Whether *pid* is this session's: a descendant of *root* or a carrier of *token*. ``None`` when it is gone."""
+def _names_basetemp(pid: int, basetemp: str) -> bool:
+    """Rule A: whether *pid*'s argv or environment names a path inside *basetemp* (the session's pytest basetemp, a
+    tree no other session's process can name). A path boundary, so ``pytest-0x`` is not inside ``pytest-0``."""
+    if not basetemp:
+        return False
+    inside = basetemp.rstrip("/").encode() + b"/"
+    exact = inside[:-1]
+    for name in ("cmdline", "environ"):
+        try:
+            raw = Path(f"/proc/{pid}/{name}").read_bytes()
+        except OSError:
+            continue
+        for field in raw.split(b"\0"):
+            value = field.partition(b"=")[2] if name == "environ" else field
+            if inside in value or value == exact or value.endswith(b":" + exact):
+                return True
+    return False
+
+
+def owned(pid: int, *, root: int, token: str, basetemp: str = "") -> bool | None:
+    """Whether *pid* is this session's: a descendant of *root*, a carrier of *token*, or (rule A) a process whose argv
+    or environment names a path inside *basetemp*. ``None`` when it is gone."""
     if _stat(pid) is None:
         return None
     seen: set[int] = set()
@@ -122,7 +168,7 @@ def owned(pid: int, *, root: int, token: str) -> bool | None:
         if st is None:
             break
         cur = st[0]
-    return _has_token(pid, token)
+    return _has_token(pid, token) or _names_basetemp(pid, basetemp)
 
 
 def _group_members(pgid: int) -> list[int]:
@@ -135,24 +181,33 @@ def _group_members(pgid: int) -> list[int]:
     return out
 
 
-def classify(kind: str, target: int, sig: int, *, root: int, token: str) -> tuple[str, int]:
-    """``("own" | "foreign" | "unclassified", pid)``: the verdict, and the pid it was read from (0 when none)."""
+def classify(kind: str, target: int, sig: int, *, root: int, token: str, basetemp: str = "") -> tuple[str, int]:
+    """``("own" | "foreign" | "unclassified", pid)``: the verdict, and the pid it was read from (0 when none).
+
+    A single process that is not the session's by :func:`owned` is still the session's (rule B) when its process
+    group's live leader is."""
     if sig == 0:
         return "unclassified", 0
     if kind == "kill" and target == -1:
         return "foreign", 0
     if kind == "kill" and target > 0:
-        verdict = owned(target, root=root, token=token)
-        return ("unclassified", target) if verdict is None else ("own" if verdict else "foreign", target)
+        verdict = owned(target, root=root, token=token, basetemp=basetemp)
+        if verdict is None:
+            return "unclassified", target
+        if not verdict:
+            st = _stat(target)
+            if st is not None and st[1] not in (target, 0) and owned(st[1], root=root, token=token, basetemp=basetemp):
+                verdict = True
+        return ("own" if verdict else "foreign"), target
     pgid = os.getpgrp() if target == 0 else abs(target)
-    leader = owned(pgid, root=root, token=token)
+    leader = owned(pgid, root=root, token=token, basetemp=basetemp)
     if leader is not None:
         return ("own" if leader else "foreign"), pgid
     members = _group_members(pgid)
     if not members:
         return "unclassified", 0
     for m in members:
-        if owned(m, root=root, token=token):
+        if owned(m, root=root, token=token, basetemp=basetemp):
             return "own", m
     return "foreign", members[0]
 
@@ -160,7 +215,7 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str) -> tupl
 def _record(kind: str, target: int, sig: int) -> None:
     """Classify and count one signal. Never raises: the fence never changes whether a signal is sent."""
     try:
-        verdict, pid = classify(kind, target, sig, root=_root, token=_token)
+        verdict, pid = classify(kind, target, sig, root=_root, token=_token, basetemp=_basetemp())
         _counts["signals"] += 1
         _counts[verdict] += 1
         if verdict == "foreign":
@@ -209,9 +264,10 @@ def uninstall() -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    global _root, _token
+    global _root, _token, _config
     if not active():
         return
+    _config = config
     if not os.environ.get(TOKEN_ENV):
         # The controller (or a run without xdist): xdist workers and every child inherit both values.
         os.environ[TOKEN_ENV] = uuid.uuid4().hex
@@ -235,12 +291,17 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         _current_test = "session teardown or between tests"
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if not active() or os.kill is not _kill:
         return
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:
         workeroutput[_WORKEROUTPUT_KEY] = {"counts": dict(_counts), "events": list(_events)}
+        return
+    # The controller, every worker's counts already fanned in (pytest_testnodedown runs before this hook).
+    if mode() == "fail" and _counts.get("foreign", 0) and not session.exitstatus:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.hookimpl(optionalhook=True)
@@ -257,8 +318,14 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
         return
     tr = terminalreporter
     tr.write_line(
-        "signal fence (report mode, nexus-xzorj): signals={signals} own={own} foreign={foreign} "
-        "unclassified={unclassified} errors={errors}".format(**{"errors": 0, **_counts}))
+        f"signal fence ({mode()} mode, nexus-xzorj): "
+        "signals={signals} own={own} foreign={foreign} unclassified={unclassified} errors={errors}".format(
+            **{"errors": 0, **_counts}))
+    if mode() == "fail" and _counts.get("foreign", 0):
+        tr.write_line(
+            f"signal fence FAILED: {_counts['foreign']} foreign signal(s): a signal reached a process this session "
+            "did not start (listed below). Fix the kill, or name the target as the session's (tests/AGENTS.md); "
+            f"{MODE_ENV}=report downgrades.", red=True)
     grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for e in _events:  # distinct per process already; workers can repeat one another's
         key = (e["test"], e["call"], e["signal"], e.get("site", ""))

@@ -237,16 +237,17 @@ By default `t2_service_env` / `t2_tenant` lease one lazily minted tenant per xdi
 - A writer that commits between one test's teardown and the next test's setup is caught by the lease-start census. A writer that fires DURING the next test's body is NOT detected: the next teardown wipes its rows before the census, so it shows up, if at all, only as an unexplained failure in that test. The A/B found one such writer, the engine reaper (now off in the pool's engine); fix the writer, never the census.
 - The summary ends with `tenant pool: leases=N mints=M retired=R fresh_tenant=K workers=W ...`. A pool tenant that is not empty at the end, or tenant tests that took no lease, fail the run. `tests/test_tenant_pool.py` drives each behaviour against the real engine, each with a control that skips the eviction (or the lease-start census) and must show the stale state. Its engine-backed tests skip under `NX_TEST_TENANT_POOL=0`; there `tests/test_tenant_pool_end_to_end.py` runs the file in a child with the pool on (must run at least one test, pass all, skip none) and asserts the engine posture of the flag unset and `0`.
 
-## The signal fence (nexus-xzorj item 3, report mode)
+## The signal fence (nexus-xzorj item 3)
 
 `tests/_signal_fence.py` wraps `os.kill` and `os.killpg` in every Linux test process and classifies each target as
-the session's (a descendant of the root pytest process, or a carrier of `NX_TEST_SIGNAL_FENCE_TOKEN`) or foreign.
-It sends every signal unchanged. The terminal summary line `signal fence (report mode, nexus-xzorj): signals=N
-own=N foreign=N unclassified=N errors=N` (per CI shard log) counts them, and the `foreign:` lines under it name the
-test, call site, signal and target program. Expected false positive: a child reparented away from the session
-whose environment was scrubbed (`env={...}`). Not counted: child pytest sessions (they print their own line into
-output the parent usually discards) and a crashed worker's counts. A foreign signal in a new test is a bug to fix,
-or a scrubbed-env reparented child to name in the test. `NX_TEST_SIGNAL_FENCE=off` turns it off.
+the session's or foreign; it always sends the signal unchanged. The session's: a descendant of the root pytest
+process, a carrier of `NX_TEST_SIGNAL_FENCE_TOKEN`, a process whose argv or environment names a path inside the
+session's basetemp (rule A), or a member of a group whose live leader is the session's (rule B). **A foreign signal
+fails the run** (default `fail` mode, Sam 2026-11-07): the summary line `signal fence (fail mode, nexus-xzorj):
+signals=N own=N foreign=N ...` and a `signal fence FAILED` line, then `foreign:` lines naming the test, call site,
+signal and target program. Fix the kill (identity-check the pid: `tests/_child_process.kill_if_identity`), or make
+the target name its own tmp_path (rule A). `NX_TEST_SIGNAL_FENCE=report` downgrades to listing only, `off` removes
+it. Not counted: child pytest sessions (they report into their own output) and a crashed worker's counts.
 
 ## Bytes written and DDL per run (nexus-sz651)
 

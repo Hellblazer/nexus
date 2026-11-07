@@ -267,6 +267,7 @@ def _inner(pytester, *args: str):
     with pytest.MonkeyPatch.context() as mp:
         for k in (fence.TOKEN_ENV, fence.ROOT_ENV):
             mp.delenv(k, raising=False)
+        mp.setenv(fence.MODE_ENV, "report")  # these probes plant foreign signals on purpose; fail mode has its own file
         mp.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
         return pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider", *args)
 
@@ -304,7 +305,7 @@ def test_switched_off_the_fence_installs_nothing_and_reports_nothing(pytester) -
         mp.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
         result = pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider")
     result.assert_outcomes(passed=1)
-    assert "signal fence (report mode" not in result.stdout.str()
+    assert "signal fence (" not in result.stdout.str()
 
 
 @_linux_fence
