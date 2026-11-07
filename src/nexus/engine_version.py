@@ -821,6 +821,16 @@ DUAL_EMBEDDER_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 161)
 #: until the engine tag, and the gate jar itself is never refused.
 NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 167)
 
+#: The first engine that carries RDR-243 Phase 2's ``sensitivity=exclude`` (Liquibase ``vectors-055``,
+#: ``vector_sensitivity_exclude_supported`` on ``GET /version``; nexus-rfvyy.7.3, .7.4). A phase 2 client
+#: refuses every ``sensitivity="exclude"`` read (every search step of ``nx_answer`` and of an llm_bound
+#: child) against an older engine, so a release must not pin one: ``scripts/check_engine_release_floor.py``
+#: fails ``--ledger-only`` and the tag-time forms when :data:`REQUIRED_ENGINE_VERSION` is below this. It is a
+#: release gate only; at run time the client reads the capability flag, never this number. On develop it
+#: leads the pin until the paired client release (nexus-rfvyy.7.15) bumps the pin to the engine tag
+#: (nexus-rfvyy.7.14); set it to that tag when it is cut if the tag is not v0.1.182. ``(0, 0, 0)`` means unset.
+SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 182)
+
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
     """Parse ``X.Y.Z`` (optional leading ``v``/``V``) to a tuple, else ``None``.
