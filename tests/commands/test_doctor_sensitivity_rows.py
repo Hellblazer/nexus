@@ -413,18 +413,19 @@ def test_the_row_does_not_walk_the_catalog_when_the_engine_cannot_hold_the_flag(
 
 
 @substrate
-def test_catalog_doctor_external_embedder_row_is_not_applicable_on_a_virgin_tenant(t2_service_env) -> None:
-    result = CliRunner().invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder", "--json"])
+def test_catalog_doctor_external_embedder_row_on_the_engine(t2_service_env) -> None:
+    """One journey: a virgin tenant reads not applicable (JSON and text, never a pass), then a flagged document in
+    a Voyage collection warns and one in a bge collection is not named. Merged into one test because the second
+    half needs the first half's tenant (one tenant minted, not two)."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder", "--json"])
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
     payload = json.loads("\n".join(lines[next(i for i, l in enumerate(lines) if l.startswith("{")):]))
     assert payload["sensitive_in_external_embedder"]["status"] == "not_applicable"
-    text = CliRunner().invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder"])
+    text = runner.invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder"])
     assert text.exit_code == 0 and "not applicable" in text.output and "[✓]" not in text.output
 
-
-@substrate
-def test_catalog_doctor_warns_on_a_flagged_document_in_a_voyage_collection_and_not_in_a_local_one(t2_service_env) -> None:
     from nexus.catalog.http_catalog_client import HttpCatalogClient
 
     with HttpCatalogClient() as cat:
@@ -434,7 +435,7 @@ def test_catalog_doctor_warns_on_a_flagged_document_in_a_voyage_collection_and_n
         loc = str(cat.register(owner, "loc", content_type="knowledge", physical_collection=BGE,
                                source_uri="file:///rfvyy87/loc.md", file_path="loc.md"))
         cat.set_sensitivity([ext, loc], True, reason="rfvyy87")
-    result = CliRunner().invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder"])
+    result = runner.invoke(main, ["catalog", "doctor", "--sensitive-in-external-embedder"])
     assert result.exit_code == 0, "a warn row never changes the exit status"
     assert "WARN" in result.output and ext in result.output and VOYAGE in result.output
     assert loc not in result.output
