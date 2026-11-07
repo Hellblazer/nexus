@@ -1811,7 +1811,10 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             # The service store-get path ignores `include` and always returns
             # the full {ids, documents, metadatas} envelope (VectorHandler P4a.2,
             # nexus-1k8s1); we pass include for intent only.
-            res = stub.get(ids=batch, include=["documents"], sensitivity="include")
+            # RDR-243 Phase 3 (nexus-rfvyy.8.6): split computes terms the way discover does, so a sensitive
+            # member is left out of the texts. split_topic's conservation guard then sees fewer fetched ids
+            # than members and refuses the split, leaving the parent topic untouched (see below).
+            res = stub.get(ids=batch, include=["documents"], sensitivity="exclude")
             res_ids = res.get("ids") or []
             # nexus-hdx2u: a store-get can legitimately return FEWER rows
             # than requested (absent/deleted ids), never more.
@@ -1941,7 +1944,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             vectors_unavailable = False
             for i in range(0, len(doc_ids), _PAGE):
                 batch = doc_ids[i:i + _PAGE]
-                result = coll.get(ids=batch, include=["documents", "embeddings"], sensitivity="include")
+                result = coll.get(ids=batch, include=["documents", "embeddings"], sensitivity="exclude")  # RDR-243 Phase 3: as _svc_fetch_by_ids
                 got_ids = result.get("ids") or []
                 got_docs = result.get("documents") or []
                 got_embs = result.get("embeddings")
@@ -2021,7 +2024,8 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     "topic's assignment set could not be fully fetched from "
                     "T3 for the split; refusing to persist a partial split "
                     "that would silently drop the unfetched assignments — "
-                    "the parent topic is left untouched"
+                    "the parent topic is left untouched (a member flagged "
+                    "sensitive is withheld from the fetch, RDR-243)"
                 ),
             )
             return 0
