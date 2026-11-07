@@ -21,6 +21,16 @@ import pytest
 from nexus.db.http_vector_client import HttpVectorClient
 
 
+@pytest.fixture(autouse=True)
+def _rerank_capable_engine(monkeypatch):
+    """These tests simulate a current engine. A rerank with ``sensitivity="include"`` reads the engine's
+    ``rerank_sensitive_exclusion_supported`` first (RDR-243 Phase 3 fix r1, critic S5); the probe and its
+    absent-key behaviour are tests/db/test_rerank_sensitive_exclusion_probe.py's subject."""
+    from nexus.db import http_vector_client as _hvc  # noqa: PLC0415 — test-local
+
+    monkeypatch.setattr(_hvc.HttpVectorClient, "supports_rerank_sensitive_exclusion", lambda self: True)
+
+
 def _client() -> HttpVectorClient:
     return HttpVectorClient()
 

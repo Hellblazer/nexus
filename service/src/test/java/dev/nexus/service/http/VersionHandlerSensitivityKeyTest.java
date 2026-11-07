@@ -81,5 +81,9 @@ class VersionHandlerSensitivityKeyTest {
         assertThat(body.has("vector_sensitivity_exclude_supported")).as("present: %s", resp.body()).isTrue();
         assertThat(body.get("vector_sensitivity_exclude_supported").isBoolean()).isTrue();
         assertThat(body.get("vector_sensitivity_exclude_supported").asBoolean()).isTrue();
+        // RDR-243 Phase 3 fix r1 (S5): the rerank-side key is its own flag too
+        assertThat(body.has("rerank_sensitive_exclusion_supported")).as("present: %s", resp.body()).isTrue();
+        assertThat(body.get("rerank_sensitive_exclusion_supported").isBoolean()).isTrue();
+        assertThat(body.get("rerank_sensitive_exclusion_supported").asBoolean()).isTrue();
     }
 }
