@@ -536,7 +536,7 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
         assertThat(body.path("calls").asInt()).as("the first call never finished its count").isZero();
         assertThat(body.path("remaining_rows").isNull()).as("the count was stopped, so no rows were counted").isTrue();
         assertThat(retiredRowCount(t, conformant(t))).isEqualTo(5);
-        assertThat(phases(t)).containsExactly("started", "finished");
+        assertThat(phases(t)).as("the root cancel writes its own row between them").containsExactly("started", "cancel_requested", "finished");
         try (Connection su = pg.createConnection("")) {
             JsonNode counts = MAPPER.readTree(DSL.using(su, SQLDialect.POSTGRES).select(GC_AUDIT.DETAILS).from(GC_AUDIT)
                 .where(GC_AUDIT.TENANT_ID.eq(t)).and(GC_AUDIT.OPERATION.eq("retire_keys_sweep"))
@@ -642,15 +642,16 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
     }
 
     @Test
-    void aWallClockCapEndsAnApplyAtItsFirstBoundary_andADryRunAtItsNextStage() throws Exception {
+    void aWallClockCapEndsAnApplyAtTheStagesOfItsCount_andADryRunAtItsNextStage() throws Exception {
         String t = "ap-cap";
         String token = tenantWithRows(t, 4);
         service.chunkKeysJobsForTests().maxRuntimeForTests(Duration.ofMillis(1));
         try {
             slowCount();
             String applyId = json(sweep(token, plan("dry_run", false, "async", true))).path("job_id").asText();
-            Thread.sleep(50);
-            assertThat(json(get(JOBS + applyId, token)).path("stopping").asText()).isEqualTo("wall_clock_cap");
+            // The cap (1 ms from the moment a worker takes the job up) is asked at the first stage of the count, so the
+            // apply ends there on its own; the held census is never reached. (`stopping` while a job is held past its
+            // cap is read in theWallClockCapInCallThree...)
             release.countDown();
             JsonNode apply = pollUntilEnded(token, applyId);
             assertThat(apply.path("state").asText()).isEqualTo("done");
@@ -862,14 +863,9 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
             assertThat(body.path("batches").asInt()).isEqualTo(2);
             assertThat(body.path("remaining_rows").asLong()).isEqualTo(4);
             assertThat(retiredRowCount(tenant, conformant(tenant))).as("the store holds what the batches swept").isEqualTo(4);
-            try (Connection su = pg.createConnection("")) {
-                JsonNode counts = MAPPER.readTree(DSL.using(su, SQLDialect.POSTGRES).select(GC_AUDIT.DETAILS).from(GC_AUDIT)
-                    .where(GC_AUDIT.TENANT_ID.eq(tenant)).and(GC_AUDIT.OPERATION.eq("retire_keys_sweep"))
-                    .and(DSL.condition("details->>'phase' = 'finished'")).orderBy(GC_AUDIT.ID.desc()).limit(1).fetchOne()
-                    .get(GC_AUDIT.DETAILS).data()).path("counts");
-                assertThat(counts.path("rows_swept").asLong()).as("the outcome row records the rows swept").isEqualTo(2);
-                assertThat(counts.path("stopped").asText()).isEqualTo(stopped);
-            }
+            JsonNode counts = auditDetails(tenant, "finished").get(0).path("counts");
+            assertThat(counts.path("rows_swept").asLong()).as("the outcome row records the rows swept").isEqualTo(2);
+            assertThat(counts.path("stopped").asText()).isEqualTo(stopped);
         }
     }
 
@@ -886,14 +882,11 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
         held.assertTwoRowsSweptAndRecorded(body, "cancelled");
         assertThat(body.path("cancelled").asBoolean()).isTrue();
         assertThat(phases(held.tenant)).containsExactly("started", "cancel_requested", "finished");
-        try (Connection su = pg.createConnection("")) {
-            var row = DSL.using(su, SQLDialect.POSTGRES).select(GC_AUDIT.ACTOR, GC_AUDIT.DETAILS).from(GC_AUDIT)
-                .where(GC_AUDIT.TENANT_ID.eq(held.tenant)).and(GC_AUDIT.OPERATION.eq("retire_keys_sweep"))
-                .and(DSL.condition("details->>'phase' = 'cancel_requested'")).fetchOne();
-            assertThat(row.get(GC_AUDIT.ACTOR)).as("names the cancelling credential by a hash prefix, never the secret")
-                .startsWith("root:").doesNotContain(ROOT);
-            assertThat(MAPPER.readTree(row.get(GC_AUDIT.DETAILS).data()).path("job_id").asText()).isEqualTo(held.id);
-        }
+        List<JsonNode> cancelRows = auditDetails(held.tenant, "cancel_requested");
+        assertThat(cancelRows).hasSize(1);
+        assertThat(cancelRows.get(0).path("job_id").asText()).isEqualTo(held.id);
+        assertThat(cancelRows.get(0).path("actor").asText()).as("names the cancelling credential by a hash prefix, never the secret")
+            .startsWith("root:").doesNotContain(ROOT);
     }
 
     @Test
@@ -1018,6 +1011,23 @@ class ChunkKeySweepAsyncIntegrationTest extends ChunkKeysTestBase {
         assertThat(body.path("accepted").path("keyless_notes").asLong()).isEqualTo(4);
         assertThat(body.path("batch_size").asInt()).isEqualTo(7);
         assertThat(body.has("resume")).as("a dry run hands out no token: an apply counts for itself").isFalse();
+    }
+
+    /** The details of the retire_keys_sweep audit rows of {@code tenant} in the given phase, oldest first, each with the row's actor. */
+    private List<JsonNode> auditDetails(String tenant, String phase) throws Exception {
+        List<JsonNode> out = new ArrayList<>();
+        try (Connection su = pg.createConnection("")) {
+            for (var r : DSL.using(su, SQLDialect.POSTGRES).select(GC_AUDIT.ACTOR, GC_AUDIT.DETAILS).from(GC_AUDIT)
+                    .where(GC_AUDIT.TENANT_ID.eq(tenant)).and(GC_AUDIT.OPERATION.eq("retire_keys_sweep"))
+                    .orderBy(GC_AUDIT.ID).fetch()) {
+                ObjectNode d = (ObjectNode) MAPPER.readTree(r.get(GC_AUDIT.DETAILS).data());
+                if (phase.equals(d.path("phase").asText())) {
+                    d.put("actor", r.get(GC_AUDIT.ACTOR));
+                    out.add(d);
+                }
+            }
+        }
+        return out;
     }
 
     private List<String> phases(String tenant) throws Exception {
