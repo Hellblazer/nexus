@@ -448,14 +448,20 @@ class DocumentMoveTest {
      * nexus-hbnml: a document move on an install that KEPT the retired queue table. The move has no statement on the
      * table any more; the document's leftover row names the source, which still exists (a move leaves the source's
      * chunks for the job), so the move completes and the row is neither blocking nor lost.
+     *
+     * <p>Run on the RESTRICT form of the foreign key ({@link RetiredAspectQueueTable#restoreRestrict}), on purpose
+     * (nexus-uq4gy): a move changes documents and chunks, never the registry row the leftover row names, so the
+     * foreign key's action is never exercised and this test passes under RESTRICT as well as under aspects-005-1's
+     * CASCADE. It is an inertness pin, not a pin on the swap (the collection-delete and re-embed tests carry
+     * that); on RESTRICT it goes red if the move ever deletes or renames the source's registry row.
      */
     @Test
-    void moveCompletes_withAKeptPopulatedQueueTable_andTheLeftoverRowIsNotLost() throws Exception {
+    void moveIsInertTowardAKeptPopulatedQueueTable_onRestrictForm_andTheLeftoverRowIsNotLost() throws Exception {
         Fx fx = pair("kept");
         String doc = seedDocs(fx, 1, 2).get(0);
         su(ctx -> {
             try {
-                RetiredAspectQueueTable.restore(ctx);
+                RetiredAspectQueueTable.restoreRestrict(ctx);
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }

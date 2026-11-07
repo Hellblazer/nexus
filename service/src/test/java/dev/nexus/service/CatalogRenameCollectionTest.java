@@ -500,9 +500,16 @@ class CatalogRenameCollectionTest {
      * of the old name is kept as a superseded tombstone, so the row's foreign key still holds and the rename
      * succeeds. Pinned because the kept table must be inert: the rename completes, the row is neither lost nor
      * blocking, and a rename back to the old name (the undo) also completes.
+     *
+     * <p>Run on the RESTRICT form of the foreign key ({@link RetiredAspectQueueTable#restoreRestrict}), on purpose
+     * (nexus-uq4gy): a rename never deletes or renames the registry row the leftover row names, so the foreign
+     * key's action is never exercised and this test passes under RESTRICT as well as under aspects-005-1's CASCADE.
+     * It is an inertness pin, not a pin on the swap (the collection-delete and re-embed tests carry that); on
+     * RESTRICT it goes red if the rename ever removes or renames the old registry row, as the pre-nexus-cecqy
+     * DELETE did.
      */
     @Test @Order(73)
-    void renameCollection_succeedsWithAKeptPopulatedQueueTable_andItsRowIsNotLost() throws Exception {
+    void renameCollection_isInertTowardAKeptPopulatedQueueTable_onRestrictForm_andItsRowIsNotLost() throws Exception {
         final String src = "knowledge__nrg-kept-src__minilm-l6-v2-384__v1";
         final String tgt = "knowledge__nrg-kept-tgt__minilm-l6-v2-384__v1";
         try (Connection su = pg.createConnection("")) {
@@ -513,7 +520,7 @@ class CatalogRenameCollectionTest {
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .values(TENANT_A, "nrg-kept-doc", "Doc", src)
                .execute();
-            RetiredAspectQueueTable.restore(ctx);
+            RetiredAspectQueueTable.restoreRestrict(ctx);
             RetiredAspectQueueTable.seed(ctx, TENANT_A, src, "nrg-kept-doc", "/p/kept.md", "pending");
         }
         try {
