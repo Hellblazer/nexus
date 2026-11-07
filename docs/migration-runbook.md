@@ -335,8 +335,11 @@ run a second pass), and shares its rule and guards:
   residue by name.
 - **Labels are untouched.** The only write route (`append_manifest_many`) rewrites a row's labels from the request,
   so the rung sends the labels and `labels_written` it read just before the write, unchanged. A label written in
-  the window between the scan and the write is carried, not reverted. The document's `indexed_at` is written back
-  after each batch, as for labels.
+  the window between the scan and the write is carried, not reverted. A span column another writer filled in that
+  window is kept when it equals the chunk row's value; when it differs, the row is not written at all (counted as
+  changed before the write), by the same rule as a stored column that disagrees. The document's `indexed_at` is
+  written back after each batch, as for labels, also when a request fails partway (including a request the engine
+  committed before the client lost the answer).
 - **Detect.** Converged from the recorded completion. Otherwise the dry run (a scan with no write). Unattended
   (`--auto`) against a managed service it reads nothing and is not applicable; the interactive `nx upgrade` scans,
   fills, verifies and records. Run it before `nx t3 retire-keys --apply`, then take the dry run's `null_span_rows`
@@ -348,15 +351,19 @@ run a second pass), and shares its rule and guards:
   `nx upgrade` makes three walks of the whole catalog (the detect dry run, the fill, the verify dry run). Completion
   is recorded once: a manifest row that gains a NULL span later (an orphan backfill, say) is not refilled, and shows
   only in the retire-keys count.
-- **Reading the result.** The summary reconciles with the engine. "Engine-comparable" is the count of rows with a NULL
-  column and the chunk key present, which is what `null_span_rows` counts; it equals the fillable rows plus the left
+- **Reading the result.** "Engine-comparable" is the count of rows with a NULL column and the chunk key present, the
+  same predicate `null_span_rows` uses, over the documents this scan walks. The scan skips `alias_of` documents and the
+  engine does not, so compare the number with the retire-keys dry run's `null_span_rows` yourself: a difference is
+  rows on alias documents, which the rung does not touch. The rung itself checks only its own bookkeeping, that the
+  count equals the fillable rows plus the left
   rows, each left bucket named (shared with another document, repeated inside the document, also held by a deleted
   document, orphan-minted, ownership listing named another row, chunk row newer than the document or without
   `indexed_at` or titled for another document, chunk span not recorded, chunk row differs from a stored column), and
   each bucket says how many of its rows have a recorded span that stays unused (lossy) as against nothing recorded
   (lossless). It also prints the engine count to expect after the pass (rows still counted because another column's
   key holds a 0 are in it), and, apart, the rows the engine never counts (chunk missing, chunk with no key for the
-  NULL columns). A 409 from the engine for a request (a superseded collection) defers those rows
+  NULL columns). A 409 from the engine for a request (a superseded collection, which the client raises as
+  `SupersededCollectionWriteError`, or any other 409) defers those rows
   (`write_refused_409`) and the run goes on; the rung ends deferred and retries on the next `nx upgrade`.
 
 ### Restoring chunks the reaper quarantined

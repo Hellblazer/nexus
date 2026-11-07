@@ -82,6 +82,7 @@ import httpx
 import structlog
 
 from nexus.catalog.types import manifest_span
+from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
@@ -187,7 +188,10 @@ class Counts:
         return sum(getattr(self, name) for name, _w in LEFT_BUCKETS)
 
     def reconciles(self) -> bool:
-        """The engine-comparable count is the fillable rows plus the named buckets, nothing else."""
+        """Every row the scan counted ended fillable or in exactly one named bucket. This is the rung's own
+        bookkeeping, not a comparison with the engine: ``counted`` is what the engine's ``null_span_rows`` reads for
+        the documents this scan walks (it skips ``alias_of`` documents), and the operator compares the two with the
+        key-retirement sweep's dry run."""
         return self.counted == self.fillable + self.left()
 
     def abandoned_total(self) -> int:
@@ -206,7 +210,8 @@ class Counts:
         return (
             f"{self.documents} document(s), {self.rows} row(s): {self.span_complete} with a complete span, "
             f"{self.null_rows} with a NULL span column. Engine-comparable (a NULL column and the chunk key present, "
-            f"any value; the engine counts these as null_span_rows): {self.counted} = {self.fillable} fillable "
+            f"any value; the engine counts these as null_span_rows, over every live document where this scan skips "
+            f"alias_of ones: compare with the key-retirement sweep's dry run): {self.counted} = {self.fillable} fillable "
             f"({self.filled} filled, {self.fillable_still_counted} of the fillable still counted for a column with nothing to copy, "
             f"{self.raced} changed before the write, {self.write_failed} write failed, {self.write_refused_409} refused 409) "
             f"+ left NULL: {left}. Recorded span left unused: {self.abandoned_total()} row(s); the other left rows had "
@@ -431,8 +436,13 @@ class ManifestSpanFillRung:
             ):
                 counts.raced += 1
                 continue
+            if any(getattr(now, c, None) is not None and getattr(now, c) != v for c, v in span.items()):
+                # another writer filled a column since the scan with a value the chunk row contradicts: filling the
+                # rest from the chunk row would join two positions' spans (the scan-time span_disagrees rule)
+                counts.raced += 1
+                continue
             columns = {c: v for c, v in span.items() if getattr(now, c, None) is None}
-            if not columns:  # someone filled every column meanwhile
+            if not columns:  # someone filled every column meanwhile, with the chunk row's values
                 counts.raced += 1
                 continue
             by_collection.setdefault(collection, {}).setdefault(tumbler, []).append({
@@ -442,6 +452,7 @@ class ManifestSpanFillRung:
                 "page_number": now.page_number, "labels_written": bool(getattr(now, "labels_written", False)),
             })
         written: set[str] = set()
+        in_flight: list[str] = []  # the request being sent: a raise after the engine committed it restamped these too
         try:
             for collection, per_doc in sorted(by_collection.items()):
                 refused = False
@@ -449,15 +460,22 @@ class ManifestSpanFillRung:
                     if refused:  # the collection answered 409 once: it will again, and the rows are counted
                         counts.write_refused_409 += sum(len(rows) for _d, rows in request)
                         continue
+                    in_flight = [d for d, _rows in request]
                     try:
                         result = writer.append_manifest_many(request, collection=collection)
-                    except httpx.HTTPStatusError as exc:
-                        if exc.response is None or exc.response.status_code != 409:
+                    except (SupersededCollectionWriteError, httpx.HTTPStatusError) as exc:
+                        # the client turns the engine's 409 collection_superseded into SupersededCollectionWriteError;
+                        # any other 409 arrives as the bare status error
+                        if isinstance(exc, httpx.HTTPStatusError) and (
+                            exc.response is None or exc.response.status_code != 409
+                        ):
                             raise
+                        in_flight = []  # refused before any write
                         refused = True
                         counts.write_refused_409 += sum(len(rows) for _d, rows in request)
                         _log.warning("manifest_span_fill_write_refused_409", collection=collection, error=str(exc))
                         continue
+                    in_flight = []
                     failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
                     for doc_id, rows in request:
                         if doc_id in failed:
@@ -470,7 +488,7 @@ class ManifestSpanFillRung:
         finally:
             # also when a later request raised: the engine restamped indexed_at on every document an earlier request
             # wrote, and left alone that stamp switches the chunk-newer guard off for the document's other rows
-            ManifestSectionLabelsRung._restore_batch(writer, sorted(written), stamps, counts)  # type: ignore[arg-type]  # reads only the restore counters
+            ManifestSectionLabelsRung._restore_batch(writer, sorted(written | set(in_flight)), stamps, counts)  # type: ignore[arg-type]  # reads only the restore counters
 
     def _requests(self, docs_rows: list[tuple[str, list[dict]]]) -> list[list[tuple[str, list[dict]]]]:
         """Cut ``(doc_id, rows)`` pairs into requests of at most ``max_rows`` rows and ``doc_batch`` documents; a

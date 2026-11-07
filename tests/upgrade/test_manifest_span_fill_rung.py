@@ -637,7 +637,26 @@ def test_a_deleted_document_that_started_holding_the_chash_before_the_write_stop
     assert world.appends == [] and rung._partial.raced == 1
 
 
-def test_a_column_filled_by_another_writer_meanwhile_is_not_sent_while_the_others_are(world: World) -> None:
+def test_a_column_filled_meanwhile_with_the_chunk_rows_value_is_not_sent_while_the_others_are(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+
+    def fill_one(w: World) -> None:  # another writer wrote the same line_start the chunk row records
+        w.manifests[d][0] = replace(w.manifests[d][0], line_start=3)
+
+    world.before_second_manifest_read = fill_one
+    rung, _ = _fill(world)
+    (_, requests), = world.appends
+    sent = requests[0][1][0]
+    assert "line_start" not in sent and (sent["line_end"], sent["char_start"], sent["char_end"]) == (9, 40, 190)
+    assert world.spans(d) == [(0, 3, 9, 40, 190)]
+    assert rung._partial.raced == 0 and rung._partial.filled == 1
+
+
+def test_a_column_filled_meanwhile_with_another_value_stops_the_fill_of_the_row(world: World) -> None:
+    """The write-time twin of span_disagrees (review r2): a late value the chunk row contradicts means the chunk row
+    may describe another position, so the other columns are not filled from it."""
     d = world.doc("1.1.1")
     world.row(d, 0, h(1))
     world.chunk(h(1), **SPAN)
@@ -647,11 +666,9 @@ def test_a_column_filled_by_another_writer_meanwhile_is_not_sent_while_the_other
 
     world.before_second_manifest_read = fill_one
     rung, _ = _fill(world)
-    (_, requests), = world.appends
-    sent = requests[0][1][0]
-    assert "line_start" not in sent and (sent["line_end"], sent["char_start"], sent["char_end"]) == (9, 40, 190)
-    assert world.spans(d) == [(0, 77, 9, 40, 190)], "the late value is kept, the rest filled"
-    assert rung._partial.raced == 0 and rung._partial.filled == 1
+    assert world.appends == []
+    assert world.spans(d) == [(0, 77, None, None, None)]
+    assert rung._partial.raced == 1 and rung._partial.filled == 0
 
 
 # ── a request that raises ────────────────────────────────────────────────────────────────────────────────────────────
@@ -686,12 +703,44 @@ def test_a_request_that_raises_after_an_earlier_one_wrote_still_restores_the_doc
     assert (d, {"indexed_at": DOC_STAMP}) in world.updates
 
 
+def test_a_request_that_raises_after_the_engine_committed_it_restores_its_own_documents_stamp(world: World) -> None:
+    """A timeout after the engine committed the request: its documents were restamped though no result came back
+    (review r2), so they are restored with the ones earlier requests wrote."""
+    d = _seven_rows(world)
+    world.restamp_on_append = "2026-11-06T00:00:00+00:00"
+    real = world.append_manifest_many
+
+    def commits_then_times_out(request, *, collection, **kw):
+        real(request, collection=collection, **kw)
+        raise httpx.ReadTimeout("no answer")
+
+    world.append_manifest_many = commits_then_times_out  # type: ignore[method-assign]
+    with pytest.raises(httpx.ReadTimeout):
+        _fill(world, world.rung(max_rows=3))
+    assert world.docs[d].indexed_at == DOC_STAMP
+    assert (d, {"indexed_at": DOC_STAMP}) in world.updates
+
+
+def _superseded() -> Exception:
+    """What the production client raises for the engine's 409 collection_superseded: the typed error built from the
+    body by the same helper ``_raise_for_status`` calls, not a bare status error."""
+    from nexus.collection_errors import superseded_write_error_from_body  # noqa: PLC0415
+
+    err = superseded_write_error_from_body(409, {
+        "error": "collection_superseded", "reason": "collection_superseded",
+        "collection": "code__art__bge-base-en-v15-768__v2", "superseded_by": "code__art__bge-base-en-v15-768__v3",
+    })
+    assert err is not None
+    return err
+
+
 def _conflict(status: int = 409) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "http://engine.invalid/manifest/append_many")
     return httpx.HTTPStatusError("conflict", request=request, response=httpx.Response(status, request=request))
 
 
-def test_a_409_for_a_superseded_collection_defers_that_collection_and_the_run_goes_on(world: World) -> None:
+@pytest.mark.parametrize("refusal", [_superseded, _conflict], ids=["typed_superseded", "bare_409"])
+def test_a_409_for_a_superseded_collection_defers_that_collection_and_the_run_goes_on(world: World, refusal) -> None:
     OTHER = "code__art__bge-base-en-v15-768__v2"
     a = world.doc("1.1.1", collection=OTHER)
     b = world.doc("1.1.2")
@@ -703,7 +752,7 @@ def test_a_409_for_a_superseded_collection_defers_that_collection_and_the_run_go
 
     def superseded(request, *, collection, **kw):
         if collection == OTHER:
-            raise _conflict()
+            raise refusal()
         return real(request, collection=collection, **kw)
 
     world.append_manifest_many = superseded  # type: ignore[method-assign]
