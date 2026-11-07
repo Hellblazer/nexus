@@ -23,7 +23,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -143,11 +142,10 @@ class VoyageRerankSensitivityTest {
         };
         svcLocal = new NexusService(0, TOKEN, ds, null, repo, local);
         svcLocal.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
 
         // Burn the per-tenant ghost sweep before collections exist (see RerankStageIntegrationTest).
-        http.send(HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + svcVoyage.getPort() + "/v1/catalog/collections/list"))
+        http.send(TestHttp.request("http://127.0.0.1:" + svcVoyage.getPort() + "/v1/catalog/collections/list")
                 .header("Authorization", "Bearer " + TOKEN).GET().build(), HttpResponse.BodyHandlers.ofString());
 
         // Vector order: a(0.0) b(0.3) c(0.6) d(0.9) e(1.2).
@@ -235,8 +233,7 @@ class VoyageRerankSensitivityTest {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private Map<String, Object> postOk(NexusService svc, String path, Object body) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN).header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build();
         var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
