@@ -172,5 +172,43 @@
   "name": "metadata-is-a-scalar",
   "meta_json": "7",
   "carries_ttl": false
+ },
+ {
+  "name": "string-tab-newline-padded",
+  "meta_json": "{\"ttl_days\":\"\\t7\\n\"}",
+  "carries_ttl": true
+ },
+ {
+  "name": "string-nbsp-padded",
+  "meta_json": "{\"ttl_days\":\"\\u00a07\"}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "int() strips Unicode whitespace such as a no-break space; the CHECK's regular expression reads ASCII whitespace only (the same late-expiry fallback)"
+ },
+ {
+  "name": "string-fullwidth-digit",
+  "meta_json": "{\"ttl_days\":\"\\uff17\"}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "int() reads a full-width decimal digit; the CHECK reads ASCII digits only (the same late-expiry fallback)"
+ },
+ {
+  "name": "float-rounds-up-to-one-in-python",
+  "meta_json": "{\"ttl_days\":0.99999999999999999999}",
+  "carries_ttl": false,
+  "reader_ttl": true,
+  "differs_from_reader": "json.loads rounds this number to the float 1.0, which int() reads as 1; the stored numeric is below 1, so the CHECK does not count it (the same late-expiry fallback)"
+ },
+ {
+  "name": "float-rounds-up-to-the-ceiling-in-python",
+  "meta_json": "{\"ttl_days\":999999999.9999999999999}",
+  "carries_ttl": true,
+  "reader_ttl": false,
+  "differs_from_reader": "json.loads rounds this number to the float 1e9, past timedelta.max.days, so the reader treats it as permanent; the stored numeric is below the ceiling, so the CHECK counts it (the stricter direction: the census names the entry and the add waits for a stamp, so nothing is frozen and nothing expires early)"
+ },
+ {
+  "name": "metadata-is-a-json-string",
+  "meta_json": "\"{\\\"ttl_days\\\":7}\"",
+  "carries_ttl": false
  }
 ]

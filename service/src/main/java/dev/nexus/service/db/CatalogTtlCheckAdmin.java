@@ -5,6 +5,7 @@ package dev.nexus.service.db;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 
 import org.jooq.Condition;
+import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
@@ -32,20 +33,35 @@ import java.util.Objects;
  * rendering ({@link #checkExpression}); the census counts the rows for which it is FALSE ({@link #violation}). They
  * cannot disagree, because there is one object.
  *
- * <p><b>What counts as a TTL.</b> Exactly what {@code nexus.catalog.note_ttl.note_ttl_days} reads as more than zero,
- * so the CHECK says "every entry the expiry clock would run on has a clock start of its own":
+ * <p><b>What counts as a TTL.</b> What {@code nexus.catalog.note_ttl.note_ttl_days} reads as more than zero, with the
+ * named exceptions below, so the CHECK says "every entry the expiry clock would run on has a clock start of its own",
+ * except for those exceptions:
  * <ul>
  *   <li>a JSON number from 1 up to (not including) 1000000000: Python truncates toward zero, so 0 and 0.5 are
  *       permanent, and a TTL past {@code timedelta.max.days} (999999999) is permanent too, as is anything larger,
  *       1e400 included;</li>
  *   <li><b>a string of decimal digits counts</b>, with an optional leading {@code +}, leading zeros and surrounding
  *       whitespace, when its value is in the same range: {@code "7"} is a TTL because {@code int("7")} is 7 and the
- *       reader expires on it. The string forms Python's {@code int()} also takes but this does not (digits with
- *       underscores, non-ASCII digits) are not counted; such an entry falls back to {@code indexed_at} in
- *       {@code clock_start}, which expires it late and never early. No writer produces a string TTL (the put path
- *       writes integers), so the regular expression is a guard against hand edits and imports, not a live path;</li>
+ *       reader expires on it. No writer produces a string TTL (the put path writes integers), so the regular
+ *       expression is a guard against hand edits and imports, not a live path;</li>
  *   <li>a boolean, null, object, array, a non-digit string ("abc") and an absent key are not a TTL; the cast below is
  *       never applied to them.</li>
+ * </ul>
+ * <b>The named gaps, where the reader and the CHECK differ.</b> The corpus
+ * ({@code catalog-ttl-check-shapes.json}) names each one under {@code differs_from_reader}, and the Python test holds
+ * the reader to it. None is a shape any writer produces. Two families:
+ * <ul>
+ *   <li><i>Fail safe (the CHECK counts less than the reader)</i>: a digit string Python's {@code int()} takes and the
+ *       regular expression does not, namely digits with underscores ({@code "1_0"}), non-ASCII decimal digits
+ *       (Arabic-Indic, full-width), and Unicode whitespace around the digits (a no-break space; the expression's
+ *       {@code \s} is ASCII whitespace and, for the rest, the database locale's); and a JSON number that
+ *       {@code json.loads} rounds up to 1.0 ({@code 0.99999999999999999999}) while the stored numeric is below 1.
+ *       Such an entry is not counted, so it can never be frozen; {@code clock_start} falls back to
+ *       {@code indexed_at} for it, which expires it late and never early.</li>
+ *   <li><i>Stricter (the CHECK counts more than the reader)</i>: a JSON number that rounds past
+ *       {@code timedelta.max.days} in Python ({@code 999999999.9999999999999}). The reader calls it permanent, the
+ *       CHECK counts it, so the census names it and the add waits for a stamp. Nothing is frozen and nothing
+ *       expires early.</li>
  * </ul>
  * {@code put_at} is present when it is a non-empty JSON string: {@code ""} means absent ({@code _NOTE_META_UNSET}
  * writes {@code put_at: ""} with {@code ttl_days: 0} on a retraction, and that pair passes), and a number, boolean,
@@ -62,18 +78,32 @@ import java.util.Objects;
  * statement, {@code lock_timeout} is 5 s, and one run holds {@link #ADVISORY_LOCK_KEY} at a time.
  *
  * <p><b>All tenants.</b> {@code nexus.catalog_documents} is FORCE row-level-security with one policy keyed to the
- * tenant stamp, and no policy that lets an owner read every row. {@link #census} therefore first requires a session
- * that is not row filtered (superuser or BYPASSRLS) and refuses with {@code admin_cannot_see_all_tenants} otherwise,
- * so an unrestricted-looking zero is never an undercount; the handler adds the scoped-count comparison the chunk
- * routes use. VALIDATE itself is not row filtered (it reads the table as the engine's constraint check), so even a
- * census that missed a tenant could not validate a table with a violator: it would fail with {@code check_violation}
- * and leave the constraint NOT VALID.
+ * tenant stamp, and no policy that lets an owner read every row (unlike {@code nexus.chunks}, vectors-029). The
+ * census therefore reads through {@link AdminDdlSession#readEveryTenant}: a session that is superuser or BYPASSRLS
+ * reads as it is; the table's OWNER, which is what the production {@code nexus_admin} is (NOSUPERUSER, not BYPASSRLS),
+ * reads with FORCE lifted for one transaction that is rolled back (the {@code AspectQueueDrain.AdminCensus}
+ * precedent: no policy changeset, FORCE back by construction), under an ACCESS EXCLUSIVE lock on the table held for
+ * the scan and bounded at {@link #OWNER_CENSUS_STATEMENT_TIMEOUT}; any other role is refused with
+ * {@code admin_cannot_see_all_tenants}, so an unrestricted-looking zero is never an undercount. The handler adds the
+ * scoped-count comparison the chunk routes use.
+ *
+ * <p><b>What each step needs.</b> The census: the all-tenant view above. ADD NOT VALID: ownership of the table, and
+ * nothing else; it scans no row. VALIDATE: ownership, and no row visibility: the constraint check is not row
+ * filtered, so even a census that missed a tenant could not validate a table that holds a violator, it would fail
+ * with {@code check_violation} and leave the constraint NOT VALID (the integration test pins this under FORCE as a
+ * role that sees no row).
+ *
+ * <p><b>The census-to-ADD window.</b> The routes count, then add, in two statements with no lock between them.
+ * A writer that stores a TTL with no {@code put_at} in that window (a pre-6pfgb.15 client) leaves one violator that
+ * the new CHECK then freezes (it could not be updated or tombstoned until stamped). So the add route counts again
+ * AFTER the ADD and reports {@code violating_after_add}, naming the tenants; the constraint refuses every later such
+ * write, so that second count is final. Stamping the named entries repairs them.
  */
 public class CatalogTtlCheckAdmin {
 
     private static final Logger log = LoggerFactory.getLogger(CatalogTtlCheckAdmin.class);
 
-    /** The session advisory lock a run holds: the bytes of {@code "catttlck"} as a bigint. */
+    /** The session advisory lock a run holds: the bytes of {@code "cattlckk"} as a bigint. */
     public static final long ADVISORY_LOCK_KEY = 0x636174746c636b6bL;
 
     public static final String CONSTRAINT = "catalog_documents_ttl_put_at_check";
@@ -81,6 +111,13 @@ public class CatalogTtlCheckAdmin {
     private static final String ADD_STATEMENT_TIMEOUT = "60s";
     private static final String VALIDATE_STATEMENT_TIMEOUT = "30min";
     private static final String CENSUS_STATEMENT_TIMEOUT = "10min";
+    /**
+     * The census as the table's owner (FORCE lifted) holds ACCESS EXCLUSIVE on the table for the scan: every catalog
+     * read and write waits behind it. A minute is the bound; past it the census stops and changes nothing.
+     */
+    static final String OWNER_CENSUS_STATEMENT_TIMEOUT = "60s";
+    private static final String OWNER_POINT_AT = "the role that owns nexus.catalog_documents (the schema owner, "
+        + "nexus_admin), or a superuser or BYPASSRLS role";
 
     private static final AdminDdlSession.Settings SETTINGS = new AdminDdlSession.Settings(
         "nexus-catalog-ttl-check", ADVISORY_LOCK_KEY, "catalog-ttl-check", CATALOG_DOCUMENTS.getSchema().getName(),
@@ -170,29 +207,32 @@ public class CatalogTtlCheckAdmin {
     /**
      * The table-wide census: every tenant's rows, the entries that carry a TTL, and the entries the CHECK would
      * refuse, read in one pass on the admin session. Refuses ({@link AdminDdlSession.Refused} 503,
-     * {@code admin_cannot_see_all_tenants}) unless the session is not row filtered. Tenants with no rows do not
-     * appear.
+     * {@code admin_cannot_see_all_tenants}) unless the session reads every row: it is a superuser or BYPASSRLS, or it
+     * owns the table and FORCE is lifted for the read ({@link AdminDdlSession#readEveryTenant}, which says what that
+     * costs). Tenants with no rows do not appear.
      */
     public List<TenantCensus> census() {
         try (AdminDdlSession s = AdminDdlSession.open(admin, SETTINGS, false)) {
-            s.requireUnrestrictedView("a superuser or BYPASSRLS role (catalog_documents has no policy that lets an "
-                + "owner read every tenant's rows)");
             s.setSession("statement_timeout", CENSUS_STATEMENT_TIMEOUT);
-            var rows = s.ctx().select(CATALOG_DOCUMENTS.TENANT_ID, DSL.count(),
-                    DSL.count().filterWhere(carriesTtl()),
-                    DSL.count().filterWhere(violation()),
-                    DSL.count().filterWhere(violation().and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())))
-                .from(CATALOG_DOCUMENTS)
-                .groupBy(CATALOG_DOCUMENTS.TENANT_ID)
-                .orderBy(CATALOG_DOCUMENTS.TENANT_ID)
-                .fetch();
-            List<TenantCensus> out = new ArrayList<>();
-            for (var r : rows) {
-                out.add(new TenantCensus(r.get(0, String.class), r.get(1, Long.class), r.get(2, Long.class),
-                    r.get(3, Long.class), r.get(4, Long.class)));
-            }
-            return out;
+            return s.readEveryTenant(OWNER_POINT_AT, OWNER_CENSUS_STATEMENT_TIMEOUT, CatalogTtlCheckAdmin::censusOn);
         }
+    }
+
+    private static List<TenantCensus> censusOn(DSLContext ctx) {
+        var rows = ctx.select(CATALOG_DOCUMENTS.TENANT_ID, DSL.count(),
+                DSL.count().filterWhere(carriesTtl()),
+                DSL.count().filterWhere(violation()),
+                DSL.count().filterWhere(violation().and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())))
+            .from(CATALOG_DOCUMENTS)
+            .groupBy(CATALOG_DOCUMENTS.TENANT_ID)
+            .orderBy(CATALOG_DOCUMENTS.TENANT_ID)
+            .fetch();
+        List<TenantCensus> out = new ArrayList<>();
+        for (var r : rows) {
+            out.add(new TenantCensus(r.get(0, String.class), r.get(1, Long.class), r.get(2, Long.class),
+                r.get(3, Long.class), r.get(4, Long.class)));
+        }
+        return out;
     }
 
     /**

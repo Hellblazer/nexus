@@ -39,18 +39,28 @@ import java.util.function.Supplier;
  *   POST /v1/admin/catalog-ttl-check/validate  VALIDATE CONSTRAINT; refused while any tenant has a violator
  * </pre>
  *
- * <p><b>The count is all tenants.</b> Each route reads {@link CatalogTtlCheckAdmin#census} on the admin session, which
- * sees the tenants with no {@code service_tokens} row and refuses (503 {@code admin_cannot_see_all_tenants}) when the
- * role is row filtered under the table's FORCE row-level security. As a second line, a tenant-scoped row count of
- * each tenant the engine knows is taken first, and the census may not be below it for any of them (503
- * {@code admin_probe_undercount}). A refusal names the tenants (409 {@code tenant_violates_constraint}); the answer
- * lists {@code tenants_checked}.
+ * <p><b>The count is all tenants.</b> Each route that counts reads {@link CatalogTtlCheckAdmin#census} on the admin
+ * session, which sees the tenants with no {@code service_tokens} row. It reads them as a superuser or BYPASSRLS role,
+ * or as the table's owner with FORCE row-level security lifted for the read (an ACCESS EXCLUSIVE lock held for the
+ * scan, bounded; see {@link AdminDdlSession#readEveryTenant}), and refuses (503
+ * {@code admin_cannot_see_all_tenants}) any other role the table's FORCE row-level security filters. As a second
+ * line, a tenant-scoped row count of each tenant the engine knows is taken first, and the census may not be below it
+ * for any of them (503 {@code admin_probe_undercount}). A refusal names the tenants (409
+ * {@code tenant_violates_constraint}); the answer lists {@code tenants_checked}.
  *
- * <p><b>Idempotence.</b> {@code add} on an existing constraint is {@code present}; {@code validate} reads
- * {@code pg_constraint.convalidated} first and answers {@code already_valid} without counting or scanning (a VALID
- * CHECK cannot have a violator), and {@code absent} when there is nothing to validate. DATA EFFECT of add: a NOT VALID
- * CHECK is evaluated on every new row version, so an entry that breaks it could no longer be updated or tombstoned;
- * the route refuses while one exists, so none is frozen. DATA EFFECT of validate: none.
+ * <p><b>Idempotence.</b> {@code add} and {@code validate} both read the constraint's state first, before any count: on
+ * an existing constraint {@code add} answers {@code present} and {@code validate} answers {@code already_valid}
+ * ({@code pg_constraint.convalidated}; a VALID CHECK cannot have a violator), or {@code absent} when there is nothing
+ * to validate, so a rerun needs no all-tenant view and cannot be refused by a racing writer. DATA EFFECT of add: a NOT
+ * VALID CHECK is evaluated on every new row version, so an entry that breaks it could no longer be updated or
+ * tombstoned; the route refuses while the count reads one. The count and the ADD are two statements, so a writer
+ * that stores a TTL with no put_at between them can still leave one: the answer then carries
+ * {@code violating_after_add} (a second count taken after the ADD, final because the CHECK refuses later ones) and a
+ * warning naming the tenants. DATA EFFECT of validate: none.
+ *
+ * <p><b>Synchronous.</b> The census (up to 10 minutes) and validate (up to 30) answer when they finish. The public
+ * edge times a request out after about 30 seconds; the engine carries on and finishes, and a retry meanwhile is
+ * answered 409 {@code constraint_run_in_progress} (add and validate hold the run lock; the census holds none).
  *
  * <p>Nothing in the engine schedules or calls these routes; {@code NexusService} mounts the handler and {@code Main}
  * binds the admin connection.
@@ -136,6 +146,16 @@ public final class CatalogTtlCheckHandler implements HttpHandler {
     }
 
     private void handleAdd(HttpExchange ex, CatalogTtlCheckAdmin admin) throws IOException {
+        // the state first, as validate does: a constraint that is already there is answered without a survey, so a
+        // rerun with a blind admin role or a racing writer is still "present", not a 503 or a 409
+        AdminDdlSession.State state = admin.state();
+        if (state.present()) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("census_skipped", "the constraint is already present");
+            out.put("constraint", constraint("present", state));
+            HttpUtil.send(ex, 200, json(out));
+            return;
+        }
         Survey survey = survey(admin);
         if (survey.refuse(ex, "are not ready for the constraint: an entry with a TTL and no put_at would be frozen "
             + "(it could not be updated or tombstoned) by a NOT VALID CHECK")) {
@@ -144,7 +164,35 @@ public final class CatalogTtlCheckHandler implements HttpHandler {
         CatalogTtlCheckAdmin.Action action = admin.add();
         Map<String, Object> out = survey.body();
         out.put("constraint", constraint(action.action(), action.after()));
+        if ("added".equals(action.action())) {
+            countAfterAdd(out, admin);
+        }
         HttpUtil.send(ex, 200, json(out));
+    }
+
+    /**
+     * The count again, after the ADD: the survey and the ADD are two statements with no lock between them, so a
+     * writer that stored a TTL with no put_at in that window left an entry the new CHECK now freezes. The CHECK
+     * refuses every later such write, so this count is final. A failure to take it does not undo the ADD, and the
+     * answer says so.
+     */
+    private void countAfterAdd(Map<String, Object> out, CatalogTtlCheckAdmin admin) {
+        try {
+            Survey after = survey(admin);
+            out.put("violating_after_add", after.violatingTotal());
+            out.put("violators_after_add", after.offenders());
+            if (after.violatingTotal() > 0) {
+                out.put("warning", "the constraint was added, but " + after.violatingTotal() + " entr"
+                    + (after.violatingTotal() == 1 ? "y" : "ies") + " with a TTL and no put_at appeared between the "
+                    + "count and the add (see violators_after_add). They are frozen: they cannot be updated or "
+                    + "tombstoned until a put_at is stamped on them. Stamp them (the backfill, or the runbook's "
+                    + "operator step for a tombstone), then count again before validate");
+            }
+        } catch (AdminDdlSession.Refused e) {
+            out.put("violating_after_add", null);
+            out.put("warning", "the constraint was added, but the count after it could not be taken ("
+                + e.reason() + "): " + e.getMessage() + ". Run the census to see whether an entry was frozen");
+        }
     }
 
     private void handleValidate(HttpExchange ex, CatalogTtlCheckAdmin admin) throws IOException {
@@ -172,14 +220,36 @@ public final class CatalogTtlCheckHandler implements HttpHandler {
     /** What one pass over the table found, and the tenants it covered. */
     private record Survey(Set<String> checked, long rowsExamined, List<CatalogTtlCheckAdmin.TenantCensus> census) {
 
+        long violatingTotal() {
+            long violating = 0;
+            for (var c : census) {
+                violating += c.violating();
+            }
+            return violating;
+        }
+
+        /** The tenants with a violator: each with its count and the tombstoned part of it. */
+        List<Map<String, Object>> offenders() {
+            List<Map<String, Object>> offenders = new ArrayList<>();
+            for (var c : census) {
+                if (c.violating() > 0) {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("tenant", c.tenant());
+                    m.put("violating_rows", c.violating());
+                    m.put("violating_tombstoned_rows", c.violatingTombstoned());
+                    offenders.add(m);
+                }
+            }
+            return offenders;
+        }
+
         Map<String, Object> body() {
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("tenants_checked", new ArrayList<>(checked));
             out.put("table_rows_examined", rowsExamined);
-            long violating = 0;
+            long violating = violatingTotal();
             List<Map<String, Object>> rows = new ArrayList<>();
             for (var c : census) {
-                violating += c.violating();
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("tenant", c.tenant());
                 m.put("rows", c.rows());
@@ -195,16 +265,7 @@ public final class CatalogTtlCheckHandler implements HttpHandler {
 
         /** Answer 409 naming the tenants with a violator and return true, or return false when there is none. */
         boolean refuse(HttpExchange ex, String why) throws IOException {
-            List<Map<String, Object>> offenders = new ArrayList<>();
-            for (var c : census) {
-                if (c.violating() > 0) {
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("tenant", c.tenant());
-                    m.put("violating_rows", c.violating());
-                    m.put("violating_tombstoned_rows", c.violatingTombstoned());
-                    offenders.add(m);
-                }
-            }
+            List<Map<String, Object>> offenders = offenders();
             if (offenders.isEmpty()) {
                 return false;
             }
