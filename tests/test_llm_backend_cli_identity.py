@@ -85,10 +85,17 @@ def _proc(stdout: bytes) -> MagicMock:
     return proc
 
 
-def run_case(kwargs: dict, extra_env: dict[str, str]) -> dict:
+def run_case(kwargs: dict, extra_env: dict[str, str], *, restriction=None, restriction_calls: list | None = None) -> dict:
     """Run one claude_dispatch against a fake subprocess; return what the
     spawn saw plus what the caller got back. Pure of ambient state: the env
-    is replaced, cwd/session/mint/uuid are pinned."""
+    is replaced, cwd/session/mint/uuid are pinned.
+
+    *restriction* (RDR-243 Phase 3 fix r1) replaces the catalog read that decides which source files a
+    file-tool grant must deny; the default is "no sensitive documents", so the recorded argv is unchanged."""
+    from nexus.operators.sensitive_paths import FileToolRestriction  # noqa: PLC0415 — test-local
+
+    if restriction is None:
+        restriction = FileToolRestriction()
     seen: dict = {}
 
     async def intercept(*args, **kw):
@@ -117,6 +124,10 @@ def run_case(kwargs: dict, extra_env: dict[str, str]) -> dict:
         patch("nexus.util.stable_cwd.cwd_was_healed", return_value=False),
         patch("nexus.operators.dispatch.uuid4", return_value=_FIXED_UUID),
         patch("nexus.operators.dispatch._close_dispatch_session"),
+        patch(
+            "nexus.operators.sensitive_paths.file_tool_restriction",
+            side_effect=lambda *a, **kw: (restriction_calls.append(1) if restriction_calls is not None else None) or restriction,
+        ),
         patch(
             "nexus.db.t1.mint_t1_session_token",
             side_effect=lambda sid, *, context: {"session_token": f"tok-{sid}"},
