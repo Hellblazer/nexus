@@ -470,13 +470,16 @@ def test_a_busy_foreign_server_that_answers_after_two_seconds_is_alive(config_di
         server.server_close()
 
 
-def test_server_is_broken_never_judges_a_foreign_server(config_dir: Path) -> None:
+def test_server_is_broken_never_judges_a_foreign_server(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import nexus._mineru_health as health
     from nexus._mineru_health import server_is_broken
 
+    # A process table read is platform-specific (lsof); pin it so the control is the same everywhere.
+    monkeypatch.setattr(health, "process_cwd_state", lambda pid: "gone")
     foreign = _info(8123, pid=os.getpid())
     foreign["output_root"] = "/srv/mineru-out/x"
     url = "http://127.0.0.1:8123"
-    # Control: the same record from our own namespace is judged by its error text.
+    # Control: the same record from our own namespace, its working directory gone, is broken.
     own = {**foreign, "pid_ns": _OURS}
     assert server_is_broken(url, "FileNotFoundError: /srv/mineru-out/x/a.pdf", own)
     assert not server_is_broken(url, "FileNotFoundError: /srv/mineru-out/x/a.pdf", foreign)
