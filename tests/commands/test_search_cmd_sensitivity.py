@@ -23,7 +23,6 @@ from nexus.types import SearchResult
 from tests.conftest import patched_mcp_infra_t3
 from tests.test_search_cmd import _CLOUD_ENV, _LOAD_CFG, _mock_t3
 
-pytestmark = pytest.mark.t2_tenant
 
 CANARY = "ZEBRA-CANARY-7731 the secret body"
 SECRET_TITLE = "Secret Merger Memo"
@@ -47,6 +46,20 @@ def _hits() -> list[SearchResult]:
     return [sensitive, plain]
 
 
+class _NoStorageT2:
+    """Stands in for ``T2Database`` around the patched ``search_cross_corpus``, which never reads the taxonomy or
+    the telemetry store it is handed. What these tests pin is how a result is printed, so no tenant is minted."""
+
+    def __init__(self, *_a, **_kw) -> None:
+        self.taxonomy = self.telemetry = None
+
+    def __enter__(self) -> "_NoStorageT2":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        return None
+
+
 @pytest.fixture
 def run_search(monkeypatch: pytest.MonkeyPatch):
     for k, v in _CLOUD_ENV.items():
@@ -59,7 +72,8 @@ def run_search(monkeypatch: pytest.MonkeyPatch):
         pool = _hits() if hits is None else hits
         with patch("nexus.commands.search_cmd._t3", return_value=mock), patched_mcp_infra_t3(mock), \
              patch("nexus.commands.search_cmd.search_cross_corpus", return_value=pool), \
-             patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+             patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG), \
+             patch("nexus.db.t2.T2Database", _NoStorageT2):
             return CliRunner().invoke(main, ["search", "query", "--corpus", "knowledge", *args])
 
     return _run
