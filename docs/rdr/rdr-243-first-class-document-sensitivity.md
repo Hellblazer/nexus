@@ -750,6 +750,12 @@ does not depend on callers telling the truth.
   1 and keeps only its terms label.
 - Negative: sensitive results rank by vector order alone, because Q4 keeps them
   from the Voyage reranker.
+- Negative: sensitivity governs nexus reads, not the filesystem. A `claude -p`
+  child that nexus dispatches keeps Read, Grep and Glob, so it can read a
+  sensitive document's source file from its working tree without passing
+  through the filter. Sam accepted this as a stated limit for phase 2
+  (nexus-rfvyy.7.19, 2026-11-06); phase 3 revisits it by denying the source
+  paths of sensitive documents in the child's grant.
 
 ### Risks and Mitigations
 
@@ -1141,3 +1147,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-06: census rows 1 and 2, item 10 and the Test Plan follow the aspect queue onto the tuple drain (nexus-hbnml, 3ff3041ad; follow-ups 04aa4afc5, e7bfef5e4, e47aa0e33): the one enqueue gate and the one drain gate, a dead task not counted by `sensitive_with_aspects`, and requeue-failed leaving a flagged task dead. Wording only; the behaviour is the reviewed code.
 - 2026-11-06: Technical Design items 3 and 4 follow the reviewed phase 2 engine (nexus-rfvyy.7.3, .7.4 and their review fixes): `sensitives` on get envelopes, chunk-level `sensitive`, the post-lookup drop under `exclude`, the gated catalog by-address reads with a live owner required, the inline `NOT EXISTS` and one function per name, the exempt routes, and the probes' no-cached-failure rule from Sam's nexus-rfvyy.3 ruling. Wording only.
 - 2026-11-06: census rows 12 and 15 follow the reviewed phase 2 client (nexus-rfvyy.7.9, Python review r1 S3 and r2 M2): the skip record is a log line and an in-process step entry, not a persisted run-record line, and the `nx_tidy` withheld count measures the catalog check after the engine filter.
+- 2026-11-06: Consequences states the child file-read limit Sam accepted for phase 2 (nexus-rfvyy.7.19, ask child-file-reads, option 1).
