@@ -27,6 +27,10 @@ from tests._module_seam import patch_in
 def test_windows_kwargs_are_the_supervisors_flags_and_no_session() -> None:
     kwargs = _mineru_spawn._server_popen_kwargs("win32")  # noqa: SLF001 — the unit under test
     assert kwargs["creationflags"] == win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW
+    # One rule: if the supervisor's flags change, this goes red until the server follows them.
+    from nexus.commands.daemon import _supervisor_popen_kwargs
+
+    assert kwargs["creationflags"] == _supervisor_popen_kwargs("win32")["creationflags"]
     assert "start_new_session" not in kwargs
     assert "cwd" in kwargs  # nexus-x3m8e: stable cwd on every platform
 
