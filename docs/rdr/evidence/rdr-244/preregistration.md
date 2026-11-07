@@ -47,4 +47,4 @@ Every metric, interval and latency percentile is reported per dataset. A latency
 
 ## The decision taken from the result
 
-**[Sam to state before the run.]**
+Baseline only (Sam, 2026-11-07, ask rdr244-result-decision: "Baseline only"). The five per-dataset numbers are published whichever way they fall, as a reproducible baseline, with no product decision attached. Neither a parity claim nor a gap claim against CoIR's published figures is made from them: the sampled corpus is easier than CoIR's and the identical-text merge raises scores, so that comparison would be biased in a known direction.
