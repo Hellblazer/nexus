@@ -9,6 +9,7 @@ step uses it.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -76,10 +77,13 @@ def test_a_real_pytest_junit_report_is_read(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     report = tmp_path / "out.xml"
+    # The child gets its own build-lease root and no substrate, so it never reads this machine's
+    # shared build lease (nexus-fam6l; tests/test_child_pytest_lease_isolation_lint.py).
+    env = {**os.environ, "NX_BUILD_LEASE_ROOT": str(tmp_path / "lease"), "NX_TEST_T2_SUBSTRATE": "none"}
     run = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--noconftest", "-c", "/dev/null",
          f"--rootdir={tmp_path}", f"--junitxml={report}", str(tmp_path / "test_two.py")],
-        capture_output=True, text=True, check=False, cwd=tmp_path,
+        capture_output=True, text=True, check=False, cwd=tmp_path, env=env,
     )
     assert run.returncode == 0, run.stdout + run.stderr
     assert "skipped" not in run.stdout.split("\n")[-2], "non-vacuity: the summary line itself names no skip"
