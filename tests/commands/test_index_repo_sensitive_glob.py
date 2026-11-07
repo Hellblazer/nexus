@@ -257,6 +257,52 @@ def test_the_hook_flags_new_and_existing_documents_and_leaves_the_rest(tmp_path:
 
 
 @pytest.mark.t2_tenant
+def test_flagging_an_existing_document_relabels_its_topics_and_a_failed_flag_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-243 Phase 3 fix r3 (N1): a topic built before the glob matched keeps a label computed from the file, so
+    the re-flag of an EXISTING document relabels its topics, after the page that flagged it and only for it."""
+    from nexus import sensitive_topics  # noqa: PLC0415 — the module the hook resolves the relabel from
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — the class a test patches
+
+    repo = tmp_path / "r"
+    a = _write(repo, "keys/a.pem")
+    b = _write(repo, "src/b.py")
+    _hook(repo, [a, b], ())
+    (doc_a,) = documents_by_file_path("keys/a.pem")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sensitive_topics, "withhold_after_flag", lambda cat, tumblers: calls.append(list(tumblers)) or [1])
+    _hook(repo, [a, b], ("*.pem",), head="h2")
+    assert _flag("keys/a.pem") and not _flag("src/b.py")
+    assert calls == [[str(doc_a.tumbler)]], "the flagged existing document, and no other, is relabelled"
+
+    # a relabel that raises does not undo the flag or fail the run
+    def boom(cat, tumblers):
+        raise RuntimeError("taxonomy down")
+
+    monkeypatch.setattr(sensitive_topics, "withhold_after_flag", boom)
+    c = _write(repo, "keys/c.pem")
+    _hook(repo, [a, b, c], (), head="h3")   # c registers unflagged
+    assert not _flag("keys/c.pem")
+    _, wanted, confirmed = _hook(repo, [a, b, c], ("*.pem",), head="h4")
+    assert _flag("keys/c.pem") and c in confirmed
+
+    # a flag that could not be set relabels nothing
+    d = _write(repo, "keys/d.pem")
+    _hook(repo, [a, b, c, d], (), head="h5")
+    calls.clear()
+    monkeypatch.setattr(sensitive_topics, "withhold_after_flag", lambda cat, tumblers: calls.append(list(tumblers)) or [1])
+
+    def refuse(self, tumblers, sensitive, *, reason=""):
+        raise RuntimeError("audited route down")
+
+    monkeypatch.setattr(HttpCatalogClient, "set_sensitivity", refuse)
+    _hook(repo, [a, b, c, d], ("*.pem",), head="h6")
+    assert calls == [] and not _flag("keys/d.pem")
+
+
+@pytest.mark.t2_tenant
 def test_the_per_file_fallback_carries_the_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import nexus.catalog.factory as factory  # noqa: PLC0415 — patched at the module the hook resolves it from
 

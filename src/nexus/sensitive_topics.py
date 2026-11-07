@@ -25,7 +25,8 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 __all__ = [
-    "REDISCOVER_HINT", "TOPIC_LABEL_WITHHELD", "purge_knowledge_map_caches", "withhold_after_flag", "withhold_topic_labels",
+    "REDISCOVER_HINT", "TOPIC_LABEL_WITHHELD", "purge_knowledge_map_caches", "withhold_after_flag", "withhold_after_flag_best_effort",
+    "withhold_topic_labels",
 ]
 
 #: What a topic that holds a late-flagged document's chunks is labelled until it is rediscovered. It is the header
@@ -87,6 +88,24 @@ def withhold_after_flag(cat: Any, tumblers: Iterable[str]) -> list[int]:
     if ids:
         purge_knowledge_map_caches()
     return ids
+
+
+def withhold_after_flag_best_effort(cat: Any, tumblers: Iterable[str], *, source: str) -> list[int]:
+    """:func:`withhold_after_flag` for a path that flags a document as a side effect (a late ``--sensitive``
+    write, ``nx index repo --sensitive-glob``, an ``.nxexp`` import): the flag is set and the caller carries on,
+    so a failure of the topic bookkeeping is logged (``sensitive_topics_not_relabelled``, naming *source* and
+    the rebuild command) and never raised. Returns the relabelled topic ids, ``[]`` on failure."""
+    wanted = [str(t) for t in tumblers]
+    if not wanted:
+        return []
+    try:
+        return withhold_after_flag(cat, wanted)
+    except Exception as exc:  # noqa: BLE001 - never block the caller on the topic bookkeeping
+        _log.warning(
+            "sensitive_topics_not_relabelled", source=source, tumblers=wanted[:5], count=len(wanted),
+            error=f"{type(exc).__name__}: {exc}"[:200], hint="run `nx taxonomy discover --force <collection>`",
+        )
+        return []
 
 
 def purge_knowledge_map_caches() -> int:

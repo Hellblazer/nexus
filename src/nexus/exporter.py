@@ -814,7 +814,13 @@ def _raise_flag_if_needed(entry: Any, sensitive: bool, reader: Any, writer: Any)
     if not sensitive or getattr(entry, "sensitive", False) is True:
         return
     _require_sensitivity(reader)
-    writer.set_sensitivity([str(entry.tumbler)], True, reason="nxexp import")
+    out = writer.set_sensitivity([str(entry.tumbler)], True, reason="nxexp import")
+    if not (isinstance(out, dict) and out.get("updated") == [0]):
+        # A document flagged after it was indexed may sit in topics labelled from it (RDR-243 Phase 3 fix r3,
+        # nexus-rfvyy.8, N1): relabel them as every flagging path does. Best effort, logged.
+        from nexus import sensitive_topics  # noqa: PLC0415 - deferred: only a late flag needs it
+
+        sensitive_topics.withhold_after_flag_best_effort(writer, [str(entry.tumbler)], source="nxexp import")
 
 
 def _resolve_owner_document(

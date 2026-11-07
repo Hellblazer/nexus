@@ -180,3 +180,73 @@ def test_json_carries_the_relabelled_topics(verb) -> None:
     result = verb("1.1.5", "--json")
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["topics_relabelled"] == [1, 10]
+
+
+# ── every path that flags an EXISTING document relabels its topics (fix r3, N1) ─────────────────────────────────
+
+
+def _record_withhold(monkeypatch) -> list:
+    """Replace the relabel with a recorder, so a path is judged by whether it asks for the relabel, not by the
+    taxonomy store (whose behaviour the tests above own)."""
+    calls: list = []
+    monkeypatch.setattr(sensitive_topics, "withhold_after_flag", lambda cat, tumblers: calls.append(list(tumblers)) or [1])
+    return calls
+
+
+def test_raise_flag_relabels_the_topics_of_the_document_it_flagged(monkeypatch) -> None:
+    from nexus.sensitive_write import raise_flag
+
+    calls = _record_withhold(monkeypatch)
+    writer = _Writer()
+    raise_flag(writer, "1.1.5", what="a --sensitive index")
+    assert writer.calls and calls == [["1.1.5"]]
+
+
+def test_raise_flag_on_an_already_flagged_document_relabels_nothing(monkeypatch) -> None:
+    from nexus.sensitive_write import raise_flag
+
+    calls = _record_withhold(monkeypatch)
+    writer = _Writer()
+    writer.set_sensitivity = lambda batch, flag, *, reason="": {"targets": list(batch), "updated": [0]}
+    raise_flag(writer, "1.1.5", what="a --sensitive index")
+    assert calls == []
+
+
+def test_a_relabel_that_fails_does_not_undo_the_flag_or_raise(monkeypatch) -> None:
+    from nexus.sensitive_write import raise_flag
+
+    def boom(cat, tumblers):
+        raise RuntimeError("taxonomy down")
+
+    monkeypatch.setattr(sensitive_topics, "withhold_after_flag", boom)
+    writer = _Writer()
+    raise_flag(writer, "1.1.5", what="a --sensitive index")  # does not raise: the flag is set
+    assert writer.calls
+
+
+def test_the_nxexp_import_of_a_sensitive_group_onto_an_existing_document_relabels_its_topics(monkeypatch) -> None:
+    from nexus import exporter
+
+    calls = _record_withhold(monkeypatch)
+    monkeypatch.setattr("nexus.catalog.http_catalog_client.require_catalog_sensitivity", lambda *_a, **_k: None)
+    writer = _Writer()
+    exporter._raise_flag_if_needed(SimpleNamespace(tumbler="1.1.5", sensitive=False), True, object(), writer)
+    assert writer.calls[0][0] == ["1.1.5"] and calls == [["1.1.5"]]
+
+    # nothing to relabel when the document was already flagged, or the group is not sensitive
+    exporter._raise_flag_if_needed(SimpleNamespace(tumbler="1.1.6", sensitive=True), True, object(), writer)
+    exporter._raise_flag_if_needed(SimpleNamespace(tumbler="1.1.7", sensitive=False), False, object(), writer)
+    assert calls == [["1.1.5"]]
+
+
+def test_the_nxexp_import_relabel_failing_does_not_fail_the_import(monkeypatch) -> None:
+    from nexus import exporter
+
+    def boom(cat, tumblers):
+        raise RuntimeError("taxonomy down")
+
+    monkeypatch.setattr(sensitive_topics, "withhold_after_flag", boom)
+    monkeypatch.setattr("nexus.catalog.http_catalog_client.require_catalog_sensitivity", lambda *_a, **_k: None)
+    writer = _Writer()
+    exporter._raise_flag_if_needed(SimpleNamespace(tumbler="1.1.5", sensitive=False), True, object(), writer)
+    assert writer.calls
