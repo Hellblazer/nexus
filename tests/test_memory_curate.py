@@ -1122,14 +1122,19 @@ def test_the_command_is_registered_and_documented() -> None:
         assert needle in section, needle
 
 
+def _no_git_env() -> dict[str, str]:
+    """This process's environment without GIT_* (a git hook running the suite exports GIT_DIR)."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def test_a_ceiling_at_the_repository_root_really_stops_git_below_it(tmp_path: Path) -> None:
     # nexus-nrqqk: the real-git case behind the ceiling trigger. Git examines cwd and never moves up into a ceiling.
     repo = _make_repo(tmp_path)
     (repo / "sub").mkdir()
     assert md.primary_checkout_root(repo / "sub", {}) == repo
-    assert md.primary_checkout_root(repo / "sub", {**os.environ, "GIT_CEILING_DIRECTORIES": str(repo)}) is None
-    assert md.primary_checkout_root(repo, {**os.environ, "GIT_CEILING_DIRECTORIES": str(repo)}) == repo
-    assert md.primary_checkout_root(repo / "sub", {**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)}) == repo
+    assert md.primary_checkout_root(repo / "sub", {**_no_git_env(), "GIT_CEILING_DIRECTORIES": str(repo)}) is None
+    assert md.primary_checkout_root(repo, {**_no_git_env(), "GIT_CEILING_DIRECTORIES": str(repo)}) == repo
+    assert md.primary_checkout_root(repo / "sub", {**_no_git_env(), "GIT_CEILING_DIRECTORIES": str(tmp_path)}) == repo
 
 
 def test_the_git_fallback_runs_in_the_callers_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1139,7 +1144,7 @@ def test_the_git_fallback_runs_in_the_callers_env(tmp_path: Path, monkeypatch: p
     outside.mkdir()
     monkeypatch.delenv("GIT_DIR", raising=False)
     assert md.primary_checkout_root(outside, {}) is None
-    assert md.primary_checkout_root(outside, {**os.environ, "GIT_DIR": str(repo / ".git")}) == repo
+    assert md.primary_checkout_root(outside, {**_no_git_env(), "GIT_DIR": str(repo / ".git")}) == repo
 
 
 def test_ceilings_and_cwds_through_symlinks_match_git(tmp_path: Path) -> None:
