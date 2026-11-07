@@ -42,6 +42,10 @@ nx search "resolve_active_session_id" --corpus code --lexical
 | `--no-threshold` | Disable distance-threshold filtering entirely. Mutually exclusive with `--threshold`. Workaround for silent threshold-drop on dense-prose collections. (RDR-087) |
 | `--quiet` | Suppress the RDR-087 silent-zero stderr note ("candidates dropped across N collections...") when every candidate is filtered by the distance threshold |
 
+### Sensitive hits (RDR-243)
+
+A hit from a document its owner flagged sensitive is handled by who reads stdout. Under Claude Code (`CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` set to a non-blank value), `nx search` replaces the hit, in every output format, with one line, `[sensitive] <tumbler>: content withheld` (the tumbler is the hit's first sensitive owner in tumbler order, left out when none resolves; no title, path or snippet), and prints `N sensitive hits withheld` after the results. `--json` keeps the array's length: a withheld hit becomes `{"sensitive": true, "sensitive_owner": "<tumbler>", "stub": "<the line>"}`. In a terminal the hit prints with a `[sensitive]` badge (the `--vimgrep` badge sits in the text field, `--files` is unchanged) and, in the prose formats, a line asking the reader not to quote it. Every `--json` item carries a `sensitive` bool. `sensitivity.mcp_output` governs the MCP tools only; the CLI has no switch.
+
 ### Search telemetry (`.nexus.yml`)
 
 RDR-087 observability surfaces are configurable via the `telemetry` section:

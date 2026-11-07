@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import logging
 import os
+import re
 from pathlib import Path
 
 import click
 import structlog
 
 from nexus.config import get_telemetry_config, get_tuning_config, load_config
-from nexus.context_annotations import DISPLAY_SOURCE_PATH_KEY
+from nexus.context_annotations import DISPLAY_SOURCE_PATH_KEY, SENSITIVE_READER_CLAUSE
 from nexus.corpus import is_conformant_collection_name, resolve_corpus
 from nexus.commands.store import _t3
 from nexus.formatters import (
@@ -19,6 +20,8 @@ from nexus.formatters import (
     format_vimgrep,
 )
 from nexus.scoring import round_robin_interleave
+from nexus.sensitive_output import BADGE, first_sensitive_owner, hit_facts, stub_line, withheld_note
+from nexus.session import started_by_claude_code
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.errors import SearchEmbeddingProfileMismatchError
 from nexus import sensitivity as _sens
@@ -48,6 +51,17 @@ def _parse_where(where_pairs: tuple[str, ...]) -> dict | None:
         raise click.BadParameter(str(e), param_hint="'--where'")
 
 _CONTENT_MAX_CHARS: int = 200
+
+_VIMGREP_PREFIX = re.compile(r"^(.*?:\d+:\d+:)(.*)$", re.DOTALL)
+
+
+def _badged(line: str, *, vimgrep: bool) -> str:
+    """*line* with the ``[sensitive]`` badge in front; a vimgrep line keeps its ``path:line:col:`` prefix so the
+    quickfix list still parses, and the badge leads the text."""
+    if vimgrep and (m := _VIMGREP_PREFIX.match(line)):
+        return f"{m.group(1)}{BADGE} {m.group(2)}"
+    return f"{BADGE} {line}"
+
 
 # Threshold recommendation offset: worst-offender threshold + this value is
 # suggested as the ``--threshold`` users should try first. 0.20 empirically
@@ -740,25 +754,17 @@ def search_cmd(
     if reverse:
         results = list(reversed(results))
 
-    # Output format
+    # RDR-243 Phase 3 (Q2, nexus-rfvyy.8.3): stdout is often read by Claude Code's Bash tool, so under Claude
+    # Code a sensitive hit is replaced by one stub line and counted in every format; in a terminal it prints
+    # with a [sensitive] badge. The posture applies to the FINAL page (after boosts, the diversity cap, paging
+    # and --reverse), so what is withheld is exactly what would have been shown.
+    withhold = started_by_claude_code()
     if json_out:
-        click.echo(format_json(results))
-    elif vimgrep:
-        for line in format_vimgrep(results, query=query):
-            click.echo(line)
-    elif files_only:
-        # nexus-1qed: the catalog-resolved _display_path (nexus-6pfgb.49: never
-        # the row's source_path, the last writer's file).
-        seen: set[str] = set()
-        for r in results:
-            file_path = r.metadata.get("_display_path", "")
-            if file_path and file_path not in seen:
-                seen.add(file_path)
-                click.echo(file_path)
-    elif compact:
-        for line in format_compact(results, query=query):
-            click.echo(line)
-    else:
+        click.echo(format_json(results, withhold_sensitive=withhold))
+        return
+
+    use_bat_effective = False
+    if not (vimgrep or files_only or compact):
         # Check bat applicability
         use_bat_effective = (
             use_bat
@@ -769,19 +775,65 @@ def search_cmd(
             click.echo("Warning: bat not found; showing plain output", err=True)
             use_bat_effective = False
 
+    seen_files: set[str] = set()
+
+    def _render(chunk: list[SearchResult]) -> list[str]:
+        """The lines the chosen format prints for *chunk*, in order (never the stub or badge)."""
+        if vimgrep:
+            return format_vimgrep(chunk, query=query)
+        if files_only:
+            # nexus-1qed: the catalog-resolved _display_path (nexus-6pfgb.49: never
+            # the row's source_path, the last writer's file).
+            out_files: list[str] = []
+            for r in chunk:
+                file_path = r.metadata.get("_display_path", "")
+                if file_path and file_path not in seen_files:
+                    seen_files.add(file_path)
+                    out_files.append(file_path)
+            return out_files
+        if compact:
+            return format_compact(chunk, query=query)
         if use_bat_effective:
-            click.echo(_format_with_bat(results))
-        else:
-            for result in results:
-                for line in format_plain_with_context(
-                    [result],
-                    lines_after=lines_after,
-                    lines_before=lines_before,
-                    query=query,
-                ):
-                    click.echo(line)
-                if show_content:
-                    text = result.content
-                    if len(text) > _CONTENT_MAX_CHARS:
-                        text = text[:_CONTENT_MAX_CHARS] + "..."
-                    click.echo(f"  {text}")
+            return [_format_with_bat(chunk)]
+        out_lines: list[str] = []
+        for result in chunk:
+            out_lines.extend(format_plain_with_context(
+                [result], lines_after=lines_after, lines_before=lines_before, query=query,
+            ))
+            if show_content:
+                text = result.content or ""
+                if len(text) > _CONTENT_MAX_CHARS:
+                    text = text[:_CONTENT_MAX_CHARS] + "..."
+                out_lines.append(f"  {text}")
+        return out_lines
+
+    facts = [hit_facts(r.metadata) for r in results]
+    shown_sensitive = (not withhold) and any(is_sens for is_sens, _ in facts)
+    # The reader clause leads a render that is read as prose; a quickfix list or a path list has no place for it.
+    if shown_sensitive and not (vimgrep or files_only):
+        click.echo(SENSITIVE_READER_CLAUSE)
+
+    withheld = 0
+    run: list[SearchResult] = []
+    for r, (is_sens, owners) in zip(results, facts, strict=True):
+        if not is_sens:
+            run.append(r)
+            continue
+        if run:
+            for line in _render(run):
+                click.echo(line)
+            run = []
+        if withhold:
+            withheld += 1
+            click.echo(stub_line(first_sensitive_owner(owners)))
+            continue
+        lines = _render([r])
+        if lines and not files_only:  # a path list stays pipeable: the terminal reader knows their own files
+            lines[0] = _badged(lines[0], vimgrep=vimgrep)
+        for line in lines:
+            click.echo(line)
+    if run:
+        for line in _render(run):
+            click.echo(line)
+    if withheld:
+        click.echo(withheld_note(withheld))
