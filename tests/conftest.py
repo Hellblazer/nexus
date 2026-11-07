@@ -5451,3 +5451,6 @@ def _no_document_is_sensitive(monkeypatch):
     from tests._doc_sensitivity_fake import NoSensitiveDocuments  # noqa: PLC0415 — as above
 
     monkeypatch.setattr(doc_sensitivity, "_catalog_reader", NoSensitiveDocuments)
+    # RDR-243 Phase 3: a dispatch that grants Read/Grep/Glob lists the catalog for sensitive source files; the same
+    # stand-in answers "none" (tests/test_dispatch_sensitive_file_deny.py passes its own reader and owns the rule).
+    monkeypatch.setattr("nexus.operators.sensitive_paths._default_reader", NoSensitiveDocuments)

@@ -241,6 +241,13 @@ def _restrict(entries: list[Any]) -> FileToolRestriction:
     return FileToolRestriction(deny_rules=tuple(rules), examined=len(entries), sensitive=len(chosen))
 
 
+def _default_reader() -> Any:
+    """The factory's catalog read handle (a seam: the unit suite stands in "no sensitive documents" here)."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: heavy import graph
+
+    return make_catalog_reader()
+
+
 def file_tool_restriction(*, reader: Any = None) -> FileToolRestriction:
     """What to do about Read, Grep and Glob for one dispatch, from the catalog's live sensitive documents.
 
@@ -248,9 +255,7 @@ def file_tool_restriction(*, reader: Any = None) -> FileToolRestriction:
     none, the factory's. Any failure to list the catalog is ``drop_file_tools`` (never "no rules")."""
     try:
         if reader is None:
-            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: heavy import graph
-
-            reader = make_catalog_reader()
+            reader = _default_reader()
         if reader is None:
             raise RuntimeError("no catalog reader")
         entries = list(reader.all_documents(limit=0))

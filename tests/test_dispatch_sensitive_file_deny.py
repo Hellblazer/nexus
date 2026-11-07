@@ -207,6 +207,11 @@ def test_a_failed_reader_construction_takes_the_file_tools_away(monkeypatch) -> 
         raise RuntimeError("no storage backend")
 
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", boom)
+    # The suite stands in "no sensitive documents" at the _default_reader seam (tests/conftest.py); this test is
+    # about the factory, so route the seam back to it.
+    from nexus.catalog import factory  # noqa: PLC0415 — test-local
+
+    monkeypatch.setattr(sp, "_default_reader", lambda: factory.make_catalog_reader())
     r = sp.file_tool_restriction()
     assert r.drop_file_tools
 

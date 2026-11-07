@@ -17,6 +17,9 @@ class NoSensitiveDocuments:
     def resolve_many(self, doc_ids: list[str]) -> dict[str, Any]:
         return {}
 
+    def all_documents(self, *, limit: int = 0) -> list[Any]:
+        return []
+
     def by_doc_id(self, doc_id: str) -> None:
         return None
 
