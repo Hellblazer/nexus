@@ -5878,9 +5878,8 @@ def _check_prose_index_recall(collections: object = _ENGINE_STATUS_UNSET) -> lis
             "Measure the recall of each named collection's own HNSW index (RDR-227 Gap 1): for k of 40, 60, 80, 100 "
             "and 120, compare the index's top-k with an exact top-k, on query vectors written for the collection's "
             "own topics (not random vectors); the target is 0.99 or better at every k",
-            "In a nexus source checkout, scripts/prose_index_recall_check.py runs that check against the configured "
-            "engine: uv run python scripts/prose_index_recall_check.py <collection> --queries-file <file> "
-            "(read-only; --dry-run prints its plan and request count first)",
+            "The nexus source tree carries a script that runs that check against the configured engine, read-only "
+            "(the prose index recall check; nx doctor's entry in the CLI reference names it and its options)",
         ],
     )]
 

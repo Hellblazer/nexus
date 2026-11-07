@@ -251,8 +251,13 @@ class Candidate:
 #: (relative-path, token) -> reason. General-purpose exemption for a
 #: genuinely non-log-event candidate the shape-based extractor cannot
 #: distinguish from a real one. See module docstring, design decision 3.
-_FALSE_CANDIDATE_ALLOWLIST: dict[tuple[str, str], str] = {}
-_ALLOWLIST_CEILING = 0
+_FALSE_CANDIDATE_ALLOWLIST: dict[tuple[str, str], str] = {
+    ("tests/e2e/dual_embedder_gate_guard_test.sh", "dg_mvv_search"): (
+        "the guard counts the gate script's own shell function dg_mvv_search in the lines it extracts from the "
+        "gate (nexus-lpu6e); it is a function name in tests/e2e/dual-embedder-gate.sh, not a log event"
+    ),
+}
+_ALLOWLIST_CEILING = 1
 
 
 #: (relative-path, token) -> reason. Distinct from _FALSE_CANDIDATE_ALLOWLIST
