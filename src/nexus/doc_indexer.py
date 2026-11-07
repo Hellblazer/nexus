@@ -2747,7 +2747,8 @@ def _markdown_chunks(
     """
     from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    raw_text = md_path.read_text(encoding="utf-8")
+    # nexus-0ib6r: utf-8-sig drops a leading BOM, which hid the frontmatter and started chunk 1.
+    raw_text = md_path.read_text(encoding="utf-8-sig")
     frontmatter, body = parse_frontmatter(raw_text, source=str(md_path), strict=True)
     frontmatter_len = len(raw_text) - len(body)
 
@@ -3818,7 +3819,7 @@ def _parse_md_frontmatter(md_path: Path) -> tuple[str, int, str]:
     year = 0
     author = ""
     try:
-        text = md_path.read_text(encoding="utf-8")
+        text = md_path.read_text(encoding="utf-8-sig")  # nexus-0ib6r: a BOM hid the frontmatter
         if text.startswith("---"):
             import re  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
             m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
