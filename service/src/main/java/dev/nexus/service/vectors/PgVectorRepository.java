@@ -2995,7 +2995,10 @@ public final class PgVectorRepository {
         List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
         List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
             ? wide.lexicalRows()
-            : stage.apply(tenant, wide.lexicalRows(), labelSplit.labels(), Integer.MAX_VALUE);
+            // nexus-6cmam: not "no cut". Each lexical hit expands to at most MAX_OWNERS_PER_HIT rows, so the extras
+            // are bounded by the rows the lexical arm handed over times that, whatever the filter keeps.
+            : stage.apply(tenant, wide.lexicalRows(), labelSplit.labels(),
+                          ManifestLabelStage.expansionBound(wide.lexicalRows().size()));
         // Every id a lexical arm reports must still be in the response: drop the ones the filter removed.
         List<LexicalStat> lexicalStats = wide.lexical();
         if (!lexicalStats.isEmpty()) {

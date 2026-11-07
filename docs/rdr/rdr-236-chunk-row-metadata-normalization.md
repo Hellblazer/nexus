@@ -552,6 +552,23 @@ critiqued once before Sam's gate decision (T2
   rollback block on a retired table. `plain_search_<dim>` takes `p_where`
   and `p_where_path`. The indexers write "" for a file with no extension.
   The epic has 36 open children after .44.
+- **RF-25 (Decided by the implementer as a reversible default, nexus-6cmam, 2026-11-07).**
+  The label stage expands a hit once per owning document, and that was uncapped:
+  a boilerplate chunk held by N documents took `min(N, limit)` slots of a page,
+  and the lexical extras of `searchPerCollection` were cut at `Integer.MAX_VALUE`,
+  so they were hits times owners. `ManifestLabelStage.MAX_OWNERS_PER_HIT` (5)
+  now bounds one hit's expansion to its first owners in `doc_id` order (the
+  lookup orders occurrences by `doc_id`, then position, so the rows kept are the
+  same on every call); the owners past it are dropped from that response, not
+  paged to. Five keeps every shared-chunk case the tests pin (two owners) and
+  the few real ones (a copied section, a vendored file), and leaves a page of
+  ten room for other hits. The lexical extras are cut at
+  `expansionBound(hits received) = hits * 5`, not at no limit. The `shared`
+  flag is still decided over every holder before the cap. The class javadoc's
+  settled semantics (a hit passes once per owning document) now carry the cap.
+  Changing the constant changes what a response drops and nothing else. Not
+  done here: a statement budget on the occurrence lookup, which still reads
+  every occurrence of a boilerplate chunk before the cap applies.
 
 ### Critical Assumptions
 

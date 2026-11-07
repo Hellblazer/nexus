@@ -396,7 +396,9 @@ class ManifestRouteBDifferentialTest {
     /** The (document, chunk) pairs the stage keeps; {@code doc@chash}. */
     private Set<String> stageDocChunks(List<ManifestLabelStage.Predicate> labels) {
         Set<String> out = new TreeSet<>();
-        for (Map<String, Object> row : stage.apply(TENANT, chunkRows, labels, Integer.MAX_VALUE)) {
+        // The owner cap (nexus-6cmam) is a response bound, not a verdict: route (b)'s SQL has none, so the stage is
+        // asked for every passing owner here.
+        for (Map<String, Object> row : stage.apply(TENANT, chunkRows, labels, Integer.MAX_VALUE, Integer.MAX_VALUE)) {
             out.add(row.get("doc_id") + "@" + row.get("id"));
         }
         return out;

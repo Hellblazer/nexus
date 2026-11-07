@@ -454,6 +454,24 @@ class ManifestLabelStageTest {
     }
 
     @Test
+    void maxOwnersPerHit_isTheValueTheIntegrationFixtureMirrors_andKeepsTheTwoOwnerSemantics() {
+        // PgVectorManifestOwnerCapTest mirrors the constant (it cannot see a package-private field).
+        assertThat(ManifestLabelStage.MAX_OWNERS_PER_HIT).isEqualTo(5);
+        assertThat(ManifestLabelStage.MAX_OWNERS_PER_HIT).isGreaterThanOrEqualTo(2);
+    }
+
+    @Test
+    void expansionBound_isTheHitsTimesTheOwnerCap_notNoCut_andSaturates() {
+        assertThat(ManifestLabelStage.expansionBound(0)).isZero();
+        assertThat(ManifestLabelStage.expansionBound(1)).isEqualTo(ManifestLabelStage.MAX_OWNERS_PER_HIT);
+        assertThat(ManifestLabelStage.expansionBound(7)).isEqualTo(7 * ManifestLabelStage.MAX_OWNERS_PER_HIT);
+        assertThat(ManifestLabelStage.expansionBound(-3)).isZero();
+        assertThat(ManifestLabelStage.expansionBound(Integer.MAX_VALUE)).isEqualTo(Integer.MAX_VALUE);
+        assertThat(ManifestLabelStage.expansionBound(300)).as("a real lexical leg stays far below the int range")
+            .isLessThan(Integer.MAX_VALUE);
+    }
+
+    @Test
     void widen_isFourTimesTheLimit_cappedAtTheCeilingUnlessTheLimitIsAlreadyAbove() {
         assertThat(ManifestLabelStage.widen(10)).isEqualTo(40);
         assertThat(ManifestLabelStage.widen(300)).isEqualTo(1200);

@@ -80,6 +80,14 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       the manifest and the fallback stops being consulted for that row.</li>
  *   <li>A hit with no live manifest row (an orphan) is kept or dropped on its chunk row's own label
  *       alone, with no {@code doc_id}.</li>
+ *   <li>A hit expands to at most {@link #MAX_OWNERS_PER_HIT} documents (nexus-6cmam): the first ones, in
+ *       {@code doc_id} order, whose occurrence passes. A boilerplate chunk (a licence header, an RDR section
+ *       stub) that thousands of documents hold would otherwise take {@code min(owners, limit)} slots of a page
+ *       and push out every other hit. The owners past the cap are dropped from that response: they are not
+ *       paged to, a narrower filter or a different query is how to reach them, and the rows that remain are
+ *       the same on every call (the lookup orders occurrences by {@code doc_id}, then position). Each owner
+ *       the cap keeps still carries its own labels; the {@code shared} decision is taken over EVERY holder
+ *       before the cap, so a capped hit is not mistaken for an unshared one.</li>
  *   <li>The caller's limit applies after expansion and de-duplication, never before.</li>
  * </ul>
  *
@@ -301,6 +309,27 @@ final class ManifestLabelStage {
 
     /** The widened cut never exceeds this unless the caller's own limit already does. */
     static final int OVERFETCH_CEILING = 1200;
+
+    /**
+     * The most documents one hit expands to (nexus-6cmam), the first in {@code doc_id} order whose occurrence
+     * passes the filter. Without it a chunk many documents share fills a page with copies of itself. Two is the
+     * least that keeps the shared-chunk semantics (each owner answers with its own labels); five leaves room for
+     * the few documents that really do share a chunk (a copied section, a vendored file) and bounds a boilerplate
+     * chunk to a fraction of the smallest useful page. Changing it changes what a response drops, so the class
+     * javadoc and the pins in {@code PgVectorManifestOwnerCapTest} and {@code ManifestLabelStageTest} move with it.
+     */
+    static final int MAX_OWNERS_PER_HIT = 5;
+
+    /**
+     * The row bound for a list this stage expands without a caller's limit (the lexical extras of {@code
+     * searchPerCollection}): every hit the stage receives may come back as at most {@link #MAX_OWNERS_PER_HIT}
+     * rows, so the output cannot outgrow {@code hits * MAX_OWNERS_PER_HIT}. It is {@link #apply}'s {@code limit}
+     * for such a list, in place of the {@link Integer#MAX_VALUE} that said "no cut"; saturating, so a hit count
+     * near the int range cannot wrap negative and cut everything.
+     */
+    static int expansionBound(int hits) {
+        return (int) Math.min(Integer.MAX_VALUE, (long) Math.max(hits, 0) * MAX_OWNERS_PER_HIT);
+    }
 
     /** Chashes per manifest lookup (a bind-parameter budget well under PostgreSQL's 32767). */
     private static final int LOOKUP_BATCH = PgVectorRepository.SOURCE_URI_JOIN_BATCH;
@@ -1043,10 +1072,23 @@ final class ManifestLabelStage {
     /**
      * Expand each row to its passing occurrences and cut to {@code limit} (best-first order is the input's).
      *
-     * @param limit the caller's limit, or {@link Integer#MAX_VALUE} for no cut (a list that is not cut here)
+     * @param limit the caller's limit; for a list the caller does not cut (the lexical extras), {@link
+     *              #expansionBound} of the number of rows passed in, never {@link Integer#MAX_VALUE}. Each hit
+     *              also expands to at most {@link #MAX_OWNERS_PER_HIT} owners, the first in {@code doc_id}
+     *              order; the owners past that are dropped from the result (see the class javadoc).
      */
     List<Map<String, Object>> apply(String tenant, List<Map<String, Object>> rows, List<Predicate> predicates,
                                     int limit) {
+        return apply(tenant, rows, predicates, limit, MAX_OWNERS_PER_HIT);
+    }
+
+    /**
+     * {@link #apply(String, List, List, int)} with the per-hit owner cap named. Production passes {@link
+     * #MAX_OWNERS_PER_HIT} through the four-argument form; a test that compares the stage's per-document verdicts
+     * with another judge (route (b)'s SQL, which has no cap) passes {@link Integer#MAX_VALUE} to see them all.
+     */
+    List<Map<String, Object>> apply(String tenant, List<Map<String, Object>> rows, List<Predicate> predicates,
+                                    int limit, int ownerCap) {
         if (rows.isEmpty()) {
             return rows;
         }
@@ -1078,6 +1120,9 @@ final class ManifestLabelStage {
                     if (passes(predicates, labels)) {
                         seenDocs.add(o.docId());
                         out.add(expanded(row, o.withShared(shared)));
+                        if (seenDocs.size() >= ownerCap) {
+                            break;  // the owners past the cap are dropped (class javadoc)
+                        }
                     }
                 }
             }
