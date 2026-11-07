@@ -296,6 +296,7 @@ def test_ensure_refuse_policy_exits_69_with_the_command_and_installs_nothing(sta
     ("legacy", "nx self install"),
     ("mcpb", "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"),
     ("dev", "uv sync"),
+    ("other", "pipx uninstall conexus && curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"),
 ])
 def test_ensure_refuses_a_layout_the_auto_path_does_not_touch(stack, kind, command) -> None:
     stack.plan = pdf_stack.InstallPlan(kind, False, command, "because of the layout")
@@ -574,24 +575,64 @@ def test_a_source_checkout_is_still_a_dev_install(monkeypatch, tmp_path) -> None
     assert plan.kind == "dev" and plan.command == "uv sync"
 
 
-@pytest.mark.parametrize("parent_pyproject", [None, '[project]\nname = "someone-else"\n'], ids=["no-pyproject", "other-project"])
-def test_a_pip_pipx_or_system_install_is_not_told_uv_sync(monkeypatch, tmp_path, parent_pyproject) -> None:
-    """nexus-nz8kl: a venv with no conexus checkout above it (pip, pipx, a system Python) used to fall
-    through to the dev plan and be told `uv sync`, which does nothing there (and `nx self install`
-    refuses there too). It is told the installer, which sets up a managed install with PDF support."""
+def _not_a_checkout_process(monkeypatch) -> None:
+    """The suite runs from an editable checkout, so the package-location signal is always on here."""
+    from nexus.db import service_endpoint
+
+    monkeypatch.setattr(service_endpoint, "is_dev_checkout_process", lambda: False)
+
+
+@pytest.mark.parametrize(
+    "parent_pyproject", [None, '[project]\nname = "someone-else"\n'], ids=["no-pyproject", "other-project"],
+)
+def test_a_pip_or_system_install_is_told_to_remove_it_then_run_the_installer(
+    monkeypatch, tmp_path, parent_pyproject,
+) -> None:
+    """nexus-nz8kl: a venv with no conexus checkout above it (pip, a system Python) used to fall through
+    to the dev plan and be told `uv sync`, which does nothing there. The installer alone is no remedy:
+    it skips its build while any nx answers on PATH (web/install.sh find_cli), and this one does. So the
+    command removes this install with its own pip first, then runs the installer."""
     from nexus.commands import self_cmd
 
     prefix = tmp_path / "env" / "venv"
     prefix.mkdir(parents=True)
     if parent_pyproject is not None:
         (prefix.parent / "pyproject.toml").write_text(parent_pyproject, encoding="utf-8")
+    _not_a_checkout_process(monkeypatch)
     monkeypatch.setattr(self_cmd, "running_generation", lambda: prefix)
     monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
     plan = pdf_stack.install_plan()
-    assert plan.kind == "other", plan
-    assert plan.command == pdf_stack._cli_install_command()  # noqa: SLF001 — the one-liner the plan must name
+    assert plan.kind == "other" and plan.auto is False, plan
     assert "uv sync" not in plan.command and "uv sync" not in plan.why
-    assert plan.auto is False
+    remove, _, installer = plan.command.partition(" && " if os.name != "nt" else "; ")
+    assert remove.endswith("-m pip uninstall -y conexus"), plan.command
+    assert installer == pdf_stack._cli_install_command()  # noqa: SLF001 — the installer runs after the removal
+    assert "removes it" in plan.why
+
+
+@pytest.mark.parametrize("platform, joiner, installer", [
+    ("darwin", " && ", "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"),
+    ("win32", "; ", "irm https://hellblazer.github.io/nexus/install.ps1 | iex"),
+])
+def test_a_pipx_install_is_removed_with_pipx(tmp_path, platform, joiner, installer) -> None:
+    prefix = tmp_path / ".local" / "share" / "pipx" / "venvs" / "conexus"
+    command = pdf_stack._foreign_install_command(prefix, platform)  # noqa: SLF001 — the unit under test
+    assert command == f"pipx uninstall conexus{joiner}{installer}"
+
+
+def test_a_checkout_whose_venv_lives_elsewhere_is_still_a_dev_install(monkeypatch, tmp_path) -> None:
+    """nexus-nz8kl review: `pip install -e <checkout>` into ~/venvs/x, or UV_PROJECT_ENVIRONMENT, puts the
+    venv outside the checkout. The package still resolves from the checkout, so it is a dev install."""
+    from nexus.commands import self_cmd
+    from nexus.db import service_endpoint
+
+    prefix = tmp_path / "venvs" / "nx"
+    prefix.mkdir(parents=True)
+    monkeypatch.setattr(service_endpoint, "is_dev_checkout_process", lambda: True)
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: prefix)
+    monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
+    plan = pdf_stack.install_plan()
+    assert plan.kind == "dev" and plan.command == "uv sync"
 
 
 def test_a_legacy_uv_tree_is_told_one_command_because_the_convergence_carries_pdf(monkeypatch) -> None:

@@ -436,11 +436,14 @@ def install_plan() -> InstallPlan:
             "this is a source checkout; its dev group carries the PDF stack",
         )
     # nexus-nz8kl: pip, pipx or a system Python. `uv sync` does nothing here and `nx self install`
-    # refuses, so name the installer, which sets up a managed install with PDF support.
+    # refuses. The installer alone is not enough either: it skips its build when any nx is already on
+    # PATH (web/install.sh find_cli, web/install.ps1), and this one is. So the command removes this
+    # install first, then runs the installer, whose managed install carries the release's pinned PDF
+    # stack and is then the only nx on PATH.
     return InstallPlan(
-        "other", False, _cli_install_command(),
-        "this install was made with pip, pipx or a system Python, which nx cannot add PDF support to; "
-        "the installer sets up a managed install that carries it",
+        "other", False, _foreign_install_command(host),
+        "this install was made with pip, pipx or a system Python, which does not carry the release's "
+        "pinned PDF stack; the command removes it, then the installer builds a managed install that does",
     )
 
 
@@ -463,17 +466,39 @@ def repair_command() -> str:
 MCPB_PDF_SETTING_ENV: str = "NX_MCPB_INCLUDE_PDF"
 
 
-def _cli_install_command() -> str:
+def _cli_install_command(platform: str | None = None) -> str:
     """The first-install one-liner for this platform (the installer scripts install PDF support by default)."""
-    if os.name == "nt":
+    if (platform == "win32") if platform is not None else os.name == "nt":
         return "irm https://hellblazer.github.io/nexus/install.ps1 | iex"
     return "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"
 
 
+def _foreign_install_command(prefix: Path, platform: str | None = None) -> str:
+    """Remove a pip or pipx install, then run the installer (nexus-nz8kl). The installer skips its
+    build while another nx answers on PATH, so the removal comes first. A pipx venv lives under a
+    ``pipx/venvs`` directory; anything else is uninstalled with its own interpreter's pip. PowerShell
+    5.1 has no ``&&``, so Windows joins the two with ``;``."""
+    windows = (platform if platform is not None else sys.platform) == "win32"
+    parts = [part.lower() for part in prefix.parts]
+    pipx = any(a == "pipx" and b == "venvs" for a, b in zip(parts, parts[1:], strict=False))
+    if pipx:
+        remove = "pipx uninstall conexus"
+    else:
+        remove = f"{shlex.quote(sys.executable)} -m pip uninstall -y conexus"
+    installer = _cli_install_command("win32" if windows else "posix")
+    return f"{remove}; {installer}" if windows else f"{remove} && {installer}"
+
+
 def _running_from_source_checkout(prefix: Path) -> bool:
-    """Whether *prefix* (the running venv root) is a conexus source checkout's ``.venv``: the
-    directory above it holds a ``pyproject.toml`` naming ``conexus``, as ``uv sync`` in a checkout
-    leaves it. Anything else (pip, pipx, a system Python) is not a checkout (nexus-nz8kl)."""
+    """Whether this process runs from a conexus source checkout (nexus-nz8kl). Two signals: the
+    ``nexus`` package itself resolves from a checkout (``service_endpoint.is_dev_checkout_process``,
+    the repo's one rule, which holds wherever the venv lives), or *prefix* (the running venv root) sits
+    directly in a directory whose ``pyproject.toml`` names ``conexus``, as ``uv sync`` leaves it.
+    Anything else (pip, pipx, a system Python) is not a checkout."""
+    from nexus.db import service_endpoint  # noqa: PLC0415 — deferred: only the layout probe needs it
+
+    if service_endpoint.is_dev_checkout_process():
+        return True
     pyproject = prefix.parent / "pyproject.toml"
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
