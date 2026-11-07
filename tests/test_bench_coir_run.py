@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 
+import nexus.catalog.factory as factory
 import nexus.config
+import nexus.corpus as corpus_mod
 import nexus.db
 import tests._engine_substrate as substrate
 from tests._module_seam import setattr_in
@@ -318,3 +320,97 @@ def test_engine_run_end_to_end_reproduces_and_merges_twins(tmp_path: Path) -> No
     fire_note_chains(outcome, _FILLER[0], hooks=reg)
     stamp_note(outcome)
     assert _aspect_counts()[0] >= 1
+
+
+# ── refusals and drops not otherwise exercised (nexus-2k66t.2, its 2026-11-07 comment) ─────────
+
+_MAPPED = _Cat({"c0": ["1.1"]}, {"1.1": ("ds:c0", "col")})
+
+
+def _one_query_sample():
+    return draw("ds", [{"_id": "c0", "text": "t"}], [{"query_id": "q0", "corpus_id": "c0", "score": 1}])
+
+
+@pytest.mark.parametrize("signal", [{"rerank_score": 0.9}, {"bib_citation_count": 12}, {"quality_boost": 0.2}])
+def test_a_row_carrying_a_rank_signal_stops_the_run(tmp_path: Path, signal: dict) -> None:
+    nx = _fake_nx(tmp_path, json.dumps([{"id": "c0", "distance": 0.1, "frecency_score": 0.4, **signal}]))
+    with pytest.raises(HarnessRefusal, match=r"ds query q0: rows carry rank signals \['" + next(iter(signal))):
+        run_dataset(_one_query_sample(), {"q0": "t"}, "col", nx=nx, catalog=_MAPPED)
+
+
+def test_an_inert_frecency_score_alone_is_not_a_rank_signal(tmp_path: Path) -> None:
+    nx = _fake_nx(tmp_path, json.dumps([{"id": "c0", "distance": 0.1, "frecency_score": 0.4, "bib_x": 0}]))
+    body = run_dataset(_one_query_sample(), {"q0": "t"}, "col", nx=nx, catalog=_MAPPED)
+    assert body["per_query"][0]["rr"] == 1.0
+
+
+class _Tax:
+    def __init__(self, assigned: list) -> None:
+        self.assigned, self.asked = assigned, None
+
+    def get_assignments_for_docs(self, chashes):
+        self.asked = chashes
+        return self.assigned
+
+
+def test_a_taxonomy_assignment_on_a_bench_chunk_stops_the_run(tmp_path: Path) -> None:
+    nx = _fake_nx(tmp_path, json.dumps([{"id": "c0", "distance": 0.1}]))
+    with pytest.raises(HarnessRefusal, match="ds: 1 taxonomy assignments on bench chunks"):
+        run_dataset(_one_query_sample(), {"q0": "t"}, "col", nx=nx, catalog=_MAPPED, taxonomy=_Tax(["a"]))
+    clean = _Tax([])
+    body = run_dataset(_one_query_sample(), {"q0": "t"}, "col", nx=nx, catalog=_MAPPED, taxonomy=clean)
+    assert body["taxonomy_assignments"] == 0 and clean.asked == ["c0"]  # asked by chunk hash
+
+
+def test_a_search_past_its_timeout_stops_the_run(tmp_path: Path, monkeypatch) -> None:
+    nx = tmp_path / "nx"
+    nx.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+    nx.chmod(0o755)
+    monkeypatch.setattr(coir_run, "SEARCH_TIMEOUT_S", 0.5)
+    with pytest.raises(HarnessRefusal, match="nx search passed 0 s on col"):
+        search(nx, "q", "col")
+
+
+def _offline_run(monkeypatch) -> None:
+    """run() with every storage handle stubbed: the drops below happen before or instead of an ingest."""
+    monkeypatch.setattr(nexus.config, "load_config", lambda: {})
+    monkeypatch.setattr(nexus.db, "make_t3", lambda: object())
+    monkeypatch.setattr(factory, "make_catalog_reader", lambda: object())
+    monkeypatch.setattr(corpus_mod, "t3_collection_name", lambda subject, **_k: f"knowledge__{subject}__{coir_run.EMBEDDING_TOKEN}__v1")
+    monkeypatch.setattr(coir_run, "_taxonomy", lambda: None)
+    monkeypatch.setattr(coir_run, "engine_info", lambda: {"embedding_mode": "onnx-local", "embedding_profile": "bge"})
+    monkeypatch.setattr(coir_run, "ensure_empty", lambda _t3, _c: None)
+
+
+def _readers(corpus, qrels):
+    return lambda _data, _name: (corpus, [{"_id": q["query_id"], "text": "q text"} for q in qrels], qrels)
+
+
+@pytest.mark.parametrize(("corpus", "qrels", "reason"), [
+    ([{"_id": "c0", "text": "t"}], [{"query_id": "q0", "corpus_id": "c0", "score": 2}], "qrels grades [2], not [1]"),
+    ([{"_id": "c0", "text": ""}], [{"query_id": "q0", "corpus_id": "c0", "score": 1}], "every drawn query was excluded"),
+])
+def test_a_dataset_is_dropped_and_named_before_its_ingest(tmp_path: Path, monkeypatch, corpus, qrels, reason) -> None:
+    _offline_run(monkeypatch)
+    monkeypatch.setattr(coir_run, "load", lambda *a, **k: pytest.fail("an ingest ran for a dropped dataset"))
+    out = tmp_path / "results.json"
+    results = run([POOL["codetrans-dl"]], tmp_path, out, nx=tmp_path / "nx", readers=_readers(corpus, qrels),
+                  enforce_engine_floor=False)
+    assert results["dropped"] == {"codetrans-dl": reason} and results["datasets"] == {}
+    assert json.loads(out.read_text())["dropped"] == {"codetrans-dl": reason}
+
+
+def test_an_over_cap_ingest_drops_the_dataset_and_the_run_goes_on(tmp_path: Path, monkeypatch) -> None:
+    _offline_run(monkeypatch)
+
+    def over(sample, *_a, **_k):
+        raise OverCap(f"{sample.dataset}: ingest passed 1800 s")
+
+    monkeypatch.setattr(coir_run, "load", over)
+    monkeypatch.setattr(coir_run, "run_dataset", lambda *a, **k: pytest.fail("a dropped dataset was queried"))
+    corpus, qrels = [{"_id": "c0", "text": "t"}], [{"query_id": "q0", "corpus_id": "c0", "score": 1}]
+    results = run([POOL["codetrans-dl"], POOL["codetrans-contest"]], tmp_path, tmp_path / "results.json",
+                  nx=tmp_path / "nx", readers=_readers(corpus, qrels), enforce_engine_floor=False)
+    assert results["dropped"] == {"codetrans-dl": "codetrans-dl: ingest passed 1800 s",
+                                  "codetrans-contest": "codetrans-contest: ingest passed 1800 s"}
+    assert results["datasets"] == {}
