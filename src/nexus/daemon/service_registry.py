@@ -2139,11 +2139,29 @@ def lease_holder_invisible(
     client, macOS, Windows). *alive* is the caller's own liveness probe (default
     :func:`pid_running`).
     """
-    probe = alive if alive is not None else pid_running
-    theirs, ours = record.payload.get("pid_ns"), own_pid_namespace()
-    if not theirs or not ours or theirs == ours:
+    if not lease_from_other_pid_namespace(record):
         return False
-    return not probe(pid) and record.is_fresh(time.time() if now is None else now)
+    # Its pid names nothing here, so a local process with the same number proves nothing
+    # either way: the heartbeat alone decides.
+    del pid, alive
+    return record.is_fresh(time.time() if now is None else now)
+
+
+def lease_from_other_pid_namespace(record: LeaseRecord) -> bool:
+    """True when *record* was published from a PID namespace other than ours (nexus-dyfsw).
+
+    A lease with no ``pid_ns`` (an older client, macOS, Windows) is never "other". A lease that
+    has one, read where PID namespaces do not exist (macOS or Windows reading a Linux container's
+    lease through a shared directory), is other: its pids mean nothing here. A Linux reader that
+    cannot read its own namespace keeps the old rule.
+    """
+    theirs = record.payload.get("pid_ns")
+    if not theirs:
+        return False
+    ours = own_pid_namespace()
+    if ours is None:
+        return not sys.platform.startswith("linux")
+    return theirs != ours
 
 
 def stop_tier_holders(

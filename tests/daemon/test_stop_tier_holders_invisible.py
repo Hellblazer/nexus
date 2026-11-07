@@ -74,3 +74,20 @@ def test_publish_records_the_publishers_namespace(tmp_path: Path) -> None:
     registry = ServiceRegistry(dir=tmp_path, tier=_TIER, ttl=5.0)
     record = registry.publish("default", endpoint={"pid": 1}, version="t", owner_token="tok")
     assert record.payload["pid_ns"] == _OURS
+
+
+def test_a_linux_lease_read_where_there_are_no_pid_namespaces_is_other(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # macOS or Windows reading a Linux container's lease through a shared directory.
+    monkeypatch.setattr(sr, "own_pid_namespace", lambda: None)
+    monkeypatch.setattr(sr.sys, "platform", "darwin")
+    registry = _publish(tmp_path, at=time.time())
+    assert _stop(tmp_path).invisible == (_PID,)
+    assert len(registry.records()) == 1
+
+
+def test_a_linux_reader_that_cannot_read_its_namespace_keeps_the_old_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sr, "own_pid_namespace", lambda: None)
+    monkeypatch.setattr(sr.sys, "platform", "linux")
+    registry = _publish(tmp_path, at=time.time())
+    assert _stop(tmp_path).invisible == ()
+    assert registry.records() == []

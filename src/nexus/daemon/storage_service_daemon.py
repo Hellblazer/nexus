@@ -4018,6 +4018,7 @@ def _stop_marked_service(
     marker already on disk (Windows). A fresh lease whose supervisor pid this
     process cannot see is appended to *invisible_out* and left alone."""
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        lease_from_other_pid_namespace,
         lease_holder_invisible,
         storage_service_member_check,
         storage_service_stack_matcher,
@@ -4043,8 +4044,12 @@ def _stop_marked_service(
 
         # Only trust supervisor_pid from a FRESH lease (guaranteed above by
         # discover()'s TTL reap), and only when the process is still alive.
+        # A pid recorded in another PID namespace names nothing here: a live pid with the
+        # same number is someone else's, so it is never signalled (nexus-dyfsw).
         supervisor_seen = (
-            isinstance(supervisor_pid, int) and supervisor_pid > 0 and _pid_is_alive(supervisor_pid)
+            isinstance(supervisor_pid, int) and supervisor_pid > 0
+            and not lease_from_other_pid_namespace(record)
+            and _pid_is_alive(supervisor_pid)
         )
         if (
             not supervisor_seen
@@ -4127,7 +4132,7 @@ def _stop_marked_service(
                     registry, record, budget=_STOP_ELECTION_BUDGET,
                 )
             signalled.append(supervisor_pid)
-        elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
+        elif isinstance(pid_to_signal, int) and pid_to_signal > 0 and not lease_from_other_pid_namespace(record):
             source = "lease"
             if (platform if platform is not None else sys.platform) == "win32":
                 # No process group to signal there. CTRL_BREAK through the

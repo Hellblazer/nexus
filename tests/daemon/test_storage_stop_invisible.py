@@ -94,3 +94,21 @@ def test_service_stop_exits_1_and_says_why_for_an_invisible_supervisor(
     assert "not visible from here" in result.output
     assert "already stopped" not in result.output
     assert "process table could not be checked" not in result.output
+
+
+def test_a_live_local_pid_with_the_containers_number_is_not_signalled(tmp_path: Path) -> None:
+    # The lease's supervisor pid is from another namespace; the same number here is a bystander.
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        registry = _registry(tmp_path)
+        registry.publish(
+            service_identity(), endpoint={"pid": bystander.pid, "port": 1}, version="t",
+            owner_token="tok", payload={"supervisor_pid": bystander.pid, "pid_ns": _THEIRS},
+        )
+        outcome = ssd.stop_storage_service(config_dir=tmp_path)
+        assert bystander.poll() is None, "a pid from another namespace was signalled here"
+        assert outcome.invisible == (bystander.pid,)
+        assert len(registry.records()) == 1
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=10)
