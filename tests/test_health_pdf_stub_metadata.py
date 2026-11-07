@@ -384,6 +384,19 @@ def test_a_stub_only_in_an_unsampled_chunk_is_missed_and_the_output_says_it_was_
     assert row.ok and "clean on a sample" in row.detail, row.detail
 
 
+def test_a_post_pass_that_failed_mid_way_is_caught_by_the_sample(monkeypatch) -> None:
+    """nexus-4z845: the post-pass writes a document's own rows in 300-id batches in manifest order, one
+    after another, and stops at the first failure (HttpVectorClient.update_chunks), so the placeholder is
+    left on a SUFFIX of the manifest. The sample always reads the last chunk, so the suffix is seen (here only chunks 17 to 19, which no other probe of 0, 6, 13, 19 reaches) and the
+    document is then read in full. The pin: drop the last chunk from the sample and this goes green-blind."""
+    _legacy_collection(monkeypatch, [20] * 30, stub_chunks={(3, i) for i in range(17, 20)})
+
+    row = _row(health._check_pdf_stub_metadata())
+
+    assert not row.ok, row.detail
+    assert "/doc3.pdf" in row.detail and "3" in row.detail, row.detail
+
+
 def test_empty_and_repeated_manifest_chashes_do_not_take_probe_slots(monkeypatch) -> None:
     """A manifest row with no chash, or a repeat of one, is not a chunk. Left in, they shift the spread:
     here chunk 6, which the four probes of a clean 20-chunk document reach, would be skipped."""
