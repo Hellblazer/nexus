@@ -482,8 +482,9 @@ def _read_pending(config_dir: Path, address: str, *, prune: bool = False) -> lis
     pending lock may pass it.
 
     Version skew: a hook from before the ask branch ignores an entry that has no ``rendered`` text, so
-    when two plugin versions share one config dir an older hook acks the answer mail and never prints
-    it; the answer record in T2 is unaffected. A matched entry deliberately carries no row text, so it
+    when two plugin versions share one config dir an older hook drops a saved matched entry (it
+    rewrites the pending file from what it can read) and the answer mail is never printed; the answer
+    record in T2 is unaffected. A matched entry deliberately carries no row text, so it
     cannot be made readable to that version without printing sender text unframed."""
     try:
         raw = _pending_path(config_dir, address).read_text(encoding="utf-8")
