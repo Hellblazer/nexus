@@ -17,20 +17,26 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
 /**
- * nexus-v75nw: the dry runs of the retire-keys sweep that run in the background, so a tenant whose preconditions take
- * longer than the edge's origin timeout (about 30 s) can still be counted. {@code POST /v1/admin/chunk-keys/sweep}
- * with {@code "async": true} on a dry run starts one here and answers at once with its id; {@code GET
- * /v1/admin/chunk-keys/sweep/jobs/{id}} reads its stage and, when it has ended, the status and body the synchronous
- * call would have answered.
+ * nexus-v75nw: the dry runs and the applies of the retire-keys sweep that run in the background, so a tenant whose
+ * preconditions take longer than the edge's origin timeout (about 30 s) can still be counted, and an apply that takes
+ * hours is not a client loop that sends a root request every few seconds. {@code POST /v1/admin/chunk-keys/sweep}
+ * with {@code "async": true} starts one here and answers at once with its id; {@code GET
+ * /v1/admin/chunk-keys/sweep/jobs/{id}} reads its stage, its progress and, when it has ended, the status and body the
+ * synchronous call would have answered; {@code POST /v1/admin/chunk-keys/sweep/jobs/{id}/cancel} asks an apply job to
+ * stop at its next batch boundary.
  *
- * <p><b>Memory only.</b> A dry run writes nothing and is cheap to repeat, so the table is not persisted: a job is
- * lost with the engine process, and a poll for an id the engine does not hold is a 404 the client answers by
- * starting again. A finished job is kept for {@link #RETENTION} and at most {@link #MAX_RETAINED} are held.
+ * <p><b>Memory only.</b> The table is not persisted: a job is lost with the engine process, and a poll for an id the
+ * engine does not hold is a 404 the client answers by starting again (a dry run writes nothing; an apply that was
+ * running keeps what its committed batches swept, and the same command counts again and takes what is left). A
+ * finished job is kept for {@link #RETENTION} so its client can read the outcome, at most {@link #MAX_RETAINED} are
+ * held, and a finished job is only ever READ: a start never reuses one, it always runs (and so recounts).
  *
  * <p><b>Bounds.</b> At most {@link #MAX_RUNNING} jobs run at once, each holding one pooled connection at a time, and
  * {@link #QUEUE} more wait; a start past that is refused ({@link Busy}, 503) rather than queued without end. One
- * tenant has at most one running job: a second start with the same request is handed the running job, and one with a
- * different request is refused ({@link Conflict}) until it ends.
+ * tenant has at most one running job, dry run or apply: a second start with the same request is handed the running
+ * job, and one with a different request is refused ({@link Conflict}) until it ends. A job stops by itself at
+ * {@link #MAX_RUNTIME} of wall clock: the work asks {@link Job#stopReason()} at its own boundaries (a stage of a dry
+ * run, a batch of an apply), so a job is never cut mid-batch.
  *
  * <p><b>Tenant state.</b> A job holds its tenant's counts, so the registry is tenant-keyed state: {@link
  * #evictTenant} is the evictor the tenant reset route runs. The threads are daemon threads and {@link #shutdown}
@@ -44,6 +50,8 @@ public final class ChunkKeysSweepJobs {
     public static final int QUEUE = 8;
     /** How long a finished job is kept for its client to read. */
     public static final Duration RETENTION = Duration.ofMinutes(30);
+    /** The longest a job runs (wall clock from its start); the work stops at its next boundary past this. */
+    public static final Duration MAX_RUNTIME = Duration.ofHours(4);
     /** Jobs held at all (running, queued and finished); a start evicts the oldest finished ones past this. */
     public static final int MAX_RETAINED = 64;
 
@@ -54,6 +62,21 @@ public final class ChunkKeysSweepJobs {
         private final String wire;
 
         State(String wire) {
+            this.wire = wire;
+        }
+
+        public String wire() {
+            return wire;
+        }
+    }
+
+    /** What a job runs: the dry run (read only) or the apply (it sweeps). Only an apply can be cancelled. */
+    public enum Kind {
+        DRY_RUN("dry_run"), APPLY("apply");
+
+        private final String wire;
+
+        Kind(String wire) {
             this.wire = wire;
         }
 
@@ -74,10 +97,24 @@ public final class ChunkKeysSweepJobs {
         Outcome run(Consumer<String> stage) throws Exception;
     }
 
-    /** As {@link Work}, told the id of the job it runs as: the signed continuation of a finished dry run names it. */
+    /** As {@link Work}, told the job it runs as: its id, whether it was told to stop, and where to publish its progress. */
     @FunctionalInterface
     public interface JobWork {
-        Outcome run(String jobId, Consumer<String> stage) throws Exception;
+        Outcome run(Job job, Consumer<String> stage) throws Exception;
+    }
+
+    /** Thrown by the work of a dry run when its job was told to stop (the cap, or the tenant reset) at a stage boundary. */
+    public static final class Stopped extends RuntimeException {
+        private final String reason;
+
+        public Stopped(String reason) {
+            super("the job was stopped: " + reason);
+            this.reason = reason;
+        }
+
+        public String reason() {
+            return reason;
+        }
     }
 
     /** No thread and no queue place is free. */
@@ -87,18 +124,25 @@ public final class ChunkKeysSweepJobs {
         }
     }
 
-    /** The tenant has a running job for a different request. */
+    /** The tenant has a running job for a different request (a dry run and an apply are different requests). */
     public static final class Conflict extends RuntimeException {
         private final String jobId;
+        private final Kind kind;
 
-        Conflict(String jobId) {
-            super("a dry run of this tenant is already running with a different request (job " + jobId + "); wait "
-                + "for it to end, or poll it");
+        Conflict(String jobId, Kind kind) {
+            super("a " + (kind == Kind.APPLY ? "sweep" : "dry run") + " of this tenant is already running with a "
+                + "different request (job " + jobId + "); wait for it to end, or poll it");
             this.jobId = jobId;
+            this.kind = kind;
         }
 
         public String jobId() {
             return jobId;
+        }
+
+        /** What the running job is: a client that wanted to apply the same request may rejoin an apply. */
+        public Kind kind() {
+            return kind;
         }
     }
 
@@ -109,7 +153,16 @@ public final class ChunkKeysSweepJobs {
         private final String callerTenant;
         private final boolean root;
         private final String fingerprint;
+        private final Kind kind;
         private final long startedMs;
+        private final LongSupplier clockMs;
+        private final long maxRuntimeMs;
+        /** Set by {@link #requestCancel}: the apply stops at its next batch boundary. */
+        private volatile boolean cancelRequested;
+        /** The apply's progress so far, written by its worker and read by a poll; -1 remaining means not known yet. */
+        private volatile int batches;
+        private volatile long rowsSwept;
+        private volatile long remaining = -1;
         /** Set by the tenant reset while the job runs: it stays (the tenant keeps its one running job) but is unseen. */
         private volatile boolean evicted;
         private volatile String stage = "queued";
@@ -117,13 +170,71 @@ public final class ChunkKeysSweepJobs {
         private volatile Outcome outcome;
         private volatile long finishedMs;
 
-        private Job(String id, String tenant, String callerTenant, boolean root, String fingerprint, long startedMs) {
+        private Job(String id, String tenant, String callerTenant, boolean root, String fingerprint, Kind kind,
+                    LongSupplier clockMs, long maxRuntimeMs) {
             this.id = id;
             this.tenant = tenant;
             this.callerTenant = callerTenant;
             this.root = root;
             this.fingerprint = fingerprint;
-            this.startedMs = startedMs;
+            this.kind = kind;
+            this.clockMs = clockMs;
+            this.maxRuntimeMs = maxRuntimeMs;
+            this.startedMs = clockMs.getAsLong();
+        }
+
+        public Kind kind() {
+            return kind;
+        }
+
+        /**
+         * Asks a running apply to stop at its next batch boundary. False (and nothing changes) for a dry run, which
+         * writes nothing and has no batch to stop at, and for a job that has ended.
+         */
+        public boolean requestCancel() {
+            if (kind != Kind.APPLY || state != State.RUNNING) {
+                return false;
+            }
+            cancelRequested = true;
+            return true;
+        }
+
+        public boolean cancelRequested() {
+            return cancelRequested;
+        }
+
+        /**
+         * Why the work should stop at its next boundary, or null: {@code evicted} (the tenant reset dropped the job),
+         * {@code cancelled} (its starter asked), or {@code wall_clock_cap} ({@link #MAX_RUNTIME} since the start).
+         */
+        public String stopReason() {
+            if (evicted) {
+                return "evicted";
+            }
+            if (cancelRequested) {
+                return "cancelled";
+            }
+            return clockMs.getAsLong() - startedMs >= maxRuntimeMs ? "wall_clock_cap" : null;
+        }
+
+        /** The worker's publication of an apply's progress: batches run, rows swept (both over the whole job) and rows left. */
+        void progress(int batchesRun, long rows, long rowsLeft) {
+            this.batches = batchesRun;
+            this.rowsSwept = rows;
+            this.remaining = rowsLeft;
+        }
+
+        public int batches() {
+            return batches;
+        }
+
+        public long rowsSwept() {
+            return rowsSwept;
+        }
+
+        /** Rows still to sweep, or -1 before the apply's count has finished. */
+        public long remaining() {
+            return remaining;
         }
 
         public String id() {
@@ -167,6 +278,7 @@ public final class ChunkKeysSweepJobs {
     private final LongSupplier clockMs;
     private final Duration retention;
     private final int maxRetained;
+    private volatile Duration maxRuntime;
     private final ThreadPoolExecutor pool;
     private final Map<String, Job> jobs = new LinkedHashMap<>();
 
@@ -175,9 +287,15 @@ public final class ChunkKeysSweepJobs {
     }
 
     ChunkKeysSweepJobs(LongSupplier clockMs, Duration retention, int maxRetained, int running, int queue) {
+        this(clockMs, retention, maxRetained, running, queue, MAX_RUNTIME);
+    }
+
+    ChunkKeysSweepJobs(LongSupplier clockMs, Duration retention, int maxRetained, int running, int queue,
+                       Duration maxRuntime) {
         this.clockMs = clockMs;
         this.retention = retention;
         this.maxRetained = maxRetained;
+        this.maxRuntime = maxRuntime;
         AtomicInteger n = new AtomicInteger();
         this.pool = new ThreadPoolExecutor(running, running, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(queue), r -> {
@@ -187,49 +305,47 @@ public final class ChunkKeysSweepJobs {
             });
     }
 
+    /** Test seam (nexus-v75nw): the wall-clock cap of the jobs started from now on; a job already running keeps its own. */
+    public void maxRuntimeForTests(Duration maxRuntime) {
+        this.maxRuntime = maxRuntime;
+    }
+
     /** The clock in use, so a status answer's {@code elapsed_ms} reads the same one the jobs were stamped with. */
     public long nowMs() {
         return clockMs.getAsLong();
     }
 
     /**
-     * Starts {@code work} for {@code tenant}, or returns the job already running for that tenant when its request is
-     * the same ({@code fingerprint}; {@link Started#created} is then false). A work that throws ends the job {@code FAILED} with a 500.
+     * Starts the dry run {@code work} for {@code tenant}, or returns the job already running for that tenant when its
+     * request is the same ({@code fingerprint}; {@link Started#created} is then false). A work that throws ends the job
+     * {@code FAILED} with a 500.
      *
      * @throws Conflict a different request of this tenant is running
      * @throws Busy     every thread and queue place is taken
      */
     public synchronized Started start(String tenant, String callerTenant, boolean root, String fingerprint, Work work) {
-        return start(tenant, callerTenant, root, fingerprint, (id, stage) -> work.run(stage));
+        return start(tenant, callerTenant, root, Kind.DRY_RUN, fingerprint, (job, stage) -> work.run(stage));
     }
 
     /**
-     * As above, the work told its job's id. A start whose request equals a job of this tenant that FINISHED
-     * ({@link State#DONE}) inside the retention window is handed that job instead of a recount; a failed one is not
-     * reused, and the apply drops a tenant's finished jobs ({@link #evictFinished}) because its counts are stale then.
+     * As above for a job of {@code kind}, the work told its job. Only a RUNNING job is joined; a finished one is never
+     * handed to a new start, which always runs (a rerun after a refusal or a sweep must count again, not replay the
+     * outcome). Any other running job of the tenant, dry run or apply, is a {@link Conflict}.
      */
-    public synchronized Started start(String tenant, String callerTenant, boolean root, String fingerprint,
+    public synchronized Started start(String tenant, String callerTenant, boolean root, Kind kind, String fingerprint,
                                       JobWork work) {
         evictExpired();
-        Job finished = null;
         for (Job j : jobs.values()) {
-            if (!j.tenant.equals(tenant)) {
+            if (!j.tenant.equals(tenant) || j.state != State.RUNNING) {
                 continue;
             }
-            if (j.state == State.RUNNING) {
-                if (!j.evicted && j.fingerprint.equals(fingerprint) && j.startedBy(callerTenant, root)) {
-                    return new Started(j, false);
-                }
-                throw new Conflict(j.id);
+            if (!j.evicted && j.kind == kind && j.fingerprint.equals(fingerprint) && j.startedBy(callerTenant, root)) {
+                return new Started(j, false);
             }
-            if (j.state == State.DONE && j.fingerprint.equals(fingerprint) && j.startedBy(callerTenant, root)) {
-                finished = j;
-            }
+            throw new Conflict(j.id, j.kind);
         }
-        if (finished != null) {
-            return new Started(finished, false);
-        }
-        Job job = new Job(UUID.randomUUID().toString(), tenant, callerTenant, root, fingerprint, clockMs.getAsLong());
+        Job job = new Job(UUID.randomUUID().toString(), tenant, callerTenant, root, fingerprint, kind, clockMs,
+            maxRuntime.toMillis());
         try {
             pool.execute(() -> run(job, work));
         } catch (RejectedExecutionException e) {
@@ -244,14 +360,19 @@ public final class ChunkKeysSweepJobs {
         Outcome outcome;
         State end;
         try {
-            outcome = work.run(job.id, s -> job.stage = s);
+            outcome = work.run(job, s -> job.stage = s);
             end = outcome.httpStatus() == 200 ? State.DONE : State.FAILED;
         } catch (Throwable t) {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("tenant", job.tenant);
-            body.put("error", "the dry run failed: " + t.getClass().getSimpleName());
+            boolean apply = job.kind == Kind.APPLY;
+            body.put("error", "the " + (apply ? "apply" : "dry run") + " failed: " + t.getClass().getSimpleName());
             body.put("reason", "sweep_failed");
-            body.put("dry_run", true);
+            body.put("dry_run", !apply);
+            if (apply) {
+                body.put("rows_swept", job.rowsSwept);
+                body.put("rows_changed", job.rowsSwept > 0);
+            }
             outcome = new Outcome(500, body);
             end = State.FAILED;
         }
@@ -268,13 +389,6 @@ public final class ChunkKeysSweepJobs {
         return j == null || j.evicted ? null : j;
     }
 
-    /** Whether the engine still holds the finished job {@code id} of {@code tenant}: the life of its continuation. */
-    public synchronized boolean holdsFinished(String id, String tenant) {
-        evictExpired();
-        Job j = id == null ? null : jobs.get(id);
-        return j != null && !j.evicted && j.state == State.DONE && j.tenant.equals(tenant);
-    }
-
     /** Whether the tenant reset hid {@code id} while it ran (the worker then writes no outcome row). */
     public synchronized boolean evicted(String id) {
         Job j = jobs.get(id);
@@ -283,8 +397,9 @@ public final class ChunkKeysSweepJobs {
 
     /**
      * Drops every job of {@code tenant} (counted or started by it): the tenant reset route's evictor. A job that is
-     * still running cannot be stopped, and the tenant keeps its one-running-job guard until it ends, so it stays
-     * in the table marked {@link Job#evicted}: no poll finds it, a continuation made from it lapses, a start does not
+     * still running is not cut off (a dry run ends at its next stage, an apply at its next batch boundary, both told
+     * by {@link Job#stopReason()}), and the tenant keeps its one-running-job guard until it ends, so it stays
+     * in the table marked {@link Job#evicted}: no poll finds it, a start does not
      * join it, and its worker writes no outcome row into the reset tenant. Returns how many jobs this dropped or hid.
      */
     public synchronized int evictTenant(String tenant) {
@@ -304,16 +419,6 @@ public final class ChunkKeysSweepJobs {
             }
         }
         return n;
-    }
-
-    /**
-     * Drops the finished jobs of {@code tenant}: an apply that changed rows makes their counts stale, so neither a
-     * rerun may be handed one nor its continuation applied. A running job stays. Returns how many were dropped.
-     */
-    public synchronized int evictFinished(String tenant) {
-        int before = jobs.size();
-        jobs.values().removeIf(j -> j.state != State.RUNNING && j.tenant.equals(tenant));
-        return before - jobs.size();
     }
 
     /** Jobs held now. */

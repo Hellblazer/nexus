@@ -32,10 +32,19 @@ chunk row is read or changed; if it cannot write the outcome row after the work,
 Pacing: ``--max-rps`` holds every request the verb sends to that rate (the request gate, nexus-ldf2s). Run against
 the cloud, start with ``--max-rps 2``. An apply is a write and goes through the production-write guard
 (``NX_ALLOW_PROD_WRITE``, nexus-a2qhz).
+
+The dry run and the apply both run as engine JOBS (nexus-v75nw): the verb starts one and polls it on a back-off (2, 4, 8,
+16, then every 30 seconds), because the public edge cuts a request at about 30 seconds and alarms on a root
+credential's request rate. The apply job is this verb's old call loop run inside the engine: its first call counts
+every precondition itself and refuses on an unaccepted residue exactly as before, so a residue that grew since the dry
+run is seen. ``--wait-seconds`` bounds the wait; a timeout leaves the job running and the same command joins it. Ctrl-C
+asks whether to cancel the apply (it stops at the next batch boundary, never inside one) or leave it running. An engine
+without the job answers the dry run in one request and the apply a call at a time, and the verb says so.
 """
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 from typing import Any, NoReturn
 
@@ -132,16 +141,42 @@ def _swept_phrase(body: dict, swept_before: int) -> str:
 
 
 def _engine_error(exc: VectorServiceError, *, swept_before: int = 0,
-                  audits: list[tuple[str, dict]] | None = None) -> NoReturn:
+                  audits: list[tuple[str, dict]] | None = None, what: str = "dry run") -> NoReturn:
     if exc.reason == "sweep_job_not_found":
+        if what == "apply":
+            _fail(
+                "The engine no longer holds the apply job (it restarted, or the job expired) and a second start was "
+                "lost the same way. The batches it committed are kept; run the same command again to count and take "
+                "what is left.", EXIT_FAILED,
+            )
         _fail(
             "The engine no longer holds the dry-run job (it restarted, or the job expired) and a second start was "
             "lost the same way. Nothing was written; run the same command again.", EXIT_FAILED,
         )
     if exc.reason == "sweep_job_still_running":
+        if getattr(exc, "what", "dry run") == "apply":
+            _fail(
+                f"{exc} Rows may already have been swept: the batches the job committed are kept, and the job goes on "
+                "until the tenant is done, it is cancelled, or the engine stops it at 4 hours.", EXIT_FAILED,
+            )
         _fail(
             f"{exc} Nothing was written. The dry run is a read; the engine bounds how many it runs at once.",
             EXIT_FAILED,
+        )
+    if exc.reason == "sweep_job_left_running":
+        _fail(str(exc), EXIT_FAILED)
+    if exc.reason == "sweep_job_running":
+        running = exc.engine_body or {}
+        _fail(
+            f"The engine is already running a {'sweep' if running.get('kind') == 'apply' else 'dry run'} of this "
+            f"tenant for a different request (job {running.get('job_id')}). Nothing was written by this command. "
+            "Wait for it to end, then run the command again; the same request joins a running job.", EXIT_FAILED,
+        )
+    if exc.reason == "sweep_job_stopped":
+        stopped = (exc.engine_body or {}).get("stopped")
+        _fail(
+            f"The engine stopped the job ({stopped}) before it finished. Nothing was changed; run the same command "
+            "again.", EXIT_FAILED,
         )
     if exc.code == 404:
         _fail(
@@ -282,85 +317,73 @@ def _render_dry_run(report: dict, *, tenant: str) -> None:
         )
 
 
-def _dry_run_progress() -> Any:
-    """A progress sink for the dry run job: one stderr line when the engine's stage changes, and one a minute while it
-    stays on a stage, so a long count shows it is alive without a line per poll."""
+def _job_progress(what: str) -> Any:
+    """A progress sink for an engine job: one stderr line when the engine's stage changes, and one a minute while it
+    stays on a stage, so a long count or sweep shows it is alive without a line per poll. An apply's lines carry the
+    batches, the rows swept and the rows left."""
     state: dict[str, Any] = {"stage": None, "printed_ms": 0}
 
     def note(event: dict) -> None:
         kind = event.get("event")
         if kind == "synchronous":
-            click.echo("  This engine predates the background dry run: counted in the one request.", err=True)
+            click.echo(f"  This engine predates the background {what}: "
+                       + ("counted in the one request." if what == "dry run"
+                          else "sweeping with the synchronous loop, one request a call."), err=True)
         elif kind in ("started", "restarted"):
-            click.echo(f"  dry run {'restarted' if kind == 'restarted' else 'started'} as engine job "
+            click.echo(f"  {what} {'restarted' if kind == 'restarted' else 'started'} as engine job "
                        f"{event.get('job_id')}", err=True)
+        elif kind == "cancel_requested":
+            click.echo(f"  cancel asked of job {event.get('job_id')}: it stops at the next batch boundary", err=True)
         elif kind == "poll":
             stage, elapsed = event.get("stage"), int(event.get("elapsed_ms") or 0)
             if stage != state["stage"] or elapsed - state["printed_ms"] >= 60_000:
-                click.echo(f"  dry run {event.get('state')}: {stage} ({elapsed / 1000:.0f} s)", err=True)
+                detail = ""
+                if what == "apply" and event.get("rows_swept") is not None:
+                    left = event.get("remaining_rows")
+                    detail = (f" [{event.get('batches')} batches, {event.get('rows_swept')} rows swept"
+                              f"{'' if left is None else f', {left} left'}]")
+                click.echo(f"  {what} {event.get('state')}: {stage}{detail} ({elapsed / 1000:.0f} s)", err=True)
                 state["stage"], state["printed_ms"] = stage, elapsed
 
     return note
 
 
-def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int], collection: str | None,
-               batch_size: int | None, as_json: bool, operator: str | None = None,
-               wait_seconds: int | None = None) -> None:
-    audits: list[tuple[str, dict]] = []
+def _ask_cancel(job_id: str) -> bool:
+    """Ctrl-C while the apply job runs: True to cancel it (at the next batch boundary), False to leave it running.
+    Without a terminal there is nobody to ask, so the job is left running and its id is printed by the caller."""
+    if not sys.stdin.isatty():
+        return False
     try:
-        report = client.chunk_keys_dry_run(
-            accept=accept, collection=collection, batch_size=batch_size,
-            measure_batch=None if not apply else False, tenant=tenant, operator=operator,
-            progress=_dry_run_progress(), **({} if wait_seconds is None else {"max_wait_s": float(wait_seconds)}),
+        return click.confirm(
+            f"\n  Interrupted. Cancel the apply (job {job_id}) at its next batch boundary? "
+            "No leaves it running in the engine", default=False, err=True,
         )
-    except VectorServiceError as exc:
-        _engine_error(exc, audits=audits)
-    if report.get("tenant") != tenant:
-        _old_engine_tenant(tenant, report.get("tenant"))
-    if isinstance(report.get("audit"), dict):
-        audits.append(("dry run", report["audit"]))
-    # The engine's job hands out a signed continuation when nothing blocks (nexus-v75nw): the apply's first call
-    # carries it and goes straight to the batches. It is a token for this run, not part of the report: keep it out of
-    # what is printed. An engine without the job, or a blocked dry run, has none, and the apply counts for itself.
-    dry_run_resume = report.get("resume") if isinstance(report.get("resume"), dict) else None
-    report = {k: v for k, v in report.items() if k != "resume"}
-    out: dict[str, Any] = {"tenant": tenant, "dry_run": not apply, "report": report}
-    if not as_json:
-        _render_dry_run(report, tenant=tenant)
-        if not apply:
-            for ln in _audit_lines(audits):
-                click.echo(ln)
-    if not apply:
-        if as_json:
-            click.echo(json.dumps(out, indent=2, default=str))
-        else:
-            click.echo("Dry run: nothing written. Re-run with --apply.")
-        return
-    if report.get("blocking"):
-        if as_json:
-            out["audit"] = [{"call": label, **a} for label, a in audits]
-            click.echo(json.dumps(out, indent=2, default=str))
-        else:
-            for ln in _audit_lines(audits):
-                click.echo(ln)
-        _fail(
-            "Not applied: " + ", ".join(report["blocking"]) + " stand in the way. Accept each residue you have "
-            "judged with --accept NAME=N (N at least its live count), or fix it.", EXIT_PRECONDITION,
-        )
+    except (click.Abort, KeyboardInterrupt, EOFError):
+        return False
+
+
+def _sync_apply_loop(client: Any, first: dict | None, *, tenant: str, accept: dict[str, int],
+                     collection: str | None, batch_size: int | None, operator: str | None,
+                     audits: list[tuple[str, dict]]) -> tuple[int, int, dict]:
+    """The call loop of an engine without the apply job: one request a call, the continuation handed back each time.
+    ``first`` is the answer of a call already made (the engine ignored ``async`` and swept in that request)."""
     swept = 0
     calls = 0
     stalled = 0
     last: dict[str, Any] = {}
-    resume: dict[str, Any] | None = dry_run_resume
+    resume: dict[str, Any] | None = None
     while True:
-        try:
-            last = client.chunk_keys_sweep(
-                dry_run=False, accept=accept, collection=collection, batch_size=batch_size,
-                max_batches=_MAX_BATCHES, budget_seconds=_BUDGET_SECONDS, resume=resume, tenant=tenant,
-                operator=operator,
-            )
-        except VectorServiceError as exc:
-            _engine_error(exc, swept_before=swept, audits=audits)
+        if first is not None:
+            last, first = first, None
+        else:
+            try:
+                last = client.chunk_keys_sweep(
+                    dry_run=False, accept=accept, collection=collection, batch_size=batch_size,
+                    max_batches=_MAX_BATCHES, budget_seconds=_BUDGET_SECONDS, resume=resume, tenant=tenant,
+                    operator=operator,
+                )
+            except VectorServiceError as exc:
+                _engine_error(exc, swept_before=swept, audits=audits)
         if last.get("tenant") != tenant:
             _old_engine_tenant(tenant, last.get("tenant"))
         calls += 1
@@ -387,9 +410,120 @@ def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int],
         if stalled >= _STALL_LIMIT:
             _fail(f"Stopped: {stalled} calls in a row swept nothing and the engine says rows remain "
                   f"({last.get('remaining_rows')}; {locked} of them locked by a writer).", EXIT_STALLED)
+    return swept, calls, last
+
+
+def _apply_sweep(client: Any, *, tenant: str, accept: dict[str, int], collection: str | None,
+                 batch_size: int | None, operator: str | None, wait_seconds: int | None,
+                 audits: list[tuple[str, dict]]) -> tuple[int, int, dict, str | None]:
+    """Run the apply as an engine job (or, against an engine without one, as the old call loop). Returns the rows
+    swept, the calls made, the last answer and the job id (None for the old loop). An apply that ended without
+    finishing (cancelled, the 4-hour cap, a stall) is reported and exits non-zero here, after the audit rows."""
+    wait = {} if wait_seconds is None else {"max_wait_s": float(wait_seconds)}
+    try:
+        result = client.chunk_keys_apply(
+            accept=accept, collection=collection, batch_size=batch_size, max_batches=_MAX_BATCHES,
+            budget_seconds=_BUDGET_SECONDS, tenant=tenant, operator=operator, progress=_job_progress("apply"),
+            on_interrupt=_ask_cancel, **wait,
+        )
+    except VectorServiceError as exc:
+        _engine_error(exc, audits=audits, what="apply")
+    if result.job_id is None:
+        swept, calls, last = _sync_apply_loop(client, result.body, tenant=tenant, accept=accept, collection=collection,
+                                              batch_size=batch_size, operator=operator, audits=audits)
+        return swept, calls, last, None
+    last = result.body
+    if last.get("tenant") != tenant:
+        _old_engine_tenant(tenant, last.get("tenant"))
+    if isinstance(last.get("audit"), dict):
+        audits.append(("apply job", last["audit"]))
+    swept = int(last.get("rows_swept", 0))
+    calls = int(last.get("calls", 1))
+    click.echo(f"  apply job {result.job_id}: swept {swept} rows in {last.get('batches')} batches, "
+               f"{last.get('remaining_rows')} left{' (done)' if last.get('done') else ''}", err=True)
+    return swept, calls, last, result.job_id
+
+
+def _unfinished_apply(last: dict, *, job_id: str | None, swept: int, audits: list[tuple[str, dict]]) -> NoReturn:
+    """The apply job ended with rows left and not done: say why and exit non-zero (the batches it ran are kept)."""
+    for ln in _audit_lines(audits):
+        click.echo(ln)
+    left = last.get("remaining_rows")
+    stopped = last.get("stopped")
+    if stopped == "cancelled":
+        _fail(f"Cancelled at a batch boundary: {swept} rows swept, {left} left (job {job_id}). The batches that ran are "
+              "kept. Run the same command to take what is left.", EXIT_FAILED)
+    if stopped == "wall_clock_cap":
+        _fail(f"The engine stopped the apply at its 4-hour limit: {swept} rows swept, {left} left (job {job_id}). The "
+              "batches that ran are kept. Run the same command to take what is left.", EXIT_FAILED)
+    if last.get("stalled"):
+        _fail(f"Stopped: the job's calls swept nothing three times in a row and the engine says rows remain "
+              f"({left}; {last.get('locked_skipped_rows', 0)} of them locked by a writer).", EXIT_STALLED)
+    _fail(f"The apply ended with rows left ({left}) and did not finish (stopped: {stopped or 'unknown'}, job {job_id}). "
+          "Run the same command to take what is left.", EXIT_FAILED)
+
+
+def _run_sweep(client: Any, *, tenant: str, apply: bool, accept: dict[str, int], collection: str | None,
+               batch_size: int | None, as_json: bool, operator: str | None = None,
+               wait_seconds: int | None = None) -> None:
+    audits: list[tuple[str, dict]] = []
+    report: dict | None
+    try:
+        report = client.chunk_keys_dry_run(
+            accept=accept, collection=collection, batch_size=batch_size,
+            measure_batch=None if not apply else False, tenant=tenant, operator=operator,
+            progress=_job_progress("dry run"),
+            **({} if wait_seconds is None else {"max_wait_s": float(wait_seconds)}),
+        )
+    except VectorServiceError as exc:
+        body = exc.engine_body or {}
+        if not (apply and exc.reason == "sweep_job_running" and body.get("kind") == "apply"):
+            _engine_error(exc, audits=audits)
+        # An apply of this tenant is already running (this command's wait ran out, or it was interrupted): there is no
+        # dry run to wait for. Ask for the same apply; the engine joins it if the request is the same, else refuses.
+        click.echo(f"  an apply of this tenant is already running as engine job {body.get('job_id')}: joining it if "
+                   "this is the same request", err=True)
+        report = None
+    out: dict[str, Any] = {"tenant": tenant, "dry_run": not apply}
+    if report is not None:
+        if report.get("tenant") != tenant:
+            _old_engine_tenant(tenant, report.get("tenant"))
+        if isinstance(report.get("audit"), dict):
+            audits.append(("dry run", report["audit"]))
+        out["report"] = report
+        if not as_json:
+            _render_dry_run(report, tenant=tenant)
+            if not apply:
+                for ln in _audit_lines(audits):
+                    click.echo(ln)
+    if not apply:
+        if as_json:
+            click.echo(json.dumps(out, indent=2, default=str))
+        else:
+            click.echo("Dry run: nothing written. Re-run with --apply.")
+        return
+    if report is not None and report.get("blocking"):
+        if as_json:
+            out["audit"] = [{"call": label, **a} for label, a in audits]
+            click.echo(json.dumps(out, indent=2, default=str))
+        else:
+            for ln in _audit_lines(audits):
+                click.echo(ln)
+        _fail(
+            "Not applied: " + ", ".join(report["blocking"]) + " stand in the way. Accept each residue you have "
+            "judged with --accept NAME=N (N at least its live count), or fix it.", EXIT_PRECONDITION,
+        )
+    swept, calls, last, job_id = _apply_sweep(
+        client, tenant=tenant, accept=accept, collection=collection, batch_size=batch_size, operator=operator,
+        wait_seconds=wait_seconds, audits=audits,
+    )
+    if job_id is not None and not last.get("done"):
+        _unfinished_apply(last, job_id=job_id, swept=swept, audits=audits)
     out["applied"] = {"rows_swept": swept, "calls": calls, "remaining_rows": last.get("remaining_rows"),
                       "locked_skipped_rows": last.get("locked_skipped_rows", 0),
                       "blocked_collections": last.get("blocked_collections", [])}
+    if job_id is not None:
+        out["applied"]["job_id"] = job_id
     out["audit"] = [{"call": label, **a} for label, a in audits]
     if as_json:
         click.echo(json.dumps(out, indent=2, default=str))
@@ -492,9 +626,11 @@ def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) ->
 @click.option("--validate", "validate", is_flag=True, default=False,
               help="Table-wide, operator only: VALIDATE the chunk CHECKs. Needs --apply.")
 @click.option("--wait-seconds", "wait_seconds", type=click.IntRange(1, 86400), default=None, metavar="N",
-              help="How long to wait for the dry run before giving up on waiting (default 1800). The count runs as a "
-                   "background job in the engine, because a large tenant's takes longer than the public edge allows "
-                   "one request; giving up leaves the job running, and running the same command again joins it.")
+              help="How long to wait for each engine job before giving up on waiting (default 1800 for the dry run, "
+                   "15300 for the apply). Both run as background jobs in the engine, because a large tenant's count "
+                   "takes longer than the public edge allows one request; giving up leaves the job running (an apply "
+                   "keeps sweeping), and running the same command again joins it. Ctrl-C asks whether to cancel the "
+                   "apply (it stops at the next batch boundary) or leave it running.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit one JSON document.")
 def retire_keys_cmd(tenant: str | None, operator: str | None, dry_run: bool, apply: bool, accept: tuple[str, ...], collection: str | None,
                     batch_size: int | None, max_rps: float | None, add_check: bool, replace: bool, validate: bool,

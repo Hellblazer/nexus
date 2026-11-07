@@ -529,6 +529,8 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("ChunkKeysSweepJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
                 + "job that holds it is evicted under ChunkKeysSweepJobs.jobs");
             notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
+            notKeyed.put("ChunkKeysSweepJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
+                + "settable by a test): no tenant's data");
             for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
                 "PgVectorRepository.tenantScope", "ReaperRepository.tenantScope", "WhoamiHandler.tenantScope",
                 "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope",
@@ -560,12 +562,6 @@ public class TenantKeyedStateGateTest {
                 "ChunkKeySweep.Resume.blocked")) {
                 notKeyed.put(f, "a component of one sweep call's result record, built for that request and dropped "
                     + "with its response; nothing keeps it between requests");
-            }
-            for (String f : List.of("ChunkKeySweep.Origin.accepted", "ChunkKeySweep.Origin.preconditions",
-                "ChunkKeySweep.Origin.rows")) {
-                notKeyed.put(f, "a component of the signed continuation a finished dry run hands the client (nexus-"
-                    + "v75nw): the engine keeps none of it, the client carries it, and it is honoured only while the "
-                    + "job it names is held, which the tenant reset evicts under ChunkKeysSweepJobs.jobs");
             }
             notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
                 + "tenant name beside its counts), built for that request and dropped with its response");
