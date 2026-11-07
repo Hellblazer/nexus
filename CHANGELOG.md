@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **A storage supervisor refused for a cluster below PostgreSQL 17 now stays up instead of exiting** (nexus-3qhls). Before, it exited non-zero and the OS unit (launchd, systemd, the Windows task) respawned it every 30 seconds forever, logging the same refusal each time. Now it logs the refusal once (`storage_service_cluster_below_floor`) and re-reads the cluster's `PG_VERSION` every five minutes. Once the cluster has been upgraded it starts with no further action, and a stop request while it waits exits 0. Any other start failure still exits as before, so the OS restart policy of RDR-175 is unchanged.
+- **A storage supervisor refused for a cluster below PostgreSQL 17 now stays up instead of exiting** (nexus-3qhls). Before, it exited non-zero and the OS unit (launchd, systemd, the Windows task) respawned it every 30 seconds forever, logging the same refusal each time. Now it logs the refusal once (`storage_service_cluster_below_floor`) and re-reads the cluster's `PG_VERSION` every 5 seconds. Once the cluster has been upgraded with `pg_upgrade` it starts in place; if it was moved aside and `nx init` re-run instead, the supervisor exits so the OS unit restarts it with the new credentials. A stop request while it waits exits 0 on every platform. `nx daemon service start` and `nx init --service` now refuse such a stopped cluster themselves, before starting a unit or a supervisor, so they report the refusal at once, and `nx daemon service status` prints it beside "No storage service lease found" (`refused` in `--json`). Any other start failure exits as before, so the OS restart policy of RDR-175 is unchanged.
 
 ### Fixed
 

@@ -164,6 +164,7 @@ class _BelowFloorSup:
 
     def __init__(self, pgdata: Path, *, upgrade_after_first: bool = False, error: Exception | None = None) -> None:
         self._creds = {"PG_DATA": str(pgdata)}
+        self._config_dir = pgdata.parent
         self._pgdata = pgdata
         self._upgrade_after_first = upgrade_after_first
         self._error = error
@@ -212,11 +213,58 @@ def test_a_below_floor_supervisor_starts_once_the_cluster_reaches_the_floor(
 
 
 def test_any_other_start_failure_still_raises_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 3600.0)  # a wait would hang the test
+    monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 0.01)
+    stop = threading.Event()
+    threading.Timer(2.0, stop.set).start()  # bounds a wrong wait: it would end in exit 0, not the raise
     sup = _BelowFloorSup(_pgdata(tmp_path, "17"), error=StorageServiceStartError("PG_DATA not found"))
     with pytest.raises(StorageServiceStartError, match="PG_DATA not found"):
-        ssd._supervise_until_stopped(sup, threading.Event(), lambda: None)  # type: ignore[arg-type]
+        ssd._supervise_until_stopped(sup, stop, lambda: None)  # type: ignore[arg-type]
     assert sup.starts == 1
+
+
+class _CountingStop(threading.Event):
+    """A stop event that records every wait's timeout and sets itself on the third wait."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeouts: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.timeouts.append(timeout)
+        if len(self.timeouts) >= 3:
+            self.set()
+        return self.is_set()
+
+
+def test_the_below_floor_wait_ticks_so_a_windows_stop_is_seen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A SIGBREAK handler runs only between waits on the main thread (RDR-224); one long wait hid it for 300 s.
+    monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 30.0)
+    sup = _BelowFloorSup(_pgdata(tmp_path, "16"))
+    stop = _CountingStop()
+    assert ssd._supervise_until_stopped(sup, stop, lambda: None) == 0  # type: ignore[arg-type]
+    assert len(stop.timeouts) == 3
+    assert all(w is not None and w <= ssd.DEFAULT_HEARTBEAT_INTERVAL for w in stop.timeouts), stop.timeouts
+
+
+def test_a_reinit_while_waiting_exits_3_for_a_fresh_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The waiting process holds the old port and password; the OS unit's restart reads the new ones.
+    monkeypatch.setattr(ssd, "_BELOW_FLOOR_RECHECK_S", 0.01)
+    pgdata = _pgdata(tmp_path, "16")
+    (tmp_path / pp.CREDENTIALS_FILENAME).write_text("PG_PORT=5433\n")
+    sup = _BelowFloorSup(pgdata)
+
+    def reinit() -> None:  # moved aside and re-initialised while the supervisor waits
+        (tmp_path / pp.CREDENTIALS_FILENAME).write_text("PG_PORT=6543\n")
+        (pgdata / "PG_VERSION").write_text(f"{PG_VERSION_FLOOR}\n")
+
+    threading.Timer(0.2, reinit).start()
+    assert ssd._supervise_until_stopped(sup, threading.Event(), lambda: None) == 3  # type: ignore[arg-type]
+    assert sup.starts == 1
+    assert sup.stops == 1
+
+
+def test_the_recheck_is_short_enough_for_a_unit_start_to_see_the_engine() -> None:
+    assert ssd._BELOW_FLOOR_RECHECK_S <= 10 < daemon_mod._UNIT_START_WAIT_S
 
 
 class _ReachedStart(Exception):
@@ -258,6 +306,38 @@ def test_the_cli_refuses_a_below_floor_cluster_before_starting_any_supervisor(
     assert isinstance(err.value.__cause__, PgClusterBelowFloorError)
     assert "A local cluster older than PostgreSQL 17" in str(err.value)
     assert start_paths == []
+
+
+def test_the_cli_leaves_a_running_old_cluster_to_the_engine(
+    tmp_path: Path, start_paths: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The supervisor refuses only a stopped cluster (nexus-hck2c); the CLI check follows the same rule.
+    monkeypatch.setattr(ssd, "_port_accepting", lambda host, port: True)
+    with pytest.raises(_ReachedStart):
+        daemon_mod.ensure_storage_supervisor(_cli_config(tmp_path, "16"))
+    assert start_paths == ["unit"]
+
+
+def test_a_refused_start_leaves_the_stop_marker(tmp_path: Path, start_paths: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    import nexus.daemon.service_registry as sr
+
+    cleared: list[object] = []
+    monkeypatch.setattr(sr, "clear_stop_marker", lambda *a, **kw: cleared.append(a))
+    with pytest.raises(StorageServiceStartError):
+        daemon_mod.ensure_storage_supervisor(_cli_config(tmp_path, "16"))
+    assert cleared == []
+
+
+def test_status_says_why_no_lease_exists(tmp_path: Path) -> None:
+    from click.testing import CliRunner
+
+    config_dir = _cli_config(tmp_path, "16")
+    result = CliRunner().invoke(daemon_mod.service_status_cmd, ["--config-dir", str(config_dir)])
+    assert result.exit_code == 1
+    assert "No storage service lease found" in result.output
+    assert "A local cluster older than PostgreSQL 17" in result.output
+    as_json = CliRunner().invoke(daemon_mod.service_status_cmd, ["--config-dir", str(config_dir), "--json"])
+    assert "A local cluster older than PostgreSQL 17" in as_json.output
 
 
 def test_the_cli_starts_a_cluster_at_the_floor_as_before(tmp_path: Path, start_paths: list[str]) -> None:

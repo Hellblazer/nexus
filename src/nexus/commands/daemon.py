@@ -619,10 +619,11 @@ def _migration_halt_cause(supervisor_error: str | None, engine_marks: dict[Path,
 
 
 def _refuse_cluster_below_floor_before_start(config_dir: Path) -> None:
-    """Raise StorageServiceStartError when the bundled cluster's PG_VERSION is below the floor (nexus-3qhls).
+    """Raise StorageServiceStartError when the stopped bundled cluster's PG_VERSION is below the floor (nexus-3qhls).
 
-    Missing or unreadable credentials, and a config with no PG_DATA (managed PostgreSQL), are
-    left to the supervisor, which reports them itself.
+    The same rule as the supervisor's own refusal: a cluster already accepting on its port is left
+    to the engine. Missing or unreadable credentials, and a config with no PG_DATA (managed
+    PostgreSQL), are left to the supervisor, which reports them itself.
     """
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -638,6 +639,9 @@ def _refuse_cluster_below_floor_before_start(config_dir: Path) -> None:
     pg_data = creds.get("PG_DATA", "")
     if not pg_data:
         return
+    port = creds.get("PG_PORT", "")
+    if port.isdigit() and _ssd._port_accepting(_ssd._SERVICE_HOST, int(port)):
+        return  # a running cluster is the engine's to refuse, as in the supervisor (nexus-hck2c)
     try:
         refuse_cluster_below_floor(Path(pg_data))
     except PgClusterBelowFloorError as exc:
@@ -709,6 +713,14 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = service_identity()
+    # nexus-3qhls: a stopped cluster below the PostgreSQL floor is refused here,
+    # before anything starts and before the stop marker below is cleared (a
+    # refused start must not undo a stop). A supervisor that meets the refusal
+    # itself stays up and waits for an upgrade, which is right for the unit's
+    # own supervisor (the OS would otherwise respawn it every 30 s); one started
+    # from here would linger, and this caller would wait out the lease timeout
+    # instead of saying why.
+    _refuse_cluster_below_floor_before_start(config_dir)
     # A start is the user's "run again": it ends any earlier stop request, whether
     # or not a supervisor turns out to be running already (RDR-224, nexus-f9bgu.33).
     clear_stop_marker(config_dir, "storage_service", scope)
@@ -755,13 +767,6 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     # (``nx daemon service start``, ``nx init --service``, the replace-quiesce
     # restart). The unit's own ``--foreground`` supervisor never comes through
     # here: it runs ``run_storage_supervisor`` directly.
-    # nexus-3qhls: a cluster below the PostgreSQL floor is refused here, before
-    # anything starts. A supervisor that meets the refusal itself stays up and
-    # waits for an upgrade (right for the unit's own supervisor, which the OS
-    # would otherwise respawn every 30 s), so one started from here would linger
-    # and this caller would wait out the lease timeout instead of saying why.
-    _refuse_cluster_below_floor_before_start(config_dir)
-
     via_unit = _start_via_autostart_unit(config_dir, registry, scope)
     if via_unit is not None:
         return via_unit
@@ -1887,6 +1892,12 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     record = registry.discover(scope)
 
     if record is None:
+        # nexus-3qhls: a supervisor refused for an old cluster stays up without a lease; say why.
+        refusal: str | None = None
+        try:
+            _refuse_cluster_below_floor_before_start(config_dir)
+        except Exception as exc:  # noqa: BLE001 — status reports; it never fails on the reason lookup
+            refusal = str(exc)
         if as_json:
             # nexus-sis0m.4: --json promises JSON on stdout; a script parsing
             # it got plain text (shakeout 7.64.1 Surface E F11). Still exit 1.
@@ -1897,12 +1908,15 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
                 "detail": "No storage service lease found; this install either "
                           "runs against a managed endpoint or the local service "
                           "is not running (nx daemon service start).",
+                **({"refused": refusal} if refusal else {}),
             }, indent=2))
             sys.exit(1)
         click.echo(
             "No storage service lease found — is the service running?",
             err=True,
         )
+        if refusal:
+            click.echo(refusal, err=True)
         sys.exit(1)
 
     ep = record.endpoint

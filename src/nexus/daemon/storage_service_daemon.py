@@ -3557,8 +3557,28 @@ def _announce_reembed_hint() -> None:
         _log.debug("reembed_hint_failed", error=str(exc))
 
 
-_BELOW_FLOOR_RECHECK_S: float = 300.0
-"""How often a supervisor holding a below-floor refusal re-reads PG_VERSION (nexus-3qhls)."""
+_BELOW_FLOOR_RECHECK_S: float = 5.0
+"""How often a supervisor holding a below-floor refusal re-reads PG_VERSION (nexus-3qhls).
+
+One small file read. Short enough that a start through the autostart unit after an upgrade
+(``_UNIT_START_WAIT_S``, 60 s) sees the engine come up instead of timing out."""
+
+
+class _ClusterFloorWait:
+    """What a below-floor wait ended with (nexus-3qhls)."""
+
+    STOPPED = "stopped"  # a stop request arrived: exit 0
+    RETRY = "retry"  # the marker passes and the credentials are unchanged: start again in place
+    RESTART = "restart"  # the marker passes but the credentials changed (a re-init): exit for a fresh process
+
+
+def _creds_file_bytes(config_dir: Path) -> bytes | None:
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import — pg_provision is loaded only on this path
+
+    try:
+        return (config_dir / CREDENTIALS_FILENAME).read_bytes()
+    except OSError:
+        return None
 
 
 def _wait_for_cluster_at_floor(
@@ -3566,19 +3586,23 @@ def _wait_for_cluster_at_floor(
     exc: StorageServiceStartError,
     stop_requested: threading.Event,
     flush_logging: Callable[[], None],
-) -> bool:
+) -> str | None:
     """Hold a below-floor refusal until the cluster reaches the floor or a stop arrives (nexus-3qhls).
 
-    Returns False when ``exc`` is not that refusal, so the caller re-raises it unchanged. Otherwise
-    logs the refusal once, re-reads the cluster's PG_VERSION every ``_BELOW_FLOOR_RECHECK_S`` and
-    returns True when the marker no longer refuses or ``stop_requested`` is set; the caller tells
-    the two apart by the event.
+    Returns None when ``exc`` is not that refusal, so the caller re-raises it unchanged. Otherwise
+    logs the refusal once and re-reads the cluster's PG_VERSION every ``_BELOW_FLOOR_RECHECK_S``,
+    returning a :class:`_ClusterFloorWait` value. The wait is a loop of waits no longer than
+    ``DEFAULT_HEARTBEAT_INTERVAL``: on Windows a SIGBREAK handler runs only between them (RDR-224,
+    src/nexus/daemon/AGENTS.md). When the marker passes, a credentials file that changed since the
+    refusal (the cluster was moved aside and ``nx init`` re-run) asks for a fresh process, since
+    this one holds the old port, password and artifact.
     """
     from nexus.db.pg_provision import PgClusterBelowFloorError, refuse_cluster_below_floor  # noqa: PLC0415 — deferred import — pg_provision is loaded only on this path
 
     if not isinstance(exc.__cause__, PgClusterBelowFloorError):
-        return False
+        return None
     pgdata = Path(sup._creds.get("PG_DATA", ""))
+    creds_at_refusal = _creds_file_bytes(sup._config_dir)
     _log.error(
         "storage_service_cluster_below_floor",
         error=str(exc),
@@ -3586,14 +3610,19 @@ def _wait_for_cluster_at_floor(
         msg="waiting for the cluster to be upgraded; the supervisor stays up and does not exit",
     )
     flush_logging()
-    while not stop_requested.wait(_BELOW_FLOOR_RECHECK_S):
+    while True:
+        deadline = time.monotonic() + _BELOW_FLOOR_RECHECK_S
+        while (left := deadline - time.monotonic()) > 0:
+            if stop_requested.wait(min(left, DEFAULT_HEARTBEAT_INTERVAL)):
+                return _ClusterFloorWait.STOPPED
         try:
             refuse_cluster_below_floor(pgdata)
         except PgClusterBelowFloorError:
             continue
-        _log.info("storage_service_cluster_at_floor", pgdata=str(pgdata))
-        return True
-    return True
+        changed = _creds_file_bytes(sup._config_dir) != creds_at_refusal
+        _log.info("storage_service_cluster_at_floor", pgdata=str(pgdata), credentials_changed=changed)
+        flush_logging()
+        return _ClusterFloorWait.RESTART if changed else _ClusterFloorWait.RETRY
 
 
 def _supervise_until_stopped(
@@ -3615,8 +3644,9 @@ def _supervise_until_stopped(
     A cluster below the PostgreSQL floor is a permanent refusal, so exiting
     on it would only buy an OS respawn every 30 s forever (nexus-3qhls). The
     supervisor stays up instead, re-reads the cluster's version marker every
-    ``_BELOW_FLOOR_RECHECK_S`` and starts once it reaches the floor; a stop
-    while it waits exits 0. Nothing gives up, and nothing respawns."""
+    ``_BELOW_FLOOR_RECHECK_S`` and starts once it reaches the floor (or exits 3
+    for a fresh process when the credentials changed meanwhile); a stop while
+    it waits exits 0. Nothing gives up, and nothing respawns."""
     while True:
         try:
             sup.start(stop_requested=stop_requested)
@@ -3642,13 +3672,15 @@ def _supervise_until_stopped(
             sup.stop()
             return 0
         except StorageServiceStartError as exc:
-            if not _wait_for_cluster_at_floor(sup, exc, stop_requested, flush_logging):
+            waited = _wait_for_cluster_at_floor(sup, exc, stop_requested, flush_logging)
+            if waited is None:
                 raise
-            if stop_requested.is_set():
-                flush_logging()
-                sup.stop()
-                return 0
-            continue
+            if waited == _ClusterFloorWait.RETRY:
+                continue
+            sup.stop()
+            # A stop is a stand-down (0). New credentials need a fresh process: exit 3 so the OS
+            # unit restarts the supervisor, which reads them (RDR-175's ordinary restart).
+            return 0 if waited == _ClusterFloorWait.STOPPED else 3
         break
 
     # GH #1369, shared across tiers (RDR-149 §shared primitive) via
