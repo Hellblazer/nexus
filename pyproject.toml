@@ -71,6 +71,11 @@ dependencies = [
     # locked 0.14.21; the existing <0.15 cap already sat at that minor's
     # next, so only the floor moved.
     "llama-index-core>=0.14.21,<0.15",
+    # RDR-242 Phase 1 Step 1 (nexus-mdbds.3): the sandboxed Lua 5.4 runtime
+    # (lupa.lua54), run in a bare `python -I` worker. Wheels for every
+    # platform the resolve gates compile (Linux x86_64/aarch64, Windows x64,
+    # macOS arm64; cp312 and cp313). Capped at the next major.
+    "lupa>=2.8,<3",
     "markdown-it-py>=4.0.0,<5",
     "msgpack>=1.0,<2",
     "numpy>=1.24,<3",
