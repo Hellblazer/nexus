@@ -94,8 +94,11 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       returns fewer owners than the cap or no row, and neither a narrower filter nor a document-key filter
  *       reaches the ones past the bound (the filter runs after the lookup); only route (b) does. The {@code
  *       shared} decision is taken over the documents the lookup read: two of them make the chunk shared, and a
- *       lookup that read one document asks the database whether any other document holds the chunk, so a
- *       capped or bounded hit is not mistaken for an unshared one. Both bounds apply to this stage only, which a
+ *       lookup that read one document asks the database whether any other document holds the chunk (only
+ *       when some occurrence has a NULL span field, since otherwise the flag cannot matter), so a capped or
+ *       bounded hit is not mistaken for an unshared one. The bound is on documents only: one document's own
+ *       repeats of the chunk are not bounded, so the rows read per chash can reach 64 times the positions a
+ *       document holds it at (a repeated page footer holds it at tens or hundreds). Both bounds apply to this stage only, which a
  *       search runs when its {@code where} names a label key or a document key (route (a)); route (b)
  *       (metadata-scoped, graph-hop, aspect-scoped and {@code manifest_search_*} reads) returns one row per owner
  *       and is neither capped nor bounded.</li>
@@ -339,7 +342,9 @@ final class ManifestLabelStage {
      * times {@link #MAX_OWNERS_PER_HIT}, so a filter that rejects most holders of a chunk still finds its owners.
      * Without it a boilerplate chunk held by thousands of documents moved every one of them to the engine's heap
      * per hit before five were kept. Documents are the unit, not positions: one document may hold a chunk at
-     * many positions (a repeated page footer), and it must not use up the bound for the others.
+     * many positions (a repeated page footer), and it must not use up the bound for the others. So the bound is on
+     * documents only: one document's own repeats are unbounded, and the rows read per chash can reach 64 times the
+     * positions a document holds the chunk at.
      *
      * <p>What it drops: a document past the first 64 live holders is never seen. A hit whose first 64 holders
      * all fail the filter returns no row, and one whose passing owners straddle the bound returns only those

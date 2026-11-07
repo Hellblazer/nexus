@@ -594,7 +594,12 @@ critiqued once before Sam's gate decision (T2
   reaches the owners past the bound; a narrower filter does not, because the
   filter runs after the lookup. The `shared` decision is taken over the
   documents read: two of them make the chunk shared, and a lookup that read one
-  document asks the database whether any other document holds the chunk.
+  document asks the database whether any other document holds the chunk, but
+  only when some occurrence lacks a span field (otherwise the flag cannot
+  matter). The bound is on documents only: one document's own repeats of the
+  chunk are not bounded, so the rows read per chash can reach 64 times the
+  positions a document holds it at (a repeated page footer holds it at tens or
+  hundreds).
   What it saves: the rows sent to the engine's Java side, the projection and
   detoast of the wide columns of the rows past the bound, and the Java objects
   built from them. What it does not save: the database still visits every
@@ -602,6 +607,16 @@ critiqued once before Sam's gate decision (T2
   join) and sorts them, so the statement's cost is not bounded. Bounding it
   would take an index on `(tenant_id, chash, doc_id, position)`, which is not
   added; that is a separate decision.
+  Measured 2026-11-07 (PostgreSQL 17, `EXPLAIN (ANALYZE, SERIALIZE, BUFFERS)`,
+  warm, median of 5, about 6,000 documents with wide rows): one chash held by
+  5,000 documents runs 1.19 ms bounded against 6.20 ms unbounded and sends 17 kB
+  against 1,342 kB (client wall 4.0 against 13.2 ms); the ordinary page, 100 keys
+  held by 1 to 3 documents each, runs 1.38 ms bounded against 0.69 ms unbounded
+  with the same rows (client wall 4.1 against 2.6 ms), the per-key LATERAL loop's
+  cost. Kept as the reversible default: the hot-path cost is under a millisecond
+  a page, the boilerplate saving is the engine-heap problem nexus-6cmam was
+  filed for. If the hot-path cost matters, the next lever is the unbounded form
+  with a per-chash `dense_rank()` by `doc_id` cut before the projection.
 
 ### Critical Assumptions
 

@@ -531,8 +531,12 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
      * carries a char-end key and its manifest row has every span but the char end (a partial NULL); c3 records a TTL no
      * owner records; note.1 has no put_at and no collection; the owner document and doc.notags lack derived meta keys
      * (the first lacks all three, the second only tags). c5/c6 break the two equalities, c8 is half stamped, c9
-     * carries a row key in a live collection. Counter-examples, counted by nothing: c11 carries a line key and its
-     * manifest row holds all four spans; note.2 has a put_at and a collection; doc.full holds every derived key.
+     * carries a row key in a live collection. c12 is owned by a manifest row that is unwritten and carries a section
+     * type and nothing else (the branch of the labels_written CHECK's OR no other row reaches); c13 is held only by
+     * {@code doc.dead}, a TOMBSTONED document, whose manifest row is unwritten with a title: the CHECK covers every
+     * manifest row, live or not, so the census (a) counts it. Counter-examples, counted by nothing: c11 carries a line
+     * key and its manifest row holds all four spans; note.2 has a put_at and a collection; doc.full holds every derived
+     * key; doc.dead itself (its one row is c13's).
      */
     private record Pre(String tenant, String token, String live) {}
 
