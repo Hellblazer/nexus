@@ -6436,6 +6436,19 @@ def _run_index(
     # RDR-243 Q8: files --sensitive-glob matched, and those the catalog now holds flagged.
     _sensitive_wanted: set[Path] = set()
     _sensitive_confirmed: set[Path] = set()
+    # RDR-243 Q8: how many of the files this run visited each --sensitive-glob pattern matched
+    # (a pattern that matched none is a typo or a stale pattern, and the CLI says so loudly).
+    _sensitive_glob_counts: dict[str, int] = {}
+    if sensitive_globs:
+        from nexus.sensitive_write import sensitive_glob_hits  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+        _sensitive_glob_counts = {g: 0 for g in sensitive_globs}
+        for _abs, _ct, _coll in indexed_for_catalog:
+            try:
+                _rel = str(_abs.relative_to(repo))
+            except ValueError:
+                _rel = _abs.name
+            for _gi in sensitive_glob_hits(_rel, sensitive_globs):
+                _sensitive_glob_counts[sensitive_globs[_gi]] += 1
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -8147,6 +8160,8 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
+        # RDR-243 Q8: per --sensitive-glob pattern, the files this run visited that it matched ({} without the option).
+        "sensitive_glob_counts": _sensitive_glob_counts,
         # nexus-wbfpw.29 round 3 through round 5 carried a
         # "self_heal_confirmed_doc_ids" stat here (tumblers this run's own
         # self-heal pass provably fully repaired, per ManifestHealResult.

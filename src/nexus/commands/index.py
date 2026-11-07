@@ -971,6 +971,33 @@ class _PhaseHeartbeat:
             self._echo(msg, True)
 
 
+def _echo_sensitive_glob_counts(globs: tuple[str, ...], stats: dict, *, since_head: bool) -> None:
+    """Print, per ``--sensitive-glob`` pattern, how many visited files it matched, and warn on zero (RDR-243 Q8).
+
+    A pattern that matched nothing is a typo or a stale pattern, and the files it was meant to protect were
+    indexed as ordinary: a sweep that found nothing is a failure, not a pass. The warning goes to stderr.
+    """
+    counts = stats.get("sensitive_glob_counts") or {}
+    click.echo("  --sensitive-glob matches:")
+    unmatched: list[str] = []
+    for g in globs:
+        n = int(counts.get(g, 0))
+        click.echo(f"    {g}: {n} file(s)")
+        if n == 0:
+            unmatched.append(g)
+    for g in unmatched:
+        extra = (
+            " --since-head visits only the files changed since the last run, so a file this pattern "
+            "protects may simply not have changed; run without --since-head to sweep every file."
+            if since_head else ""
+        )
+        click.echo(
+            f"WARNING: --sensitive-glob {g!r} matched 0 files. Check the pattern: a file it was meant to "
+            f"protect was NOT flagged sensitive.{extra}",
+            err=True,
+        )
+
+
 @index.command("repo")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
@@ -1676,6 +1703,8 @@ def index_repo_cmd(
                 f"  skipped: index fresh (use --force) — {skipped_files} of "
                 f"{n} file(s) unchanged"
             )
+        if sensitive_globs and not frecency_only:
+            _echo_sensitive_glob_counts(tuple(sensitive_globs), stats, since_head=since_head)
         if not frecency_only and stats:
             rdr_indexed = stats.get("rdr_indexed", 0)
             rdr_current = stats.get("rdr_current", 0)
