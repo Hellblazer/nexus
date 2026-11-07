@@ -2,12 +2,12 @@
 title: "A Sandboxed Lua Runtime over the Nexus Surface: Client-Side, Read-Only First"
 id: RDR-242
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-11-02
-accepted_date:
+accepted_date: 2026-11-07
 related_issues: ["nexus-mdbds.1", "nexus-mdbds"]
 related_rdrs: [RDR-239, RDR-240, RDR-110, RDR-111, RDR-205]
 ---
@@ -1258,3 +1258,4 @@ scope change and the round 2 findings named.
   measurement, Phase 1 Step 1 on a bare child process, and the static
   check in the worker. Technical Design renumbered 1 to 13.
 - 2026-11-07: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `55954c930`; critique `nexus_rdr/242-gate-critique-2026-11-07-r3`.
+- 2026-11-07: Accepted (Sam, "Accept, fold residuals"). Residual dispositions: S1, S2, S3, S4 and S5 carried by bead nexus-mdbds (stage 3 implementation), each with its Implementation Plan phase.
