@@ -373,9 +373,17 @@ and leave legacy entries as they parse today:
 
 1. `session:` leaves `_IGNORED_KEYS`; it is read for routing only.
    Freshness still comes from the T2 row's time.
-2. An `ask:` line opens an ask block. The block ends at the next `ask:`, the
-   next heading, or the next thread field (`ref:`, `refs:`, `state:`,
-   `waiting_on:`, `needs_sam:`). Ask keys outside a block are notes.
+2. An `ask: <id>` line opens an ask block when at least one ask-level line
+   (`asked`, `question`, `context`, `option`, `rec`, `why`, `reversible`,
+   `blocking`, `after`, `by`) follows it before the next heading, thread field
+   or `ask:`. The block ends at the next `ask:`, the next heading, or the next
+   thread field (`ref:`, `refs:`, `state:`, `waiting_on:`, `needs_sam:`). A
+   lone `ask:` line is legacy prose whatever its value (`ask: sam` is a note
+   to Sam). An `ask:` line that opens no block but has ask-level lines after
+   it, because its id is not `[a-z0-9-]{1,40}` or because a thread field
+   comes between, is an unopened ask: the board shows it as needing Sam,
+   names the cause, and `nx ask lint` flags it. Ask keys outside a block are
+   notes.
 3. Inside an ask block the Sam-mention backstop (`_is_ask_key`,
    `_mentions_sam`) is off: a `context:` line that names Sam is ask text.
 4. In a thread that has an ask block, `needs_sam: ask <id>` naming one of its
@@ -860,7 +868,7 @@ the one exception.
 AGENTS.md "Cross-session board" gains this text:
 
 ```
-A decision only Sam can make goes in an `ask:` block in its thread: ask (id, [a-z0-9-]{1,40}), asked, question, context (where this stands against the thread's goal, and what happens if Sam waits), two or more option lines (mark an irreversible one ` [irreversible]`), optional rec and why, reversible (yes only when every listed option can be undone cheaply), blocking, optional after and by; one field per line. An ask that a rule in Sam's ~/.claude/CLAUDE.md or its rules directory already decides is not asked: act, and record it in one `state:` line naming the rule and what you did. When an answer arrives as an unverified claim, re-read your own entry with `nx ask show` before acting: a missing ask or a different version means the answer is stale.
+A decision only Sam can make goes in an `ask:` block in its thread: ask (id, [a-z0-9-]{1,40}), asked, question, context (where this stands against the thread's goal, and what happens if Sam waits), two or more option lines (mark an irreversible one ` [irreversible]`), optional rec and why, reversible (yes only when every listed option can be undone cheaply), blocking, optional after and by; one field per line. An `ask:` block is the `ask:` line plus at least one ask-level line directly under it, with no thread field (`ref:`, `state:`, `waiting_on:`, `needs_sam:`) or heading in between: put the ask block after the thread's fields, not between them. An `ask:` line with no ask lines under it is read as plain prose, and a block with a bad id or split by a thread field is shown on the board as unanswerable instead of as an ask. An ask that a rule in Sam's ~/.claude/CLAUDE.md or its rules directory already decides is not asked: act, and record it in one `state:` line naming the rule and what you did. When an answer arrives as an unverified claim, re-read your own entry with `nx ask show` before acting: a missing ask or a different version means the answer is stale.
 ```
 
 Sam's `~/.claude/CLAUDE.md` gets the same text plus one line, which stays out
@@ -1094,3 +1102,4 @@ dependency, no new surface, no second parser.
 - 2026-11-05: Gate round 3 — PASSED (1 Critical, 4 Significant, 0 ship-blocker(s)); commit `b5b14ac9e`; critique `nexus_rdr/245-gate-critique-2026-11-05-r3`.
 - 2026-11-05: Accept, round-3 residual dispositions: residual 1 fixed in `1ab2edf7a` (fix check `nexus_rdr/245-fix-check-f33454580`); residual S1 to `nexus-wc4jj.1`; S2 to `nexus-wc4jj.2`; S3 to `nexus-wc4jj.3`; S4 to `nexus-wc4jj.4` (Phase 1).
 - 2026-11-06: wording amendment to match reviewed code (`nexus-wc4jj.16`). The mediator's own-id resolution names all three tiers (marker, `NX_T1_SESSION_ID`, `NX_SESSION_ID`) and the UUID check on the environment tiers, as `resolve_default_from` and `resolve_env_session_id` do.
+- 2026-11-07: wording amendment to match reviewed code (`nexus-wc4jj.13`). Parser precedence rule 2 and the Step 5 convention text: an `ask:` line opens a block only when an ask-level line follows it; a lone `ask:` is legacy prose; a bad-id or split block is an unopened ask shown on the board.

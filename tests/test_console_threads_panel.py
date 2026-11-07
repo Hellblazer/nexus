@@ -487,21 +487,51 @@ def test_an_unreadable_answers_project_leaves_the_ask_counted() -> None:
 
 
 def test_the_answers_are_not_read_when_no_entry_holds_a_structured_ask() -> None:
-    def boom():
-        raise AssertionError("answers read for a board with no structured ask")
+    calls: list[int] = []  # not an assert inside the reader: the route swallows a reader's exception
+
+    def reader():
+        calls.append(1)
+        return []
 
     rows = [{"title": "s", "timestamp": _iso(datetime.now(timezone.utc)), "content": "## A\nneeds_sam: pick\n"}]
-    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows, answers_reader=boom).get("/threads").text
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows, answers_reader=reader).get("/threads").text
     assert "1 thing needs you." in html
+    assert calls == []
+    _client(bd_runner=NO_BEADS, threads_reader=_halcyon_rows, answers_reader=reader).get("/threads")
+    assert calls == [1]  # the reader is reached when a structured ask is on the board
 
 
-def test_a_lone_ask_with_a_bad_id_is_counted_on_the_board() -> None:
-    content = _ASK_FIXTURE.read_text(encoding="utf-8").replace("ask: d1105-k9kr9-keying", "ask: Bad_Id").replace(
-        "needs_sam: Bad_Id", "needs_sam: none"
+def test_an_ask_block_with_a_bad_id_and_no_other_ask_is_counted_on_the_board() -> None:
+    content = (
+        _ASK_FIXTURE.read_text(encoding="utf-8")
+        .replace("needs_sam: ask d1105-k9kr9-keying", "needs_sam: none")
+        .replace("ask: d1105-k9kr9-keying", "ask: Bad_Id")
     )
+    assert "needs_sam: none" in content and "ask: Bad_Id" in content  # the replacements applied
     html = _client(bd_runner=NO_BEADS, threads_reader=lambda: _halcyon_rows(content)).get("/threads").text
-    assert "Nothing needs you" not in html
-    assert "Bad_Id" in html
+    assert "1 thing needs you." in html
+    assert "cannot be answered" in html and "Bad_Id" in html
+
+
+def test_ask_fields_after_a_thread_field_are_counted_on_the_board_not_lost() -> None:
+    content = "## T\nask: pick-port\nstate: x\nquestion: Q?\ncontext: c\n"
+    rows = [{"title": "s", "timestamp": _iso(datetime.now(timezone.utc)), "content": content}]
+    html = _client(bd_runner=NO_BEADS, threads_reader=lambda: rows).get("/threads").text
+    assert "1 thing needs you." in html
+    assert "cannot be answered" in html and "thread field" in html
+
+
+def test_an_answered_ask_is_noted_as_awaiting_pickup_and_not_counted() -> None:
+    html = _client(
+        bd_runner=NO_BEADS, threads_reader=_halcyon_rows, answers_reader=lambda: [_sent_record_for_halcyon()]
+    ).get("/threads").text
+    assert "1 answered, awaiting pickup." in html
+    assert "Nothing needs you." in html
+
+
+def test_no_pickup_note_when_nothing_is_answered() -> None:
+    html = _client(bd_runner=NO_BEADS, threads_reader=_halcyon_rows).get("/threads").text
+    assert "awaiting pickup" not in html
 
 
 def test_a_legacy_ask_sam_line_is_counted_on_the_board() -> None:

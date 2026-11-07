@@ -46,6 +46,10 @@
 </section>
 {% endif %}
 
+{% if asks.answered %}
+<p class="thread-notice ts">{{ asks.answered | length }} answered, awaiting pickup.</p>
+{% endif %}
+
 <section class="thread-sessions">
   <h3>Sessions</h3>
   {% if not board.cards and not t2_error %}

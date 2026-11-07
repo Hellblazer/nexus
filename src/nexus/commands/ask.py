@@ -414,10 +414,11 @@ def list_cmd(ctx: click.Context, as_json: bool, show_all: bool) -> None:
     now = s.now()
     rows = _read_rows(s)
     asks = _all_asks(rows)
-    classes = classify(rows, now, _records_for(s, asks))
+    records = _records_for(s, asks)
+    classes = classify(rows, now, records)
     board = build_board(rows, now)
     beads = s.beads()
-    merged = merge_asks(board.needs_you, beads.beads, board.structured)
+    merged = merge_asks(board.needs_you, beads.beads, board.structured, records)
     findings = lint(rows)
     digest = _answer_entries(s, now, LIST_DIGEST_WINDOW)
     if as_json:
@@ -437,6 +438,12 @@ def list_cmd(ctx: click.Context, as_json: bool, show_all: bool) -> None:
             if group:
                 out.append(f"{name.capitalize()} ({len(group)})")
                 out.extend(_group_line(c, width) for c in group)
+    if classes.malformed:
+        out.append(f"Malformed asks ({len(classes.malformed)}): no block opened, so they cannot be answered")
+        out.extend(
+            _fit(_c(f"  {u.entry}/{u.id or '(no id)'}: {u.reason}" + (f": {u.question}" if u.question else "")), width)
+            for u in classes.malformed
+        )
     if merged.threads:
         out.append(f"Legacy asks ({len(merged.threads)})")
         out.extend(
@@ -469,6 +476,10 @@ def _list_json(classes: Any, merged: Any, beads: BeadsResult, findings: Any, dig
         {"session": i.session, "thread": i.thread.title, "needs_sam": i.thread.needs_sam, "age": i.age,
          "refs": list(i.thread.refs)}
         for i in merged.threads
+    ]
+    data["malformed"] = [
+        {"entry": u.entry, "thread": u.thread, "id": u.id, "question": u.question, "reason": u.reason}
+        for u in classes.malformed
     ]
     data["beads"] = [
         {

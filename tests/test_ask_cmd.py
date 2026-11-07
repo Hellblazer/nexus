@@ -930,3 +930,28 @@ def test_a_batch_record_without_a_time_is_not_reused(world: World) -> None:
     r = world.run(*mediator_args("--batch-words", "w"))
     assert r.exit_code == 0, r.output
     assert world.t2.record()["batch_title"] != old
+
+
+def test_list_names_a_malformed_ask_in_text_and_json() -> None:
+    w = listing_world()
+    w.t2.add("threads", "bad", "session: 88888888-2222-4333-8444-555555555555\n\n## T\nask: Bad_Id\nquestion: Lost?\ncontext: c\n", FRESH)
+    text_out = w.run("list").output
+    assert "Malformed asks (1)" in text_out and "bad/Bad_Id" in text_out and "Lost?" in text_out
+    data = json.loads(w.run("list", "--json").stdout)
+    assert [(m["entry"], m["id"], m["question"]) for m in data["malformed"]] == [("bad", "Bad_Id", "Lost?")]
+    assert "id is not" in data["malformed"][0]["reason"]
+
+
+def test_list_has_no_malformed_section_when_every_ask_opened() -> None:
+    w = listing_world()
+    assert "Malformed" not in w.run("list").output
+    assert json.loads(w.run("list", "--json").stdout)["malformed"] == []
+
+
+def test_list_takes_an_answered_ask_off_the_bead_it_was_folded_into() -> None:
+    w = listing_world()
+    before = next(ln for ln in w.run("list").output.splitlines() if "nexus-k9kr9" in ln)
+    assert f"halcyon/{ASK_ID}" in before
+    w.t2.add("asks", TITLE, json.dumps({**js("answer_record_v1.json"), "status": "sent"}))
+    after = next(ln for ln in w.run("list").output.splitlines() if "nexus-k9kr9" in ln)
+    assert f"halcyon/{ASK_ID}" not in after

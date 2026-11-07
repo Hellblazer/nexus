@@ -955,7 +955,7 @@ def test_an_id_with_one_following_ask_field_still_opens_a_block() -> None:
 
 def test_ask_fields_after_a_thread_field_do_not_make_the_lone_id_a_block() -> None:
     (t,) = parse_session("e", "## T\nask: a1\nstate: x\nquestion: Q?\n").threads
-    assert t.asks == ()
+    assert t.asks == ()  # but it is not lost either: see the unopened tests below
 
 
 def test_an_empty_needs_sam_then_a_structured_ask_keeps_the_structured_ask() -> None:
@@ -1054,3 +1054,74 @@ def test_an_answered_ask_folded_into_a_bead_leaves_the_bead_pointer_and_question
     assert asks.beads[0].ask_pointers == ()
     assert asks.beads[0].raised_by == ()
     assert asks.count == 1  # the bead itself still needs Sam
+
+
+# --- review round: nothing is silently lost -----------------------------------------------
+
+LATE = "## T\nask: pick-port\nstate: x\nquestion: Q?\ncontext: c\n"
+
+
+def test_ask_fields_after_a_thread_field_are_an_unopened_ask_naming_the_real_cause() -> None:
+    (t,) = parse_session("e", LATE).threads
+    assert t.asks == ()
+    (u,) = t.unopened
+    assert (u.id, u.question, u.bad_id, u.after_thread_field) == ("pick-port", "Q?", False, True)
+    assert "thread field" in u.reason and "[a-z0-9-]" not in u.reason
+    assert "pick-port" in t.needs_sam and "thread field" in t.needs_sam and "Q?" in t.needs_sam
+    assert [i.thread.needs_sam for i in build_board([row("e", LATE)], NOW).needs_you] == [t.needs_sam]
+
+
+def test_classify_and_lint_name_ask_fields_after_a_thread_field() -> None:
+    c = classify([row("e", LATE)], NOW, ())
+    assert [(u.id, u.after_thread_field) for u in c.malformed] == [("pick-port", True)]
+    found = findings(row("e", LATE))
+    assert pairs(found) == {("ask-after-thread-field", "pick-port")}  # not a false bad-id, not also lone-ask
+
+
+def test_an_id_and_fields_split_by_a_heading_or_the_next_ask_stay_apart() -> None:
+    content = "## A\nask: a1\nstate: x\n## B\nquestion: Q?\n"
+    assert parse_session("e", content).threads[0].unopened == ()
+    content = "## A\nask: a1\nstate: x\nask: a2\nquestion: Q?\n"
+    assert parse_session("e", content).threads[0].unopened == ()
+
+
+def test_a_bad_id_with_fields_after_a_thread_field_names_both_causes() -> None:
+    (t,) = parse_session("e", "## T\nask: Bad_Id\nstate: x\nquestion: Q?\n").threads
+    (u,) = t.unopened
+    assert u.bad_id and u.after_thread_field
+    assert "thread field" in u.reason and "[a-z0-9-]" in u.reason
+
+
+def test_a_valid_id_note_beside_a_structured_ask_is_not_a_bad_id() -> None:
+    content = entry_text(ask_text("a1")) + "ask: ok\n"
+    found = findings(row("e", content))
+    assert ("bad-id", "ok") not in pairs(found)
+    assert ("lone-ask", "ok") in pairs(found)
+
+
+@pytest.mark.parametrize("word", ["ok", "pick-port", "fixme"])
+def test_a_lone_id_shaped_ask_line_is_a_lint_note(word: str) -> None:
+    found = findings(row("e", f"## T\nask: {word}\nstate: x\n"))
+    assert pairs(found) == {("lone-ask", word)}
+
+
+def test_the_legacy_ask_sam_is_not_a_lint_note() -> None:
+    assert findings(row("e", "## T\nask: sam\nstate: x\n")) == ()
+
+
+def test_a_bad_id_line_naming_sam_is_listed_once_and_keeps_its_bad_id_finding() -> None:
+    content = "## T\nask: Sam please pick\nquestion: Q?\ncontext: c\n"
+    (t,) = parse_session("e", content).threads
+    assert t.needs_sam.count("Sam please pick") == 1
+    assert ("bad-id", "Sam please pick") in pairs(findings(row("e", content)))
+
+
+def test_merge_asks_lists_answered_asks_apart_from_the_count() -> None:
+    after = _open_asks([sent_record("already-answered")])
+    assert [o.ask.id for o in after.answered] == ["already-answered"]
+    assert after.count == len(after.threads) + len(after.beads) + len(after.structured)  # answered not counted
+
+
+def test_a_conditional_answered_ask_is_not_listed_as_awaiting_pickup() -> None:
+    after = _open_asks([sent_record("engine-deploy-go")])
+    assert "engine-deploy-go" not in [o.ask.id for o in after.answered]
