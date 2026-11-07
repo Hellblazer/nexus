@@ -6139,8 +6139,8 @@ def _benign_warning(row: HealthResult) -> bool:
     client by design (nexus-y3wuu), which warns on every cloud box. Without this a cloud box never reaches the
     "every other row is fine" that lets the setup row stand down.
 
-    nexus-8qnuk: only that kind. The warnings nexus-9b0ih made ok=False (two OpenCV builds, a Windows box
-    missing the PDF runtime, a dependency-lock rebuild owed) are not benign: each names a fix the user
+    nexus-8qnuk: only that kind. The rows nexus-9b0ih made ok=False (two OpenCV builds, a warning off Linux
+    and a failure on it; a Windows box missing the PDF runtime; a dependency-lock rebuild owed) are not benign: each names a fix the user
     still owes, and a failed setup run can be their cause, so they keep the setup warning up."""
     return row.warn and not row.ok and is_managed_not_probeable(row)
 

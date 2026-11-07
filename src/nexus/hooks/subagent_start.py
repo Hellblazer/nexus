@@ -169,8 +169,10 @@ _WORKTREE_PREFLIGHT_SCRIPT: str = "scripts/agent-worktree-preflight.sh"
 
 
 def _carries_preflight_script(start: str) -> bool:
-    """True when ``start`` or a directory above it holds the preflight script."""
-    if not start:
+    """True when ``start``, or a directory above it up to the first git checkout, holds the
+    preflight script. The walk stops at a ``.git`` entry (a directory, or a worktree's file), so a
+    project nested under a nexus checkout, or under a stray ``scripts/`` copy, is not told to run it."""
+    if not start or start.startswith("${"):  # an unsubstituted hook template is no path
         return False
     try:
         here = os.path.realpath(start)
@@ -179,6 +181,8 @@ def _carries_preflight_script(start: str) -> bool:
     while True:
         if os.path.isfile(os.path.join(here, _WORKTREE_PREFLIGHT_SCRIPT)):
             return True
+        if os.path.lexists(os.path.join(here, ".git")):
+            return False  # the checkout the cwd is in: a project above it is not this one
         parent = os.path.dirname(here)
         if parent == here:
             return False
@@ -202,8 +206,10 @@ def _worktree_preflight_row(repo_root: str, cwd: str = "") -> str:
     nexus-13mbx: the main repo root alone withheld the row whenever git could not
     resolve it (a bare repo with worktrees, a git timeout, a hook started outside
     the checkout). The row is also given when ``cwd`` (the payload's, else the
-    hook process's) lies in a checkout that carries the script, which keys it on
-    the agent's own worktree as well.
+    hook process's, tried second) lies in a checkout that carries the script, which
+    keys it on the agent's own worktree as well. A cwd above every checkout still
+    gets no row; a worktree-isolated dispatch, the only one the row is for, runs in
+    its worktree.
     """
     if repo_root and os.path.isfile(os.path.join(repo_root, _WORKTREE_PREFLIGHT_SCRIPT)):
         return _WORKTREE_PREFLIGHT
@@ -619,7 +625,8 @@ def run(payload: dict | None) -> HookResult:
 
     parts.append(_RELAY)
     parts.append(_ORCH)
-    parts.append(_worktree_preflight_row(repo_root, str(data.get("cwd") or "") or _process_cwd()))
+    parts.append(_worktree_preflight_row(repo_root, str(data.get("cwd") or ""))
+                 or _worktree_preflight_row("", _process_cwd()))
 
     skip_storage_docs, skip_operators = _classify(agent_type, task_text)
 

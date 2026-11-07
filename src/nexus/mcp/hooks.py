@@ -254,7 +254,7 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         # margin exists (nexus-dgvsz: a late answer tears down the transport).
         timeout_s=9.0,
         run=_run_subagent_start,
-        fields=('session_id', 'agent_id', 'agent_type', 'task'),
+        fields=('session_id', 'agent_id', 'agent_type', 'task', 'cwd'),
         field_docs={
             "session_id": (
                 "Forced onto every subprocess this hook spawns. It runs detached, so without it the T2 scan and scratch read resolve a sibling session's machine-wide pointer."
@@ -265,6 +265,9 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
             ),
             "task": (
                 "The dispatch's task text. Pattern-matched to decide whether catalog, phase-gate, operator or code-navigation context is worth its bytes."
+            ),
+            "cwd": (
+                "The starting subagent's working directory (nexus-13mbx). The Preflight row is given when it lies in a checkout carrying the preflight script, so a worktree-isolated agent gets the row from its own worktree."
             ),
         },
         summary=(

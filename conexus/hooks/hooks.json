@@ -238,7 +238,8 @@
               "session_id": "${session_id}",
               "agent_id": "${agent_id}",
               "agent_type": "${agent_type}",
-              "task": "${task}"
+              "task": "${task}",
+              "cwd": "${cwd}"
             },
             "timeout": 10
           }

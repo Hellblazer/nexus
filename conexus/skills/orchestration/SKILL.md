@@ -190,7 +190,7 @@ full-review rounds and surface it, rather than celebrating the speed.
 
 ## Scope Discipline (cross-reference)
 
-See [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md § Scope](../../resources/agent-shared/CONTEXT_PROTOCOL.md).
+See [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md](../../resources/agent-shared/CONTEXT_PROTOCOL.md) § Scope.
 Deliver at the scope intended: a plan or bead graph is a record of intended
 work, not a standing order; goal-met is a stop, not a license to continue; a
 blast radius exploding mid-flight (more than about 20 tests broken by one
