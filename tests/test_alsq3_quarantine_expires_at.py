@@ -17,6 +17,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+import structlog.testing
 
 import nexus.catalog.chunk_quarantine as cq
 from nexus.catalog.chunk_quarantine import GcFloor, quarantine_expires_at
@@ -139,8 +140,11 @@ def test_a_non_knowledge_origin_sends_no_stamp(kind) -> None:
 
 def test_an_origin_whose_row_cannot_be_read_sends_no_stamp_and_the_move_still_runs() -> None:
     class _Unreadable(_Db):
+        # As HttpVectorClient: a failed listing raises only under strict, and is a None otherwise.
         def _resolve_collection_row(self, collection, *, strict=False):
-            raise RuntimeError("listing failed")
+            if strict:
+                raise RuntimeError("listing failed")
+            return None
 
     no_row = _Db(_batch(1, 0))
     no_row.content_type = None
@@ -148,6 +152,25 @@ def test_an_origin_whose_row_cannot_be_read_sends_no_stamp_and_the_move_still_ru
     assert cq.quarantine_orphans_bounded_serverside(no_row, _COLL, _QUAR, _STAMP) == (1, [])
     assert cq.quarantine_orphans_bounded_serverside(unreadable, _COLL, _QUAR, _STAMP) == (1, [])
     assert no_row.calls == [{}] and unreadable.calls == [{}]
+
+
+def test_a_failed_listing_is_read_strictly_and_warned() -> None:
+    class _Unreadable(_Db):
+        def __init__(self, *responses: dict) -> None:
+            super().__init__(*responses)
+            self.strict_seen: list[bool] = []
+
+        def _resolve_collection_row(self, collection, *, strict=False):
+            self.strict_seen.append(strict)
+            if strict:
+                raise RuntimeError("listing failed")
+            return None
+
+    db = _Unreadable(_batch(1, 0))
+    with structlog.testing.capture_logs() as logs:
+        assert cq.quarantine_orphans_bounded_serverside(db, _COLL, _QUAR, _STAMP) == (1, [])
+    assert db.strict_seen == [True]
+    assert [e["event"] for e in logs if e.get("log_level") == "warning"] == ["quarantine_retention_stamp_row_unreadable"]
 
 
 def test_a_handle_that_cannot_resolve_a_row_sends_no_stamp() -> None:
@@ -168,7 +191,7 @@ def test_a_handle_that_cannot_resolve_a_row_sends_no_stamp() -> None:
 
 
 def _http_client(content_type: str = "knowledge"):
-    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — deferred so the module-level doubles need no client import
 
     client = HttpVectorClient.__new__(HttpVectorClient)
     client._tenant = None

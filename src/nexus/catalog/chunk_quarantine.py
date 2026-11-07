@@ -317,13 +317,15 @@ def _origin_is_knowledge(db: Any, collection_name: str) -> bool:
     origin (``reaper_expire_client_quarantine``); a code, docs or rdr sibling is expired by the client's own sweep
     and never reads it. So the stamp is sent for knowledge only, and the engine is not asked to write a key nothing
     reads. A handle with no row resolver (a test double, an in-memory store), a failed read and a missing row all
-    answer ``False``: no stamp, and the engine keeps its own retention, which is what an unstamped row gets.
+    answer ``False``: no stamp, and the engine keeps its own retention, which is what an unstamped row gets. The read
+    is ``strict``: ``HttpVectorClient`` answers a failed listing with ``None`` otherwise, and the failure would pass
+    as a missing row with no warning.
     """
     # Looked up on the type: a mock store answers any attribute.
     if getattr(type(db), "_resolve_collection_row", None) is None:
         return False
     try:
-        row = db._resolve_collection_row(collection_name)
+        row = db._resolve_collection_row(collection_name, strict=True)
     except Exception:  # noqa: BLE001 — the stamp is optional and additive; an unreadable row must never block the move
         _log.warning("quarantine_retention_stamp_row_unreadable", collection=collection_name, exc_info=True)
         return False
