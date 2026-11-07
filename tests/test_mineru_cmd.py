@@ -45,7 +45,7 @@ def _no_group_signal():
 def _write_pid(pid_file: Path, pid: int = 12345, port: int = 8010) -> None:
     pid_file.write_text(json.dumps({
         "pid": pid, "port": port, "started_at": "2026-04-02T12:00:00+00:00",
-    }))
+    }), encoding="utf-8")
 
 
 def _mock_start_success(pid=42, port=8010):
@@ -72,7 +72,7 @@ class TestMineruStart:
         with patches[0] as mock_popen, patches[1], patches[2], patches[3], patches[4]:
             result = runner.invoke(main, ["mineru", "start"])
         assert result.exit_code == 0
-        data = json.loads(pid_file.read_text())
+        data = json.loads(pid_file.read_text(encoding="utf-8"))
         assert data["pid"] == 42 and data["port"] == 8010
         kw = mock_popen.call_args.kwargs
         # nexus-dmhxw: POSIX starts a new session; Windows takes the storage supervisor's flags instead
@@ -144,7 +144,7 @@ class TestMineruStart:
              patch("nexus.config.set_config_value"):
             result = runner.invoke(main, ["mineru", "start", "--port", "9000"])
         assert result.exit_code == 0
-        data = json.loads(pid_file.read_text())
+        data = json.loads(pid_file.read_text(encoding="utf-8"))
         assert data["port"] == 9000
         call_args = mock_popen.call_args[0][0]
         assert "--port" in call_args and call_args[call_args.index("--port") + 1] == "9000"
