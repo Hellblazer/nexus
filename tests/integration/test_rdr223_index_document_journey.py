@@ -466,7 +466,7 @@ def test_a_document_with_no_catalog_identity_fails_the_run_and_writes_nothing(tm
 
 def _stored_metadata(collection: str, chashes: list[str], *, non_live: bool = False) -> dict[str, dict]:
     kw = {"include_non_live": True} if non_live else {}
-    got = hvc.HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"], **kw)
+    got = hvc.HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"], sensitivity="include", **kw)
     assert len(got["ids"]) == len(chashes), "every chunk is stored"
     return dict(zip(got["ids"], got["metadatas"]))
 
