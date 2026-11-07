@@ -86,6 +86,17 @@
             ],
             "default": null
           },
+          "cwd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "session_id": {
             "anyOf": [
               {
