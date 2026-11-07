@@ -155,8 +155,8 @@ def _bin_bash_is_pre_4() -> bool:
 
 #: ``lock_test.sh`` passes this many assertions where its flock tests (10-16, nexus-fuz9t) run,
 #: and this many where they print one skip line instead (darwin, no flock(1)).
-_LOCK_SUITE_FLOOR_WITH_FLOCK = 46
-_LOCK_SUITE_FLOOR_WITHOUT_FLOCK = 32
+_LOCK_SUITE_FLOOR_WITH_FLOCK = 49
+_LOCK_SUITE_FLOOR_WITHOUT_FLOCK = 34
 
 
 def _lock_suite_has_flock_tests() -> bool:

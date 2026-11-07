@@ -161,6 +161,15 @@
 # Reclaim re-probes the flock of the dir it renamed away before it removes it
 # (a pid number alone does not identify a lock across namespaces).
 #
+# CLAIM IDENTITY (nexus-fuz9t review): for the same reason, the post-mv readbacks
+# that tell a landed claim from a nested one (the fresh claim's, and the reclaim
+# restore's) do not compare pids. Each claim writes `claim_id` (pid, start token,
+# clock and $RANDOM) into its staging dir, and the readback compares that. A pid
+# compare let a claim that nested into another namespace's live lock with the same
+# pid number return success, a second holder. `pid` is still written and is still
+# what lock_release, _lock_is_stale and the diagnostics read; a lockdir without
+# `claim_id` (an older tree) falls back to the pid compare on restore.
+#
 # API:
 #   lock_acquire <lockdir-path> [timeout_s]
 #       Returns 0 once the lock is held by this process ($$). Default
@@ -231,6 +240,8 @@ _lock_pid_exists() {
 
 # Holder-side flock (see LIVENESS UNDER PID NAMESPACES above).
 _LOCK_FLOCK_FILE="holder.flock"
+#: The claim's own id (see CLAIM IDENTITY above); `pid` keeps its meaning for every reader.
+_LOCK_CLAIM_FILE="claim_id"
 #: "lockdir|fd" for every flock this shell holds.
 _LOCK_FD_REG=()
 #: Set by _lock_flock_take: the descriptor it opened, or empty.
@@ -394,7 +405,7 @@ e2e_lock_root() {
 # lock_acquire <lockdir-path> [timeout_s]
 lock_acquire() {
     local lockdir="$1" timeout="${2:-0}" start_ts now holder_pid
-    local stale_holder_pid claim captured_pid fresh claim_flock
+    local stale_holder_pid claim captured_pid captured_claim_id fresh claim_flock claim_id restore_landed
 
     if [[ -z "$lockdir" ]]; then
         echo "lock_acquire: ERROR — lockdir-path is required" >&2
@@ -422,6 +433,10 @@ lock_acquire() {
         if mkdir "$fresh" 2>/dev/null; then
             printf '%s\n' "$$" >"$fresh/pid"
             _lock_start_token "$$" >"$fresh/start_token"
+            # CLAIM IDENTITY: unique to this attempt, so the readback below cannot mistake an
+            # occupant whose pid has our number (another PID namespace) for our own claim.
+            claim_id="$$:$(cat "$fresh/start_token" 2>/dev/null):${EPOCHREALTIME:-$(date +%s)}:$RANDOM$RANDOM"
+            printf '%s\n' "$claim_id" >"$fresh/$_LOCK_CLAIM_FILE"
             _lock_flock_take "$fresh"
             if [[ ! -e "$lockdir" ]] && mv "$fresh" "$lockdir" 2>/dev/null; then
                 # Test-only seam (RDR-184 P0 re-round Test 5b): widen the
@@ -434,14 +449,15 @@ lock_acquire() {
                 if [[ -n "${NX_LOCK_TEST_WIDEN_WINDOW:-}" ]]; then
                     sleep "${NX_LOCK_TEST_WIDEN_SECONDS:-1}"
                 fi
-                if [[ "$(cat "$lockdir/pid" 2>/dev/null)" == "$$" ]]; then
+                if [[ "$(cat "$lockdir/$_LOCK_CLAIM_FILE" 2>/dev/null)" == "$claim_id" ]]; then
                     [[ -z "$_LOCK_NEW_FD" ]] || _lock_fd_register "$lockdir" "$_LOCK_NEW_FD"
                     _LOCK_NEW_FD=""
                     return 0
                 fi
-                # The mv "succeeded" (exit 0) but $lockdir/pid doesn't
-                # show our own pid — we nested inside a directory that
-                # raced into existence in the vacancy-check-to-mv gap.
+                # The mv "succeeded" (exit 0) but $lockdir does not carry
+                # our claim id — we nested inside a directory that raced
+                # into existence in the vacancy-check-to-mv gap (its pid
+                # may still read as ours: CLAIM IDENTITY above).
                 # Do not claim success. Clean up ONLY our own nested
                 # artifact (never the other occupant's content) and
                 # retry from the top.
@@ -466,6 +482,7 @@ lock_acquire() {
             claim="$lockdir.reclaim.$$"
             if mv "$lockdir" "$claim" 2>/dev/null; then
                 captured_pid="$(cat "$claim/pid" 2>/dev/null || true)"
+                captured_claim_id="$(cat "$claim/$_LOCK_CLAIM_FILE" 2>/dev/null || true)"
                 # Identity by pid text is not enough: pids repeat across PID namespaces, so a
                 # live holder that landed at $lockdir after our verdict can carry the dead
                 # holder's pid number. The dir we hold now is private, so its flock cannot be
@@ -501,7 +518,17 @@ lock_acquire() {
                         sleep "${NX_LOCK_TEST_WIDEN_SECONDS:-1}"
                     fi
                     if mv "$claim" "$lockdir" 2>/dev/null; then
-                        if [[ "$(cat "$lockdir/pid" 2>/dev/null)" != "$captured_pid" ]]; then
+                        # Did the restore land, or nest into a third contender's claim? Compare
+                        # the claim id where the captured lock has one (a pid number can repeat
+                        # across PID namespaces); a lockdir from an older tree has only its pid.
+                        if [[ -n "$captured_claim_id" ]]; then
+                            restore_landed=0
+                            [[ "$(cat "$lockdir/$_LOCK_CLAIM_FILE" 2>/dev/null)" == "$captured_claim_id" ]] && restore_landed=1
+                        else
+                            restore_landed=0
+                            [[ "$(cat "$lockdir/pid" 2>/dev/null)" == "$captured_pid" ]] && restore_landed=1
+                        fi
+                        if ((restore_landed == 0)); then
                             # Restore "succeeded" (exit 0) but a third
                             # contender's fresh claim landed in the
                             # widened gap and we nested inside IT instead

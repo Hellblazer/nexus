@@ -28,6 +28,15 @@ bad() {
     echo "  [FAIL] $1"
     FAIL=$((FAIL + 1))
 }
+# _now_ms: wall clock in milliseconds (EPOCHREALTIME on bash 5, whole seconds from date before it).
+_now_ms() {
+    if [[ -n "${EPOCHREALTIME:-}" ]]; then
+        local us="${EPOCHREALTIME/[.,]/}"
+        echo $((10#$us / 1000))
+    else
+        echo "$(($(date +%s) * 1000))"
+    fi
+}
 
 # ── Test 1: acquire/release roundtrip ────────────────────────────────────
 echo "Test 1: acquire/release roundtrip"
@@ -919,10 +928,12 @@ if _lock_flock_ok; then
     }
 
     # _wait_holder_asleep <pid>: wait (60 s at most) until <pid> has exec'd into `sleep 30`, i.e.
-    # its lock_acquire returned and it will not touch its lockdir again.
+    # its lock_acquire returned and it will not touch its lockdir again. Returns 1 at once if <pid>
+    # has exited (bash reaps its background child, so kill -0 then fails).
     _wait_holder_asleep() {
         local args deadline=$((SECONDS + 60))
         while ((SECONDS < deadline)); do
+            kill -0 "$1" 2>/dev/null || return 1
             if [[ -r "/proc/$1/cmdline" ]]; then
                 args="$(tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null)"
             else
@@ -937,18 +948,29 @@ if _lock_flock_ok; then
     echo "Test 10: a live holder whose recorded pid is invisible is not reclaimed"
     LOCKDIR="$WORKDIR/nsvisible.lock"
     # Regression pin for the setup race (nexus-fuz9t). The holder is slowed between its claiming mv
-    # and its pid readback (the seam Test 5b uses), so a setup that rewrote pid as soon as the lockdir
-    # appeared would land in that gap on every run, and the checks below wait for the holder to be
-    # asleep, so the consequence (the holder reads a pid not its own, drops its flock and re-takes the
-    # lock, rewriting pid) is in place before they judge, on every run rather than on a loaded runner.
+    # and its claim readback (the seam Test 5b uses), so a setup that rewrote pid as soon as the
+    # lockdir appeared (the old wait) would land in that gap on every run. With the setup below the
+    # holder is done before pid is rewritten, so _wait_holder_asleep returns at once; it is there for
+    # that counterfactual: it holds the checks until the holder has stopped acting, so an early rewrite's
+    # consequence (the holder sees a claim not its own, drops its flock and re-takes the lock, rewriting
+    # pid) is in place before they judge, instead of landing after them.
     rc_holder=0
+    t0_ms="$(_now_ms)"
     _start_flock_holder "$LOCKDIR" "$WORKDIR/nsvisible.ready" NX_LOCK_TEST_WIDEN_WINDOW=1 NX_LOCK_TEST_WIDEN_SECONDS=1 || rc_holder=$?
+    elapsed_ms=$(($(_now_ms) - t0_ms))
     ns_holder=$FLOCK_HOLDER
     case "$rc_holder" in
         0) ok "a holder on this host keeps holder.flock in its lockdir, held once lock_acquire returns" ;;
         2) bad "no held holder.flock after a successful acquire -- the lockdir is a pid-rule lockdir" ;;
         *) bad "test setup: the holder's lock_acquire did not return within 60 s, or the holder exited" ;;
     esac
+    # The pin is armed only if the seam fired: a renamed or dropped NX_LOCK_TEST_WIDEN_WINDOW would make
+    # the holder's acquire instant and the old wait would pass again.
+    if ((elapsed_ms >= 900)); then
+        ok "the widen seam slowed the holder's acquire (${elapsed_ms} ms), so the setup-race pin is armed"
+    else
+        bad "the holder's acquire took ${elapsed_ms} ms, under the 1 s NX_LOCK_TEST_WIDEN_WINDOW seam: the seam did not fire and the setup-race pin is disarmed"
+    fi
     # What a sibling job sees: a pid that names nothing in its own namespace.
     bash -c 'exit 0' &
     gone_pid=$!
@@ -1157,6 +1179,52 @@ DRIVER_EOF
 else
     echo "Tests 10-16: skipped (no flock(1) or bash older than 4.1 on this host; pid-rule lockdirs only)"
 fi
+
+# ── Test 18: a nested claim is refused when the occupant's pid has this process's number ──
+# nexus-fuz9t review: two jobs in different PID namespaces can share one lockdir root, so a live
+# holder in the other namespace can record the same pid number as this process. If that holder's
+# lockdir lands between lock_acquire's vacancy check and its claiming mv, the mv nests, and a readback
+# that compares the bare pid file to $$ reads the occupant's pid as its own and claims a lock it does
+# not hold. The readback must compare the claim's own unique id instead. The driver lands the
+# occupant (pid = the driver's own $$, a claim id of its own) inside that gap through an mv wrapper.
+echo "Test 18: a claim that nested into a lock whose recorded pid equals this process's is refused"
+LOCKDIR="$WORKDIR/twinpid.lock"
+cat >"$WORKDIR/twinpid_driver.sh" <<'DRIVER_EOF'
+source "$1/lock.sh"
+lockdir="$2"
+printf '%s\n' "$$" >"$3"
+mv() {
+    case "$1" in
+        *.fresh.*)
+            if [[ ! -e "$lockdir" ]]; then
+                command mkdir "$lockdir"
+                printf '%s\n' "$$" >"$lockdir/pid"
+                _lock_start_token "$$" >"$lockdir/start_token"
+                echo "other-namespace-claim" >"$lockdir/claim_id"
+            fi
+            ;;
+    esac
+    command mv "$@"
+}
+lock_acquire "$lockdir" 0
+DRIVER_EOF
+bash "$WORKDIR/twinpid_driver.sh" "$HERE" "$LOCKDIR" "$WORKDIR/twinpid_pid" >/dev/null 2>&1
+rc18=$?
+twin_driver_pid="$(cat "$WORKDIR/twinpid_pid" 2>/dev/null || echo '?')"
+if [[ ! -d "$LOCKDIR" ]]; then
+    bad "test setup: the occupant lockdir was never planted, so the nested claim was not exercised"
+elif [[ "$rc18" -ne 0 ]]; then
+    ok "lock_acquire refused a claim that nested into a lock whose recorded pid equals its own"
+else
+    bad "lock_acquire claimed a lock it nested into, because the occupant's recorded pid has its number (readback compared pid, not the claim's id)"
+fi
+nested_left="$(find "$LOCKDIR" -mindepth 1 -maxdepth 1 -name '*.fresh.*' 2>/dev/null)"
+if [[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" == "$twin_driver_pid" && "$(cat "$LOCKDIR/claim_id" 2>/dev/null)" == other-namespace-claim && -z "$nested_left" ]]; then
+    ok "the occupant's lockdir is intact and holds no nested claim"
+else
+    bad "the occupant's lockdir was changed or still holds the nested claim (pid $(cat "$LOCKDIR/pid" 2>/dev/null), claim_id $(cat "$LOCKDIR/claim_id" 2>/dev/null), nested: ${nested_left:-none})"
+fi
+rm -rf "$LOCKDIR"
 
 # ── Test 17: two overlapping runs of this script do not interfere ────────
 # nexus-xzwyo: the output files were fixed /tmp/lock_test_out1..8, so two runs on one box (two
