@@ -65,7 +65,7 @@ Analysis report with findings and recommendations
 - [ ] Recommendations are actionable
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Investigation Methodology
 

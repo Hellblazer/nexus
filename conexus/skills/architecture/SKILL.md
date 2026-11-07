@@ -90,7 +90,7 @@ Architecture design with execution plan
 - [ ] Execution plan created with beads
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Architecture Methodology
 
