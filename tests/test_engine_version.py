@@ -612,6 +612,10 @@ class TestRequiredEngineVersion:
         # POST /v1/catalog/sensitivity, catalog_sensitivity_supported on /version, the one-way write
         # rules) and the root-names-the-target chunk-key sweep (nexus-6pfgb.43). The client refuses
         # --sensitive against an older engine, so the floor rises with it.
+        # ->(0,1,181) 2026-11-06 for 7.97.0: pairs with engine-service-v0.1.181. It carries RDR-230
+        # Phase 1 (index anchor, canary query ring vectors-054, recall canary, maintenance status)
+        # and the aspect-queue table retirement (aspects-005, nexus-hbnml), which removes the
+        # /v1/aspects/queue/* routes; not additive, so the floor rises and the deploy is paired.
         assert REQUIRED_ENGINE_VERSION == _floor_named_by_changelog(_CHANGELOG.read_text(encoding="utf-8"))
 
 
