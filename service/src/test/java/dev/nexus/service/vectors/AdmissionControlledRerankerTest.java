@@ -199,7 +199,14 @@ class AdmissionControlledRerankerTest {
         };
         assertThat(new AdmissionControlledReranker(offMachine, admission, true).sendsTextOffMachine()).isTrue();
         assertThat(new AdmissionControlledReranker(availability(true), admission, true).sendsTextOffMachine())
-                .as("the default is false: a reranker sends nothing off the machine unless it says so").isFalse();
+                .as("the default is true: a reranker is treated as off-machine unless it says it stays local").isTrue();
+        Reranker local = new Reranker() {
+            @Override public String modelToken() { return "local"; }
+            @Override public boolean sendsTextOffMachine() { return false; }
+            @Override public List<Scored> rerank(String q, List<String> d, Integer k) { return List.of(); }
+        };
+        assertThat(new AdmissionControlledReranker(local, admission, true).sendsTextOffMachine())
+                .as("the wrapper delegates: a local delegate stays local").isFalse();
         assertThat(new VoyageReranker("k", "rerank-2.5").sendsTextOffMachine()).isTrue();
     }
 

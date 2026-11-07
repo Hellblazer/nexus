@@ -133,6 +133,7 @@ class VoyageRerankSensitivityTest {
         // handed and scores the last document highest.
         Reranker local = new Reranker() {
             @Override public String modelToken() { return "local-fake"; }
+            @Override public boolean sendsTextOffMachine() { return false; }
             @Override public List<Scored> rerank(String query, List<String> documents, Integer topK) {
                 localDocs.add(List.copyOf(documents));
                 List<Scored> out = new ArrayList<>();
