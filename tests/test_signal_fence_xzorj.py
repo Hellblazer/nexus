@@ -70,10 +70,55 @@ def test_a_child_is_the_sessions(child) -> None:
     assert fence.classify("kill", child.pid, signal.SIGTERM, root=_ids()[0], token=_ids()[1]) == ("own", child.pid)
 
 
+def _outsider(root: int) -> int:
+    """The root pytest process's parent (the shell or runner that started it): not the session's."""
+    st = fence._stat(root)
+    if root <= 1 or st is None or st[0] <= 0:
+        pytest.skip("the root has no readable parent (pytest is pid 1 in this namespace)")
+    return st[0]
+
+
 def test_a_process_the_session_did_not_start_is_foreign() -> None:
     root, token = _ids()
-    assert fence.classify("kill", 1, signal.SIGTERM, root=root, token=token) == ("foreign", 1)
+    outsider = _outsider(root)
+    assert fence.classify("kill", outsider, signal.SIGTERM, root=root, token=token) == ("foreign", outsider)
     assert fence.classify("kill", -1, signal.SIGTERM, root=root, token=token) == ("foreign", 0)
+
+
+def test_a_root_of_pid_1_owns_everything_under_it() -> None:
+    """Under a per-job PID namespace pytest can be pid 1: the ancestor walk must still reach it."""
+    assert fence.owned(os.getpid(), root=1, token="not-the-token") is True
+
+
+def test_a_foreign_group_and_a_group_with_no_member_left() -> None:
+    root, token = _ids()
+    outsider_group = fence._stat(_outsider(root))[1]
+    if outsider_group == os.getpgrp():
+        pytest.skip("the runner shares the session's group here")
+    assert fence.classify("killpg", outsider_group, signal.SIGTERM, root=root, token=token)[0] == "foreign"
+    assert fence.classify("killpg", 2**22 + 1, signal.SIGTERM, root=root, token=token) == ("unclassified", 0)
+
+
+def test_kill_0_and_killpg_0_name_the_callers_own_group() -> None:
+    root, token = _ids()
+    expected = fence.classify("killpg", os.getpgrp(), signal.SIGTERM, root=root, token=token)
+    assert fence.classify("kill", 0, signal.SIGTERM, root=root, token=token) == expected
+    assert fence.classify("killpg", 0, signal.SIGTERM, root=root, token=token) == expected
+
+
+def test_a_group_whose_leader_exited_is_judged_by_a_live_member(tmp_path) -> None:
+    pidfile = tmp_path / "member.pid"
+    leader = subprocess.Popen([sys.executable, "-c", (
+        "import os, subprocess, sys; "
+        f"p = subprocess.Popen({_SLEEP!r}); open({str(pidfile)!r}, 'w').write(str(p.pid))")],
+        start_new_session=True)
+    leader.wait()
+    member = int(pidfile.read_text())
+    try:
+        assert fence._stat(leader.pid) is None, "the leader is gone"
+        assert fence.classify("killpg", leader.pid, signal.SIGTERM, root=_ids()[0], token=_ids()[1]) == ("own", member)
+    finally:
+        _reap(member)
 
 
 def test_a_reparented_child_keeps_its_claim_through_the_inherited_marker(tmp_path) -> None:
@@ -130,29 +175,66 @@ def test_a_foreign_signal_is_recorded_with_the_test_that_sent_it(monkeypatch) ->
     monkeypatch.setattr(fence, "_events", events)
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(fence, "_real_kill", lambda pid, sig: sent.append((pid, sig)))
-    os.kill(1, signal.SIGTERM)  # recorded, then handed to the stub: init is never signalled
-    assert sent == [(1, signal.SIGTERM)]
+    outsider = _outsider(_ids()[0])
+    os.kill(outsider, signal.SIGTERM)  # recorded, then handed to the stub: the outsider is never signalled
+    assert sent == [(outsider, signal.SIGTERM)]
     assert len(events) == 1
     e = events[0]
     assert e["test"].endswith("test_a_foreign_signal_is_recorded_with_the_test_that_sent_it")
-    assert (e["call"], e["target"], e["signal"], e["pid"]) == ("kill", 1, "SIGTERM", 1)
+    assert (e["call"], e["target"], e["signal"], e["pid"]) == ("kill", outsider, "SIGTERM", outsider)
+    assert e["site"].startswith("tests/test_signal_fence_xzorj.py:"), e["site"]
 
 
-def test_the_session_summary_counts_and_lists_foreign_signals(pytester) -> None:
-    pytester.makepyfile(test_probe=(
-        "import os, signal\n"
-        "from tests import _signal_fence as fence\n"
-        "def test_x(monkeypatch):\n"
-        "    monkeypatch.setattr(fence, '_real_kill', lambda pid, sig: None)\n"
-        "    os.kill(1, signal.SIGTERM)\n"
-    ))
+def test_a_cleared_environment_does_not_change_what_is_the_sessions(child, monkeypatch) -> None:
+    """Tests clear os.environ (patch.dict(..., clear=True)); the identity was captured at configure."""
+    monkeypatch.setattr(fence, "_counts", {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0})
+    for k in (fence.TOKEN_ENV, fence.ROOT_ENV):
+        monkeypatch.delenv(k)
+    os.kill(child.pid, signal.SIGTERM)
+    child.wait(timeout=10)
+    assert fence._counts["own"] == 1 and fence._counts["foreign"] == 0
+
+
+def test_a_classification_that_raises_still_sends_the_signal(monkeypatch) -> None:
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(fence, "_real_kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(fence, "classify", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(fence, "_counts", {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0})
+    os.kill(4242, signal.SIGTERM)
+    assert sent == [(4242, signal.SIGTERM)] and fence._counts["errors"] == 1
+
+
+_PROBE = (
+    "import os, signal\n"
+    "from tests import _signal_fence as fence\n"
+    "def test_x(monkeypatch):\n"
+    "    monkeypatch.setattr(fence, '_real_kill', lambda pid, sig: None)\n"
+    "    os.kill(4242 if fence._stat(4242) is None else 2**22 + 1, signal.SIGTERM)\n"
+    "    parent = fence._stat(int(os.environ[fence.ROOT_ENV]))[0]\n"
+    "    os.kill(parent, signal.SIGTERM)\n"
+)
+
+
+def _inner(pytester, *args: str):
+    pytester.makepyfile(test_probe=_PROBE, test_probe2=_PROBE.replace("test_x", "test_y"))
     with pytest.MonkeyPatch.context() as mp:
         for k in (fence.TOKEN_ENV, fence.ROOT_ENV):
             mp.delenv(k, raising=False)
         mp.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
-        result = pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider")
-    result.assert_outcomes(passed=1)
+        return pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider", *args)
+
+
+def test_without_xdist_the_plugin_loads_and_reports(pytester) -> None:
+    """``-p no:xdist`` (the dual-embedder release gate runs that way): the xdist-only hook is optional."""
+    result = _inner(pytester, "-p", "no:xdist")
+    result.assert_outcomes(passed=2)
+    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): signals=4 own=0 foreign=2 unclassified=2 errors=0"])
+
+
+def test_the_workers_counts_fan_in_to_the_controllers_summary(pytester) -> None:
+    result = _inner(pytester, "-n", "2")
+    result.assert_outcomes(passed=2)
     result.stdout.fnmatch_lines([
-        "signal fence (report mode, nexus-xzorj): signals=1 own=0 foreign=1 unclassified=0",
-        '  foreign: *"test": "test_probe.py::test_x"*',
+        "signal fence (report mode, nexus-xzorj): signals=4 own=0 foreign=2 unclassified=2 errors=0",
+        '  foreign: *"test": "test_probe*.py::test_*"*',
     ])

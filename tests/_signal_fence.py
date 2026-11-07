@@ -14,10 +14,16 @@ target is classified:
   process, or carries the session's environment marker (``NX_TEST_SIGNAL_FENCE_TOKEN``, which every child
   inherits unless its environment is scrubbed);
 * **foreign**: anything else, including ``kill(-1, ...)`` and a group no member of which is ours;
-* a probe (signal 0), a target that no longer exists, and a target that cannot be read are not classified.
+* a probe (signal 0) and a target whose ``/proc/<pid>/stat`` is gone (it exited) are not classified; a target whose
+  environment cannot be read (another user's process) and that does not descend from the root is foreign.
 
-Report mode records every foreign signal (the test, the signal, the target and its command line) and the terminal
-summary lists them. The bead's next step is measurement: a develop CI run counts the false positives (the dry
+The identity (root pid and marker) is captured once per process at configure, so a test that edits or clears
+``os.environ`` changes nothing here. Each foreign event names the test (or the session phase), the call site, the
+signal, the target and its command line; the summary groups repeats. Expected false positives: a child reparented
+away from the session whose environment was scrubbed (``env={...}``) carries no marker and reads as foreign.
+
+Report mode records every foreign signal and the terminal summary (grep ``signal fence (report mode``) counts and
+lists them, from every xdist worker. The bead's next step is measurement: a develop CI run counts the false positives (the dry
 probe flagged reparented children with scrubbed environments), and only a measured zero would justify refusing.
 
 Linux only: it reads ``/proc`` and spawns nothing (the posix_spawn census stays as it is). macOS has no ``/proc``,
@@ -44,7 +50,12 @@ _MAX_LISTED = 20
 
 _real_kill: Callable[[int, int], None] = os.kill
 _real_killpg: Callable[[int, int], None] = getattr(os, "killpg", None)  # type: ignore[assignment]
-_current_test = ""
+#: What the process is doing when it signals: a test's node id while its protocol runs, else the session phase.
+_current_test = "session setup"
+#: This process's session identity, captured once at configure: a test that edits or clears ``os.environ`` must not
+#: change what the fence counts as the session's.
+_root = 0
+_token = ""
 _events: list[dict[str, Any]] = []
 _counts = {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0}
 
@@ -89,9 +100,11 @@ def owned(pid: int, *, root: int, token: str) -> bool | None:
         return None
     seen: set[int] = set()
     cur = pid
-    while cur > 1 and cur not in seen:
+    while cur not in seen:
         if cur == root:
             return True
+        if cur <= 1:
+            break
         seen.add(cur)
         st = _stat(cur)
         if st is None:
@@ -133,20 +146,22 @@ def classify(kind: str, target: int, sig: int, *, root: int, token: str) -> tupl
 
 
 def _record(kind: str, target: int, sig: int) -> None:
-    root, token = int(os.environ.get(ROOT_ENV, "0") or 0), os.environ.get(TOKEN_ENV, "")
+    """Classify and count one signal. Never raises: the fence never changes whether a signal is sent."""
     try:
-        verdict, pid = classify(kind, target, sig, root=root, token=token)
-    except Exception:  # noqa: BLE001 — the fence never changes whether a signal is sent
-        verdict, pid = "unclassified", 0
-    _counts["signals"] += 1
-    _counts[verdict] += 1
-    if verdict == "foreign":
-        try:
-            name = signal.Signals(sig).name
-        except ValueError:
-            name = str(sig)
-        _events.append({"test": _current_test, "call": kind, "target": target, "signal": name,
-                        "pid": pid, "cmdline": _cmdline(pid) if pid else "", "fence_pid": os.getpid()})
+        verdict, pid = classify(kind, target, sig, root=_root, token=_token)
+        _counts["signals"] += 1
+        _counts[verdict] += 1
+        if verdict == "foreign":
+            try:
+                name = signal.Signals(sig).name
+            except ValueError:
+                name = str(sig)
+            caller = sys._getframe(2)  # the frame that called os.kill / os.killpg
+            site = "/".join(Path(caller.f_code.co_filename).parts[-2:]) + f":{caller.f_lineno}"
+            _events.append({"test": _current_test, "call": kind, "target": target, "signal": name, "site": site,
+                            "pid": pid, "cmdline": _cmdline(pid) if pid else "", "fence_pid": os.getpid()})
+    except Exception:  # noqa: BLE001
+        _counts["errors"] = _counts.get("errors", 0) + 1
 
 
 def _kill(pid: int, sig: int) -> None:
@@ -174,19 +189,30 @@ def uninstall() -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    global _root, _token
     if not active():
         return
     if not os.environ.get(TOKEN_ENV):
         # The controller (or a run without xdist): xdist workers and every child inherit both values.
         os.environ[TOKEN_ENV] = uuid.uuid4().hex
         os.environ[ROOT_ENV] = str(os.getpid())
+    try:
+        _root = int(os.environ.get(ROOT_ENV, "") or 0)
+    except ValueError:
+        _root = 0
+    _token = os.environ.get(TOKEN_ENV, "")
     install()
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> Any:
     global _current_test
     _current_test = item.nodeid
+    try:
+        return (yield)
+    finally:
+        # Between tests and after the last one (session-scoped fixture teardown, sessionfinish, atexit).
+        _current_test = "session teardown or between tests"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -197,6 +223,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         workeroutput[_WORKEROUTPUT_KEY] = {"counts": dict(_counts), "events": _events[:200]}
 
 
+@pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node: Any, error: Any) -> None:
     payload = (getattr(node, "workeroutput", None) or {}).get(_WORKEROUTPUT_KEY)
     if payload:
@@ -211,11 +238,18 @@ def pytest_terminal_summary(terminalreporter: Any, exitstatus: int, config: pyte
     tr = terminalreporter
     tr.write_line(
         "signal fence (report mode, nexus-xzorj): signals={signals} own={own} foreign={foreign} "
-        "unclassified={unclassified}".format(**_counts))
-    for e in _events[:_MAX_LISTED]:
+        "unclassified={unclassified} errors={errors}".format(**{"errors": 0, **_counts}))
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for e in _events:
+        key = (e["test"], e["call"], e["signal"], e.get("site", ""))
+        if key in grouped:
+            grouped[key]["repeats"] += 1
+        else:
+            grouped[key] = {**e, "repeats": 1}
+    for e in list(grouped.values())[:_MAX_LISTED]:
         tr.write_line("  foreign: " + json.dumps(e, sort_keys=True))
-    if len(_events) > _MAX_LISTED:
-        tr.write_line(f"  ... {len(_events) - _MAX_LISTED} more")
+    if len(grouped) > _MAX_LISTED:
+        tr.write_line(f"  ... {len(grouped) - _MAX_LISTED} more distinct")
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
