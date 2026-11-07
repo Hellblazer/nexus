@@ -13,12 +13,16 @@ at run time cancel out; the base is read from ``git archive`` of the merge base 
 temporary directory, never a worktree or a checkout, and is collected against that tree's own
 ``src/`` and files (nexus-l35bq: collected against HEAD's code, a base test that used an API HEAD
 had changed failed to import, and the whole count was lost). A base module that still will not
-collect is named, with its HEAD count, and the others are counted. A module skipped at collection (a module-level
-``importorskip`` or ``skip``) yields no items and would read as zero: it is named as uncounted on whichever side
-skipped it, left out of the delta, and never refused (a platform-conditional skip holds on every push; nexus-xxuvz).
-Advisory: exit 0 unless
-``--strict`` and the branch adds tenant tests, or 2 when the count could not be taken (a HEAD
-module that does not collect, or the budget).
+collect is named, with its HEAD count, and the others are counted.
+
+A module skipped at collection (a module-level ``importorskip`` or ``skip``) yields no items and would read as
+zero (nexus-xxuvz). It is left out of the delta and named on whichever side skipped it, never refused (a
+platform-conditional skip holds on every push). A ``NOTE:`` line names one that hides no count; a ``WARNING:``
+line names one that does (skipped at head with a count at the base, or skipped at the base with a count at head),
+where a rise cannot be ruled out. A module skipped on both sides is a ``NOTE:`` and silent under ``--quiet-if-zero``.
+
+Advisory: exit 0 unless ``--strict`` and the branch adds tenant tests or leaves a ``WARNING:`` module, or 2 when the
+count could not be taken (a HEAD module that does not collect, or the budget).
 
     uv run python scripts/tenant_delta.py [--base REF] [--quiet-if-zero] [--strict]
 """
@@ -264,9 +268,12 @@ def main(argv: list[str] | None = None) -> int:
     delta = sum(h - b for _m, b, h in rows)
     # An uncounted module with no tenant test at head cannot raise the count; only the others are named.
     risky = {m: r for m, r in uncounted.items() if head.get(m, 0) > 0}
-    # Skipped at the base but counted at head: a rise cannot be ruled out. Skipped at head: it contributes nothing here.
+    # Skipped at the base but counted at head: a rise cannot be ruled out.
     risky_skipped = {m: r for m, r in base_skipped.items() if head.get(m, 0) > 0}
-    if delta == 0 and not risky and not risky_skipped and args.quiet_if_zero:
+    # Skipped at head but counted at the base: head's skip hides a count the base had, so a rise elsewhere in the
+    # module cannot be ruled out either. Skipped on both sides is in neither set and stays quiet.
+    risky_head = {m: r for m, r in head_skipped.items() if base.get(m, 0) > 0}
+    if delta == 0 and not risky and not risky_skipped and not risky_head and args.quiet_if_zero:
         return 0
     for module, before, after in rows:
         if after != before:
@@ -274,7 +281,10 @@ def main(argv: list[str] | None = None) -> int:
     for module, reason in risky.items():
         _say(f"  WARNING: {module}: not counted at the merge base, {head[module]} at head ({reason})")
     for module in modules:
-        if module in head_skipped:
+        if module in risky_head:
+            _say(f"  WARNING: {module}: skipped at collection at head, {base[module]} at the merge base "
+                 f"({head_skipped[module]})")
+        elif module in head_skipped:
             _say(f"  NOTE: {module}: skipped at collection at head ({head_skipped[module]}); not counted")
         elif module in base_skipped and module not in risky_skipped:
             _say(f"  NOTE: {module}: skipped at collection at the merge base ({base_skipped[module]}); not counted")
@@ -290,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
               "pytest-gate's storage-touch fan-in: make the new test tenant-free, or raise the ceiling in "
               "the same commit with a reason (tests/AGENTS.md)")
         return 1 if args.strict else 0
-    if risky or risky_skipped:
+    if risky or risky_skipped or risky_head:
         return 1 if args.strict else 0  # a rise cannot be ruled out where the base could not be counted
     return 0
 

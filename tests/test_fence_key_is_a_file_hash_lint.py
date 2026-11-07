@@ -16,7 +16,15 @@ writers is ``doc_indexer._sha256`` of the file being indexed. This walks the cal
   a thread target) fails, since the walk cannot see through it, and so does a writer called outside any function;
 * only the functions in ``_ORIGINS`` may make the key, each from its own file parameter, and a key parameter is
   never rebound;
-* ``_sha256`` is defined once in ``src`` and is the file's sha256 (a behavioural check against hashlib).
+* ``_sha256`` is defined once in ``src`` and is the file's sha256 (a behavioural check against hashlib), and is bound
+  nowhere else: no parameter, ``import ... as``, ``for`` or ``with`` target, or assignment, at module level or in a
+  function (``_sha256_strays``);
+* a writer or a key-path function fetched by its string (``getattr(m, "n")``, ``m.__getattribute__("n")``) fails, like
+  any other reference the walk cannot see through;
+* only ``_STAMPERS`` call ``stamp_registered_content_hash``: a call at module level, the stamp fetched by its string,
+  imported ``as`` another name, or referenced other than as a direct callee all fail (``_stamp_callers``).
+
+Each check has a source-string fixture at the end of the file that it must catch, so its reach is itself tested.
 
 Anything else turns this red: a future caller that salts, derives or re-points the key.
 """
@@ -233,8 +241,7 @@ class _Walk:
                 if name in names and id(node) not in allowed:
                     out.append(f"{path.relative_to(_SRC.parents[1])}:{node.lineno}: {name} is referenced other than "
                                "by a direct call, which the walk cannot follow")
-                if (isinstance(node, ast.Call) and _name_of(node.func) in ("getattr", "__getattribute__")
-                        and any(isinstance(a, ast.Constant) and a.value in names for a in node.args[1:2])):
+                if isinstance(node, ast.Call) and _reflects(node, names):
                     out.append(f"{path.relative_to(_SRC.parents[1])}:{node.lineno}: a writer or key-path function is "
                                "reached by getattr, which the walk cannot follow")
                 if isinstance(node, ast.alias) and node.name in names and node.asname:
@@ -268,10 +275,34 @@ def test_every_fence_key_at_the_writer_seams_is_the_indexed_file_s_sha256() -> N
     assert not problems, "\n".join(problems)
 
 
+def _reflects(call: ast.Call, names) -> bool:
+    """``getattr(obj, "<name>")``, ``obj.__getattribute__("<name>")`` or ``object.__getattribute__(obj, "<name>")``
+    with a *name* in *names*: the function is fetched by its string, which the walk cannot follow."""
+    fn = _name_of(call.func)
+    if fn == "getattr":
+        candidates = call.args[1:2]
+    elif fn == "__getattribute__":
+        candidates = call.args[:2]
+    else:
+        return False
+    return any(isinstance(a, ast.Constant) and a.value in names for a in candidates)
+
+
 def _stamp_callers(modules) -> set[str]:
-    """The names of the functions that call the stamp, plus ``<module>:<file>`` for a call outside any function."""
+    """The names of the functions that call the stamp, plus ``<module>:<file>`` for a call outside any function, and
+    ``<getattr>``, ``<alias>`` or ``<reference>`` ``:<file>`` for a stamp fetched by its string, imported under another
+    name, or named other than as the callee of a direct call: shapes whose caller this scan cannot name."""
     out: set[str] = set()
     for path, tree in modules:
+        callees = {id(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _reflects(node, {"stamp_registered_content_hash"}):
+                out.add(f"<getattr>:{path.name}")
+            elif isinstance(node, ast.alias) and node.name == "stamp_registered_content_hash" and node.asname:
+                out.add(f"<alias>:{path.name}")
+            elif (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)
+                  and _name_of(node) == "stamp_registered_content_hash" and id(node) not in callees):
+                out.add(f"<reference>:{path.name}")
         in_functions: set[int] = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -374,3 +405,33 @@ def test_importing_the_one_def_is_not_a_stray() -> None:
 def test_a_module_level_stamp_call_is_caught() -> None:
     source = _CLEAN + "\nstamp_registered_content_hash(1, 2)\n"
     assert _stamp_callers(_fixture(source)) == {"<module>:fixture.py"}
+
+
+def test_a_writer_reached_by_dunder_getattribute_is_caught() -> None:
+    source = _CLEAN + '''
+def sneaky(mod):
+    mod.__getattribute__("_write_chunks_with_owner_rows")(1, 2, "salted")
+'''
+    _sites, problems = _writer_problems(_fixture(source))
+    assert any("getattr" in p for p in problems), problems
+
+
+def test_a_stamp_reached_by_getattr_is_caught() -> None:
+    source = 'def sneaky(mod):\n    getattr(mod, "stamp_registered_content_hash")(1, 2)\n'
+    assert _stamp_callers(_fixture(source)) == {"<getattr>:fixture.py"}
+
+
+def test_a_stamp_reached_by_dunder_getattribute_is_caught() -> None:
+    source = 'def sneaky(mod):\n    mod.__getattribute__("stamp_registered_content_hash")(1, 2)\n'
+    assert _stamp_callers(_fixture(source)) == {"<getattr>:fixture.py"}
+
+
+def test_a_stamp_imported_as_an_alias_and_called_is_caught() -> None:
+    source = ("from nexus.x import stamp_registered_content_hash as stamp\n\n"
+              "def sneaky():\n    stamp(1, 2)\n")
+    assert _stamp_callers(_fixture(source)) == {"<alias>:fixture.py"}
+
+
+def test_a_stamp_referenced_without_a_call_is_caught() -> None:
+    source = "def sneaky(mod):\n    fn = mod.stamp_registered_content_hash\n    fn(1, 2)\n"
+    assert _stamp_callers(_fixture(source)) == {"<reference>:fixture.py"}

@@ -312,15 +312,28 @@ def test_the_census_returns_a_collection_skipped_module_apart_from_the_failed_on
     assert list(skipped) == ["tests/test_b.py"] and "no_such_module_anywhere" in skipped["tests/test_b.py"]
 
 
-def test_a_module_skipped_at_head_is_uncounted_not_a_drop_to_zero(repo: Path) -> None:
-    """test_a counts 2 at the base; skipped at collection at head it would read 2 -> 0 (-2). It is named instead."""
+def test_a_module_skipped_at_head_with_a_base_count_is_a_warning_not_a_drop_to_zero(repo: Path) -> None:
+    """test_a counts 2 at the base; skipped at collection at head it would read 2 -> 0 (-2). It is named as a
+    WARNING instead (a count the head hides), left out of the delta, and --strict fails on it as on the base side."""
     _commit(repo, {"tests/test_a.py": _SKIPPED_AT_COLLECTION + "@pytest.mark.t2_tenant\ndef test_one():\n    pass\n"},
+            "head")
+    proc = _run(repo)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "tests/test_a.py: 2 -> 0" not in proc.stdout
+    assert "WARNING: tests/test_a.py: skipped at collection at head, 2 at the merge base" in proc.stdout
+    assert "no_such_module_anywhere" in proc.stdout
+    assert "tenant delta: +0 test(s)" in proc.stdout and "1 skipped at collection" in proc.stdout
+    assert _run(repo, "--strict").returncode == 1
+    assert _run(repo, "--quiet-if-zero").stdout != "", "a hidden base count is not silent under --quiet-if-zero"
+
+
+def test_a_module_skipped_at_head_with_no_base_count_is_a_note_and_not_strict(repo: Path) -> None:
+    _commit(repo, {"tests/test_b.py": _SKIPPED_AT_COLLECTION + "@pytest.mark.t2_tenant\ndef test_m():\n    pass\n"},
             "head")
     proc = _run(repo, "--strict")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "tests/test_a.py: 2 -> 0" not in proc.stdout
-    assert "tests/test_a.py: skipped at collection at head" in proc.stdout and "no_such_module_anywhere" in proc.stdout
-    assert "tenant delta: +0 test(s)" in proc.stdout and "1 skipped at collection" in proc.stdout
+    assert "NOTE: tests/test_b.py: skipped at collection at head" in proc.stdout
+    assert "WARNING" not in proc.stdout
 
 
 def test_a_module_skipped_at_the_base_with_tenant_tests_at_head_is_named_and_cannot_rule_out_a_rise(

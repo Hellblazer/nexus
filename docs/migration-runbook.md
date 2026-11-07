@@ -670,9 +670,10 @@ PostgreSQL is gone, install the same major version first (for example Homebrew
 `postgresql@16`). If you do not need the data, skip all of this: move the data
 directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 
-Run the block in a shell of its own (start `bash` first, or save it as a script):
-step 2 ends that shell with `exit 1` when a `$DATA.old` is already there, so the
-rest of a pasted block cannot run on top of the refusal.
+Save the block as a script and run it with `bash <file>`; do not paste it into
+a shell. Each step below ends the script with `exit 1` when it fails (step 2
+when a `$DATA.old` is already there), so nothing after the failure runs. Pasted,
+the `exit` can leave the rest of the block running in the shell you pasted into.
 
 ```bash
 CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
@@ -690,9 +691,11 @@ nx daemon service stop
 "$OLD_BIN/pg_ctl" -D "$DATA" status           # "no server running"
 
 # 2. Move the old directory aside. If a previous attempt left one, STOP: this
-#    ends the shell (exit 1), so nothing below it runs. Move or remove the old
-#    `$DATA.old` yourself, then start over from the top in a new shell.
-if [ -e "$DATA.old" ]; then echo "STOP: $DATA.old exists: move it away, then start over" >&2; exit 1; fi
+#    ends the script (exit 1), so nothing below it runs. After a failed attempt
+#    `$DATA.old` is your ORIGINAL cluster: do not remove it. Follow "To back
+#    out before the service starts" below (remove the new `$DATA`, then
+#    `mv "$DATA.old" "$DATA"`), and run the script again.
+if [ -e "$DATA.old" ]; then echo "STOP: $DATA.old exists: it is the original cluster of a failed attempt; follow \"To back out before the service starts\" in the runbook" >&2; exit 1; fi
 mv "$DATA" "$DATA.old" || exit 1
 
 # 3. A new cluster with the options nx creates its own with, trust auth for the
@@ -700,15 +703,15 @@ mv "$DATA" "$DATA.old" || exit 1
 #    fresh short directory: pg_upgrade puts its sockets there, and macOS caps a
 #    socket path at 103 bytes.
 WORK="$(mktemp -d /tmp/pgup.XXXXXX)" && cd "$WORK"
-"$NEW_BIN/initdb" -D "$DATA" --no-locale -E UTF8 --auth=trust --username "$USER"
+"$NEW_BIN/initdb" -D "$DATA" --no-locale -E UTF8 --auth=trust --username "$USER" || exit 1
 
 # 4. The old cluster asks for a password once nx has converted it to
 #    scram-sha-256 (any nx release from nexus-ja4pq on does that on service
 #    start). pg_upgrade reads it from PGPASSWORD; set it without printing it,
 #    and unset it before the service starts, so the service does not inherit it.
 export PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")"
-"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" --check
-"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER"
+"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" --check || exit 1
+"$NEW_BIN/pg_upgrade" -b "$OLD_BIN" -B "$NEW_BIN" -d "$DATA.old" -D "$DATA" -U "$USER" || exit 1
 unset PGPASSWORD
 
 # 5. Start, then the follow-up pg_upgrade prints. The managed configuration
@@ -723,7 +726,8 @@ unset PASS
 nx doctor   # "Local PostgreSQL version" passes; "Local PostgreSQL authentication" shows scram-sha-256
 ```
 
-Run `--check` first: it changes nothing and reports anything that would stop
+The script stops at a failed `initdb` or `--check` (`|| exit 1`) before the real
+`pg_upgrade` runs. `--check` changes nothing and reports anything that would stop
 the upgrade. If it reports an encoding or locale mismatch, the old cluster was
 made with other options; remove the new `$DATA`, run `initdb` again with the old
 cluster's encoding and locale, and check again. `--username` is the superuser
