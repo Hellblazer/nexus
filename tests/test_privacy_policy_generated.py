@@ -426,6 +426,12 @@ def test_memory_rollup_is_stated_as_not_enforced() -> None:
         ("pdf staging rows", ("staging",)),
         ("the audit table has no CLI view", ("catalog_sensitivity_changes", "no CLI view")),
         ("the shell bypass", ("CLAUDECODE", "Bash")),
+        ("delete, purge-trash, re-register", ("purge-trash", "no audit row", "source URI")),
+        ("repo runs bound for a Voyage collection", ("--sensitive-glob", "--ack-external-embedder", "not indexed")),
+        ("CLI verbs outside the output posture", ("nx catalog delete", "nx catalog trash", "nx catalog gc", "nx enrich aspects")),
+        ("title, author and path are discoverable", ("catalog_show(title=)", "store_get", "author", "discoverable")),
+        ("the audit table readers", ("nexus_diag", "managed-cloud tenant", "service database role")),
+        ("the edge allowlist bead", ("nexus-rfvyy.7.5", "2026-11-07")),
     ],
 )
 def test_the_not_enforced_section_names_each_recorded_gap(gap: str, needles: tuple[str, ...]) -> None:
@@ -459,3 +465,28 @@ def test_the_how_to_names_commands_and_keys_that_exist() -> None:
         "nx doctor", "nx catalog show",
     ):
         assert shown in text, f"the page does not show {shown!r}"
+
+
+def test_the_cached_catalog_probe_is_the_five_minutes_the_page_states() -> None:
+    """The page says the catalog key's answer, a failed probe included, is kept 5 minutes per client process."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    assert HttpCatalogClient._CAPABILITY_TTL_S == 300.0
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    assert "5 minutes" in text and "_CAPABILITY_TTL_S" in text and "_version_flags" in text
+    assert hasattr(HttpCatalogClient, "_version_flags")
+
+
+def test_the_page_names_the_gates_that_exist_on_import_and_reindex() -> None:
+    from nexus import sensitive_write as sw
+
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    for fn in ("gate_sensitive_import", "gate_sensitive_reindex"):
+        assert callable(getattr(sw, fn)), f"non-vacuity: {fn} exists"
+        assert fn in text, f"the page does not name {fn}"
+
+
+def test_the_doctor_row_is_described_as_current_state_only() -> None:
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    assert "shows the current config value only" in text
+    assert "tells you the first one is not in use" not in text
