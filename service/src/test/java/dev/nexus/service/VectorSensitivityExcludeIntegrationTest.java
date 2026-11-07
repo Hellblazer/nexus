@@ -259,9 +259,13 @@ class VectorSensitivityExcludeIntegrationTest {
     private void seedSecond384(DSLContext dsl) {
         PgContainerHelper.insertCollection(dsl, TENANT, COLL_B);
         String model = PgContainerHelper.collectionModel(dsl, TENANT, COLL_B);
-        for (String key : NON_SENSITIVE) {
+        // The vectors sit BEYOND the crowd test's plain rows (angles 2.5 to 2.89 from the query), nearest key first:
+        // that test walks the HNSW index of this model's partition for the first ten rows it may return, and a row
+        // of this collection among its near neighbours changed how the walk ended.
+        for (int i = 0; i < NON_SENSITIVE.size(); i++) {
+            String key = NON_SENSITIVE.get(i);
             byte[] chash = HexFormat.of().parseHex(hex(key));
-            double theta = ANGLE.get(key);
+            double theta = 2.95 + 0.03 * i;
             dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL_B).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, text(key))
@@ -1271,6 +1275,21 @@ class VectorSensitivityExcludeIntegrationTest {
     }
 
     /**
+     * The mirror of the case above: the flagged row is the VECTOR row (n1, the one the threshold keeps), and the lexical
+     * extras n2..n5 stay. The lexical report loses n1 (its lexical copy was the same row) and keeps the extras.
+     */
+    @Test
+    void lexicalRace_aVectorRowDropped_whileTheLexicalExtrasStay() throws Exception {
+        String a = coll(384);
+        withFlagAppearingBetweenReadAndLookup(List.of("n1"), () -> {
+            var raced = lexicalSearch(List.of(a), K, Map.of(a, 0.03));
+            assertThat(servedFrom(raced, a)).containsExactlyInAnyOrderElementsOf(hexes("n2", "n3", "n4", "n5"));
+            assertReportMatchesResponse(raced, a);
+            assertThat(statOf(raced, a).get("lexical_count").asInt()).isEqualTo(K - 1);
+        });
+    }
+
+    /**
      * The labelled path (a {@code section_type} filter follows the search): the lexical report is cut to the ids the
      * filter left in the response, keyed by (collection, id). n1's owner in the first collection is labelled
      * {@code references} and filtered out there; n1 is a hit in the second collection too, where it is kept, and its
@@ -1341,7 +1360,7 @@ class VectorSensitivityExcludeIntegrationTest {
     void everyChunkTextRouteTheCensusDerivesHasARecipeInThisClass() throws Exception {
         Set<String> derived = VectorSensitivityRouteParityTest.derivedTextRoutes(
             VectorSensitivityRouteParityTest.findings(
-                VectorSensitivityRouteParityTest.textFunctionsFromPgProc(pg).keySet()));
+                VectorSensitivityRouteParityTest.names(VectorSensitivityRouteParityTest.textFunctionsFromPgProc(pg))));
         Set<String> recipes = new java.util.TreeSet<>();
         routes().forEach(r -> recipes.add(r.path()));
         recipes.add(GET);
