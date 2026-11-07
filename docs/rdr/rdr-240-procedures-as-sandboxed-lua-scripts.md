@@ -108,7 +108,7 @@ scripts behind it.
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-238 Memory Curation | Parent; split from it | It owns supersession by deletion, the bounded index and the curation habits. Its curation report's cold-state section takes MCP tool, CLI verb and injected-context counts from this RDR's transcript queries (RDR-238 Technical Design 4); its round-1 gate (2026-11-01) blocked on that dependency, and its fix made this RDR a prerequisite of its Phase 2 and of `nx memory curate`, calling with the argument object `{query, since, until, project}` the `memory`, `tools`, `loads` and `violations` queries (RDR-238 Technical Design 5). |
-| RDR-242 Sandboxed Lua Runtime (nexus-mdbds.1, accepted 2026-11-07) | Depends on it | It owns the sandbox: the interpreter (`lupa`, PUC Lua 5.4), the worker process, the static check, the verb table, the limits, the library lookup and the shadowing refusal (its Technical Design 2 to 13). Its version 1 has no write verb; one waits for an approval document (its Technical Design 1 and 10). This RDR owns the procedure header that RDR-242 reads the grants from (Technical Design 1 here; RDR-242 residual S4), the argument check, the procedures and their queries, and states what the queries need from `transcripts.sessions` (Technical Design 4 here). Whether a repo root runs by default is RDR-242's open question (its residual S5); the four procedures here all ship in the package root, so none depends on the answer. |
+| RDR-242 Sandboxed Lua Runtime (nexus-mdbds.1, accepted 2026-11-07) | Depends on it | It owns the sandbox: the interpreter (`lupa`, PUC Lua 5.4), the worker process, the static check, the verb table, the limits, the library lookup and the shadowing refusal (its Technical Design 2 to 13). Its version 1 has no write verb; one waits for an approval document (its Technical Design 1 and 10). This RDR owns the procedure header that RDR-242 reads the grants from (Technical Design 1 here; RDR-242 residual S4), the argument check, the procedures and their queries, and states what the queries need from `transcripts.sessions` (Technical Design 4 here). Whether a repo root runs by default is a question RDR-242's round-3 gate left open for Sam (its residual S5, on nexus-mdbds; RDR-242 as accepted runs both roots). Three of the four procedures here ship in the package root; `preflight` is nexus's own and lives in the nexus repo's root (Technical Design 8), so it alone depends on the answer. |
 | RDR-239 The Tuple-Space Dictionary | Sibling in the same epic (nexus-mdbds) | Stage 1 of the scriptable tuple space. The runtime exposes what the dictionary describes; these procedures read memory and transcripts, not tuples, so they use no dictionary entry in v1. |
 | RDR-209 Heat-Based Graduation | Consumer | Its gate-record rollup reads the tags the gate-record script derives. Until its Phase 0b read counter lands, the transcript queries here are its read-count source. |
 | RDR-111 The ORB | Abandoned; lesson kept | Its arc (RDR-110 to 119) built a composition layer ahead of its consumers and was scrapped. This RDR is the runtime's first consumer, and ships one procedure at a time. |
@@ -246,7 +246,7 @@ schema.
    caller writes the same way, replacing the bare-argument form of `nx rdr
    preamble rdr-research -- add`.
 4. `preflight`: reads the diff, names its change classes, and returns the
-   checks each class needs, composing the existing selectors.
+   checks each class needs as commands, the existing selectors included.
 
 ### Technical Design
 
@@ -262,7 +262,7 @@ schema.
    ```lua
    -- procedure: research_add
    -- summary: Build an RDR research record; the caller writes it with memory_put.
-   -- args: rdr:integer, classification:string, method:string, finding:string
+   -- args: rdr:integer, classification:string, method:string, finding:string, repo:string
    -- grants: memory.list, tables.get
    ```
 
@@ -275,21 +275,38 @@ schema.
      optional argument.
    - `grants` is `none`, or a comma-separated list of verb names.
    - Anything else in those four lines, a missing line, or a key out of
-     order refuses the file with the rule `header`, naming the line.
+     order refuses the file with the kind `header`, naming the line.
 
-   One Python function, `nexus.procedures.header.parse(source) -> Header`,
-   reads it as text and is the only reader. RDR-242's `run_script` calls it
-   on the bytes it read, before the static check, which takes the grants
-   from it and cross-checks them against the bytecode (its rules
-   `verb-unknown`, `verb-ungranted` and `grant-unused`). The same call
-   checks the caller's `args` against the header before any worker starts
-   (Technical Design 2), so the file is read and parsed once per run.
-2. **Runner.** One Python function, `run_procedure(name, args)`, calls
-   RDR-242's `run_script(name, args)` and returns its JSON result. The
-   argument check is the header's: an argument the header does not name, a
-   missing required argument, or a JSON value of the wrong type (an
-   `integer` is a JSON number with no fractional part) refuses the run with
-   the rule `args`, naming the argument. RDR-242 owns the rest: the lookup,
+   One Python function, `nexus.lua_runtime.header.parse(source) -> Header`,
+   reads it as text and is the only reader. It lives with the runtime, so
+   the runtime imports nothing from the procedures, and RDR-242's Phase 3
+   Step 3, the step its residual S4 names, builds it to this format. The
+   spike's reader (`static_check.py` lines 238-245) scans three lines; the
+   port reads four. The parser also refuses a header byte outside printable
+   ASCII, as the static check's `bytes` rule does for the whole file.
+   RDR-242's `run_script` calls it on the bytes it read, before the static
+   check, which takes the grants from it and cross-checks them against the
+   bytecode (its rules `verb-unknown`, `verb-ungranted` and
+   `grant-unused`). The same call checks the caller's `args` against it
+   (Technical Design 2), so the file is read and parsed once per run, inside
+   `run_script`, before any worker starts. A header or argument refusal is
+   RDR-242's `ScriptError` with the kind `header` or `args`. Both are
+   requirements on `run_script` beyond RDR-242's Technical Design 4, which
+   lists only the name, root and static-check refusals; they are recorded on
+   nexus-mdbds with its residual S4.
+2. **Runner.** One Python function, `run_procedure(name, args)`, fills the
+   reserved arguments, calls RDR-242's `run_script(name, args)` and returns
+   its JSON result. It reads no file. The argument check runs inside
+   `run_script` (Technical Design 1) and refuses with the kind `args`,
+   naming the argument: an argument the header does not name, a missing
+   required argument, or a JSON value of the wrong type (an `integer` is a
+   JSON number with no fractional part). Two argument names are reserved,
+   because the sandbox has no clock and no verb returns the repo (RDR-242
+   Technical Design 7 and 10, `nexus_rdr/240-research-6`): `now`, the host's
+   UTC time as an ISO 8601 string, and `repo`, the base name of the caller's
+   git top-level directory, absent outside a repo. A header that declares
+   either gets it from `run_procedure`, and a caller that passes either is
+   refused there with the kind `args`. RDR-242 owns the rest: the lookup,
    the name rule, the static check, the grants, the limits, and the errors
    (`ScriptError`, `ScriptLimitError`, `ScriptWorkerError`,
    `ScriptBusyError`), which `run_procedure` passes through unchanged. No
@@ -311,6 +328,13 @@ schema.
      inputs (a `memory_get` title, a Bash command) and times, instruction
      loads, model, token counts and sizes. A tool call's input is not a
      message body.
+   - the names of the tools deferred to the session (announced, not
+     loaded), and on each tool call an `is_error` flag read from its
+     result's error marker, without the result's content; `tools` needs the
+     first and `agents` the second.
+   - a session belongs to the window that holds its first record's time (its
+     start), and to no other, so a session that runs past midnight, or is
+     resumed on a later day, is counted once.
    - no message bodies unless the caller passes `bodies=true`, since
      transcripts hold everything a session saw. With `bodies=true` a record
      carries the session's assistant text, and never tool results (what a
@@ -324,7 +348,8 @@ schema.
      for one day or one hour.
 5. **`transcripts`.** Queries, each a function in the script with a fixture
    test, called with the argument object `{query, since, until, project}`
-   (`since` and `until` UTC dates, `until` defaulting to now, `project` a
+   (`since` and `until` UTC dates, `until` defaulting to the reserved `now`
+   of Technical Design 2, `project` a
    Claude Code project directory name or `all`). Rows of `memory`, `tools`
    and `loads` carry a session id, a name, a count, a last-use time and a
    size; rows of `violations` carry a rule, a count and the number of main
@@ -342,16 +367,42 @@ schema.
    2 before and after counts), `loads` (instruction files, their types and
    sizes, per main session and per dispatch), and
    `procedures` (script runs against hand-written equivalents, A3). Cost
-   uses one dated price table and says it is an estimate. Every query calls
-   `transcripts.sessions` one UTC day at a time and keeps only its counts
-   between calls, so no verb result holds more than a day's records and the
-   query's own state stays small; a 30-day query is 30 verb calls, against
-   RDR-242's cap of 10,000 a run. A day that does not fit (A2) fails the run
-   with RDR-242's error and is never counted as zero.
-6. **`gate_record`.** Arguments `kind` (review, critique, confirm,
-   fixround), `bead`, optional `rdr`, `sha`, `outcome` (justified, partial,
-   not-justified) and `body`. Returns `{project, title, tags, content}`: T2
-   project `<repo>`, the title `<kind>-<sha>-<slug>-<date>`, the tags
+   uses one dated price table and says it is an estimate.
+
+   Every query calls `transcripts.sessions` one UTC day at a time, stepping
+   days with a small inline function (the sandbox has no `require` and no
+   clock), and keeps only its rows between calls, so no verb result holds
+   more than a day's records; 30 days are 30 verb calls, against RDR-242's
+   cap of 10,000 a run. A run's own result is capped at 1 MB of JSON
+   (RDR-242 Technical Design 11), and the per-session rows of `memory`,
+   `tools` and `loads` over 30 days are larger than that (inferred, not
+   measured, from about 5,000 sessions; round-1 gate critique C1). So the
+   result is paged by whole days: a run adds days while its rows stay under
+   768 KB and returns `{rows, truncated_records, next_since}`, where
+   `next_since` is the first day it did not cover and is absent once the
+   window is done. The caller runs the procedure again with `since` set to
+   `next_since` and the same `until`, and joins the pages: per-session rows
+   concatenate, and `violations` rows (a rule, a count, a main-session
+   count) sum by rule. `nx memory curate`'s 30-day call is then a loop of
+   runs. RDR-238 leaves this interface's shape to this RDR's gate (its lines
+   518-520, `nexus_rdr/240-research-6`); its argument object and row shapes
+   are unchanged. A day whose rows alone pass 768 KB is split into hours,
+   and an hour that still does not fit fails the run with the kind
+   `result-window`, naming the hour, never with a short count. A day whose
+   verb result does not fit (A2) fails the run with RDR-242's error and is
+   never counted as zero.
+6. **`gate_record`.** Covers the review agents' gate records in T2 project
+   `<repo>`, the ones the RDR-209 rollup reads. It does not cover the RDR
+   gate flow's records in `<repo>_rdr` (`<id>-gate-critique-<date>-r<N>`,
+   `<id>-fix-check-<sha>`, `<id>-gate-latest`), which `nx rdr preamble
+   rdr-verdict` prints and `nx rdr` reads by those titles
+   (`nexus_rdr/240-research-6`); they keep their titles. Arguments `kind`
+   (review, critique, confirm, fix-check), `bead`, optional `rdr`, `sha`,
+   `outcome` (justified, partial, not-justified), `body`, and the reserved
+   `now` and `repo`. Every kind is a title token the audit-tag table already
+   matches (`src/nexus/tables/audit-tags.toml`). Returns `{project, title,
+   tags, content}`: T2 project `<repo>`, the title
+   `<kind>-<sha>-<slug>-<date>` with the date taken from `now`, the tags
    `kind:gate,bead:B[,rdr:N]`, and the record text; the caller writes it with
    `memory_put`, passing the four fields unchanged and no TTL. It refuses an
    outcome outside the verdict vocabulary the review agents already use. The
@@ -361,10 +412,15 @@ schema.
    verb ships the caller still makes the write, so a caller that edits the
    returned tags is not stopped; the lint and the RDR-209 rollup's own tag
    check are what catch it.
-7. **`research_add`.** Arguments `rdr`, `classification`, `method` and
-   `finding`. Reads the RDR's existing research titles with `memory.list`,
-   takes the next sequence number, and returns `{project, title, content}`
-   for `<repo>_rdr/<id>-research-<seq>` in the record format the gate
+7. **`research_add`.** Arguments `rdr`, `classification`, `method`,
+   `finding` and the reserved `repo`. Checks `classification` and `method`
+   against a checked table, `src/nexus/tables/rdr-research-vocab.toml`, read
+   with `tables.get`; the vocabulary is today a Python constant
+   (`_RESEARCH_METHODS`, `src/nexus/commands/rdr.py` line 2555), and it moves
+   to the table, which `nx rdr` then reads too. Reads the RDR's existing
+   research titles with `memory.list`, takes the next sequence number, and
+   returns `{project, title, content}` for `<repo>_rdr/<id>-research-<seq>`
+   in the record format the gate
    preamble reads; the caller writes it with `memory_put`, whose content is a
    string and never passes through a shell. The `rdr-research` skill's
    examples change to it, and the bare-argument form of `rdr-research --
@@ -373,15 +429,22 @@ schema.
    first; the skill tells the caller to read the title back before writing
    and to run the procedure again if it is taken, which narrows that window
    and does not close it.
-8. **`preflight`.** Classifies the diff (Python, engine `service/`, plugin
-   surface, docs, workflow YAML, schema changeset) from a checked table,
-   `src/nexus/tables/preflight_classes`, and returns the checks each class
-   needs: ruff on touched files, the class's tripwire tests, the
-   affected-integration and docs-reader selectors' output, the drift ledger
-   when the plugin surface changed, the gate-jar staleness check when
-   `service/` changed, actionlint for workflows. It returns commands and
-   runs none: the runtime has no shell, and a heavy check runs through
-   `lab-remote` at the caller's hand. A new class is a table row, not prose.
+8. **`preflight`.** Arguments `base` (the commit to diff against); grants
+   `git.diff_names` and `git.diff_stat`. Classifies the diff (Python, engine
+   `service/`, plugin surface, docs, workflow YAML, schema changeset) from a
+   class table held as a local Lua table in the script, reviewed like any
+   source line, and returns the checks each class needs as commands: ruff on
+   touched files, the class's tripwire tests, the commands that run the
+   affected-integration and docs-reader selectors
+   (`scripts/select_affected_integration_tests.py`,
+   `scripts/select_docs_reader_tests.py`), the drift ledger when the plugin
+   surface changed, the gate-jar staleness check when `service/` changed,
+   actionlint for workflows. It returns commands and runs none, the
+   selectors included: the runtime has no shell, and a heavy check runs
+   through `lab-remote` at the caller's hand. A new class is a row in that
+   table, not prose. Its classes are nexus's own, so by the Approach's rule
+   it lives in the nexus repo's root, `.nexus/procedures/preflight.lua`, and
+   is the one procedure here that needs the repo root to run.
 9. **Promotion recipe.** A section in the `writing-nx-skills` skill: the
    criterion, the target choice, the citation of sources, and a loss check in
    which `substantive-critic` compares the target with its source files and
@@ -394,9 +457,9 @@ schema.
 | --- | --- | --- |
 | Sandboxed interpreter | None yet | RDR-242 (nexus-mdbds.1) |
 | Transcript instruments | `scripts/skill_routing_census.py`; six ad hoc scans | Fold into `transcripts` |
-| Test selection | `scripts/select_affected_integration_tests.py`, `scripts/select_docs_reader_tests.py` | `preflight` returns their output |
-| Verdict vocabulary | `tests/test_review_agent_verdict_vocabulary_lint.py` | `gate_record` enforces it at write |
-| Closed vocabularies | `src/nexus/tables/` | Preflight's change classes become a table |
+| Test selection | `scripts/select_affected_integration_tests.py`, `scripts/select_docs_reader_tests.py` | `preflight` returns the commands that run them |
+| Verdict vocabulary | `tests/test_review_agent_verdict_vocabulary_lint.py` | `gate_record` refuses an outcome outside it |
+| Closed vocabularies | `src/nexus/tables/` | The research vocabulary becomes a table; preflight's classes stay in its script |
 | Prose from stdin | `nx memory put -` | Kept; `research_add` covers the verb that lacks it |
 | Skill authoring rules | `writing-nx-skills` skill | Add the promotion section |
 
@@ -465,15 +528,16 @@ run than to reread. Skills stay the target for procedures that need judgment.
   writing it; the lint of Technical Design 6 and the read-back of Technical
   Design 7 bound that.
 - **A transcript query does not fit RDR-242's limits (A2).** Mitigation:
-  the day-at-a-time calls and the per-record cut (Technical Design 4 and 5);
-  Phase 1 Step 1 measures both before any query ships, with a remedy for
-  each miss.
+  the day-at-a-time calls, the per-record cut and the paged result
+  (Technical Design 4 and 5); Phase 1 Step 1 measures them before any query
+  ships, with a remedy for each miss.
 - **A repo procedure nobody reviewed runs.** RDR-242's residual (its
   Technical Design 2, residual S5): an agent that can write to
   `.nexus/procedures/` in a checkout, or a cloned repo that carries one, can
   run a file nobody has reviewed. Version 1 bounds that by the sandbox and
-  the read-only verbs. None of the four procedures here lives in a repo
-  root.
+  the read-only verbs. Of the four procedures here only `preflight` lives in
+  a repo root, the nexus repo's own, where it is reviewed like any source
+  file.
 - **Agents keep improvising.** Mitigation: the `procedures` query measures it
   (A3), and the skills and agent write-back lines name the script.
 - **A promotion drops a rule.** Mitigation: the loss check (Technical Design
@@ -484,15 +548,20 @@ run than to reread. Skills stay the target for procedures that need judgment.
 - Unknown procedure, or a repo procedure shadowing a shipped name: refused,
   error names it.
 - A header that breaks the format of Technical Design 1: refused with the
-  rule `header`, naming the line.
-- Arguments that fail the header's types: refused with the rule `args`
-  before any worker starts.
+  kind `header`, naming the line.
+- Arguments that fail the header's types, or a caller passing a reserved
+  `now` or `repo`: refused with the kind `args` before any worker starts.
 - A script calls an undeclared verb or exceeds a limit: fails with RDR-242's
   error naming the verb or limit; version 1 verbs only read, so nothing is
   left half done.
 - A day's `transcripts.sessions` result over RDR-242's verb-result bound:
-  the run fails with that error, and the query reports no count for the
-  window rather than a short one.
+  the run fails, and the query reports no count for the window rather than
+  a short one. The error is `ScriptLimitError("memory")` once RDR-242 builds
+  the table on a protected path (its residual S3, on nexus-mdbds); without
+  that the worker aborts and the error is `ScriptWorkerError`.
+- A day or hour whose rows pass the 768 KB page bound: a day is split into
+  hours, and an hour that still does not fit fails with the kind
+  `result-window`, naming it.
 - One session's record over 1 MB: cut and marked `truncated`, counted in
   the query's result.
 - Two `research_add` runs for one RDR at once: the same sequence number,
@@ -506,7 +575,9 @@ run than to reread. Skills stay the target for procedures that need judgment.
 - [x] The Lua runtime RDR accepted: RDR-242, 2026-11-07.
 - [ ] RDR-242's read-only runtime landed: `run_script`, the worker, the
       static check and the version 1 verbs (its Phases 1 to 3), with
-      `run_script` calling this RDR's header parser (Technical Design 1).
+      `run_script` calling the header parser, which RDR-242's Phase 3 Step 3
+      builds to this RDR's format (Technical Design 1), so neither plan
+      waits on the other.
 - [x] RDR-238 accepted (this RDR does not depend on its implementation).
 
 ### Minimum Viable Validation
@@ -520,35 +591,44 @@ JSON.
 
 #### Step 1: Runner, library roots and `transcripts`
 
-`run_procedure`, both front doors, the header parser and the argument check,
-and the `transcripts` queries, each with a fixture test. Then the A2 spike,
-on the laptop over its own transcripts for the last 30 days, run through
-`run_procedure` so RDR-242's limits apply. It records:
+`run_procedure`, both front doors, the reserved arguments, the header
+fixture tests against RDR-242's parser, and the `transcripts` queries with
+their paging, each with a fixture test. Then the A2 spike, on the laptop
+over its own transcripts for the last 30 days, run through `run_procedure`
+so RDR-242's limits apply. It records:
 
 - the wall time of a 30-day `tools` query and of a 30-day `violations`
-  query (`bodies=true`), verb time included. Pass: each under 60 s. That is
-  A2's "under a minute" and also RDR-242's default wall-time limit, so the
-  bound has no headroom and the record states each margin.
+  query (`bodies=true`), each the total of its paged runs, verb time
+  included. Pass: each total under 60 s, A2's "under a minute". RDR-242's
+  wall-time limit of 60 s applies to each run, so a total that passes keeps
+  every run inside it; the record states the margin.
 - the largest one-day `transcripts.sessions` result in the window, in JSON
   bytes, with and without bodies, and the run's peak Lua memory. Pass: the
-  largest day at most half of RDR-242's verb-result bound as its Phase 1
-  Step 2 sets it from the measured JSON-to-Lua ratio (about 22 MB of JSON
-  for this shape, `nexus_rdr/240-research-4`), the other half left for the
-  query's own state; peak Lua memory under the 64 MB `max_memory`.
+  largest day at most half of RDR-242's verb-result bound, which its
+  residual S3 (on nexus-mdbds) has its Phase 1 Step 2 set from the measured
+  JSON-to-Lua ratio (about 22 MB of JSON for this shape,
+  `nexus_rdr/240-research-4`; RDR-242's text still says 64 MB), the other
+  half left for the query's own state; peak Lua memory under the 64 MB
+  `max_memory`.
+- the number of runs each 30-day query took, the largest page in JSON
+  bytes, and every day split into hours. Pass: every page under the 1 MB
+  result cap.
 - the number of records cut to 1 MB.
 
 A missed fit line moves the queries to one-hour windows (Technical Design 4
 allows timestamps), and the spike runs again. A missed time line, or a fit
 line still missed at one hour, comes back to this RDR and to RDR-242
 before any query ships, with two of the remedies RDR-242's residual S3
-names: a page-by-page verb, or a larger memory limit for a named procedure. Done when the spike passes and RDR-238's research 2, 4 and 5 can
-be re-derived from the queries.
+names: a page-by-page verb, or a larger memory limit for a named procedure.
+A page line missed is a `result-window` failure, and comes back the same
+way. Done when the spike passes and RDR-238's research 2, 4 and 5 can be
+re-derived from the queries.
 
 #### Step 2: `preflight`
 
-The change-class table, the classifier and the composed selectors. Done when
-its output for the last ten develop pushes matches what was run or should
-have been.
+The class table in the script, the classifier and the selector commands, in
+the nexus repo's root. Done when its output for the last ten develop pushes
+matches what was run or should have been.
 
 ### Phase 2: The record-building procedures
 
@@ -589,29 +669,37 @@ None of its own. `lupa>=2.8,<3`, which RDR-242 adds.
 
 - Header: one fixture per refusal of Technical Design 1 (a missing line, a
   key out of order, an unknown type, a repeated argument name, a
-  `procedure` that is not the file name, a summary over 100 characters),
-  each refused with the rule `header` and the line; a valid header parses
+  `procedure` that is not the file name, a summary over 100 characters,
+  a non-ASCII byte), each refused with the kind `header` and the line,
+  run against RDR-242's parser; a valid header parses
   to its fields; a Lua file whose `grants` line omits a verb it calls is
   refused by RDR-242's `verb-ungranted`, and one that names a verb it never
   calls by `grant-unused`.
 - Runner: an unknown name, a shadowing repo name, and mistyped arguments
   (an unknown key, a missing required one, `1.5` for an `integer`) are each
-  refused before any worker starts; an undeclared verb call fails naming the
-  verb.
+  refused with the kind `args` before any worker starts; a caller passing
+  `now` or `repo` is refused; a header declaring them receives the host's
+  values; an undeclared verb call fails naming the verb.
 - Front doors: a lint that `procedure_run` and `nx run` call
   `run_procedure` and nothing else.
 - Transcripts: each query against a fixture transcript with known counts; a
   test that no query returns a message body unless asked, and that
   `bodies=true` carries assistant text and no tool result; a fixture
   session over 1 MB comes back cut, marked `truncated`, and counted; a
-  fixture spanning three days makes three verb calls.
+  fixture spanning three days makes three verb calls; a session spanning
+  midnight is counted once, on its start day; a fixture whose rows pass
+  768 KB returns `next_since`, and the joined pages equal the counts of the
+  same fixture in one window; a single hour over the page bound fails with
+  `result-window`.
 - Preflight: each change class against a fixture diff; the result contains
   commands and the runner executes none.
 - Research add: a finding containing `;`, backticks and `$(...)` returned,
   written with `memory_put` and read back byte for byte; the next sequence
-  number follows the fixture RDR's highest; the bare-argument form exits
-  nonzero.
-- Gate record: title and tags derived exactly; an outcome outside the
+  number follows the fixture RDR's highest; a classification or method
+  outside `rdr-research-vocab` is refused, and `nx rdr` reads the same
+  table; the bare-argument form exits nonzero.
+- Gate record: title (its date from `now`) and tags derived exactly, and
+  each kind's title matched by the audit-tag table; an outcome outside the
   vocabulary refused with no record returned.
 - Library: a lint that no shipped procedure's `grants` line names a verb
   outside RDR-242's version 1 table (`verb-unknown` refuses it at run time;
@@ -628,8 +716,9 @@ in T2.
 ### Performance Expectations
 
 A2's bounds, measured in Phase 1 Step 1: a 30-day transcript query under
-60 s on the laptop, verb time included, and the largest one-day verb result
-at most half of RDR-242's verb-result bound.
+60 s on the laptop across its paged runs, verb time included; the largest
+one-day verb result at most half of RDR-242's verb-result bound; every page
+under the 1 MB result cap.
 
 ## Finalization Gate
 
@@ -643,9 +732,12 @@ this RDR. Every site that carried the old form now carries the new one:
 the Approach list, Technical Design 1 to 7, Trade-offs, Failure Modes,
 Phase 2, the Test Plan (the `memory.put`-last lint is gone) and New
 Dependencies. RDR-238's interface for this RDR (its Technical Design 5:
-`{query, since, until, project}`, the four queries and their row shapes) is
-unchanged by this revision; the day-at-a-time calls are inside the
-procedure.
+`{query, since, until, project}`, the four queries and their row shapes)
+keeps its argument object and row shapes. Its result is paged, because
+RDR-242 caps a run's result at 1 MB: the caller loops on `next_since` and
+joins the pages (Technical Design 5). RDR-238 leaves that shape to this
+RDR's gate (its lines 518-520), so the paging needs no change to RDR-238's
+text, and `nx memory curate` is built to loop.
 
 ### Assumption Verification
 
@@ -666,7 +758,14 @@ procedure.
   `src/nexus/lua_runtime/` does not exist (checked 2026-11-07).
 - The header form follows the spike's comment-line reader
   (`scripts/spikes/rdr242-lua-sandbox/static_check.py` lines 238-245,
-  `nexus_rdr/240-research-5`), extended from one key to four.
+  `nexus_rdr/240-research-5`), extended from one key to four and from three
+  lines to four. The parser, `nexus.lua_runtime.header.parse`, and the
+  `header` and `args` refusal kinds inside `run_script` are requirements on
+  RDR-242's Phase 3 Step 3 beyond its Technical Design 4, recorded on
+  nexus-mdbds.
+- The sandbox has no clock and no verb returns a repo name (RDR-242
+  Technical Design 7 and 10, `nexus_rdr/240-research-6`), hence the reserved
+  `now` and `repo` arguments.
 - `nx memory put -` reads stdin (checked 2026-11-07); `memory_put` takes its
   content as a string.
 
@@ -675,7 +774,9 @@ procedure.
 Four procedures, one runner, two front doors, one header format, and a
 promotion recipe. Out of scope: any write verb (RDR-242's approval
 document), tuple-space verbs (RDR-239 and the aura stage), and whether a
-repo root runs by default (RDR-242's open question). The bare-argument
+repo root runs by default (left open for Sam by RDR-242's round-3 gate,
+residual S5). The RDR gate flow's own records in `<repo>_rdr` are out of
+`gate_record`'s scope (Technical Design 6). The bare-argument
 refusal of `rdr-research -- add` retires a CLI argument form; it is listed
 in Technical Design 7 so the acceptance covers it.
 
@@ -688,13 +789,20 @@ in Technical Design 7 so the acceptance covers it.
 - **Windows:** the worker and its limits are RDR-242's, per platform; the
   procedures add no platform code.
 - **Performance:** A2, measured before any query ships.
-- **Upgrade:** none; no stored format changes. Research and gate records
-  keep their titles and format.
+- **Upgrade:** no stored record changes format. Research records and the
+  RDR gate flow's records keep their titles; the review agents' gate
+  records take `gate_record`'s titles from Phase 2 Step 2 on, and older
+  ones keep theirs. The `rdr-research` skill ships in the conexus plugin and
+  the procedures in the package, which release separately, so the order is:
+  a package release adds the procedures and keeps the bare-argument form
+  working; the plugin release that follows switches the skill to
+  `procedure_run`; a later package release adds the bare-argument refusal.
 
 ### Proportionality
 
-The runtime is RDR-242's cost; this RDR adds one parser, one thin runner,
-two thin front doors and four Lua files, against Gap 3's alternative of
+The runtime is RDR-242's cost; this RDR adds a header format (whose parser
+RDR-242 builds), one thin runner, two thin front doors, one checked table
+and four Lua files, against Gap 3's alternative of
 four Python verbs and their MCP schemas. The record-building procedures
 keep a caller write until a write verb exists, rather than adding one here.
 
@@ -718,3 +826,5 @@ keep a caller write until a write verb exists, rather than adding one here.
 | --- | --- |
 | 2026-11-01 | Filed as draft (nexus-qo7ie.2), split from RDR-238 at Sam's review: procedures become sandboxed Lua scripts behind one runner with an MCP and a CLI door. |
 | 2026-11-07 | Revised to RDR-242 as accepted: no write verb, so `gate_record` and `research_add` return their record for the caller to write (A1 settled on its fallback); the header is a four-line comment block this RDR owns, with one parser that RDR-242's `run_script` calls (residual S4); queries call `transcripts.sessions` a day at a time, records over 1 MB are cut, bodies are assistant text only, and the A2 spike gains a memory-fit pass line (residual S3); Finalization Gate written. |
+| 2026-11-07 | Gate round 1 — BLOCKED (1 Critical, 4 Significant, 1 ship-blocker(s)); commit `9c293bc45`; critique `nexus_rdr/240-gate-critique-2026-11-07-r1`. |
+| 2026-11-07 | Round-1 fixes: the transcript result is paged by whole days under RDR-242's 1 MB result cap (`next_since`), with a page line in the A2 spike (C1); the header parser and the `header` and `args` refusal kinds live in RDR-242's `run_script`, built by its Phase 3 Step 3 (S1); reserved `now` and `repo` arguments, `preflight` returns commands and lives in the nexus repo root (S2); `gate_record` covers the review agents' records only, kind `fix-check` (S3); sessions belong to their start window, records carry deferred tools and error flags (S4). |
