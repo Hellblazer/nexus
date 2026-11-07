@@ -44,30 +44,3 @@ def is_process_alive(pid: int) -> bool:
     from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: library modules import this one cheaply
 
     return pid_alive(pid)
-
-
-def recorded_server_alive(info: dict) -> bool:
-    """True when the pid file's server is running, judged by its pid or by its port.
-
-    The pid alone is not enough (nexus-dyfsw): a server started from another PID namespace that
-    shares this config directory (a container sharing HOME) has a pid this process cannot see, and
-    unlinking its pid file let a second server start. A ``/health`` 200 on the recorded port, on
-    this host, counts as alive too. One short probe, paid only when the pid looks dead.
-    """
-    pid = info.get("pid")
-    if isinstance(pid, int) and is_process_alive(pid):
-        return True
-    return server_answers(info)
-
-
-def server_answers(info: dict) -> bool:
-    """True when ``127.0.0.1:<info["port"]>/health`` answers 200 within a second."""
-    port = info.get("port")
-    if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
-        return False
-    import httpx  # noqa: PLC0415 — deferred: library modules import this one cheaply
-
-    try:
-        return httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code == 200
-    except httpx.HTTPError:
-        return False
