@@ -751,11 +751,19 @@ does not depend on callers telling the truth.
 - Negative: sensitive results rank by vector order alone, because Q4 keeps them
   from the Voyage reranker.
 - Negative: sensitivity governs nexus reads, not the filesystem. A `claude -p`
-  child that nexus dispatches keeps Read, Grep and Glob, so it can read a
+  child that nexus dispatches keeps Read, Grep and Glob, so it could read a
   sensitive document's source file from its working tree without passing
   through the filter. Sam accepted this as a stated limit for phase 2
-  (nexus-rfvyy.7.19, 2026-11-06); phase 3 revisits it by denying the source
-  paths of sensitive documents in the child's grant.
+  (nexus-rfvyy.7.19, 2026-11-06). Phase 3 closes it for the files the catalog
+  names (nexus-rfvyy.8, fix round r1): each dispatch whose grant names a file
+  tool lists the catalog's live sensitive documents and passes one deny rule
+  per source file (`Read(//abs/path)`, a `file://` source URI or an absolute
+  `file_path`; other schemes are skipped) as `--disallowedTools`. Claude Code
+  applies a Read deny rule to Grep and Glob as a best effort, so those two are
+  covered to that extent. The bound is 100 rules; past it one rule per parent
+  directory; past that, or when the catalog cannot be listed, Read, Grep and
+  Glob are removed from the child by name. The limit that remains is a copy
+  of the content at a path the catalog does not name.
 
 ### Risks and Mitigations
 
