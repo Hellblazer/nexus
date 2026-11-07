@@ -325,6 +325,13 @@ public final class NexusService {
      * construction of the route; {@link #chunkKeysAudit} replaces it (a test seam: the routes read it per request).
      */
     private volatile dev.nexus.service.http.ChunkKeysAdminHandler.Audit chunkKeysAudit;
+    /**
+     * nexus-v75nw: the retire-keys dry runs that run in the background (tenant-keyed: a job holds its tenant's counts;
+     * {@code ChunkKeysSweepJobs} is the evictor the tenant reset route runs). Built before the route is registered.
+     */
+    private final dev.nexus.service.http.ChunkKeysSweepJobs chunkKeysJobs = new dev.nexus.service.http.ChunkKeysSweepJobs();
+    /** Test seam: when set, the chunk-keys routes use this sweep instead of the one built over the vector repository. */
+    private volatile dev.nexus.service.vectors.ChunkKeySweep chunkKeysSweepForTests;
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} does
@@ -831,13 +838,15 @@ public final class NexusService {
         // rather than a 404 that reads as an unknown route. Nothing in the engine calls these routes; the admin
         // connection the constraint routes run on is bound late, from Main (chunkConstraintAdmin).
         this.chunkKeysAudit = catalogRepo::recordGcAudit;
+        final dev.nexus.service.vectors.ChunkKeySweep chunkKeySweep = pgVectorRepository == null ? null
+                : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository);
         var chunkKeysCtx = server.createContext(dev.nexus.service.http.ChunkKeysAdminHandler.PATH,
                 new dev.nexus.service.http.ChunkKeysAdminHandler(
-                        pgVectorRepository == null ? null
-                            : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository),
+                        () -> chunkKeysSweepForTests != null ? chunkKeysSweepForTests : chunkKeySweep,
                         () -> chunkConstraintAdmin,
                         tokenStore::listKnownTenants,
-                        () -> chunkKeysAudit));
+                        () -> chunkKeysAudit,
+                        chunkKeysJobs));
         chunkKeysCtx.getFilters().addAll(authFilter);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
@@ -1048,7 +1057,8 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("ChunkReaper",
                 t -> chunkReaper == null ? 0 : chunkReaper.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",
-                t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0));
+                t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
+            dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant));
     }
 
     /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
@@ -1249,6 +1259,14 @@ public final class NexusService {
      */
     public void chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit audit) {
         this.chunkKeysAudit = audit;
+    }
+
+    /**
+     * Test seam (nexus-v75nw): serve the chunk-keys routes from {@code sweep}, so a test can make the count slow; null
+     * restores the engine's own.
+     */
+    void chunkKeysSweepForTests(dev.nexus.service.vectors.ChunkKeySweep sweep) {
+        this.chunkKeysSweepForTests = sweep;
     }
 
     /** The sink bound now (see {@link #chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit)}). */
@@ -2075,6 +2093,7 @@ public final class NexusService {
      *  executor immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
+        chunkKeysJobs.shutdown();
         // The runner's executor too; an in-flight batch is interrupted, and a job left running resumes from its
         // cursor on the next boot.
         if (reembedExecutor != null) {

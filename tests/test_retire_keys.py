@@ -170,6 +170,219 @@ class TestWire:
         assert hv._CHUNK_KEYS_ADD_TIMEOUT_S > hv._CHUNK_KEYS_TIMEOUT_S
 
 
+class TestDryRunJob:
+    """nexus-v75nw: the dry run of a large tenant outlasts the public edge's ~30 s origin timeout (four 504s on the
+    production tenant), so ``chunk_keys_dry_run`` starts it as an engine job and polls. The transport is stubbed at
+    ``_post`` / ``_get``; the engine half (the job lifecycle, and that the job's counts equal the synchronous ones) is
+    ``ChunkKeySweepAsyncIntegrationTest``."""
+
+    JOB = "11111111-2222-3333-4444-555555555555"
+    PATH = f"/v1/admin/chunk-keys/sweep/jobs/{JOB}"
+
+    @staticmethod
+    def _started() -> dict:
+        return {"job_id": TestDryRunJob.JOB, "tenant": "nexus", "state": "running", "stage": "queued", "elapsed_ms": 0}
+
+    @staticmethod
+    def _running(stage: str, ms: int) -> dict:
+        return {"job_id": TestDryRunJob.JOB, "tenant": "nexus", "state": "running", "stage": stage, "elapsed_ms": ms}
+
+    @staticmethod
+    def _ended(status: int, body: dict, state: str = "done") -> dict:
+        return {"job_id": TestDryRunJob.JOB, "tenant": "nexus", "state": state, "stage": state, "elapsed_ms": 61_000,
+                "http_status": status, "body": body}
+
+    class Clock:
+        """A fake monotonic clock that a fake sleep advances: no test waits."""
+
+        def __init__(self) -> None:
+            self.now = 0.0
+            self.sleeps: list[float] = []
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+        def monotonic(self) -> float:
+            return self.now
+
+    def _run(self, post, get, *, clock: "TestDryRunJob.Clock | None" = None, **kw):
+        clock = clock or self.Clock()
+        events: list[dict] = []
+        with patch.object(hv, "_post", side_effect=post), patch.object(hv, "_get", side_effect=get):
+            result = _client().chunk_keys_dry_run(
+                tenant="nexus", progress=events.append, sleep=clock.sleep, monotonic=clock.monotonic, **kw)
+        return result, events, clock
+
+    def test_start_job_asks_for_async_on_a_dry_run_only(self) -> None:
+        with patch.object(hv, "_post", return_value={}) as post, patch.object(hv, "_guard_chunk_keys_write"):
+            _client().chunk_keys_sweep(start_job=True)
+            _client().chunk_keys_sweep(dry_run=False, start_job=True)
+            _client().chunk_keys_sweep()
+        started, apply, plain = (c.args[1] for c in post.call_args_list)
+        assert started["async"] is True and started["dry_run"] is True
+        assert "async" not in apply, "an apply is bounded by its own budget and never asks for a job"
+        assert "async" not in plain, "the synchronous call is unchanged"
+
+    def test_a_dry_run_longer_than_the_edge_completes_by_polling_where_the_synchronous_call_504s(self) -> None:
+        """The simulation: the synchronous request is cut by the edge after ~30 s (504); the job takes 50 s of polling."""
+        report = _dry_report(tenant="nexus")
+
+        def post(path, body, **kw):
+            if body.get("async"):
+                return self._started()
+            raise VectorServiceError("POST ... HTTP 504", code=504)   # the edge
+
+        polls = iter([self._running("census 1/3: knowledge__a__m__v1", 4_000), self._running("precondition:keyless_notes", 22_000),
+                      self._running("precondition:wrong_width_rows", 41_000), self._ended(200, report)])
+
+        with patch.object(hv, "_post", side_effect=post), patch.object(hv, "_guard_chunk_keys_write"):
+            with pytest.raises(VectorServiceError) as direct:
+                _client().chunk_keys_sweep(tenant="nexus")
+            assert direct.value.code == 504, "positive control: the synchronous call does not fit the edge"
+
+        result, events, clock = self._run(post, lambda path, **kw: next(polls), poll_interval_s=10.0)
+
+        assert result == report, "the job's answer is the synchronous answer"
+        assert clock.sleeps == [10.0, 10.0, 10.0], "polled every interval until the job ended"
+        assert [e["event"] for e in events] == ["started", "poll", "poll", "poll", "poll"]
+        assert events[2]["stage"] == "precondition:keyless_notes"
+
+    def test_the_poll_goes_to_the_jobs_route_of_the_job_the_start_named(self) -> None:
+        paths: list[str] = []
+
+        def get(path, **kw):
+            paths.append(path)
+            return self._ended(200, _dry_report())
+
+        self._run(lambda p, b, **kw: self._started(), get)
+        assert paths == [self.PATH]
+
+    def test_an_engine_that_predates_the_job_answers_the_dry_run_itself_and_the_client_says_so(self) -> None:
+        report = _dry_report(tenant="nexus")   # no job_id: the old engine ignored the field
+        calls: list[str] = []
+
+        result, events, clock = self._run(lambda p, b, **kw: report, lambda path, **kw: calls.append(path))
+
+        assert result == report
+        assert calls == [], "nothing to poll"
+        assert events == [{"event": "synchronous"}]
+        assert clock.sleeps == []
+
+    def test_the_wait_is_bounded_and_the_timeout_names_the_job_that_goes_on(self) -> None:
+        result_calls = {"n": 0}
+
+        def get(path, **kw):
+            result_calls["n"] += 1
+            return self._running("precondition:keyless_ttl_rows", result_calls["n"] * 5_000)
+
+        clock = self.Clock()
+        with pytest.raises(hv.ChunkKeysDryRunTimeout) as err:
+            self._run(lambda p, b, **kw: self._started(), get, clock=clock, max_wait_s=30.0, poll_interval_s=10.0)
+
+        assert err.value.job_id == self.JOB and err.value.reason == "sweep_job_still_running"
+        assert isinstance(err.value, VectorServiceError)
+        assert self.JOB in str(err.value) and "again to join" in str(err.value)
+        assert clock.now == 30.0 and result_calls["n"] == 4, "polled at 0, 10, 20 and 30 s, then stopped waiting"
+
+    def test_a_job_that_failed_raises_what_the_synchronous_call_would_have(self) -> None:
+        body = {"tenant": "nexus", "error": "the dry run failed: DataAccessException", "reason": "sweep_failed",
+                "dry_run": True, "rows_changed": False}
+
+        with pytest.raises(VectorServiceError) as err:
+            self._run(lambda p, b, **kw: self._started(), lambda path, **kw: self._ended(500, body, state="failed"))
+
+        assert err.value.code == 500 and err.value.reason == "sweep_failed"
+        assert err.value.engine_body == body
+
+    def test_a_job_whose_audit_row_failed_raises_with_the_counts_in_the_body(self) -> None:
+        body = {**_dry_report(tenant="nexus"), "reason": "audit_write_failed", "error": "the outcome row", "rows_changed": False}
+
+        with pytest.raises(VectorServiceError) as err:
+            self._run(lambda p, b, **kw: self._started(), lambda path, **kw: self._ended(500, body, state="failed"))
+
+        assert err.value.reason == "audit_write_failed"
+        assert err.value.engine_body["totals"] == body["totals"]
+
+    def test_a_bad_poll_is_not_the_jobs_failure_but_five_in_a_row_are(self) -> None:
+        report = _dry_report(tenant="nexus")
+        seq = iter([VectorServiceError("504", code=504), urllib.error.URLError("reset"), self._running("sampling", 1),
+                    TimeoutError("slow"), self._ended(200, report)])
+
+        def get(path, **kw):
+            item = next(seq)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        result, _, _ = self._run(lambda p, b, **kw: self._started(), get)
+        assert result == report, "the failures were not consecutive: the count of them restarts on a good poll"
+
+        def always_504(path, **kw):
+            raise VectorServiceError("504", code=504)
+
+        with pytest.raises(VectorServiceError) as err:
+            self._run(lambda p, b, **kw: self._started(), always_504)
+        assert err.value.code == 504
+
+    def test_a_poll_the_engine_refuses_for_a_client_reason_is_not_retried(self) -> None:
+        calls = {"n": 0}
+
+        def get(path, **kw):
+            calls["n"] += 1
+            raise VectorServiceError("403", code=403)
+
+        with pytest.raises(VectorServiceError):
+            self._run(lambda p, b, **kw: self._started(), get)
+        assert calls["n"] == 1
+
+    def test_a_job_the_engine_lost_is_started_again_once(self) -> None:
+        report = _dry_report(tenant="nexus")
+        posts = {"n": 0}
+        gets = iter([VectorServiceError("404", code=404, reason="sweep_job_not_found"), self._ended(200, report)])
+
+        def post(path, body, **kw):
+            posts["n"] += 1
+            return self._started()
+
+        def get(path, **kw):
+            item = next(gets)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        result, events, _ = self._run(post, get)
+
+        assert result == report and posts["n"] == 2
+        assert [e["event"] for e in events if e["event"] in ("started", "restarted")] == ["started", "restarted"]
+
+    def test_a_job_lost_twice_is_an_error_not_a_loop(self) -> None:
+        def get(path, **kw):
+            raise VectorServiceError("404", code=404, reason="sweep_job_not_found")
+
+        posts = {"n": 0}
+
+        def post(path, body, **kw):
+            posts["n"] += 1
+            return self._started()
+
+        with pytest.raises(VectorServiceError) as err:
+            self._run(post, get)
+        assert err.value.reason == "sweep_job_not_found" and posts["n"] == 2
+
+    def test_a_start_the_engine_refuses_is_raised_and_never_joined(self) -> None:
+        """409 ``sweep_job_running`` is a DIFFERENT request in flight: its counts would answer another question."""
+        refusal = VectorServiceError("409", code=409, reason="sweep_job_running", engine_body={"job_id": "other"})
+
+        def post(path, body, **kw):
+            raise refusal
+
+        gets: list[str] = []
+        with pytest.raises(VectorServiceError) as err:
+            self._run(post, lambda path, **kw: gets.append(path))
+        assert err.value is refusal and gets == []
+
+
 # ── the CLI ──────────────────────────────────────────────────────────────────
 
 
@@ -207,6 +420,8 @@ class FakeClient:
         self.applies = list(applies or [])
         self.error = error
         self.calls: list[tuple[str, dict]] = []
+        self.dry_run_extras = []
+        self.progress_events = []
 
     def chunk_keys_sweep(self, **kw):
         self.calls.append(("sweep", kw))
@@ -216,6 +431,21 @@ class FakeClient:
         if kw.get("dry_run", True):
             return self.report
         return self.applies.pop(0)
+
+    dry_run_extras: list[dict] = []   # replaced per instance in __init__
+
+    def chunk_keys_dry_run(self, **kw):
+        """The dry run the verb starts (the engine runs it as a background job): the stub answers it from its
+        ``chunk_keys_sweep``, so the recorded call keeps the shape every CLI test reads, and keeps the job-only
+        arguments (``progress``, ``max_wait_s``) apart."""
+        progress = kw.pop("progress", None)
+        extras = {k: kw.pop(k) for k in ("max_wait_s",) if k in kw}
+        self.dry_run_extras.append({"progress": progress, **extras})
+        for event in self.progress_events:
+            progress(event)
+        return self.chunk_keys_sweep(dry_run=True, **kw)
+
+    progress_events: list[dict] = []
 
     def chunk_keys_add_constraints(self, **kw):
         self.calls.append(("add", kw))
@@ -267,6 +497,50 @@ class TestCli:
         assert "5 to sweep" in result.output and "1 with a wrong-width chash" in result.output
         assert "keyless_notes: 2 (acceptable residue)" in result.output
         assert "Dry run: nothing written" in result.output
+
+    def test_the_dry_run_is_the_engine_job_and_its_progress_is_printed_as_the_stage_changes(self) -> None:
+        client = FakeClient(_dry_report())
+        client.progress_events = [
+            {"event": "started", "job_id": "j-1"},
+            {"event": "poll", "job_id": "j-1", "state": "running", "stage": "census 1/2: c", "elapsed_ms": 2_000},
+            {"event": "poll", "job_id": "j-1", "state": "running", "stage": "census 1/2: c", "elapsed_ms": 4_000},
+            {"event": "poll", "job_id": "j-1", "state": "running", "stage": "precondition:keyless_notes", "elapsed_ms": 9_000},
+            {"event": "poll", "job_id": "j-1", "state": "done", "stage": "done", "elapsed_ms": 11_000},
+        ]
+        result = _run(client, "--tenant", TENANT)
+        assert result.exit_code == 0, result.output
+        assert "dry run started as engine job j-1" in result.output
+        assert result.output.count("dry run running: census 1/2: c") == 1, "one line per stage, not one per poll"
+        assert "dry run running: precondition:keyless_notes (9 s)" in result.output
+        assert "dry run done: done (11 s)" in result.output
+        assert "5 to sweep" in result.output, "the counts are printed as before"
+
+    def test_an_engine_without_the_job_falls_back_to_the_synchronous_count_and_says_so(self) -> None:
+        client = FakeClient(_dry_report())
+        client.progress_events = [{"event": "synchronous"}]
+        result = _run(client, "--tenant", TENANT)
+        assert result.exit_code == 0, result.output
+        assert "predates the background dry run" in result.output and "5 to sweep" in result.output
+
+    def test_wait_seconds_bounds_the_polling_and_is_sent_only_when_given(self) -> None:
+        client = FakeClient(_dry_report())
+        _run(client, "--tenant", TENANT)
+        assert "max_wait_s" not in client.dry_run_extras[0]
+        _run(client, "--tenant", TENANT, "--wait-seconds", "90")
+        assert client.dry_run_extras[1]["max_wait_s"] == 90.0
+
+    def test_a_wait_that_ran_out_exits_1_and_says_the_job_goes_on_and_nothing_was_written(self) -> None:
+        client = FakeClient(_dry_report(), error=hv.ChunkKeysDryRunTimeout("j-9", 1800))
+        result = _run(client, "--tenant", TENANT)
+        assert result.exit_code == rk.EXIT_FAILED
+        assert "j-9" in result.output and "goes on in the engine" in result.output and "Nothing was written" in result.output
+        assert "does not carry the retire-keys routes" not in result.output
+
+    def test_a_lost_job_is_not_mistaken_for_an_engine_without_the_routes(self) -> None:
+        lost = VectorServiceError("404", code=404, reason="sweep_job_not_found")
+        result = _run(FakeClient(_dry_report(), error=lost), "--tenant", TENANT)
+        assert result.exit_code == rk.EXIT_FAILED, "404 is EXIT_NO_ROUTE only when the route is what is missing"
+        assert "no longer holds the dry-run job" in result.output
 
     def test_the_dry_run_says_its_cost_figure_is_the_select_only_lower_bound(self) -> None:
         result = _run(FakeClient(_dry_report()), "--tenant", TENANT)
@@ -672,6 +946,9 @@ class TestNoAutomaticTrigger:
         "service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java",
         "service/src/main/java/dev/nexus/service/http/ChunkKeysAdminHandler.java",
         "tests/test_retire_keys.py",
+        "service/src/main/java/dev/nexus/service/http/ChunkKeysSweepJobs.java",
+        "service/src/test/java/dev/nexus/service/ChunkKeySweepAsyncIntegrationTest.java",
+        "service/src/test/java/dev/nexus/service/http/ChunkKeysSweepJobsTest.java",
         # reads the engine's null_span_rows through the dry run (nothing is written) to compare it with the span-fill rung's summary
         "tests/upgrade/test_legacy_rows_walk_substrate.py",
         "service/src/test/java/dev/nexus/service/ChunkKeysTestBase.java",
@@ -683,7 +960,7 @@ class TestNoAutomaticTrigger:
         "service/src/test/java/dev/nexus/service/db/ChunksWriterLastWrittenAtScanTest.java",
         "service/src/test/java/dev/nexus/service/EgressGuardCensus.java",
     }
-    NAMES = ("chunk_keys_sweep", "chunk_keys_add_constraints", "chunk_keys_validate_constraints",
+    NAMES = ("chunk_keys_sweep", "chunk_keys_dry_run", "chunk_keys_add_constraints", "chunk_keys_validate_constraints",
              "/v1/admin/chunk-keys", "admin/chunk-keys", "retire-keys", "retire_keys")
     #: Not scanned: version control, environments and build output, and prose (docs, the site, any *.md) that only
     #: describes the verb. Everything else is: src, scripts, conexus, .github, deploy, hooks, tests, the engine.

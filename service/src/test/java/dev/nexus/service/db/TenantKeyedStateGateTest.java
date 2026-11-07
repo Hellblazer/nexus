@@ -449,6 +449,7 @@ public class TenantKeyedStateGateTest {
         private static final String OWNERLESS_LOG = "OwnerlessLogLimiter";
         private static final String REAPER = "ChunkReaper";
         private static final String DATA_SWEEP = "NexusService.dataSweepFailuresByTenant";
+        private static final String CHUNK_KEYS_JOBS = "ChunkKeysSweepJobs";
 
         private static final String HANDLE =
             "a TenantScope handle: it holds the DataSource wrapper only, the tenant is a per-call argument";
@@ -518,8 +519,16 @@ public class TenantKeyedStateGateTest {
             keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
             keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
             keyed.put("TokenCache.Entry.tenantId", TOKEN_CACHE);   // the value of map
+            keyed.put("ChunkKeysSweepJobs.jobs", CHUNK_KEYS_JOBS);   // the background retire-keys dry runs (nexus-v75nw)
+            keyed.put("ChunkKeysSweepJobs.Job.tenant", CHUNK_KEYS_JOBS);   // the value of jobs
+            keyed.put("ChunkKeysSweepJobs.Job.callerTenant", CHUNK_KEYS_JOBS);   // the value of jobs
+            keyed.put("ChunkKeysSweepJobs.Job.outcome", CHUNK_KEYS_JOBS);   // the value of jobs: the tenant's counts
+            keyed.put("ChunkKeysSweepJobs.Outcome.body", CHUNK_KEYS_JOBS);   // the counts, held by the job's outcome
 
             // Not keyed: each with the reason it holds nothing a reset must clear.
+            notKeyed.put("ChunkKeysSweepJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
+                + "job that holds it is evicted under ChunkKeysSweepJobs.jobs");
+            notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
             for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
                 "PgVectorRepository.tenantScope", "ReaperRepository.tenantScope", "WhoamiHandler.tenantScope",
                 "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope",

@@ -43,6 +43,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -448,13 +449,17 @@ public final class ChunkKeySweep {
 
     /** As {@link #preconditions}, with the breakdown of {@code generated_nulls} and {@code null_span_rows}. */
     public Preconditions preconditionReport(String tenant, ChunkKeyPlan plan) {
+        return preconditionReport(tenant, plan, stage -> { });
+    }
+
+    private Preconditions preconditionReport(String tenant, ChunkKeyPlan plan, Consumer<String> stage) {
         return scope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
-            return countPreconditions(ctx, tenant, plan);
+            return countPreconditions(ctx, tenant, plan, stage);
         });
     }
 
-    private Preconditions countPreconditions(DSLContext ctx, String tenant, ChunkKeyPlan plan) {
+    private Preconditions countPreconditions(DSLContext ctx, String tenant, ChunkKeyPlan plan, Consumer<String> stage) {
         Map<String, Long> out = new LinkedHashMap<>();
         Map<String, Object> details = new LinkedHashMap<>();
         CatalogDocuments d = CATALOG_DOCUMENTS.as("d");
@@ -463,6 +468,7 @@ public final class ChunkKeySweep {
         Condition liveDoc = d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull());
 
         // A legacy manifest row (labels_written false) whose label is on the chunk row only: the sweep would lose it.
+        stage.accept("precondition:legacy_label_rows");
         out.put("legacy_label_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(m)
                 .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
@@ -471,12 +477,14 @@ public final class ChunkKeySweep {
                 .and(hasAny(c.METADATA, LABEL_KEYS))));
 
         // A live note with no put_at in its catalog meta: its TTL and tags are read from the chunk row until it has one.
+        stage.accept("precondition:keyless_notes");
         out.put("keyless_notes", (long) ctx.fetchCount(
             DSL.selectOne().from(d)
                 .where(liveDoc).and(d.CONTENT_TYPE.eq(NOTE_CONTENT_TYPE))
                 .and(DSL.coalesce(hasKeyAsField(d.METADATA, "put_at"), DSL.inline(false)).isFalse())));
 
         // A chunk row that records a TTL no live owner's catalog meta records: the sweep would make that note permanent.
+        stage.accept("precondition:keyless_ttl_rows");
         Field<String> rowTtl = DSL.jsonbGetAttributeAsText(c.METADATA, "ttl_days");
         out.put("keyless_ttl_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(c)
@@ -489,6 +497,7 @@ public final class ChunkKeySweep {
                     .and(DSL.coalesce(hasKeyAsField(d.METADATA, "ttl_days"), DSL.inline(false)).isTrue()))));
 
         // A live document with no physical collection: its chunks have no home the manifest can name (RDR-191).
+        stage.accept("precondition:homeless_documents");
         out.put("homeless_documents", (long) ctx.fetchCount(
             DSL.selectOne().from(d).where(liveDoc).and(d.PHYSICAL_COLLECTION.eq(""))));
 
@@ -498,6 +507,7 @@ public final class ChunkKeySweep {
         // char end likewise, and the char start when it is a positive integer or an integer beside a recorded end (0 is
         // the head of the text only then). A string, float, boolean or null is never recorded. Counted per column (the
         // sweep deletes all four keys), and a row once whatever columns it lacks.
+        stage.accept("precondition:null_span_rows");
         Condition endRecorded = positiveInt(c.METADATA, "chunk_end_char");
         Condition lineStart = m.LINE_START.isNull().and(positiveInt(c.METADATA, "line_start"));
         Condition lineEnd = m.LINE_END.isNull().and(positiveInt(c.METADATA, "line_end"));
@@ -523,6 +533,7 @@ public final class ChunkKeySweep {
 
         // An indexed document that lacks a stored source_format, tags or category (backfill-meta's residue), by content
         // type and by which key is missing: the count alone does not say whether backfill-meta has run for the type.
+        stage.accept("precondition:generated_nulls");
         Condition missingAny = DSL.coalesce(DSL.function("jsonb_exists_all", SQLDataType.BOOLEAN, d.METADATA,
             keyArray(DERIVED_META_KEYS)), DSL.inline(false)).isFalse();
         Result<?> gen = ctx.select(d.CONTENT_TYPE, DSL.count(),
@@ -555,10 +566,13 @@ public final class ChunkKeySweep {
         details.put("generated_nulls", genDetail);
 
         // The constraints' own equalities and the width, counted over every collection of the tenant.
+        stage.accept("precondition:chunk_text_hash_mismatch");
         out.put("chunk_text_hash_mismatch", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(hashMismatch())));
+        stage.accept("precondition:embedding_model_mismatch");
         out.put("embedding_model_mismatch", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(modelMismatch())));
+        stage.accept("precondition:wrong_width_rows");
         out.put("wrong_width_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(width(false))));
 
@@ -571,13 +585,16 @@ public final class ChunkKeySweep {
                 .and(m.SECTION_TITLE.isNotNull().or(m.SECTION_TYPE.isNotNull()).or(m.PAGE_NUMBER.isNotNull()))));
 
         // Rows the sweep cannot rewrite by key: a metadata value that is not a JSON object.
+        stage.accept("precondition:non_object_metadata_rows");
         out.put("non_object_metadata_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(DSL.not(isObject(CHUNKS.METADATA)))));
 
         // Rows an earlier restore left half-stamped: the engine's row keys on a live row, and the implication broken.
+        stage.accept("precondition:row_keys_on_live_rows");
         out.put("row_keys_on_live_rows", plan.rowKeys().isEmpty() ? 0L : (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
                 .and(notBypass(CHUNKS.COLLECTION, plan)).and(hasAny(CHUNKS.METADATA, plan.rowKeys()))));
+        stage.accept("precondition:quarantine_implication_violations");
         out.put("quarantine_implication_violations", plan.quarantineImplies().isEmpty() ? 0L : (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(quarantineBreach(plan))));
         return new Preconditions(out, details);
@@ -628,13 +645,25 @@ public final class ChunkKeySweep {
      */
     public DryRun dryRun(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, int batchSize,
                          boolean measureBatch) {
+        return dryRun(tenant, plan, accepted, batchSize, measureBatch, stage -> { });
+    }
+
+    /**
+     * As above, naming each step to {@code stage} before it starts: {@code collections}, {@code census I/N: COLLECTION} per censused collection, one {@code precondition:NAME}
+     * per precondition count, {@code sampling}. The asynchronous dry run (nexus-v75nw) shows the latest one to a client
+     * that polls; the answer is the same as the one-argument form's whatever the sink does.
+     */
+    public DryRun dryRun(String tenant, ChunkKeyPlan plan, Map<String, Long> accepted, int batchSize,
+                         boolean measureBatch, Consumer<String> stage) {
         int size = clampBatch(batchSize);
-        List<CollectionCount> collections = collectionsOf(tenant, plan);
-        Preconditions pre = preconditionReport(tenant, plan);
+        stage.accept("collections");
+        List<CollectionCount> collections = collectionsOf(tenant, plan, stage);
+        Preconditions pre = preconditionReport(tenant, plan, stage);
         List<String> blocking = blocking(pre.counts(), accepted);
         List<Sample> samples = List.of();
         List<String> sweepable = new ArrayList<>(sweepableCollections(collections));
         if (measureBatch && !sweepable.isEmpty()) {
+            stage.accept("sampling");
             samples = sample(tenant, plan, sweepable, size);
         }
         return new DryRun(tenant, collections, pre.counts(), pre.details(), Map.copyOf(accepted), blocking, samples, size);
@@ -910,13 +939,24 @@ public final class ChunkKeySweep {
 
     /** Per-collection standing of one tenant, each collection with rows to sweep censused. */
     public List<CollectionCount> collectionsOf(String tenant, ChunkKeyPlan plan) {
+        return collectionsOf(tenant, plan, stage -> { });
+    }
+
+    private List<CollectionCount> collectionsOf(String tenant, ChunkKeyPlan plan, Consumer<String> stage) {
         List<CollectionCount> raw = scope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
             return retiredByCollection(ctx, tenant, plan);
         });
         List<CollectionCount> collections = new ArrayList<>();
+        int censused = 0;
+        long toCensus = raw.stream().filter(c -> c.retiredRows() - c.wrongWidthRows() > 0).count();
         for (CollectionCount c : raw) {
-            collections.add(c.retiredRows() - c.wrongWidthRows() > 0 ? withCensus(tenant, c) : c);
+            if (c.retiredRows() - c.wrongWidthRows() > 0) {
+                stage.accept("census " + (++censused) + "/" + toCensus + ": " + c.collection());
+                collections.add(withCensus(tenant, c));
+            } else {
+                collections.add(c);
+            }
         }
         return collections;
     }
