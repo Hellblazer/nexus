@@ -278,17 +278,31 @@ def _default_t3() -> Any:
 # Java twin: CatalogRepository.CHUNK_TITLE_SUFFIX (and FILE_NAME_PREFIX for the basename below).
 _CHUNK_TITLE_SUFFIX = re.compile(r":(?:chunk-\d+|\d+-\d+|page-\d+)$")
 
+#: Written into every completion record's detail since the title rule strips the per-chunk suffix from the
+#: DOCUMENT's title as well as the chunk row's (nexus-l8o33). A record without it was written under the old rule,
+#: which refused every page of a document an ETL import titled after one of its chunks (gate-xr789: 111553 rows);
+#: such a record triggers one more scan, and the engine's count is not asked for it, because an engine from before
+#: the same change in ``CatalogRepository.manifestSectionLabelFillable`` still counts by the old rule.
+TITLE_RULE_MARK: str = "title rule 2"
+
 
 def _title_names_document(title: str, doc: Any) -> bool:
     """True when a chunk row's *title* is this document's own: its title, its file path or file name, with
     or without a per-chunk suffix. A row that carries no title is not contradicted. The title is the LAST
-    writer's, so one that names another file is a former owner's row."""
+    writer's, so one that names another file is a former owner's row.
+
+    The suffix is stripped from the document's title too: an ETL import can title a document after one of
+    its chunks (``paper.pdf:page-3``), and its other pages' chunks name the same file with another suffix
+    (gate-xr789, 2026-11-07: 111553 legacy rows refused for that alone, nexus-l8o33)."""
     if not title:
         return True
+    doc_title = getattr(doc, "title", "") or ""
+    file_path = getattr(doc, "file_path", "") or ""
     own = {n for n in (
-        getattr(doc, "title", "") or "",
-        getattr(doc, "file_path", "") or "",
-        os.path.basename(getattr(doc, "file_path", "") or ""),
+        doc_title,
+        _CHUNK_TITLE_SUFFIX.sub("", doc_title),
+        file_path,
+        os.path.basename(file_path),
     ) if n}
     stripped = _CHUNK_TITLE_SUFFIX.sub("", title)
     return bool({title, stripped, os.path.basename(stripped)} & own)
@@ -647,15 +661,26 @@ class ManifestSectionLabelsRung:
 
     # ── detect ───────────────────────────────────────────────────────────────
 
-    def _recorded(self) -> bool:
-        """True when this tenant's completion is on file, at any package version. An unreadable ledger is not
-        a record. The rung is a one-time transition: rows that stay legacy by design stay legacy, and a
-        rescan per release would copy what the guards refused once a co-owner left."""
+    def _record(self) -> CompletionRecord | None:
+        """This tenant's completion record, or ``None`` (none on file, or an unreadable ledger, where the scan
+        decides)."""
         try:
-            return self._record_fn() is not None
+            return self._record_fn()
         except Exception as exc:  # noqa: BLE001 — an unreadable ledger is 'not recorded', and the scan decides
             _log.info("manifest_section_labels_ledger_unreadable", error=str(exc))
-            return False
+            return None
+
+    def _recorded(self) -> bool:
+        """True when this tenant's completion is on file under the current title rule (:data:`TITLE_RULE_MARK`), at
+        any package version. The rung is a one-time transition: rows that stay legacy by design stay legacy, and a
+        rescan per release would copy what the guards refused once a co-owner left. A record from before the rule
+        changed is not current: the rows the old rule refused are scanned once more."""
+        record = self._record()
+        return record is not None and TITLE_RULE_MARK in (record.detail or "")
+
+    def _record_predates_title_rule(self) -> bool:
+        record = self._record()
+        return record is not None and TITLE_RULE_MARK not in (record.detail or "")
 
     def _stale_zero(self) -> bool:
         """True when the deferral log says the engine's count was outdated at the last walk (see
@@ -676,6 +701,25 @@ class ManifestSectionLabelsRung:
         self._from_engine = False
         if self._recorded():
             return RungStatus(applicable=True, converged=True)
+        if self._record_predates_title_rule():
+            # One more pass under the current title rule; pending even when nothing turns out fillable, so that the
+            # walk's converge, verify and record rewrite the record with the mark and the next detect reads it as
+            # current. No engine count: an engine from before the rule change counts by the old rule.
+            if refuses_unbounded_read(self._managed_fn):
+                reason = (
+                    "the completion record predates the current title rule (" + TITLE_RULE_MARK + "); unattended "
+                    f"`nx upgrade --auto` does not scan a managed catalog; {INTERACTIVE_REMEDY}"
+                )
+                _log.info("manifest_section_labels_rung_skipped", reason=reason)
+                return RungStatus(applicable=False, converged=False, pending_detail=reason)
+            return RungStatus(
+                applicable=True,
+                converged=False,
+                pending_detail=(
+                    "the completion record predates the current title rule (" + TITLE_RULE_MARK + "): the rows the "
+                    "old rule refused are scanned once more (`nx upgrade`)"
+                ),
+            )
         # A deferral on file says the engine counted none and the scan then found some: its count is not trusted
         # until a scan has run (any mode: an unattended managed run then reads nothing and is not applicable, and
         # its not-applicable leaves the log's entry alone, where a deferral of another kind would overwrite it).
@@ -826,7 +870,7 @@ class ManifestSectionLabelsRung:
                     ENGINE_STALE_MARKER + ": " + self._verify_detail + "; the fill runs on the next `nx upgrade`"
                 )
             return False
-        self._record_detail = f"{self._filled} filled this run; {counts.summary()}"
+        self._record_detail = f"{self._filled} filled this run; {counts.summary()}; {TITLE_RULE_MARK}"
         return True
 
     def verify_deferred(self) -> bool:

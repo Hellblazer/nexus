@@ -22,7 +22,7 @@ from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from tests.upgrade.conftest import InMemoryCompletionLedger
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SECTION_LABELS, RUNG_ORDER, default_registry
-from nexus.upgrade_ladder.rungs.manifest_section_labels import FILLABLE_PROBE_LIMIT, ManifestSectionLabelsRung
+from nexus.upgrade_ladder.rungs.manifest_section_labels import FILLABLE_PROBE_LIMIT, TITLE_RULE_MARK, ManifestSectionLabelsRung
 
 COLL = "docs__art__bge-base-en-v15-768__v1"
 OTHER = "docs__other__bge-base-en-v15-768__v1"
@@ -607,11 +607,64 @@ def test_a_completion_recorded_by_an_earlier_package_version_still_short_circuit
     from nexus.upgrade_ladder.completion import CompletionRecord
 
     _one_fillable_and_one_newer_row(world)
-    old = CompletionRecord(rung_name=RUNG_MANIFEST_SECTION_LABELS, verified_at="t0", package_version="1.0.0")
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
+
+    old = CompletionRecord(
+        rung_name=RUNG_MANIFEST_SECTION_LABELS, verified_at="t0", package_version="1.0.0",
+        detail=f"0 filled this run; ...; {TITLE_RULE_MARK}",
+    )
 
     status = world.rung(record_fn=lambda: old).detect()
 
     assert (status.applicable, status.converged) == (True, True) and world.listings == 0
+
+
+def _pre_rule_record():
+    from nexus.upgrade_ladder.completion import CompletionRecord
+
+    return CompletionRecord(
+        rung_name=RUNG_MANIFEST_SECTION_LABELS, verified_at="t0", package_version="7.97.0",
+        detail="12 filled this run; 47 document(s) ...",
+    )
+
+
+def test_a_record_written_under_the_old_title_rule_is_pending_once_without_asking_the_engine(world: World) -> None:
+    """nexus-l8o33: the old rule refused every page of a document an ETL import titled after one of its chunks
+    (gate-xr789, 111553 rows), and the record it wrote short-circuited every later detect. A record without
+    TITLE_RULE_MARK reports pending, and the engine's count (an older engine counts by the old rule) is not read."""
+    _one_fillable_and_one_newer_row(world)
+
+    status = world.rung(record_fn=_pre_rule_record).detect()
+
+    assert (status.applicable, status.converged) == (True, False)
+    assert "title rule" in status.pending_detail
+    assert world.engine_reads() == (0, 0, 0, 0, 0)
+
+
+def test_a_pre_rule_record_is_not_scanned_unattended_on_a_managed_service(world: World) -> None:
+    _one_fillable_and_one_newer_row(world)
+    with _bound_auto():
+        status = world.rung(managed_fn=lambda: True, record_fn=_pre_rule_record).detect()
+    assert (status.applicable, status.converged) == (False, False) and world.listings == 0
+
+
+def test_the_walk_over_a_pre_rule_record_rescans_and_rewrites_it_with_the_mark(world: World) -> None:
+    from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
+
+    _one_fillable_and_one_newer_row(world)
+    ledger = InMemoryCompletionLedger()
+    old = _pre_rule_record()
+    ledger.record_verified(old.rung_name, package_version=old.package_version, detail=old.detail)
+    rung = world.rung(record_fn=lambda: ledger.completions().get(ManifestSectionLabelsRung.name))
+    runner = LadderRunner(LadderRegistry((rung,)), ledger, package_version_fn=lambda: "9.9.9")
+
+    first = runner.run()
+
+    assert [r.outcome for r in first.runs] == [RungOutcome.RECORDED]
+    assert TITLE_RULE_MARK in ledger.completions()[RUNG_MANIFEST_SECTION_LABELS].detail
+    listings = world.listings
+    assert [r.outcome for r in runner.run().runs] == [RungOutcome.ALREADY_RECORDED]
+    assert world.listings == listings, "the rewritten record short-circuits: no second rescan"
 
 
 def test_an_unreadable_ledger_is_not_a_record_and_the_scan_runs(world: World) -> None:
@@ -996,7 +1049,7 @@ def test_a_bound_deadline_alone_is_a_clock_not_the_unattended_signal(world: Worl
 def test_auto_on_a_managed_service_with_a_recorded_completion_is_still_converged(world: World) -> None:
     _one_fillable_and_one_newer_row(world)
     with _bound_auto():
-        status = world.rung(managed_fn=lambda: True, record_fn=lambda: object()).detect()
+        status = world.rung(managed_fn=lambda: True, record_fn=lambda: SimpleNamespace(detail=TITLE_RULE_MARK)).detect()
     assert (status.applicable, status.converged) == (True, True)
     assert world.engine_reads() == (0, 0, 0, 0, 0), "the record answers before the engine is asked"
 

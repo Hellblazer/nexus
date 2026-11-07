@@ -8706,15 +8706,19 @@ public final class CatalogRepository {
                 .and(stampAt.isNull().or(withinSkew));
 
             // _title_names_document: no title is not contradicted; else the title, the title without its per-chunk
-            // suffix, or that one's file name, equals the document's title, file path or file name. Empty names do not count.
+            // suffix, or that one's file name, equals the document's title (with or without ITS per-chunk suffix: an ETL
+            // import can title a document after one of its chunks, nexus-l8o33), file path or file name. Empty names do
+            // not count.
             Field<String> unsuffixed = DSL.regexpReplaceAll(chunkTitle, CHUNK_TITLE_SUFFIX, "");
             Field<String> unsuffixedName = DSL.regexpReplaceAll(unsuffixed, FILE_NAME_PREFIX, "");
             Field<String> ownTitle = DSL.nullif(doc.TITLE, "");
+            Field<String> ownTitleUnsuffixed = DSL.nullif(DSL.regexpReplaceAll(doc.TITLE, CHUNK_TITLE_SUFFIX, ""), "");
             Field<String> ownPath = DSL.nullif(doc.FILE_PATH, "");
             Field<String> ownName = DSL.nullif(DSL.regexpReplaceAll(doc.FILE_PATH, FILE_NAME_PREFIX, ""), "");
             Condition namesDocument = chunkTitle.isNull().or(chunkTitle.eq(""));
             for (Field<String> candidate : List.of(chunkTitle, unsuffixed, unsuffixedName)) {
-                namesDocument = namesDocument.or(candidate.eq(ownTitle)).or(candidate.eq(ownPath)).or(candidate.eq(ownName));
+                namesDocument = namesDocument.or(candidate.eq(ownTitle)).or(candidate.eq(ownTitleUnsuffixed))
+                    .or(candidate.eq(ownPath)).or(candidate.eq(ownName));
             }
 
             var matching = ctx.selectOne()
