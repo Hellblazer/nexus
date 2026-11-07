@@ -165,9 +165,31 @@ the workspace, and the models do read it: a no-skill control therefore passes
 several graders it would not pass from `nx ask answer --help` alone, so read
 the control's failures, not its passes, as the skill's measured effect.
 
-o06, o09 and o10 were redesigned after the runs below (nexus-wc4jj.16): a later message in the
-script no longer settles the outcome up front, so a run without the skill can now fail a
-behaviour grader. The results below do not describe them until they are rerun.
+o06, o09 and o10 were redesigned after the 2026-11-06 runs below (nexus-wc4jj.16): a later
+message in the script no longer settles the outcome up front, so a run without the skill can
+fail a behaviour grader.
+
+Runs on 2026-11-07 (claude 2.1.319, claude-opus-5-5, macOS, develop at 0ffbf81c3, `--runs 3
+--ablation with-without --scaffold --allow-tools Bash --mocks record`, one case per
+invocation, from a copy of the plugin outside git; $11.69 in all). Passes, with skill / without:
+
+| Case | With | Without | What the control fails |
+| --- | --- | --- | --- |
+| o06 echo-before-send | 1/3 | 0/3 | nothing sent, the revised echo-back, the second echo |
+| o07 sam-words-span | 3/3 | 0/3 | echo-back before the first send |
+| o08 reversible-only | 3/3 | 0/3 | names what it left alone, the tag ask as irreversible |
+| o09 ambiguous-reply | 3/3 | 0/3 | only `queue-read-with-list-json` |
+| o10 no-reply | 3/3 | 0/3 | behaviour graders (score 0.33) |
+| o11 hold-note-only | 2/3 | 1/3 | only `queue-read-with-list-json` |
+| o12 batch-words | 3/3 | 0/3 | echo-back before the first send |
+| o13 asker-stale | 2/3 | 3/3 | nothing |
+| o14 no-mediation | 2/3 | 0/3 | reports the refusal and that nothing was sent |
+
+o06, o07, o08, o10, o12 and o14 discriminate on behaviour. o09 and o11 discriminate only
+through the command-form grader, and o13 not at all: the control reads the stub and handles a
+stale ask unaided. With the skill, o06 fails `change-is-echoed-again-and-nothing-is-sent` in 2
+of 3 runs (the skill's echo-again rule is not reliably followed), o13 misses
+`names-the-current-version` once, o11 and o14 miss once each.
 
 Runs on 2026-11-06 (claude 2.1.319, claude-opus-5-5, macOS, `--runs 1 --ablation none
 --scaffold --allow-tools Bash --mocks record`, `-j 7`, the cases only; below the `--runs 3`

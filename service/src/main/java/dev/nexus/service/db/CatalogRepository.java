@@ -62,6 +62,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -7451,7 +7452,7 @@ public final class CatalogRepository {
                                               List<String> sweepChashes) {
         List<String> toSweep = normalizeSweepChashes(sweepChashes);
         int chunksWritten = appendOneDocumentTx(tenant, docId, collection, rows, resolvedChunks,
-                writtenChashesOut, Set.of(), null, null);
+                writtenChashesOut, Set.of(), null, null, null);
         // The append has COMMITTED (the transaction above returned). Only now does the deferred
         // sweep run, in its own transaction: it cannot share the append's, which holds the sweep
         // gate SHARED (see runSweepTransaction), and a rolled-back append must sweep nothing.
@@ -7474,6 +7475,9 @@ public final class CatalogRepository {
      *        ({@code write_many}'s {@code complete} semantics: the fail-closed verify, and a refusal
      *        is reported through {@code completeRefusedOut}, never thrown)
      * @param completeRefusedOut where a refused stamp is reported; {@code null} when {@code complete} is
+     * @param expectedRefusedOut where the rows refused by their {@code expected} guard are reported (nexus-tj0wu:
+     *        {@code {doc_id, position, reason}}); {@code null} when the caller does not take the guard, in which
+     *        case a row that carries {@code expected} is refused as a bad request instead of written unguarded
      * @return the count of chunk rows written
      */
     private int appendOneDocumentTx(String tenant, String docId, String collection,
@@ -7482,7 +7486,12 @@ public final class CatalogRepository {
                                     List<String>[] writtenChashesOut,
                                     Set<String> writtenThisRequest,
                                     Map<String, Object> complete,
-                                    List<Map<String, Object>> completeRefusedOut) {
+                                    List<Map<String, Object>> completeRefusedOut,
+                                    List<Map<String, Object>> expectedRefusedOut) {
+        if (expectedRefusedOut == null && rows.stream().anyMatch(r -> r.get("expected") != null)) {
+            throw new IllegalArgumentException(
+                "'expected' is honoured by manifest/append_many only; this route would write the row unguarded");
+        }
         requireNonBlank(collection, "collection");
         int[] chunksWritten = new int[1];
         // nexus-wbfpw.66: this transaction runs under DeadlockRetry and is re-run from scratch
@@ -7492,10 +7501,12 @@ public final class CatalogRepository {
         // upsertManifestChunkVectors on every attempt that reaches it, which every successful
         // attempt does.
         List<Map<String, Object>> attemptRefused = new ArrayList<>();
+        List<Map<String, Object>> attemptExpectedRefused = new ArrayList<>();
         RacedEmbeds raced = new RacedEmbeds();
         manifestWriteTxn(tenant, "catalog.appendManifestChunks " + collection, ctx -> {
             chunksWritten[0] = 0;
             attemptRefused.clear();
+            attemptExpectedRefused.clear();
             raced.reset();
             // Case-1 duty only (RDR-191): does docId exist at all? A ghost
             // document is no longer a special case -- its rows are stamped
@@ -7518,6 +7529,12 @@ public final class CatalogRepository {
                 throw new TombstonedDocumentException(docId,
                     "appendManifestChunks refused: document is tombstoned: " + docId);
             }
+            // nexus-tj0wu: a row that carries `expected` is written only while the stored row at its position
+            // still holds the values the caller read. Checked under the index-run lock taken above and with the
+            // rows locked FOR UPDATE, so a writer that commits first is seen (the row is refused) and one that
+            // comes later waits for this transaction.
+            final List<Map<String, Object>> toWrite = expectedRefusedOut == null
+                ? rows : refuseStaleExpected(ctx, tenant, docId, rows, attemptExpectedRefused);
             // RDR-223 P1.1: the chunk-vector UPSERT runs AFTER the index-run
             // lock and BEFORE the manifest rows, in this same transaction --
             // writeManifestRows' order exactly (RDR-223 F-2). The raced-embed
@@ -7526,12 +7543,12 @@ public final class CatalogRepository {
             // earlier document of the same append_many request wrote, so a chash
             // shared between two documents of one request is not counted as a race.
             if (resolvedChunks != null) {
-                chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, collection, rows,
+                chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, collection, toWrite,
                         resolvedChunks, writtenThisRequest, writtenChashesOut, raced);
                 java.util.function.Consumer<DSLContext> hook = afterChunkUpsertHookForTests;
                 if (hook != null) hook.accept(ctx);
             }
-            if (!rows.isEmpty()) {
+            if (!toWrite.isEmpty()) {
                 stampIndexedAt(ctx, tenant, docId);
             }
             // nexus-11gh6 §7d: routed through the single-homed insert helper,
@@ -7545,9 +7562,9 @@ public final class CatalogRepository {
             // outcome left to vary on.
             // nexus-pvkbv: an upsert that puts another chunk at a position this document holds displaces the
             // chunk that stood there; the rows at these positions are read first, the displaced ones cleared after.
-            Map<Integer, String> writtenAt = chashesByPosition(rows);
+            Map<Integer, String> writtenAt = chashesByPosition(toWrite);
             Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
-            for (var row : rows) {
+            for (var row : toWrite) {
                 insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_APPEND);
             }
             DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
@@ -7557,7 +7574,7 @@ public final class CatalogRepository {
             // manifest carried a stale count until someone ran /manifest/resync.
             // count(*) rather than += rows.size(): appends upsert BY POSITION,
             // so an append that overwrites existing positions adds no rows.
-            if (!rows.isEmpty()) {
+            if (!toWrite.isEmpty()) {
                 // nexus-eldyi: guarded, fail loud — same reasoning as
                 // writeManifestRows (data-bearing, VOID public signature; the
                 // throw rolls back the append written above in this same txn).
@@ -7584,8 +7601,119 @@ public final class CatalogRepository {
         if (completeRefusedOut != null) {
             completeRefusedOut.addAll(attemptRefused);
         }
+        if (expectedRefusedOut != null) {
+            expectedRefusedOut.addAll(attemptExpectedRefused);
+        }
         raced.flush(collection);
         return chunksWritten[0];
+    }
+
+    /**
+     * nexus-tj0wu: the compare half of an append's compare-and-set. {@code UPSERT_APPEND} writes the chash, the
+     * three labels and {@code labels_written} from the request, so a caller that re-read a row, decided from it and
+     * wrote back would put its read values over a re-index or label write that committed in between. A row that
+     * carries {@code expected} ({@code {chash, section_title?, section_type?, page_number?, labels_written?,
+     * line_start?, line_end?, char_start?, char_end?}}, a key that is absent is not compared) is kept for the write only while the stored row at its position
+     * holds exactly those values; the compared key set is the caller's, so a caller that rewrites nothing but a
+     * span can name only the chash. A row whose position is gone is refused too. A refused row is dropped from the
+     * write (no chunk it alone references is inserted, no span written) and reported, never thrown: the document
+     * and its other rows go on. The stored rows are read {@code FOR UPDATE}, in position order, and only those of
+     * a LIVE document: a tombstoned document's rows read as absent, so a guarded write to one is refused.
+     *
+     * @return the rows to write: every row without {@code expected}, then the ones whose guard held, in request order
+     */
+    private static List<Map<String, Object>> refuseStaleExpected(DSLContext ctx, String tenant, String docId,
+                                                                   List<Map<String, Object>> rows,
+                                                                   List<Map<String, Object>> refusedOut) {
+        Set<Integer> guarded = new java.util.TreeSet<>();
+        for (var row : rows) {
+            if (row.get("expected") != null) {
+                Integer position = i(row, "position");
+                if (position == null) {
+                    throw new IllegalArgumentException("a row with 'expected' needs a 'position'");
+                }
+                guarded.add(position);
+            }
+        }
+        if (guarded.isEmpty()) return rows;
+        Map<Integer, org.jooq.Record> stored = new HashMap<>();
+        ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE,
+                CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
+                CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, CATALOG_DOCUMENT_CHUNKS.LINE_START,
+                CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                .and(CATALOG_DOCUMENT_CHUNKS.POSITION.in(guarded))
+                .and(liveParentDoc(ctx, tenant)))
+            .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+            .forUpdate()
+            .fetch()
+            .forEach(r -> stored.put(r.get(CATALOG_DOCUMENT_CHUNKS.POSITION), r));
+        List<Map<String, Object>> keep = new ArrayList<>(rows.size());
+        for (var row : rows) {
+            if (!(row.get("expected") instanceof Map<?, ?> raw)) {
+                keep.add(row);
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> expected = (Map<String, Object>) raw;
+            Integer position = i(row, "position");
+            org.jooq.Record now = stored.get(position);
+            String reason;
+            if (now == null) {
+                reason = "position_absent";
+            } else if (!String.valueOf(expected.get("chash")).equalsIgnoreCase(now.get(CHK_CHASH_HEX))) {
+                reason = "chash_changed";
+            } else if (!labelsMatch(expected, now)) {
+                reason = "labels_changed";
+            } else if (!spansMatch(expected, now)) {
+                reason = "span_changed";
+            } else {
+                keep.add(row);
+                continue;
+            }
+            Map<String, Object> refused = new LinkedHashMap<>();
+            refused.put("doc_id", docId);
+            refused.put("position", position);
+            refused.put("reason", reason);
+            refusedOut.add(refused);
+        }
+        return keep;
+    }
+
+    /** Whether each span column {@code expected} names equals the stored row's (null equals null; an absent key is not compared). */
+    private static boolean spansMatch(Map<String, Object> expected, org.jooq.Record now) {
+        return intMatches(expected, "line_start", now.get(CATALOG_DOCUMENT_CHUNKS.LINE_START))
+            && intMatches(expected, "line_end", now.get(CATALOG_DOCUMENT_CHUNKS.LINE_END))
+            && intMatches(expected, "char_start", now.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START))
+            && intMatches(expected, "char_end", now.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END));
+    }
+
+    private static boolean intMatches(Map<String, Object> expected, String key, Integer have) {
+        if (!expected.containsKey(key)) return true;
+        Object want = expected.get(key);
+        return want == null ? have == null : want instanceof Number n && have != null && n.intValue() == have;
+    }
+
+    /** Whether each label key {@code expected} names equals the stored row's (null equals null; an absent key is not compared). */
+    private static boolean labelsMatch(Map<String, Object> expected, org.jooq.Record now) {
+        if (expected.containsKey("section_title")
+                && !java.util.Objects.equals(expected.get("section_title"), now.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE))) {
+            return false;
+        }
+        if (expected.containsKey("section_type")
+                && !java.util.Objects.equals(expected.get("section_type"), now.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE))) {
+            return false;
+        }
+        if (!intMatches(expected, "page_number", now.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER))) {
+            return false;
+        }
+        if (expected.containsKey("labels_written")
+                && !java.util.Objects.equals(expected.get("labels_written"), now.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN))) {
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -7620,6 +7748,7 @@ public final class CatalogRepository {
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> sweepDetail = new ArrayList<>();
         List<Map<String, Object>> completeRefused = new ArrayList<>();
+        List<Map<String, Object>> expectedRefused = new ArrayList<>();
         Set<String> requestWrittenChashes = new HashSet<>();
         // The deferred sweeps of the documents that committed, run only after EVERY document has
         // been appended. A sweep fired straight after its own document's commit could delete a
@@ -7645,23 +7774,27 @@ public final class CatalogRepository {
             // A refusal is held per document and added to the response only once the document's
             // transaction has committed: a document that rolls back has no stamp to report.
             List<Map<String, Object>> docRefused = new ArrayList<>();
+            List<Map<String, Object>> docExpectedRefused = new ArrayList<>();
             try {
                 if (docId == null || docId.isBlank()) {
                     throw new IllegalArgumentException("'doc_id' required");
                 }
                 List<String> toSweep = normalizeSweepChashes(sweepChashes);
                 int chunksWritten = appendOneDocumentTx(tenant, docId, collection, rows,
-                        resolvedChunks, written, requestWrittenChashes, docComplete, docRefused);
+                        resolvedChunks, written, requestWrittenChashes, docComplete, docRefused, docExpectedRefused);
                 completeRefused.addAll(docRefused);
+                expectedRefused.addAll(docExpectedRefused);
+                int rowsWritten = rows.size() - docExpectedRefused.size();
                 // Merged only now that this document's transaction has committed.
                 if (written[0] != null) requestWrittenChashes.addAll(written[0]);
                 okDocs++;
-                totalRows += rows.size();
+                totalRows += rowsWritten;
                 totalChunksWritten += chunksWritten;
                 Map<String, Object> r = new LinkedHashMap<>();
                 r.put("doc_id", docId);
                 r.put("ok", true);
-                r.put("count", rows.size());
+                r.put("count", rowsWritten);
+                if (!docExpectedRefused.isEmpty()) r.put("expected_refused", docExpectedRefused.size());
                 r.put("chunks_written", chunksWritten);
                 results.add(r);
                 if (!toSweep.isEmpty()) {
@@ -7714,6 +7847,10 @@ public final class CatalogRepository {
         // the client's echo that this engine understood the field.
         out.put("complete_refused", completeRefused);
         out.put("complete_refused_count", completeRefused.size());
+        // nexus-tj0wu: rows a per-row `expected` guard refused. Always present, and the scalar is the client's echo
+        // that this engine understood the field (an engine without it ignores `expected` and writes unguarded).
+        out.put("expected_refused", expectedRefused);
+        out.put("expected_refused_count", expectedRefused.size());
         out.put("results", results);
         return out;
     }

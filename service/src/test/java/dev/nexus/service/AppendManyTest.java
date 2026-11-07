@@ -3,14 +3,23 @@
 package dev.nexus.service;
 
 import dev.nexus.service.vectors.RacedEmbedActivity;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-223 P1.4 (bead nexus-z0o2p.5) -- {@code manifest/append_many}: several documents in
@@ -393,5 +402,257 @@ class AppendManyTest extends AtomicWriteTestBase {
         assertThat((List<?>) response.get("complete_refused")).isEmpty();
         assertThat(indexState(f.docId())).isNull();
         assertThat(results(response).get(0)).doesNotContainKey("complete");
+    }
+
+    // ── nexus-tj0wu: the per-row `expected` guard. UPSERT_APPEND writes chash, labels and labels_written from
+    //    the request, so a caller that re-read a row and writes it back must not revert a re-index or a label
+    //    write that committed in between. ──
+
+    private static Map<String, Object> guarded(Map<String, Object> row, Map<String, Object> expected) {
+        Map<String, Object> out = new LinkedHashMap<>(row);
+        out.put("expected", expected);
+        return out;
+    }
+
+    private static Map<String, Object> labelled(int position, String chash, String title, String type, int page) {
+        Map<String, Object> r = new LinkedHashMap<>(row(position, chash));
+        r.put("section_title", title);
+        r.put("section_type", type);
+        r.put("page_number", page);
+        r.put("labels_written", true);
+        return r;
+    }
+
+    private Map<String, Object> manifestRow(String docId, int position) {
+        return repo.getManifest(TENANT, docId).stream()
+            .filter(r -> ((Number) r.get("position")).intValue() == position).findFirst().orElseThrow();
+    }
+
+    /** A document with the chunks a, b, c stored and the manifest rows 0:a, 1:b (legacy labels). */
+    private Fx seededGuardFixture(String tag, String a, String b, String c) {
+        Fx f = fixture(tag);
+        svc.writeManyCombined(TENANT, f.collection(),
+            List.of(chunk(a, "a text"), chunk(b, "b text"), chunk(c, "c text")),
+            List.of(doc(f.docId(), List.of(row(0, a), row(1, b), row(2, c)))), null, false, false);
+        return f;
+    }
+
+    @Test
+    void anExpectedRowWhoseStoredValuesStillMatch_isWritten_andNothingIsReportedRefused() throws Exception {
+        String a = ch("exp-ok-a"), b = ch("exp-ok-b"), c = ch("exp-ok-c");
+        Fx f = seededGuardFixture("expok", a, b, c);
+        Map<String, Object> mine = new LinkedHashMap<>(row(0, a));
+        mine.put("line_start", 5);
+        mine.put("labels_written", false);
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(mine, Map.of(
+                "chash", a, "labels_written", false))))), null, false).response();
+
+        assertThat(response).containsEntry("docs", 1).containsEntry("rows", 1)
+            .containsEntry("expected_refused_count", 0).containsEntry("failed_doc_ids", List.of());
+        assertThat((List<?>) response.get("expected_refused")).isEmpty();
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("line_start", 5);
+    }
+
+    @Test
+    void aReIndexOfThePositionBetweenTheReadAndTheWrite_isNotRevertedToTheReadChash() throws Exception {
+        String a = ch("exp-race-a"), b = ch("exp-race-b"), c = ch("exp-race-c");
+        Fx f = seededGuardFixture("exprace", a, b, c);
+        // The caller read position 0 holding `a`; a re-index then puts `c` there ...
+        repo.appendManifestChunks(TENANT, f.docId(), f.collection(), List.of(row(0, c)));
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("chash", c);
+
+        // ... and the caller's write, still carrying what it read, is refused instead of putting `a` back.
+        Map<String, Object> mine = new LinkedHashMap<>(row(0, a));
+        mine.put("line_start", 5);
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(mine, Map.of("chash", a))))), null, false).response();
+
+        assertThat(response).containsEntry("docs", 1).containsEntry("rows", 0)
+            .containsEntry("expected_refused_count", 1).containsEntry("failed_doc_ids", List.of());
+        @SuppressWarnings("unchecked")
+        var refused = (List<Map<String, Object>>) response.get("expected_refused");
+        assertThat(refused).containsExactly(Map.of("doc_id", f.docId(), "position", 0, "reason", "chash_changed"));
+        assertThat(results(response).get(0)).containsEntry("ok", true).containsEntry("count", 0)
+            .containsEntry("expected_refused", 1);
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("chash", c).containsEntry("line_start", null);
+    }
+
+    @Test
+    void aLabelWriteBetweenTheReadAndTheWrite_isNotRevertedToTheReadLabels() throws Exception {
+        String a = ch("exp-lab-a"), b = ch("exp-lab-b"), c = ch("exp-lab-c");
+        Fx f = seededGuardFixture("explab", a, b, c);
+        // The caller read position 0 as a legacy row (no labels); a label write then records the labels.
+        repo.appendManifestChunks(TENANT, f.docId(), f.collection(), List.of(labelled(0, a, "Intro", "body", 4)));
+
+        Map<String, Object> mine = new LinkedHashMap<>(row(0, a));
+        mine.put("line_start", 5);
+        mine.put("labels_written", false);
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(mine, Map.of(
+                "chash", a, "labels_written", false))))), null, false).response();
+
+        assertThat(response).containsEntry("rows", 0).containsEntry("expected_refused_count", 1);
+        @SuppressWarnings("unchecked")
+        var refused = (List<Map<String, Object>>) response.get("expected_refused");
+        assertThat(refused.get(0)).containsEntry("reason", "labels_changed");
+        // a guard that names only a label is compared on that label: the stored title is no longer NULL
+        Map<String, Object> onlyTitle = new LinkedHashMap<>();
+        onlyTitle.put("chash", a);
+        onlyTitle.put("section_title", null);
+        var second = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(mine, onlyTitle)))), null, false).response();
+        assertThat(second).containsEntry("rows", 0).containsEntry("expected_refused_count", 1);
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("section_title", "Intro").containsEntry("section_type", "body")
+            .containsEntry("page_number", 4).containsEntry("line_start", null);
+    }
+
+    @Test
+    void oneStaleRowDoesNotStopItsFreshNeighbour_norItsDocument() throws Exception {
+        String a = ch("exp-mix-a"), b = ch("exp-mix-b"), c = ch("exp-mix-c");
+        Fx f = seededGuardFixture("expmix", a, b, c);
+        repo.appendManifestChunks(TENANT, f.docId(), f.collection(), List.of(row(0, c)));   // position 0 moved on
+
+        Map<String, Object> stale = new LinkedHashMap<>(row(0, a));
+        stale.put("line_start", 5);
+        Map<String, Object> fresh = new LinkedHashMap<>(row(1, b));
+        fresh.put("line_start", 9);
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(stale, Map.of("chash", a)), guarded(fresh, Map.of("chash", b))))),
+            null, false).response();
+
+        assertThat(response).containsEntry("docs", 1).containsEntry("rows", 1).containsEntry("expected_refused_count", 1);
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("chash", c).containsEntry("line_start", null);
+        assertThat(manifestRow(f.docId(), 1)).containsEntry("chash", b).containsEntry("line_start", 9);
+    }
+
+    @Test
+    void aPositionThatIsGone_isRefused_andCreatesNoRow() throws Exception {
+        String a = ch("exp-gone-a"), b = ch("exp-gone-b"), c = ch("exp-gone-c");
+        Fx f = seededGuardFixture("expgone", a, b, c);
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(row(7, a), Map.of("chash", a))))), null, false).response();
+
+        assertThat(response).containsEntry("rows", 0).containsEntry("expected_refused_count", 1);
+        @SuppressWarnings("unchecked")
+        var refused = (List<Map<String, Object>>) response.get("expected_refused");
+        assertThat(refused.get(0)).containsEntry("position", 7).containsEntry("reason", "position_absent");
+        assertThat(manifestChashes(f.docId())).containsExactly(a, b, c);
+    }
+
+    @Test
+    void aRowWithoutExpected_isWrittenAsBefore_andTheRefusalFieldsAreAlwaysThere() throws Exception {
+        String a = ch("exp-none-a"), b = ch("exp-none-b"), c = ch("exp-none-c");
+        Fx f = seededGuardFixture("expnone", a, b, c);
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, c)))), null, false).response();
+
+        assertThat(response).containsEntry("rows", 1).containsEntry("expected_refused_count", 0);
+        assertThat((List<?>) response.get("expected_refused")).isEmpty();
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("chash", c);
+    }
+
+    @Test
+    void aSpanWrittenBetweenTheReadAndTheWrite_isNotOverwritten_whenTheGuardNamesTheSpan() throws Exception {
+        String a = ch("exp-span-a"), b = ch("exp-span-b"), c = ch("exp-span-c");
+        Fx f = seededGuardFixture("expspan", a, b, c);
+        // The caller read position 0 with no span; the position's own writer then records one (same chunk).
+        Map<String, Object> theirs = new LinkedHashMap<>(row(0, a));
+        theirs.put("line_start", 70);
+        theirs.put("line_end", 80);
+        repo.appendManifestChunks(TENANT, f.docId(), f.collection(), List.of(theirs));
+
+        Map<String, Object> mine = new LinkedHashMap<>(row(0, a));
+        mine.put("line_start", 5);
+        Map<String, Object> read = new LinkedHashMap<>();
+        read.put("chash", a);
+        read.put("line_start", null);
+        read.put("line_end", null);
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(mine, read)))), null, false).response();
+
+        assertThat(response).containsEntry("rows", 0).containsEntry("expected_refused_count", 1);
+        @SuppressWarnings("unchecked")
+        var refused = (List<Map<String, Object>>) response.get("expected_refused");
+        assertThat(refused.get(0)).containsEntry("reason", "span_changed");
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("line_start", 70).containsEntry("line_end", 80);
+    }
+
+    /**
+     * The compare is only a compare-and-set because the stored rows are read FOR UPDATE: a writer that holds the row
+     * makes the guarded append WAIT, and when it commits the append reads the committed value and refuses. A second
+     * transaction holds the row, a span is written under that lock, and the guarded append (which names the span as
+     * NULL and would write 5 over it) is still in flight until the holder commits; then it is refused as
+     * {@code span_changed} and the holder's 7 stands. With a plain read in {@code refuseStaleExpected} the append
+     * would not wait, would compare against the old NULL, and the upsert would put 5 over the 7.
+     */
+    @Test
+    void aGuardedAppend_waitsForAWriterHoldingTheRow_thenRefusesOnTheCommittedValue() throws Exception {
+        String a = ch("exp-lock-a"), b = ch("exp-lock-b"), c = ch("exp-lock-c");
+        Fx f = seededGuardFixture("explock", a, b, c);
+        Map<String, Object> mine = new LinkedHashMap<>(row(0, a));
+        mine.put("line_start", 5);
+        Map<String, Object> expected = new LinkedHashMap<>();
+        expected.put("chash", a);
+        expected.put("line_start", null);
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSLContext ctx = DSL.using(holder, SQLDialect.POSTGRES);
+            var heldRow = CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(f.docId()))
+                .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(0));
+            assertThat(ctx.selectFrom(CATALOG_DOCUMENT_CHUNKS).where(heldRow).forUpdate().fetch()).hasSize(1);
+
+            CompletableFuture<Map<String, Object>> append = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return svc.appendManyCombined(TENANT, f.collection(),
+                        List.of(mdoc(f.docId(), List.of(guarded(mine, expected)))), null, false).response();
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            assertThatThrownBy(() -> append.get(1500, TimeUnit.MILLISECONDS))
+                .as("the guarded append waits for the row's lock instead of comparing against an old read")
+                .isInstanceOf(TimeoutException.class);
+
+            ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.LINE_START, 7).where(heldRow).execute();
+            holder.commit();
+
+            var response = append.get(30, TimeUnit.SECONDS);
+            assertThat(response).containsEntry("rows", 0).containsEntry("expected_refused_count", 1);
+            @SuppressWarnings("unchecked")
+            var refused = (List<Map<String, Object>>) response.get("expected_refused");
+            assertThat(refused).containsExactly(Map.of("doc_id", f.docId(), "position", 0, "reason", "span_changed"));
+        }
+        assertThat(manifestRow(f.docId(), 0)).as("the holder's span stands").containsEntry("line_start", 7);
+    }
+
+    @Test
+    void aTombstonedDocumentsRows_areRefusedAsAbsent_notWritten() throws Exception {
+        String a = ch("exp-tomb-a"), b = ch("exp-tomb-b"), c = ch("exp-tomb-c");
+        Fx f = seededGuardFixture("exptomb", a, b, c);
+        assertThat(repo.deleteDocument(TENANT, f.docId())).isEqualTo(1);
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(guarded(row(0, a), Map.of("chash", a))))), null, false).response();
+
+        assertThat(response).containsEntry("rows", 0).containsEntry("expected_refused_count", 1);
+        @SuppressWarnings("unchecked")
+        var refused = (List<Map<String, Object>>) response.get("expected_refused");
+        assertThat(refused.get(0)).containsEntry("reason", "position_absent");
+    }
+
+    @Test
+    void theSingleDocumentAppend_refusesARowThatCarriesExpected_ratherThanWritingItUnguarded() throws Exception {
+        String a = ch("exp-one-a"), b = ch("exp-one-b"), c = ch("exp-one-c");
+        Fx f = seededGuardFixture("expone", a, b, c);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.appendManifestChunks(
+                TENANT, f.docId(), f.collection(), List.of(guarded(row(0, c), Map.of("chash", a)))))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("append_many");
+        assertThat(manifestRow(f.docId(), 0)).containsEntry("chash", a);
     }
 }

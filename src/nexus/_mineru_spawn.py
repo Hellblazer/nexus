@@ -245,7 +245,25 @@ def mineru_server_argv(mineru_bin: str, port: int, platform: str | None = None) 
     ]
 
 
-def spawn_server_process(port: int) -> subprocess.Popen | None:
+def _server_popen_kwargs(platform: str | None = None) -> dict[str, object]:
+    """``Popen`` kwargs for the detached MinerU server (nexus-dmhxw).
+
+    The storage supervisor's rule (``commands.daemon._supervisor_popen_kwargs``): POSIX gets
+    ``start_new_session=True``; Windows gets ``CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`` (its own
+    group, a hidden console, never ``DETACHED_PROCESS``). Both carry the stable cwd and a pinned
+    ``NEXUS_CONFIG_DIR`` from ``service_registry.detached_spawn_kwargs`` (nexus-x3m8e)."""
+    from nexus import _vcrt  # noqa: PLC0415 -- stdlib-only
+    from nexus.daemon.service_registry import detached_spawn_kwargs  # noqa: PLC0415 — branch-local; only when spawning the server
+
+    stable = detached_spawn_kwargs()
+    if _vcrt.is_windows(platform):
+        from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
+
+        return {"creationflags": win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW, **stable}
+    return {"start_new_session": True, **stable}
+
+
+def spawn_server_process(port: int, *, platform: str | None = None) -> subprocess.Popen | None:
     """Launch the mineru-api child + write its pid file (nexus-1qdb9).
 
     The launch core shared by the ``nx mineru start`` command, the
@@ -258,7 +276,7 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
     mineru_bin = _resolve_mineru_api_bin()
     if mineru_bin is None:
         return None
-    cmd = mineru_server_argv(mineru_bin, port)
+    cmd = mineru_server_argv(mineru_bin, port, platform)
     output_root = _mineru_output_root()
     # RDR-148 Gap 4: the mineru-api server is long-lived; DEVNULL discarded
     # its startup banner and crash tracebacks, the only record of WHY it
@@ -293,18 +311,22 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
         # getcwd/abspath/Path.cwd call in the server or its libraries.
         # detached_spawn_kwargs also pins a relative NEXUS_CONFIG_DIR, which
         # the child would otherwise resolve against its new cwd.
-        from nexus.daemon.service_registry import detached_spawn_kwargs  # noqa: PLC0415 — branch-local; only when spawning the server
+        # nexus-dmhxw: on Windows start_new_session means nothing, so the server was a plain child
+        # inside its spawner's Job Object (the Desktop extension's bootstrap, a contained run_bounded)
+        # and died when that job closed. It takes the storage supervisor's flags, through the shared
+        # breakaway primitive (nexus-9pc2f), which retries without breakaway when the job refuses it.
+        from nexus.daemon.service_registry import popen_outliving_host_job  # noqa: PLC0415 — branch-local; only when spawning the server
 
-        stable = detached_spawn_kwargs()
+        stable = _server_popen_kwargs(platform)
         env = _server_env(output_root)
         if "env" in stable:
             env["NEXUS_CONFIG_DIR"] = stable.pop("env")["NEXUS_CONFIG_DIR"]
-        proc = subprocess.Popen(
+        proc = popen_outliving_host_job(
+            subprocess.Popen,
             cmd,
             env=env,
             stdout=server_log,
             stderr=server_log,
-            start_new_session=True,
             **stable,
         )
     except (FileNotFoundError, PermissionError):

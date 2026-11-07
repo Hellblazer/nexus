@@ -35,7 +35,7 @@
         "path": "tool-spill",
         "ref": "v7.97.0"
       },
-      "description": "Keeps big tool output out of your context, no setup needed: a main-session Bash output or whole-file Read over 4000 bytes is cut to its head and tail, with a note saying where the full text is. Options can stay blank (blank = default).",
+      "description": "Keeps big tool output out of your context, no setup needed: a main-session Bash output or whole-file Read over 5000 bytes is cut to its head and tail, with a note saying where the full text is. Options can stay blank (blank = default).",
       "version": "7.97.0"
     },
     {

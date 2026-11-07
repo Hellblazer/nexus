@@ -370,6 +370,23 @@ public final class ChunkKeySweep {
         return DSL.condition(DSL.function("jsonb_exists", SQLDataType.BOOLEAN, metadata, DSL.val(key)));
     }
 
+    /** The key holds a JSON integer (a number written without a fraction or exponent; not a string, bool or null). */
+    private static Condition anyInt(Field<JSONB> metadata, String key) {
+        return jsonIntegerText(metadata, key, "^-?[0-9]+$");
+    }
+
+    /** The key holds a JSON integer above zero (the value {@code manifest_span} treats as recorded). */
+    private static Condition positiveInt(Field<JSONB> metadata, String key) {
+        return jsonIntegerText(metadata, key, "^[1-9][0-9]*$");
+    }
+
+    private static Condition jsonIntegerText(Field<JSONB> metadata, String key, String regex) {
+        Field<JSONB> value = DSL.jsonbGetAttribute(metadata, key);
+        Field<String> typeOf = DSL.function("jsonb_typeof", SQLDataType.VARCHAR, value);
+        // typeOf is NULL for an absent key and the AND is then NULL, which no WHERE or FILTER admits.
+        return typeOf.eq("number").and(DSL.jsonbGetAttributeAsText(metadata, key).likeRegex(regex));
+    }
+
     /** A row's {@code chunk_text_hash} that is not its chash in hex (a row without the key passes, as the CHECK does). */
     static Condition hashMismatch() {
         Field<String> hash = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "chunk_text_hash");
@@ -473,12 +490,18 @@ public final class ChunkKeySweep {
         out.put("homeless_documents", (long) ctx.fetchCount(
             DSL.selectOne().from(d).where(liveDoc).and(d.PHYSICAL_COLLECTION.eq(""))));
 
-        // A manifest span column that is NULL while the chunk row holds the matching key: the sweep would lose that
-        // position. Counted per column (the sweep deletes all four keys), and a row once whatever columns it lacks.
-        Condition lineStart = m.LINE_START.isNull().and(hasKey(c.METADATA, "line_start"));
-        Condition lineEnd = m.LINE_END.isNull().and(hasKey(c.METADATA, "line_end"));
-        Condition charStart = m.CHAR_START.isNull().and(hasKey(c.METADATA, "chunk_start_char"));
-        Condition charEnd = m.CHAR_END.isNull().and(hasKey(c.METADATA, "chunk_end_char"));
+        // A manifest span column that is NULL while the chunk row RECORDS the matching value: the sweep would lose that
+        // position. "Recorded" is the Python client's manifest_span rule, by value: make_chunk_metadata writes 0 for "not
+        // recorded", so a key that is present is not a position. A line is recorded when it is a positive integer, the
+        // char end likewise, and the char start when it is a positive integer or an integer beside a recorded end (0 is
+        // the head of the text only then). A string, float, boolean or null is never recorded. Counted per column (the
+        // sweep deletes all four keys), and a row once whatever columns it lacks.
+        Condition endRecorded = positiveInt(c.METADATA, "chunk_end_char");
+        Condition lineStart = m.LINE_START.isNull().and(positiveInt(c.METADATA, "line_start"));
+        Condition lineEnd = m.LINE_END.isNull().and(positiveInt(c.METADATA, "line_end"));
+        Condition charStart = m.CHAR_START.isNull().and(
+            positiveInt(c.METADATA, "chunk_start_char").or(anyInt(c.METADATA, "chunk_start_char").and(endRecorded)));
+        Condition charEnd = m.CHAR_END.isNull().and(endRecorded);
         var spanRow = ctx.select(
                 DSL.count(),
                 DSL.count().filterWhere(lineStart), DSL.count().filterWhere(lineEnd),

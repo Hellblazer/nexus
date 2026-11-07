@@ -55,5 +55,39 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-2egi7: the peer-data end line carries a per-block code named in the frame line. nexus-wc4jj.15: ask-branch follow-ups (non-ASCII peer bodies print on a legacy code page, 0.4 s ack headroom before the record GET, a choice outside the record's options never matches, a bad saved matched entry is logged once).
 - `conexus/skills/nexus/reference.md`
   nexus-jlq15: the store_put `session` row says accepted and ignored (deprecated).
+- `conexus/hooks/hooks.json`
+  nexus-13mbx: SubagentStart passes `${cwd}` to hook_subagent_start, so the Preflight row keys on the agent's checkout (da913d960).
+- `conexus/skills/architecture/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/codebase-analysis/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/composition-probe/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/deep-analysis/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/orchestration/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-audit-checklist/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-close/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-fix-checklist/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-gate-checklist/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/rdr-research/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/research-synthesis/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/strategic-planning/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/substantive-critique/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `conexus/skills/writing-nx-skills/SKILL.md`
+  nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `tool-spill/hooks/register.ts`
+  tool-spill census 2026-11-07 (T2 nexus/tool-spill-census-2026-11-07): the Bash note names the cut lines and their Read offset, error-shaped lines by number, a spill-file Read up to 4x passes whole; Sam's defaults A (plain cat/sed -n up to 3x) and B (limit 5000).
+- `tool-spill/.claude-plugin/plugin.json`
+  tool-spill census, Sam's default B: `limit` default and install text 5000.
 
 ## Deferred to the next client release

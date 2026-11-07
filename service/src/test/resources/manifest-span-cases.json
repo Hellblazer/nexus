@@ -1,0 +1,25 @@
+{
+  "_comment": "The span value rule, one table for both halves (nexus-qmrfi, review of c58372716). 'chunk' is the span metadata a T3 chunk row holds (an absent key is an absent key); 'recorded' is, per chunk key, the manifest value the client's nexus.catalog.types.manifest_span derives from it, or null when the key is not a recorded span. ChunkKeySweepIntegrationTest#nullSpanRowsFollowsTheSharedSpanCaseTable seeds one chunk per case and requires the engine's null_span_rows (total and by_field) to count exactly the non-null entries; tests/catalog/test_manifest_span_cases.py requires manifest_span to return exactly this table. Add a case here and both halves are held to it. Values stay in forms a jsonb round trip leaves alone (no exponent text): 1e2 is read as a float by both JSON parsers and written back as 100.0.",
+  "cases": [
+    {"id": "absent", "chunk": {}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "all-zero", "chunk": {"line_start": 0, "line_end": 0, "chunk_start_char": 0, "chunk_end_char": 0}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "all-positive", "chunk": {"line_start": 3, "line_end": 9, "chunk_start_char": 40, "chunk_end_char": 190}, "recorded": {"line_start": 3, "line_end": 9, "chunk_start_char": 40, "chunk_end_char": 190}},
+    {"id": "zero-start-beside-a-recorded-end", "chunk": {"line_start": 0, "line_end": 0, "chunk_start_char": 0, "chunk_end_char": 9}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": 0, "chunk_end_char": 9}},
+    {"id": "zero-start-beside-a-zero-end", "chunk": {"chunk_start_char": 0, "chunk_end_char": 0}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "zero-start-and-no-end-key", "chunk": {"chunk_start_char": 0}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "end-only", "chunk": {"chunk_end_char": 9}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": 9}},
+    {"id": "positive-start-and-zero-end", "chunk": {"chunk_start_char": 5, "chunk_end_char": 0}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": 5, "chunk_end_char": null}},
+    {"id": "one-positive-line", "chunk": {"line_start": 12, "line_end": 0, "chunk_start_char": 0, "chunk_end_char": 0}, "recorded": {"line_start": 12, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "negative-lines", "chunk": {"line_start": -1, "line_end": -5}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "negative-end", "chunk": {"chunk_start_char": 0, "chunk_end_char": -9}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "negative-start-beside-a-recorded-end", "chunk": {"chunk_start_char": -3, "chunk_end_char": 9}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": -3, "chunk_end_char": 9}},
+    {"id": "json-null", "chunk": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "strings", "chunk": {"line_start": "7", "line_end": "9", "chunk_start_char": "0", "chunk_end_char": "9"}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "string-start-beside-a-recorded-end", "chunk": {"chunk_start_char": "0", "chunk_end_char": 9}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": 9}},
+    {"id": "booleans", "chunk": {"line_start": true, "line_end": true, "chunk_start_char": true, "chunk_end_char": true}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "floats", "chunk": {"line_start": 7.0, "line_end": 9.5, "chunk_start_char": 0.0, "chunk_end_char": 9.0}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "float-exponent", "chunk": {"line_start": 1e2, "line_end": 1e2, "chunk_start_char": 0, "chunk_end_char": 1e2}, "recorded": {"line_start": null, "line_end": null, "chunk_start_char": null, "chunk_end_char": null}},
+    {"id": "past-int32", "chunk": {"line_start": 3000000000, "line_end": 3000000001, "chunk_start_char": 3000000002, "chunk_end_char": 3000000003}, "recorded": {"line_start": 3000000000, "line_end": 3000000001, "chunk_start_char": 3000000002, "chunk_end_char": 3000000003}},
+    {"id": "past-int64", "chunk": {"line_start": 99999999999999999999, "chunk_end_char": 99999999999999999999}, "recorded": {"line_start": 99999999999999999999, "line_end": null, "chunk_start_char": null, "chunk_end_char": 99999999999999999999}}
+  ]
+}

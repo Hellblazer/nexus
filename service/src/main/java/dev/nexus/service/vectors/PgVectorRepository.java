@@ -2284,10 +2284,11 @@ public final class PgVectorRepository {
      * The lexical arm of one collection in a {@link #searchPerCollection} request that asked for it
      * ({@code lexical}, nexus-xd2rc), aligned with {@link PerCollectionResult#perCollection()}.
      *
-     * @param count     rows the collection's text-gated statement returned (0 on error)
+     * @param count     rows the collection's text-gated statement returned (0 on error), less any row the
+     *                  {@code sensitivity=exclude} race drop removed after the statement ran (nexus-rfvyy.7.17)
      * @param ids       their ids, best first; every one is in the response, as a vector row or as a
-     *                  {@link PerCollectionResult#lexicalRows()} row. Empty when the collection's vector arm
-     *                  failed: its lexical rows are not served either
+     *                  {@link PerCollectionResult#lexicalRows()} row, so a row the race drop removed is not listed.
+     *                  Empty when the collection's vector arm failed: its lexical rows are not served either
      * @param error     the failure text when the lexical statement returned nothing, else {@code null}
      * @param errorKind the stable failure kind (set exactly when {@code error} is), else {@code null}
      */
@@ -3002,12 +3003,18 @@ public final class PgVectorRepository {
         // Every id a lexical arm reports must still be in the response: drop the ones the filter removed.
         List<LexicalStat> lexicalStats = wide.lexical();
         if (!lexicalStats.isEmpty()) {
+            // keyed by (collection, id): one chash can be a hit in two collections and be filtered out of only one
             Set<String> served = new HashSet<>();
-            for (var row : rows) served.add(String.valueOf(row.get("id")));
-            for (var row : lexicalRows) served.add(String.valueOf(row.get("id")));
+            for (var row : rows) served.add(rowKey(String.valueOf(row.get("collection")), String.valueOf(row.get("id"))));
+            for (var row : lexicalRows) {
+                served.add(rowKey(String.valueOf(row.get("collection")), String.valueOf(row.get("id"))));
+            }
             List<LexicalStat> kept = new ArrayList<>(lexicalStats.size());
-            for (LexicalStat st : lexicalStats) {
-                kept.add(new LexicalStat(st.count(), st.ids().stream().filter(served::contains).toList(),
+            for (int i = 0; i < lexicalStats.size(); i++) {
+                LexicalStat st = lexicalStats.get(i);
+                String collection = wide.perCollection().get(i).collection();
+                kept.add(new LexicalStat(st.count(),
+                                         st.ids().stream().filter(id -> served.contains(rowKey(collection, id))).toList(),
                                          st.error(), st.errorKind()));
             }
             lexicalStats = kept;
@@ -3201,11 +3208,18 @@ public final class PgVectorRepository {
             served.addAll(lexicalRows);
         }
         long enrichStartNanos = System.nanoTime();
-        enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows, excludeSensitive);
+        List<String> racedFromServed = enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows,
+                                                        excludeSensitive);
         if (excludeSensitive) {
-            // served is a copy when the lexical leg added rows: the rows the response carries are dropped too
-            dropSensitiveRows(rows);
-            dropSensitiveRows(lexicalRows);
+            // served IS rows when the lexical leg added nothing, so the lookup dropped from rows in place and its
+            // return (racedFromServed) is the only record of it; when the leg added rows served is a copy, and the
+            // rows the response carries are dropped here by the flag the lookup put on the shared row maps
+            Set<String> raced = new HashSet<>(racedFromServed);
+            raced.addAll(dropSensitiveRows(rows));
+            raced.addAll(dropSensitiveRows(lexicalRows));
+            if (!raced.isEmpty() && !lexicalStats.isEmpty()) {
+                lexicalStats = withoutRacedIds(stats, lexicalStats, raced);
+            }
         }
         final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
         long fillStartNanos = System.nanoTime();
@@ -9674,10 +9688,12 @@ FROM scope s
      * @param labelStageFollows true when a label or document-key filter's stage runs over these rows next
      * @param excludeSensitive  true when the request asked for {@code sensitivity=exclude}: a row the sensitive lookup
      *                          then flags is dropped from {@code rows} ({@link #attachSensitive})
+     * @return the {@code (collection, id)} keys of the rows that drop removed, for a caller that reports ids it served
      */
-    private void enrichSearchRows(String tenant, List<Map<String, Object>> rows,
-                                  boolean includeSourceUri, boolean labelStageFollows, boolean excludeSensitive) {
-        if (rows.isEmpty()) return;
+    private List<String> enrichSearchRows(String tenant, List<Map<String, Object>> rows,
+                                          boolean includeSourceUri, boolean labelStageFollows,
+                                          boolean excludeSensitive) {
+        if (rows.isEmpty()) return List.of();
         // nexus-6pfgb.26: ONE lookup per window, whether or not source_uri was asked for: the owner's
         // doc_id, position and span come from the same row, so every chunk-level row needs it. Under a
         // label or document-key filter none: the stage that runs next re-points source_uri, doc_id,
@@ -9733,7 +9749,7 @@ FROM scope s
                 row.put("source_uri", owner != null ? owner.sourceUri() : null);
             }
         }
-        attachSensitive(tenant, rows, excludeSensitive);
+        return attachSensitive(tenant, rows, excludeSensitive);
     }
 
     /**
@@ -9743,8 +9759,8 @@ FROM scope s
      * search; a row carries the chunk's chash as {@code chash} (document-level rows, whose {@code id} is a tumbler) or
      * as its {@code id}. A lookup that fails fails the search: a hit is never served with its flag unknown.
      */
-    private void attachSensitive(String tenant, List<Map<String, Object>> rows, boolean excludeSensitive) {
-        if (rows.isEmpty()) return;
+    private List<String> attachSensitive(String tenant, List<Map<String, Object>> rows, boolean excludeSensitive) {
+        if (rows.isEmpty()) return List.of();
         Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             Object chash = row.get("chash") instanceof String c ? c : row.get("id");
@@ -9770,7 +9786,7 @@ FROM scope s
             String hex = row.get("chash") instanceof String c ? c : (String) row.get("id");
             row.put("sensitive", sensitiveKeys.contains(ManifestLabelStage.ownerKey((String) row.get("collection"), hex)));
         }
-        if (excludeSensitive) dropSensitiveRows(rows);
+        return excludeSensitive ? dropSensitiveRows(rows) : List.of();
     }
 
     /**
@@ -9779,9 +9795,39 @@ FROM scope s
      * {@code sensitivity=exclude} such a row must not be served (review fix F2, nexus-rfvyy.7.4). A flag lookup never
      * adds a row, so the page can only come back shorter than the search made it, never wrong.
      */
-    private static void dropSensitiveRows(List<Map<String, Object>> rows) {
-        if (rows.isEmpty()) return;
-        rows.removeIf(r -> Boolean.TRUE.equals(r.get("sensitive")));
+    private static List<String> dropSensitiveRows(List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return List.of();
+        List<String> dropped = new ArrayList<>();
+        rows.removeIf(r -> {
+            if (!Boolean.TRUE.equals(r.get("sensitive"))) return false;
+            dropped.add(rowKey(String.valueOf(r.get("collection")), String.valueOf(r.get("id"))));
+            return true;
+        });
+        return dropped;
+    }
+
+    private static String rowKey(String collection, String id) {
+        return collection + "\u0000" + id;
+    }
+
+    /**
+     * Take the ids the race drop removed out of each collection's lexical report (nexus-rfvyy.7.17): a
+     * {@link LexicalStat#ids()} entry is documented as "in the response", and the id of a row dropped after the
+     * search is not. The count falls with the ids; both stay as the statement returned them when nothing was dropped.
+     * Keyed by (collection, id), because one chash can be a hit in two collections and be flagged in only one.
+     */
+    private static List<LexicalStat> withoutRacedIds(List<PerCollectionStat> stats, List<LexicalStat> lexicalStats,
+                                                     Set<String> raced) {
+        List<LexicalStat> out = new ArrayList<>(lexicalStats.size());
+        for (int i = 0; i < lexicalStats.size(); i++) {
+            LexicalStat st = lexicalStats.get(i);
+            String collection = stats.get(i).collection();
+            List<String> kept = st.ids().stream().filter(id -> !raced.contains(rowKey(collection, id))).toList();
+            int removed = st.ids().size() - kept.size();
+            out.add(removed == 0 ? st
+                : new LexicalStat(Math.max(0, st.count() - removed), kept, st.error(), st.errorKind()));
+        }
+        return out;
     }
 
     /**

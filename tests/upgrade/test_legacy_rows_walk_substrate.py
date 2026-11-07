@@ -181,15 +181,17 @@ def test_the_walk_fills_exactly_the_manifest_spans_a_chunk_row_is_exact_for(
     (before_labels,) = cat.get_manifest(labelled)
     assert (before_labels.section_title, before_labels.labels_written) == ("Intro", True)
     before = _engine_null_span_rows()
-    assert before == 9, "exact, agree, clash, labelled, shared x2, held (the deleted holder's row is not live), zero, lines"
+    assert before == 8, (
+        "exact, agree, clash, labelled, shared x2, held (the deleted holder's row is not live) and lines; not zero: the "
+        "engine counts by recorded value (nexus-qmrfi), and a chunk whose four keys are 0 records nothing")
 
     # The rung's summary accounts for the engine's count, by name (the dry run is the same scan the walk makes).
     scan = _span_fill_counts()
     assert scan.counted == before and scan.reconciles(), scan.summary()
     assert (scan.fillable, scan.multi_row_cross_document, scan.tombstoned_co_owner, scan.chunk_span_unrecorded,
             scan.span_disagrees) == (4, 2, 1, 1, 1), scan.summary()
-    assert scan.abandoned_total() == 4, "the shared pair (2), the held row and the contradicted row record a span that goes unused"
-    assert scan.engine_count_after() == before - 3, "the lines-only row is filled and stays counted for its zero chars"
+    assert scan.left() == 4, "the shared pair (2), the held row and the contradicted row record a span that goes unused"
+    assert scan.engine_count_after() == before - 4, "the lines-only row is filled and its zero chars are not counted"
 
     _run_ladder(dry_run=True, auto_mode=False)
     pending = [line for line in _pending_lines(capsys.readouterr().out) if RUNG_MANIFEST_SPAN_FILL in line]
@@ -210,7 +212,7 @@ def test_the_walk_fills_exactly_the_manifest_spans_a_chunk_row_is_exact_for(
     for t in (shared_a, shared_b, held, zero):
         assert spans(t) == (None,) * 4, f"{t} stays NULL by design"
     after = _engine_null_span_rows()
-    assert after == before - 3 == scan.engine_count_after(), (before, after, scan.summary())
+    assert after == before - 4 == scan.engine_count_after(), (before, after, scan.summary())
 
     # After the walk the same scan names the residue: nothing fillable, every counted row in a named bucket.
     rest = _span_fill_counts()

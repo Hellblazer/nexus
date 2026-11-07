@@ -57,6 +57,7 @@ class World:
         self._manifest_reads = 0
         self.updates: list[tuple[str, dict]] = []
         self.restamp_on_append: str | None = None
+        self.before_append = None   # called with self, once, between the rung's re-read and the engine's compare
 
     def doc(self, tumbler: str, *, indexed_at: str = DOC_STAMP, title: str = "", file_path: str = "",
             meta: dict | None = None, collection: str = COLL) -> str:
@@ -106,16 +107,42 @@ class World:
         return rows, [t for t in self.tombstoned if t["chash"] in wanted]
 
     # writer ---------------------------------------------------------------
+    def _guard(self, d: str, new: dict, refused: list) -> bool:
+        """The engine's per-row ``expected`` compare (nexus-tj0wu): True when the row may be written."""
+        expected = new.get("expected")
+        if expected is None:
+            return True
+        old = next((r for r in self.manifests[d] if r.position == new["position"]), None)
+        if old is None:
+            reason = "position_absent"
+        elif old.chash != expected["chash"]:
+            reason = "chash_changed"
+        elif any(k in expected and getattr(old, k) != expected[k]
+                 for k in ("section_title", "section_type", "page_number", "labels_written")):
+            reason = "labels_changed"
+        elif any(k in expected and getattr(old, k) != expected[k]
+                 for k in ("line_start", "line_end", "char_start", "char_end")):
+            reason = "span_changed"
+        else:
+            return True
+        refused.append({"doc_id": d, "position": new["position"], "reason": reason})
+        return False
+
     def append_manifest_many(self, docs, *, collection, **kw) -> dict:
         assert not kw, kw
         self.appends.append((collection, [(d, [dict(r) for r in rows]) for d, rows in docs]))
-        failed = []
+        if self.before_append:
+            hook, self.before_append = self.before_append, None
+            hook(self)
+        failed, refused = [], []
         for d, rows in docs:
             if d in self.fail_doc_ids:
                 failed.append(d)
                 continue
-            index = {r.position: i for i, r in enumerate(self.manifests[d])}
             for new in rows:
+                if not self._guard(d, new, refused):
+                    continue
+                index = {r.position: i for i, r in enumerate(self.manifests[d])}
                 i = index[new["position"]]
                 old = self.manifests[d][i]
                 same_chunk = old.chash == new["chash"] and old.collection == collection
@@ -131,7 +158,8 @@ class World:
                     else any(k in new for k in ("section_title", "section_type", "page_number")))
             if self.restamp_on_append is not None:
                 self.docs[d].indexed_at = self.restamp_on_append
-        return {"ok": True, "docs": len(docs), "failed_doc_ids": failed}
+        return {"ok": True, "docs": len(docs), "failed_doc_ids": failed,
+                "expected_refused": refused, "expected_refused_count": len(refused)}
 
     def update(self, tumbler: str, **fields) -> None:
         self.updates.append((tumbler, dict(fields)))
@@ -213,7 +241,7 @@ def test_a_row_whose_stored_column_differs_from_the_chunk_row_is_not_filled_at_a
     assert world.appends == []
     c = rung._partial
     assert (c.span_disagrees, c.fillable, c.filled, c.counted) == (1, 0, 0, 1)
-    assert c.abandoned["span_disagrees"] == 1 and c.reconciles()
+    assert c.reconciles()
     assert result.outcome is ConvergeOutcome.COMPLETED
 
 
@@ -630,7 +658,7 @@ def test_a_listing_that_does_not_name_this_row_as_the_one_holder_leaves_it_null(
     assert world.appends == [], case
     c = rung._partial
     assert (c.stale_listing, c.fillable, c.counted) == (1, 0, 1), case
-    assert c.abandoned["stale_listing"] == 1 and c.reconciles()
+    assert c.reconciles()
 
 
 def test_a_document_without_indexed_at_cannot_attribute_the_chunk_row(world: World) -> None:
@@ -811,33 +839,93 @@ def test_a_status_other_than_409_still_aborts_the_run(world: World) -> None:
         _fill(world)
 
 
+# ── nexus-tj0wu: a write racing the rung is refused by the engine, not reverted ────────────────────────────────────
+
+
+def test_a_reindex_between_the_reread_and_the_post_is_refused_and_not_reverted(world: World) -> None:
+    """The rung re-reads, then a re-index puts another chunk at the position, then the POST. Without `expected` the
+    upsert takes the read chash and the read labels from the request and puts them back over the re-index."""
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    world.before_append = lambda w: w.manifests[d].__setitem__(0, replace(w.manifests[d][0], chash=h(2)))
+    rung = world.rung()
+
+    rung.converge(Report())
+
+    assert world.manifests[d][0].chash == h(2), "the re-index stands"
+    assert world.spans(d) == [(0, None, None, None, None)], "the old chunk's span is not written onto the new chunk"
+    c = rung._partial
+    assert (c.raced, c.filled, c.fillable) == (1, 0, 1), c.summary()
+    assert rung._filled == 0
+
+
+def test_a_label_written_between_the_reread_and_the_post_is_not_overwritten(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    world.before_append = lambda w: w.manifests[d].__setitem__(
+        0, replace(w.manifests[d][0], section_title="Mine", section_type="body", page_number=2, labels_written=True))
+    rung = world.rung()
+
+    rung.converge(Report())
+
+    assert world.labels(d) == [(0, "Mine", "body", 2, True)], "the concurrent label write stands"
+    assert (rung._partial.raced, rung._partial.filled) == (1, 0)
+
+
+def test_a_span_written_between_the_reread_and_the_post_is_not_overwritten(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1))
+    world.chunk(h(1), **SPAN)
+    world.before_append = lambda w: w.manifests[d].__setitem__(0, replace(w.manifests[d][0], line_start=70, line_end=80))
+    rung = world.rung()
+
+    rung.converge(Report())
+
+    assert world.spans(d) == [(0, 70, 80, None, None)], "the re-index's own span stands"
+    assert (rung._partial.raced, rung._partial.filled) == (1, 0)
+
+
+def test_the_request_carries_what_was_read_for_the_engine_to_compare(world: World) -> None:
+    d = world.doc("1.1.1")
+    world.row(d, 0, h(1), title="T", stype="body", page=3, written=True, line_start=3)
+    world.chunk(h(1), **SPAN)
+
+    _fill(world)
+
+    ((_coll, docs),) = world.appends
+    assert docs[0][1][0]["expected"] == {
+        "chash": h(1), "section_title": "T", "section_type": "body", "page_number": 3, "labels_written": True,
+        "line_start": 3, "line_end": None, "char_start": None, "char_end": None}
+
+
 # ── what the summary accounts for ────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_rows_left_for_ownership_are_split_into_a_recorded_span_unused_and_nothing_recorded(world: World) -> None:
+def test_the_engine_comparable_count_is_by_recorded_value_and_the_rest_is_reported_apart(world: World) -> None:
     a, b, g = world.doc("1.1.1"), world.doc("1.1.2"), world.doc("1.1.3")
-    world.row(a, 0, h(1))                        # shared, chunk records a span: lossy
+    world.row(a, 0, h(1))                        # shared, chunk records a span: counted, left for ownership
     world.row(b, 0, h(1))
-    world.row(g, 0, h(2))                        # shared, chunk records 0s: lossless
+    world.row(g, 0, h(2))                        # shared, chunk records 0s: nothing recorded, so not counted
     world.row(b, 1, h(2))
-    world.row(g, 1, h(3))                        # chunk missing: not engine-counted
-    world.row(g, 2, h(4))                        # chunk without any span key: not engine-counted
+    world.row(g, 1, h(3))                        # chunk missing: not counted
+    world.row(g, 2, h(4))                        # chunk without any span key: not counted
     world.chunk(h(1), **SPAN)
     world.chunk(h(2), line_start=0, line_end=0, chunk_start_char=0, chunk_end_char=0)
     world.chunk(h(4))
     rung, _ = _fill(world)
     c = rung._partial
-    assert c.multi_row_cross_document == 4 and c.abandoned["multi_row_cross_document"] == 2
-    assert (c.chunk_missing, c.chunk_without_span_keys) == (1, 1)
-    assert (c.null_rows, c.counted) == (6, 4) and c.reconciles()
+    assert c.multi_row_cross_document == 2, "the 0-valued shared pair is not in an ownership bucket: the engine skips it"
+    assert (c.chunk_missing, c.chunk_without_span_keys, c.chunk_span_unrecorded) == (1, 1, 2)
+    assert (c.null_rows, c.counted) == (6, 2) and c.reconciles()
     text = c.summary()
-    assert "= 0 fillable" in text and "2 with a recorded span unused" in text
-    assert "Not counted by the engine: 1 chunk missing, 1 chunk with no key" in text and "DOES NOT RECONCILE" not in text
+    assert "= 0 fillable" in text and "each with a recorded span unused: " in text
+    assert "Not counted by the engine (nothing recorded): 1 chunk missing, 1 chunk with no key" in text
+    assert "2 chunk whose keys are 0" in text and "DOES NOT RECONCILE" not in text
 
 
-def test_a_filled_row_whose_other_column_has_a_zero_key_stays_in_the_engine_count_and_the_summary_says_so(
-    world: World,
-) -> None:
+def test_a_filled_row_whose_other_column_has_a_zero_key_leaves_the_engine_count_whole(world: World) -> None:
     d = world.doc("1.1.1")
     world.row(d, 0, h(1))
     world.row(d, 1, h(2))
@@ -846,5 +934,23 @@ def test_a_filled_row_whose_other_column_has_a_zero_key_stays_in_the_engine_coun
     rung, _ = _fill(world)
     c = rung._partial
     assert world.spans(d) == [(0, 3, 9, None, None), (1, 3, 9, 40, 190)]
-    assert (c.counted, c.fillable, c.filled, c.fillable_still_counted) == (2, 2, 2, 1)
-    assert c.engine_count_after() == 1 and c.reconciles()
+    assert (c.counted, c.fillable, c.filled) == (2, 2, 2)
+    assert c.engine_count_after() == 0 and c.reconciles(), "the 0 chars are not counted by the engine, so zero is reached"
+
+
+def test_a_refused_row_in_one_request_does_not_stall_the_collections_later_requests(world: World) -> None:
+    """nexus-tj0wu review: ``refused`` was the collection's 409 flag AND, after a request with an ``expected``
+    refusal, the set of refused positions (non-empty, so truthy): every later request of the collection took the
+    409 branch and was never sent. Seven rows in requests of 3 / 3 / 1, a re-index of row 0 between the re-read
+    and the first POST: the other six rows are still written and none is counted as a 409."""
+    d = _seven_rows(world)
+    world.before_append = lambda w: w.manifests[d].__setitem__(0, replace(w.manifests[d][0], chash=h(99)))
+    rung = world.rung(max_rows=3)
+
+    rung.converge(Report())
+
+    assert [len(rows) for _c, req in world.appends for _d, rows in req] == [3, 3, 1], "every request is sent"
+    c = rung._partial
+    assert (c.raced, c.filled, c.write_refused_409) == (1, 6, 0), c.summary()
+    assert world.spans(d)[0] == (0, None, None, None, None), "the re-indexed row is not written"
+    assert all(None not in span for _p, *span in world.spans(d)[1:]), world.spans(d)

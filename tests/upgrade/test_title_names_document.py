@@ -31,7 +31,7 @@ def test_a_document_titled_after_one_of_its_chunks_owns_its_other_chunks(doc_tit
 
 @pytest.mark.parametrize(("doc", "chunk_title"), [
     # the export-bundle document: named after a whole collection export, its chunks name many files
-    (_doc(title="docs__1-1__voyage-context-3__v1.nxexp"), "docs/mcp-servers.md:chunk-0"),
+    (_doc(title="docs__1-1__bge-base-en-v15-768__v1.nxexp"), "docs/mcp-servers.md:chunk-0"),
     # a page suffix on both sides does not make two files one
     (_doc(title="papers/2408.04948.pdf:page-2"), "papers/2604.15583.pdf:page-6"),
     (_doc(file_path="src/a.py", title="a.py"), "other/file.py:1-5"),
