@@ -992,6 +992,47 @@ public final class PgCatalogProbes {
                 Boolean.TRUE.equals(r.get(secdef)), r.get(config), r.get(acl), r.get(owner)));
     }
 
+    /**
+     * Everything that defines one function, for a before/after comparison that must not trust the changeset
+     * text: the argument list with its defaults, the return type, the body ({@code prosrc}), the full
+     * {@code pg_get_functiondef} text, volatility, language, SECURITY DEFINER flag, {@code proconfig}, owner
+     * and {@code proacl}. {@code identity} is {@code name(identity arguments)}, so two overloads are two rows.
+     */
+    public record FunctionDefinition(String identity, String arguments, String result, String body,
+                                     String definition, String volatility, String language,
+                                     boolean securityDefiner, String config, String owner, String acl) {
+    }
+
+    /** Every function in {@code schema} (aggregates excluded, as {@code pg_get_functiondef} rejects them), by identity. */
+    public static Map<String, FunctionDefinition> functionDefinitionsIn(DSLContext ctx, String schema) {
+        Field<String> proname = DSL.field(DSL.name("p", "proname"), String.class);
+        Field<String> identityArgs = DSL.function("pg_get_function_identity_arguments", String.class,
+            DSL.field(DSL.name("p", "oid")));
+        Field<String> args = DSL.function("pg_get_function_arguments", String.class, DSL.field(DSL.name("p", "oid")));
+        Field<String> result = DSL.function("pg_get_function_result", String.class, DSL.field(DSL.name("p", "oid")));
+        Field<String> body = DSL.field(DSL.name("p", "prosrc"), String.class);
+        Field<String> definition = DSL.function("pg_get_functiondef", String.class, DSL.field(DSL.name("p", "oid")));
+        Field<String> volatility = DSL.field(DSL.name("p", "provolatile")).cast(org.jooq.impl.SQLDataType.VARCHAR);
+        Field<String> language = DSL.field(DSL.name("l", "lanname"), String.class);
+        Field<Boolean> secdef = DSL.field(DSL.name("p", "prosecdef"), Boolean.class);
+        Field<String> config = DSL.field(DSL.name("p", "proconfig")).cast(org.jooq.impl.SQLDataType.VARCHAR);
+        Field<String> owner = DSL.function("pg_get_userbyid", String.class, DSL.field(DSL.name("p", "proowner")));
+        Field<String> acl = DSL.field(DSL.name("p", "proacl")).cast(org.jooq.impl.SQLDataType.VARCHAR);
+        var out = new java.util.TreeMap<String, FunctionDefinition>();
+        ctx.select(proname, identityArgs, args, result, body, definition, volatility, language, secdef, config,
+                owner, acl)
+            .from(pgProcJoined())
+            .join(DSL.table(DSL.name("pg_language")).as("l"))
+                .on(DSL.field(DSL.name("l", "oid")).eq(DSL.field(DSL.name("p", "prolang"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("p", "prokind"), String.class).ne("a"))
+            .forEach(r -> out.put(r.get(proname) + "(" + r.get(identityArgs) + ")",
+                new FunctionDefinition(r.get(proname) + "(" + r.get(identityArgs) + ")", r.get(args), r.get(result),
+                    r.get(body), r.get(definition), r.get(volatility), r.get(language),
+                    Boolean.TRUE.equals(r.get(secdef)), r.get(config), r.get(owner), r.get(acl))));
+        return out;
+    }
+
     /** RLS flags of one ordinary table ({@code relkind = 'r'}). */
     public record RowSecurityRow(String schema, String table, boolean enabled, boolean forced) {
     }
