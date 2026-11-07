@@ -29,6 +29,18 @@ ROWS = 7000  # three allow-list slices at the 3000 cap
 DIM = 16
 
 
+class _FixtureCollection:
+    """The handle ``HttpVectorClient.get_collection`` returns: its ``get`` reads chunk text."""
+
+    def __init__(self, client: "FixtureClient") -> None:
+        self.client = client
+
+    def get(self, ids=None, where=None, include=None, limit=None, offset=0, *, sensitivity="include"):
+        assert sensitivity == "exclude", "sampled query text must never come from a sensitive chunk"
+        pos = {i: n for n, i in enumerate(self.client.ids)}
+        return {"ids": list(ids), "documents": [self.client.texts[pos[i]] for i in ids]}
+
+
 class FixtureClient:
     def __init__(self, *, lossy_drop: int = 0, chash_allow_supported: bool = True, rows: int = ROWS) -> None:
         rng = np.random.default_rng(20261107)
@@ -56,10 +68,9 @@ class FixtureClient:
         assert collection == COLL
         return [{"id": i} for i in self.ids[offset:offset + limit]]
 
-    def get(self, ids=None, where=None, include=None, limit=None, offset=0, *, sensitivity):
-        assert sensitivity == "exclude", "sampled query text must never come from a sensitive chunk"
-        pos = {i: n for n, i in enumerate(self.ids)}
-        return {"ids": list(ids), "documents": [self.texts[pos[i]] for i in ids]}
+    def get_collection(self, name):
+        assert name == COLL
+        return _FixtureCollection(self)
 
     def search(self, query, collection_names, n_results=10, *, chash_allow=None, sensitivity):
         assert collection_names == [COLL]
@@ -186,3 +197,51 @@ def test_score_k_counts_a_boundary_tie_as_a_hit_and_flags_a_top1_miss():
     # page lacks the nearest row and every row is farther: recall 2/3, top-1 miss
     recall, miss = rc.score_k([rc.Hit("b", 0.2), rc.Hit("c", 0.3), rc.Hit("y", 0.5)], exact, 3)
     assert recall == pytest.approx(2 / 3) and miss is True
+
+
+def test_the_double_matches_the_real_clients_signatures():
+    """Review r1 I1: an invented ``get`` on the double hid a crash on the real client. Every method the script calls
+    exists on HttpVectorClient (or the collection handle it returns) with the parameters the script passes."""
+    import inspect
+
+    from nexus.db.http_vector_client import HttpVectorClient, _ServiceCollectionStub
+
+    for name in ("supports_chash_allow", "list_collections", "list_store", "search", "get_collection"):
+        assert hasattr(HttpVectorClient, name), name
+    real_search = inspect.signature(HttpVectorClient.search).parameters
+    assert {"query", "collection_names", "n_results", "chash_allow", "sensitivity"} <= set(real_search)
+    assert {"collection", "limit", "offset"} <= set(inspect.signature(HttpVectorClient.list_store).parameters)
+    assert {"ids", "include", "limit", "sensitivity"} <= set(inspect.signature(_ServiceCollectionStub.get).parameters)
+    assert not hasattr(HttpVectorClient, "get"), "the script must read text through get_collection, as the real client does"
+
+
+def test_an_incomplete_listing_cannot_run(tmp_path):
+    """Review r1 S1: a listing shorter than the live count would narrow the exact arm and overstate recall."""
+    c = _client()
+    real_list = c.list_store
+    c.list_store = lambda collection, limit=200, offset=0: real_list(collection, limit, offset) if offset == 0 else []
+    code, _, err = _run(c, tmp_path)
+    assert code == rc.EXIT_CANNOT_RUN and "incomplete exact arm" in err, err
+
+
+def test_an_engine_error_exits_cannot_run_not_below_target(tmp_path):
+    """Review r1 I2: exit 1 means recall under the target; a failure to measure is exit 2."""
+    c = _client()
+
+    def boom(*_a, **_k):
+        raise ConnectionError("engine down")
+
+    c.search = boom
+    code, _, err = _run(c, tmp_path)
+    assert code == rc.EXIT_CANNOT_RUN and "ConnectionError" in err, err
+
+
+def test_the_threshold_and_its_source_are_printed(tmp_path, monkeypatch):
+    """Review r1 S2: the engine's value cannot be read, so the report says which value it assumed and where from."""
+    c = _client()
+    code, out, _ = _run(c, tmp_path)
+    assert code == rc.EXIT_OK and "(from --threshold;" in out, out
+    monkeypatch.delenv("NX_SEARCH_EXACT_MAX_ROWS", raising=False)
+    assert rc.threshold_source(None) == f"the default {rc.DEFAULT_THRESHOLD}"
+    monkeypatch.setenv("NX_SEARCH_EXACT_MAX_ROWS", "50000")
+    assert rc.threshold_source(None) == "NX_SEARCH_EXACT_MAX_ROWS in this shell"

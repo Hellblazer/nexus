@@ -41,7 +41,8 @@ opening text from the collection itself (sensitive chunks excluded); a chunk use
 document-to-document evidence RDR-227 research-12 called weak, so the report says which source ran.
 
 Exit codes: 0 every k at or above the target; 1 a k under it; 2 the check could not run (no engine support for
-``chash_allow``, empty collection, too few queries, listing failure); 3 vacuous (collection not above the threshold).
+``chash_allow``, empty or incompletely listed collection, too few queries, or an engine or network error); 3 vacuous
+(collection not above the threshold).
 
     uv run python scripts/prose_index_recall_check.py docs__1-2__voyage-context-3__v1 --queries-file q.txt
     uv run python scripts/prose_index_recall_check.py <collection> --sample 20 --seed 7 --dry-run
@@ -78,8 +79,16 @@ TIE_EPS = 1e-6
 EXIT_OK, EXIT_BELOW, EXIT_CANNOT_RUN, EXIT_VACUOUS = 0, 1, 2, 3
 
 
+class CollectionReader(Protocol):
+    """The collection handle ``HttpVectorClient.get_collection`` returns (``_ServiceCollectionStub``): its ``get``."""
+
+    def get(self, ids: list[str] | None = None, where: dict | None = None, include: list[str] | None = None,
+            limit: int | None = None, offset: int = 0, *, sensitivity: str = ...) -> dict: ...
+
+
 class RecallClient(Protocol):
-    """The slice of ``HttpVectorClient`` this script reads. A test passes a double with the same signatures."""
+    """The slice of ``HttpVectorClient`` this script reads. A test passes a double with the same signatures, and a
+    parity test checks them against the real client (review: an invented ``get`` hid a crash on the real one)."""
 
     def supports_chash_allow(self) -> bool: ...
 
@@ -87,8 +96,7 @@ class RecallClient(Protocol):
 
     def list_store(self, collection: str, limit: int = 200, offset: int = 0) -> list[dict]: ...
 
-    def get(self, ids: list[str] | None = None, where: dict | None = None, include: list[str] | None = None,
-            limit: int | None = None, offset: int = 0, *, sensitivity: str) -> dict: ...
+    def get_collection(self, name: str) -> CollectionReader: ...
 
     def search(self, query: str, collection_names: list[str], n_results: int = 10, *,
                chash_allow: Sequence[str] | None = None, sensitivity: str) -> list[dict]: ...
@@ -202,6 +210,16 @@ def list_chashes(client: RecallClient, collection: str) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def live_count(client: RecallClient, collection: str) -> int | None:
+    """The collection's live chunk count as the engine reports it (``count``), or ``None`` when it reports none."""
+    for row in client.list_collections():
+        if isinstance(row, dict) and row.get("name") == collection:
+            v = row.get("count")
+            if isinstance(v, int) and not isinstance(v, bool):
+                return v
+    return None
+
+
 def physical_rows(client: RecallClient, collection: str, listed: int) -> int:
     """The router's number: the physical row count of the listing (``stored_count``, else ``count``); else *listed*."""
     for row in client.list_collections():
@@ -251,8 +269,9 @@ def sample_queries(client: RecallClient, collection: str, chashes: Sequence[str]
     queries: list[str] = []
     pool = list(chashes)
     rng.shuffle(pool)
+    reader = client.get_collection(collection)
     for start in range(0, len(pool), LIST_PAGE):
-        got = client.get(ids=pool[start:start + LIST_PAGE], include=["documents"], limit=LIST_PAGE, sensitivity="exclude")
+        got = reader.get(ids=pool[start:start + LIST_PAGE], include=["documents"], limit=LIST_PAGE, sensitivity="exclude")
         for text in got.get("documents") or []:
             if isinstance(text, str) and text.strip():
                 queries.append(" ".join(text.split())[:MAX_QUERY_CHARS])
@@ -282,6 +301,11 @@ def run_check(client: RecallClient, collection: str, *, queries_file: str | None
     chashes = list_chashes(client, collection)
     if not chashes:
         raise CannotRun(f"{collection}: no live chunks listed (wrong name, or the collection is empty)")
+    live = live_count(client, collection)
+    if live is not None and len(chashes) < live:
+        # review: a short listing narrows the exact arm, so served rows outside it read as hits and recall reads high
+        raise CannotRun(f"{collection}: the listing returned {len(chashes):,} chunks of the {live:,} the engine counts "
+                        "live; an incomplete exact arm would overstate recall. Rerun when no write is in flight")
     rows = physical_rows(client, collection, len(chashes))
     if rows <= threshold and not allow_exact_route:
         print(f"VACUOUS: {collection} holds {rows:,} rows, at or below the threshold {threshold:,}; the router runs it "
@@ -333,6 +357,15 @@ def default_threshold() -> int:
     return value if 0 < value <= 1_000_000 else DEFAULT_THRESHOLD
 
 
+def threshold_source(args_threshold: int | None) -> str:
+    """Where the vacuity threshold came from, for the report: the engine's own value cannot be read by a client."""
+    if args_threshold is not None:
+        return "--threshold"
+    if os.environ.get("NX_SEARCH_EXACT_MAX_ROWS", "").strip():
+        return "NX_SEARCH_EXACT_MAX_ROWS in this shell"
+    return f"the default {DEFAULT_THRESHOLD}"
+
+
 def main(argv: Sequence[str] | None = None, *, client: RecallClient | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("collection", help="full collection name, e.g. docs__1-2__voyage-context-3__v1")
@@ -350,13 +383,24 @@ def main(argv: Sequence[str] | None = None, *, client: RecallClient | None = Non
 
         client = make_t3()
     threshold = args.threshold if args.threshold is not None else default_threshold()
+    source = threshold_source(args.threshold)
+    text_out = sys.stderr if args.json else sys.stdout
+    print(f"threshold {threshold:,} (from {source}; the engine's own NX_SEARCH_EXACT_MAX_ROWS cannot be read by a "
+          "client, so pass --threshold if it runs another value)", file=text_out)  # noqa: T201 — CLI output
     try:
         code, report = run_check(client, args.collection, queries_file=args.queries_file, sample=args.sample,
                                  seed=args.seed, threshold=threshold, allow_exact_route=args.allow_exact_route,
-                                 dry_run=args.dry_run, out=sys.stderr if args.json else sys.stdout)
+                                 dry_run=args.dry_run, out=text_out)
     except CannotRun as exc:
         print(f"cannot run: {exc}", file=sys.stderr)  # noqa: T201 — CLI output
         return EXIT_CANNOT_RUN
+    except Exception as exc:  # noqa: BLE001 — review: an engine or network failure is "cannot run", never "recall below target"
+        print(f"cannot run: {type(exc).__name__}: {exc}", file=sys.stderr)  # noqa: T201 — CLI output
+        return EXIT_CANNOT_RUN
+    if code == EXIT_OK and args.threshold is None:
+        print("note: PASS was judged against a threshold this client assumed; if the engine runs a higher "
+              "NX_SEARCH_EXACT_MAX_ROWS the collection may have been served exact, and recall then reads 1.0 "
+              "whatever the index does", file=text_out)  # noqa: T201 — CLI output
     if args.json and report is not None:
         sys.stdout.write(json.dumps({"collection": report.collection, "rows": report.rows, "queries": report.queries,
                           "minimum": report.minimum, "target": TARGET, "top1_misses": report.top1_misses,
