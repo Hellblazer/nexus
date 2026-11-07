@@ -2801,8 +2801,9 @@ class TestPageCoverage:
         assert _missing_pages([], 0) == []
         assert _missing_pages([2, 2, 1], 2) == []
 
-    def test_stamp_writes_devonthink_title_url_year(self, monkeypatch, tmp_path):
-        """critique [24937] Critical 2: DEVONthink's name becomes the catalog title."""
+    def test_stamp_writes_devonthink_title_url_and_no_year(self, monkeypatch, tmp_path):
+        """critique [24937] Critical 2: DEVONthink's name becomes the catalog title. nexus-55clh: the
+        stamp writes no year, even when the facts carry one (an older cache shape)."""
         import nexus.commands.dt as dt_mod
         from types import SimpleNamespace
 
@@ -2834,7 +2835,7 @@ class TestPageCoverage:
         facts = {"name": "DT Name", "url": "https://x/y.pdf", "year": 2013, "page_count": 20}
         assert dt_mod._stamp_dt_uri_on_entry(tmp_path / "a.pdf", "U1", facts=facts)
         tumbler, fields = updates[0]
-        assert fields["title"] == "DT Name" and fields["year"] == 2013
+        assert fields["title"] == "DT Name" and "year" not in fields
         assert fields["source_uri"] == "x-devonthink-item://U1"
         assert fields["meta"]["devonthink_url"] == "https://x/y.pdf" and fields["meta"]["devonthink_page_count"] == 20
 
@@ -2843,12 +2844,13 @@ class TestPageCoverage:
 
         payload = {
             "name": "A Reference Schema", "url": "https://example.org/x.pdf",
-            "creationDate": "2013-09-25T20:58:15-07:00", "pageCount": 20,
+            # nexus-55clh: Grossberg & Stone 1986, imported 2025. creationDate is the file's date.
+            "creationDate": "2025-03-14T10:00:00-07:00", "pageCount": 20,
         }
         monkeypatch.setattr(dt_mod, "_dt_call", lambda tool, args: payload)
         dt_mod._reset_facts_cache()
         facts = dt_mod._dt_record_facts("U1")
-        assert facts == {"name": "A Reference Schema", "url": "https://example.org/x.pdf", "year": 2013, "page_count": 20}
+        assert facts == {"name": "A Reference Schema", "url": "https://example.org/x.pdf", "page_count": 20}
         monkeypatch.setattr(dt_mod, "_dt_call", lambda tool, args: None)
         assert dt_mod._dt_record_facts("U1") == facts, "cached per run"
         dt_mod._reset_facts_cache()
