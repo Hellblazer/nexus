@@ -201,7 +201,7 @@ def test_write_then_check_is_clean(tmp_path, monkeypatch) -> None:
     doc = tmp_path / "privacy-policy.md"
     doc.write_text(POLICY.read_text(encoding="utf-8").replace("OpenAlex", "OpenAlexx", 1), encoding="utf-8")
     sens = tmp_path / "sensitivity.md"
-    sens.write_text(SENSITIVITY.read_text(encoding="utf-8").replace("Voyage AI", "Voyage AIx", 1), encoding="utf-8")
+    sens.write_text(SENSITIVITY.read_text(encoding="utf-8").replace("Voyage AI (`api.voyageai.com`)", "Voyage AIx (`api.voyageai.com`)", 1), encoding="utf-8")
     monkeypatch.setattr(gen, "POLICY", doc)
     monkeypatch.setattr(gen, "SENSITIVITY", sens)
     assert gen.main(["--check"]) == 1
@@ -347,3 +347,115 @@ def test_sensitivity_stub_has_its_sections_and_points_at_the_rdr() -> None:
     assert "rdr/rdr-243-first-class-document-sensitivity.md" in text
     assert "T2 note" in text
     assert ls.not_yet_enforced_line(ls.RELEASE_ENFORCED_PHASE) in text
+
+
+# --------------------------------------------------------------------------- #
+# docs/sensitivity.md as the operator's page (RDR-243 Phase 3 Step 3.8, nexus-rfvyy.8.9).
+#
+# The page lists EVERY registry row in its per-surface table with the row's behaviour and enforcing phase, not
+# only the rows at or below RELEASE_ENFORCED_PHASE: the generated regions above stay honest about what a
+# release enforces, and this table is where an operator reads what each surface does and when. The rows are
+# read from the loader, never typed here, so a new registry row fails this test until the page names it.
+# --------------------------------------------------------------------------- #
+
+_SURFACE_HEADING = "## What each surface does"
+_NOT_ENFORCED_HEADING = "## What it does not enforce"
+
+
+def _doc_section(text: str, heading: str) -> str:
+    """The text under *heading* up to the next ``## `` heading; the test fails when the heading is absent."""
+    start = text.find("\n" + heading + "\n")
+    assert start >= 0, f"docs/sensitivity.md has no {heading!r} section"
+    start += 1
+    end = text.find("\n## ", start + len(heading))
+    return text[start:end if end >= 0 else len(text)]
+
+
+def _table_cells(section: str, label: str) -> list[str]:
+    """The cells of the table row whose first cell is *label*, or ``[]``."""
+    for line in section.splitlines():
+        if line.startswith(f"| {label} |"):
+            return [c.strip() for c in line.strip().strip("|").split(" | ")]
+    return []
+
+
+def test_every_registry_row_is_in_the_surface_table_with_its_behaviour_and_phase() -> None:
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _SURFACE_HEADING)
+    registry = ls.rows()
+    assert len(registry) >= ls.CENSUS_ROW_COUNT, "non-vacuity: the registry has the census's rows"
+    missing, wrong = [], []
+    for r in registry:
+        cells = _table_cells(section, r.label)
+        if not cells:
+            missing.append(r.name)
+            continue
+        # columns: Surface | Behaviour | Phase | What happens to a sensitive document
+        if len(cells) != 4 or cells[1] != f"`{r.behaviour}`" or cells[2] != str(r.phase) or not cells[3].strip():
+            wrong.append((r.name, cells))
+    assert not missing, f"docs/sensitivity.md has no row for: {missing}"
+    assert not wrong, f"docs/sensitivity.md has a row with the wrong behaviour, phase or an empty description: {wrong}"
+    rows_in_table = [ln for ln in section.splitlines() if ln.startswith("| ") and not ln.startswith(("| Surface", "| ---"))]
+    assert len(rows_in_table) == len(registry), "the table has a row the registry does not"
+
+
+def test_the_surface_table_is_not_a_second_generated_region() -> None:
+    """The generated table prints the policy words; this one is written by hand and tested against the loader."""
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _SURFACE_HEADING)
+    assert "BEGIN GENERATED" not in section
+
+
+def test_memory_rollup_is_stated_as_not_enforced() -> None:
+    """Census row 18: a T2 note that quotes a sensitive document reaches the LLM, and no part of RDR-243 prevents it."""
+    row = ls.row_for("memory_rollup")
+    assert row.behaviour == "n/a-not-a-document", "non-vacuity: the row is the gap the page must state"
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
+    assert row.label in section, "row 18 is named in the not-enforced section"
+    para = next(p for p in re.split(r"\n\n|\n- ", section) if row.label in p)
+    assert "not enforced" in para.lower()
+    assert "T2 note" in para
+    assert "memory_consolidate" in para
+
+
+@pytest.mark.parametrize(
+    ("gap", "needles"),
+    [
+        ("the release phase", ("RELEASE_ENFORCED_PHASE",)),
+        ("DEVONthink group inheritance", ("DEVONthink", "group", "not been verified")),
+        ("the cloud edge key", ("edge", "allowlist", "catalog_sensitivity_supported")),
+        ("traverse and catalog_link_query", ("traverse", "catalog_link_query", "hash")),
+        ("pdf staging rows", ("staging",)),
+        ("the audit table has no CLI view", ("catalog_sensitivity_changes", "no CLI view")),
+        ("the shell bypass", ("CLAUDECODE", "Bash")),
+    ],
+)
+def test_the_not_enforced_section_names_each_recorded_gap(gap: str, needles: tuple[str, ...]) -> None:
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
+    for needle in needles:
+        assert needle in section, f"the not-enforced section does not state {gap}: no {needle!r}"
+
+
+def test_the_release_phase_is_stated_by_the_constants_own_value() -> None:
+    section = _doc_section(SENSITIVITY.read_text(encoding="utf-8"), _NOT_ENFORCED_HEADING)
+    assert f"`RELEASE_ENFORCED_PHASE` is {ls.RELEASE_ENFORCED_PHASE}" in section
+    assert {r.phase for r in ls.rows() if r.phase > ls.RELEASE_ENFORCED_PHASE} == {2, 3}, "non-vacuity"
+
+
+def test_the_how_to_names_commands_and_keys_that_exist() -> None:
+    import click
+
+    from nexus.cli import main
+
+    text = SENSITIVITY.read_text(encoding="utf-8")
+    catalog = main.commands["catalog"]
+    assert isinstance(catalog, click.Group)
+    opts = {o for p in catalog.commands["sensitive"].params if isinstance(p, click.Option) for o in p.opts}
+    assert {"--collection", "--path", "--owner", "--clear", "--reason"} <= opts
+    assert any("--sensitive" in p.opts for p in catalog.commands["list"].params if isinstance(p, click.Option))
+    repo = main.commands["index"].commands["repo"]
+    assert any("--sensitive-glob" in p.opts for p in repo.params if isinstance(p, click.Option))
+    for shown in (
+        "nx catalog sensitive", "nx catalog list --sensitive", "--clear --reason", "--sensitive-glob",
+        "nx config set sensitivity.mcp_output flag", "--ack-external-embedder", "nx catalog doctor",
+        "nx doctor", "nx catalog show",
+    ):
+        assert shown in text, f"the page does not show {shown!r}"
