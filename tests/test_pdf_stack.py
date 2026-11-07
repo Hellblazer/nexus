@@ -604,7 +604,7 @@ def test_a_pip_or_system_install_is_told_to_remove_it_then_run_the_installer(
     plan = pdf_stack.install_plan()
     assert plan.kind == "other" and plan.auto is False, plan
     assert "uv sync" not in plan.command and "uv sync" not in plan.why
-    remove, _, installer = plan.command.partition(" && " if os.name != "nt" else "; ")
+    remove, _, installer = plan.command.partition("; ")
     # This interpreter's own remover: its pip, or uv pip when it has none (the suite's uv venv has none).
     assert remove.endswith("-m pip uninstall -y conexus") or (
         remove.startswith("uv pip uninstall --python ") and remove.endswith(" conexus")
@@ -614,7 +614,7 @@ def test_a_pip_or_system_install_is_told_to_remove_it_then_run_the_installer(
 
 
 @pytest.mark.parametrize("platform, joiner, installer", [
-    ("darwin", " && ", "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"),
+    ("darwin", "; ", "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"),
     ("win32", "; ", "irm https://hellblazer.github.io/nexus/install.ps1 | iex"),
 ])
 def test_a_pipx_install_is_removed_with_pipx(tmp_path, platform, joiner, installer) -> None:
@@ -628,11 +628,11 @@ _WINDOWS_INSTALLER = "irm https://hellblazer.github.io/nexus/install.ps1 | iex"
 
 
 @pytest.mark.parametrize("platform, python, has_pip, expected", [
-    ("darwin", "/opt/venv/bin/python", True, f"/opt/venv/bin/python -m pip uninstall -y conexus && {_POSIX_INSTALLER}"),
+    ("darwin", "/opt/venv/bin/python", True, f"/opt/venv/bin/python -m pip uninstall -y conexus; {_POSIX_INSTALLER}"),
     ("darwin", "/opt/my venv/bin/python", True,
-     f"'/opt/my venv/bin/python' -m pip uninstall -y conexus && {_POSIX_INSTALLER}"),
+     f"'/opt/my venv/bin/python' -m pip uninstall -y conexus; {_POSIX_INSTALLER}"),
     ("darwin", "/opt/venv/bin/python", False,
-     f"uv pip uninstall --python /opt/venv/bin/python conexus && {_POSIX_INSTALLER}"),
+     f"uv pip uninstall --python /opt/venv/bin/python conexus; {_POSIX_INSTALLER}"),
     ("win32", r"C:\Python312\python.exe", True,
      rf"& 'C:\Python312\python.exe' -m pip uninstall -y conexus; {_WINDOWS_INSTALLER}"),
     ("win32", r"C:\Users\o'brien\venv\Scripts\python.exe", True,
@@ -654,7 +654,7 @@ def test_a_pipx_venv_under_a_custom_pipx_home_is_found_by_its_metadata(tmp_path)
     prefix.mkdir(parents=True)
     (prefix / "pipx_metadata.json").write_text("{}", encoding="utf-8")
     command = pdf_stack._foreign_install_command(prefix, "linux", python="/x/python", has_pip=True)  # noqa: SLF001
-    assert command == f"pipx uninstall conexus && {_POSIX_INSTALLER}"
+    assert command == f"pipx uninstall conexus; {_POSIX_INSTALLER}"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="needs Windows PowerShell's own parser")

@@ -482,8 +482,10 @@ def _foreign_install_command(prefix: Path, platform: str | None = None, *, pytho
     ``pipx/venvs`` directory by default; it is removed with pipx, which also takes its ``nx`` link off
     PATH. Anything else is uninstalled with its own interpreter's pip, or with ``uv pip`` when that
     interpreter has no pip (a ``uv venv``). On Windows the interpreter is called with ``&`` and a
-    single-quoted path (PowerShell reads a bare quoted string as a value, not a command), and the two
-    steps are joined with ``;``, since PowerShell 5.1 has no ``&&``."""
+    single-quoted path (PowerShell reads a bare quoted string as a value, not a command). The two steps
+    are joined with ``;`` on every platform: PowerShell 5.1 has no ``&&`` and user-facing text never
+    chains with it (tests/test_user_surface_verb_rot.py). If the removal fails, the installer still finds
+    the old nx and skips its build, which changes nothing."""
     windows = (platform if platform is not None else sys.platform) == "win32"
     python = python if python is not None else sys.executable
     if has_pip is None:
@@ -506,7 +508,7 @@ def _foreign_install_command(prefix: Path, platform: str | None = None, *, pytho
     else:
         remove = f"uv pip uninstall --python {quoted} conexus"
     installer = _cli_install_command("win32" if windows else "posix")
-    return f"{remove}; {installer}" if windows else f"{remove} && {installer}"
+    return f"{remove}; {installer}"
 
 
 def _running_from_source_checkout(prefix: Path) -> bool:
