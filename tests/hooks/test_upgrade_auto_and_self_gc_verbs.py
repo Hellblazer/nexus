@@ -36,9 +36,7 @@ now starts the child in its own session and returns after a short bounded wait.
 """
 from __future__ import annotations
 
-import contextlib
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -50,9 +48,10 @@ from nexus._hook_runtime._io import HookResult
 from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.hooks import self_gc, upgrade_auto
 from nexus.util.nx_argv import nx_argv
+from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests._child_process import kill_if_identity
 from tests._module_seam import setattr_in
 from tests._platform import IS_WINDOWS, posix_only, scrubbed_env
-from tests._child_encoding import PYTHON_CHILD_ENCODING
 
 
 class _FakeCompleted:
@@ -140,7 +139,10 @@ def fake_nx(tmp_path, monkeypatch):
             script = tmp_path / "nx"
             body = [f'echo "{stdout}"'] if stdout else []
             body += [f'echo "{stderr}" >&2'] if stderr else []
-            body += [f"exec sleep {sleep:g}"] if sleep else [f"exit {rc}"]
+            # a python sleeper, not `exec sleep`: its command line keeps the pid file's path, which a cleanup checks
+            # before signalling a pid read back from that file (nexus-xzorj)
+            body += ([f"exec \"{sys.executable}\" -c 'import sys, time; time.sleep(float(sys.argv[1]))' {sleep:g} \"{pid_file}\""]
+                     if sleep else [f"exit {rc}"])
             script.write_text(
                 "#!/bin/sh\n"
                 f'echo "$@" > "{argv_file}"\n'
@@ -278,9 +280,8 @@ def test_upgrade_auto_returns_while_a_long_upgrade_runs_on_in_its_own_session(
         assert fields["pid"] == pid
         assert fields["argv"][-2:] == ["upgrade", "--auto"]
         assert fields["returncode"] is None, "still running when the hook returned"
-    finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
+    finally:  # a pid from the fake's pid file: only while it is still the fake (its command line names tmp_path)
+        kill_if_identity(pid, str(pid_file.parent))
 
 
 def test_upgrade_auto_logs_the_spawn_with_the_childs_pid_and_exit_status(fake_nx, emitted):

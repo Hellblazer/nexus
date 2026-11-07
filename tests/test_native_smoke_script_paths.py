@@ -23,7 +23,13 @@ from pathlib import Path
 
 import pytest
 
-from tests._child_process import kill_group, popen_in_group, signal_group, terminal_signals_default
+from tests._child_process import (
+    kill_group,
+    kill_if_identity,
+    popen_in_group,
+    signal_group,
+    terminal_signals_default,
+)
 from tests._tmp_root import child_env_with_tmpdir
 
 SERVICE = Path(__file__).resolve().parent.parent / "service"
@@ -139,9 +145,8 @@ def test_a_binary_that_answers_health_is_killed_and_its_container_removed(tmp_pa
         assert calls[-1] == f"rm -f {name}", calls
         assert len(started) == 1 and _gone(started[0]), "the cleanup trap killed the engine"
     finally:
-        for pid in started:
-            if _alive(pid):
-                os.kill(pid, signal.SIGKILL)
+        for pid in started:  # a pid from the fake's pid file: signal it only while it is still that fake (nexus-xzorj)
+            kill_if_identity(pid, str(tmp_path / "nexus-service"))
 
 
 def test_a_container_that_never_gets_ready_is_removed_before_the_binary_runs(tmp_path: Path) -> None:
@@ -419,8 +424,8 @@ def _run_shapes(
             boots = [(int(pid), url) for pid, _, url in rows]
             leaked = [int(pid) for pid, leak, _ in rows if leak == "1"]
         leftover = [pid for pid, _ in boots if not _gone(pid, 1.0)]
-        for pid in leftover:
-            os.kill(pid, signal.SIGKILL)
+        for pid in leftover:  # a pid from the fake's pid file: signal it only while it is still that fake (nexus-xzorj)
+            kill_if_identity(pid, str(fake))
     calls = log.read_text().splitlines() if log.exists() else []
     run = _ShapesRun(proc, calls, boots, leftover, scratch)
     run.elapsed, run.leaked = time.monotonic() - t0, leaked
