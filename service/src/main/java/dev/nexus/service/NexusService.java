@@ -1269,6 +1269,11 @@ public final class NexusService {
         this.chunkKeysSweepForTests = sweep;
     }
 
+    /** Test seam (nexus-v75nw): the registry the asynchronous dry runs live in, to run the tenant reset's evictor. */
+    dev.nexus.service.http.ChunkKeysSweepJobs chunkKeysJobsForTests() {
+        return chunkKeysJobs;
+    }
+
     /** The sink bound now (see {@link #chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit)}). */
     public dev.nexus.service.http.ChunkKeysAdminHandler.Audit chunkKeysAudit() {
         return chunkKeysAudit;

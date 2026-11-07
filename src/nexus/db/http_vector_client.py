@@ -1970,12 +1970,15 @@ def _request_deadline_ms_for(path: str) -> int | None:
 #: ``budget_seconds`` and by the census it runs first, so this is a ceiling above both.
 _CHUNK_KEYS_TIMEOUT_S = 300
 
-#: A retire-keys dry run that runs as an engine job (nexus-v75nw): seconds between two polls of the job, and how long
-#: the client waits for it before it stops waiting (the job goes on, and the same command joins it).
-_CHUNK_KEYS_JOB_POLL_S = 2.0
+#: A retire-keys dry run that runs as an engine job (nexus-v75nw): seconds slept after the 1st, 2nd, ... poll of the
+#: job, the last repeated. The edge logs every root-credential request as ``edge_passthrough_unattributed`` and its
+#: alarm sums those over 5 minutes at a threshold of 20 (bob, 2026-11-07): a 2 s poll is about 150 requests in that
+#: window and would page security, this backs off to one poll every 30 s, which is 10 in 5 minutes at steady state.
+_CHUNK_KEYS_JOB_POLL_SCHEDULE: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 30.0)
+#: How long the client waits for the job before it stops waiting (the job goes on, and the same command joins it).
 _CHUNK_KEYS_JOB_MAX_WAIT_S = 1800.0
-#: Polls that fail in a row (a 5xx, the edge's 504, a dropped connection) before the dry run gives up. A poll is a
-#: cheap read and the job does not depend on it, so a single bad one is not the job's failure.
+#: Polls that fail in a row (a 5xx, the edge's 504, a 429, a dropped connection) before the dry run gives up. A poll is
+#: a cheap read and the job does not depend on it, so a single bad one is not the job's failure.
 _CHUNK_KEYS_JOB_POLL_FAILURES = 5
 
 #: The validate route scans the whole chunk table (the engine allows it 30 minutes); the socket outlasts that.
@@ -5647,15 +5650,17 @@ class HttpVectorClient:
         self, *, accept: Mapping[str, int] | None = None, collection: str | None = None,
         batch_size: int | None = None, measure_batch: bool | None = None, tenant: str | None = None,
         operator: str | None = None, progress: Callable[[dict], None] | None = None,
-        max_wait_s: float = _CHUNK_KEYS_JOB_MAX_WAIT_S, poll_interval_s: float = _CHUNK_KEYS_JOB_POLL_S,
+        max_wait_s: float = _CHUNK_KEYS_JOB_MAX_WAIT_S,
+        poll_schedule: Sequence[float] = _CHUNK_KEYS_JOB_POLL_SCHEDULE,
         sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
     ) -> dict:
         """The retire-keys dry run, through the engine's background job when it has one (nexus-v75nw).
 
         The counts of a large tenant take longer than the public edge's origin timeout (about 30 s: four 504s on the
         production tenant), so the synchronous call cannot carry them. This starts the dry run as a job
-        (``POST .../sweep`` with ``async``), polls ``GET .../sweep/jobs/{id}`` every ``poll_interval_s`` for up to
-        ``max_wait_s`` and answers what the synchronous call would have: the same dict, or the same
+        (``POST .../sweep`` with ``async``), polls ``GET .../sweep/jobs/{id}`` for up to ``max_wait_s``, sleeping
+        ``poll_schedule[i]`` after the i-th poll (the last entry repeats: 2, 4, 8, 16, then 30 s, so a long count sends
+        about 10 polls in 5 minutes, under the edge's alarm on root-credential requests), and answers what the synchronous call would have: the same dict, or the same
         :class:`VectorServiceError` (the job's ``http_status`` and ``body`` are the call's).
 
         ``progress`` is called with ``{"event": "started" | "poll" | "restarted" | "synchronous", ...}`` (a poll
@@ -5679,23 +5684,27 @@ class HttpVectorClient:
                 return reply
             note({"event": "restarted" if restarted else "started", "job_id": job_id})
             try:
-                return self._await_dry_run_job(str(job_id), note, max_wait_s, poll_interval_s, sleep, monotonic)
+                return self._await_dry_run_job(str(job_id), note, max_wait_s, tuple(poll_schedule), sleep, monotonic)
             except VectorServiceError as exc:
                 if exc.reason != "sweep_job_not_found" or restarted:
                     raise
                 restarted = True
 
     def _await_dry_run_job(
-        self, job_id: str, note: Callable[[dict], None], max_wait_s: float, poll_interval_s: float,
+        self, job_id: str, note: Callable[[dict], None], max_wait_s: float, poll_schedule: tuple[float, ...],
         sleep: Callable[[float], None], monotonic: Callable[[], float],
     ) -> dict:
         deadline = monotonic() + max_wait_s
         failures = 0
+        polls = 0
         while True:
+            polls += 1
             try:
                 job = _get(f"/v1/admin/chunk-keys/sweep/jobs/{job_id}", tenant=self._tenant)
             except VectorServiceError as exc:
-                if exc.reason == "sweep_job_not_found" or (exc.code is not None and exc.code < 500):
+                # A 429 is the edge or the engine asking for less: a bad poll like a 5xx (the job does not depend on
+                # it), counted toward the allowance, not a refusal of the request.
+                if exc.reason == "sweep_job_not_found" or (exc.code is not None and exc.code < 500 and exc.code != 429):
                     raise
                 failures += 1
                 if failures >= _CHUNK_KEYS_JOB_POLL_FAILURES:
@@ -5713,7 +5722,8 @@ class HttpVectorClient:
                     return _dry_run_job_answer(job_id, job)
             if monotonic() >= deadline:
                 raise ChunkKeysDryRunTimeout(job_id, max_wait_s)
-            sleep(poll_interval_s)
+            wait = poll_schedule[min(polls - 1, len(poll_schedule) - 1)]
+            sleep(max(0.0, min(wait, deadline - monotonic())))
 
     def chunk_keys_add_constraints(self, *, replace: bool = False) -> dict:
         """POST /v1/admin/chunk-keys/add-constraints: the table-wide add of the chunk CHECKs, NOT VALID (nexus-6pfgb.43).

@@ -293,6 +293,13 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         int maxBatches = dryRun ? 0 : intField(body, "max_batches", DEFAULT_MAX_BATCHES, 1, MAX_MAX_BATCHES);
         int budget = dryRun ? 0 : intField(body, "budget_seconds", DEFAULT_BUDGET_SECONDS, 1, MAX_BUDGET_SECONDS);
         ChunkKeySweep.Resume resume = dryRun ? null : resume(body);
+        // A dry run's continuation is good only while the engine still holds the job it came from (30 minutes, and
+        // not past a tenant reset or an apply that changed rows): after that the call re-counts, as a lost token does.
+        boolean continuationLapsed = false;
+        if (resume != null && resume.origin() != null && !jobs.holdsFinished(resume.origin().jobId(), tenant)) {
+            resume = null;
+            continuationLapsed = true;
+        }
 
         // The intent row goes in before the sweep reads or changes any chunk row (only the tenant-registry existence
         // probe above ran before it): a sink that cannot be written refuses the call with no chunk read or changed,
@@ -345,8 +352,13 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 counts.put("remaining_rows", applied.remainingRows());
                 counts.put("locked_skipped_rows", applied.lockedSkippedRows());
                 counts.put("blocked_collections", applied.blocked().size());
+                boolean resumeIgnored = applied.resumeIgnored() || continuationLapsed;
                 counts.put("resumed", resume != null && !applied.resumeIgnored());
-                counts.put("resume_ignored", applied.resumeIgnored());
+                counts.put("resume_ignored", resumeIgnored);
+                if (resume != null && resume.origin() != null && !applied.resumeIgnored()) {
+                    counts.put("from_dry_run_job", resume.origin().jobId());
+                    counts.put("preconditions_not_recounted", resume.origin().preconditions());
+                }
                 out = new LinkedHashMap<>();
                 out.put("tenant", applied.tenant());
                 out.put("dry_run", false);
@@ -359,12 +371,16 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                 out.put("elapsed_ms", applied.totalMs());
                 out.put("blocked_collections", blockedList(applied.blocked()));
                 out.put("resume", applied.resume() == null ? null : resumeBody(applied.resume()));
-                out.put("resume_ignored", applied.resumeIgnored());
+                out.put("resume_ignored", resumeIgnored);
             }
             completed = true;
         } catch (RuntimeException e) {
             failure = e;
         } finally {
+            if (!dryRun && progress.rowsSwept() > 0) {
+                // The rows changed: the finished dry runs of this tenant describe a tenant that is gone.
+                jobs.evictFinished(tenant);
+            }
             if (trail != null) {
                 if (failure instanceof ChunkKeySweep.PreconditionRefused refused) {
                     counts.put("blocking", refused.report().blocking());
@@ -381,6 +397,17 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         }
 
         if (failure != null) {
+            if (failure instanceof ChunkKeySweep.ResumeMismatch mismatch) {
+                Map<String, Object> refusal = new LinkedHashMap<>();
+                refusal.put("tenant", tenant);
+                refusal.put("error", mismatch.getMessage());
+                refusal.put("reason", "resume_mismatch");
+                if (trail != null) {
+                    refusal.put("audit", trail.body());
+                }
+                HttpUtil.send(ex, 400, json(refusal));
+                return;
+            }
             if (failure instanceof ChunkKeySweep.PreconditionRefused refused) {
                 Map<String, Object> refusal = preconditionBody(refused);
                 if (trail != null) {
@@ -453,11 +480,13 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
     private void startDryRunJob(HttpExchange ex, String tenant, String callerTenant, boolean root, Trail trail,
                                 ChunkKeyPlan plan, Map<String, Long> accepted, int batchSize, boolean measure,
                                 String only) throws IOException {
-        String fingerprint = new TreeMap<>(accepted) + "|" + batchSize + "|" + measure + "|" + only;
+        String fingerprint = new TreeMap<>(accepted) + "|" + batchSize + "|" + measure + "|" + only + "|"
+            + plan.fingerprint();
         ChunkKeysSweepJobs.Started started;
         try {
             started = jobs.start(tenant, callerTenant, root, fingerprint,
-                stage -> runDryRun(tenant, callerTenant, trail, plan, accepted, batchSize, measure, stage));
+                (jobId, stage) -> runDryRun(jobId, tenant, callerTenant, trail, plan, accepted, batchSize, measure,
+                    stage));
         } catch (ChunkKeysSweepJobs.Conflict | ChunkKeysSweepJobs.Busy refused) {
             if (trail != null) {
                 trail.outcome(new LinkedHashMap<>(), refused);
@@ -480,16 +509,28 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             // This request's intent row has no job of its own to write its outcome: close it here.
             trail.outcome(new LinkedHashMap<>(Map.of("joined_job_id", started.job().id())), null);
         }
+        noStore(ex);
         HttpUtil.send(ex, 202, json(jobBody(started.job(), false)));
     }
 
-    /** The work of one job: the dry run, its counts, and (root) the outcome row; the status and body it answers. */
-    private ChunkKeysSweepJobs.Outcome runDryRun(String tenant, String callerTenant, Trail trail, ChunkKeyPlan plan,
-                                                 Map<String, Long> accepted, int batchSize, boolean measure,
-                                                 java.util.function.Consumer<String> stage) {
+    /** A job answer is the state of one moment (and may carry a continuation): no cache keeps it. */
+    private static void noStore(HttpExchange ex) {
+        ex.getResponseHeaders().set("Cache-Control", "no-store");
+    }
+
+    /**
+     * The work of one job: the dry run, its counts, and (root) the outcome row; the status and body it answers. A dry
+     * run that ends with nothing blocking carries the continuation an apply passes back as {@code resume}, so the
+     * apply's first call does not count again. Failures map as the synchronous call maps them: a pool exhaustion is the
+     * retryable 503, an {@link IllegalArgumentException} a 400, anything else {@code sweep_failed}.
+     */
+    private ChunkKeysSweepJobs.Outcome runDryRun(String jobId, String tenant, String callerTenant, Trail trail,
+                                                 ChunkKeyPlan plan, Map<String, Long> accepted, int batchSize,
+                                                 boolean measure, java.util.function.Consumer<String> stage) {
         Map<String, Object> counts = new LinkedHashMap<>();
         Map<String, Object> out = null;
         RuntimeException failure = null;
+        boolean completed = false;
         try {
             var report = sweep().dryRun(tenant, plan, accepted, batchSize, measure, stage);
             log.info("event=retire_keys_dry_run tenant={} caller_tenant={} sweepable={} blocked={} blocking={} async=true",
@@ -497,14 +538,31 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             counts.putAll(dryRunCounts(report));
             out = dryRunBody(report);
             out.put("dry_run", true);
+            if (report.blocking().isEmpty()) {
+                out.put("resume", resumeBody(sweep().issueDryRunResume(tenant, jobId, plan, report)));
+            }
+            completed = true;
         } catch (RuntimeException e) {
             failure = e;
         } finally {
-            if (trail != null) {
-                trail.outcome(counts, failure);
+            // An Error skips the catch: still a failed call, never a "finished" outcome with empty counts. A job the
+            // tenant reset dropped writes no row into the reset tenant.
+            if (trail != null && !jobs.evicted(jobId)) {
+                trail.outcome(counts, failure != null || completed ? failure
+                    : new IllegalStateException("the dry run did not complete"));
             }
         }
         if (failure != null) {
+            if (HttpUtil.isPoolExhausted(failure)) {
+                log.warn("event=chunk_keys_admin_pool_exhausted tenant={} dry_run=true async=true error={}", tenant,
+                    failure.getMessage());
+                return new ChunkKeysSweepJobs.Outcome(503,
+                    new LinkedHashMap<>(Map.of("error", "database connection pool exhausted, retry")));
+            }
+            if (failure instanceof IllegalArgumentException) {
+                return new ChunkKeysSweepJobs.Outcome(400,
+                    new LinkedHashMap<>(Map.of("error", String.valueOf(failure.getMessage()))));
+            }
             log.error("event=retire_keys_sweep_failed tenant={} caller_tenant={} dry_run=true async=true error={}",
                 tenant, callerTenant, failure.getMessage(), failure);
             Map<String, Object> err = new LinkedHashMap<>();
@@ -523,6 +581,7 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         if (trail != null) {
             out.put("audit", trail.body());
             if (trail.outcomeFailed) {
+                out.remove("resume");
                 out.put("error", "the sweep ran but its outcome audit row could not be written; this call's counts "
                     + "are in this answer");
                 out.put("reason", "audit_write_failed");
@@ -540,13 +599,15 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
      * not hold, and for one another credential started: it learns nothing about other callers' jobs.
      */
     private void handleJob(HttpExchange ex, String callerTenant, String id) throws IOException {
+        // The answer is one moment's state and may carry a continuation: never cached, found or not.
+        noStore(ex);
         String scopeName = RequestContext.scope();
         if (!TokenStore.SCOPE_ROOT.equals(scopeName) && !TokenStore.SCOPE_TENANT.equals(scopeName)) {
             HttpUtil.send(ex, 403, json(Map.of("error",
                 "the sweep needs a tenant or root credential, not scope " + scopeName)));
             return;
         }
-        ChunkKeysSweepJobs.Job job = id.isEmpty() || id.contains("/") ? null : jobs.find(id);
+        ChunkKeysSweepJobs.Job job = id.isEmpty() || id.contains("/") || id.contains("..") ? null : jobs.find(id);
         if (job == null || !job.startedBy(callerTenant, RequestContext.isOperator())) {
             HttpUtil.send(ex, 404, json(Map.of("error", "no such dry-run job on this engine (it may have expired, "
                 + "or the engine restarted): start the dry run again", "reason", "sweep_job_not_found")));
@@ -675,7 +736,8 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         /** Never throws; {@link #outcomeFailed} says whether the row went in. */
         void outcome(Map<String, Object> counts, RuntimeException failure) {
             String phase = failure == null ? "finished"
-                : failure instanceof ChunkKeySweep.PreconditionRefused ? "refused" : "failed";
+                : failure instanceof ChunkKeySweep.PreconditionRefused || failure instanceof ChunkKeySweep.ResumeMismatch
+                    ? "refused" : "failed";
             Map<String, Object> details = details(phase);
             details.put("intent_audit_id", intentId);
             details.put("counts", counts);
@@ -819,6 +881,15 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         m.put("collections", r.collections());
         m.put("blocked", blockedList(r.blocked()));
         m.put("remaining", r.remaining());
+        if (r.origin() != null) {
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("job_id", r.origin().jobId());
+            o.put("plan", r.origin().plan());
+            o.put("accepted", r.origin().accepted());
+            o.put("preconditions", r.origin().preconditions());
+            o.put("rows", r.origin().rows());
+            m.put("origin", o);
+        }
         m.put("sig", r.sig());
         return m;
     }
@@ -1053,7 +1124,27 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
         }
         long remaining = r.get("remaining") instanceof Number n ? n.longValue() : 0L;
         String sig = r.get("sig") instanceof String s ? s : null;
-        return new ChunkKeySweep.Resume(cursor, collections, blocked, remaining, sig);
+        ChunkKeySweep.Origin origin = null;
+        if (r.get("origin") != null) {
+            if (!(r.get("origin") instanceof Map<?, ?> om)) {
+                throw new IllegalArgumentException("resume.origin must be the object a dry run returned");
+            }
+            origin = new ChunkKeySweep.Origin(om.get("job_id") instanceof String j ? j : null,
+                om.get("plan") instanceof String p ? p : null, longMap(om.get("accepted")),
+                longMap(om.get("preconditions")), longMap(om.get("rows")));
+        }
+        return new ChunkKeySweep.Resume(cursor, collections, blocked, remaining, sig, origin);
+    }
+
+    /** A JSON object of name to integer; anything else reads as empty (the signature then fails to verify). */
+    private static Map<String, Long> longMap(Object v) {
+        Map<String, Long> out = new TreeMap<>();
+        if (v instanceof Map<?, ?> m) {
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                out.put(String.valueOf(e.getKey()), e.getValue() instanceof Number n ? n.longValue() : 0L);
+            }
+        }
+        return out;
     }
 
     private static boolean isHex(String s) {

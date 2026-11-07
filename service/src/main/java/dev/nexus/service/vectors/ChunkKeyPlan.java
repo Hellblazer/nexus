@@ -83,6 +83,19 @@ public record ChunkKeyPlan(List<String> allowed, List<String> rowKeys, List<Stri
         quarantineImplies = List.copyOf(quarantineImplies);
     }
 
+    /**
+     * A digest of the whole plan: the allow-list, the ROW keys, the bypass prefixes and the implication, each list
+     * framed by its length so a key moved between lists changes it. Two requests carry the same plan exactly when this
+     * is equal; a dry-run job and a signed continuation name the plan they were made under by it (nexus-v75nw).
+     */
+    public String fingerprint() {
+        StringBuilder b = new StringBuilder();
+        for (List<String> l : List.of(allowed, rowKeys, bypassPrefixes, quarantineImplies)) {
+            b.append(l.size()).append(':').append(String.join("\n", l)).append('\u0000');
+        }
+        return digest(List.of(b.toString()));
+    }
+
     /** SHA-256 (hex) of {@code keys} joined by a newline, in the order given: what the generator renders. */
     static String digest(List<String> keys) {
         try {

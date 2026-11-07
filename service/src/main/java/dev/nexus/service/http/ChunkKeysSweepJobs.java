@@ -74,6 +74,12 @@ public final class ChunkKeysSweepJobs {
         Outcome run(Consumer<String> stage) throws Exception;
     }
 
+    /** As {@link Work}, told the id of the job it runs as: the signed continuation of a finished dry run names it. */
+    @FunctionalInterface
+    public interface JobWork {
+        Outcome run(String jobId, Consumer<String> stage) throws Exception;
+    }
+
     /** No thread and no queue place is free. */
     public static final class Busy extends RuntimeException {
         Busy() {
@@ -104,6 +110,8 @@ public final class ChunkKeysSweepJobs {
         private final boolean root;
         private final String fingerprint;
         private final long startedMs;
+        /** Set by the tenant reset while the job runs: it stays (the tenant keeps its one running job) but is unseen. */
+        private volatile boolean evicted;
         private volatile String stage = "queued";
         private volatile State state = State.RUNNING;
         private volatile Outcome outcome;
@@ -129,6 +137,11 @@ public final class ChunkKeysSweepJobs {
 
         public State state() {
             return state;
+        }
+
+        /** True once the tenant reset dropped this job: its outcome belongs to no tenant any more and is not recorded. */
+        public boolean evicted() {
+            return evicted;
         }
 
         public String stage() {
@@ -187,14 +200,34 @@ public final class ChunkKeysSweepJobs {
      * @throws Busy     every thread and queue place is taken
      */
     public synchronized Started start(String tenant, String callerTenant, boolean root, String fingerprint, Work work) {
+        return start(tenant, callerTenant, root, fingerprint, (id, stage) -> work.run(stage));
+    }
+
+    /**
+     * As above, the work told its job's id. A start whose request equals a job of this tenant that FINISHED
+     * ({@link State#DONE}) inside the retention window is handed that job instead of a recount; a failed one is not
+     * reused, and the apply drops a tenant's finished jobs ({@link #evictFinished}) because its counts are stale then.
+     */
+    public synchronized Started start(String tenant, String callerTenant, boolean root, String fingerprint,
+                                      JobWork work) {
         evictExpired();
+        Job finished = null;
         for (Job j : jobs.values()) {
-            if (j.state == State.RUNNING && j.tenant.equals(tenant)) {
-                if (j.fingerprint.equals(fingerprint) && j.startedBy(callerTenant, root)) {
+            if (!j.tenant.equals(tenant)) {
+                continue;
+            }
+            if (j.state == State.RUNNING) {
+                if (!j.evicted && j.fingerprint.equals(fingerprint) && j.startedBy(callerTenant, root)) {
                     return new Started(j, false);
                 }
                 throw new Conflict(j.id);
             }
+            if (j.state == State.DONE && j.fingerprint.equals(fingerprint) && j.startedBy(callerTenant, root)) {
+                finished = j;
+            }
+        }
+        if (finished != null) {
+            return new Started(finished, false);
         }
         Job job = new Job(UUID.randomUUID().toString(), tenant, callerTenant, root, fingerprint, clockMs.getAsLong());
         try {
@@ -207,11 +240,11 @@ public final class ChunkKeysSweepJobs {
         return new Started(job, true);
     }
 
-    private void run(Job job, Work work) {
+    private void run(Job job, JobWork work) {
         Outcome outcome;
         State end;
         try {
-            outcome = work.run(s -> job.stage = s);
+            outcome = work.run(job.id, s -> job.stage = s);
             end = outcome.httpStatus() == 200 ? State.DONE : State.FAILED;
         } catch (Throwable t) {
             Map<String, Object> body = new LinkedHashMap<>();
@@ -231,13 +264,55 @@ public final class ChunkKeysSweepJobs {
     /** The job with this id, or null when the engine holds none (never started, expired, evicted, or another process). */
     public synchronized Job find(String id) {
         evictExpired();
-        return jobs.get(id);
+        Job j = jobs.get(id);
+        return j == null || j.evicted ? null : j;
     }
 
-    /** Drops every job of {@code tenant} (counted or started by it): the tenant reset route's evictor. Returns how many. */
+    /** Whether the engine still holds the finished job {@code id} of {@code tenant}: the life of its continuation. */
+    public synchronized boolean holdsFinished(String id, String tenant) {
+        evictExpired();
+        Job j = id == null ? null : jobs.get(id);
+        return j != null && !j.evicted && j.state == State.DONE && j.tenant.equals(tenant);
+    }
+
+    /** Whether the tenant reset hid {@code id} while it ran (the worker then writes no outcome row). */
+    public synchronized boolean evicted(String id) {
+        Job j = jobs.get(id);
+        return j != null && j.evicted;
+    }
+
+    /**
+     * Drops every job of {@code tenant} (counted or started by it): the tenant reset route's evictor. A job that is
+     * still running cannot be stopped, and the tenant keeps its one-running-job guard until it ends, so it stays
+     * in the table marked {@link Job#evicted}: no poll finds it, a continuation made from it lapses, a start does not
+     * join it, and its worker writes no outcome row into the reset tenant. Returns how many jobs this dropped or hid.
+     */
     public synchronized int evictTenant(String tenant) {
+        int n = 0;
+        for (Job j : new ArrayList<>(jobs.values())) {
+            if (!j.tenant.equals(tenant) && !j.callerTenant.equals(tenant)) {
+                continue;
+            }
+            if (j.state == State.RUNNING) {
+                if (!j.evicted) {
+                    j.evicted = true;
+                    n++;
+                }
+            } else {
+                jobs.remove(j.id);
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Drops the finished jobs of {@code tenant}: an apply that changed rows makes their counts stale, so neither a
+     * rerun may be handed one nor its continuation applied. A running job stays. Returns how many were dropped.
+     */
+    public synchronized int evictFinished(String tenant) {
         int before = jobs.size();
-        jobs.values().removeIf(j -> j.tenant.equals(tenant) || j.callerTenant.equals(tenant));
+        jobs.values().removeIf(j -> j.state != State.RUNNING && j.tenant.equals(tenant));
         return before - jobs.size();
     }
 
@@ -253,7 +328,7 @@ public final class ChunkKeysSweepJobs {
 
     private void evictExpired() {
         long cutoff = clockMs.getAsLong() - retention.toMillis();
-        jobs.values().removeIf(j -> j.state != State.RUNNING && j.finishedMs < cutoff);
+        jobs.values().removeIf(j -> j.state != State.RUNNING && (j.evicted || j.finishedMs < cutoff));
     }
 
     private void trim() {

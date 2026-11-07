@@ -561,6 +561,12 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, "a component of one sweep call's result record, built for that request and dropped "
                     + "with its response; nothing keeps it between requests");
             }
+            for (String f : List.of("ChunkKeySweep.Origin.accepted", "ChunkKeySweep.Origin.preconditions",
+                "ChunkKeySweep.Origin.rows")) {
+                notKeyed.put(f, "a component of the signed continuation a finished dry run hands the client (nexus-"
+                    + "v75nw): the engine keeps none of it, the client carries it, and it is honoured only while the "
+                    + "job it names is held, which the tenant reset evicts under ChunkKeysSweepJobs.jobs");
+            }
             notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
                 + "tenant name beside its counts), built for that request and dropped with its response");
             for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",

@@ -209,4 +209,88 @@ class ChunkKeysSweepJobsTest {
         assertThat(tenantStart.job().startedBy("t", false)).isTrue();
         assertThat(tenantStart.job().startedBy("u", false)).isFalse();
     }
+
+    // ---- the fix round: finished-job rerun join, eviction of a running job, the continuation's life ------------
+
+    @Test
+    void aStartMatchingAFinishedJobInsideRetentionIsHandedThatJob_aFailedOrOtherCallersOrExpiredOneIsNot()
+            throws Exception {
+        Started first = jobs.start("t", "t", false, "fp", stage -> ok("t"));
+        await(() -> first.job().state() == State.DONE);
+
+        Started again = jobs.start("t", "t", false, "fp", stage -> {
+            throw new AssertionError("a finished job is reused, not recounted");
+        });
+        assertThat(again.created()).isFalse();
+        assertThat(again.job().id()).isEqualTo(first.job().id());
+        Started other = jobs.start("t", "t", false, "fp-other", stage -> ok("t"));
+        assertThat(other.job().id()).as("another request").isNotEqualTo(first.job().id());
+        await(() -> other.job().state() == State.DONE);
+
+        Started failed = jobs.start("f", "f", false, "fp", stage -> new Outcome(500, Map.of("reason", "sweep_failed")));
+        await(() -> failed.job().state() == State.FAILED);
+        assertThat(jobs.start("f", "f", false, "fp", stage -> ok("f")).created()).as("a failed job is recounted").isTrue();
+
+        Started mine = jobs.start("r", "default", true, "fp", stage -> ok("r"));
+        await(() -> mine.job().state() == State.DONE);
+        assertThat(jobs.start("r", "r", false, "fp", stage -> ok("r")).created())
+            .as("not handed to a credential that could not have read it").isTrue();
+
+        now.addAndGet(Duration.ofMinutes(31).toMillis());
+        assertThat(jobs.start("t", "t", false, "fp", stage -> ok("t")).created()).as("past the retention").isTrue();
+    }
+
+    @Test
+    void evictFinishedDropsAFinishedJobOfTheTenant_andARunningOneStays() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        Started done = jobs.start("t", "t", false, "fp", stage -> ok("t"));
+        await(() -> done.job().state() == State.DONE);
+        Started running = jobs.start("u", "u", false, "fp", stage -> {
+            release.await(20, TimeUnit.SECONDS);
+            return ok("u");
+        });
+        assertThat(jobs.holdsFinished(done.job().id(), "t")).isTrue();
+        assertThat(jobs.holdsFinished(done.job().id(), "other")).as("another tenant's id").isFalse();
+        assertThat(jobs.holdsFinished(running.job().id(), "u")).as("a running job has no continuation yet").isFalse();
+        assertThat(jobs.holdsFinished(null, "t")).isFalse();
+
+        assertThat(jobs.evictFinished("t")).isEqualTo(1);
+        assertThat(jobs.holdsFinished(done.job().id(), "t")).isFalse();
+        assertThat(jobs.evictFinished("u")).as("a running job stays").isZero();
+        release.countDown();
+    }
+
+    @Test
+    void evictingARunningJobHidesItButKeepsTheTenantsOneJobGuard_untilItEnds() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        Started running = jobs.start("t", "t", false, "fp", stage -> {
+            release.await(20, TimeUnit.SECONDS);
+            return ok("t");
+        });
+
+        assertThat(jobs.evictTenant("t")).isEqualTo(1);
+
+        assertThat(jobs.evicted(running.job().id())).isTrue();
+        assertThat(running.job().evicted()).isTrue();
+        assertThat(jobs.find(running.job().id())).as("no poll finds it").isNull();
+        assertThatThrownBy(() -> jobs.start("t", "t", false, "fp", stage -> ok("t")))
+            .as("the same request does not join an invisible job").isInstanceOf(Conflict.class);
+        assertThat(jobs.evictTenant("t")).as("already hidden: not counted twice").isZero();
+        release.countDown();
+        await(() -> running.job().state() == State.DONE);
+        assertThat(jobs.holdsFinished(running.job().id(), "t")).as("a hidden job gives no continuation").isFalse();
+        assertThat(jobs.start("t", "t", false, "fp", stage -> ok("t")).created())
+            .as("the guard ends with the worker, and the hidden job is dropped").isTrue();
+    }
+
+    @Test
+    void theWorkIsToldItsJobsId() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        Started s = jobs.start("t", "t", false, "fp", (id, stage) -> {
+            seen.set(id);
+            return ok("t");
+        });
+        await(() -> s.job().state() == State.DONE);
+        assertThat(seen.get()).isEqualTo(s.job().id());
+    }
 }
