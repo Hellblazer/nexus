@@ -345,12 +345,12 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   reaches 0 when none remains. An engine older than the change counts every present key, so there the count does not
   reach zero for lineless chunks and the residue is accepted by name.
   **The sweep may drop values the count ignores.** A key that is present but is not a recorded span (a string
-  such as `"7"`, a float such as `9.0`, a boolean, a null, a 0 line, or a 0 start beside an unrecorded end) is
-  not counted and does not hold the sweep back, and `nx t3 retire-keys --apply` deletes it with the other
-  keys. Those are the values `manifest_span` also declines to write (the manifest columns are integers), so
-  nothing the manifest could have held is lost, but a string or float span that older indexing left on a chunk
-  row is gone after the sweep; the dry run's `null_span_rows` cannot tell you it was there. The one table both
-  halves are held to is `service/src/test/resources/manifest-span-cases.json`.
+  such as `"7"`, a float such as `9.0`, a boolean, a null, a 0 or negative line, or a 0 start beside an
+  unrecorded end) is not counted and does not hold the sweep back, and `nx t3 retire-keys --apply` deletes it
+  with the other keys. `manifest_span` declines to write every one of those (the manifest columns hold recorded
+  integer spans only), so no value the rung could have copied is lost. A string or float span that older indexing
+  left on a chunk row is lost, though, and the dry run's `null_span_rows` cannot tell you it was there. The one
+  table both halves are held to is `service/src/test/resources/manifest-span-cases.json`.
 - **Labels are untouched.** The only write route (`append_manifest_many`) rewrites a row's labels from the request,
   so the rung sends the labels and `labels_written` it read just before the write, unchanged. A label written in
   the window between the scan and the write is carried, not reverted. A span column another writer filled in that
