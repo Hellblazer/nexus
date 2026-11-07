@@ -87,14 +87,18 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       and push out every other hit. The owners past the cap are dropped from that response: they are not
  *       paged to, a narrower filter or a different query is how to reach them, and the rows that remain are
  *       the same on every call (the lookup orders occurrences by {@code doc_id}, then position). Each owner
- *       the cap keeps still carries its own labels; the {@code shared} decision is taken over EVERY holder
- *       before the cap, so a capped hit is not mistaken for an unshared one. The cap counts owners that PASS
- *       the filter, not owners walked, among the first {@link #OCCURRENCES_PER_CHASH} live occurrences of the
- *       chash in the same order (the lookup's statement budget, nexus-6cmam): an owner past those is never seen,
- *       so a chunk held by more documents than that, whose leading holders all fail the filter, can return fewer
- *       than the cap or no row. It applies to this stage only, which a search runs when its {@code where}
- *       names a label key or a document key (route (a)); route (b) (metadata-scoped, graph-hop, aspect-scoped and
- *       {@code manifest_search_*} reads) returns one row per owner and is not capped.</li>
+ *       the cap keeps still carries its own labels. The cap counts owners that PASS the filter, not owners
+ *       walked, among the first {@link #DOCUMENTS_PER_CHASH} live documents that hold the chash, in {@code doc_id}
+ *       order, every position of each (the lookup's statement budget, nexus-6cmam). A document past those is
+ *       never seen: a chunk held by more live documents than that, whose leading holders all fail the filter,
+ *       returns fewer owners than the cap or no row, and neither a narrower filter nor a document-key filter
+ *       reaches the ones past the bound (the filter runs after the lookup); only route (b) does. The {@code
+ *       shared} decision is taken over the documents the lookup read: two of them make the chunk shared, and a
+ *       lookup that read one document asks the database whether any other document holds the chunk, so a
+ *       capped or bounded hit is not mistaken for an unshared one. Both bounds apply to this stage only, which a
+ *       search runs when its {@code where} names a label key or a document key (route (a)); route (b)
+ *       (metadata-scoped, graph-hop, aspect-scoped and {@code manifest_search_*} reads) returns one row per owner
+ *       and is neither capped nor bounded.</li>
  *   <li>The caller's limit applies after expansion and de-duplication, never before.</li>
  * </ul>
  *
@@ -328,26 +332,27 @@ final class ManifestLabelStage {
     static final int MAX_OWNERS_PER_HIT = 5;
 
     /**
-     * The most live occurrences of ONE chash the lookup behind {@link #apply} reads (nexus-6cmam, the statement
-     * budget): the first ones in {@code (doc_id, position)} order, cut in SQL by a per-chash {@code LATERAL ...
-     * LIMIT}. The owner cap is applied in Java after the filter, so the lookup has to hand it more candidates than
-     * the cap keeps; 64 is about twelve times {@link #MAX_OWNERS_PER_HIT}, so a filter that rejects most holders
-     * of a chunk still finds its owners. Without it a boilerplate chunk held by thousands of documents moved every
-     * one of them to the engine's heap per hit before five were kept.
+     * The most live DOCUMENTS the lookup behind {@link #apply} reads per chash (nexus-6cmam, the statement
+     * budget): the first ones in {@code doc_id} order, with every position each holds the chash at, cut in SQL by a
+     * per-chash {@code LATERAL (SELECT DISTINCT doc_id ... ORDER BY doc_id LIMIT n)}. The owner cap is applied in
+     * Java after the filter, so the lookup has to hand it more candidates than the cap keeps; 64 is about twelve
+     * times {@link #MAX_OWNERS_PER_HIT}, so a filter that rejects most holders of a chunk still finds its owners.
+     * Without it a boilerplate chunk held by thousands of documents moved every one of them to the engine's heap
+     * per hit before five were kept. Documents are the unit, not positions: one document may hold a chunk at
+     * many positions (a repeated page footer), and it must not use up the bound for the others.
      *
-     * <p>What it drops: an owner past the first 64 candidates is never seen. A hit whose first 64 holders all fail
-     * the filter returns no row, and one whose passing owners straddle the bound returns only those inside it, even
-     * though a later holder would pass. That is the same kind of loss the owner cap makes (the response is a
-     * bounded sample of a boilerplate chunk's owners, reached by a narrower filter or another query), and only a
-     * chunk held by more than 64 live documents can lose anything. Moving the filter into SQL would remove the
-     * loss but not the work: the labels, the document-level keys and the chunk-row fallback are judged in Java
-     * ({@link #passes}), by design. What the bound does NOT do: the index serving it is {@code (tenant_id, chash)},
-     * not in {@code doc_id} order, so the database still visits each occurrence's index entry and heap row to order
-     * them (the inner {@code LATERAL} sorts, top-N); the saving is the wide row fetch (labels, spans, document
-     * columns), the rows sent to this process and the objects built past the bound, not the index probe.
-     * {@code firstOwners} is unaffected (it already returns one row per chash).
+     * <p>What it drops: a document past the first 64 live holders is never seen. A hit whose first 64 holders
+     * all fail the filter returns no row, and one whose passing owners straddle the bound returns only those
+     * inside it, even though a later holder would pass. Route (b) reaches them; a narrower filter does not, since
+     * the filter is judged in Java after this lookup, as are the labels, the document-level keys and the
+     * chunk-row fallback ({@link #passes}, by design). Only a chunk held by more than 64 live documents can lose
+     * anything. What the bound saves: the rows sent to this process, the projection and detoast of the wide
+     * columns of the rows past it, and the Java objects built from them. What it does NOT save: the database
+     * still visits every holder's index entry, heap row and {@code catalog_documents} row and sorts them, so the
+     * statement's cost is not bounded; that would take an index on {@code (tenant_id, chash, doc_id, position)},
+     * which is not added. {@code firstOwners} is unaffected (it already returns one row per chash).
      */
-    static final int OCCURRENCES_PER_CHASH = 64;
+    static final int DOCUMENTS_PER_CHASH = 64;
 
     /**
      * The row bound for a list this stage expands without a caller's limit (the lexical extras of {@code
@@ -855,7 +860,8 @@ final class ManifestLabelStage {
 
     /**
      * The live manifest occurrences of each (collection, chash) the rows name, in (doc_id, position)
-     * order, at most {@link #OCCURRENCES_PER_CHASH} per chash. One bounded statement per collection and batch, under the tenant's row-level security, joined
+     * order, every position of at most {@link #DOCUMENTS_PER_CHASH} documents per chash. One bounded statement per
+     * collection and batch, under the tenant's row-level security, joined
      * to the document so a tombstoned document owns nothing. The same statement reads the document-level
      * values the predicates name ({@code docKeys}); nothing is read for a filter that names none.
      */
@@ -870,7 +876,7 @@ final class ManifestLabelStage {
                 chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(chash);
             }
         }
-        return fetchOccurrences(tenant, chashesByCollection, docKeys, false, OCCURRENCES_PER_CHASH);
+        return fetchOccurrences(tenant, chashesByCollection, docKeys, false, DOCUMENTS_PER_CHASH);
     }
 
     /**
@@ -1064,10 +1070,11 @@ final class ManifestLabelStage {
     }
 
     /**
-     * The one statement behind both lookups, for ONE collection and one batch of chashes. Package-private so
-     * a plan test can EXPLAIN the statement production runs, not a copy of it. {@code firstOnly} is {@code
-     * SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}; otherwise every occurrence, ordered
-     * by {@code doc_id}, {@code position}.
+     * The unbounded form of the statement behind both lookups, for ONE collection and one batch of chashes.
+     * Production runs it for {@code firstOnly} ({@code SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id,
+     * position}); the all-occurrences lookup of {@link #apply} runs the bounded seven-argument form, which a plan
+     * test EXPLAINs instead. Without {@code firstOnly} this form returns every occurrence, ordered by {@code
+     * doc_id}, {@code position}, and only a test compares it with the bounded one.
      */
     static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String collection,
                                                List<byte[]> keys, List<Field<?>> select, boolean firstOnly) {
@@ -1075,11 +1082,14 @@ final class ManifestLabelStage {
     }
 
     /**
-     * {@link #occurrenceQuery(DSLContext, String, String, List, List, boolean)} with the most occurrences read per
-     * chash named ({@link #OCCURRENCES_PER_CHASH} in production). A bound below {@link Integer#MAX_VALUE}
-     * (and not {@code firstOnly}) is a {@code LATERAL} over the chash list: per chash, the first {@code
-     * perChashBound} live {@code (doc_id, position)} keys in order, joined back by primary key to the columns the
-     * caller selects. The statement therefore returns at most {@code perChashBound} rows per chash.
+     * {@link #occurrenceQuery(DSLContext, String, String, List, List, boolean)} with the most DOCUMENTS read per
+     * chash named ({@link #DOCUMENTS_PER_CHASH} in production). A bound below {@link Integer#MAX_VALUE} (and not
+     * {@code firstOnly}) is a {@code LATERAL} over the chash list: per chash, the first {@code perChashBound} live
+     * {@code doc_id}s in order ({@code SELECT DISTINCT doc_id ... ORDER BY doc_id LIMIT n}), then EVERY position
+     * those documents hold the chash at, joined back to the columns the caller selects. Distinct documents, not
+     * positions: labels are per position and {@link #apply} lets a later position of a document pass when its
+     * first fails, and one document repeating a chunk (a page footer) must not use up the bound for the others.
+     * The statement therefore returns every position of at most {@code perChashBound} documents per chash.
      */
     static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String collection,
                                                List<byte[]> keys, List<Field<?>> select, boolean firstOnly,
@@ -1087,15 +1097,20 @@ final class ManifestLabelStage {
         if (firstOnly || perChashBound == Integer.MAX_VALUE) {
             return unboundedOccurrenceQuery(ctx, tenant, collection, keys, select, firstOnly);
         }
-        List<Row1<byte[]>> keyRows = new ArrayList<>(keys.size());
+        // A repeated key would repeat its rows here (the IN form of the unbounded statement dedupes by itself).
+        Map<java.nio.ByteBuffer, byte[]> distinct = new LinkedHashMap<>();
         for (byte[] k : keys) {
+            distinct.putIfAbsent(java.nio.ByteBuffer.wrap(k), k);
+        }
+        List<Row1<byte[]>> keyRows = new ArrayList<>(distinct.size());
+        for (byte[] k : distinct.values()) {
             keyRows.add(DSL.row(k));
         }
         Table<Record1<byte[]>> keyList = DSL.values(keyRows.toArray(new Row1[0])).as(KEY_LIST, "chash");
         Field<byte[]> kChash = keyList.field("chash", byte[].class);
         var wc = CATALOG_DOCUMENT_CHUNKS.as("win_c");
         var wd = CATALOG_DOCUMENTS.as("win_d");
-        Table<?> window = DSL.lateral(ctx.select(wc.DOC_ID, wc.POSITION)
+        Table<?> window = DSL.lateral(ctx.selectDistinct(wc.DOC_ID)
                 .from(wc)
                 .join(wd)
                     // A tombstoned document owns nothing (nexus-mqd6t): it does not use up the bound.
@@ -1103,18 +1118,21 @@ final class ManifestLabelStage {
                 .where(wc.TENANT_ID.eq(tenant)
                     .and(wc.COLLECTION.eq(collection))
                     .and(wc.CHASH.eq(kChash)))
-                .orderBy(wc.DOC_ID, wc.POSITION)
+                .orderBy(wc.DOC_ID)
                 .limit(perChashBound))
             .as(OCCURRENCE_WINDOW);
         Field<String> winDoc = DSL.field(DSL.name(OCCURRENCE_WINDOW, "doc_id"), String.class);
-        Field<Integer> winPos = DSL.field(DSL.name(OCCURRENCE_WINDOW, "position"), Integer.class);
         return ctx.select(select)
             .from(keyList)
             .crossJoin(window)
+            // Back to the manifest rows: every position of a windowed document that holds THIS chash (a document
+            // holds other chashes at other positions, so the chash and collection stay in the join; tenant_id
+            // and doc_id lead the primary key).
             .join(CATALOG_DOCUMENT_CHUNKS)
                 .on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                     .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(winDoc))
-                    .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(winPos)))
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(kChash)))
             .join(CATALOG_DOCUMENTS)
                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
@@ -1177,7 +1195,9 @@ final class ManifestLabelStage {
     /**
      * {@link #apply(String, List, List, int)} with the per-hit owner cap named. Production passes {@link
      * #MAX_OWNERS_PER_HIT} through the four-argument form; a test that compares the stage's per-document verdicts
-     * with another judge (route (b)'s SQL, which has no cap) passes {@link Integer#MAX_VALUE} to see them all.
+     * with another judge (route (b)'s SQL, which has no cap) passes {@link Integer#MAX_VALUE} to lift the OWNER cap
+     * only. The lookup behind it still reads at most {@link #DOCUMENTS_PER_CHASH} documents per chash, so a
+     * chash held by more live documents than that is not seen whole whatever the cap.
      */
     List<Map<String, Object>> apply(String tenant, List<Map<String, Object>> rows, List<Predicate> predicates,
                                     int limit, int ownerCap) {

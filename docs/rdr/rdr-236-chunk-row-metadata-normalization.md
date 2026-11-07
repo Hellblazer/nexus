@@ -574,25 +574,34 @@ critiqued once before Sam's gate decision (T2
   derived invariant of the cap (the stage cannot emit more than hits times the
   cap, so the bound never binds), not an independent control, and no test
   fails if the call site goes back to `Integer.MAX_VALUE`. The `shared`
-  flag is still decided over every holder before the cap. The class javadoc's
+  flag is decided before the cap (over the documents the lookup read, below). The class javadoc's
   settled semantics (a hit passes once per owning document) now carry the cap.
   Changing the constant changes what a response drops and nothing else.
   Statement budget (nexus-6cmam remainder): the occurrence lookup behind the
-  stage now reads at most `ManifestLabelStage.OCCURRENCES_PER_CHASH` (64) live
-  occurrences per chash, the first in `(doc_id, position)` order, cut in SQL by
-  a per-chash `LATERAL ... LIMIT` joined back by primary key. The filter still
-  runs in Java after the lookup, so the bound is larger than the owner cap (about
-  twelve times). What it drops: an owner past the first 64 candidates is never
+  stage now reads at most `ManifestLabelStage.DOCUMENTS_PER_CHASH` (64) live
+  DOCUMENTS per chash: the first 64 in `doc_id` order, with every position each
+  holds the chash at, cut in SQL by a per-chash
+  `LATERAL (SELECT DISTINCT doc_id ... ORDER BY doc_id LIMIT 64)` and joined
+  back to the manifest rows. The unit is the document, not the position: one
+  document can hold a chunk at many positions (a repeated page footer), and it
+  must not use up the bound for the others or hide them from the `shared`
+  decision. The filter still runs in Java
+  after the lookup, so the bound is larger than the owner cap (about twelve
+  times). What it drops: a document past the first 64 live holders is never
   seen, so a hit whose first 64 holders all fail the filter returns no row, and
   one whose passing owners straddle the bound returns only those inside it. Only
-  a chunk held by more than 64 live documents can lose anything. What it does
-  not save: no index is in `(tenant_id, chash, doc_id, position)` order, so the
-  database still visits each occurrence's index entry and heap row to order
-  them (the inner LATERAL sorts, top-N); the saving is the wide row fetch, the
-  rows sent to the engine's Java side and the objects built past the bound.
-  An index in that
-  order would make the LATERAL stop early; adding one to
-  `catalog_document_chunks` is a separate decision.
+  a chunk held by more than 64 live documents can lose anything. Route (b)
+  reaches the owners past the bound; a narrower filter does not, because the
+  filter runs after the lookup. The `shared` decision is taken over the
+  documents read: two of them make the chunk shared, and a lookup that read one
+  document asks the database whether any other document holds the chunk.
+  What it saves: the rows sent to the engine's Java side, the projection and
+  detoast of the wide columns of the rows past the bound, and the Java objects
+  built from them. What it does not save: the database still visits every
+  holder's index entry, heap row and `catalog_documents` row (the tombstone
+  join) and sorts them, so the statement's cost is not bounded. Bounding it
+  would take an index on `(tenant_id, chash, doc_id, position)`, which is not
+  added; that is a separate decision.
 
 ### Critical Assumptions
 
