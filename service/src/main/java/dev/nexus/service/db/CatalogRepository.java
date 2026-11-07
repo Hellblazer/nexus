@@ -8642,7 +8642,7 @@ public final class CatalogRepository {
      *   <li>the chunk row's {@code indexed_at} and the document's both exist and the chunk's is no more than five
      *       minutes after the document's ({@code note_ttl.PUT_SKEW});</li>
      *   <li>the chunk row's {@code title}, with any per-chunk suffix stripped, is absent or names the document
-     *       (its title, its file path, or the file name).</li>
+     *       (its title with or without its own per-chunk suffix, its file path, or the file name; nexus-l8o33).</li>
      * </ul>
      *
      * <p>Where SQL cannot say what Python's {@code datetime.fromisoformat} says, the answer errs toward COUNTING
