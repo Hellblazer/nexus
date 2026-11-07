@@ -384,7 +384,7 @@ public final class ChunkKeySweep {
         Field<JSONB> value = DSL.jsonbGetAttribute(metadata, key);
         Field<String> typeOf = DSL.function("jsonb_typeof", SQLDataType.VARCHAR, value);
         // typeOf is NULL for an absent key and the AND is then NULL, which no WHERE or FILTER admits.
-        return typeOf.eq("number").and(DSL.condition("{0} ~ {1}", DSL.jsonbGetAttributeAsText(metadata, key), DSL.inline(regex)));
+        return typeOf.eq("number").and(DSL.jsonbGetAttributeAsText(metadata, key).likeRegex(regex));
     }
 
     /** A row's {@code chunk_text_hash} that is not its chash in hex (a row without the key passes, as the CHECK does). */
