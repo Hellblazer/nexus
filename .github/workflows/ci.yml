@@ -2869,6 +2869,7 @@ jobs:
               - 'uv.lock'
               - 'pyproject.toml'
               - 'tests/e2e/constraints-resolve-gate.sh'
+              - 'tests/e2e/lib/python.sh'
 
       - name: Verify the constraints predicate is usable (fail loud, never default-skip)
         run: |

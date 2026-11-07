@@ -245,3 +245,15 @@ def test_the_threshold_and_its_source_are_printed(tmp_path, monkeypatch):
     assert rc.threshold_source(None) == f"the default {rc.DEFAULT_THRESHOLD}"
     monkeypatch.setenv("NX_SEARCH_EXACT_MAX_ROWS", "50000")
     assert rc.threshold_source(None) == "NX_SEARCH_EXACT_MAX_ROWS in this shell"
+
+
+def test_a_pass_against_an_assumed_threshold_carries_the_caution(tmp_path, monkeypatch):
+    """Review r2: with no --threshold the engine's value is assumed, and a PASS says so."""
+    monkeypatch.setenv("NX_SEARCH_EXACT_MAX_ROWS", "100")
+    c = _client()
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = rc.main([COLL, "--queries-file", _queries_file(tmp_path, 12)], client=c)
+    assert code == rc.EXIT_OK and "threshold this client assumed" in out.getvalue(), out.getvalue()
+    code, given, _ = _run(_client(), tmp_path)
+    assert code == rc.EXIT_OK and "threshold this client assumed" not in given, "an explicit --threshold needs no caution"

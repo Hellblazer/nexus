@@ -51,6 +51,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-gyo4g: Stop wake guard v2, a structural Sam gate (gate word over an approval predicate, a handover to a principal), test subjects and courtesies no longer drop a clause, only gates chain.
 - `conexus/commands/devonthink-index.md`
   nexus-55clh: the verify step no longer says the catalog row shows a DEVONthink year (96380fcf6).
+- `conexus/agents/code-review-expert.md`
+  nexus-rnzcb: NO ACCEPTANCE BAR is printed only when the relay has no bar (the census found it printed with a bar in 11.4% of runs) (bfe6247a7).
 - `conexus/launch/nx_standin.py`
   nexus-n6a8v: the manual install commands are the bare install README gives on every platform, with no `--torch-backend` (b31c9ad4f).
 - `conexus/skills/asks/SKILL.md`

@@ -332,7 +332,7 @@ def test_the_constraints_resolve_job_is_path_gated_on_the_lock_inputs_and_fails_
     filt = next(s for s in steps if str(s.get("uses", "")).startswith("dorny/paths-filter@"))
     paths = yaml.safe_load(filt["with"]["filters"])["constraints"]
     assert set(paths) >= {"src/nexus/_install/constraints.txt", "src/nexus/_install/overrides.txt", "uv.lock",
-                          "pyproject.toml", "tests/e2e/constraints-resolve-gate.sh"}
+                          "pyproject.toml", "tests/e2e/constraints-resolve-gate.sh", "tests/e2e/lib/python.sh"}
     guard = next(s for s in steps if "predicate is usable" in s.get("name", ""))
     assert "if" not in guard and "exit 1" in guard["run"], "the non-vacuity step runs every time"
     run = next(s for s in steps if "tests/e2e/constraints-resolve-gate.sh" in s.get("run", ""))
