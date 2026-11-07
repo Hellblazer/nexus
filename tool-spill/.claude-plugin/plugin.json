@@ -1,7 +1,7 @@
 {
   "name": "conexus-tool-spill",
   "version": "7.97.0",
-  "description": "Keeps big tool output out of your context with no setup. In the main conversation, a Bash output or whole-file Read over 4000 bytes is cut to its first 1400 and last 800 bytes, with a note saying where the full text is (Bash output is saved to a file), so one big command costs a few KB of context instead of all of it. Every option can stay blank: blank means the default shown in its name.",
+  "description": "Keeps big tool output out of your context with no setup. In the main conversation, a Bash output or whole-file Read over 5000 bytes is cut to its first 1400 and last 800 bytes, with a note saying where the full text is (Bash output is saved to a file), so one big command costs a few KB of context instead of all of it. Every option can stay blank: blank means the default shown in its name.",
   "author": {
     "name": "Hal Hildebrand",
     "url": "https://github.com/Hellblazer"
@@ -11,9 +11,9 @@
   "userConfig": {
     "limit": {
       "type": "number",
-      "title": "Cut output larger than this many bytes (blank = 4000)",
-      "description": "The size at which a main-session Bash output or whole-file Read is cut. Raise it to see more output whole; lower it to save more context. Blank uses 4000.",
-      "default": 4000
+      "title": "Cut output larger than this many bytes (blank = 5000)",
+      "description": "The size at which a main-session Bash output or whole-file Read is cut. Raise it to see more output whole; lower it to save more context. Blank uses 5000.",
+      "default": 5000
     },
     "head": {
       "type": "number",

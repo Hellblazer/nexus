@@ -4,7 +4,7 @@ import { expect, mock, test } from 'claude-code/testing'
 // `claude plugin test tool-spill`. Nothing sits beneath the plugin: the hooks each test registers stand for the
 // engine, so a `tool.call` hook answers what the tool "returned", an `fs.write` hook records what was spilled and a
 // `session.surfaces` hook says whether the session is interactive. Defaults throughout unless a test sets options:
-// limit 4000, head 1400, tail 800, headless runs left alone.
+// limit 5000, head 1400, tail 800, headless runs left alone.
 
 const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i}`).join('\n')
 // ASCII text of exactly `n` bytes.
@@ -52,10 +52,10 @@ const readResult = (content: string, filePath = '/repo/big.txt', startLine = 1) 
 
 // ---------------------------------------------------------------- Bash: the boundary, with the options omitted
 
-test('a Bash result of exactly limit bytes passes unchanged (default limit 4000)', async ($, on) => {
+test('a Bash result of exactly limit bytes passes unchanged (default limit 5000)', async ($, on) => {
   const writes = spy(on)
-  const stdout = exact(4_000)
-  expect(size(stdout)).toBe(4_000)
+  const stdout = exact(5_000)
+  expect(size(stdout)).toBe(5_000)
   on('tool.call', () => BIG_BASH(stdout))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
@@ -64,9 +64,9 @@ test('a Bash result of exactly limit bytes passes unchanged (default limit 4000)
   expect(writes).toHaveLength(0)
 })
 
-test('a Bash result of limit + 1 bytes spills (default limit 4000)', async ($, on) => {
+test('a Bash result of limit + 1 bytes spills (default limit 5000)', async ($, on) => {
   const writes = spy(on)
-  const stdout = exact(4_001)
+  const stdout = exact(5_001)
   on('tool.call', () => BIG_BASH(stdout))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
@@ -74,16 +74,16 @@ test('a Bash result of limit + 1 bytes spills (default limit 4000)', async ($, o
   expect(writes).toHaveLength(1)
   expect(writes[0].text).toBe(stdout)
   expect(r.result.stdout).toContain('[tool-spill:')
-  expect(size(r.result.stdout)).toBeLessThan(4_001)
+  expect(size(r.result.stdout)).toBeLessThan(5_001)
 })
 
 test('stdout and stderr count together toward the limit', async ($, on) => {
   const writes = spy(on)
-  on('tool.call', () => ({ result: { stdout: exact(3_000), stderr: exact(1_500) } }))
+  on('tool.call', () => ({ result: { stdout: exact(3_000), stderr: exact(2_500) } }))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
 
-  // stdout alone (3000) is under the limit; only the 4500-byte sum makes it spill
+  // stdout alone (3000) is under the limit; only the 5500-byte sum makes it spill
   expect(writes).toHaveLength(1)
   expect(r.result.stdout).toContain('[tool-spill:')
 })
@@ -124,9 +124,10 @@ test('a long Bash result keeps its head and its tail, cut at line ends, with the
   expect(all.indexOf(tail.split('\n')[0])).toBeGreaterThan(0)
   expect(note).toContain(`Full output: ${writes[0].path}`)
   expect(note).toContain('1000 lines')
-  // the note counts the lines it cut
-  const cut = Number(/(\d+) middle lines cut/.exec(note)![1])
-  expect(head.split('\n').length + cut + tail.split('\n').length).toBe(1_000)
+  // the note names the cut lines by number, and they are exactly the ones between head and tail
+  const [, from, to] = /lines (\d+)-(\d+) cut/.exec(note)!.map(Number)
+  expect(from).toBe(head.split('\n').length + 1)
+  expect(to - from + 1 + head.split('\n').length + tail.split('\n').length).toBe(1_000)
 })
 
 test('a failure on the last line of an exit-0 result is still in what the model reads', async ($, on) => {
@@ -139,7 +140,7 @@ test('a failure on the last line of an exit-0 result is still in what the model 
   expect(r.result.stdout.endsWith('FAILED: 3 tests, exit code hidden by tee')).toBe(true)
 })
 
-test('error lines in the cut middle are counted in the note', async ($, on) => {
+test('error lines in the cut middle are named by their line numbers in the file', async ($, on) => {
   spy(on)
   const all = lines(1_000).split('\n')
   all[500] = 'ERROR: disk full'
@@ -151,16 +152,139 @@ test('error lines in the cut middle are counted in the note', async ($, on) => {
 
   const { head, tail, note } = parts(r.result.stdout)
   expect(head + tail).not.toContain('disk full') // really in the cut part
-  expect(note).toContain('3 of them mention an error or failure')
+  expect(note).toContain('error-shaped lines 501, 502, 503')
 })
 
-test('a clean middle says none of it mentions an error', async ($, on) => {
+test('at most three error lines are named, and the rest are counted', async ($, on) => {
+  spy(on)
+  const all = lines(1_000).split('\n')
+  for (const i of [400, 410, 420, 430, 440]) all[i] = `FAILED tests/test_x.py::test_${i} - AssertionError: no`
+  on('tool.call', () => BIG_BASH(all.join('\n')))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'pytest' })
+
+  expect(parts(r.result.stdout).note).toContain('error-shaped lines 401, 411, 421 and 2 more')
+})
+
+test('a clean middle names no error lines', async ($, on) => {
   spy(on)
   on('tool.call', () => BIG_BASH(lines(1_000)))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
 
-  expect(parts(r.result.stdout).note).toContain('0 of them mention an error or failure')
+  expect(parts(r.result.stdout).note).not.toContain('error')
+})
+
+// Precision fixtures for the error shapes (tool-spill census 2026-11-07, T2 nexus/tool-spill-census-2026-11-07: the
+// old word list flagged 1467 cut lines of which 40 were real errors). Each REAL line is an error a reader must not miss;
+// each NOT line is prose, code or a passing log line that only uses an error word.
+const REAL_ERRORS = [
+  'E       AssertionError: expected 3, got 4',
+  'FAILED tests/test_a.py::test_b - KeyError: x',
+  'Traceback (most recent call last):',
+  'ValueError: bad input',
+  'java.lang.IllegalStateException: boom',
+  'fatal: not a git repository (or any of the parent directories): .git',
+  "cat: /nope: No such file or directory",
+  'ERROR: Could not find a version that satisfies the requirement',
+  'error: failed to push some refs',
+  'src/x.c:12:5: error: expected ;',
+  'panic: runtime error: index out of range',
+]
+const NOT_ERRORS = [
+  'def handle_error(self, exc):',
+  '    # errors are retried; a failure here is not fatal',
+  'test_fail_closed_when_unreachable PASSED',
+  '2 failed, 40 passed',
+  'ok: 0 errors, 0 warnings',
+  '  --fail-fast    stop at the first failure',
+  'raise ValueError(msg)',
+  'except FileNotFoundError:',
+  '    except (KeyError, ValueError):',
+  'if not found: return cannot_happen',
+  'Permission model: access denied paths are listed below',
+  'timed out waiting is a normal outcome here',
+  'the error budget is 5%',
+]
+
+test('every real error shape in the cut middle is named', async ($, on) => {
+  spy(on)
+  const all = lines(1_000).split('\n')
+  REAL_ERRORS.forEach((l, i) => { all[300 + i * 20] = l })
+  on('tool.call', () => BIG_BASH(all.join('\n')))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
+
+  expect(parts(r.result.stdout).note).toContain(`error-shaped lines 301, 321, 341 and ${REAL_ERRORS.length - 3} more`)
+})
+
+test('lines that only use an error word are not error-shaped', async ($, on) => {
+  spy(on)
+  const all = lines(1_000).split('\n')
+  NOT_ERRORS.forEach((l, i) => { all[300 + i * 20] = l })
+  on('tool.call', () => BIG_BASH(all.join('\n')))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
+
+  expect(parts(r.result.stdout).note).not.toContain('error-shaped')
+})
+
+test('the Read the note names returns exactly the cut lines from the spill file', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => BIG_BASH(lines(1_000)))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'seq 1000' })
+
+  const { head, tail, note } = parts(r.result.stdout)
+  const [, offset, limit] = /Read offset (\d+) limit (\d+)/.exec(note)!.map(Number)
+  const file = writes[0].text.split('\n')
+  const read = file.slice(offset - 1, offset - 1 + limit)
+  expect(read[0]).toBe(file[head.split('\n').length])
+  expect([...head.split('\n'), ...read, ...tail.split('\n')]).toEqual(file)
+})
+
+test('a cut too big for one Read is pointed at in slices', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => BIG_BASH(lines(20_000)))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'seq 20000' })
+
+  const { note } = parts(r.result.stdout)
+  const [, from, to] = /lines (\d+)-(\d+) cut/.exec(note)!.map(Number)
+  const [, offset, limit] = /Read offset (\d+) limit (\d+)/.exec(note)!.map(Number)
+  expect(offset).toBe(from)
+  expect(limit).toBeLessThan(to - from + 1)
+  // about 4x the limit per slice, as the Read note suggests
+  const slice = writes[0].text.split('\n').slice(offset - 1, offset - 1 + limit).join('\n')
+  expect(size(slice)).toBeLessThanOrEqual(4 * 5_000)
+  expect(size(slice)).toBeGreaterThan(3 * 5_000)
+  expect(note).toContain('in slices')
+})
+
+test('a stderr cut names its lines as they sit in the spill file, after stdout', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => ({ result: { stdout: lines(500), stderr: lines(700) } }))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'noisy' })
+
+  const { head, note } = parts(r.result.stderr)
+  const [, offset] = /Read offset (\d+)/.exec(note)!.map(Number)
+  const file = writes[0].text.split('\n')
+  const errStart = file.indexOf('--- stderr ---') + 1
+  expect(offset - 1).toBe(errStart + head.split('\n').length)
+  expect(file[offset - 1]).toBe(lines(700).split('\n')[head.split('\n').length])
+})
+
+test('the note is short: under 170 bytes beside its path (the old one was about 230)', async ($, on) => {
+  const writes = spy(on)
+  const all = lines(1_000).split('\n')
+  all[500] = 'ValueError: x'
+  on('tool.call', () => BIG_BASH(all.join('\n')))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
+
+  const { note } = parts(r.result.stdout)
+  expect(size(note) - size(writes[0].path)).toBeLessThan(170)
 })
 
 test('stderr is cut to its head and tail too, and both streams land in the file', async ($, on) => {
@@ -199,7 +323,7 @@ test('output that only mentions the marker is still cut (nexus-x967v)', async ($
   const stdout = exact(2_500) + '\nthe <persisted-output> marker, quoted in prose\n' + exact(2_500)
   on('tool.call', () => BIG_BASH(stdout))
 
-  const r: any = await $.tool.call({ tool: 'Bash', command: 'cat README.md' })
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'grep -n . README.md' })
 
   expect(writes).toHaveLength(1)
   expect(writes[0].text).toBe(stdout)
@@ -305,24 +429,24 @@ test('a failed spill-directory lookup is not remembered: the next spill tries ag
 
 // ---------------------------------------------------------------- bytes, not characters
 
-test('the limit counts UTF-8 bytes: 1500 three-byte characters spill', async ($, on) => {
+test('the limit counts UTF-8 bytes: 1800 three-byte characters spill', async ($, on) => {
   const writes = spy(on)
-  const stdout = '日本語'.repeat(500) // 1500 characters, 4500 bytes
+  const stdout = '日本語'.repeat(600) // 1800 characters, 5400 bytes
   on('tool.call', () => BIG_BASH(stdout))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
 
   expect(writes).toHaveLength(1)
-  expect(size(r.result.stdout)).toBeLessThan(4_500)
+  expect(size(r.result.stdout)).toBeLessThan(5_400)
 })
 
-test('the byte boundary holds for multi-byte text: 3999 bytes pass, 4002 spill', async ($, on) => {
+test('the byte boundary holds for multi-byte text: 4998 bytes pass, 5001 spill', async ($, on) => {
   const writes = spy(on)
-  // 1333 x 3 bytes = 3999: passes. 1334 x 3 bytes = 4002: spills.
-  on('tool.call', (_: unknown, e: any) => BIG_BASH('語'.repeat(e.command === 'under' ? 1_333 : 1_334)))
+  // 1666 x 3 bytes = 4998: passes. 1667 x 3 bytes = 5001: spills.
+  on('tool.call', (_: unknown, e: any) => BIG_BASH('語'.repeat(e.command === 'under' ? 1_666 : 1_667)))
 
   const under: any = await $.tool.call({ tool: 'Bash', command: 'under' })
-  expect(under.result.stdout).toBe('語'.repeat(1_333))
+  expect(under.result.stdout).toBe('語'.repeat(1_666))
   expect(writes).toHaveLength(0)
 
   await $.tool.call({ tool: 'Bash', command: 'over' })
@@ -384,9 +508,9 @@ test('a head and tail larger than the limit are scaled down together to fit it',
   expect(size(tail)).toBeGreaterThan(250)
 })
 
-test('nonsense options fall back to the defaults: 4000 passes, 4001 spills', { options: { limit: -5, head: 0, tail: -3 } }, async ($, on) => {
+test('nonsense options fall back to the defaults: 5000 passes, 5001 spills', { options: { limit: -5, head: 0, tail: -3 } }, async ($, on) => {
   const writes = spy(on)
-  on('tool.call', (_: unknown, e: any) => BIG_BASH(exact(e.command === 'at' ? 4_000 : 4_001)))
+  on('tool.call', (_: unknown, e: any) => BIG_BASH(exact(e.command === 'at' ? 5_000 : 5_001)))
 
   await $.tool.call({ tool: 'Bash', command: 'at' })
   expect(writes).toHaveLength(0)
@@ -577,10 +701,10 @@ test('a whole-file Read over the limit is cut, with the next offset, a limit to 
 
 test('a Read of exactly limit bytes passes, limit + 1 is cut (default limit)', async ($, on) => {
   spy(on)
-  on('tool.call', (_: unknown, e: any) => readResult(exact(e.file_path === '/repo/at.txt' ? 4_000 : 4_001), e.file_path))
+  on('tool.call', (_: unknown, e: any) => readResult(exact(e.file_path === '/repo/at.txt' ? 5_000 : 5_001), e.file_path))
 
   const at: any = await $.tool.call({ tool: 'Read', file_path: '/repo/at.txt' })
-  expect(at.result.file.content).toBe(exact(4_000))
+  expect(at.result.file.content).toBe(exact(5_000))
 
   const over: any = await $.tool.call({ tool: 'Read', file_path: '/repo/over.txt' })
   expect(over.result.file.content).toContain('[tool-spill:')
@@ -726,8 +850,8 @@ for (const command of [
 
 test('a Bash read of a spill file over 4x the limit is cut and saved like any other', async ($, on) => {
   const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
-  const stdout = lines(2_000)
-  expect(size(stdout)).toBeGreaterThan(16_000)
+  const stdout = lines(2_500)
+  expect(size(stdout)).toBeGreaterThan(20_000)
   on('tool.call', () => BIG_BASH(stdout))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: `cat ${SPILL}/toolu_1.txt` })
@@ -737,7 +861,7 @@ test('a Bash read of a spill file over 4x the limit is cut and saved like any ot
   expect(r.result.stdout).toContain('[tool-spill:')
 })
 
-for (const command of ['cat /var/tmp/x/claude-tool-spill-samuel/a.txt', 'cat /var/tmp/x/claude-tool-spill-sam.bak']) {
+for (const command of ['head -c 10000 /var/tmp/x/claude-tool-spill-samuel/a.txt', 'head -c 10000 /var/tmp/x/claude-tool-spill-sam.bak']) {
   test(`a path that only shares a prefix with the spill directory is still cut: ${command}`, async ($, on) => {
     const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
     on('tool.call', () => BIG_BASH(exact(10_000)))
@@ -757,5 +881,99 @@ test('the Bash note points at a sliced Read of the spill file', async ($, on) =>
 
   const { note } = parts(r.result.stdout)
   expect(note).toContain(`Full output: ${writes[0].path}`)
-  expect(note).toContain('with the Read tool (offset and limit; a sliced Read is never cut)')
+  expect(note).toMatch(/Read offset \d+ limit \d+/)
 })
+
+// ---------------------------------------------------------------- Defaults Sam chose (ask tool-spill-defaults, 2026-11-07)
+
+test('B: an output of 5000 bytes is never cut by default', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => BIG_BASH(exact(5_000)))
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
+  expect(r.result.stdout).toBe(exact(5_000))
+  expect(writes).toHaveLength(0)
+})
+
+test('B: 5001 bytes spill by default', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => BIG_BASH(exact(5_001)))
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
+  expect(r.result.stdout).toContain('[tool-spill:')
+  expect(writes).toHaveLength(1)
+})
+
+// A: a plain read of one file is the model's own slice, as a sliced Read is.
+for (const command of ['cat /repo/a.txt', 'cat -- "/repo/my file.txt"', "sed -n 10,400p /repo/a.py",
+                       "sed -n '1,200p' src/x.ts", '  cat /repo/a.txt  ']) {
+  test(`A: a plain one-file read passes whole up to 3x the limit: ${command}`, async ($, on) => {
+    const writes = spy(on)
+    const stdout = exact(15_000)
+    on('tool.call', () => BIG_BASH(stdout))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    expect(r.result.stdout).toBe(stdout)
+    expect(writes).toHaveLength(0)
+  })
+}
+
+test('A: a plain one-file read over 3x the limit is cut', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => BIG_BASH(exact(15_001)))
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'cat /repo/a.txt' })
+  expect(r.result.stdout).toContain('[tool-spill:')
+  expect(writes).toHaveLength(1)
+})
+
+for (const command of ['cat /repo/a.txt | head -400', 'cat a.txt b.txt', 'cat /repo/a.txt; ls', 'cat $(ls *.txt)',
+                       'sed -n 1,400p a.py && echo done', "sed -n '/foo/p' a.py", 'sed -i 1d a.py', 'cat < a.txt',
+                       'cat a.txt > b.txt', 'grep -n x a.py', 'cat `pick`', 'sed -n 1,400p a.py b.py']) {
+  test(`A: anything but a plain one-file cat or sed -n range is cut as before: ${command}`, async ($, on) => {
+    const writes = spy(on)
+    on('tool.call', () => BIG_BASH(exact(10_000)))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    expect(r.result.stdout).toContain('[tool-spill:')
+    expect(writes).toHaveLength(1)
+  })
+}
+
+test('C stays: a non-zero-exit Bash result still passes whole', async ($, on) => {
+  const writes = spy(on)
+  const stdout = exact(20_000)
+  on('tool.call', () => ({ ...BIG_BASH(stdout), isError: true }))
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'pytest' })
+  expect(r.result.stdout).toBe(stdout)
+  expect(writes).toHaveLength(0)
+})
+
+// ---------------------------------------------------------------- Read: a whole Read of a spill file (census P2)
+
+test('a whole Read of a spill file under 4x the limit passes whole', async ($, on) => {
+  spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
+  const content = exact(10_000)
+  on('tool.call', () => readResult(content, `${SPILL}/toolu_1.txt`))
+
+  const r: any = await $.tool.call({ tool: 'Read', file_path: `${SPILL}/toolu_1.txt` })
+
+  expect(r.result.file.content).toBe(content)
+})
+
+test('a whole Read of a spill file over 4x the limit is cut like any other', async ($, on) => {
+  spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
+  const content = lines(2_500)
+  expect(size(content)).toBeGreaterThan(20_000)
+  on('tool.call', () => readResult(content, `${SPILL}/toolu_1.txt`))
+
+  const r: any = await $.tool.call({ tool: 'Read', file_path: `${SPILL}/toolu_1.txt` })
+
+  expect(r.result.file.content).toContain('[tool-spill:')
+})
+
+for (const filePath of ['/var/tmp/x/claude-tool-spill-samuel/a.txt', '/repo/claude-tool-spill-sam.bak/a.txt', '/repo/big.txt']) {
+  test(`a whole Read of a 10 KB file outside the spill directory is still cut: ${filePath}`, async ($, on) => {
+    spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
+    on('tool.call', () => readResult(exact(10_000), filePath))
+
+    const r: any = await $.tool.call({ tool: 'Read', file_path: filePath })
+
+    expect(r.result.file.content).toContain('[tool-spill:')
+  })
+}

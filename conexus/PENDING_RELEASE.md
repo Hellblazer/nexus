@@ -85,5 +85,9 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
 - `conexus/skills/writing-nx-skills/SKILL.md`
   nexus-y4ikt: resource and registry links show their `${CLAUDE_PLUGIN_ROOT}` path as link text (3edb5ec59).
+- `tool-spill/hooks/register.ts`
+  tool-spill census 2026-11-07 (T2 nexus/tool-spill-census-2026-11-07): the Bash note names the cut lines and their Read offset, error-shaped lines by number, a spill-file Read up to 4x passes whole; Sam's defaults A (plain cat/sed -n up to 3x) and B (limit 5000).
+- `tool-spill/.claude-plugin/plugin.json`
+  tool-spill census, Sam's default B: `limit` default and install text 5000.
 
 ## Deferred to the next client release

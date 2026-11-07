@@ -6,27 +6,52 @@ import type { Engine, Register } from 'claude-code'
 // default, headless runs (`claude -p`: nx_answer operators, headless critics).
 //
 //   Bash: the full text goes to a file; the model gets the head and the tail of each stream (cut at line ends), a
-//         note between them naming the file, how many middle lines were cut and how many of those mention an error
-//         or a failure. A failure on the last line, or an error buried in the middle, is therefore never silent.
-//         A command that names the spill directory (reading a spill file back) passes whole up to 4 times the
-//         limit, so a slice of a spill is not spilled again; past that it is cut like any other.
+//         note between them naming the file, the cut lines by their numbers in it, the Read offset and limit that
+//         return them, and the first error-shaped cut lines by number. A failure on the last line is in the tail;
+//         an error report buried in the middle is named. A command that names the spill directory (reading a
+//         spill file back) passes whole up to 4 times the limit, so a slice of a spill is not spilled again; past
+//         that it is cut like any other.
 //   Read: a whole-file read only. A read the model sliced itself (offset or limit) passes whole, so following the
 //         note costs nothing extra, and instruction files (skills, agents, rules, AGENTS.md, CLAUDE.md) pass whole.
+//         A whole Read of a spill file passes whole up to 4 times the limit, as a Bash read of one does.
 //
-// Options (userConfig, all validated): `limit` 4000 bytes, `head` 1400, `tail` 800, `includeHeadless` false. A
+// Options (userConfig, all validated): `limit` 5000 bytes, `head` 1400, `tail` 800, `includeHeadless` false. A
 // non-positive or non-numeric number falls back to its default; head and tail are scaled down together when they
 // would not fit in `limit`. The spill directory is `<temp dir>/claude-tool-spill-<user>`, the temp dir being $TMPDIR,
 // else $TEMP, else $TMP, else /tmp, and the user $USER, else $LOGNAME, else $USERNAME, else `user`. On a POSIX host
 // each spill first makes that directory owner-only (`PRIVATE_DIR`); one it cannot make private turns spilling off.
 
-const DEFAULT_LIMIT = 4_000
+// 5000, not 4000 (Sam, ask tool-spill-defaults, 2026-11-07, option B): the census found 42% of spills were 5000 bytes
+// or less, where a cut saved little and cost a follow-up read.
+const DEFAULT_LIMIT = 5_000
 const DEFAULT_HEAD = 1_400
 const DEFAULT_TAIL = 800
 // A Bash read of a spill file passes whole up to this many times the limit.
 const SPILL_READ_FACTOR = 4
+// A plain one-file `cat FILE` or `sed -n A,Bp FILE` passes whole up to this many times the limit: the model chose
+// that slice itself, as with a sliced Read (Sam, ask tool-spill-defaults, 2026-11-07, option A).
+const PLAIN_READ_FACTOR = 3
+const ONE_FILE = String.raw`(?:[^\s|;&<>\`$()'"]+|"[^"$\`]*"|'[^']*')`
+const PLAIN_READ = new RegExp(String.raw`^\s*(?:cat(?:\s+--)?|sed\s+-n\s+(?:\d+(?:,\d+)?p|'\d+(?:,\d+)?p'|"\d+(?:,\d+)?p"))` +
+  String.raw`\s+${ONE_FILE}\s*$`)
 // Either separator, so a Windows path matches too.
 const INSTRUCTIONS = /(^|[\\/])(SKILL|AGENTS|CLAUDE|CLAUDE\.local|REGISTER)\.md$|[\\/](skills|agents|commands|rules)[\\/]/i
-const ERRORISH = /error|fail|traceback|panic|exception|fatal|denied|not found|no such|cannot|refused|timed out|unable/i
+// Lines shaped like a real error report, not lines that merely use an error word: the old word list flagged 1467
+// cut lines in the 2026-11-07 census, of which 40 were errors (T2 nexus/tool-spill-census-2026-11-07, proposal 3).
+const ERROR_SHAPES: readonly RegExp[] = [
+  /^E\s/, // a pytest assertion line
+  /\bFAILED\b/,
+  /^\s*Traceback \(most recent call last\)/,
+  /^(?!\s*except\b).*\b\w+(Error|Exception): \S/, // ValueError: bad, not `except KeyError:` source
+  /\bfatal:/i,
+  /No such file/,
+  /^\s*(ERROR|error)(\[[^\]]*\])?:/, // pip, cargo, git push
+  /:\d+(:\d+)?: error:/, // a compiler diagnostic
+  /^panic:/,
+]
+const errorShaped = (line: string) => ERROR_SHAPES.some(re => re.test(line))
+// How many error lines the note names by number.
+const NAMED_ERRORS = 3
 
 function bytes(s: string): number {
   return new TextEncoder().encode(s).length
@@ -90,16 +115,33 @@ function positive(v: unknown, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback
 }
 
-// `text` as head + note + tail, or `text` itself when head and tail already cover it. `name` labels a stream.
-function squeeze(text: string, headMax: number, tailMax: number, where: string, name: string): string {
+// `text` as head + note + tail, or `text` itself when head and tail already cover it. `name` labels a stream;
+// `before` is how many lines of the spill file come before this stream's first line, so the note's line numbers
+// are the file's, and `limit` sizes the Read the note suggests (census proposal 1: 39% of read-backs re-read text
+// the model had already been shown, because the note named no line).
+function squeeze(text: string, headMax: number, tailMax: number, path: string, name: string, before: number,
+                 limit: number): string {
   if (bytes(text) <= headMax + tailMax) return text
   const h = head(text, headMax)
   const t = tail(text.slice(h.length), tailMax)
-  const middle = text.slice(h.length, text.length - t.length).replace(/^\n/, '').replace(/\n$/, '')
+  let start = h.length
+  if (text[start] === '\n') start += 1
+  let end = text.length - t.length
+  if (end > start && text[end - 1] === '\n') end -= 1
+  const middle = text.slice(start, end)
   const lines = middle ? middle.split('\n') : []
-  const flagged = lines.filter(l => ERRORISH.test(l)).length
+  if (!lines.length) return t ? `${h}\n${t}` : h
+  const first = before + text.slice(0, start).split('\n').length
+  const last = first + lines.length - 1
+  // A slice of about 4x the limit, as the Read note suggests, so following the note costs a bounded read.
+  const fits = Math.max(20, Math.floor((limit * 4) / Math.max(1, bytes(middle) / lines.length)))
+  const read = lines.length <= fits ? `Read offset ${first} limit ${lines.length}`
+    : `Read offset ${first} limit ${fits}, in slices`
+  const errors = lines.flatMap((l, i) => errorShaped(l) ? [first + i] : [])
+  const named = errors.length ? ` error-shaped lines ${errors.slice(0, NAMED_ERRORS).join(', ')}` +
+    (errors.length > NAMED_ERRORS ? ` and ${errors.length - NAMED_ERRORS} more.` : '.') : ''
   const note = `\n[tool-spill: ${name}${Math.round(bytes(text) / 1000)} KB, ${lineCount(text)} lines; ` +
-    `${lines.length} middle lines cut, ${flagged} of them mention an error or failure. ${where}]`
+    `lines ${first}-${last} cut. Full output: ${path}; ${read}.${named}]`
   return t ? `${h}${note}\n${t}` : h + note
 }
 
@@ -194,12 +236,13 @@ export const register: Register = (on, options) => {
         const input: any = e
         if (typeof input.command === 'string' && namesSpillDir(input.command, dir) &&
             size <= LIMIT * SPILL_READ_FACTOR) return res
+        if (typeof input.command === 'string' && PLAIN_READ.test(input.command) &&
+            size <= LIMIT * PLAIN_READ_FACTOR) return res
         if (!(await isPrivate($, dir, spill))) return res
         const path = `${dir}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`
-        const where = `Full output: ${path}. Read a slice of it with the Read tool (offset and limit; a sliced Read ` +
-          'is never cut) or hand it to a subagent; do not re-run the command.'
-        const stdout = squeeze(out, HEAD, TAIL, where, '')
-        const stderr = squeeze(err, HEAD, TAIL, where, 'stderr ')
+        // The file is stdout, a `--- stderr ---` line, then stderr, so stderr's first line is stdout's count + 2.
+        const stdout = squeeze(out, HEAD, TAIL, path, '', 0, LIMIT)
+        const stderr = squeeze(err, HEAD, TAIL, path, 'stderr ', out.split('\n').length + 1, LIMIT)
         if (stdout === out && stderr === err) return res
         await $.fs.write(path, err ? `${out}\n--- stderr ---\n${err}` : out)
         return { result: { ...res.result, stdout, stderr }, context: res.context }
@@ -213,6 +256,9 @@ export const register: Register = (on, options) => {
         const size = bytes(f.content)
         if (size <= LIMIT) return res
         if (!INCLUDE_HEADLESS && await isHeadless($)) return res
+        // A whole Read of a spill file passes whole up to SPILL_READ_FACTOR times the limit, the rule a Bash read of
+        // one already has: cutting it again only repeats its head (census proposal 2: 114 such cut-then-reread trips).
+        if (size <= LIMIT * SPILL_READ_FACTOR && namesSpillDir(String(f.filePath), await dirOf($))) return res
 
         const shown = head(f.content, HEAD + TAIL)
         const n = lineCount(shown)
