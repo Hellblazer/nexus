@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.function.Function;
 
 /**
  * One connection on the engine's admin values ({@link AdminConnection}), the plumbing the operator-run constraint
@@ -49,6 +50,8 @@ public final class AdminDdlSession implements AutoCloseable {
     private static final String CHECK_VIOLATION = "23514";
     /** SQLSTATE: insufficient_privilege. */
     private static final String INSUFFICIENT_PRIVILEGE = "42501";
+    /** SQLSTATE: query_canceled (the statement_timeout tripped). */
+    private static final String QUERY_CANCELED = "57014";
 
     /** Why a call was refused; {@code status} is the HTTP status the handler answers. */
     public static final class Refused extends RuntimeException {
@@ -210,6 +213,14 @@ public final class AdminDdlSession implements AutoCloseable {
      *                reads every row of this table
      */
     public void requireUnrestrictedView(String pointAt) {
+        Refused refusal = unrestrictedViewRefusal(pointAt);
+        if (refusal != null) {
+            throw refusal;
+        }
+    }
+
+    /** {@link #requireUnrestrictedView}'s decision, as the refusal it would throw (null: the session reads every row). */
+    private Refused unrestrictedViewRefusal(String pointAt) {
         String role = ctx.select(DSL.currentUser()).fetchOne(0, String.class);
         var attrs = ctx.select(DSL.field(DSL.name("r", "rolsuper"), Boolean.class),
                 DSL.field(DSL.name("r", "rolbypassrls"), Boolean.class))
@@ -217,12 +228,12 @@ public final class AdminDdlSession implements AutoCloseable {
             .where(DSL.field(DSL.name("r", "rolname"), String.class).eq(role))
             .fetchOne();
         if (attrs != null && (Boolean.TRUE.equals(attrs.value1()) || Boolean.TRUE.equals(attrs.value2()))) {
-            return;
+            return null;
         }
         String label = settings.tableLabel();
         for (var p : selectPolicies("RESTRICTIVE")) {
             if (!isTrue(p.value2()) && appliesToSession(p.value1())) {
-                throw new Refused(503, "admin_cannot_see_all_tenants",
+                return new Refused(503, "admin_cannot_see_all_tenants",
                     "the admin session role " + role + " is narrowed by the RESTRICTIVE policy " + p.value3()
                         + " on " + label + ", whose qual is not true, so the table-wide probe would not read every "
                         + "tenant's rows. Point NX_DB_ADMIN_* at a superuser or BYPASSRLS role, or drop the policy");
@@ -230,14 +241,97 @@ public final class AdminDdlSession implements AutoCloseable {
         }
         for (var p : selectPolicies("PERMISSIVE")) {
             if (isTrue(p.value2()) && appliesToSession(p.value1())) {
-                return;
+                return null;
             }
         }
-        throw new Refused(503, "admin_cannot_see_all_tenants",
+        return new Refused(503, "admin_cannot_see_all_tenants",
             "the admin session role " + role + " does not read every tenant's rows of " + label + ": it is neither "
                 + "a superuser nor BYPASSRLS, and no permissive SELECT policy with a true qual applies to it, so "
                 + "the table-wide probe would read zero rows and the constraint checks would pass over every "
                 + "tenant. Point NX_DB_ADMIN_* at " + pointAt);
+    }
+
+    /**
+     * Run {@code read} where it sees every tenant's rows of the run's table, or refuse
+     * ({@code admin_cannot_see_all_tenants}). Three ways to see them, tried in this order:
+     * <ol>
+     *   <li>the session already does ({@link #requireUnrestrictedView}: superuser, BYPASSRLS, or a true-qual
+     *       permissive SELECT policy): {@code read} runs as it is, with no lock;</li>
+     *   <li>the session role OWNS the table, as the production {@code nexus_admin} does. FORCE row level security
+     *       is lifted for one transaction that is always rolled back, the precedent of
+     *       {@code AspectQueueDrain.AdminCensus} (nexus-hbnml): {@code ALTER TABLE ... NO FORCE ROW LEVEL SECURITY}
+     *       is transactional DDL, so the rollback puts FORCE back by construction and the table is never left
+     *       unforced, whatever fails. No policy changeset is needed. <b>Cost:</b> that ALTER takes ACCESS EXCLUSIVE,
+     *       which holds every reader and writer of the table until the rollback, so the transaction is bounded
+     *       ({@code lock_timeout} 5 s to get the lock, the migration walk refused, {@code statement_timeout}
+     *       {@code ownerStatementTimeout} for the read) and the read gives up, changing nothing, past it;</li>
+     *   <li>otherwise the refusal {@link #requireUnrestrictedView} would throw.</li>
+     * </ol>
+     * A table that is not FORCE row-level-security is read by its owner as it is (the owner is exempt), with no ALTER.
+     *
+     * @param pointAt               the end of the refusal's "Point NX_DB_ADMIN_* at ..." sentence
+     * @param ownerStatementTimeout the {@code statement_timeout} of the owner path: the longest the table lock is held
+     * @param read                  the read, given this session's jOOQ context
+     */
+    public <T> T readEveryTenant(String pointAt, String ownerStatementTimeout, Function<DSLContext, T> read) {
+        Refused refusal = unrestrictedViewRefusal(pointAt);
+        if (refusal == null) {
+            return read.apply(ctx);
+        }
+        Ownership ownership = ownership();
+        if (ownership == null || !ownership.ownedBySession()) {
+            throw refusal;
+        }
+        if (!ownership.forced()) {
+            return read.apply(ctx);
+        }
+        guard(ownerStatementTimeout);   // the migration walk refused; lock_timeout and statement_timeout bounded
+        try {
+            conn.setAutoCommit(false);
+            try {
+                ddl("ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY", List.of(settings.schema(), settings.table()));
+                return read.apply(ctx);
+            } catch (DataAccessException e) {
+                if (QUERY_CANCELED.equals(e.sqlState())) {
+                    throw new Refused(503, "read_timeout",
+                        "the table-wide read of " + settings.tableLabel() + " took longer than "
+                            + ownerStatementTimeout + " under the table lock it needs as the table owner, and was "
+                            + "stopped; nothing was changed. Run it in a quiet window, or point NX_DB_ADMIN_* at a "
+                            + "superuser or BYPASSRLS role, which needs no lock");
+                }
+                throw e;
+            } finally {
+                conn.rollback();   // FORCE ROW LEVEL SECURITY is back: the ALTER was part of this transaction
+            }
+        } catch (SQLException e) {
+            throw refusal(e);
+        } finally {
+            try {
+                conn.setAutoCommit(true);
+            } catch (SQLException e) {
+                log.warn("event=admin_ddl_autocommit_restore_failed run={} cause=\"{}\"", settings.runLabel(),
+                    e.toString());
+            }
+        }
+    }
+
+    /** What the session role is to the run's table. */
+    private record Ownership(boolean ownedBySession, boolean forced) {}
+
+    /** The table's ownership (does the session role hold the owner's privileges) and FORCE flag; null if absent. */
+    private Ownership ownership() {
+        var cls = DSL.table(DSL.name("pg_catalog", "pg_class")).as("cls");
+        var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("ns");
+        var row = ctx.select(
+                DSL.function("pg_has_role", SQLDataType.BOOLEAN, DSL.currentUser(),
+                    DSL.field(DSL.name("cls", "relowner")), DSL.inline("USAGE")),
+                DSL.field(DSL.name("cls", "relforcerowsecurity"), Boolean.class))
+            .from(cls)
+            .join(ns).on(DSL.field(DSL.name("ns", "oid")).eq(DSL.field(DSL.name("cls", "relnamespace"))))
+            .where(DSL.field(DSL.name("ns", "nspname"), String.class).eq(settings.schema()))
+            .and(DSL.field(DSL.name("cls", "relname"), String.class).eq(settings.table()))
+            .fetchOne();
+        return row == null ? null : new Ownership(Boolean.TRUE.equals(row.value1()), Boolean.TRUE.equals(row.value2()));
     }
 
     /** The run table's policies of {@code kind} (PERMISSIVE or RESTRICTIVE) that govern SELECT: roles, qual, name. */

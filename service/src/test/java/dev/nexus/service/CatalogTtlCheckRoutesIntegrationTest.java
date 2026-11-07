@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.nexus.service.db.AdminConnection;
+import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.CatalogTtlCheckAdmin;
 import dev.nexus.service.db.TenantConstants;
 import org.jooq.DSLContext;
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * nexus-6pfgb.44: the catalog TTL CHECK's three routes ({@code census}, {@code add}, {@code validate} under
@@ -282,7 +284,147 @@ class CatalogTtlCheckRoutesIntegrationTest extends ChunkKeysTestBase {
         assertThat(admin().state().present()).as("nothing was added").isFalse();
     }
 
+    // ---- 3b. the table's owner is enough: the managed service's nexus_admin ----------------------------------------
+
+    private static final String OWNER = "tt_owner_route";
+    private static final String OWNER_PASS = "ttownerroutepw";
+
+    private boolean forceRowSecurity() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return Boolean.TRUE.equals(DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.field(DSL.name("c", "relforcerowsecurity"), Boolean.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq("catalog_documents"))
+                .fetchOne(0, Boolean.class));
+        }
+    }
+
+    @Test
+    @Order(35)
+    void theTableOwnerWithoutBypassRlsCountsEveryTenant_theTokenlessOneIncluded_andPutsForceBack() throws Exception {
+        String originalOwner;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            originalOwner = DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.field(DSL.name("tableowner"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_tables")))
+                .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("tablename"), String.class).eq("catalog_documents"))
+                .fetchOne(0, String.class);
+            PgContainerHelper.createLoginRole(su, OWNER, OWNER_PASS, false);
+            PgContainerHelper.grantSchemaUsage(su, "nexus", OWNER);
+            PgContainerHelper.grantSchemaCreate(su, "nexus", OWNER);
+            PgContainerHelper.alterTableOwner(su, CATALOG_DOCUMENTS, OWNER);
+        }
+        service.catalogTtlCheckAdmin(new CatalogTtlCheckAdmin(new AdminConnection(pg.getJdbcUrl(), OWNER, OWNER_PASS)));
+        try {
+            try (Connection owner = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), OWNER, OWNER_PASS)) {
+                assertThat(DSL.using(owner, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS))
+                    .as("fixture: FORCE hides every row from the table's owner").isZero();
+            }
+
+            HttpResponse<String> counted = census(ROOT);
+            HttpResponse<String> refused = add(ROOT);
+
+            assertThat(counted.statusCode()).as(counted.body()).isEqualTo(200);
+            JsonNode body = json(counted);
+            assertThat(tenantNames(body)).containsExactlyInAnyOrder(A, B, GHOST, TOMB);
+            assertThat(row(body, GHOST).path("violating_rows").asLong()).as("the tenant with no token row").isEqualTo(1);
+            assertThat(body.path("violating_total").asLong()).isEqualTo(4);
+            assertThat(body.path("table_rows_examined").asLong()).isEqualTo(7);
+            assertThat(refused.statusCode()).as(refused.body()).isEqualTo(409);
+            assertThat(json(refused).path("reason").asText()).isEqualTo("tenant_violates_constraint");
+            assertThat(tenantNames(json(refused))).containsExactlyInAnyOrder(A, GHOST, TOMB);
+            assertThat(forceRowSecurity()).as("FORCE ROW LEVEL SECURITY is back after both calls").isTrue();
+        } finally {
+            service.catalogTtlCheckAdmin(admin());
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.alterTableOwner(su, CATALOG_DOCUMENTS, originalOwner);
+            }
+        }
+        assertThat(admin().state().present()).as("nothing was added").isFalse();
+    }
+
     // ---- 4. the order an operator runs: stamp, add, validate -----------------------------------------------------
+
+    @Test
+    @Order(38)
+    void aViolatorWrittenBetweenTheCountAndTheAddIsReportedAfterTheAdd_withTheConstraintInPlace() throws Exception {
+        stampAll();
+        AtomicReference<String> racer = new AtomicReference<>();
+        service.catalogTtlCheckAdmin(new CatalogTtlCheckAdmin(
+                new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
+            @Override
+            public Action add() {
+                try {
+                    racer.set(doc(A, "{\"ttl_days\":7}"));   // a pre-6pfgb.15 client, after the count and before the add
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+                return super.add();
+            }
+        });
+        try {
+            HttpResponse<String> r = add(ROOT);
+
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+            JsonNode body = json(r);
+            assertThat(body.path("violating_total").asLong()).as("the count before the add read zero").isZero();
+            assertThat(body.path("constraint").path("action").asText()).isEqualTo("added");
+            assertThat(body.path("violating_after_add").asLong()).as("the count after it names the racer").isEqualTo(1);
+            assertThat(body.path("violators_after_add").size()).isEqualTo(1);
+            assertThat(body.path("violators_after_add").get(0).path("tenant").asText()).isEqualTo(A);
+            assertThat(body.path("warning").asText()).contains("frozen").contains("violators_after_add");
+        } finally {
+            service.catalogTtlCheckAdmin(admin());
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                ctx.alterTable(CATALOG_DOCUMENTS).dropConstraintIfExists(DSL.name(CatalogTtlCheckAdmin.CONSTRAINT)).execute();
+                ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TUMBLER.eq(racer.get())).execute();
+            }
+        }
+    }
+
+    @Test
+    @Order(39)
+    void aCountAfterTheAddThatCannotBeTakenDoesNotHideTheAdd() throws Exception {
+        stampAll();
+        AtomicInteger counts = new AtomicInteger();
+        service.catalogTtlCheckAdmin(new CatalogTtlCheckAdmin(
+                new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())) {
+            @Override
+            public List<TenantCensus> census() {
+                if (counts.incrementAndGet() > 1) {
+                    throw new AdminDdlSession.Refused(503, "admin_probe_undercount", "the second count is refused");
+                }
+                return super.census();
+            }
+        });
+        try {
+            HttpResponse<String> r = add(ROOT);
+
+            assertThat(r.statusCode()).as("the add landed, so the answer is 200, not the count's 503: " + r.body())
+                .isEqualTo(200);
+            JsonNode body = json(r);
+            assertThat(body.path("constraint").path("action").asText()).isEqualTo("added");
+            assertThat(body.has("violating_after_add")).isTrue();
+            assertThat(body.path("violating_after_add").isNull()).isTrue();
+            assertThat(body.path("warning").asText()).contains("admin_probe_undercount").contains("census");
+            assertThat(admin().state().present()).isTrue();
+        } finally {
+            service.catalogTtlCheckAdmin(admin());
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENTS)
+                    .dropConstraintIfExists(DSL.name(CatalogTtlCheckAdmin.CONSTRAINT)).execute();
+            }
+        }
+    }
 
     @Test
     @Order(40)
@@ -301,6 +443,30 @@ class CatalogTtlCheckRoutesIntegrationTest extends ChunkKeysTestBase {
         assertThat(c.path("definition").asText()).contains("jsonb_typeof").endsWith("NOT VALID");
         assertThat(json(second).path("constraint").path("action").asText()).isEqualTo("present");
         assertThat(json(first).path("tenants_checked").size()).isGreaterThanOrEqualTo(5);
+        assertThat(json(first).has("violating_after_add")).as("the add reports the count taken after it").isTrue();
+        assertThat(json(first).path("violating_after_add").asLong()).as("the count after the add: nothing raced")
+            .isZero();
+        assertThat(json(first).path("violators_after_add").size()).isZero();
+        assertThat(json(first).has("warning")).isFalse();
+    }
+
+    @Test
+    @Order(42)
+    void addOnAnExistingConstraintAnswersPresentWithoutASurvey_evenForARoleThatCannotCountOrACountThatIsShort()
+            throws Exception {
+        for (CatalogTtlCheckAdmin bound : List.of(blindAdmin(), lyingAdmin(B, null))) {
+            service.catalogTtlCheckAdmin(bound);
+            try {
+                HttpResponse<String> r = add(ROOT);
+
+                assertThat(r.statusCode()).as("a survey would be a 503 here: " + r.body()).isEqualTo(200);
+                assertThat(json(r).path("constraint").path("action").asText()).isEqualTo("present");
+                assertThat(json(r).path("census_skipped").asText()).isNotEmpty();
+                assertThat(json(r).has("tenants")).as("no count was taken").isFalse();
+            } finally {
+                service.catalogTtlCheckAdmin(admin());
+            }
+        }
     }
 
     @Test

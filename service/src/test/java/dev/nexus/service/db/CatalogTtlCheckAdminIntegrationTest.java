@@ -9,22 +9,27 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.vectors.ChunkConstraintAdmin;
+import org.assertj.core.api.ThrowableAssert;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.io.InputStream;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -393,14 +398,284 @@ class CatalogTtlCheckAdminIntegrationTest {
         assertThat(admin().state().present()).isFalse();
     }
 
+    /**
+     * The CHECK as the server is sent it. Pinned whole: Postgres does not promise to evaluate the operands of AND in
+     * the written order, so a cast is safe only inside the CASE branch its {@code jsonb_typeof} picks. Turning a CASE
+     * guard into an AND, dropping the coalesce that keeps the CHECK from being NULL, or moving a cast out of its
+     * branch changes this text. A change here is a change to a constraint definition on a live table, on purpose
+     * reviewed as one.
+     */
+    private static final String CHECK_EXPRESSION =
+        "case when case when jsonb_typeof((\"metadata\"->'ttl_days')) = 'number' then (cast((\"metadata\"->'ttl_days') "
+        + "as numeric) >= 1 and cast((\"metadata\"->'ttl_days') as numeric) < 1000000000) when "
+        + "jsonb_typeof((\"metadata\"->'ttl_days')) = 'string' then (((\"metadata\"->>'ttl_days') ~ "
+        + "'^\\s*\\+?0*[1-9][0-9]{0,8}\\s*$')) else false end then (coalesce(jsonb_typeof((\"metadata\"->'put_at')), "
+        + "'') = 'string' and coalesce((\"metadata\"->>'put_at'), '') <> '') else true end";
+
     @Test
     @Order(50)
-    void theCheckExpressionIsTheCensusPredicateRenderedOnce() {
+    void theCheckExpressionIsTheCensusPredicateRenderedOnce_andEveryCastSitsInsideItsCaseBranch() {
         String expr = CatalogTtlCheckAdmin.checkExpression();
 
-        assertThat(expr).containsIgnoringCase("jsonb_typeof").containsIgnoringCase("coalesce")
-            .containsIgnoringCase("case when").as("format() would read a percent sign").doesNotContain("%");
+        assertThat(expr).as("the whole rendered CHECK").isEqualTo(CHECK_EXPRESSION);
+        assertThat(expr).as("the type test of ttl_days is a CASE guard, never an operand of an AND")
+            .doesNotContain("'ttl_days')) = 'number' and").doesNotContain("'ttl_days')) = 'string' and");
+        assertThat(expr).as("format() would read a percent sign").doesNotContain("%");
         assertThat(CatalogTtlCheckAdmin.addStatement()).as("the expression is the template's one argument")
             .contains("%s").doesNotContain("jsonb_typeof");
+    }
+
+    // ---- 5. the run guards, through the session the two constraint steps share ------------------------------------
+
+    /** A second session that holds {@code key} as a session advisory lock until it is closed. */
+    private final class Held implements AutoCloseable {
+        private final Connection conn;
+
+        Held(long key) throws Exception {
+            conn = pg.createConnection("");
+            conn.setAutoCommit(true);
+            assertThat(DSL.using(conn, SQLDialect.POSTGRES)
+                .select(DSL.function("pg_try_advisory_lock", SQLDataType.BOOLEAN, DSL.val(key)))
+                .fetchOne(0, Boolean.class)).as("fixture: the lock was free").isTrue();
+        }
+
+        @Override
+        public void close() throws Exception {
+            conn.close();   // the session ends and its advisory locks go with it
+        }
+    }
+
+    private static void assertRefused(ThrowableAssert.ThrowingCallable call, int status, String reason) {
+        assertThatThrownBy(call).isInstanceOf(AdminDdlSession.Refused.class).satisfies(e -> {
+            var refused = (AdminDdlSession.Refused) e;
+            assertThat(refused.reason()).isEqualTo(reason);
+            assertThat(refused.status()).isEqualTo(status);
+        });
+    }
+
+    private void dropConstraintIfPresent() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(CATALOG_DOCUMENTS)
+                .dropConstraintIfExists(DSL.name(CatalogTtlCheckAdmin.CONSTRAINT)).execute();
+        }
+    }
+
+    @Test
+    @Order(60)
+    void aRunHoldingTheRunLockRefusesAddAndValidateWith409_butNotTheCensusOrTheState() throws Exception {
+        dropConstraintIfPresent();
+
+        try (Held run = new Held(CatalogTtlCheckAdmin.ADVISORY_LOCK_KEY)) {
+            assertRefused(() -> admin().add(), 409, "constraint_run_in_progress");
+            assertRefused(() -> admin().validate(), 409, "constraint_run_in_progress");
+            assertThat(admin().census()).as("a read takes no run lock").isNotNull();
+            assertThat(admin().state().present()).isFalse();
+        }
+
+        assertThat(admin().state().present()).as("the refused add added nothing").isFalse();
+    }
+
+    @Test
+    @Order(61)
+    void theChunkStepsRunLockIsNotThisStepsLock() throws Exception {
+        dropConstraintIfPresent();
+        assertThat(CatalogTtlCheckAdmin.ADVISORY_LOCK_KEY).isNotEqualTo(ChunkConstraintAdmin.ADVISORY_LOCK_KEY);
+
+        try (Held chunkRun = new Held(ChunkConstraintAdmin.ADVISORY_LOCK_KEY)) {
+            assertThat(admin().add().action()).as("a chunk-constraint run does not hold this step up").isEqualTo("added");
+        } finally {
+            dropConstraintIfPresent();
+        }
+    }
+
+    @Test
+    @Order(62)
+    void aMigrationWalkRefusesAddAndValidateWith503_butNotTheCensusOrTheState() throws Exception {
+        dropConstraintIfPresent();
+
+        try (Held walk = new Held(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY)) {
+            assertRefused(() -> admin().add(), 503, "migration_in_progress");
+            assertRefused(() -> admin().validate(), 503, "migration_in_progress");
+            assertThat(admin().census()).as("an unrestricted read takes no lock and needs no guard").isNotNull();
+            assertThat(admin().state().present()).isFalse();
+        }
+
+        assertThat(admin().state().present()).as("the refused add added nothing").isFalse();
+        assertThat(admin().add().action()).as("once the walk is over the same call goes through").isEqualTo("added");
+        dropConstraintIfPresent();
+    }
+
+    // ---- 6. the table's owner, as the managed service's nexus_admin is it ---------------------------------------
+
+    private static final String OWNER = "tt_owner_adm";
+    private static final String OWNER_PASS = "ttowneradminpw";
+    private boolean ownerRoleExists;
+    private String originalOwner;
+
+    private CatalogTtlCheckAdmin ownerAdmin() {
+        return new CatalogTtlCheckAdmin(new AdminConnection(pg.getJdbcUrl(), OWNER, OWNER_PASS));
+    }
+
+    /** The table's owner becomes a NOSUPERUSER NOBYPASSRLS login role, as production's nexus_admin is. */
+    private void ownTable() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            if (originalOwner == null) {
+                originalOwner = DSL.using(su, SQLDialect.POSTGRES)
+                    .select(DSL.field(DSL.name("tableowner"), String.class))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_tables")))
+                    .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus"))
+                    .and(DSL.field(DSL.name("tablename"), String.class).eq("catalog_documents"))
+                    .fetchOne(0, String.class);
+            }
+            if (!ownerRoleExists) {
+                PgContainerHelper.createLoginRole(su, OWNER, OWNER_PASS, false);
+                PgContainerHelper.grantSchemaUsage(su, "nexus", OWNER);
+                PgContainerHelper.grantSchemaCreate(su, "nexus", OWNER);
+                ownerRoleExists = true;
+            }
+            PgContainerHelper.alterTableOwner(su, CATALOG_DOCUMENTS, OWNER);
+        }
+    }
+
+    private void disownTable() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.alterTableOwner(su, CATALOG_DOCUMENTS, originalOwner);
+        }
+    }
+
+    /** Whether FORCE ROW LEVEL SECURITY is on, read as superuser from pg_class. */
+    private boolean forceRowSecurity() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return Boolean.TRUE.equals(DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.field(DSL.name("c", "relforcerowsecurity"), Boolean.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq("catalog_documents"))
+                .fetchOne(0, Boolean.class));
+        }
+    }
+
+    private int rowsTheOwnerSees() throws Exception {
+        try (Connection owner = DriverManager.getConnection(pg.getJdbcUrl(), OWNER, OWNER_PASS)) {
+            return DSL.using(owner, SQLDialect.POSTGRES).fetchCount(CATALOG_DOCUMENTS);
+        }
+    }
+
+    @Test
+    @Order(70)
+    void theOwnerWithoutBypassRlsCountsEveryTenant_withForceLiftedForTheReadAndPutBack() throws Exception {
+        deleteAll();
+        dropConstraintIfPresent();
+        String a = "ttl-own-a";
+        String b = "ttl-own-b";
+        insert(a, "{\"ttl_days\":7}");
+        insert(a, withPutAt("{\"ttl_days\":7}", "\"" + STAMP + "\""));
+        insert(b, "{\"ttl_days\":\"30\"}");
+        insert(b, "{}");
+        List<CatalogTtlCheckAdmin.TenantCensus> asSuperuser = admin().census();
+        ownTable();
+        try {
+            assertThat(rowsTheOwnerSees()).as("fixture: FORCE hides every row from the table's owner").isZero();
+
+            List<CatalogTtlCheckAdmin.TenantCensus> asOwner = ownerAdmin().census();
+
+            assertThat(asOwner).as("the owner's count is the superuser's, every tenant").isEqualTo(asSuperuser);
+            assertThat(asOwner).extracting(CatalogTtlCheckAdmin.TenantCensus::tenant).containsExactly(a, b);
+            assertThat(asOwner.stream().mapToLong(CatalogTtlCheckAdmin.TenantCensus::violating).sum()).isEqualTo(2);
+            assertThat(forceRowSecurity()).as("FORCE ROW LEVEL SECURITY is back").isTrue();
+            assertThat(rowsTheOwnerSees()).as("and the owner is blind again").isZero();
+        } finally {
+            disownTable();
+        }
+    }
+
+    @Test
+    @Order(71)
+    void theOwnerNeedsNoRowVisibilityToAddOrValidate_andValidateFindsAViolatorItCannotRead() throws Exception {
+        deleteAll();
+        dropConstraintIfPresent();
+        String violator = insert("ttl-own-v", "{\"ttl_days\":7}");
+        ownTable();
+        try {
+            CatalogTtlCheckAdmin owner = ownerAdmin();
+            assertThat(rowsTheOwnerSees()).as("fixture: the owner reads no row under FORCE").isZero();
+
+            assertThat(owner.add().action()).as("ownership is all ADD needs").isEqualTo("added");
+            assertRefused(owner::validate, 409, "check_violation");
+            assertThat(owner.state().validated()).as("the failed VALIDATE leaves it NOT VALID").isFalse();
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.METADATA, JSONB.jsonb(withPutAt("{\"ttl_days\":7}", "\"" + STAMP + "\"")))
+                    .where(CATALOG_DOCUMENTS.TUMBLER.eq(violator)).execute();
+            }
+            assertThat(owner.validate().action()).as("stamped, VALIDATE passes as the same blind owner")
+                .isEqualTo("validated");
+            assertThat(forceRowSecurity()).isTrue();
+        } finally {
+            disownTable();
+            dropConstraintIfPresent();
+        }
+    }
+
+    @Test
+    @Order(72)
+    void theOwnerPathRefusesDuringAMigrationWalk_andLeavesForceOn() throws Exception {
+        deleteAll();
+        insert("ttl-own-m", "{}");
+        ownTable();
+        try (Held walk = new Held(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY)) {
+            assertRefused(() -> ownerAdmin().census(), 503, "migration_in_progress");
+            assertThat(admin().census()).as("a superuser reads without the lock").isNotEmpty();
+            assertThat(forceRowSecurity()).isTrue();
+        } finally {
+            disownTable();
+        }
+    }
+
+    @Test
+    @Order(73)
+    @Timeout(120)
+    void theOwnerPathGivesUpOnTheTableLockWithin5Seconds_changingNothing() throws Exception {
+        deleteAll();
+        insert("ttl-own-l", "{}");
+        ownTable();
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            // a ROW SHARE lock on the table, held in an open transaction: ACCESS EXCLUSIVE cannot be had
+            DSL.using(holder, SQLDialect.POSTGRES).selectFrom(CATALOG_DOCUMENTS).limit(1).forShare().fetch();
+            long started = System.nanoTime();
+
+            assertRefused(() -> ownerAdmin().census(), 503, "lock_timeout");
+
+            assertThat((System.nanoTime() - started) / 1_000_000_000L).as("seconds waited").isLessThan(30);
+            holder.rollback();
+        } finally {
+            disownTable();
+        }
+        assertThat(forceRowSecurity()).isTrue();
+    }
+
+    @Test
+    @Order(74)
+    void aReadPastItsBoundIsStoppedAsReadTimeout_theTransactionRolledBack_andTheSessionUsable() throws Exception {
+        ownTable();
+        var settings = new AdminDdlSession.Settings("nexus-catalog-ttl-test", 0x7474657374L, "ttl-test",
+            "nexus", "catalog_documents", "census");
+        try (AdminDdlSession s = AdminDdlSession.open(new AdminConnection(pg.getJdbcUrl(), OWNER, OWNER_PASS),
+                settings, false)) {
+            assertRefused(() -> s.readEveryTenant("the owner", "100ms",
+                ctx -> ctx.select(DSL.function("pg_sleep", SQLDataType.OTHER, DSL.val(5))).fetch()), 503, "read_timeout");
+
+            assertThat(s.states(List.of(CatalogTtlCheckAdmin.CONSTRAINT))).as("autocommit is back").hasSize(1);
+            assertThat(forceRowSecurity()).as("the lifted FORCE was rolled back with the timeout").isTrue();
+        } finally {
+            disownTable();
+        }
     }
 }

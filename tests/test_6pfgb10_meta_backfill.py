@@ -111,6 +111,54 @@ def test_an_entry_holding_ttl_but_no_put_at_gets_only_put_at_and_only_from_a_row
     assert not_written.outcome["put_at"] == "residue:no_written_row"
 
 
+@pytest.mark.parametrize("stamp", ["", None, 5, True, {}, []])
+def test_a_ttl_entry_whose_put_at_holds_no_stamp_is_filled_like_one_with_no_put_at(stamp):
+    """The table CHECK on catalog_documents (nexus-6pfgb.44) reads a put_at of "" as absent, and so is any
+    value that is not a non-empty string. An entry with a TTL and such a put_at is a violator; key presence
+    would leave it for ever and the census would never read zero."""
+    entry = _entry({"ttl_days": 7, "put_at": stamp})
+    same = mb.plan_note(entry, [("c1", _row(**MINE, ttl_days=7))], sole=[])
+    assert same.meta == {"put_at": PUT} and same.outcome["put_at"] == STAMPED
+    differs = mb.plan_note(entry, [("c1", _row(**MINE, ttl_days=30))], sole=[])
+    assert differs.meta == {} and differs.outcome["put_at"] == "residue:row_ttl_differs", "the same ttl rule as no put_at"
+
+
+def test_a_digit_string_ttl_with_an_empty_put_at_is_filled_because_the_reader_and_the_check_count_it():
+    plan = mb.plan_note(_entry({"ttl_days": "7", "put_at": ""}), [("c1", _row(**MINE, ttl_days=7))], sole=[])
+    assert plan.meta == {"put_at": PUT}
+
+
+def test_the_retraction_pair_keeps_its_empty_put_at_and_a_stamped_entry_is_untouched():
+    """ttl_days 0 with put_at "" is what a re-put without a TTL writes (_NOTE_META_UNSET): it is not a
+    violator, and it is final. A real stamp is final whatever the TTL."""
+    row = _row(**MINE, tags="stale", category="stale", ttl_days=30)
+    for held in ({"ttl_days": 0, "put_at": ""}, {"ttl_days": 7, "put_at": PUT}, {"put_at": ""}):
+        plan = mb.plan_note(_entry(dict(held)), [("c1", row)], sole=["c1"])
+        assert plan.meta == {} and set(plan.outcome.values()) == {PRESENT}, held
+
+
+def test_a_run_stamps_a_ttl_entry_with_an_empty_put_at_and_a_second_run_finds_it_done():
+    w = _World()
+    violator = _entry({"ttl_days": 7, "put_at": ""}, title="v", tumbler="1.1.1")
+    retraction = _entry({"ttl_days": 0, "put_at": ""}, title="r", tumbler="1.1.2")
+    w.entries = [violator, retraction]
+    w.manifests = {"1.1.1": [_Manifest("n1")], "1.1.2": [_Manifest("n2")]}
+    w.owners = {"n1": ["1.1.1"], "n2": ["1.1.2"]}
+    c = violator.physical_collection
+    w.rows[(c, "n1")] = _row(catalog_doc_id="1.1.1", title="v", ttl_days=7)
+    w.rows[(c, "n2")] = _row(catalog_doc_id="1.1.2", title="r", ttl_days=7)
+
+    first = mb.backfill_meta(w, w, w, apply=True)
+
+    assert [(u["tumbler"], u["meta"]) for u in w.updates] == [("1.1.1", {"put_at": PUT})], \
+        "the retraction pair is final: it is not a violator and is not sent"
+    assert first.keys["note.put_at"].stamped == 1
+    violator.meta = {"ttl_days": 7, "put_at": PUT}
+    w.updates.clear()
+    second = mb.backfill_meta(w, w, w, apply=True)
+    assert w.updates == [] and second.keys["note.put_at"].stamped == 0
+
+
 def test_a_legacy_tags_string_is_left_alone_and_counted_for_the_array_rung():
     plan = mb.plan_note(_entry({"tags": "a, b", "put_at": PUT}), [], sole=[])
     assert plan.meta == {} and plan.outcome["tags_legacy_string"] == PRESENT
