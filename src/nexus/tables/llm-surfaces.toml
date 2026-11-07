@@ -26,7 +26,7 @@
 #               it, and a `module:Class` entry the whole class (the lint reads
 #               it that way). Several functions share a row when the census
 #               row is one surface with several call sites (row 12 is ten
-#               operators, row 23 nine MCP read tools). A target in the
+#               operators, row 23 the MCP read tools). A target in the
 #               engine (Java) is named by the Python caller that drives it.
 #               A target may also be a source-read or probe that feeds the
 #               surface: the census has no row of its own for it.
@@ -288,6 +288,9 @@ label = "Knowledge Map in SubagentStart"
 sends = "topic labels, into every agent's context"
 targets = [
     "nexus.hooks.subagent_start:_knowledge_map_section",
+    "nexus.context:generate_context_l1",
+    "nexus.sensitive_topics:withhold_topic_labels",
+    "nexus.sensitive_topics:withhold_after_flag",
   ]
 endpoints = ["session-model"]
 behaviour = "exclude"
@@ -493,10 +496,16 @@ targets = [
     "nexus.mcp.core:store_get",
     "nexus.mcp.core:store_get_many",
     "nexus.mcp.core:store_list",
+    "nexus.mcp.core:search_metadata_scoped",
+    "nexus.mcp.core:search_topic_scoped",
+    "nexus.mcp.core:search_graph_hop",
+    "nexus.mcp.core:search_aspect_scoped",
+    "nexus.mcp.core:collection_info",
     "nexus.mcp.catalog:catalog_search",
     "nexus.mcp.catalog:catalog_list",
     "nexus.mcp.catalog:catalog_show",
     "nexus.mcp.catalog:catalog_links",
+    "nexus.mcp.catalog:catalog_link_query",
   ]
 endpoints = ["session-model"]
 behaviour = "withhold"
@@ -512,6 +521,14 @@ label = "`nx search` and `nx query` output"
 sends = "result text on stdout, often read by the Bash tool of Claude Code"
 targets = [
     "nexus.commands.search_cmd:search_cmd",
+    "nexus.commands.store:get_cmd",
+    "nexus.commands.store:list_cmd",
+    "nexus.commands.catalog:show_cmd",
+    "nexus.commands.catalog:list_cmd",
+    "nexus.commands.catalog:search_cmd",
+    "nexus.commands.catalog_cmds.links:links_cmd",
+    "nexus.commands.catalog_cmds.links:links_for_file_cmd",
+    "nexus.hooks.subagent_start:_linked_rdrs_section",
   ]
 endpoints = ["session-model"]
 behaviour = "withhold"
