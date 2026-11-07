@@ -334,10 +334,12 @@ run:
    (NOSUPERUSER NOBYPASSRLS NOINHERIT LOGIN data role). The engine refuses
    to boot (`event=service_role_bypassrls_refused`, exit 1) when the role it
    connects as (`NX_DB_USER`) has `BYPASSRLS` and is not a superuser
-   (nexus-b1adx): the changelog's `partition_copy_access` skips `BYPASSRLS`
-   grantees, so a `BYPASSRLS` service role would get no DML grant on any
-   tenant leaf or model partition created afterwards, and row-level security
-   would not bind it. The message names the fix, `ALTER ROLE <role>
+   (nexus-b1adx): row-level security does not bind a `BYPASSRLS` role, even
+   under `FORCE ROW LEVEL SECURITY` and even when it owns the schema, so tenant
+   isolation would not be enforced (nexus-2jfoj). A `BYPASSRLS` role that does
+   not own the leaves would also get no DML grant on any tenant leaf or model
+   partition created afterwards, since the changelog's `partition_copy_access`
+   skips `BYPASSRLS` grantees. The message names the fix, `ALTER ROLE <role>
    NOBYPASSRLS`. A superuser passes (single-role development setups) with a `WARN`
    (`event=service_role_superuser_isolation_not_enforced`, naming the role): row-level
    security does not bind a superuser either, so tenant isolation is not enforced for a

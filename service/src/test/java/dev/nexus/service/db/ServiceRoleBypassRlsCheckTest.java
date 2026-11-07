@@ -25,6 +25,9 @@ class ServiceRoleBypassRlsCheckTest {
         assertThat(msg).contains("svc_x").contains("BYPASSRLS")
             .contains("NOBYPASSRLS").contains("restart")
             .contains("vectors-039-1").contains("permission denied")
+            // nexus-2jfoj: isolation is the reason that holds for a schema-owning role too, so it leads.
+            .contains("tenant isolation is not enforced").contains("FORCE ROW LEVEL SECURITY")
+            .contains("whether or not it owns the schema")
             // The message ships to operators who have no nexus checkout: a link, not a repo path (nexus-z7ddd).
             .contains("https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#storage-service-postgres-prerequisites")
             .doesNotContain("See docs/");
