@@ -76,8 +76,8 @@ _RUNBOOK = (
 UNTESTED_NOTE = "not yet run against a real pre-17 cluster; copy the data directory first"
 #: Nothing locks the service while the upgrade runs (the runbook has the same exposure): another nx session or a
 #: login item can start it on the half-built cluster. Said wherever the untested note is.
-NO_LOCK_NOTE = ("nothing locks the service during the upgrade: close other nx sessions (and Claude Code sessions "
-                "with the conexus plugin) and disable an autostart unit (launchd, systemd) first")
+NO_LOCK_NOTE = ("nothing locks the service during the upgrade: close other terminals running nx, and Claude Code "
+                "sessions with the conexus plugin, and disable an autostart unit (launchd, systemd) first")
 
 #: What a failure before the data directory moves leaves behind (the service and the old server are stopped first).
 _NOT_MOVED = (

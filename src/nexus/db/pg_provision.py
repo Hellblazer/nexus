@@ -791,6 +791,17 @@ def _run(
     refuse_root()
     _log.debug("pg_provision_run", cmd=_redacted(cmd))
     try:
+        if kill_on_interrupt:  # passed only when asked, so existing callers' fakes never see the keyword
+            return run_bounded(
+                cmd,
+                timeout=timeout,
+                check=check,
+                cwd=cwd,
+                env=_bundle_lib_env(cmd, env),
+                stdout=subprocess.PIPE if capture else None,
+                stderr=subprocess.PIPE if capture else None,
+                kill_on_interrupt=True,
+            )
         return run_bounded(
             cmd,
             timeout=timeout,
@@ -799,7 +810,6 @@ def _run(
             env=_bundle_lib_env(cmd, env),
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
-            **({"kill_on_interrupt": True} if kill_on_interrupt else {}),
         )
     except subprocess.TimeoutExpired as exc:
         # Rebuild rather than mutate: TimeoutExpired.cmd is what str() reads.
