@@ -89,6 +89,7 @@ class World:
         self.owner_reads = 0
         self.position_reads = 0
         self.before_second_manifest_read = None  # called with self, once, before the re-read
+        self.before_append = None  # called with self, once, between the rung's re-read and the engine's compare
         self._manifest_reads = 0
         self.tombstoned: list[dict] = []  # manifest rows of deleted documents (nexus-6pfgb.58)
         self.tombstoned_reported = True  # False: an engine before include_tombstoned, which sends no list
@@ -166,16 +167,42 @@ class World:
         return rows, gone
 
     # writer ---------------------------------------------------------------
+    def _guard(self, d: str, new: dict, refused: list) -> bool:
+        """The engine's per-row ``expected`` compare (nexus-tj0wu): True when the row may be written."""
+        expected = new.get("expected")
+        if expected is None:
+            return True
+        old = next((r for r in self.manifests[d] if r.position == new["position"]), None)
+        if old is None:
+            reason = "position_absent"
+        elif old.chash != expected["chash"]:
+            reason = "chash_changed"
+        elif any(k in expected and getattr(old, k) != expected[k]
+                 for k in ("section_title", "section_type", "page_number", "labels_written")):
+            reason = "labels_changed"
+        elif any(k in expected and getattr(old, k) != expected[k]
+                 for k in ()):
+            reason = "span_changed"
+        else:
+            return True
+        refused.append({"doc_id": d, "position": new["position"], "reason": reason})
+        return False
+
     def append_manifest_many(self, docs, *, collection, **kw) -> dict:
         assert not kw, kw
         self.appends.append((collection, [(d, [dict(r) for r in rows]) for d, rows in docs]))
-        failed = []
+        if self.before_append:
+            hook, self.before_append = self.before_append, None
+            hook(self)
+        failed, refused = [], []
         for d, rows in docs:
             if d in self.fail_doc_ids:
                 failed.append(d)
                 continue
-            rows_by_pos = {r.position: i for i, r in enumerate(self.manifests[d])}
             for new in rows:
+                if not self._guard(d, new, refused):
+                    continue
+                rows_by_pos = {r.position: i for i, r in enumerate(self.manifests[d])}
                 i = rows_by_pos[new["position"]]
                 self.manifests[d][i] = replace(
                     self.manifests[d][i], chash=new["chash"], section_title=new["section_title"],
@@ -183,7 +210,8 @@ class World:
                     labels_written=new["labels_written"])
             if self.restamp_on_append is not None:
                 self.docs[d].indexed_at = self.restamp_on_append
-        return {"ok": True, "docs": len(docs), "failed_doc_ids": failed}
+        return {"ok": True, "docs": len(docs), "failed_doc_ids": failed,
+                "expected_refused": refused, "expected_refused_count": len(refused)}
 
     def update(self, tumbler: str, **fields) -> None:
         self.single_updates += 1
@@ -277,7 +305,11 @@ def test_a_single_row_chash_takes_the_chunk_rows_label_and_is_marked_written(wor
     assert collection == COLL
     assert docs == [("1.1.1", [{
         "chash": h(1), "position": 0, "section_title": "Refs", "section_type": "references",
-        "page_number": 9, "labels_written": True}])], "chash, position, the three labels and the flag; no span keys, so the engine keeps the stored span"
+        "page_number": 9, "labels_written": True,
+        "expected": {"chash": h(1), "section_title": None, "section_type": None, "page_number": None,
+                     "labels_written": False}}])], (
+        "chash, position, the three labels and the flag, and the values just read for the engine to compare "
+        "(nexus-tj0wu); no span keys, so the engine keeps the stored span")
     assert rung.verify() is True
     assert "1 filled this run" in rung.record_detail()
 
@@ -1277,7 +1309,62 @@ def test_a_chash_also_held_by_a_tombstoned_document_is_not_filled(world: World) 
     assert "1 also held by a deleted document" in result.detail
     assert [a[1] for a in world.appends] == [[("1.1.2", [{
         "chash": h(2), "position": 0, "section_title": "Refs", "section_type": "references",
-        "page_number": 9, "labels_written": True}])]]
+        "page_number": 9, "labels_written": True,
+        "expected": {"chash": h(2), "section_title": None, "section_type": None, "page_number": None,
+                     "labels_written": False}}])]]
+
+
+# ── nexus-tj0wu: a write racing the rung is refused by the engine, not reverted ────────────────────────────────────
+
+
+def test_a_reindex_between_the_reread_and_the_post_is_refused_and_not_reverted(world: World) -> None:
+    """The rung re-reads, then a re-index puts another chunk at the position, then the POST. Without `expected` the
+    upsert writes the read chash and the label back over the re-index."""
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.before_append = lambda w: w.manifests["1.1.1"].__setitem__(
+        0, replace(w.manifests["1.1.1"][0], chash=h(2)))
+    rung = world.rung()
+
+    result = rung.converge(Report())
+
+    assert world.manifests["1.1.1"][0].chash == h(2), "the re-index stands"
+    assert world.labels("1.1.1") == [(0, None, None, None, False)], "no label was written onto the moved position"
+    c = rung._partial
+    assert (c.raced, c.filled) == (1, 0), c.summary()
+    assert rung._filled == 0
+    assert result.outcome is ConvergeOutcome.COMPLETED
+
+
+def test_a_label_written_between_the_reread_and_the_post_is_not_overwritten(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    _labelled(world, h(1))
+    world.before_append = lambda w: w.manifests["1.1.1"].__setitem__(
+        0, replace(w.manifests["1.1.1"][0], section_title="Mine", section_type="body", page_number=2, labels_written=True))
+    rung = world.rung()
+
+    rung.converge(Report())
+
+    assert world.labels("1.1.1") == [(0, "Mine", "body", 2, True)], "the concurrent label write stands"
+    assert (rung._partial.raced, rung._partial.filled) == (1, 0)
+
+
+def test_one_raced_row_does_not_stop_its_neighbour_and_only_the_written_row_counts_as_filled(world: World) -> None:
+    world.doc("1.1.1")
+    world.row("1.1.1", 0, h(1))
+    world.row("1.1.1", 1, h(2))
+    _labelled(world, h(1))
+    _labelled(world, h(2))
+    world.before_append = lambda w: w.manifests["1.1.1"].__setitem__(
+        0, replace(w.manifests["1.1.1"][0], chash=h(3)))
+    rung = world.rung()
+
+    rung.converge(Report())
+
+    assert world.labels("1.1.1") == [(0, None, None, None, False), (1, "Refs", "references", 9, True)]
+    assert (rung._partial.raced, rung._partial.filled, rung._filled) == (1, 1, 1)
 
 
 def test_a_tombstoned_holder_of_another_chash_does_not_stop_this_fill(world: World) -> None:

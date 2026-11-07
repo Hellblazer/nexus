@@ -105,9 +105,10 @@ WHAT IT DOES.
              predicate gap) cannot hold the rung at 'converged, then deferred' for ever. See :meth:`detect`.
 
 RESIDUAL WINDOW. Between the re-read of a batch's manifests and the ``append_manifest_many`` POST, a row can
-still become written or gain a co-owner: ``UPSERT_APPEND`` carries no ``WHERE labels_written = false``. The
-re-read narrows the window to one request; it does not close it, and a row filled in that window takes a
-label the guards would have refused a moment later.
+gain a co-owner, which the engine cannot see. A re-index or a label write of the same position is closed
+(nexus-tj0wu): every row carries ``expected`` (the chash, labels, ``labels_written`` and span columns just
+read) and the engine writes it only while the stored row still holds them, else refuses that row, which the
+rung counts as ``raced`` (:func:`refused_positions`).
 
 FILL-ONLY. A row already ``labels_written`` is never a candidate, whatever its labels (an empty label
 included). The rung never writes a label with ``labels_written`` false (the catalog-046 CHECK).
@@ -174,6 +175,36 @@ _LABEL_KEYS = ("section_title", "section_type", "page_number")
 #: ``indexed_at`` is the backfill's run time, later than any chunk it holds, so the date guard always passes
 #: for it, and the chunk label is a FORMER owner's (nexus-jz86a, decision (a)): its rows stay legacy.
 ORPHAN_BACKFILL_MARKER = ("backfill_from", "t3_orphan")  # Java twin: CatalogRepository.ORPHAN_BACKFILL_VALUE
+
+
+#: The span columns of a manifest row, wire names.
+_SPAN_WIRE = ("line_start", "line_end", "char_start", "char_end")
+
+
+def expected_values(row: Any, *, spans: bool = True) -> dict[str, Any]:
+    """The stored values ``append_manifest_many`` compares before it writes *row*'s position (nexus-tj0wu): the chash,
+    the three labels and ``labels_written`` of the row as just read, and with *spans* the four span columns. The
+    engine writes the row only while the stored row still equals them, else refuses it (``expected_refused``)."""
+    out: dict[str, Any] = {
+        "chash": row.chash,
+        "section_title": getattr(row, "section_title", None),
+        "section_type": getattr(row, "section_type", None),
+        "page_number": getattr(row, "page_number", None),
+        "labels_written": bool(getattr(row, "labels_written", False)),
+    }
+    if spans:
+        out.update({c: getattr(row, c, None) for c in _SPAN_WIRE})
+    return out
+
+
+def refused_positions(result: Any) -> set[tuple[str, int]]:
+    """``(doc_id, position)`` of every row the engine refused for its ``expected`` guard in an ``append_manifest_many``
+    answer (nexus-tj0wu); empty for an answer that refused none."""
+    out: set[tuple[str, int]] = set()
+    for entry in (result or {}).get("expected_refused") or []:
+        if isinstance(entry, dict) and entry.get("position") is not None:
+            out.add((str(entry.get("doc_id")), int(entry["position"])))
+    return out
 
 
 def minted_by_orphan_backfill(doc: Any) -> bool:
@@ -543,6 +574,7 @@ class ManifestSectionLabelsRung:
                 continue
             by_collection.setdefault(collection, {}).setdefault(tumbler, []).append({
                 "chash": row.chash, "position": row.position, **labels, "labels_written": True,
+                "expected": expected_values(now, spans=False),
             })
         written: set[str] = set()
         try:
@@ -550,13 +582,17 @@ class ManifestSectionLabelsRung:
                 for request in self._requests(sorted(per_doc.items())):
                     result = writer.append_manifest_many(request, collection=collection)
                     failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
+                    refused = refused_positions(result)
                     for doc_id, rows in request:
                         if doc_id in failed:
                             counts.write_failed += len(rows)
-                        else:
-                            counts.filled += len(rows)
-                            counts.by_collection[collection] += len(rows)
-                            self._filled += len(rows)
+                            continue
+                        lost = sum(1 for r in rows if (doc_id, int(r["position"])) in refused)
+                        counts.raced += lost
+                        if len(rows) > lost:
+                            counts.filled += len(rows) - lost
+                            counts.by_collection[collection] += len(rows) - lost
+                            self._filled += len(rows) - lost
                             written.add(doc_id)
         finally:
             # once per document, however many requests or collections carried its rows; also when a later request

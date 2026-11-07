@@ -4013,6 +4013,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         engine that ignores the field, so this raises ``RuntimeError`` rather than let the caller
         believe the document is stamped.
 
+        *rows* may carry an ``expected`` object (nexus-tj0wu; additive engine field): the values the
+        caller read from that position's stored row, ``{chash, section_title?, section_type?,
+        page_number?, labels_written?, line_start?, line_end?, char_start?, char_end?}`` (a key left
+        out is not compared). The engine writes the row only while the stored row still holds them,
+        else refuses THAT row and writes the rest: the refusals come back in ``expected_refused``
+        (``[{doc_id, position, reason}]``, reason ``chash_changed``, ``labels_changed``,
+        ``span_changed`` or ``position_absent``) with ``expected_refused_count``. The upsert takes
+        chash, labels and ``labels_written`` from the request, so without the guard a write made
+        from a re-read puts the read values over a re-index or label write that committed in
+        between. ACK-ECHO: a request that sent ``expected`` and got a response with no
+        ``expected_refused_count`` was handled by an engine that ignores the field, and wrote the
+        rows UNGUARDED; this raises :class:`~nexus.errors.EngineOlderThanClientError` (after the
+        write) rather than let the caller believe the guard held.
+
         Caps, refused locally before any round trip: :data:`MANIFEST_APPEND_MANY_MAX_DOCS`
         documents, :data:`MANIFEST_APPEND_MANY_MAX_CHUNKS` chunks,
         :data:`MANIFEST_APPEND_SWEEP_CHASHES_CAP` sweep chashes per document.
@@ -4113,6 +4127,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 f"append_many ack mismatch for {collection!r}: sent complete for {len(stamps)} "
                 "document(s) but the response carried no 'complete_refused_count' key; the engine "
                 "does not stamp on append_many and the documents are NOT complete"
+            )
+        guarded_rows = sum(1 for _d, rows in docs for r in rows if r.get("expected") is not None)
+        if guarded_rows and "expected_refused_count" not in out:
+            raise EngineOlderThanClientError(
+                f"append_many ack mismatch for {collection!r}: sent 'expected' on {guarded_rows} "
+                "row(s) but the response carried no 'expected_refused_count' key; the engine ignores "
+                "the guard and wrote those rows unguarded"
             )
         _echo_supplied_vectors("append_manifest_many", chunks, out)
         return out

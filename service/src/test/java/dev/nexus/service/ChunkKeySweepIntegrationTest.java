@@ -661,6 +661,50 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         assertThat(retiredRowCount(p.tenant(), p.live())).isZero();
     }
 
+    /**
+     * nexus-qmrfi: {@code null_span_rows} counts a chunk key by VALUE, as the client's {@code manifest_span} does. The
+     * writer's default for "not recorded" is 0, so a key that is present is not a position. z1 holds all four keys as 0
+     * (counted by nothing); z2 holds a 0 char start beside a recorded end (a real start of 0: two columns counted);
+     * z3 holds values that are not integers (a string, a float, a bool) and a 0 start beside an unrecorded end
+     * (counted by nothing); z4 holds one positive line (one column). Filling the recorded columns brings the count to 0
+     * while z1 and z3 keep their NULL columns: zero is reachable.
+     */
+    @Test
+    void nullSpanRowsCountsARecordedValue_aZeroOrANonIntegerKeyIsNotAPosition() throws Exception {
+        String tenant = "sw-span-value";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        Map<String, Map<String, Object>> r = new LinkedHashMap<>();
+        r.put("z1", keyed(tenant, live, "z1", "line_start", 0, "line_end", 0, "chunk_start_char", 0, "chunk_end_char", 0));
+        r.put("z2", keyed(tenant, live, "z2", "line_start", 0, "line_end", 0, "chunk_start_char", 0, "chunk_end_char", 9));
+        r.put("z3", keyed(tenant, live, "z3", "line_start", "7", "line_end", true, "chunk_start_char", 0,
+            "chunk_end_char", 9.0));
+        r.put("z4", keyed(tenant, live, "z4", "line_start", 12, "line_end", 0, "chunk_start_char", 0, "chunk_end_char", 0));
+        seed(tenant, live, r);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, live, hexOf(tenant, live, "z1"),
+                hexOf(tenant, live, "z2"), hexOf(tenant, live, "z3"), hexOf(tenant, live, "z4"));
+        }
+
+        JsonNode pre = json(sweep(token, plan()));
+        JsonNode count = pre.path("preconditions").path("null_span_rows");
+        assertThat(count.asLong()).as("z2 and z4 record a position; z1 and z3 record none").isEqualTo(2);
+        JsonNode byField = pre.path("precondition_details").path("null_span_rows").path("by_field");
+        assertThat(byField.path("line_start").asLong()).as("z4 only: z3's \"7\" is a string").isEqualTo(1);
+        assertThat(byField.path("line_end").asLong()).as("a 0 and a bool are not lines").isZero();
+        assertThat(byField.path("chunk_start_char").asLong()).as("z2: 0 beside a recorded end; not z1, z3, z4").isEqualTo(1);
+        assertThat(byField.path("chunk_end_char").asLong()).as("z2; z3's 9.0 is a float").isEqualTo(1);
+
+        // The columns the client's fill rung writes: only what a chunk records. The rest stay NULL and stay uncounted.
+        manifestSpans(tenant, live, hexOf(tenant, live, "z2"), null, null, 0, 9);
+        manifestSpans(tenant, live, hexOf(tenant, live, "z4"), 12, null, null, null);
+        JsonNode after = json(sweep(token, plan()));
+        assertThat(after.path("preconditions").path("null_span_rows").asLong())
+            .as("only unrecorded keys remain: the count reaches zero").isZero();
+        assertThat(after.path("blocking").toString()).doesNotContain("null_span_rows");
+    }
+
     @Test
     void aCountThatGrowsBetweenTheDryRunAndTheApplyIsRefused_theAcceptedNumberIsAnUpperBound() throws Exception {
         Pre p = preconditionTenant("sw-pre-grow");

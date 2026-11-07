@@ -455,6 +455,46 @@ class CatalogHandlerAppendChunksTest {
         assertThat(overCap.bodyString()).contains("docs[0]").contains("300");
     }
 
+    @Test
+    void appendMany_expected_isGuardedOverHttp_andAMalformedGuardIs400() throws Exception {
+        registerDoc("aph.m7");
+        String a = ch("aphm7-a"), b = ch("aphm7-b");
+        CapturingExchange seed = post("/v1/catalog/manifest/append", "{\"doc_id\":\"aph.m7\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":0,\"chash\":\"" + a + "\"},{\"position\":1,\"chash\":\"" + b + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + a + "\",\"text\":\"aphm7 a\"},{\"chash\":\"" + b + "\",\"text\":\"aphm7 b\"}]}");
+        handle(handler, seed);
+        assertThat(seed.status).isEqualTo(200);
+        // a re-index puts b at position 0 after the caller read a
+        CapturingExchange moved = post("/v1/catalog/manifest/append", "{\"doc_id\":\"aph.m7\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":0,\"chash\":\"" + b + "\"}]}");
+        handle(handler, moved);
+        assertThat(moved.status).isEqualTo(200);
+
+        CapturingExchange stale = post("/v1/catalog/manifest/append_many", manyBody(
+            "[{\"doc_id\":\"aph.m7\",\"rows\":[{\"position\":0,\"chash\":\"" + a + "\",\"line_start\":5,"
+            + "\"expected\":{\"chash\":\"" + a + "\"}}]}]", ""));
+        handle(handlerWithoutService, stale);
+        assertThat(stale.status).isEqualTo(200);
+        assertThat(stale.bodyString()).contains("\"rows\":0").contains("\"expected_refused_count\":1")
+            .contains("\"reason\":\"chash_changed\"");
+        assertThat(repo.getManifest(TENANT, "aph.m7").get(0)).containsEntry("chash", b).containsEntry("line_start", null);
+
+        for (String bad : new String[] {
+                "\"expected\":\"x\"", "\"expected\":{}", "\"expected\":{\"chash\":\"" + "a".repeat(32) + "\"}",
+                "\"expected\":{\"chash\":\"" + a + "\",\"page_number\":\"4\"}",
+                "\"expected\":{\"chash\":\"" + a + "\",\"labels_written\":1}",
+                "\"expected\":{\"chash\":\"" + a + "\",\"line_start\":\"3\"}",
+                "\"expected\":{\"chash\":\"" + a + "\",\"colour\":\"red\"}"}) {
+            CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody(
+                "[{\"doc_id\":\"aph.m7\",\"rows\":[{\"position\":0,\"chash\":\"" + a + "\"," + bad + "}]}]", ""));
+            handle(handlerWithoutService, ex);
+            assertThat(ex.status).as(bad).isEqualTo(400);
+            assertThat(ex.bodyString()).as(bad).contains("docs[0]").contains("expected");
+        }
+        assertThat(repo.getManifest(TENANT, "aph.m7").get(0)).as("a malformed guard writes nothing")
+            .containsEntry("chash", b);
+    }
+
     // ── append_many `complete` (RDR-223 fix round, nexus-z0o2p.19) ──
 
     @Test

@@ -378,6 +378,30 @@ class TestAppendManifestMany:
                 [("1.1.1", [_row(_A, 0)])], complete={"1.1.1": ("h", 1)}, collection=_COLLECTION)
         _says_the_engine_is_older_and_what_to_do(exc.value)
 
+    # ── per-row `expected` (nexus-tj0wu): the engine writes a row only while the stored values still match ──
+
+    def test_expected_rides_the_row_and_the_refusals_come_back(self, monkeypatch) -> None:
+        row = {**_row(_A, 0), "expected": {"chash": _A, "labels_written": False}}
+        resp = {"docs": 1, "rows": 0, "failed_doc_ids": [], "results": [],
+                "expected_refused": [{"doc_id": "1.1.1", "position": 0, "reason": "chash_changed"}],
+                "expected_refused_count": 1}
+        c, rec = _client(monkeypatch, resp)
+        out = c.append_manifest_many([("1.1.1", [row])], collection=_COLLECTION)
+        assert rec.calls[0][1]["docs"][0]["rows"][0]["expected"] == {"chash": _A, "labels_written": False}
+        assert out["expected_refused_count"] == 1 and out["expected_refused"][0]["reason"] == "chash_changed"
+
+    def test_an_answer_without_expected_refused_count_is_an_ack_mismatch(self, monkeypatch) -> None:
+        """An engine that ignores `expected` wrote the row unguarded: the caller must not believe the guard held."""
+        row = {**_row(_A, 0), "expected": {"chash": _A}}
+        c, _ = _client(monkeypatch, {"docs": 1, "results": [], "failed_doc_ids": []})
+        with pytest.raises(RuntimeError, match="expected_refused_count") as exc:
+            c.append_manifest_many([("1.1.1", [row])], collection=_COLLECTION)
+        _says_the_engine_is_older_and_what_to_do(exc.value)
+
+    def test_a_request_without_expected_needs_no_refusal_field(self, monkeypatch) -> None:
+        c, _ = _client(monkeypatch, {"docs": 1, "results": [], "failed_doc_ids": []})
+        assert c.append_manifest_many([("1.1.1", [_row(_A, 0)])], collection=_COLLECTION)["docs"] == 1
+
     @pytest.mark.parametrize("stamp", [("", 1), ("h", -1), ("h", True), ("h", "1")])
     def test_a_malformed_stamp_is_refused_before_any_post(self, monkeypatch, stamp) -> None:
         c, rec = _client(monkeypatch)

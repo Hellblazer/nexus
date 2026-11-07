@@ -337,11 +337,13 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   the row's other columns from it would join the lines of one writer to the characters of another. A partial row
   whose stored columns agree with the chunk row, or that the chunk row does not record, is filled on its NULL
   columns. A chunk value of 0 is "not recorded" (`make_chunk_metadata` writes 0 for it) and is not copied.
-- **The engine count does not reach zero for 0-valued keys.** The engine's `null_span_rows` counts a row with a NULL
-  manifest column and the chunk key PRESENT, whatever its value, so every chunk written without lines (the writer
-  puts 0) stays in the count however much the rung does; those rows are lossless, there is nothing to copy. The
-  engine predicate will test for a recorded value as the rung does (bead nexus-qmrfi); until then, accept the
-  residue by name.
+- **The engine counts by recorded value, so the count can reach zero.** The engine's `null_span_rows` counts a row with
+  a NULL manifest column whose chunk key RECORDS a value, by the same rule as the rung (a positive line, a positive
+  end, a start that is positive or beside a recorded end, integers only; nexus-qmrfi). A chunk written without lines
+  (the writer puts 0) is not counted: there is nothing recorded to lose. Only a recorded span the rung leaves
+  unused (shared chunk, deleted co-owner, unattributable chunk, contradicted column) stays in the count, and it
+  reaches 0 when none remains. An engine older than the change counts every present key, so there the count does not
+  reach zero for lineless chunks and the residue is accepted by name.
 - **Labels are untouched.** The only write route (`append_manifest_many`) rewrites a row's labels from the request,
   so the rung sends the labels and `labels_written` it read just before the write, unchanged. A label written in
   the window between the scan and the write is carried, not reverted. A span column another writer filled in that
@@ -353,9 +355,14 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   (`--auto`) against a managed service it reads nothing and is not applicable; the interactive `nx upgrade` scans,
   fills, verifies and records. Run it before `nx t3 retire-keys --apply`, then take the dry run's `null_span_rows`
   and accept only what the summary accounts for.
-- **Run it on a quiet tenant.** Between its last re-read and the write, a concurrent re-index of the same position
-  can change the row's chash or labels, and the write puts the re-read values back (the engine's append has no
-  compare-and-set; bead nexus-tj0wu asks for one). Nothing else should index into the tenant while it runs.
+- **A write racing the rung is refused, not reverted** (nexus-tj0wu). The append puts a row's chash and labels
+  from the request, so each row the rung sends carries `expected`: the chash, labels, `labels_written` and span
+  columns it just read. The engine writes the row only while the stored row still holds them; a re-index, a label
+  write or a span write that landed after the re-read makes it refuse that one row, and the rung counts it as
+  "changed before the write" and goes on (the next `nx upgrade` takes it up again). The same guard protects
+  `manifest-section-labels`. Not guarded: a row that gains a co-owner in that window (the engine does not see
+  it), so still prefer a quiet tenant. An engine without the guard ignores `expected`; the client then raises
+  instead of treating the rows as guarded.
 - **The managed path is interactive, and slow.** Against a managed service `--auto` reads nothing; the interactive
   `nx upgrade` makes three walks of the whole catalog (the detect dry run, the fill, the verify dry run). Completion
   is recorded once: a manifest row that gains a NULL span later (an orphan backfill, say) is not refilled, and shows
@@ -367,11 +374,11 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   count equals the fillable rows plus the left
   rows, each left bucket named (shared with another document, repeated inside the document, also held by a deleted
   document, orphan-minted, ownership listing named another row, chunk row newer than the document or without
-  `indexed_at` or titled for another document, chunk span not recorded, chunk row differs from a stored column), and
-  each bucket says how many of its rows have a recorded span that stays unused (lossy) as against nothing recorded
-  (lossless). It also prints the engine count to expect after the pass (rows still counted because another column's
-  key holds a 0 are in it), and, apart, the rows the engine never counts (chunk missing, chunk with no key for the
-  NULL columns). A 409 from the engine for a request (a superseded collection, which the client raises as
+  `indexed_at` or titled for another document, chunk row differs from a stored column). Every counted row has a
+  recorded span on the chunk row, so every left row is a recorded span that stays unused. It also prints the engine
+  count to expect after the pass (the counted rows minus the fillable ones), and, apart, the rows the engine never
+  counts because nothing is recorded (chunk missing, chunk with no key for the NULL columns, chunk whose keys are 0
+  or not a number). A 409 from the engine for a request (a superseded collection, which the client raises as
   `SupersededCollectionWriteError`, or any other 409) defers those rows
   (`write_refused_409`) and the run goes on; the rung ends deferred and retries on the next `nx upgrade`.
 

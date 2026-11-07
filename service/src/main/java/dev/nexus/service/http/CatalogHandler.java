@@ -1340,6 +1340,7 @@ public final class CatalogHandler implements HttpHandler {
                 }
                 List<Map<String, Object>> rows = strictRows(in.get("rows"));
                 requireCanonicalChashes(rows);
+                requireWellFormedExpected(rows);
                 Map<String, Object> doc = new LinkedHashMap<>();
                 doc.put("doc_id", docId);
                 doc.put("rows", rows);
@@ -3569,6 +3570,53 @@ public final class CatalogHandler implements HttpHandler {
             }
             rows.get(i).put("chash",
                 dev.nexus.service.db.Chash.requireCanonical(s, "rows[" + i + "]"));
+        }
+    }
+
+    /**
+     * nexus-tj0wu: the per-row {@code expected} guard of {@code manifest/append_many}, parsed at the boundary:
+     * absent or null is no guard; otherwise an object with a canonical 64-hex {@code chash} (written back
+     * lower-case) and, optionally, the labels the caller read: {@code section_title}/{@code section_type}
+     * (string or null), {@code page_number} (integer or null) and {@code labels_written} (boolean), and the span
+     * columns {@code line_start}, {@code line_end}, {@code char_start}, {@code char_end} (integer or null). A key
+     * that is absent is not compared. Anything else is a 400, before any transaction: a guard that parsed as "no guard"
+     * would write the row unguarded.
+     */
+    @SuppressWarnings("unchecked")
+    private static void requireWellFormedExpected(List<Map<String, Object>> rows) {
+        for (int i = 0; i < rows.size(); i++) {
+            Object raw = rows.get(i).get("expected");
+            if (raw == null) continue;
+            String at = "rows[" + i + "].expected";
+            if (!(raw instanceof Map<?, ?> m)) {
+                throw new IllegalArgumentException(at + " must be an object");
+            }
+            Map<String, Object> expected = (Map<String, Object>) m;
+            if (!(expected.get("chash") instanceof String chash)) {
+                throw new IllegalArgumentException(at + ".chash required (string)");
+            }
+            expected.put("chash", dev.nexus.service.db.Chash.requireCanonical(chash, at));
+            for (String k : List.of("section_title", "section_type")) {
+                if (expected.containsKey(k) && expected.get(k) != null && !(expected.get(k) instanceof String)) {
+                    throw new IllegalArgumentException(at + "." + k + " must be a string or null");
+                }
+            }
+            for (String k : List.of("page_number", "line_start", "line_end", "char_start", "char_end")) {
+                Object n = expected.get(k);
+                if (expected.containsKey(k) && n != null
+                        && !(n instanceof Integer || n instanceof Long || n instanceof Short)) {
+                    throw new IllegalArgumentException(at + "." + k + " must be an integer or null");
+                }
+            }
+            if (expected.containsKey("labels_written") && !(expected.get("labels_written") instanceof Boolean)) {
+                throw new IllegalArgumentException(at + ".labels_written must be a boolean");
+            }
+            for (String k : expected.keySet()) {
+                if (!List.of("chash", "section_title", "section_type", "page_number", "labels_written",
+                        "line_start", "line_end", "char_start", "char_end").contains(k)) {
+                    throw new IllegalArgumentException(at + "." + k + " is not an expected-value field");
+                }
+            }
         }
     }
 

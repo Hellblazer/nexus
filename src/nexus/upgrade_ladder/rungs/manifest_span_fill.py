@@ -22,9 +22,9 @@ attributable to the document (its ``indexed_at`` is no later than the document's
 its ``title`` names the document). A span is a property of one position in one file: a chunk shared by two rows
 holds the span of whichever wrote last, so every shared row stays NULL. Nothing is invented: a column is filled only
 from a chunk value ``manifest_span`` accepts as recorded (a positive line, a positive end, a start that is positive
-or beside a recorded end). ``make_chunk_metadata`` writes 0 for "not recorded", and the engine's ``null_span_rows``
-counts a row whose chunk key is present even then, so a row can stay in the engine's count with nothing to copy;
-the summary names those rows apart (``chunk_span_unrecorded``).
+or beside a recorded end). ``make_chunk_metadata`` writes 0 for "not recorded"; the engine's ``null_span_rows``
+counts by the same value rule (``ChunkKeySweep.preconditions``, nexus-qmrfi), so a lineless chunk's 0 is not counted,
+and the summary names those rows apart (``chunk_span_unrecorded``) as rows with nothing to copy and nothing to lose.
 
 FILL-ONLY, COLUMN BY COLUMN, AND ONLY WHEN THE CHUNK ROW AGREES. Only a column that is NULL on the manifest row is
 written, with the chunk row's value. A column that already holds a value is never sent (the engine's append upserts a
@@ -34,12 +34,13 @@ position, and filling the row's other columns from it would join the lines of on
 A row whose stored columns agree with the chunk row (or are not recorded there) is filled on its NULL ones.
 
 WHAT THE SUMMARY ACCOUNTS FOR. The engine's ``null_span_rows`` (``ChunkKeySweep.preconditions``) counts a row with a NULL
-manifest column and the matching chunk key PRESENT, whatever its value. The summary splits the rows the scan reads the same
-way: ``counted`` (what the engine counts) = ``fillable`` + the named buckets of :data:`LEFT_BUCKETS`, each said to be lossy
-(the chunk row records a span that stays unused) or lossless (nothing recorded), so that accepting the residue is accepting
-named rows. Rows the engine never counts (``chunk_missing``, ``chunk_without_span_keys``) are reported apart. Because the
-engine tests key presence, a lineless chunk (``make_chunk_metadata`` writes 0) stays in its count whatever this rung does,
-until the engine tests for a recorded value as ``manifest_span`` does (bead nexus-qmrfi).
+manifest column whose chunk key RECORDS a value, by ``manifest_span``'s rule (a positive line, a positive end, a start that
+is positive or beside a recorded end, integers only). The summary splits the rows the scan reads the same way: ``counted``
+(what the engine counts) = ``fillable`` + the named buckets of :data:`LEFT_BUCKETS`. Every counted row has a recorded span on
+the chunk row, so a row left in a bucket is a recorded span that stays unused, and accepting the residue is accepting named
+rows. Rows the engine never counts (``chunk_missing``, ``chunk_without_span_keys``, ``chunk_span_unrecorded``) are reported
+apart: there is nothing recorded to copy or lose. Once every fillable row is written the engine count is ``counted -
+fillable``, and it reaches 0 when only unrecorded keys remain.
 
 THE ONLY WRITE ROUTE, AND WHAT IT COSTS. The fill goes through ``append_manifest_many`` (``UPSERT_APPEND``,
 ``CatalogRepository.insertManifestChunkRows``), which upserts by position. On a conflict it takes a sent span value
@@ -60,10 +61,11 @@ WHAT IT DOES.
              service, at the time limit, on a refused write, and on an indexed_at that could not be restored.
   verify   : positive signal only: a whole dry run found no fillable row.
 
-RESIDUAL WINDOW. Between the re-read and the POST a row can gain a co-owner, and a concurrent re-index of the position
-can change its chash or labels: the upsert takes chash, labels and ``labels_written`` from the request with no
-compare-and-set, so the POST puts the re-read values back over such a write (bead nexus-tj0wu asks the engine for the
-guard). Run the rung on a quiet tenant. A failed request does not strand the ``indexed_at`` restore: it runs in a
+RESIDUAL WINDOW. Between the re-read and the POST a row can gain a co-owner, which the engine cannot see: run the rung
+on a quiet tenant. A concurrent re-index or label write of the same position is closed (nexus-tj0wu): the upsert takes
+chash, labels and ``labels_written`` from the request, so every row carries ``expected`` (the chash, labels,
+``labels_written`` and span columns just read) and the engine writes it only while the stored row still equals them,
+else refuses that row, which the rung counts as ``raced``. A failed request does not strand the ``indexed_at`` restore: it runs in a
 ``finally`` for every document an earlier request wrote; a 409 on a request (a superseded collection) defers that
 request's rows (``write_refused_409``) and the scan goes on.
 
@@ -111,7 +113,9 @@ from nexus.upgrade_ladder.rungs.manifest_section_labels import (
     _default_writer,
     _row_collection,
     _title_names_document,
+    expected_values,
     minted_by_orphan_backfill,
+    refused_positions,
 )
 
 _log = structlog.get_logger(__name__)
@@ -138,7 +142,6 @@ LEFT_BUCKETS: tuple[tuple[str, str], ...] = (
     ("chunk_newer_than_document", "with a chunk row written after the document"),
     ("chunk_without_indexed_at", "with no indexed_at on the chunk row or the document"),
     ("chunk_titled_for_another", "with a chunk row titled for another document"),
-    ("chunk_span_unrecorded", "whose chunk span is 0 or not a number (nothing recorded)"),
     ("span_disagrees", "whose chunk row differs from a column the manifest already holds"),
 )
 
@@ -147,11 +150,11 @@ LEFT_BUCKETS: tuple[tuple[str, str], ...] = (
 class Counts:
     """What one scan saw.
 
-    A row with a NULL span column is in exactly one of three places: ``chunk_missing`` / ``chunk_without_span_keys``
-    (the engine does not count it: there is no chunk key beside the NULL column), or ``counted``, the rows the engine's
-    ``null_span_rows`` counts (a NULL manifest column and the chunk key present, any value). A counted row is
-    ``fillable`` or in exactly one of :data:`LEFT_BUCKETS`; ``abandoned`` says, per bucket, how many of those rows
-    have a span recorded on the chunk row that stays unused, as against rows with nothing recorded to lose."""
+    A row with a NULL span column is in exactly one of four places: ``chunk_missing`` / ``chunk_without_span_keys`` /
+    ``chunk_span_unrecorded`` (the engine does not count it: no chunk row, no chunk key beside the NULL column, or only
+    0s and non-numbers there), or ``counted``, the rows the engine's ``null_span_rows`` counts (a NULL manifest column
+    whose chunk key records a value, by ``manifest_span``'s rule). A counted row is ``fillable`` or in exactly one of
+    :data:`LEFT_BUCKETS`, and a left one has a recorded span that stays unused."""
 
     documents: int = 0
     rows: int = 0                        # manifest rows examined
@@ -160,7 +163,6 @@ class Counts:
     counted: int = 0                     # of those, the ones the engine's null_span_rows counts
     fillable: int = 0                    # exact for at least one NULL column (includes raced / write failures)
     filled: int = 0
-    fillable_still_counted: int = 0      # fillable, but another NULL column with its chunk key present would remain
     multi_row_cross_document: int = 0    # the chash has rows in more than one document
     multi_row_in_document: int = 0       # the chash recurs inside this one document
     tombstoned_co_owner: int = 0         # a deleted document also holds the chash
@@ -168,7 +170,7 @@ class Counts:
     orphan_minted: int = 0               # rows of documents the orphan backfill minted: left alone on purpose
     chunk_missing: int = 0               # no live chunk row for the chash (the engine does not count it)
     chunk_without_span_keys: int = 0     # the chunk row carries none of the keys of the NULL columns (not counted)
-    chunk_span_unrecorded: int = 0       # it carries them, but as 0 / not a number: nothing recorded to copy
+    chunk_span_unrecorded: int = 0       # it carries them, but as 0 / not a number: nothing recorded (not counted)
     chunk_newer_than_document: int = 0   # the chunk row was written after the document
     chunk_without_indexed_at: int = 0    # no indexed_at on one side, so not attributable
     chunk_titled_for_another: int = 0    # the chunk row's title names another document's file
@@ -179,7 +181,6 @@ class Counts:
     restore_failed: int = 0              # documents whose indexed_at could not be written back after the fill
     restore_failed_docs: list[str] = field(default_factory=list)
     by_collection: Counter = field(default_factory=Counter)
-    abandoned: Counter = field(default_factory=Counter)  # bucket name -> rows whose recorded span stays unused
 
     def as_dict(self) -> dict[str, int]:
         return {k: v for k, v in vars(self).items() if isinstance(v, int)}
@@ -195,30 +196,27 @@ class Counts:
         key-retirement sweep's dry run."""
         return self.counted == self.fillable + self.left()
 
-    def abandoned_total(self) -> int:
-        return sum(self.abandoned.values())
-
     def engine_count_after(self) -> int:
-        """What the engine's ``null_span_rows`` reads once every fillable row is written (a dry run predicts it): the
-        fillable rows leave the count, except those with another NULL column whose chunk key is present."""
-        return self.counted - self.fillable + self.fillable_still_counted
+        """What the engine's ``null_span_rows`` reads once every fillable row is written (a dry run predicts it): a
+        fillable row is written on every NULL column its chunk row records, so it leaves the count whole."""
+        return self.counted - self.fillable
 
     def summary(self) -> str:
         left = "; ".join(
-            f"{getattr(self, name)} {words}" + (f" ({self.abandoned[name]} with a recorded span unused)" if self.abandoned[name] else "")
+            f"{getattr(self, name)} {words}"
             for name, words in LEFT_BUCKETS
         )
         return (
             f"{self.documents} document(s), {self.rows} row(s): {self.span_complete} with a complete span, "
-            f"{self.null_rows} with a NULL span column. Engine-comparable (a NULL column and the chunk key present, "
-            f"any value; the engine counts these as null_span_rows, over every live document where this scan skips "
+            f"{self.null_rows} with a NULL span column. Engine-comparable (a NULL column whose chunk key records a "
+            f"value; the engine counts these as null_span_rows, over every live document where this scan skips "
             f"alias_of ones: compare with the key-retirement sweep's dry run): {self.counted} = {self.fillable} fillable "
-            f"({self.filled} filled, {self.fillable_still_counted} of the fillable still counted for a column with nothing to copy, "
-            f"{self.raced} changed before the write, {self.write_failed} write failed, {self.write_refused_409} refused 409) "
-            f"+ left NULL: {left}. Recorded span left unused: {self.abandoned_total()} row(s); the other left rows had "
-            f"nothing recorded to lose. Engine count once they are written: {self.engine_count_after()}"
-            f"{'' if self.reconciles() else ' [DOES NOT RECONCILE]'}. Not counted by the engine: {self.chunk_missing} "
-            f"chunk missing, {self.chunk_without_span_keys} chunk with no key for the NULL columns. "
+            f"({self.filled} filled, {self.raced} changed before the write, {self.write_failed} write failed, "
+            f"{self.write_refused_409} refused 409) + left NULL, each with a recorded span unused: {left}. "
+            f"Engine count once they are written: {self.engine_count_after()}"
+            f"{'' if self.reconciles() else ' [DOES NOT RECONCILE]'}. Not counted by the engine (nothing recorded): "
+            f"{self.chunk_missing} chunk missing, {self.chunk_without_span_keys} chunk with no key for the NULL columns, "
+            f"{self.chunk_span_unrecorded} chunk whose keys are 0 or not a number. "
             f"{self.restore_failed} indexed_at not restored"
         )
 
@@ -372,9 +370,8 @@ class ManifestSpanFillRung:
             for chash, meta in _chunk_metadatas(t3, collection, sorted(set(chashes))).items():
                 chunk_metas[(collection, chash)] = meta
 
-        keys = dict(SPAN_COLUMNS)
-        # (document, row, collection, columns to fill, filled row stays counted for another column)
-        plan: list[tuple[Any, Any, str, dict[str, int], bool]] = []
+        # (document, row, collection, columns to fill)
+        plan: list[tuple[Any, Any, str, dict[str, int]]] = []
         for i, (doc, row, nulls) in enumerate(candidates):
             collection = _row_collection(row, doc)
             meta = chunk_metas.get((collection, row.chash))
@@ -385,20 +382,22 @@ class ManifestSpanFillRung:
             if why == "no_span_keys":
                 counts.chunk_without_span_keys += 1
                 continue
+            if all(recorded[c] is None for c in nulls):
+                # the keys are there as 0 or not a number: the engine does not count the row (it counts by value), and
+                # there is nothing to copy or lose, whoever owns the chash
+                counts.chunk_span_unrecorded += 1
+                continue
             counts.counted += 1
-            lossy = any(recorded[c] is not None for c in nulls)
 
             def leave(bucket: str) -> None:
                 setattr(counts, bucket, getattr(counts, bucket) + 1)
-                if lossy:
-                    counts.abandoned[bucket] += 1
 
             if verdict[i] is not None:
                 leave(verdict[i])  # type: ignore[arg-type]
                 continue
             if span is None:
                 leave({
-                    "unrecorded": "chunk_span_unrecorded", "newer": "chunk_newer_than_document",
+                    "newer": "chunk_newer_than_document",
                     "no_indexed_at": "chunk_without_indexed_at", "other_title": "chunk_titled_for_another",
                 }[why])
                 continue
@@ -410,25 +409,23 @@ class ManifestSpanFillRung:
                 # values is trusted for this row (a fill would join lines of one writer to chars of another).
                 leave("span_disagrees")
                 continue
-            still = any(keys[c] in meta for c in nulls if c not in span)
-            plan.append((doc, row, collection, span, still))
+            plan.append((doc, row, collection, span))
         counts.fillable += len(plan)
-        counts.fillable_still_counted += sum(1 for *_x, k in plan if k)
         if writer is None or not plan:
             return
         self._write(reader, writer, plan, counts)
 
     def _write(
-        self, reader: Any, writer: Any, plan: list[tuple[Any, Any, str, dict[str, int], bool]], counts: Counts,
+        self, reader: Any, writer: Any, plan: list[tuple[Any, Any, str, dict[str, int]]], counts: Counts,
     ) -> None:
         """Re-read the batch just before writing, drop what changed, and append the rest per collection."""
-        docs = sorted({str(d.tumbler) for d, _r, _c, _s, _k in plan})
-        stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _s, _k in plan}  # as read at scan
+        docs = sorted({str(d.tumbler) for d, _r, _c, _s in plan})
+        stamps = {str(d.tumbler): getattr(d, "indexed_at", "") for d, _r, _c, _s in plan}  # as read at scan
         fresh = reader.get_manifests(docs) or {}
         fresh_rows = {t: {r.position: r for r in rows} for t, rows in fresh.items()}
-        again, again_deleted = ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r, _c, _s, _k in plan}))
+        again, again_deleted = ManifestSectionLabelsRung._owner_rows(reader, sorted({r.chash for _d, r, _c, _s in plan}))
         by_collection: dict[str, dict[str, list[dict]]] = {}
-        for doc, row, collection, span, _k in plan:
+        for doc, row, collection, span in plan:
             tumbler = str(doc.tumbler)
             now = fresh_rows.get(tumbler, {}).get(row.position)
             if (
@@ -451,6 +448,7 @@ class ManifestSpanFillRung:
                 # the upsert rewrites the labels from the request: send the row's own, as just read
                 "section_title": now.section_title, "section_type": now.section_type,
                 "page_number": now.page_number, "labels_written": bool(getattr(now, "labels_written", False)),
+                "expected": expected_values(now),
             })
         written: set[str] = set()
         in_flight: list[str] = []  # the request being sent: a raise after the engine committed it restamped these too
@@ -478,13 +476,17 @@ class ManifestSpanFillRung:
                         continue
                     in_flight = []
                     failed = {str(d) for d in (result or {}).get("failed_doc_ids") or []}
+                    refused = refused_positions(result)
                     for doc_id, rows in request:
                         if doc_id in failed:
                             counts.write_failed += len(rows)
-                        else:
-                            counts.filled += len(rows)
-                            counts.by_collection[collection] += len(rows)
-                            self._filled += len(rows)
+                            continue
+                        lost = sum(1 for r in rows if (doc_id, int(r["position"])) in refused)
+                        counts.raced += lost
+                        if len(rows) > lost:
+                            counts.filled += len(rows) - lost
+                            counts.by_collection[collection] += len(rows) - lost
+                            self._filled += len(rows) - lost
                             written.add(doc_id)
         finally:
             # also when a later request raised: the engine restamped indexed_at on every document an earlier request
