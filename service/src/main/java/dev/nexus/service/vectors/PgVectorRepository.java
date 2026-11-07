@@ -8791,7 +8791,7 @@ FROM scope s
      * </ol>
      * The common page (a label whose chunks have one owner each) is decided by the first read; reading {@code 2 * cap}
      * eagerly cost +55% on a mid-sized label that re-runs anyway (nexus-zk7rw review r1). The price is on a page that
-     * does widen, which now reads {@code cap} and then {@code 2 * cap}. A {@code cap} above half of
+     * does widen, which now reads {@code cap} and then {@code 2 * cap}: at most twice what the eager read cost. A {@code cap} above half of
      * {@link Integer#MAX_VALUE} cannot be doubled and answers the cap.
      */
     static int distinctQualifying(int cap, java.util.function.IntFunction<List<String>> readKeys) {

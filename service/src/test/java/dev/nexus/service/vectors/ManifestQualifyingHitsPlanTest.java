@@ -214,8 +214,9 @@ class ManifestQualifyingHitsPlanTest {
      * chunks (the Hash Join reads the whole manifest and the chunk rows, 0.5 s on lab-m; there the planner takes it from
      * a cap of 41 to 82, and below that a nested loop with a sequential scan of the chunk rows) and pinned the shape:
      * {@link #assertHashJoinOverSeqScans}. On this 40,000-chunk
-     * fixture the analyzed gated plan is that one at EVERY cap, label and gate probed (11 to 1,000), so the pin does not
-     * depend on a cap; a planner that learns to stream the gated count turns it red, and the pin is then to be replaced
+     * fixture the analyzed gated plan was that one at every cap, label and gate probed once by hand (11 to 1,000); the
+     * test asserts caps 11 and 22. The pin is the 40,000-chunk fixture's shape, not the production-scale one: at 220,000
+     * chunks and a cap of about 11 the planner takes a nested loop instead. A planner that learns to stream the gated count turns it red, and the pin is then to be replaced
      * by {@link #assertStreamingIndexPlan}, not loosened.
      */
     private void assertAllShapes(String state, boolean gatedStreams) {
@@ -238,7 +239,7 @@ class ManifestQualifyingHitsPlanTest {
     @Test
     void theCountPlanIsAStreamingIndexPlan_onAnUnanalyzedTableAndAnAnalyzedOne_withAndWithoutATextGate()
             throws Exception {
-        // 11 is a page of 10 plus one; 22 is the bound the distinct count reads for it.
+        // 11 is a page of 10 plus one; 22 is the bound the distinct count widens to when its first read holds repeats.
         String unanalyzedPlan = plan("rare-x", 11);
         String unanalyzedGatedPlan = plan("rare-x", 11, GATES[0], false);
         assertAllShapes("unanalyzed", true);

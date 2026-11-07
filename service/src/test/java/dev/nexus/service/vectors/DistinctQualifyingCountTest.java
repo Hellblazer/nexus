@@ -112,7 +112,7 @@ class DistinctQualifyingCountTest {
 
         int count = PgVectorRepository.distinctQualifying(4, fake::read);
 
-        assertThat(count).isGreaterThanOrEqualTo(4);
+        assertThat(count).as("the wide read's seven chunks, not the cap").isEqualTo(7);
         assertThat(fake.reads).containsExactly(4, 8);
         assertThat(widens() - before).isEqualTo(1);
     }
@@ -169,5 +169,47 @@ class DistinctQualifyingCountTest {
 
         assertThat(fake.reads).containsExactly(5);
         assertThat(widens() - before).isZero();
+    }
+
+    /** The nexus-zk7rw count this class replaced: one read of twice the cap (the cap alone for a cap of 1). */
+    private static int eagerTwiceTheCap(int cap, List<String> source) {
+        int fetchCap = cap > 1 && cap <= Integer.MAX_VALUE / 2 ? 2 * cap : cap;
+        List<String> rows = source.subList(0, Math.min(fetchCap, source.size()));
+        int distinct = new java.util.HashSet<>(rows).size();
+        return rows.size() < fetchCap ? distinct : Math.max(distinct, cap);
+    }
+
+    @Test
+    void everyKeySequenceOverFourChunksUpToLengthEight_getsTheEagerReadsDecision_atCapsOneToFive() {
+        // The decision is "at or above the cap" (re-run) or an exact count below it. Exhaustive over a small alphabet,
+        // so a later change to either branch that flips one decision fails here, not only in the hand-run measurement.
+        String[] alphabet = {"c/a", "c/b", "c/c", "c/d"};
+        int compared = 0;
+        for (int length = 0; length <= 8; length++) {
+            int[] digits = new int[length];
+            int total = (int) Math.pow(alphabet.length, length);
+            for (int n = 0; n < total; n++) {
+                int v = n;
+                for (int i = 0; i < length; i++) {
+                    digits[i] = v % alphabet.length;
+                    v /= alphabet.length;
+                }
+                List<String> source = new ArrayList<>(length);
+                for (int d : digits) {
+                    source.add(alphabet[d]);
+                }
+                for (int cap = 1; cap <= 5; cap++) {
+                    int old = eagerTwiceTheCap(cap, source);
+                    int now = PgVectorRepository.distinctQualifying(cap, k -> source.subList(0, Math.min(k, source.size())));
+                    if (old >= cap) {
+                        assertThat(now).as("re-run kept for %s at cap %d", source, cap).isGreaterThanOrEqualTo(cap);
+                    } else {
+                        assertThat(now).as("exact count kept for %s at cap %d", source, cap).isEqualTo(old);
+                    }
+                    compared++;
+                }
+            }
+        }
+        assertThat(compared).as("non-vacuity: every sequence up to length 8 at five caps").isEqualTo(5 * 87381);
     }
 }
