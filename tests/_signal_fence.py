@@ -96,7 +96,7 @@ def _cmdline(pid: int) -> str:
         argv0 = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
     except OSError:
         return ""
-    return Path(argv0.decode("utf-8", "replace")).name[:60]
+    return Path(argv0.decode("utf-8", "replace")).name.split(" ", 1)[0][:60]  # a rewritten title can hold spaces
 
 
 def owned(pid: int, *, root: int, token: str) -> bool | None:
