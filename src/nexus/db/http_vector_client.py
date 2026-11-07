@@ -5261,11 +5261,23 @@ class HttpVectorClient:
             body["floor_min_chunks"] = floor_min_chunks
         return body
 
+    @staticmethod
+    def _expires_body(quarantine_expires_at: str | None) -> dict:
+        """The optional retention stamp of the move route (nexus-alsq3), additive.
+
+        ``quarantine_expires_at`` is the absolute instant (``yyyy-MM-ddTHH:mm:ssZ``) the client wants the moved
+        rows kept until (``quarantined_at`` plus ``NX_GC_QUARANTINE_DAYS``). An engine that carries vectors-056
+        writes it on the rows it moves and its expiry of client-moved knowledge quarantine then waits for the
+        later of its own retention and the stamp; an older engine ignores the field and expires at its own
+        retention, and its response does not say so. Sent only when given.
+        """
+        return {} if quarantine_expires_at is None else {"quarantine_expires_at": quarantine_expires_at}
+
     def gc_quarantine_orphans(
         self, collection: str, quarantine_collection: str,
         quarantined_at: str, sample_limit: int = 20, *,
         floor_fraction: float | None = None, floor_min_chunks: int | None = None,
-        force: bool = False,
+        force: bool = False, quarantine_expires_at: str | None = None,
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans.
 
@@ -5284,6 +5296,7 @@ class HttpVectorClient:
                 "quarantined_at": quarantined_at,
                 "sample_limit": sample_limit,
                 **self._floor_body(floor_fraction, floor_min_chunks, force),
+                **self._expires_body(quarantine_expires_at),
             },
             tenant=self._tenant,
         )
@@ -5292,7 +5305,7 @@ class HttpVectorClient:
         self, collection: str, quarantine_collection: str,
         quarantined_at: str, sample_limit: int, row_limit: int, *,
         floor_fraction: float | None = None, floor_min_chunks: int | None = None,
-        force: bool = False,
+        force: bool = False, quarantine_expires_at: str | None = None,
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans with ``row_limit`` (catalog-037/
         nexus-a6mon's engine route; wired client-side at nexus-e8h5x review
@@ -5332,6 +5345,7 @@ class HttpVectorClient:
                 "sample_limit": sample_limit,
                 "row_limit": row_limit,
                 **self._floor_body(floor_fraction, floor_min_chunks, force),
+                **self._expires_body(quarantine_expires_at),
             },
             tenant=self._tenant, gate_busy=True,
         )

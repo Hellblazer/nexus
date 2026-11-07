@@ -34,11 +34,15 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    a floor wedged every bulk quarantine, because one burst ages out as ~100%
    of the sibling's client rows. ``NX_GC_FLOOR_FRACTION`` / ``NX_GC_FORCE``
    govern the move into quarantine and nothing on this path.
-   ``NX_GC_QUARANTINE_DAYS`` governs this client expiry only. For a
-   ``quarantine-knowledge__*`` sibling a newer engine also expires the client-moved
-   rows, on its own ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14),
-   whatever ``NX_GC_QUARANTINE_DAYS`` says; it never touches a code, docs or rdr
-   sibling, so a longer client value is honoured there and only there.
+   ``NX_GC_QUARANTINE_DAYS`` governs this client expiry, and rides every move as
+   an absolute ``quarantine_expires_at`` stamp (nexus-alsq3,
+   :func:`quarantine_expires_at`). For a ``quarantine-knowledge__*`` sibling a
+   newer engine also expires the client-moved rows, at the LATER of its own
+   ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14) and the row's
+   stamp, so a longer ``NX_GC_QUARANTINE_DAYS`` is honoured there too. A row moved
+   before the stamp existed, or by an engine that ignores the field, is judged by
+   the engine's retention alone. The engine never touches a code, docs or rdr
+   sibling.
    The client expiry is a bounded, keyed drain (RDR-222 Amendment A1, nexus-1579m;
    :func:`expire_quarantine_bounded_serverside`): pages of ``GC_EXPIRE_ROW_LIMIT_DEFAULT``
    rows, each its own request key, so one expiry too large for the edge's ~30 s deadline
@@ -168,6 +172,27 @@ def quarantine_days() -> int:
     return val
 
 
+#: The one stamp shape (``quarantined_at``'s, and what the engine compares as text).
+_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def quarantine_expires_at(quarantined_at: str, days: int | None = None) -> str | None:
+    """The absolute instant a row moved at *quarantined_at* is to be kept until: *quarantined_at* plus *days*
+    (default :func:`quarantine_days`, ``NX_GC_QUARANTINE_DAYS``), in the same fixed-width UTC shape.
+
+    This is the client's retention, written on each row by the engine at move time (nexus-alsq3) so the engine's
+    own expiry of client-moved knowledge quarantine waits for the later of its retention and this instant. An
+    ABSOLUTE instant, so the engine needs no knowledge of the client's policy and a later change of the variable
+    does not move rows already stamped. ``None`` when *quarantined_at* is not that shape: no stamp is better than a
+    guessed one, and the engine keeps its own retention for the row.
+    """
+    try:
+        moved = datetime.strptime(quarantined_at, _STAMP_FORMAT).replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return None
+    return (moved + timedelta(days=quarantine_days() if days is None else days)).strftime(_STAMP_FORMAT)
+
+
 def now_stamp() -> str:
     """The GC quarantine timestamp format: ``2026-08-10T12:00:00Z``.
 
@@ -284,6 +309,12 @@ def _read_floor(result: dict, floor: GcFloor | None, moved_before: int) -> None:
         )
 
 
+def _expires_fields(quarantined_at: str) -> dict[str, Any]:
+    """The additive ``quarantine_expires_at`` request field (nexus-alsq3), or nothing when the stamp is unusable."""
+    stamp = quarantine_expires_at(quarantined_at)
+    return {} if stamp is None else {"quarantine_expires_at": stamp}
+
+
 def quarantine_orphans_serverside(
     db: Any, collection_name: str, quarantine_name: str,
     quarantined_at: str, sample_limit: int = 20, *, floor: GcFloor | None = None,
@@ -297,10 +328,12 @@ def quarantine_orphans_serverside(
     fn = getattr(db, "gc_quarantine_orphans", None)
     if fn is None:
         return None
+    # nexus-alsq3: the client's retention rides the move, so the engine's expiry honours NX_GC_QUARANTINE_DAYS.
+    extra = _expires_fields(quarantined_at)
     if floor is None:
-        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit)
+        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, **extra)
     else:
-        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, **floor.request_fields())
+        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, **floor.request_fields(), **extra)
         _read_floor(result, floor, 0)
     return int(result.get("moved", 0)), list(result.get("sample") or [])
 
@@ -622,6 +655,9 @@ def quarantine_orphans_bounded_serverside(
         # is read: a later batch's ``{"given": false}`` is not an echo of this request.
         floor_bearing = floor is not None and batches == 0
         extra = floor.request_fields() if floor_bearing else {}
+        # The retention stamp rides EVERY batch (nexus-alsq3): each batch moves its own rows and the engine stamps
+        # the rows of the call that moved them.
+        extra.update(_expires_fields(quarantined_at))
         try:
             result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit, **extra)
         except Exception as exc:  # noqa: BLE001 — strict mode re-labels a mid-drain failure; otherwise re-raised unchanged

@@ -831,6 +831,19 @@ NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 167)
 #: (nexus-rfvyy.7.14); set it to that tag when it is cut if the tag is not v0.1.182. ``(0, 0, 0)`` means unset.
 SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 182)
 
+#: The first engine that carries nexus-alsq3's client quarantine retention (Liquibase ``vectors-056``: the
+#: move writes ``quarantine_expires_at`` and the client-moved knowledge expiry waits for it) AND the engine-owned
+#: row key it adds to the chunk-key plan. The second half is why a release must not pin an older engine: the
+#: retire-keys sweep and constraint requests render their engine-owned key list from
+#: ``chunk-metadata-keys.toml`` and the engine refuses a list whose digest it does not hold, so a client with the
+#: key in its table is refused by an engine without it (the sweep's upgrade rung and the key-retirement verb).
+#: The retention stamp itself degrades quietly on an older engine (it is ignored and the engine expires at its
+#: own 14 days). ``scripts/check_engine_release_floor.py`` fails ``--ledger-only`` and the tag-time forms when
+#: :data:`REQUIRED_ENGINE_VERSION` is below this. A release gate only; on develop it leads the pin until the paired
+#: client release bumps the pin. Set to the next engine tag after v0.1.181; if the tag that carries ``vectors-056``
+#: is a later one, set this to that tag when it is cut. ``(0, 0, 0)`` means unset.
+QUARANTINE_EXPIRES_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 182)
+
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
     """Parse ``X.Y.Z`` (optional leading ``v``/``V``) to a tuple, else ``None``.

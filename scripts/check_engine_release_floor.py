@@ -60,7 +60,8 @@ ledger read, for release-branch PR CI.
 **Note-URI floor** (RDR-231, nexus-bivz3.15/.16): ``--ledger-only`` and the bare/auto-paired forms
 also fail when ``REQUIRED_ENGINE_VERSION`` is below ``NOTE_URI_MIN_ENGINE_VERSION``
 (:func:`check_note_uri_floor_vs_pin`), and when it is below ``SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION``
-(RDR-243 Phase 2, :func:`check_sensitivity_exclude_floor_vs_pin`). Develop pushes run neither mode, so the floor leading the pin
+(RDR-243 Phase 2, :func:`check_sensitivity_exclude_floor_vs_pin`), and when it is below
+``QUARANTINE_EXPIRES_MIN_ENGINE_VERSION`` (nexus-alsq3, :func:`check_quarantine_expires_floor_vs_pin`). Develop pushes run neither mode, so the floor leading the pin
 there is not flagged.
 
 **Client-precondition mode** (``--client-precondition [TAG]``, nexus-9ssih):
@@ -529,10 +530,31 @@ def check_sensitivity_exclude_floor_vs_pin() -> int:
     )
 
 
+def check_quarantine_expires_floor_vs_pin() -> int:
+    """A release must pin an engine that carries the client quarantine retention stamp (nexus-alsq3, ``vectors-056``).
+
+    The engine half adds the engine-owned row key ``quarantine_expires_at`` to the chunk-key plan, whose
+    engine-owned (ROW) key list the engine holds by digest. This client renders the list from its key table, so an
+    engine without the key refuses its retire-keys sweep and constraint requests. A release pinning an older engine
+    would converge every local install to one that refuses them (the stamp itself is ignored quietly). Same shape and
+    callers as :func:`check_note_uri_floor_vs_pin`. Returns ``0`` (unset floor, or pin >= floor) or ``1``.
+    """
+    return _floor_vs_pin(
+        "QUARANTINE_EXPIRES_MIN_ENGINE_VERSION", _engine_version.QUARANTINE_EXPIRES_MIN_ENGINE_VERSION,
+        "quarantine-expires", "QUARANTINE EXPIRES",
+        "This client's chunk-key plan names the engine-owned key quarantine_expires_at, which an engine "
+        "without vectors-056 refuses (the engine holds that list by digest), so a release pinning v{pin} would "
+        "converge every local install to an engine that refuses the key-retirement sweep.",
+    )
+
+
 def check_feature_floors_vs_pin() -> int:
-    """Every feature floor a release pin must meet (note-URI, sensitivity-exclude). Runs them all, so one
-    run names every failing floor; returns ``1`` when any fails."""
-    rcs = [check_note_uri_floor_vs_pin(), check_sensitivity_exclude_floor_vs_pin()]
+    """Every feature floor a release pin must meet (note-URI, sensitivity-exclude, quarantine-expires). Runs them
+    all, so one run names every failing floor; returns ``1`` when any fails."""
+    rcs = [
+        check_note_uri_floor_vs_pin(), check_sensitivity_exclude_floor_vs_pin(),
+        check_quarantine_expires_floor_vs_pin(),
+    ]
     return 1 if any(rcs) else 0
 
 
