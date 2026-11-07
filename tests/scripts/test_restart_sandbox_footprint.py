@@ -225,6 +225,7 @@ def _cleanup_sandbox(run, tmp_path: Path, procs: list[tuple[int, str]]):
     sb.nexus_config.mkdir(parents=True)
     sb.watch = _Watch(procs)
     sb.before = {"rs_alpha": {"sessionId": "x"}}
+    sb.real_nx = ""  # the engine-side teardown reads (nexus-iz8ub) are covered in test_restart_sandbox_teardown
     sb.tmux = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "")  # no server: nothing to kill
     return sb
 
