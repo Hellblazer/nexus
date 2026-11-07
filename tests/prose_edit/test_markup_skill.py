@@ -356,12 +356,42 @@ def test_a_resource_unavailable_error_means_a_dialog_and_the_document_tools_may_
     and the app's document tools then drop out of the session; only open_document stays listed."""
     text = s6b()
     err = text[text.index('A call that ends with the error "read: Resource temporarily unavailable"'):text.index("If a call fails in any other way")]
-    before(err, "waiting on a dialog", "closed its connection", "only open_document left", "Tell the author to answer the dialog",
-           "Don't Save", "ToolSearch", "call the open_document tool on the document again", "poll as above")
+    before(err, "waiting on a dialog", "closed its connection", "only open_document left",
+           "Ask the author which answer the dialog got", "After \"Don't Save\"", "ToolSearch",
+           "call the open_document tool on the document again", "poll as above")
     cp = closing()
     fallback = cp[cp.index("If a call fails or does not answer"):]
     before(fallback, "Resource temporarily unavailable", "waiting on one of those dialogs", "answer it as above",
            "drop out of the session", "call the open_document tool on the document again", "before the next get_document call")
+
+
+def test_the_resource_unavailable_branch_asks_which_answer_and_stops_after_cancel_or_save() -> None:
+    """scmcs.4 review r1 blocker 2: the error comes back only once the dialog is answered, so the skill asks which
+    answer it got: Don't Save re-opens, Cancel kept the author's changes, Save rewrote the file, so run again."""
+    text = s6b()
+    err = text[text.index('A call that ends with the error "read: Resource temporarily unavailable"'):text.index("If a call fails in any other way")]
+    before(err, "has now been answered", "only once the dialog is gone", "Ask the author which answer the dialog got",
+           "end your turn", "After \"Don't Save\"", "open_document tool on the document again",
+           "After \"Cancel\"", "kept the app's changes", "delete WORK and stop",
+           "After \"Save\"", "rewrote the whole file", "run again")
+
+
+def test_both_failure_branches_after_the_open_keep_the_authors_own_work_caveat() -> None:
+    """scmcs.4 review r1 blocker 1: an unsaved-changes prompt can come up after open_document whatever the pre-open
+    read showed, and Don't Save loses the author's own work, so both failure branches say so."""
+    text = s6b()
+    err = text[text.index('A call that ends with the error "read: Resource temporarily unavailable"'):text.index("If a call fails in any other way")]
+    other = text[text.index("If a call fails in any other way"):text.index("If the polls end with `url` still another file")]
+    for branch in (err, other):
+        before(branch, "only for changes an earlier prose-edit review left", "never \"Save\"",
+               "loses changes that are the author's own work", "the author's to decide first")
+
+
+def test_the_wait_for_the_dialog_answer_is_an_exception_to_every_stop_deleting_work() -> None:
+    """scmcs.4 review r1 blocker 3: step 6b ends the turn to ask which answer a dialog got, with WORK in place, which
+    the every-stop-deletes-WORK rule of step 5 must name."""
+    step5 = TEXT[TEXT.index("5. WORK is the directory"):TEXT.index("6. If the brief contains")]
+    before(step5, "On every stop after WORK exists", "are the exceptions", "step 6b's wait for the author to say which answer a dialog got")
 
 
 def test_6b_tells_the_author_not_to_type_in_the_app_until_the_review_ends() -> None:
