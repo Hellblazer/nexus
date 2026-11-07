@@ -317,7 +317,7 @@ def pins(*, hybrid_default, engine: dict) -> dict:
             "k": K, "seed": SEED, "queries_per_dataset": QUERIES, "corpus_cap": CAP, "resamples": RESAMPLES,
             "ingest_cap_s": None, "hybrid_default": hybrid_default, "gain": "2^g-1 (grades checked to be 1)",
             "duplicate_text": "equivalence classes (ask rdr244-duplicate-text)",
-            "query_text": "passed whole to nx search; the embedder truncates at its own window",
+            "query_text": "passed whole to nx search, length unchecked; the embedder's handling past its window is unmeasured",
             "rank_order": "nx search output order; key order within equal-distance runs",
             "distance_threshold": "none: a bge collection gets no threshold (search_engine."
                                   "_threshold_for_collection_model)",
