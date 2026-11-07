@@ -900,6 +900,8 @@ name-to-file map.
 
 ### Phase 4: Hand-off
 
+#### Step 1: RDR-240's runner on the run path
+
 RDR-240's runner calls `resolve` and `run_script`; this RDR closes when its
 first procedure, registered and approved, runs through it.
 
@@ -974,13 +976,149 @@ first procedure, registered and approved, runs through it.
 
 ### Contradiction Check
 
+No contradictions found between the research findings, the design and the
+plan. Each constraint in "What the probes force on any design" has a design
+item: PUC Lua 5.4 only (Technical Design 9); compile in mode `"t"` and refuse
+byte 27 (items 4 and 11); plain values in and a host-walked, capped
+conversion out (items 12, 14 and 15); no host object and no pre-built
+closure in the environment (items 10 and 12); no `coroutine` in version 1,
+and wrappers for both `create` and `wrap` when it comes (item 10); the
+guarded `pcall` and the rearming hook (item 14); the result cap (item 14);
+and a static check over Lua's own bytecode (item 4). The cases of
+`registry_probe.py` match the refusals of item 8 and the registry cases of
+the Test Plan.
+
+Three places were read for conflict and agree. The dynamic index on a
+string passes the static check in Key Discoveries, and Technical Design 4
+says so and gives it to the second layer. Wall time is a default limit in
+item 14, and A2 says one long C call overruns it; the design states this as a
+gap to measure in Phase 1 Step 2, with Alternative 2 as the hardening if it
+proves large. The registry probe ran against an in-memory stand-in, so it
+shows the shape of the state rules, not the engine's enforcement of them;
+that enforcement is Phase 2 Step 1 and rests on A6 and A7.
+
 ### Assumption Verification
+
+Research records: 28 in T2, `nexus_rdr/242-research-1` to `-28`, one for
+each of the 21 Key Discoveries (1 to 21) and one for each of A1 to A7 (22
+to 28). By class: 22 verified (20 by spike, 2 by source search), 1
+documented (prior art, docs only), 5 assumed.
+
+Verified: A3, by a code read of each verb's nearest client call. A4, for
+`lupa` 2.8 only: the calibration passed there, no other release in
+`>=2.8,<3` was checked, and the calibration test in the suite is what fails
+on a change.
+
+Open, not resolved:
+
+- A1: the native Windows install has not run. Phase 1 Step 1 runs it on
+  qwent before anything else lands.
+- A2: the wall-time overrun of one long C call is not measured. Phase 1
+  Step 2 measures it. The instruction and memory limits hold for Lua 5.4 by
+  spike.
+- A5: not run, and it waits on the first Open Question (which hardware holds
+  the key). The FIDO2 variant (`PROTOCOL.u2f`) was not read and its verifier
+  is not written. Phase 2 Step 1 tests each key type in both verifiers;
+  Phase 2 Step 4 enrolls the key and approves one script.
+- A6: argued in Technical Design 7, not tested. The credential tests of the
+  Test Plan test it; the untouched-key case is a hand test on the laptop,
+  since CI has no key.
+- A7: no Java code exists. Phase 2 Step 1 writes and tests it.
+
+A5, A6 and A7 are recorded as assumed with docs-only evidence, so the
+Layer 2 census lists them as high risk. None of the three can be verified
+before the hardware question is answered and Phase 2 code exists. They are
+not marked acknowledged; that is Sam's call at the gate.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| `LuaRuntime(register_eval, register_builtins, unpack_returned_tuples, attribute_filter, max_memory)` | `lupa` 2.8, `lupa.lua54` | Spike |
+| `load(src, name, "t", env)`, `string.dump`, `debug.sethook` count hook | Lua 5.4 bundled in `lupa` 2.8 | Spike |
+| SSHSIG verification of an `ssh-ed25519` signature | `cryptography` | Spike |
+| `ssh-keygen -Y sign`, `ssh-keygen -Y verify` | OpenSSH 10.3p1 | Spike |
+| SSHSIG for `sk-` keys (flags and counter) | OpenSSH `PROTOCOL.u2f` | Not verified (not read) |
+| Ed25519 and ECDSA P-256 verification | JDK | Docs Only (A7) |
+| `db.resolve_title`, `db.list_entries`, `db.search` | nexus T2 store | Source Search |
+| `load_packaged_table` | `nexus.tables` | Source Search |
 
 ### Scope Verification
 
+The five gaps map to deliverables. Gap 1 to Technical Design 9 to 11 and
+Phase 1. Gap 2 to items 12 and 13 and Phase 3. Gap 3 to items 14 and 15 and
+Phase 1 Step 2. Gap 4 to the end of item 13 and the grant checks of items 6
+and 8: a write verb is its own entry in the verb table, granted only when
+declared and covered by Sam's signature, and version 1 ships none. Gap 5 to
+items 1 to 8 and Phase 2.
+
+The RDR has no section headed Minimum Viable Validation. The end-to-end
+proof in scope is Phase 2 Step 4: Sam enrolls his key and approves one
+fixture script on the laptop, and it runs on macOS, chas and qwent. The
+close condition is Phase 4: RDR-240's first procedure, registered and
+approved, runs through `resolve` and `run_script`. Both are in scope, not
+deferred. Phase 2 Step 4 cannot run until the first Open Question is
+answered.
+
+Out of scope as written: write verbs, tuple-space verbs (the aura stage of
+nexus-mdbds), `coroutine`, an MCP tool that registers, and the worker
+process of Alternative 2. RDR-240's edit to its own premise (a procedure
+file is what a registration reads) belongs to RDR-240, which cannot be
+accepted before this RDR is.
+
 ### Cross-Cutting Concerns
 
+- **Versioning**: `lupa>=2.8,<3`, raised deliberately. The calibration test
+  and the escape suite fail on a bytecode layout change or a new global. The
+  checker version is in the signed payload and the check re-runs before
+  every run, so a stricter checker refuses an old approval. The bundled Lua
+  5.4 patch release is not recorded (A4).
+- **Build tool compatibility**: `lupa` installs from wheels with no
+  compiler on the platforms checked; native Windows is open (A1).
+  `cryptography` becomes a direct dependency.
+- **Licensing**: `lupa` 2.8's package metadata says "MIT style" (read
+  2026-11-07). The license of the bundled Lua was not read for this
+  response.
+- **Deployment model**: scripts run in the client process (the `nx` CLI and
+  the MCP server). The registry needs a Liquibase changeset, three tables
+  and the `/v1/scripts` routes, so it rides an engine-service release. The
+  RDR does not say what `nx script` prints against an engine without those
+  routes; that is left to implementation.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: nothing runs a script until RDR-240's
+  `run_procedure` calls `resolve` and `run_script`; neither the CLI nor MCP
+  runs one directly (item 16). The phases land the sandbox, the registry and
+  the verbs separately.
+- **Secret/credential lifecycle**: the approver key is generated in
+  hardware and never exists as a file, an environment variable or a token.
+  Enrollment is once, from the `root` scope, with proof of possession;
+  rotation is signed by the current key; a lost key is cleared by an
+  operator statement in the runbook (Technical Design 7). Which hardware is
+  the first Open Question; whether revocation needs the key is the second.
+- **Memory management**: one `LuaRuntime` per run, discarded after it; a
+  64 MB `max_memory` cap; a result cap of 1 MB of JSON and 32 levels,
+  checked while the host walks the value. The 200 MB string returned with no
+  cap is why the result cap is the host's.
+- **Tenancy**: all three tables are scoped to the tenant; the registrant
+  comes from the authenticated principal; a tenant holds at most 100 pending
+  versions.
+- **Day 2 operations**: the three tables have no update or delete route, so
+  rows accumulate; the RDR states no retention for old versions or events.
+  The one manual operation is the operator reset of a lost key.
+
 ### Proportionality
+
+The RDR is about 1,150 lines for two layers: a sandbox and a registry with
+signed approval. The registry exists because of Sam's direction of
+2026-11-03, the sandbox because of Gaps 1 and 3. Research Findings is the
+longest part because it records 21 probe findings; each one forced a
+design item or is cited by one. Version 1 is built for one consumer: seven
+read verbs, no write, no `coroutine`. The largest cost is engine work (a
+changeset, three tables, routes and SSHSIG in Java); Alternative 7 rejects
+the cheaper store for a stated reason. Two sections could be trimmed before
+locking: the Investigation list repeats questions the Key Discoveries
+answer, and Alternative 4 is a pointer to RDR-240. Neither is trimmed here,
+since this preparation changes no design text.
 
 ## References
 
@@ -1006,3 +1144,6 @@ first procedure, registered and approved, runs through it.
   registry spikes and their findings (three new escapes and their
   mitigations), A4 to A7, Alternatives 5 to 8, the threat model, Phase 2 and
   its tests, and Open Questions. Retitled.
+- 2026-11-07: research recorded as structured findings, Finalization Gate
+  responses written, plan steps re-headed to the template grammar (no design
+  change).
