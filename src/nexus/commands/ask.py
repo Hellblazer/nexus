@@ -160,7 +160,7 @@ def live_lock(timeout: float = LOCK_WAIT) -> Iterator[None]:
         deadline = time.monotonic() + timeout
         while True:
             try:
-                lock_fd(fd, blocking=False)
+                lock_fd(fd, blocking=False)  # lifecycle-gate-allow: a bounded mutex over one batch record's read-modify-write, not a lifecycle election
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
