@@ -59,7 +59,9 @@ def _nx_service(verb: str, config_dir: Path) -> int:
     "initdb, pg_upgrade --check, pg_upgrade, start the service, then update_extensions.sql and "
     "vacuumdb --all --analyze-in-stages. Any failure after the move removes the new directory and "
     "moves the original back. <data>.old is kept. "
-    "This command is not yet run against a real pre-17 cluster; copy the data directory first.",
+    "This command is not yet run against a real pre-17 cluster; copy the data directory first. "
+    "Nothing locks the service during the upgrade: close other nx and Claude Code sessions and disable "
+    "an autostart unit first.",
 )
 @click.option("--config-dir", "config_dir_str", default=None, help="Config directory override.")
 def pg_upgrade_cmd(old_bin: Path, check_only: bool, do_apply: bool, config_dir_str: str | None) -> None:

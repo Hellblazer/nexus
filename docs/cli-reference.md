@@ -4540,7 +4540,9 @@ with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
 It is the scripted form of "A local cluster older than PostgreSQL 17" in
 [the migration runbook](migration-runbook.md). Linux and macOS only.
 
-**Not yet run against a real pre-17 cluster; copy the data directory first.**
+**Not yet run against a real pre-17 cluster; copy the data directory first.** Nothing locks the service while
+the upgrade runs: close other `nx` sessions and Claude Code sessions with the conexus plugin, and disable an
+autostart unit (launchd, systemd), before `--apply`.
 The command is tested against fake PostgreSQL binaries only. Until a real run
 exists, take a copy of the data directory (`cp -a <data> <copy>`) before
 `--apply`; the dry run and `--apply` both print this reminder.

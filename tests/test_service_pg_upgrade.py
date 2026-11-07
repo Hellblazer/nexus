@@ -692,6 +692,40 @@ def test_build_plan_resolves_its_paths(rig: Rig, monkeypatch: pytest.MonkeyPatch
     assert plan.config_dir.is_absolute() and plan.old_bin.is_absolute() and plan.pgdata.is_absolute()
 
 
+def test_a_relative_bundle_bin_is_made_absolute(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review r2: a relative NEXUS_PG_BIN would break once pg_upgrade runs with cwd at the work directory."""
+    monkeypatch.chdir(rig.root)
+    monkeypatch.setenv("NEXUS_PG_BIN", os.path.relpath(os.environ["NEXUS_PG_BIN"], rig.root))
+    plan = upgrade_mod.build_plan(rig.cfg, rig.old_bin)
+    assert plan.new_bins.bin_dir.is_absolute() and plan.new_bins.initdb.is_absolute()
+
+
+def test_the_rollback_guard_holds_the_fatal_signals(rig: Rig) -> None:
+    """Review r2: with the guard a no-op, a signal during the rollback would cut it in half."""
+    seen: list[int] = []
+    previous = signal.signal(signal.SIGINT, lambda signum, _f: seen.append(signum))
+    try:
+        with upgrade_mod._interrupts_held():
+            os.kill(os.getpid(), signal.SIGINT)
+            assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+        assert seen == [], "the signal reached the handler inside the guard"
+        assert signal.getsignal(signal.SIGINT) is not signal.SIG_IGN, "the guard restores the handler"
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_the_no_lock_warning_is_shown_where_a_user_sees_it(rig: Rig) -> None:
+    """Review r2: nothing locks the service during the upgrade, so the user is told to close other sessions."""
+    note = upgrade_mod.NO_LOCK_NOTE
+    assert note in rig.run().output
+    applied = rig.run("--apply")
+    assert applied.exit_code == 0 and applied.output.index(note) < applied.output.index("stopping the storage service")
+    helped = " ".join(CliRunner().invoke(main, ["daemon", "service", "pg-upgrade", "--help"]).output.split()).lower()
+    assert "nothing locks the service during the upgrade" in helped
+    doc = " ".join((Path(__file__).resolve().parents[1] / "docs/cli-reference.md").read_text(encoding="utf-8").split())
+    assert "Nothing locks the service while the upgrade runs" in doc
+
+
 # -- errors (finding 4)
 
 

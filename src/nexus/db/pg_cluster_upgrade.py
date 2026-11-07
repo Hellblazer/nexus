@@ -74,6 +74,10 @@ _RUNBOOK = (
 #: The limit of what is known about this command. Shown in the help, the docs, the dry run and before the move.
 #: Remove it once the command has run against a real pre-17 cluster.
 UNTESTED_NOTE = "not yet run against a real pre-17 cluster; copy the data directory first"
+#: Nothing locks the service while the upgrade runs (the runbook has the same exposure): another nx session or a
+#: login item can start it on the half-built cluster. Said wherever the untested note is.
+NO_LOCK_NOTE = ("nothing locks the service during the upgrade: close other nx sessions (and Claude Code sessions "
+                "with the conexus plugin) and disable an autostart unit (launchd, systemd) first")
 
 #: What a failure before the data directory moves leaves behind (the service and the old server are stopped first).
 _NOT_MOVED = (
@@ -111,6 +115,21 @@ _FATAL_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "
 
 
 @contextlib.contextmanager
+def _signals_blocked() -> Iterator[None]:
+    """Block the fatal signals while handlers are swapped, so a second signal cannot land between two
+    ``signal.signal`` calls (review r2). A pending one is delivered when the mask is restored."""
+    mask = getattr(signal, "pthread_sigmask", None)
+    if mask is None:  # no POSIX signal masks (Windows, which the command refuses anyway)
+        yield
+        return
+    previous = mask(signal.SIG_BLOCK, _FATAL_SIGNALS)
+    try:
+        yield
+    finally:
+        mask(signal.SIG_SETMASK, previous)
+
+
+@contextlib.contextmanager
 def _interrupts_raise() -> Iterator[None]:
     """For the block: SIGINT, SIGTERM and SIGHUP raise :class:`_Interrupted` in the main thread.
 
@@ -121,36 +140,40 @@ def _interrupts_raise() -> Iterator[None]:
         raise _Interrupted(signal.Signals(signum).name)
 
     saved: dict[int, object] = {}
-    for sig in _FATAL_SIGNALS:
-        try:
-            if signal.getsignal(sig) == signal.SIG_IGN:
-                continue
-            saved[sig] = signal.signal(sig, handler)
-        except (ValueError, OSError):
-            break
+    with _signals_blocked():
+        for sig in _FATAL_SIGNALS:
+            try:
+                if signal.getsignal(sig) == signal.SIG_IGN:
+                    continue
+                saved[sig] = signal.signal(sig, handler)
+            except (ValueError, OSError):
+                break
     try:
         yield
     finally:
-        for sig, previous in saved.items():
-            with contextlib.suppress(ValueError, OSError):
-                signal.signal(sig, previous if previous is not None else signal.SIG_DFL)  # type: ignore[arg-type]
+        with _signals_blocked():
+            for sig, previous in saved.items():
+                with contextlib.suppress(ValueError, OSError):
+                    signal.signal(sig, previous if previous is not None else signal.SIG_DFL)  # type: ignore[arg-type]
 
 
 @contextlib.contextmanager
 def _interrupts_held() -> Iterator[None]:
     """For the block: SIGINT, SIGTERM and SIGHUP are ignored, so a rollback cannot be cut in half."""
     saved: dict[int, object] = {}
-    for sig in _FATAL_SIGNALS:
-        try:
-            saved[sig] = signal.signal(sig, signal.SIG_IGN)
-        except (ValueError, OSError):
-            break
+    with _signals_blocked():
+        for sig in _FATAL_SIGNALS:
+            try:
+                saved[sig] = signal.signal(sig, signal.SIG_IGN)
+            except (ValueError, OSError):
+                break
     try:
         yield
     finally:
-        for sig, previous in saved.items():
-            with contextlib.suppress(ValueError, OSError):
-                signal.signal(sig, previous if previous is not None else signal.SIG_DFL)  # type: ignore[arg-type]
+        with _signals_blocked():
+            for sig, previous in saved.items():
+                with contextlib.suppress(ValueError, OSError):
+                    signal.signal(sig, previous if previous is not None else signal.SIG_DFL)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -261,6 +284,8 @@ def build_plan(config_dir: Path, old_bin: Path, *, require_no_old_dir: bool = Tr
 
     try:
         new_bins = discover_pg_binaries()
+        if not new_bins.bin_dir.is_absolute():  # review r2: a relative NEXUS_PG_BIN would break once cwd moves
+            new_bins = type(new_bins).from_dir(_absolute(new_bins.bin_dir))
     except PgBinaryNotFoundError as exc:
         raise PgUpgradeRefused(f"the bundled PostgreSQL {PG_VERSION_FLOOR} is not available: {exc}") from None
     for name in ("pg_upgrade", "vacuumdb"):
@@ -298,6 +323,7 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
     old_ctl, new = plan.old_bin / "pg_ctl", plan.new_bins.bin_dir
     return [
         f"NOTE: this command is {UNTESTED_NOTE} ({plan.pgdata}).",
+        f"NOTE: {NO_LOCK_NOTE}.",
         "",
         f"cluster      {plan.pgdata} (PostgreSQL {plan.cluster_major}, superuser {plan.os_user})",
         f"old bin      {plan.old_bin}",
@@ -320,7 +346,7 @@ def plan_lines(plan: UpgradePlan) -> list[str]:
         "vacuumdb --all --analyze-in-stages, both over TCP",
         f"  8. keep {plan.pgdata_old}; say how to remove it once the service has run",
         "",
-        "--check-only runs initdb into a temporary directory and pg_upgrade --check against it. pg_upgrade --check "
+        "--check-only runs pg_upgrade --check against the real cluster, with a temporary initdb as the new one. pg_upgrade --check "
         "starts and stops the old server on the real data directory and does not modify it, so the old server "
         "must not be running.",
         "Nothing was changed. Re-run with --check-only to test it, or --apply to upgrade.",
@@ -474,6 +500,7 @@ class ClusterUpgrade:
     def _apply(self, workdir: Path) -> None:
         p = self.plan
         self.say(f"NOTE: this command is {UNTESTED_NOTE} ({p.pgdata}).")
+        self.say(f"NOTE: {NO_LOCK_NOTE}.")
         try:
             self._stop_and_move()
             self._upgrade(workdir)
@@ -618,7 +645,7 @@ class ClusterUpgrade:
                 f"({exc.strerror}). Your original cluster is intact there: `mv {p.pgdata_old} {p.pgdata}`.{kept}"
             )
         return (
-            f"Rolled back: the new directory was removed and the original cluster is back at {p.pgdata}, as it was. "
+            f"Rolled back: the new directory was removed and the original cluster is back at {p.pgdata}, intact (an interrupted old server needs crash recovery on its next start; its files were not changed). "
             f"The service is stopped and cannot start a PostgreSQL below 17; fix the cause and run this again.{kept}"
         )
 
