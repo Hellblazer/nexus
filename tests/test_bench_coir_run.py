@@ -154,7 +154,7 @@ _LOCAL = {"embedding_mode": "onnx-local", "embedding_profile": "bge"}
 
 
 @pytest.mark.parametrize(("collection", "engine", "match"), [
-    ("knowledge__code-snippets__voyage-code-3__v1", _LOCAL, "is not a bge-base-en-v15-768 collection"),
+    ("knowledge__code-snippets__minilm-l6-v2-384__v1", _LOCAL, "is not a bge-base-en-v15-768 collection"),
     (_BGE, {"embedding_mode": "voyage", "embedding_profile": "bge"}, "engine embeds as"),
     (_BGE, {"embedding_mode": "onnx-local", "embedding_profile": "minilm"}, "engine embeds as"),
     (_BGE, {}, "engine embeds as"),
