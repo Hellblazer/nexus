@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""nexus-xzorj item 3: the session signal fence (tests/_signal_fence.py), report mode.
+"""nexus-xzorj item 3: the session signal fence (tests/_signal_fence.py): classification, delivery and the fan-in.
 
 The classification runs against real processes on Linux (``/proc``): a child is the session's, a process the
 session did not start is not, a reparented child keeps its claim through the inherited marker, and a reparented
@@ -277,7 +277,7 @@ def test_without_xdist_the_plugin_loads_and_reports(pytester) -> None:
     """``-p no:xdist`` (the dual-embedder release gate runs that way): the xdist-only hook is optional."""
     result = _inner(pytester, "-p", "no:xdist")
     result.assert_outcomes(passed=2)
-    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): signals=4 own=0 foreign=2 unclassified=2 errors=0"])
+    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): signals=4 own=0 foreign=2 unclassified=2 sanctioned=0 errors=0"])
 
 
 @_linux_fence
@@ -285,7 +285,7 @@ def test_the_workers_counts_fan_in_to_the_controllers_summary(pytester) -> None:
     result = _inner(pytester, "-n", "2")
     result.assert_outcomes(passed=2)
     result.stdout.fnmatch_lines([
-        "signal fence (report mode, nexus-xzorj): signals=4 own=0 foreign=2 unclassified=2 errors=0",
+        "signal fence (report mode, nexus-xzorj): signals=4 own=0 foreign=2 unclassified=2 sanctioned=0 errors=0",
         '  foreign: *"test": "test_probe*.py::test_*"*',
     ])
 

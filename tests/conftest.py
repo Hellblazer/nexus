@@ -15,7 +15,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
-from tests import _storage_touch_guard
+from tests import _signal_fence, _storage_touch_guard
 
 # nexus-pfuns round 2: enables the `pytester` fixture (pytest's own
 # built-in sandbox-subprocess testing plugin) for
@@ -39,8 +39,8 @@ import sys as _sys  # noqa: E402
 # guard; active in the default substrate (optin), inert under none.
 # tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
 # tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
-# tests._signal_fence (nexus-xzorj): every os.kill/os.killpg target is classified as this session's or not; report
-# mode, Linux only, listed in the terminal summary.
+# tests._signal_fence (nexus-xzorj): every os.kill/os.killpg target is classified as this session's or not, Linux
+# only; a foreign signal fails the run (fail mode, the default), listed in the terminal summary.
 pytest_plugins = [
     "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
     "tests._shard_collection_plugin", "tests._signal_fence",
@@ -5089,7 +5089,8 @@ def _drain_stale_tmp_run(pytest_root: Path, *, _kill=None) -> None:
     :func:`stale_pytest_roots` never sees it. Same scoped reaper, one ``ps``.
     *_kill* is the reaper's test seam (``(pid, signal_name)``)."""
     snapshot = _ps_all()
-    reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot, _kill=_kill)
+    with _signal_fence.sanctioned("stale tmp-run drain"):  # an earlier, dead run's daemons (nexus-xzorj)
+        reap_leaked_test_daemons(tmp_root=pytest_root, _list_procs=lambda: snapshot, _kill=_kill)
 
 
 def _matches_class(cmd: str, label: str) -> bool:
@@ -5334,10 +5335,13 @@ def _reap_leaked_test_daemons(tmp_path_factory):
             snapshot = _ps_all()
         except Exception:  # noqa: BLE001 -- a startup probe is never a verdict
             snapshot = []
-        for stale in stale_roots:
-            drained.extend(
-                reap_leaked_test_daemons(tmp_root=stale, _list_procs=lambda: snapshot)
-            )
+        # nexus-xzorj: these kills target an earlier, dead session's daemons on purpose; the signal fence counts
+        # them sanctioned, not foreign.
+        with _signal_fence.sanctioned("conftest START stale-daemon reaper"):
+            for stale in stale_roots:
+                drained.extend(
+                    reap_leaked_test_daemons(tmp_root=stale, _list_procs=lambda: snapshot)
+                )
     if drained:
         print(f"\n[nexus-1odsl] reaped {len(drained)} daemon(s) stranded by "
               f"earlier runs: {drained}")

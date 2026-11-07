@@ -244,10 +244,14 @@ the session's or foreign; it always sends the signal unchanged. The session's: a
 process, a carrier of `NX_TEST_SIGNAL_FENCE_TOKEN`, a process whose argv or environment names a path inside the
 session's basetemp (rule A), or a member of a group whose live leader is the session's (rule B). **A foreign signal
 fails the run** (default `fail` mode, Sam 2026-11-07): the summary line `signal fence (fail mode, nexus-xzorj):
-signals=N own=N foreign=N ...` and a `signal fence FAILED` line, then `foreign:` lines naming the test, call site,
-signal and target program. Fix the kill (identity-check the pid: `tests/_child_process.kill_if_identity`), or make
-the target name its own tmp_path (rule A). `NX_TEST_SIGNAL_FENCE=report` downgrades to listing only, `off` removes
-it. Not counted: child pytest sessions (they report into their own output) and a crashed worker's counts.
+signals=N own=N foreign=N unclassified=N sanctioned=N errors=N`, a `signal fence FAILED` line, then `foreign:` lines
+naming the test, call site, signal and target program. Fix the kill (identity-check the pid:
+`tests/_child_process.kill_if_identity`), or make the target name its own tmp_path (rule A). A deliberate signal to
+an earlier, dead session's leftovers (a session-start reaper) goes inside `with _signal_fence.sanctioned("<who>"):`
+and counts `sanctioned`. `NX_TEST_SIGNAL_FENCE=report` downgrades to listing only, `off` removes it (any other value
+means `fail`). A child pytest session a test spawns runs in report mode, so its count never fails the exit code the
+parent asserts; it is not counted in the parent's line. The ownership tests skip when pytest is pid 1 of its
+namespace (every orphan reparents to it there).
 
 ## Bytes written and DDL per run (nexus-sz651)
 

@@ -18,9 +18,11 @@ Then ``fail`` (the default) turns any foreign signal into a failed session, with
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -57,6 +59,13 @@ def _detached(tmp_path: Path, argv: list[str], env: dict[str, str]) -> int:
     return _wait_pid(pidfile)
 
 
+def _not_pid1_root() -> None:
+    """Under a per-job PID namespace pytest can be pid 1, and every orphan then reparents to the root: a test that
+    needs a process outside the session cannot build one there."""
+    if fence._root <= 1:
+        pytest.skip("pytest is pid 1 of its namespace: every orphan reparents to the root")
+
+
 def _reap(pid: int) -> None:
     try:
         fence._real_kill(pid, signal.SIGKILL)
@@ -79,6 +88,7 @@ def test_the_session_basetemp_is_the_controllers_root_on_every_worker(tmp_path) 
 
 @_linux_fence
 def test_rule_a_a_detached_scrubbed_process_whose_argv_names_the_basetemp_is_the_sessions(tmp_path) -> None:
+    _not_pid1_root()
     marker = tmp_path / "argv-marker"
     pid = _detached(tmp_path, [*_SLEEP, str(marker)], _SCRUBBED)
     try:
@@ -90,6 +100,7 @@ def test_rule_a_a_detached_scrubbed_process_whose_argv_names_the_basetemp_is_the
 
 @_linux_fence
 def test_rule_a_a_detached_scrubbed_process_whose_environment_names_the_basetemp_is_the_sessions(tmp_path) -> None:
+    _not_pid1_root()
     pid = _detached(tmp_path, _SLEEP, {**_SCRUBBED, "HOME": str(tmp_path / "home")})
     try:
         assert _verdict(pid) == ("own", pid)
@@ -99,6 +110,7 @@ def test_rule_a_a_detached_scrubbed_process_whose_environment_names_the_basetemp
 
 @_linux_fence
 def test_rule_a_matches_a_path_inside_the_basetemp_not_a_sibling_that_shares_its_prefix(tmp_path) -> None:
+    _not_pid1_root()
     sibling = fence._basetemp() + "x/elsewhere"  # pytest-0 versus pytest-0x: a different tree
     pid = _detached(tmp_path, [*_SLEEP, sibling], {**_SCRUBBED, "HOME": sibling})
     try:
@@ -108,7 +120,29 @@ def test_rule_a_matches_a_path_inside_the_basetemp_not_a_sibling_that_shares_its
 
 
 @_linux_fence
+def test_rule_a_matches_the_basetemp_only_at_a_path_start(tmp_path) -> None:
+    """/scratch + the basetemp is another tree that merely ends in the same string."""
+    _not_pid1_root()
+    pid = _detached(tmp_path, [*_SLEEP, "/scratch" + fence._basetemp() + "/x"], _SCRUBBED)
+    try:
+        assert _verdict(pid) == ("foreign", pid)
+    finally:
+        _reap(pid)
+
+
+@_linux_fence
+def test_rule_a_finds_the_basetemp_inside_a_path_list(tmp_path) -> None:
+    _not_pid1_root()
+    pid = _detached(tmp_path, _SLEEP, {"PATH": f"/usr/bin:{fence._basetemp()}:/bin"})
+    try:
+        assert _verdict(pid) == ("own", pid)
+    finally:
+        _reap(pid)
+
+
+@_linux_fence
 def test_a_detached_scrubbed_process_naming_nothing_of_the_sessions_is_still_foreign(tmp_path) -> None:
+    _not_pid1_root()
     pid = _detached(tmp_path, _SLEEP, _SCRUBBED)
     try:
         assert _verdict(pid) == ("foreign", pid)
@@ -120,6 +154,7 @@ def test_a_detached_scrubbed_process_naming_nothing_of_the_sessions_is_still_for
 def test_rule_b_a_reparented_member_of_a_group_whose_live_leader_is_the_sessions(tmp_path) -> None:
     """The leader is this session's child and leads its own group; it starts an intermediate that starts the member
     in the leader's group with a scrubbed environment and exits, so the member is reparented away."""
+    _not_pid1_root()
     pidfile = tmp_path / "member.pid"
     member_code = (
         "import os, subprocess; "
@@ -145,13 +180,71 @@ def test_rule_b_a_reparented_member_of_a_group_whose_live_leader_is_the_sessions
 
 @_linux_fence
 def test_rule_b_does_not_claim_a_member_of_a_foreign_group(tmp_path) -> None:
-    pid = _detached(tmp_path, _SLEEP, _SCRUBBED)  # leads its own group, naming nothing of ours
+    """A live foreign leader (detached, scrubbed, naming nothing of ours) with a reparented member in its group: the
+    member is foreign, because rule B asks whether the leader is the session's."""
+    _not_pid1_root()
+    pidfile = tmp_path / "foreign-member.pid"
+    member_code = (
+        "import os, subprocess; "
+        f"p = subprocess.Popen({_SLEEP!r}, env={_SCRUBBED!r}); "
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid)); os._exit(0)"
+    )
+    leader_code = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {member_code!r}], env={_SCRUBBED!r}).wait(); time.sleep(60)"
+    )
+    # The leader's own argv names the member's pid file under our tmp_path, which rule A would claim: hand it the
+    # code through stdin-free argv that names nothing of ours by writing the pid file outside the basetemp.
+    outside = Path(tempfile.mkdtemp(dir=os.environ.get("NX_TEST_TMP_ORIG") or "/tmp"))
     try:
-        assert _verdict(pid) == ("foreign", pid)
-        assert fence.classify("killpg", pid, signal.SIGTERM, root=_ids()[0], token=_ids()[1],
-                              basetemp=fence._basetemp()) == ("foreign", pid)
+        if Path(fence._basetemp()) in outside.resolve().parents:
+            pytest.skip("no directory outside the basetemp to plant in")
+        pidfile = outside / "member.pid"
+        member_code = member_code.replace(str(tmp_path / "foreign-member.pid"), str(pidfile))
+        leader_code = (
+            "import subprocess, sys, time; "
+            f"subprocess.Popen([sys.executable, '-c', {member_code!r}], env={_SCRUBBED!r}).wait(); time.sleep(60)"
+        )
+        leader = _detached(outside, [sys.executable, "-c", leader_code], _SCRUBBED)
+        member = _wait_pid(pidfile)
+        try:
+            st = fence._stat(member)
+            assert st is not None and st[1] == leader and st[0] != leader
+            assert _verdict(member) == ("foreign", member)
+        finally:
+            _reap(member)
+            _reap(leader)
     finally:
-        _reap(pid)
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+@_linux_fence
+def test_a_planted_stale_daemon_reaped_at_session_start_is_sanctioned_not_foreign(monkeypatch) -> None:
+    """An earlier, dead session left an aspect worker under its own root; the conftest drain (the same function the
+    session-start reapers run) signals it through the real os.kill, and the fence counts it sanctioned."""
+    _not_pid1_root()
+    import tests.conftest as cf  # noqa: PLC0415 — the reaper under test lives there
+
+    stale = Path(tempfile.mkdtemp(dir=os.environ.get("NX_TEST_TMP_ORIG") or "/tmp"))
+    try:
+        if Path(fence._basetemp()) in stale.resolve().parents:
+            pytest.skip("no directory outside the basetemp to plant in")
+        (stale / "cfg").mkdir()
+        argv = [sys.executable, "-c", "import time; time.sleep(60)", "aspect-worker", "--config-dir", str(stale / "cfg")]
+        pid = _detached(stale, argv, _SCRUBBED)
+        monkeypatch.setattr(fence, "_counts", {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0})
+        assert _verdict(pid) == ("foreign", pid), "outside the reaper's scope it would read foreign"
+        try:
+            cf._drain_stale_tmp_run(stale)
+            deadline = time.monotonic() + 10
+            while fence._stat(pid) is not None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert fence._stat(pid) is None or open(f"/proc/{pid}/stat").read().split(") ")[1][0] == "Z", "reaped"
+            assert fence._counts.get("sanctioned", 0) >= 1 and fence._counts["foreign"] == 0
+        finally:
+            _reap(pid)
+    finally:
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 # ── the failing check ────────────────────────────────────────────────────────────────────────────────────────
@@ -190,7 +283,7 @@ def test_negative_control_a_planted_foreign_signal_fails_the_session_by_default(
     result.assert_outcomes(passed=1)
     assert result.ret == pytest.ExitCode.TESTS_FAILED, "the planted foreign signal must turn the run red"
     result.stdout.fnmatch_lines([
-        "signal fence (fail mode, nexus-xzorj): signals=1 own=0 foreign=1 unclassified=0 errors=0",
+        "signal fence (fail mode, nexus-xzorj): signals=1 own=0 foreign=1 unclassified=0 sanctioned=0 errors=0",
         "signal fence FAILED: 1 foreign signal(s)*",
     ])
 
@@ -219,7 +312,22 @@ def test_report_mode_lists_the_foreign_signal_and_leaves_the_exit_status_alone(p
 
 @_linux_fence
 def test_a_session_that_already_failed_keeps_its_own_exit_status(pytester) -> None:
-    source = _PLANTED + "\ndef test_fails():\n    assert False\n"
+    """A run that ends with its own nonzero status (here 3, set by pytest.exit) keeps it: fail mode only turns an OK
+    into a failure, never rewrites another code to 1."""
+    source = _PLANTED + "\ndef test_zz_exits():\n    import pytest\n    pytest.exit('stop', returncode=3)\n"
     result = _inner(pytester, source, None)
-    result.assert_outcomes(passed=1, failed=1)
-    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    assert result.ret == 3
+
+
+@_linux_fence
+def test_a_nested_session_reports_and_leaves_its_parents_verdict_alone(pytester) -> None:
+    """A pytest a test spawns inherits the marker and root; its own count must not fail the exit code the parent
+    test asserts, so it runs in report mode."""
+    pytester.makepyfile(test_inner=_PLANTED.replace("int(os.environ[fence.ROOT_ENV])", "os.getpid()"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv(fence.MODE_ENV, raising=False)
+        mp.setenv(fence.ROOT_ENV, str(os.getpid()))  # this session's root: the inner one is nested
+        mp.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
+        result = pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider")
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): *"])

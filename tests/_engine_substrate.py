@@ -2255,7 +2255,11 @@ def _psql_command(
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
-        sweep_stale_substrate_clusters()
+        # nexus-xzorj: the sweep signals an earlier, dead session's clusters on purpose: sanctioned, not foreign.
+        from tests import _signal_fence  # noqa: PLC0415 — the substrate imports nothing of the suite's at load
+
+        with _signal_fence.sanctioned("stale substrate cluster sweep"):
+            sweep_stale_substrate_clusters()
     except Exception as exc:  # noqa: BLE001 - the sweep must never block boot (nexus-lgdy1)
         warnings.warn(
             f"nexus test substrate: session-start sweep failed unexpectedly: "
