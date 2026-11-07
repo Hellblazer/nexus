@@ -1302,8 +1302,19 @@ def _catalog_hook(
     needs_fence: dict[str, tuple[str, str]] | None = None,
     unregistered: dict[Path, str] | None = None,
     housekeeping_keep: list[Path] | None = None,
+    sensitive_globs: tuple[str, ...] = (),
+    sensitive_wanted: set[Path] | None = None,
+    sensitive_confirmed: set[Path] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    ``sensitive_globs`` (RDR-243 Q8, nexus-rfvyy.8.8) are the ``--sensitive-glob`` patterns. A file whose
+    repo-relative path matches one is registered with ``sensitive = true`` (a new document carries it in
+    its register request), and an existing document that is not yet flagged is raised through the audited
+    ``set_sensitivity`` route, also when nothing else about the file changed. ``sensitive_wanted`` is an
+    OUT-param holding every matching file; ``sensitive_confirmed`` holds those the catalog now holds
+    flagged. A caller that embeds must not embed a wanted file that is not confirmed (the flag is the
+    only thing the later skips and local-only legs read).
 
     ``housekeeping_keep`` (nexus-2k66t.4.2) names files that exist but were
     deliberately not offered for registration this run (PDFs held back because
@@ -1511,6 +1522,8 @@ def _catalog_hook(
         _stage_t0 = time.monotonic()
         _stage_s: dict[str, float] = {}
         new_batch: list[tuple[Path, dict]] = []
+        # RDR-243 Q8: existing documents matched by --sensitive-glob that are not flagged yet.
+        raise_batch: list[tuple[Path, str]] = []
         # nexus-xedhp: changed-but-existing docs, batched via update_many
         # (Pass 1b, below) instead of an inline per-file writer.update().
         changed_batch: list[tuple[Path, dict]] = []
@@ -1522,11 +1535,15 @@ def _catalog_hook(
         # existing RDR whose CONTENT hash changed is re-fed to the
         # dependency generator as if new; head-hash-only bumps are not.
         relink_rdr_tumblers: list = []
+        from nexus.sensitive_write import sensitive_glob_matches  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
         for abs_path, content_type, collection_name in indexed_files:
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
                 rel_path = abs_path.name
+            _sens_glob = bool(sensitive_globs) and sensitive_glob_matches(rel_path, sensitive_globs)
+            if _sens_glob and sensitive_wanted is not None:
+                sensitive_wanted.add(abs_path)
 
             # nexus-u8n4r: refuse registration of files whose REGISTERED
             # identity (owner's main-repo root + rel_path — never the raw
@@ -1655,8 +1672,15 @@ def _catalog_hook(
                         "head_hash": head_hash,
                         "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
                         "source_mtime": source_mtime,
+                        **({"sensitive": True} if _sens_glob else {}),
                     }))
                 else:
+                    if _sens_glob:
+                        if getattr(existing, "sensitive", False) is True:
+                            if sensitive_confirmed is not None:
+                                sensitive_confirmed.add(abs_path)
+                        else:
+                            raise_batch.append((abs_path, str(existing.tumbler)))
                     # nexus-dst5h: skip the write when nothing changed —
                     # a warm re-run otherwise pays one serial update
                     # round-trip per file. An empty file_hash (read
@@ -1755,6 +1779,28 @@ def _catalog_hook(
 
         _stage_s["pass1_resolve"] = time.monotonic() - _stage_t0
         _stage_mark = time.monotonic()
+
+        # RDR-243 Q8 (nexus-rfvyy.8.8): raise the flag on EXISTING documents a --sensitive-glob matches, through
+        # the audited route (``sensitive`` is not an updatable column, so update_many would be refused). It
+        # runs whether or not anything else about the file changed. A page that fails leaves its files
+        # unconfirmed, and the caller then does not embed them.
+        if raise_batch:
+            from nexus.sensitive_write import SENSITIVE_REASON  # noqa: PLC0415 — circular-dep avoidance (nexus.sensitive_write)
+            _set_sens = getattr(writer, "set_sensitivity", None)
+            for _start in range(0, len(raise_batch), _CATALOG_REGISTER_PAGE):
+                _page = raise_batch[_start : _start + _CATALOG_REGISTER_PAGE]
+                try:
+                    if not callable(_set_sens):
+                        raise RuntimeError("the catalog writer has no set_sensitivity")
+                    _set_sens([t for _, t in _page], True, reason=f"{SENSITIVE_REASON}: nx index repo --sensitive-glob")
+                except Exception as exc:  # noqa: BLE001 — boundary: any failure of the audited route leaves these files unflagged, and the run does not embed them
+                    _log.warning(
+                        "sensitive_glob_flag_not_set", repo=repo_name, files=len(_page),
+                        error_type=type(exc).__name__, error=str(exc),
+                    )
+                    continue
+                if sensitive_confirmed is not None:
+                    sensitive_confirmed.update(p for p, _ in _page)
 
         # Pass 1b: batch-update the CHANGED existing docs (nexus-xedhp,
         # duoak.11 follow-up). A HEAD bump flips every doc's stored head_hash
@@ -1888,6 +1934,8 @@ def _catalog_hook(
                     )
                 for (path, doc), (tum, created) in zip(page, pairs):
                     file_to_doc_id[path] = str(tum)
+                    if doc.get("sensitive") and sensitive_confirmed is not None:
+                        sensitive_confirmed.add(path)
                     _fp = doc.get("file_path", "")
                     _conflict = _conflicts_by_path.get(_fp) or None
                     if created:
@@ -1985,6 +2033,8 @@ def _catalog_hook(
                             **{k: v for k, v in doc.items() if k != "title"},
                         )
                         file_to_doc_id[path] = str(tum)
+                        if doc.get("sensitive") and sensitive_confirmed is not None:
+                            sensitive_confirmed.add(path)
                         if created:
                             new_tumblers.append(tum)
                             new_content_types.add(doc.get("content_type", ""))
@@ -2597,8 +2647,12 @@ def index_repository(
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
     client: "httpx.Client | None" = None,
+    sensitive_globs: tuple[str, ...] = (),
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
+
+    *sensitive_globs* (RDR-243 Q8, ``nx index repo --sensitive-glob``): files whose repo-relative path
+    matches one are registered ``sensitive`` before anything is embedded. See :func:`_catalog_hook`.
 
     Files are classified and routed:
     - Code → code__ collection (voyage-code-3, AST chunking)
@@ -2717,7 +2771,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_re_embed=force_re_embed, since_head=since_head, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file, on_phase=on_phase, on_flush=on_flush, on_stage_timers=on_stage_timers, hooks=hooks, fence_run_state=_fence_run_state, sensitive_globs=sensitive_globs)
                 _relink_changed_pdfs(_fence_run_state)
                 # nexus-6m9zy.6 (#12): owners.head_hash is the BASE the
                 # NEXT --since-head run diffs from. Advancing it past a
@@ -5446,6 +5500,7 @@ def _run_index(
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
     hooks: "HookRegistry | None" = None,
     fence_run_state: dict | None = None,
+    sensitive_globs: tuple[str, ...] = (),
 ) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
@@ -6339,6 +6394,9 @@ def _run_index(
     _needs_fence: dict[str, tuple[str, str]] = {}
     # nexus-z0o2p.20: why each file the hook could not resolve has no document.
     _unregistered_causes: dict[Path, str] = {}
+    # RDR-243 Q8: files --sensitive-glob matched, and those the catalog now holds flagged.
+    _sensitive_wanted: set[Path] = set()
+    _sensitive_confirmed: set[Path] = set()
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -6354,6 +6412,9 @@ def _run_index(
         needs_fence=_needs_fence,
         unregistered=_unregistered_causes,
         housekeeping_keep=_pdf_held,
+        sensitive_globs=sensitive_globs,
+        sensitive_wanted=_sensitive_wanted,
+        sensitive_confirmed=_sensitive_confirmed,
     )
     if on_phase is not None:
         on_phase(
@@ -6420,6 +6481,17 @@ def _run_index(
             indexed_for_catalog, file_to_doc_id, _unregistered_causes,
             on_phase=on_phase,
         )
+    # RDR-243 Q8: a file a --sensitive-glob matched whose flag the catalog did not confirm is not embedded.
+    # Every later skip and local-only leg reads that flag, so an unflagged one would go out as ordinary.
+    _glob_unflagged = _sensitive_wanted - _sensitive_confirmed
+    if _glob_unflagged:
+        _refused_paths = {*_refused_paths, *_glob_unflagged}
+        for _p in sorted(_glob_unflagged):
+            _log.warning(
+                "sensitive_glob_file_refused_unflagged", path=str(_p),
+                note="the catalog did not confirm the sensitive flag for this file; it was not indexed")
+        if on_phase is not None:
+            on_phase(f"{len(_glob_unflagged)} file(s) matching --sensitive-glob not indexed: the flag could not be set")
     _identity_less_dropped = sum(
         1 for _p, _cause in _identity_less_refusals
         if not _cause.startswith("ephemeral:")

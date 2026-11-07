@@ -16,7 +16,8 @@ reading individual records by ``x-devonthink-item://<UUID>`` URI
   query, honouring its ``search group`` scope and ``exclude subgroups``
   flag
 
-Each helper returns ``list[tuple[str, str]]`` of ``(uuid, absolute_path)``.
+Each helper returns a list of :class:`DtRecord`, ``(uuid, absolute_path)`` pairs that also carry
+``excluded`` (RDR-243 Q7).
 
 Multi-database iteration: when ``database is None`` (the default) every
 helper iterates DT's ``databases`` collection so a tag/group/smart-group
@@ -50,7 +51,9 @@ from nexus.bounded_subprocess import run_bounded
 
 __all__ = [
     "DTNotAvailableError",
+    "DtRecord",
     "_dt_group_records",
+    "_dt_record_excluded",
     "_dt_selection",
     "_dt_smart_group_records",
     "_dt_tag_records",
@@ -139,37 +142,78 @@ def _run_osascript(script: str, timeout: int) -> str:
 # ── Output parser ────────────────────────────────────────────────────────────
 
 
-def _parse_records(stdout: str) -> list[tuple[str, str]]:
-    """Parse ``uuid<TAB>path<LF>`` lines into ``(uuid, path)`` tuples.
+class DtRecord(tuple):
+    """A ``(uuid, path)`` pair that also says whether DEVONthink excludes the record from AI.
+
+    RDR-243 Q7 / A6 (``nexus_rdr/243-research-12``): DEVONthink 4 exposes the exclusion as one boolean
+    AppleScript property, ``exclude from chat``, on the record and on its database; the database flag
+    takes priority, so ``excluded`` is true when either is. It stays a 2-tuple so every caller that
+    unpacks ``(uuid, path)``, and every test double that returns a bare pair, keeps working; a bare
+    pair reads as not excluded (``getattr(rec, "excluded", False)``).
+    """
+
+    excluded: bool
+
+    def __new__(cls, uuid: str, path: str, excluded: bool = False) -> "DtRecord":
+        self = super().__new__(cls, (uuid, path))
+        self.excluded = excluded
+        return self
+
+    def __getnewargs__(self) -> tuple[str, str, bool]:
+        return (self[0], self[1], self.excluded)
+
+    def __repr__(self) -> str:
+        return f"DtRecord({self[0]!r}, {self[1]!r}, excluded={self.excluded})"
+
+
+# The third output field the scripts emit: "1" excluded, "0" not, "?" the property could not be read.
+_EXCL_TRUE, _EXCL_FALSE, _EXCL_UNREADABLE = "1", "0", "?"
+
+
+def _parse_records(stdout: str) -> list[DtRecord]:
+    """Parse ``uuid<TAB>path[<TAB>excluded]<LF>`` lines into :class:`DtRecord` pairs.
 
     Blank lines are skipped; lines without a tab are skipped (defensive
-    against AppleScript dropping a record with no path). UUID dedupe
-    is the caller's responsibility because multi-DB iteration may
+    against AppleScript dropping a record with no path). A line without the
+    third field (a legacy two-field line) reads as not excluded. A path may hold a
+    tab, so the third field is taken from the end and only when it is one of the three marks.
+    UUID dedupe is the caller's responsibility because multi-DB iteration may
     legitimately want to know that a UUID surfaces in two libraries
     before collapsing.
     """
-    records: list[tuple[str, str]] = []
+    records: list[DtRecord] = []
     for line in stdout.splitlines():
         if not line:
             continue
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
+        parts = line.split("\t")
+        if len(parts) < 2:
             continue
-        uuid, path = parts[0].strip(), parts[1].strip()
-        if uuid and path:
-            records.append((uuid, path))
+        mark = ""
+        if len(parts) >= 3 and parts[-1].strip() in (_EXCL_TRUE, _EXCL_FALSE, _EXCL_UNREADABLE):
+            mark = parts[-1].strip()
+            path = "\t".join(parts[1:-1]).strip()
+        else:
+            path = "\t".join(parts[1:]).strip()
+        uuid = parts[0].strip()
+        if not (uuid and path):
+            continue
+        if mark == _EXCL_UNREADABLE:
+            # Fail open, loudly: a DEVONthink without the property (before 4) has nothing to honour, and
+            # one unreadable record must not lose the batch. A DT 4 read failure shows up here.
+            _log.warning("dt_exclusion_unreadable", uuid=uuid, path=path, property=_EXCLUDE_PROPERTY)
+        records.append(DtRecord(uuid, path, mark == _EXCL_TRUE))
     return records
 
 
-def _dedupe_by_uuid(records: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """First-wins dedupe by UUID, preserving order."""
+def _dedupe_by_uuid(records: list[DtRecord]) -> list[DtRecord]:
+    """First-wins dedupe by UUID, preserving order (the first record's exclusion flag wins)."""
     seen: set[str] = set()
-    out: list[tuple[str, str]] = []
-    for uuid, path in records:
-        if uuid in seen:
+    out: list[DtRecord] = []
+    for rec in records:
+        if rec[0] in seen:
             continue
-        seen.add(uuid)
-        out.append((uuid, path))
+        seen.add(rec[0])
+        out.append(rec)
     return out
 
 
@@ -193,10 +237,43 @@ def _applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+#: The AppleScript property, on a record and on a database alike (sdef four-char code ``DTxi``).
+_EXCLUDE_PROPERTY = "exclude from chat"
+
+
+def _exclusion_lines(var: str, out: str = "theExcl") -> str:
+    """AppleScript that sets ``out`` to "1", "0" or "?" for the record held in ``var`` (RDR-243 Q7).
+
+    Reads the record's own flag and its database's flag, each in its own ``try`` so one unreadable
+    property neither loses the batch nor hides the other. "1" when either is true (DEVONthink's own
+    contract gives the database flag priority); "?" when a read failed and the other did not say true:
+    an older DEVONthink without the property reads "?", which the parser treats as not excluded and logs.
+    This only reads: this RDR adds no write to DEVONthink.
+    """
+    return (
+        f'set {out} to "0"\n'
+        'try\n'
+        f'  if ({_EXCLUDE_PROPERTY} of {var}) is true then set {out} to "1"\n'
+        'on error\n'
+        f'  set {out} to "?"\n'
+        'end try\n'
+        'try\n'
+        f'  if ({_EXCLUDE_PROPERTY} of (database of {var})) is true then set {out} to "1"\n'
+        'on error\n'
+        f'  if {out} is "0" then set {out} to "?"\n'
+        'end try\n'
+    )
+
+
+def _indent(text: str, n: int) -> str:
+    pad = " " * n
+    return "".join(pad + line + "\n" for line in text.splitlines())
+
+
 # ── Selector: current selection ──────────────────────────────────────────────
 
 
-def _dt_selection() -> list[tuple[str, str]]:
+def _dt_selection() -> list[DtRecord]:
     """Records currently selected in DEVONthink's UI.
 
     Returns ``[]`` when nothing is selected. 10s timeout — the
@@ -208,8 +285,9 @@ def _dt_selection() -> list[tuple[str, str]]:
         '  set theOutput to ""\n'
         '  set theRecords to selected records\n'
         '  repeat with theRecord in theRecords\n'
-        '    set theOutput to theOutput & ((uuid of theRecord) as string) '
-        '& tab & ((path of theRecord) as string) & linefeed\n'
+        + _indent(_exclusion_lines("theRecord"), 4)
+        + '    set theOutput to theOutput & ((uuid of theRecord) as string) '
+        '& tab & ((path of theRecord) as string) & tab & theExcl & linefeed\n'
         '  end repeat\n'
         '  return theOutput\n'
         'end tell'
@@ -223,21 +301,47 @@ def _dt_selection() -> list[tuple[str, str]]:
 # ── Selector: single UUID ────────────────────────────────────────────────────
 
 
+def _dt_record_excluded(uuid: str) -> bool:
+    """Whether DEVONthink excludes the record ``uuid`` from AI, on the record or on its database.
+
+    The same two reads the multi-record selectors make (:func:`_exclusion_lines`), for one record fetched
+    by UUID. "?" (property unreadable) reads as not excluded and is logged, as in :func:`_parse_records`.
+    Read only.
+    """
+    _require_darwin()
+    script = (
+        'tell application id "DNtp"\n'
+        f'  set theRecord to get record with uuid "{_applescript_escape(uuid)}"\n'
+        + _indent(_exclusion_lines("theRecord"), 2)
+        + '  return theExcl\n'
+        'end tell'
+    )
+    mark = _run_osascript(script, timeout=10).strip()
+    if mark == _EXCL_UNREADABLE:
+        _log.warning("dt_exclusion_unreadable", uuid=uuid, property=_EXCLUDE_PROPERTY)
+    return mark == _EXCL_TRUE
+
+
 def _dt_uuid_record(
     uuid: str,
     *,
     dt_resolver=None,
-) -> list[tuple[str, str]]:
-    """Resolve a single DEVONthink record UUID to ``[(uuid, path)]``.
+    dt_exclusion=None,
+) -> list[DtRecord]:
+    """Resolve a single DEVONthink record UUID to ``[DtRecord(uuid, path, excluded)]``.
 
     Reuses :func:`nexus.aspect_readers._devonthink_resolver_default` for
     the osascript path so we don't duplicate the
     ``record with uuid "..."`` wrangling. ``dt_resolver`` lets tests
-    inject a fake without spawning subprocesses.
+    inject a fake without spawning subprocesses. The exclusion flag is a second
+    read (:func:`_dt_record_excluded`, or ``dt_exclusion``): the resolver's
+    ``(path, error)`` shape is shared with the readers and stays as it is. An injected
+    ``dt_resolver`` with no ``dt_exclusion`` reads as not excluded and spawns nothing.
 
     Returns ``[]`` when the resolver reports a missing record so the
     return type stays consistent with the multi-record selectors.
     """
+    injected = dt_resolver is not None
     if dt_resolver is None:
         _require_darwin()
         # Module attribute access (not local-name binding) so tests
@@ -250,7 +354,9 @@ def _dt_uuid_record(
     if path is None:
         _log.debug("dt_uuid_record_miss", uuid=uuid, detail=error_detail)
         return []
-    return [(uuid, path)]
+    if dt_exclusion is None and not injected:
+        dt_exclusion = _dt_record_excluded
+    return [DtRecord(uuid, path, bool(dt_exclusion(uuid)) if dt_exclusion is not None else False)]
 
 
 # ── Selector: tag ────────────────────────────────────────────────────────────
@@ -259,7 +365,7 @@ def _dt_uuid_record(
 def _dt_tag_records(
     tag: str,
     database: str | None = None,
-) -> list[tuple[str, str]]:
+) -> list[DtRecord]:
     """Every record carrying ``tag`` across the requested database scope.
 
     Empty ``tag`` short-circuits to ``[]`` without spawning osascript —
@@ -278,8 +384,9 @@ def _dt_tag_records(
         '  repeat with theDb in theDbs\n'
         f'    set theRecords to lookup records with tags {{"{tag_lit}"}} in theDb\n'
         '    repeat with theRecord in theRecords\n'
-        '      set theOutput to theOutput & ((uuid of theRecord) as string) '
-        '& tab & ((path of theRecord) as string) & linefeed\n'
+        + _indent(_exclusion_lines("theRecord"), 6)
+        + '      set theOutput to theOutput & ((uuid of theRecord) as string) '
+        '& tab & ((path of theRecord) as string) & tab & theExcl & linefeed\n'
         '    end repeat\n'
         '  end repeat\n'
         '  return theOutput\n'
@@ -297,7 +404,7 @@ def _dt_tag_records(
 def _dt_group_records(
     group_path: str,
     database: str | None = None,
-) -> list[tuple[str, str]]:
+) -> list[DtRecord]:
     """Every leaf record under ``group_path`` (recursively).
 
     ``group_path`` is the DT path inside the database, e.g.
@@ -319,9 +426,10 @@ def _dt_group_records(
         '      if type of theChild is group then\n'
         '        my collectRecords(theChild, accumRef)\n'
         '      else\n'
-        '        set contents of accumRef to (contents of accumRef) & '
+        + _indent(_exclusion_lines("theChild"), 8)
+        + '        set contents of accumRef to (contents of accumRef) & '
         '((uuid of theChild) as string) & tab & '
-        '((path of theChild) as string) & linefeed\n'
+        '((path of theChild) as string) & tab & theExcl & linefeed\n'
         '      end if\n'
         '    end repeat\n'
         '  end tell\n'
@@ -359,7 +467,7 @@ def _dt_group_records(
 def _dt_smart_group_records(
     name: str,
     database: str | None = None,
-) -> list[tuple[str, str]]:
+) -> list[DtRecord]:
     """Execute a user-authored smart group's query.
 
     Three-property read (sdef-canonical, locked by RDR research):
@@ -398,8 +506,9 @@ def _dt_smart_group_records(
         '        set theResults to search thePred in theScope '
         'exclude subgroups theExclude\n'
         '        repeat with r in theResults\n'
-        '          set theOutput to theOutput & ((uuid of r) as string) & '
-        'tab & ((path of r) as string) & linefeed\n'
+        + _indent(_exclusion_lines("r"), 10)
+        + '          set theOutput to theOutput & ((uuid of r) as string) & '
+        'tab & ((path of r) as string) & tab & theExcl & linefeed\n'
         '        end repeat\n'
         '      end if\n'
         '    end repeat\n'
