@@ -646,3 +646,14 @@ def test_the_t2_note_store_tells_a_failed_read_from_no_note_only_when_asked() ->
     assert store.load() is None  # census progress keeps its "a failed read is no note"
     with pytest.raises(NoteUnreadable, match="engine down"):
         store.load(strict=True)
+
+
+def test_the_doctor_says_when_the_deferral_log_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    # nexus-4qygk: an unreadable log keeps its streaks, so the row must not read as "nothing deferred".
+    _LEDGER.clear()
+    monkeypatch.setattr("nexus.upgrade_ladder.http_store.DeferredLadderLedger", _LedgerStandIn)
+    monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: DeferralLog(_UnreadableStore()))
+    row = _row(monkeypatch, _Rung("slow"))
+    assert "deferral log could not be read" in row.detail
+    monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: DeferralLog(_MemoryStore()))
+    assert "could not be read" not in _row(monkeypatch, _Rung("slow")).detail  # control

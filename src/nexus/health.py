@@ -9990,6 +9990,10 @@ def _check_pending_rungs() -> list[HealthResult]:
         stuck = guarded("deferral_log_read", _escalated_text, [])
         if stuck:
             parts.insert(0, "REPEATEDLY DEFERRED: " + "; ".join(stuck))
+        # nexus-4qygk: an unreadable log keeps its streaks rather than reset them, so it cannot show a rung
+        # that defers every walk. Say so instead of reading as "nothing deferred".
+        elif not guarded("deferral_log_probe", lambda: t2_deferral_log().readable(), True):
+            parts.append("the upgrade deferral log could not be read, so a rung deferring every run would not show here")
     else:
         parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
     if not_checked:

@@ -40,6 +40,13 @@ is dropped. NOT_ATTEMPTED and failed runs leave entries alone: the rung was not
 walked, or it failed loudly (which stops the upgrade and says so), and neither
 is evidence that a streak ended.
 
+A walk whose read of the note FAILS (the store raised, as opposed to holding no
+note) writes nothing and is not counted: saving would put the deferring rungs at
+1 over streaks it could not see (nexus-4qygk). Content that does not parse is
+read as no note and is overwritten by the next write. While the store stays
+unreadable the streaks stand still, and the doctor row says the log could not be
+read (:meth:`DeferralLog.readable`).
+
 The note is a T2 row any version or tool may have written. Only the documented
 shape is read; an entry of any other shape is ignored and dropped by the next
 write. Callers run every operation through :func:`~nexus.upgrade_ladder.census_progress.guarded`:
@@ -215,6 +222,15 @@ class DeferralLog:
             }
         if entries != before:
             self._store.save({"rungs": entries})
+
+    def readable(self) -> bool:
+        """False when the note store could not be read. ``record`` then skips its write, so the streaks
+        stand still until a read succeeds; the doctor says so (nexus-4qygk)."""
+        try:
+            self._entries(strict=True)
+        except NoteUnreadable:
+            return False
+        return True
 
     def deferrals(self) -> dict[str, RungDeferral]:
         """Every rung with a streak, by name."""

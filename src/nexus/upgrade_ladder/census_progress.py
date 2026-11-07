@@ -159,7 +159,8 @@ class NoteStore(Protocol):
 
 class T2NoteStore:
     """A :class:`NoteStore` on one T2 memory note. Every failure degrades to
-    'no note'."""
+    'no note', except a failed read under ``load(strict=True)``, which raises
+    :class:`NoteUnreadable`."""
 
     def __init__(self, title: str, *, project: str = PROGRESS_PROJECT, tags: str = "upgrade-ladder,rdr192") -> None:
         self._title = title
@@ -193,8 +194,8 @@ class T2NoteStore:
             return None
         try:
             note = json.loads(row["content"]) if row else None
-        except (TypeError, ValueError, KeyError):
-            return None  # unparseable content: no usable note, and rewriting it is the repair
+        except Exception:  # noqa: BLE001 — any content that does not parse (RecursionError included) is no note
+            return None  # and rewriting it is the repair
         return note if isinstance(note, dict) else None
 
     def save(self, note: dict[str, Any]) -> None:
