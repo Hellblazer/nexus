@@ -2091,6 +2091,9 @@ class HolderStopResult:
     ``unreadable``: alive, but the command line could not be read, so not
     signalled (an empty read is inconclusive, never proof it is not ours).
     ``foreign``: alive and running something else (a recycled pid); untouched.
+    ``invisible``: no such pid here, but its record's heartbeat is fresh, so a
+    holder this process cannot see (another PID namespace) is still beating;
+    nothing was signalled and the record stays (nexus-dyfsw).
     """
 
     stopped: tuple[int, ...] = ()
@@ -2098,6 +2101,7 @@ class HolderStopResult:
     refused: tuple[GracefulStopSend, ...] = ()
     unreadable: tuple[int, ...] = ()
     foreign: tuple[int, ...] = ()
+    invisible: tuple[int, ...] = ()
 
 
 def stop_tier_holders(
@@ -2126,7 +2130,8 @@ def stop_tier_holders(
     refusal is never escalated. The pid is ``endpoint[pid_key]``, else
     ``payload[pid_key]`` (the storage service records ``supervisor_pid`` in its
     payload, the aspect worker ``pid`` in its endpoint). A record is relinquished unless its pid is
-    still running our command afterwards, so a dead holder's lease goes too.
+    still running our command afterwards, so a dead holder's lease goes too; a pid that cannot be
+    seen here keeps its record while the record's heartbeat is fresh (``invisible``, nexus-dyfsw).
     A pid that is alive but runs something else (``foreign``) is a recycled
     pid, so by default its record goes as well; a caller whose stop must not
     read as done while a live process stays unexplained passes
@@ -2144,6 +2149,9 @@ def stop_tier_holders(
     targets: list[int] = []
     unreadable: list[int] = []
     foreign: list[int] = []
+    invisible: list[int] = []
+    now = time.time()
+
     def _pid_of(record: LeaseRecord) -> object:
         return record.endpoint.get(pid_key, record.payload.get(pid_key))
 
@@ -2151,12 +2159,17 @@ def stop_tier_holders(
         pid = _pid_of(record)
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == os.getpid():
             continue
-        if pid in targets or pid in unreadable or pid in foreign:
+        if pid in targets or pid in unreadable or pid in foreign or pid in invisible:
             continue
         cmd = read_command(pid)
         if not cmd:
             if pid_running(pid):
                 unreadable.append(pid)
+            elif record.is_fresh(now):
+                # nexus-dyfsw: a pid this process cannot see whose holder still heartbeats is
+                # alive elsewhere (another PID namespace); dropping its record would let a
+                # second holder start beside it.
+                invisible.append(pid)
             continue
         argv = read_argv(pid) if is_ours_argv is not None else []
         ours = is_ours_argv(argv) if is_ours_argv is not None and argv else is_ours(cmd)
@@ -2173,7 +2186,7 @@ def stop_tier_holders(
         if targets
         else []
     )
-    held = set(survivors) | set(unreadable)
+    held = set(survivors) | set(unreadable) | set(invisible)
     if keep_foreign_leases:
         held |= set(foreign)
     for record in records:
@@ -2189,6 +2202,7 @@ def stop_tier_holders(
         refused=tuple(refused),
         unreadable=tuple(unreadable),
         foreign=tuple(foreign),
+        invisible=tuple(invisible),
     )
 
 

@@ -2127,7 +2127,7 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
     result = stop_aspect_workers(config_dir)
     if result.stopped:
         click.echo(f"Aspect-worker stopped (pid {', '.join(str(p) for p in result.stopped)}).")
-    elif not (result.survivors or result.unreadable or result.foreign):
+    elif not (result.survivors or result.unreadable or result.foreign or result.invisible):
         click.echo("No aspect-worker running.")
     failed = False
     if result.survivors or result.unreadable:
@@ -2140,6 +2140,15 @@ def aspect_worker_stop_cmd(config_dir_str: str | None) -> None:
             f"Pid {pids} is alive but is not an aspect worker serving {config_dir}; "
             "not signalled, and its lease is kept. If it is a stale lease whose pid was "
             "recycled, remove the aspect_worker_addr.* file in that directory.",
+            err=True,
+        )
+        failed = True
+    if result.invisible:
+        pids = ", ".join(str(p) for p in result.invisible)
+        click.echo(
+            f"Pid {pids} is not visible from here, but its lease is still heartbeating, so a "
+            "worker in another PID namespace (a container sharing this directory) may hold it; "
+            "not signalled, and its lease is kept. Stop it from where it runs.",
             err=True,
         )
         failed = True
