@@ -167,8 +167,11 @@
 # clock and $RANDOM) into its staging dir, and the readback compares that. A pid
 # compare let a claim that nested into another namespace's live lock with the same
 # pid number return success, a second holder. `pid` is still written and is still
-# what lock_release, _lock_is_stale and the diagnostics read; a lockdir without
-# `claim_id` (an older tree) falls back to the pid compare on restore.
+# what lock_release, _lock_is_stale and the diagnostics read. A captured lockdir
+# without `claim_id` (an older tree) falls back to the pid compare on restore, and
+# only against an occupant that has no `claim_id` either. A contender still running
+# an older tree keeps its pid-compare readback, so it stays exposed to this until
+# its branch rebases onto this one.
 #
 # API:
 #   lock_acquire <lockdir-path> [timeout_s]
@@ -445,8 +448,10 @@ lock_acquire() {
                 # has forced a nesting outcome can observe the nested
                 # state before this verification acts on it, instead of
                 # relying on scheduler luck. No-op (empty var) in every
-                # normal invocation.
+                # normal invocation. NX_LOCK_TEST_SEAM_FIRED=<file> records
+                # that the seam fired (Test 10 asserts it).
                 if [[ -n "${NX_LOCK_TEST_WIDEN_WINDOW:-}" ]]; then
+                    [[ -z "${NX_LOCK_TEST_SEAM_FIRED:-}" ]] || echo acquire >>"$NX_LOCK_TEST_SEAM_FIRED"
                     sleep "${NX_LOCK_TEST_WIDEN_SECONDS:-1}"
                 fi
                 if [[ "$(cat "$lockdir/$_LOCK_CLAIM_FILE" 2>/dev/null)" == "$claim_id" ]]; then
@@ -515,6 +520,7 @@ lock_acquire() {
                     # outright — see HONEST RESIDUAL above). No-op (empty
                     # var) in every normal invocation.
                     if [[ -n "${NX_LOCK_TEST_WIDEN_WINDOW:-}" ]]; then
+                        [[ -z "${NX_LOCK_TEST_SEAM_FIRED:-}" ]] || echo restore >>"$NX_LOCK_TEST_SEAM_FIRED"
                         sleep "${NX_LOCK_TEST_WIDEN_SECONDS:-1}"
                     fi
                     if mv "$claim" "$lockdir" 2>/dev/null; then
@@ -525,8 +531,10 @@ lock_acquire() {
                             restore_landed=0
                             [[ "$(cat "$lockdir/$_LOCK_CLAIM_FILE" 2>/dev/null)" == "$captured_claim_id" ]] && restore_landed=1
                         else
+                            # Only an occupant that has no claim_id either can be our capture: a
+                            # current-tree claim with the same pid number is a third contender's.
                             restore_landed=0
-                            [[ "$(cat "$lockdir/pid" 2>/dev/null)" == "$captured_pid" ]] && restore_landed=1
+                            [[ ! -e "$lockdir/$_LOCK_CLAIM_FILE" && "$(cat "$lockdir/pid" 2>/dev/null)" == "$captured_pid" ]] && restore_landed=1
                         fi
                         if ((restore_landed == 0)); then
                             # Restore "succeeded" (exit 0) but a third
@@ -569,6 +577,8 @@ lock_acquire() {
 }
 
 # lock_release <lockdir-path>
+# Authorizes by pid == $$, not claim_id: every caller runs lock_acquire (or exits on its failure)
+# before it installs the trap that releases, so only a process that won the claim reaches this.
 lock_release() {
     local lockdir="$1" holder_pid
 
