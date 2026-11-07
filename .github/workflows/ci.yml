@@ -1655,7 +1655,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate, constraints-resolve-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1672,6 +1672,7 @@ jobs:
           integration_any="${{ needs.changes.outputs.integration_any }}"
           integration_result="${{ needs.test-integration-affected.result }}"
           mcpb_result="${{ needs.mcpb-resolve-gate.result }}"
+          constraints_result="${{ needs.constraints-resolve-gate.result }}"
           event_name="${{ github.event_name }}"
           base_ref="${{ github.base_ref }}"
 
@@ -1782,6 +1783,19 @@ jobs:
             fi
           elif [ "$mcpb_result" != "success" ]; then
             echo "::warning::mcpb-resolve-gate reported '$mcpb_result' (advisory off the release PR; release.yml blocks before publish)"
+          fi
+
+          # constraints-resolve-gate (nexus-imhgf): same rule as mcpb-resolve-gate. Blocking on a PR into main;
+          # elsewhere reported, not blocking (develop is pushed directly, and the release battery's resolve leg runs
+          # the same gate before a tag).
+          echo "constraints-resolve-gate result: $constraints_result"
+          if [ "$event_name" = "pull_request" ] && [ "$base_ref" = "main" ]; then
+            if [ "$constraints_result" != "success" ]; then
+              echo "::error::PR targets main but constraints-resolve-gate reported '$constraints_result' instead of success — the shipped install lock must resolve on every supported target before a release PR can merge"
+              exit 1
+            fi
+          elif [ "$constraints_result" != "success" ]; then
+            echo "::warning::constraints-resolve-gate reported '$constraints_result' (advisory off the release PR; the release battery's resolve leg blocks before a tag)"
           fi
 
           # nexus-rpaat: the affected-integration job MUST succeed when the
@@ -2828,3 +2842,54 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/check_mcpb_resolve.py
+
+  constraints-resolve-gate:
+    # nexus-imhgf — the shipped install lock must RESOLVE on every supported target, checked on the change that
+    # breaks it. The release battery's resolve leg (tests/e2e/constraints-resolve-gate.sh) ran only after release
+    # prep; the failure it catches appears when constraints.txt, overrides.txt, uv.lock or pyproject.toml change.
+    # Same PATH GATE shape as mcpb-resolve-gate: the job always runs and reports, the resolve (uv pip compile per
+    # target, off-host, nothing installed; about 3 s warm) runs only when an input changed, and the non-vacuity
+    # step fails an unusable filter output instead of skipping under a green check. The battery leg stays as the
+    # release-time backstop.
+    name: install constraints resolve gate (nexus-imhgf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: changes
+        with:
+          filters: |
+            constraints:
+              - 'src/nexus/_install/constraints.txt'
+              - 'src/nexus/_install/overrides.txt'
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'tests/e2e/constraints-resolve-gate.sh'
+
+      - name: Verify the constraints predicate is usable (fail loud, never default-skip)
+        run: |
+          set -euo pipefail
+          constraints="${{ steps.changes.outputs.constraints }}"
+          case "$constraints" in
+            true|false) ;;
+            *)
+              echo "::error::paths-filter produced no usable constraints output ('$constraints') — cannot prove whether the install lock inputs changed, refusing to silently skip the resolve"
+              exit 1
+              ;;
+          esac
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        if: steps.changes.outputs.constraints == 'true'
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Resolve the shipped lock on every supported target
+        if: steps.changes.outputs.constraints == 'true'
+        run: |
+          set -euo pipefail
+          tests/e2e/constraints-resolve-gate.sh
