@@ -10,12 +10,16 @@ nexus-9pc2f): ``CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW``, through the share
 """
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from nexus import _mineru_spawn
+from nexus.daemon.service_registry import pid_alive
 from nexus.util import win_job
 from tests._module_seam import patch_in
 
@@ -90,3 +94,44 @@ def test_the_posix_spawn_is_unchanged(tmp_path: Path, monkeypatch) -> None:
     popen = _spawn(tmp_path, "darwin")
     _, kwargs = popen.call_args
     assert kwargs["start_new_session"] is True and "creationflags" not in kwargs
+
+
+# ── native Windows: the kernel honours the flags (the guest check the bead names) ──
+
+_PARENT = r'''
+import importlib.util, subprocess, sys, time
+spec = importlib.util.spec_from_file_location("mcpb_bootstrap", sys.argv[1])
+bootstrap = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bootstrap)
+job = bootstrap._KillOnCloseJob()  # the Desktop extension's own job: kill-on-close, breakaway allowed
+assert job.assign_self()
+argv = [sys.executable, "-c", "import time; time.sleep(60)"]
+if sys.argv[3] == "fixed":
+    from nexus import _mineru_spawn
+    from nexus.daemon.service_registry import popen_outliving_host_job
+    child = popen_outliving_host_job(subprocess.Popen, argv, **_mineru_spawn._server_popen_kwargs("win32"))
+else:
+    child = subprocess.Popen(argv, start_new_session=True)  # the spawn before nexus-dmhxw
+open(sys.argv[2], "w").write(str(child.pid))
+'''
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a real Job Object needs native Windows")
+@pytest.mark.parametrize("mode, survives", [("fixed", True), ("before", False)])
+def test_the_server_outlives_the_desktop_extensions_job(tmp_path: Path, mode: str, survives: bool) -> None:
+    """The parent puts itself in mcpb/src/bootstrap.py's kill-on-close job, spawns a stand-in server
+    and exits, so the OS closes the job. The fixed spawn breaks away and lives; the old one dies
+    with the job (the control that shows the test can fail)."""
+    repo = Path(__file__).resolve().parents[1]
+    pid_file = tmp_path / "child.pid"
+    subprocess.run(
+        [sys.executable, "-c", _PARENT, str(repo / "mcpb" / "src" / "bootstrap.py"), str(pid_file), mode],
+        check=True, timeout=60,
+    )
+    pid = int(pid_file.read_text())
+    try:
+        time.sleep(2)  # the job closes when the parent's last handle does
+        assert pid_alive(pid) is survives
+    finally:
+        if pid_alive(pid):
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, check=False)
