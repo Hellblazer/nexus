@@ -1394,6 +1394,13 @@ def platform_failure_hint(stderr: str, *, system: str | None = None) -> str | No
     )
 
 
+def _is_resolve_failure(stderr: str) -> bool:
+    """Whether uv's output is a dependency-resolution failure (its "No solution found" or an
+    "unsatisfiable" requirement), as opposed to a network, build or disk failure."""
+    low = stderr.lower()
+    return "no solution found" in low or "unsatisfiable" in low
+
+
 def torch_backend_hint(
     stderr: str, *, env: Mapping[str, str] | None = None, system: str | None = None,
 ) -> str | None:
@@ -1410,7 +1417,10 @@ def torch_backend_hint(
         return None
     env = os.environ if env is None else env
     backend = env.get("NX_TORCH_BACKEND", "").strip().lower()
-    if backend != "cu128" and not (backend == "auto" and "cu128" in stderr):
+    # nexus-0ib6r (4): under auto, uv naming cu128 is not enough; a download timeout for a cu128 wheel
+    # names it too. Only a resolve failure is the missing-backend case.
+    auto_cu128 = backend == "auto" and "cu128" in stderr and _is_resolve_failure(stderr)
+    if backend != "cu128" and not auto_cu128:
         return None
     return (
         "The torch backend is cu128, which does not exist for this release's torch. "
