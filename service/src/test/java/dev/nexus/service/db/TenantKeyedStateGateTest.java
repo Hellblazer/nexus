@@ -727,6 +727,7 @@ public class TenantKeyedStateGateTest {
                 "OwnerlessWriteActivity.REFUSED",
                 "OwnerlessWriteActivity.WOULD_REFUSE",
                 "PgVectorRepository.EXACT_FALLBACKS",
+                "PgVectorRepository.QUALIFYING_WIDENS",
                 "PgVectorRepository.ROUTED_EXACT",
                 "PgVectorRepository.ROUTED_HNSW",
                 "PgVectorRepository.SHORT_PAGE_COUNT_DEADLINES",
