@@ -128,6 +128,9 @@ def test_cli_search_a_real_degrade_still_warns_and_orders_by_the_calibrated_scor
     meta = {"knowledge__other": {"degraded": True, "error": "boom"}, COL: {"degraded": False}}
     out = _cli_search(rows, meta, monkeypatch)
     assert out.exit_code == 0 and "server rerank degraded" in out.stderr
+    # The calibrated order is the nearest-first one apply_ranking_boosts set (no frecency here): c, b, a. The
+    # scored-rows-lead order would be a (0.9), b (0.7), then the unscored c, so this pins the branch by its output.
+    assert _ids(out) == ["c", "b", "a"]
 
 
 # ── MCP search ───────────────────────────────────────────────────────────────
