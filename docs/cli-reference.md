@@ -1799,7 +1799,8 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-text-dedup]
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity]
                   [--link-coverage] [--visible-outside-manifest]
-                  [--sensitive-in-aspect-eligible] [--sensitive-with-aspects] [--json]
+                  [--sensitive-in-aspect-eligible] [--sensitive-with-aspects]
+                  [--sensitive-in-external-embedder] [--sensitivity-mcp-output] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
@@ -1816,6 +1817,8 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--visible-outside-manifest` (nexus-wbfpw.26, RDR-192 Step 14): a canary for a live(c) regression. Under live(c) a chunk with no manifest row in its own collection is hidden from search and get. For each `knowledge__` collection the check takes the manifest-less census's `superseded` bucket (chunks whose owning note is live and whose manifest names a different chash) and asks the normal `get` reader, never the stored-row one (no `include_non_live`), whether each is visible. A visible chunk is a finding naming the collection, the note's tumbler and title, and the chash, and fails the check (exit 1); the census and the probe are separate reads, so re-run to confirm a finding. A healthy engine finds none; a finding means live(c), or a predicate that drifted from it, stopped hiding the chunk. A split note legitimately has several live chunks, so the check does not count chunks per title; it flags only chunks the census classes as superseded. It probes `get` only, not search: a search probe needs the superseded chunk's text, and the engine never returns text for a stored row that live(c) hides. It reads at most 300 per call, probes each census page as it lands, probes at most 5,000 chunks and checks a 120-second budget between calls (one call can run to the 120-second HTTP timeout, so a run can take about 240 seconds), and prints `checked N of M` so a clean result says what it covered. A run cut short by either budget says so and still passes if it probed something and found nothing visible; a run cut short before it probed anything reads **INCONCLUSIVE** and exits 1. When the superseded bucket is empty in every collection (the steady state once the reaper has drained it) it reads **nothing to probe** (exit 0, no PASS word, `vacuous: true` in `--json`): that run could not have detected a regression. It reads **not applicable** (exit 0, no PASS line) on a box with no `knowledge__` collection and against an engine without the census route. Needs an engine that carries `POST /v1/vectors/manifest-less-census`.
 - `--sensitive-in-aspect-eligible` (RDR-243, nexus-rfvyy.6.17): WARN for each sensitive document whose collection has an aspect extractor (`select_config`, which includes an opted-in `docs__` collection) or already holds aspect rows. Does not change the exit status. Reads **not applicable**, never a pass, on a tenant with no sensitive documents, on an engine without `catalog_sensitivity_supported`, and when the catalog or the aspect store cannot be read.
 - `--sensitive-with-aspects` (RDR-243, nexus-rfvyy.6.17): FAIL (exit 1) for each sensitive document that already has an aspect row or a queued aspect task in either side of the queue, with `nx enrich delete --tumbler <t>` printed per document. Same not-applicable rule. Both rows read the catalog's documents once to find the sensitive ones.
+- `--sensitive-in-external-embedder` (RDR-243, nexus-rfvyy.8.7): WARN for each sensitive document in a collection embedded by an external service: a Voyage model token, or a legacy name that carries none. A collection whose name carries a local model token (`bge-base-en-v15-768`, `minilm-l6-v2-384`) is not flagged. Does not change the exit status. Same not-applicable rule as the two rows above.
+- `--sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7): prints the active `sensitivity.mcp_output` value (`withhold`, the default, or `flag`). WARN when it is `flag` (sensitive content reaches the session model with a badge) or when the value is not one of the two. A config row, so it never reads not applicable. Does not change the exit status.
 
 Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
 
@@ -3634,7 +3637,8 @@ run `nx init`, or one using a managed Postgres.
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-`ghost-sweep`, `harness-grant`, `docs-aspects-config`, `sensitive-in-aspect-eligible`, `sensitive-with-aspects`
+`ghost-sweep`, `harness-grant`, `docs-aspects-config`, `sensitive-in-aspect-eligible`, `sensitive-with-aspects`,
+`sensitive-in-external-embedder`, `sensitivity-mcp-output`
 (the last six have no `--check-ghost-sweep` / `--check-harness-grant` /
 `--check-docs-aspects-config` flag; they only run as part of this
 supplementary set).
@@ -3654,6 +3658,8 @@ sensitive documents, on an engine without the sensitivity column, and when the c
 aspect store cannot be read. The warn row prints and never changes the exit code; a `sensitive-with-aspects`
 fail is the one supplementary finding that gates: `nx doctor` (text mode) exits 1 on it, as
 `nx catalog doctor --sensitive-with-aspects` does.
+`sensitive-in-external-embedder` and `sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7) are the rows `nx catalog
+doctor --sensitive-in-external-embedder` and `--sensitivity-mcp-output` print; both warn and neither gates.
 `ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
