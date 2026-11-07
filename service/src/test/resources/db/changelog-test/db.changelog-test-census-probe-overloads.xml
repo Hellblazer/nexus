@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-rfvyy.7.17: plants two overloads of one function that return chunk text under the column name body
+    in Liquibase XML instead of Java SQL strings (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included).
+    jOOQ OSS has no CREATE FUNCTION. VectorSensitivityRouteParityTest plants these in a throwaway schema, ${probe}
+    (a plain test identifier validated by the caller, never input), as a negative control for the chunk-text
+    census: the census must see each planted function. The bodies hold dollar quotes, hence
+    splitStatements="false". Run by that test directly, which drops ${probe} afterwards; runAlways, bookkeeping in
+    its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="census-probe-twin-text" author="nexus-rfvyy.7.17" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+CREATE FUNCTION ${probe}.twin(p text) RETURNS table(chash bytea, body text) LANGUAGE sql AS $f$
+SELECT c.chash, c.chunk_text FROM nexus.chunks c $f$
+        </sql>
+    </changeSet>
+
+    <changeSet id="census-probe-twin-int" author="nexus-rfvyy.7.17" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+CREATE FUNCTION ${probe}.twin(p int) RETURNS table(chash bytea, body text) LANGUAGE sql AS $f$
+SELECT c.chash, c.chunk_text FROM nexus.chunks c $f$
+        </sql>
+    </changeSet>
+</databaseChangeLog>
