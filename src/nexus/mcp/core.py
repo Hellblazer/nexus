@@ -5917,7 +5917,7 @@ def store_put(
         ),
     )] = "",
     session: Annotated[str, Field(
-        description="Optional explicit session_id override. Falls back to the NX_SESSION_ID env var.",
+        description="Deprecated: accepted and ignored. No stored chunk carries a session id.",
     )] = "",
     entity_key: Annotated[str, Field(
         description=(

@@ -83,7 +83,8 @@ def store() -> None:
                    "matches it. A re-put without it removes the stored key.")
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
-@click.option("--session-id", default="", hidden=True)
+@click.option("--session-id", default="", hidden=True,
+              help="Deprecated: accepted and ignored. No stored chunk carries a session id.")
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
     source: str,
