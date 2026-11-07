@@ -264,7 +264,7 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     repo = _make_repo(tmp_path)
     wt = _linked_worktree(tmp_path, repo)
     asked: list[Path] = []
-    monkeypatch.setattr(md, "_primary_via_git", lambda cwd: asked.append(cwd) or Path("/via/git"))
+    monkeypatch.setattr(md, "_primary_via_git", lambda cwd, env=None: asked.append(cwd) or Path("/via/git"))
     for cwd in (repo, repo, wt):
         assert md.primary_checkout_root(cwd, {}) == repo
     assert md.primary_checkout_root(tmp_path / "plain", {}) is None  # no .git above: not a repository
@@ -274,6 +274,10 @@ def test_the_read_does_not_ask_git_but_the_fallback_cases_do(
     assert md.primary_checkout_root(repo, {"GIT_COMMON_DIR": str(repo / ".git")}) == Path("/via/git")
     # GIT_CEILING_DIRECTORIES can stop git's search above cwd, which the read does not model: ask git
     assert md.primary_checkout_root(repo / "sub", {"GIT_CEILING_DIRECTORIES": str(repo)}) == Path("/via/git")
+    assert len(asked) == 3
+    # a ceiling that is not strictly above cwd cannot change git's answer: read, do not ask (nexus-nrqqk)
+    for ceiling in (str(repo), str(tmp_path / "elsewhere"), "relative/dir", ""):
+        assert md.primary_checkout_root(repo, {"GIT_CEILING_DIRECTORIES": ceiling}) == repo, ceiling
     assert len(asked) == 3
     # an unrecognised layout: ask git
     broken = tmp_path / "broken"
@@ -1116,3 +1120,23 @@ def test_the_command_is_registered_and_documented() -> None:
         assert flag in section, flag
     for needle in ("near-duplicates", "S-7", "90-day TTL", "Jaccard", "closed"):
         assert needle in section, needle
+
+
+def test_a_ceiling_at_the_repository_root_really_stops_git_below_it(tmp_path: Path) -> None:
+    # nexus-nrqqk: the real-git case behind the ceiling trigger. Git examines cwd and never moves up into a ceiling.
+    repo = _make_repo(tmp_path)
+    (repo / "sub").mkdir()
+    assert md.primary_checkout_root(repo / "sub", {}) == repo
+    assert md.primary_checkout_root(repo / "sub", {**os.environ, "GIT_CEILING_DIRECTORIES": str(repo)}) is None
+    assert md.primary_checkout_root(repo, {**os.environ, "GIT_CEILING_DIRECTORIES": str(repo)}) == repo
+    assert md.primary_checkout_root(repo / "sub", {**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)}) == repo
+
+
+def test_the_git_fallback_runs_in_the_callers_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # nexus-nrqqk: a GIT_DIR given only in the caller's mapping must reach git, not just the trigger.
+    repo = _make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    assert md.primary_checkout_root(outside, {}) is None
+    assert md.primary_checkout_root(outside, {**os.environ, "GIT_DIR": str(repo / ".git")}) == repo

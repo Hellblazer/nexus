@@ -33,12 +33,13 @@ THE MAPPING, :func:`memory_dir`. Given a working directory *cwd*:
      ``commondir`` (a ``--separate-git-dir`` or submodule layout) is its own common directory,
      the answer ``git rev-parse --git-common-dir`` gives. A spawn costs about 55 ms here (it
      loads structlog and ~230 modules) against 0.1 ms for the read.
-     FALLBACK: only when ``GIT_DIR``, ``GIT_COMMON_DIR`` or ``GIT_CEILING_DIRECTORIES`` is set
-     (they redirect or stop git's search away from the layout on disk) or the layout is
+     FALLBACK: only when ``GIT_DIR`` or ``GIT_COMMON_DIR`` is set (they redirect git away from the
+     layout on disk), a ``GIT_CEILING_DIRECTORIES`` entry lies above *cwd* (it can stop git's
+     search short of the ``.git`` the read would find), or the layout is
      unrecognised (a ``.git`` directory or a ``gitdir:`` target without ``HEAD``, a ``gitdir:``
      line that is malformed or points nowhere, a ``commondir`` that points nowhere)
      does it run ``git rev-parse --path-format=absolute --git-common-dir`` through
-     ``run_bounded`` (deferred import; 5 s limit). Not matched to git by the read:
+     ``run_bounded`` (deferred import; 5 s limit), in the caller's *env* when one is given. Not matched to git by the read:
      filesystem-boundary stops and ``safe.directory``. In a ``--separate-git-dir``, submodule or
      bare-repository worktree layout the primary is the git directory's parent, as git reports
      it, which (inferred, not observed) is not the directory Claude Code keyed its memory by;
@@ -136,25 +137,50 @@ def _common_dir_by_reading(cwd: Path) -> Path | None:
     return None
 
 
+def _ceiling_can_stop(cwd: Path, ceilings: str) -> bool:
+    """True when a ``GIT_CEILING_DIRECTORIES`` entry lies strictly above *cwd*.
+
+    Git examines *cwd* itself whatever the ceiling, and stops before moving up into a ceiling
+    directory (measured: ceiling at the repository root, cwd in a subdirectory, is "not a git
+    repository"; cwd at the root, or a ceiling above the root, finds it). An entry that is not an
+    ancestor of *cwd* cannot change the answer, so only an ancestor sends the call to git. Each
+    entry is compared both as written and resolved, so a symlink on either side still counts.
+    """
+    here = {Path(os.path.abspath(cwd)), _real(cwd)}
+    for entry in ceilings.split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue  # git ignores a relative entry; an empty one only changes symlink handling
+        for ceiling in {Path(os.path.abspath(entry)), _real(entry)}:
+            if any(h != ceiling and h.is_relative_to(ceiling) for h in here):
+                return True
+    return False
+
+
 def primary_checkout_root(cwd: Path, env: Mapping[str, str] | None = None) -> Path | None:
     """The primary checkout's root: the parent of the git common directory, or None.
 
-    Reads ``.git`` and spawns nothing; asks git (:func:`_primary_via_git`) only when ``GIT_DIR``,
-    ``GIT_COMMON_DIR`` or ``GIT_CEILING_DIRECTORIES`` is set in *env* or the layout is unrecognised. See the module docstring.
+    Reads ``.git`` and spawns nothing; asks git (:func:`_primary_via_git`, with the same *env*)
+    only when ``GIT_DIR`` or ``GIT_COMMON_DIR`` is set in *env*, a ``GIT_CEILING_DIRECTORIES``
+    entry lies above *cwd*, or the layout is unrecognised. See the module docstring.
     """
     e = os.environ if env is None else env
-    if not (e.get("GIT_DIR") or e.get("GIT_COMMON_DIR") or e.get("GIT_CEILING_DIRECTORIES")):
+    redirected = bool(e.get("GIT_DIR") or e.get("GIT_COMMON_DIR"))
+    ceilings = e.get("GIT_CEILING_DIRECTORIES", "")
+    if not redirected and not (ceilings and _ceiling_can_stop(cwd, ceilings)):
         try:
             common = _common_dir_by_reading(cwd)
         except _Unrecognised:
             pass
         else:
             return None if common is None else common.parent
-    return _primary_via_git(cwd)
+    return _primary_via_git(cwd, env)
 
 
-def _primary_via_git(cwd: Path) -> Path | None:
-    """The fallback: ask git. The imports are deferred because they pull structlog and ~230 modules."""
+def _primary_via_git(cwd: Path, env: Mapping[str, str] | None = None) -> Path | None:
+    """The fallback: ask git, in *env* when one is given (else this process's environment).
+
+    The imports are deferred because they pull structlog and ~230 modules.
+    """
     # A module-scope run_bounded import takes 14 ms / 106 modules to 62-84 ms / 337 (measured on the
     # deleted hooks/verification_config); only a caller that reaches this fallback pays it.
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred by the hooks convention, measurement above
@@ -164,6 +190,7 @@ def _primary_via_git(cwd: Path) -> Path | None:
         proc = run_bounded(
             argv_off_cwd(["git", "-C", os.fspath(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"]),
             timeout=5,
+            env=None if env is None else dict(env),
         )
     except Exception:  # noqa: BLE001 — a missing git, a timeout or a spawn failure is "not found", never an error
         return None
