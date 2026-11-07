@@ -67,7 +67,7 @@ def test_own_file_and_other_names_are_left_alone(tmp_path: Path) -> None:
 def test_a_worker_holds_its_lock_from_write_until_remove(tmp_path: Path) -> None:
     aw._write_worker_lock(tmp_path)
     mine = aw._worker_lock_path(tmp_path)
-    assert mine.read_text() == str(os.getpid())
+    assert os.stat(mine).st_size == len(str(os.getpid()))  # a read would hit the held byte on Windows
     assert _is_held(mine)
     aw._remove_worker_lock(tmp_path)
     assert not mine.exists()

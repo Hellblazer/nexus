@@ -2104,6 +2104,25 @@ class HolderStopResult:
     invisible: tuple[int, ...] = ()
 
 
+def lease_holder_invisible(
+    record: LeaseRecord,
+    pid: int,
+    *,
+    alive: Callable[[int], bool] | None = None,
+    now: float | None = None,
+) -> bool:
+    """True when *pid* is not alive here but *record* still heartbeats (nexus-dyfsw).
+
+    The one rule every stop path applies to a holder it cannot see: a fresh heartbeat
+    means the holder is alive somewhere this process cannot see (another PID namespace
+    sharing the config directory), so its record must not be relinquished and nothing
+    may be started beside it. A stale record of an absent pid is a dead holder, as
+    before. *alive* is the caller's own liveness probe (default :func:`pid_running`).
+    """
+    probe = alive if alive is not None else pid_running
+    return not probe(pid) and record.is_fresh(time.time() if now is None else now)
+
+
 def stop_tier_holders(
     *,
     dir: Path,
@@ -2165,7 +2184,7 @@ def stop_tier_holders(
         if not cmd:
             if pid_running(pid):
                 unreadable.append(pid)
-            elif record.is_fresh(now):
+            elif lease_holder_invisible(record, pid, now=now):
                 # nexus-dyfsw: a pid this process cannot see whose holder still heartbeats is
                 # alive elsewhere (another PID namespace); dropping its record would let a
                 # second holder start beside it.

@@ -48,24 +48,6 @@ def lock_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # ── stale lock cleanup ────────────────────────────────────────────────────────
 
 
-def test_clear_stale_lock_removes_empty_old_file(tmp_path: Path) -> None:
-    """Empty lock files older than _LOCK_STALE_SECONDS are removed."""
-    from nexus.indexer import _clear_stale_lock, _LOCK_STALE_SECONDS
-
-    lock = tmp_path / "stale.lock"
-    lock.touch()
-    # Backdate the file so it's clearly stale
-    import os
-    old_time = time.time() - _LOCK_STALE_SECONDS - 1
-    os.utime(lock, (old_time, old_time))
-
-    _clear_stale_lock(lock)
-    assert not lock.exists()
-
-
-# ── lock path helper ──────────────────────────────────────────────────────────
-
-
 def test_repo_lock_path_is_stable(tmp_path: Path) -> None:
     """_repo_lock_path returns a consistent path for the same repo."""
     from nexus.indexer import _repo_lock_path

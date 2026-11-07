@@ -3992,7 +3992,7 @@ def stop_storage_service(
         invisible_out=invisible,
     )
     if invisible:
-        outcome = dataclasses.replace(outcome, invisible=tuple(invisible), sweep_verified=False)
+        outcome = dataclasses.replace(outcome, invisible=tuple(invisible))
     if outcome.refused or outcome.stubborn or outcome.invisible:
         # The marker said "this service is meant to stay down". It must be
         # written BEFORE the signal (the signal itself can produce the exit the
@@ -4018,6 +4018,7 @@ def _stop_marked_service(
     marker already on disk (Windows). A fresh lease whose supervisor pid this
     process cannot see is appended to *invisible_out* and left alone."""
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        lease_holder_invisible,
         storage_service_member_check,
         storage_service_stack_matcher,
         sweep_matching_processes,
@@ -4049,7 +4050,7 @@ def _stop_marked_service(
             not supervisor_seen
             and isinstance(supervisor_pid, int)
             and supervisor_pid > 0
-            and record.is_fresh(time.time())
+            and lease_holder_invisible(record, supervisor_pid, alive=_pid_is_alive)
         ):
             # nexus-dyfsw: the lease still heartbeats, so its supervisor is alive
             # somewhere this process cannot see (another PID namespace sharing

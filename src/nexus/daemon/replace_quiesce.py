@@ -171,8 +171,9 @@ def blocked_message(outcome: Any, *, replacing: Replacing) -> str | None:
 
     A refused pid is the Windows cross-session case: nothing was signalled or
     killed, and the message says whose session to run the upgrade from. A pid
-    that survived the whole escalation is the other case. Both say that no file
-    was replaced.
+    that survived the whole escalation is another. A supervisor a heartbeating
+    lease names but this process cannot see (another PID namespace, nexus-dyfsw)
+    is the third. Each says that no file was replaced.
     """
     what = "engine" if replacing == "engine" else "PostgreSQL bundle"
     refused = tuple(getattr(outcome, "refused", ()) or ())
@@ -219,6 +220,14 @@ def blocked_message(outcome: Any, *, replacing: Replacing) -> str | None:
             "escalation and may still be running"
         )
         remedies.append("Stop them by hand, then run the upgrade again.")
+    invisible = tuple(getattr(outcome, "invisible", ()) or ())
+    if invisible:
+        parts.append(
+            f"the storage-service lease is still heartbeating, but its supervisor "
+            f"(pid {', '.join(str(p) for p in invisible)}) is not visible from here, so it runs "
+            "in another PID namespace that shares this config directory and was not stopped"
+        )
+        remedies.append("Stop it from where it runs, then run the upgrade again.")
     if not parts:
         return None
     if refused:

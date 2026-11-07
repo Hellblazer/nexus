@@ -950,7 +950,12 @@ def _write_worker_lock(locks_dir: Path | None = None) -> None:
             _worker_lock_fd = None
         fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: held for the worker's life as its liveness marker; not an election (nexus-dyfsw)
+            try:
+                _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: held for the worker's life as its liveness marker; not an election (nexus-dyfsw)
+            except BlockingIOError:
+                # Another process's sweep probes the file for microseconds; ask once more.
+                time.sleep(0.05)
+                _locking.lock_fd(fd, blocking=False)  # lifecycle-gate-allow: the same marker lock, retried once after a sweep's probe (nexus-dyfsw)
             os.ftruncate(fd, 0)
             os.write(fd, str(os.getpid()).encode("ascii"))
         except BaseException:

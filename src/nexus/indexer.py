@@ -16,6 +16,7 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.indexer_utils  — staleness check, credential check, shared helpers
   nexus.index_context  — IndexContext dataclass
 """
+import contextlib
 import os
 import sys
 import subprocess
@@ -24,7 +25,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 import structlog
 
@@ -330,7 +331,6 @@ def _repo_lock_path(repo: Path) -> Path:
     return nexus_config_dir() / "locks" / f"{path_hash}.lock"
 
 
-_LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
 #: Page size for the batched catalog register_many pass (nexus-9dvqy). Matches
 #: the server's MAX_BATCH_DOC_IDS cap. Module-level so tests can shrink it to
 #: force multi-page behaviour without a 1000+ file corpus.
@@ -382,6 +382,40 @@ def _gc_floor_fraction() -> float:
     return val
 
 
+def _acquire_repo_lock(lock_path: Path, on_locked: str) -> IO[str] | None:
+    """Open and lock the repo lock file; the open file, or None when *on_locked* is 'skip' and it is held.
+
+    Locks the file the path names at the moment it returns: a sweep may unlink the inode between
+    this process's open and its lock (nexus-dyfsw), and a lock on an unlinked inode excludes
+    nobody, so the loop re-opens the path and locks again. A sweep's own probe holds an unheld
+    file for microseconds, so a 'skip' caller asks once more before reading the lock as held.
+    """
+    probe_retried = False
+    while True:
+        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")  # noqa: SIM115  (must stay open while locked)
+        try:
+            lock_file(lock_fd, blocking=(on_locked == "wait"))
+        except BlockingIOError:
+            # on_locked == "skip" and another process holds the lock.
+            # Nothing has been written to the file — close and leave the
+            # holder's content exactly as it was. A sweep's probe holds an
+            # unheld file for microseconds (nexus-dyfsw), so ask once more
+            # before reading the lock as a live indexer's.
+            lock_fd.close()
+            if not probe_retried:
+                probe_retried = True
+                time.sleep(0.05)
+                continue
+            return None
+        # nexus-dyfsw: another process's sweep may have unlinked this file
+        # between our open and our lock; a lock on an unlinked inode
+        # excludes nobody, so take the lock on the file the path names now.
+        if sys.platform == "win32" or _same_file(lock_fd.fileno(), lock_path):
+            return lock_fd
+        lock_fd.close()
+
+
 def _clear_stale_lock(lock_path: Path) -> None:
     """Delete *lock_path* when no process holds its platform lock.
 
@@ -391,7 +425,7 @@ def _clear_stale_lock(lock_path: Path) -> None:
     whatever it contains, an empty one left by a process killed before it wrote its PID
     included. The lock is held across the unlink on POSIX; Windows cannot unlink an open file,
     so it is released first, and a file someone opened in that gap is left. A holder that locked
-    the inode just unlinked notices and retries (:func:`_lock_repo_file`).
+    the inode just unlinked notices and retries (the lock loop in :func:`index_repository`).
     """
     try:
         fd = os.open(str(lock_path), os.O_RDWR)
@@ -2661,23 +2695,9 @@ def index_repository(
         # known, so a loser left its own (soon-dead) PID in the file the
         # winner still held; the next arrival's stale-lock sweep then saw
         # ESRCH on that dead PID and unlinked the live holder's lock.
-        while True:
-            raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-            lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")  # noqa: SIM115  (must stay open while locked)
-            try:
-                lock_file(lock_fd, blocking=(on_locked == "wait"))
-            except BlockingIOError:
-                # on_locked == "skip" and another process holds the lock.
-                # Nothing has been written to the file — close and leave the
-                # holder's content exactly as it was.
-                lock_fd.close()
-                return {}
-            # nexus-dyfsw: another process's sweep may have unlinked this file
-            # between our open and our lock; a lock on an unlinked inode
-            # excludes nobody, so take the lock on the file the path names now.
-            if sys.platform == "win32" or _same_file(lock_fd.fileno(), lock_path):
-                break
-            lock_fd.close()
+        lock_fd = _acquire_repo_lock(lock_path, on_locked)
+        if lock_fd is None:
+            return {}
         # We now hold the exclusive flock: safe to stamp our own PID.
         try:
             lock_fd.seek(0)
@@ -2773,14 +2793,23 @@ def index_repository(
                     _set_owner_head_hash(repo, _current_head(repo))
             return stats
         finally:
-            if lock_fd is not None:
+            # nexus-dyfsw: unlink while still holding the lock, and only the file
+            # the path still names, so a waiter cannot lock this inode in the gap
+            # and then lose its path to a third arrival. Windows cannot unlink an
+            # open file, so it releases first, as before.
+            if lock_fd is not None and lock_path is not None and sys.platform != "win32":
+                if _same_file(lock_fd.fileno(), lock_path):
+                    with contextlib.suppress(FileNotFoundError):
+                        lock_path.unlink()
                 unlock_file(lock_fd)
                 lock_fd.close()
-            if lock_path is not None:
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass  # already gone — harmless
+            else:
+                if lock_fd is not None:
+                    unlock_file(lock_fd)
+                    lock_fd.close()
+                if lock_path is not None:
+                    with contextlib.suppress(FileNotFoundError, PermissionError):
+                        lock_path.unlink()
             # nexus-hg2dw point (2): runs on EVERY exit — normal return, an
             # exception propagating out of `_run_index`, or a KeyboardInterrupt
             # (SIGINT) — fail-stamping anything Pass 1 registered as needing

@@ -198,7 +198,8 @@ def _stop_under_election() -> None:
             # sharing this config dir) still answers; its pid file is not stale.
             click.echo(
                 f"MinerU server on port {info.get('port')} answers, but PID {pid} is not visible from here "
-                "(another PID namespace?); not stopped. Stop it from where it runs.",
+                "(another PID namespace?); not stopped. Stop it from where it runs. If that port now "
+                f"belongs to something else, remove {pid_path} by hand.",
                 err=True,
             )
             raise SystemExit(1)

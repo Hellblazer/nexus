@@ -71,3 +71,53 @@ def test_same_file_tells_an_unlinked_lock_from_the_one_the_path_names(tmp_path: 
         assert not _same_file(fd, lock)
     finally:
         os.close(fd)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot unlink an open file")
+def test_a_lock_on_an_inode_a_sweep_unlinked_is_retaken_on_the_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop in _acquire_repo_lock: a sweep that unlinks between open and lock must not leave us on a dead inode."""
+    import nexus.indexer as ix
+
+    lock = tmp_path / "repo.lock"
+    real_lock_file = ix.lock_file
+    calls = {"n": 0}
+
+    def lock_then_lose_the_path(f, *, blocking):
+        real_lock_file(f, blocking=blocking)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            lock.unlink()  # another process's sweep, between our open and our lock
+
+    monkeypatch.setattr(ix, "lock_file", lock_then_lose_the_path)
+    held = ix._acquire_repo_lock(lock, "wait")
+    try:
+        assert held is not None and calls["n"] == 2
+        assert _same_file(held.fileno(), lock)
+    finally:
+        held.close()
+
+
+def test_a_skip_caller_retries_once_through_a_sweeps_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import nexus.indexer as ix
+
+    lock = tmp_path / "repo.lock"
+    real_lock_file = ix.lock_file
+    calls = {"n": 0}
+
+    def probed_once(f, *, blocking):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise BlockingIOError("a sweep's probe holds it")
+        real_lock_file(f, blocking=blocking)
+
+    monkeypatch.setattr(ix, "lock_file", probed_once)
+    monkeypatch.setattr(ix.time, "sleep", lambda s: None)
+    held = ix._acquire_repo_lock(lock, "skip")
+    assert held is not None and calls["n"] == 2
+    held.close()
+    fd = _hold(lock)  # a real holder: skip gives up after its one retry
+    try:
+        monkeypatch.setattr(ix, "lock_file", real_lock_file)
+        assert ix._acquire_repo_lock(lock, "skip") is None
+    finally:
+        os.close(fd)
