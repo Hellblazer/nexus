@@ -2664,6 +2664,49 @@ def boost_window_size(page_size: int) -> int:
     return max(_BOOST_WINDOW_FLOOR, 3 * max(1, page_size))
 
 
+def engine_held_slots(results: list[SearchResult]) -> list[tuple[int, SearchResult]]:
+    """``(slot, row)`` of each row the engine HELD back from a text-exporting reranker (RDR-243 Phase 3).
+
+    The engine's RerankStage merges a held row back at the index it had in the input list; it carries
+    ``sensitive: true`` and no ``rerank_score``. *results* is the list ``search_cross_corpus`` returned, in the
+    engine's order, so a row's index here is its slot. Call it BEFORE ``apply_ranking_boosts`` re-sorts the list."""
+    return [
+        (i, r) for i, r in enumerate(results)
+        if r.metadata.get("sensitive") is True and "rerank_score" not in r.metadata
+    ]
+
+
+def restore_held_slots(ordered: list[SearchResult], held: list[tuple[int, SearchResult]]) -> list[SearchResult]:
+    """*ordered* (the scored-first order the consumers build) with each held row put back at its engine slot.
+
+    A held row in *ordered* is taken out first (it sorts with the unscored rows), then each is inserted at its slot
+    in ascending order, so "a sensitive top-1 stays top-1". A slot past the end appends. Returns a new list."""
+    if not held:
+        return list(ordered)
+    held_ids = {id(r) for _slot, r in held}
+    out = [r for r in ordered if id(r) not in held_ids]
+    for slot, r in sorted(held, key=lambda sr: sr[0]):
+        out.insert(min(slot, len(out)), r)
+    return out
+
+
+def benign_held_degrades(rerank_meta: dict[str, dict], results: list[SearchResult]) -> set[str]:
+    """Collections whose reported rerank degrade is only the engine's "every rerankable row is sensitive" case.
+
+    The engine makes no reranker call when every row with text is held back, and says so as a loud degrade. That
+    is not a failure and must not turn the whole page into the calibrated ``partial_rerank`` order (RDR-210
+    Technical Design 12) or a warning: a collection counts here when it has rows with text and every one of them is
+    a held row (sensitive, no ``rerank_score``). A collection with any other contentful row is a real degrade."""
+    benign: set[str] = set()
+    for col, meta in rerank_meta.items():
+        if not meta.get("degraded"):
+            continue
+        rows = [r for r in results if r.collection == col and (r.content or "").strip()]
+        if rows and all(r.metadata.get("sensitive") is True and "rerank_score" not in r.metadata for r in rows):
+            benign.add(col)
+    return benign
+
+
 def apply_ranking_boosts(
     results: list[SearchResult],
     *,

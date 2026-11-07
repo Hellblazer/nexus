@@ -30,7 +30,10 @@ from nexus.search_engine import (
     SearchDiagnostics,
     apply_file_diversity_cap,
     apply_ranking_boosts,
+    benign_held_degrades,
     boost_window_size,
+    engine_held_slots,
+    restore_held_slots,
     search_cross_corpus,
 )
 from nexus.types import SearchResult
@@ -655,6 +658,9 @@ def search_cmd(
     # attachment via search_cross_corpus (see the comment on
     # make_catalog_reader() above).
     _scoring_cat = _search_catalog  # nexus-mw2kg: reuse the reader passed to search_cross_corpus
+    # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep the slot
+    # the engine merged them into; read before apply_ranking_boosts re-sorts the list.
+    _held_slots = engine_held_slots(results) if want_server_rerank else []
     # nexus: hybrid scoring + RDR-055 E2 quality boost — shared with the MCP
     # search()/query() paths via apply_ranking_boosts (search_engine.py) so
     # both surfaces rank identically for identical inputs.
@@ -682,8 +688,18 @@ def search_cmd(
     # on stderr — never WARN-only invisible, never a silent input-order
     # fallback (the retired scoring._rerank_cloud anti-pattern).
     _scored = [r for r in results if "rerank_score" in r.metadata] if want_server_rerank else []
+    # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back, not a
+    # failure: it neither warns as one nor turns the page into the calibrated order (fix r1, review S2).
+    _benign = benign_held_degrades(rerank_meta, results) if want_server_rerank else set()
+    if _benign:
+        click.echo(
+            f"Note: {len(_benign)} collection(s) were not reranked: every candidate row is sensitive and is held "
+            "back from the reranker; they stay in their vector-order slots.",
+            err=True,
+        )
+    _real_degrades = {c: m for c, m in rerank_meta.items() if m.get("degraded") and c not in _benign}
     if want_server_rerank:
-        _degraded = {c: m for c, m in rerank_meta.items() if m.get("degraded")}
+        _degraded = _real_degrades
         if _degraded:
             _reasons = {m.get("error") or "unknown" for m in _degraded.values()}
             _reason = next(iter(sorted(_reasons)))
@@ -701,9 +717,7 @@ def search_cmd(
     # every row of the degraded family (one rate-limited group would sink a
     # whole family). Order every row by the calibrated hybrid_score that
     # apply_ranking_boosts already set; the degrade warning above stays.
-    _partial_rerank = bool(_scored) and want_server_rerank and any(
-        m.get("degraded") for m in rerank_meta.values()
-    )
+    _partial_rerank = bool(_scored) and want_server_rerank and bool(_real_degrades)
     if _scored and _partial_rerank:
         # apply_ranking_boosts returned the rows in that order already (and
         # past its boost window in distance order, nexus-cbg2s), so it is kept
@@ -718,7 +732,8 @@ def search_cmd(
         for r in _scored:
             r.hybrid_score = float(r.metadata["rerank_score"])
         _scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-        _unscored = [r for r in results if "rerank_score" not in r.metadata]
+        _held_ids = {id(r) for _slot, r in _held_slots}
+        _unscored = [r for r in results if "rerank_score" not in r.metadata and id(r) not in _held_ids]
         # nexus-0bmhd: the file-diversity cap is the LAST ordering step
         # before the page truncation, unconditionally (every CLI
         # invocation renders for a reader) — capping before this re-sort
@@ -730,8 +745,11 @@ def search_cmd(
         # cap's "kept" head ahead of a scored row that overflowed its file's
         # quota; a scored row always outranks an unscored one, so the groups
         # are capped separately and joined.
-        results = (
-            apply_file_diversity_cap(_scored) + apply_file_diversity_cap(_unscored)
+        #
+        # Held rows (the engine kept them out of the reranker) go back to their engine slots AFTER the cap, so a
+        # sensitive top-1 stays top-1 end to end (RerankStage's slot-preserving merge, review S2).
+        results = restore_held_slots(
+            apply_file_diversity_cap(_scored) + apply_file_diversity_cap(_unscored), _held_slots,
         )[:n]
     else:
         # No server scores (rerank off, single collection, legacy backend, or

@@ -3418,8 +3418,11 @@ def _search_render(
         from nexus.search_engine import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             apply_file_diversity_cap,
             apply_ranking_boosts,
+            benign_held_degrades as _benign_held_degrades,
             boost_window_size,
+            engine_held_slots as _engine_held_slots,
             flag_displayed_contradictions,
+            restore_held_slots as _restore_held_slots,
             search_cross_corpus,
         )
 
@@ -3538,6 +3541,9 @@ def _search_render(
             # path ranked by raw vector distance only and never read
             # frecency_score or bib_citation_count at all.
             _cluster_order = [_row_key(r) for r in results] if clustered else None
+            # RDR-243 Phase 3 fix r1 (nexus-rfvyy.8): rows the engine held back from a text-exporting reranker keep
+            # the slot it merged them into; read before apply_ranking_boosts re-sorts the list.
+            held_slots = _engine_held_slots(results) if lexical_rerank else []
             results = apply_ranking_boosts(
                 results,
                 hybrid=cfg.get("search", {}).get("hybrid_default", False),
@@ -3554,7 +3560,11 @@ def _search_render(
                 # DEGRADED and others were scored, "scored rows lead" would
                 # sink the degraded family's rows, so every row stays in the
                 # calibrated hybrid_score order apply_ranking_boosts set.
-                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded"))
+                # An all-sensitive collection's "no rerank performed" degrade is the engine holding every row back,
+                # not a failure: it is not a degrade here (fix r1, review S2) and does not flip the page to the
+                # calibrated order.
+                benign = _benign_held_degrades(rerank_meta, results)
+                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded") and c not in benign)
                 scored = [r for r in results if "rerank_score" in r.metadata]
                 partial_rerank = bool(degraded) and bool(scored)
                 if partial_rerank:
@@ -3565,7 +3575,17 @@ def _search_render(
                     for r in scored:
                         r.hybrid_score = float(r.metadata["rerank_score"])
                     scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
-                    results = scored + [r for r in results if "rerank_score" not in r.metadata]
+                    held_ids = {id(r) for _slot, r in held_slots}
+                    # Held rows return to the engine's slots (a sensitive top-1 stays top-1).
+                    results = _restore_held_slots(
+                        scored + [r for r in results if "rerank_score" not in r.metadata and id(r) not in held_ids],
+                        held_slots,
+                    )
+                if benign and not degraded:
+                    rerank_note = (
+                        f"{len(benign)} collection(s) not reranked: every candidate row is sensitive and is held "
+                        "back from the reranker"
+                    )
                 if degraded:
                     rerank_note = (
                         f"lexical rerank degraded in {len(degraded)} collection(s) "
