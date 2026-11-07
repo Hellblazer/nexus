@@ -473,18 +473,38 @@ def _cli_install_command(platform: str | None = None) -> str:
     return "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"
 
 
-def _foreign_install_command(prefix: Path, platform: str | None = None) -> str:
+def _foreign_install_command(prefix: Path, platform: str | None = None, *, python: str | None = None,
+                             has_pip: bool | None = None) -> str:
     """Remove a pip or pipx install, then run the installer (nexus-nz8kl). The installer skips its
-    build while another nx answers on PATH, so the removal comes first. A pipx venv lives under a
-    ``pipx/venvs`` directory; anything else is uninstalled with its own interpreter's pip. PowerShell
-    5.1 has no ``&&``, so Windows joins the two with ``;``."""
+    build while another nx answers on PATH, so the removal comes first.
+
+    A pipx venv carries ``pipx_metadata.json`` whatever ``PIPX_HOME`` is, and sits under a
+    ``pipx/venvs`` directory by default; it is removed with pipx, which also takes its ``nx`` link off
+    PATH. Anything else is uninstalled with its own interpreter's pip, or with ``uv pip`` when that
+    interpreter has no pip (a ``uv venv``). On Windows the interpreter is called with ``&`` and a
+    single-quoted path (PowerShell reads a bare quoted string as a value, not a command), and the two
+    steps are joined with ``;``, since PowerShell 5.1 has no ``&&``."""
     windows = (platform if platform is not None else sys.platform) == "win32"
+    python = python if python is not None else sys.executable
+    if has_pip is None:
+        import importlib.util  # noqa: PLC0415 — deferred, stdlib
+
+        has_pip = importlib.util.find_spec("pip") is not None
     parts = [part.lower() for part in prefix.parts]
-    pipx = any(a == "pipx" and b == "venvs" for a, b in zip(parts, parts[1:], strict=False))
+    pipx = (prefix / "pipx_metadata.json").is_file() or any(
+        a == "pipx" and b == "venvs" for a, b in zip(parts, parts[1:], strict=False)
+    )
+    if windows:
+        quoted = "'" + python.replace("'", "''") + "'"
+        exe = f"& {quoted}"
+    else:
+        quoted = exe = shlex.quote(python)
     if pipx:
         remove = "pipx uninstall conexus"
+    elif has_pip:
+        remove = f"{exe} -m pip uninstall -y conexus"
     else:
-        remove = f"{shlex.quote(sys.executable)} -m pip uninstall -y conexus"
+        remove = f"uv pip uninstall --python {quoted} conexus"
     installer = _cli_install_command("win32" if windows else "posix")
     return f"{remove}; {installer}" if windows else f"{remove} && {installer}"
 
