@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """pytest plugin for scripts/tenant_delta.py (nexus-g37hn): at collection, count the tests in
-each module that will mint a test tenant, and write ``{"counts": {module: count}, "failed": {nodeid: reason}}``
+each module that will mint a test tenant, and write
+``{"counts": {module: count}, "failed": {nodeid: reason}, "skipped": {nodeid: reason}}``
 to ``$TENANT_CENSUS_OUT``, with ``"complete": true`` (written only once the census hook ran). ``failed`` holds every collector that failed to collect (a module, or a package or
 directory whose conftest or ``__init__`` failed; ``""`` is the session itself), with its first error line, so a
-run with ``--continue-on-collection-errors`` says which modules it could not count (nexus-l35bq).
+run with ``--continue-on-collection-errors`` says which modules it could not count (nexus-l35bq). ``skipped``
+holds every collector that skipped at collection (a module-level ``importorskip`` or ``skip``) with its reason:
+such a module yields no items, so it is in neither ``counts`` nor ``failed`` and would read as zero (nexus-xxuvz).
 
 A test mints one under the default substrate (``optin``, nexus-j23ni) when it carries the
 ``t2_tenant`` marker (module ``pytestmark`` included), or its fixture closure holds
@@ -29,6 +32,7 @@ import pytest
 
 _TENANT_FIXTURES = ("t2_tenant", "t2_service_env")
 _FAILED: dict[str, str] = {}
+_SKIPPED: dict[str, str] = {}
 
 
 def _first_error(text: str) -> str:
@@ -40,9 +44,18 @@ def _first_error(text: str) -> str:
     return (lines[-1].strip() if lines else "")[:300]
 
 
+def _skip_reason(report) -> str:
+    """The reason of a skipped collector: its longrepr is ``(path, lineno, "Skipped: <reason>")``."""
+    longrepr = report.longrepr
+    text = longrepr[2] if isinstance(longrepr, tuple) and len(longrepr) == 3 else str(longrepr)
+    return str(text).removeprefix("Skipped: ").strip()[:300]
+
+
 def pytest_collectreport(report) -> None:
     if report.failed:
         _FAILED[report.nodeid] = _first_error(report.longreprtext)
+    elif report.skipped:
+        _SKIPPED[report.nodeid] = _skip_reason(report)
 
 
 @pytest.hookimpl(trylast=True)
@@ -61,4 +74,4 @@ def pytest_collection_modifyitems(session, config, items) -> None:
     # Written here and only here, marked complete: a collection that ended before this hook (a UsageError, or an
     # earlier modifyitems hook that raised) leaves no file, and the reader refuses it rather than reading zeros.
     with open(os.environ["TENANT_CENSUS_OUT"], "w", encoding="utf-8") as out:
-        json.dump({"complete": True, "counts": dict(counts), "failed": dict(_FAILED)}, out)
+        json.dump({"complete": True, "counts": dict(counts), "failed": dict(_FAILED), "skipped": dict(_SKIPPED)}, out)

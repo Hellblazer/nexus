@@ -13,7 +13,10 @@ at run time cancel out; the base is read from ``git archive`` of the merge base 
 temporary directory, never a worktree or a checkout, and is collected against that tree's own
 ``src/`` and files (nexus-l35bq: collected against HEAD's code, a base test that used an API HEAD
 had changed failed to import, and the whole count was lost). A base module that still will not
-collect is named, with its HEAD count, and the others are counted. Advisory: exit 0 unless
+collect is named, with its HEAD count, and the others are counted. A module skipped at collection (a module-level
+``importorskip`` or ``skip``) yields no items and would read as zero: it is named as uncounted on whichever side
+skipped it, left out of the delta, and never refused (a platform-conditional skip holds on every push; nexus-xxuvz).
+Advisory: exit 0 unless
 ``--strict`` and the branch adds tenant tests, or 2 when the count could not be taken (a HEAD
 module that does not collect, or the budget).
 
@@ -87,15 +90,16 @@ def _owner(module: str, failed: dict[str, str]) -> str | None:
 
 
 def census(root: Path, modules: list[str], *, deadline: float,
-           own_src: bool = False) -> tuple[dict[str, int], dict[str, str]]:
+           own_src: bool = False) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
     """One collection under *root* (only the modules that exist there), with collection errors allowed:
-    tenant-minting tests per module, and each module that failed to collect with its first error line.
+    tenant-minting tests per module, each module that failed to collect with its first error line, and, apart,
+    each module skipped at collection with its reason (it yields no items; it is neither counted nor failed).
     *own_src* puts *root*'s ``src/`` first on the path, so its tests import its own code rather than the
     installed package. Finishes before *deadline* (a time.monotonic() value) or raises; CollectionFailed when
     nothing can be attributed (no census, or the session itself failed)."""
     present = [m for m in modules if (root / m).is_file()]
     if not present:
-        return {}, {}
+        return {}, {}, {}
     with tempfile.TemporaryDirectory(prefix="tenant-census-") as tmp:
         out = Path(tmp) / "census.json"
         # The plugin is loaded under a name no tree has: a tree's pyproject puts its own scripts/ (and its own,
@@ -120,7 +124,8 @@ def census(root: Path, modules: list[str], *, deadline: float,
         except (OSError, ValueError) as exc:
             raise CollectionFailed(root, proc.returncode, f"the census file could not be read ({exc})") from exc
         if not (isinstance(data, dict) and data.get("complete") is True
-                and isinstance(data.get("counts"), dict) and isinstance(data.get("failed"), dict)):
+                and isinstance(data.get("counts"), dict) and isinstance(data.get("failed"), dict)
+                and isinstance(data.get("skipped", {}), dict)):
             # Never read an incomplete or unexpected census as "no tenant tests" (an older plugin wrote a bare
             # mapping; a collection cut short before the census hook writes nothing).
             raise CollectionFailed(root, proc.returncode,
@@ -133,32 +138,36 @@ def census(root: Path, modules: list[str], *, deadline: float,
             # A failure that covers no module asked for cannot be placed; the modules it hid would read as zero.
             if not any(_owner(m, {nodeid: reason}) for m in present):
                 raise CollectionFailed(root, proc.returncode, f"{nodeid}: {reason}")
-        counts = {m: n for m, n in data["counts"].items() if m not in failed}
-        return counts, failed
+        # A skip that covers no module asked for hides nothing that was asked about: it is not placed, not refused.
+        skipped = {m: r for m in present if m not in failed and (r := _owner(m, data.get("skipped", {}))) is not None}
+        counts = {m: n for m, n in data["counts"].items() if m not in failed and m not in skipped}
+        return counts, failed, skipped
 
 
 def _one_by_one(root: Path, modules: list[str], *, deadline: float,
-                own_src: bool) -> tuple[dict[str, int], dict[str, str]]:
+                own_src: bool) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
     """Each module alone, for a run whose failure could not be attributed: the counts it can take, and the
     rest with a reason. Out of budget, the modules not yet tried are named as such and the counts kept."""
     counts: dict[str, int] = {}
     failed: dict[str, str] = {}
+    skipped: dict[str, str] = {}
     for i, module in enumerate(modules):
         try:
-            c, f = census(root, [module], deadline=deadline, own_src=own_src)
+            c, f, sk = census(root, [module], deadline=deadline, own_src=own_src)
         except subprocess.TimeoutExpired:
             for rest in modules[i:]:
                 failed[rest] = _NOT_TRIED
             break
         except CollectionFailed as exc:
-            f, c = {module: exc.reason}, {}
+            f, c, sk = {module: exc.reason}, {}, {}
         counts.update(c)
         failed.update(f)
-    return counts, failed
+        skipped.update(sk)
+    return counts, failed, skipped
 
 
 def _attempt(root: Path, modules: list[str], *, deadline: float,
-             own_src: bool) -> tuple[dict[str, int], dict[str, str]]:
+             own_src: bool) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
     try:
         return census(root, modules, deadline=deadline, own_src=own_src)
     except CollectionFailed:
@@ -166,11 +175,11 @@ def _attempt(root: Path, modules: list[str], *, deadline: float,
 
 
 def base_census(repo: Path, base: str, modules: list[str], *,
-                deadline: float) -> tuple[dict[str, int], dict[str, str]]:
+                deadline: float) -> tuple[dict[str, int], dict[str, str], dict[str, str]]:
     """The same count at *base*, over its whole tree unpacked from git archive (a test may read any file of it
     while collecting). First against the installed (HEAD's) code; a module that fails there is tried again
     against the base's own src/ (an API HEAD has since changed); one that fails both is returned with its
-    reason. Measured at 64e2fe6da against its parent, the mcp 2.3 move: against HEAD's code 5 of 36 changed
+    reason. A module skipped at collection is returned apart (third mapping) and not retried. Measured at 64e2fe6da against its parent, the mcp 2.3 move: against HEAD's code 5 of 36 changed
     modules could not be counted, against the base's src/ first 16 (nexus-l35bq review r1)."""
     with tempfile.TemporaryDirectory(prefix="tenant-base-") as tmp:
         # Resolved: on macOS the temp dir is under /var, a symlink to /private/var. pytest resolves its rootdir
@@ -187,21 +196,22 @@ def base_census(repo: Path, base: str, modules: list[str], *,
         with tarfile.open(tar_path) as tar:
             tar.extractall(root, filter="data")
         tar_path.unlink()
-        counts, failed = _attempt(root, modules, deadline=deadline, own_src=False)
+        counts, failed, skipped = _attempt(root, modules, deadline=deadline, own_src=False)
         retry = [m for m, why in failed.items() if why != _NOT_TRIED]
         if retry:
             try:
-                again, still = _attempt(root, retry, deadline=deadline, own_src=True)
+                again, still, again_skipped = _attempt(root, retry, deadline=deadline, own_src=True)
             except subprocess.TimeoutExpired:
                 # Pass 1's counts stand; the modules it could not count are left uncounted, not dropped.
-                again, still = {}, {m: failed[m] for m in retry}
+                again, still, again_skipped = {}, {m: failed[m] for m in retry}, {}
             counts.update(again)
+            skipped.update(again_skipped)
             for module in retry:
                 if module not in still:
                     failed.pop(module, None)
                 else:
                     failed[module] = still[module]
-        return counts, failed
+        return counts, failed, skipped
 
 
 def _say(text: str, *, err: bool = False) -> None:
@@ -235,12 +245,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         deadline = time.monotonic() + args.budget_s
         # HEAD's own src/ is the installed code (an editable install); first on the path all the same.
-        head, head_failed = census(repo, modules, deadline=deadline, own_src=True)
+        head, head_failed, head_skipped = census(repo, modules, deadline=deadline, own_src=True)
         if head_failed:
             module, reason = next(iter(head_failed.items()))
             # A module the branch itself cannot collect would read as zero tenant tests: refuse instead.
             raise CollectionFailed(repo, 2, f"{module}: {reason}")
-        base, uncounted = base_census(repo, merge_base, modules, deadline=deadline)
+        base, uncounted, base_skipped = base_census(repo, merge_base, modules, deadline=deadline)
     except subprocess.TimeoutExpired:
         _say(f"WARNING: tenant delta: not counted, over the {args.budget_s:g} s budget "
              f"({len(modules)} changed test module(s)); run scripts/tenant_delta.py by hand", err=True)
@@ -248,27 +258,39 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, subprocess.SubprocessError, OSError, tarfile.TarError) as exc:
         _say(f"WARNING: tenant delta: could not count ({str(exc)[:400]})", err=True)
         return 2
-    rows = [(m, base.get(m, 0), head.get(m, 0)) for m in modules if m not in uncounted]
+    # A module skipped at collection on either side is uncounted there; it is left out of the delta, never refused.
+    skip_notes = {m for m in modules if m in head_skipped or m in base_skipped}
+    rows = [(m, base.get(m, 0), head.get(m, 0)) for m in modules if m not in uncounted and m not in skip_notes]
     delta = sum(h - b for _m, b, h in rows)
     # An uncounted module with no tenant test at head cannot raise the count; only the others are named.
     risky = {m: r for m, r in uncounted.items() if head.get(m, 0) > 0}
-    if delta == 0 and not risky and args.quiet_if_zero:
+    # Skipped at the base but counted at head: a rise cannot be ruled out. Skipped at head: it contributes nothing here.
+    risky_skipped = {m: r for m, r in base_skipped.items() if head.get(m, 0) > 0}
+    if delta == 0 and not risky and not risky_skipped and args.quiet_if_zero:
         return 0
     for module, before, after in rows:
         if after != before:
             _say(f"  {module}: {before} -> {after} ({after - before:+d})")
     for module, reason in risky.items():
         _say(f"  WARNING: {module}: not counted at the merge base, {head[module]} at head ({reason})")
+    for module in modules:
+        if module in head_skipped:
+            _say(f"  NOTE: {module}: skipped at collection at head ({head_skipped[module]}); not counted")
+        elif module in base_skipped and module not in risky_skipped:
+            _say(f"  NOTE: {module}: skipped at collection at the merge base ({base_skipped[module]}); not counted")
+    for module, reason in risky_skipped.items():
+        _say(f"  WARNING: {module}: skipped at collection at the merge base, {head[module]} at head ({reason})")
     limit = ceiling(repo)
+    skip_count = f", {len(skip_notes)} skipped at collection (not counted)" if skip_notes else ""
     not_counted = f", {len(uncounted)} not counted at the merge base" if uncounted else ""
-    _say(f"tenant delta: {delta:+d} test(s) that mint a tenant across {len(modules)} changed module(s){not_counted}; "
+    _say(f"tenant delta: {delta:+d} test(s) that mint a tenant across {len(modules)} changed module(s){not_counted}{skip_count}; "
           f"python_unit ceiling {limit}, tolerance 0 (tests/storage_touch_ceiling.toml)")
     if delta > 0:
         _say("  develop CI's count usually sits at or just under the ceiling, so a rise will likely fail "
               "pytest-gate's storage-touch fan-in: make the new test tenant-free, or raise the ceiling in "
               "the same commit with a reason (tests/AGENTS.md)")
         return 1 if args.strict else 0
-    if risky:
+    if risky or risky_skipped:
         return 1 if args.strict else 0  # a rise cannot be ruled out where the base could not be counted
     return 0
 

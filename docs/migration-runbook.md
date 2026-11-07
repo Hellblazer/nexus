@@ -670,6 +670,10 @@ PostgreSQL is gone, install the same major version first (for example Homebrew
 `postgresql@16`). If you do not need the data, skip all of this: move the data
 directory aside, and `nx init` provisions a new PostgreSQL 17 cluster.
 
+Run the block in a shell of its own (start `bash` first, or save it as a script):
+step 2 ends that shell with `exit 1` when a `$DATA.old` is already there, so the
+rest of a pasted block cannot run on top of the refusal.
+
 ```bash
 CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
 OLD_BIN=/opt/homebrew/opt/postgresql@16/bin   # the PostgreSQL that created the cluster
@@ -685,8 +689,11 @@ nx daemon service stop
 "$OLD_BIN/pg_ctl" -D "$DATA" -m fast stop
 "$OLD_BIN/pg_ctl" -D "$DATA" status           # "no server running"
 
-# 2. Move the old directory aside, unless a previous attempt left one.
-if [ -e "$DATA.old" ]; then echo "$DATA.old exists: move it away first"; else mv "$DATA" "$DATA.old"; fi
+# 2. Move the old directory aside. If a previous attempt left one, STOP: this
+#    ends the shell (exit 1), so nothing below it runs. Move or remove the old
+#    `$DATA.old` yourself, then start over from the top in a new shell.
+if [ -e "$DATA.old" ]; then echo "STOP: $DATA.old exists: move it away, then start over" >&2; exit 1; fi
+mv "$DATA" "$DATA.old" || exit 1
 
 # 3. A new cluster with the options nx creates its own with, trust auth for the
 #    upgrade (the next service start converts it to scram-sha-256). Run from a
