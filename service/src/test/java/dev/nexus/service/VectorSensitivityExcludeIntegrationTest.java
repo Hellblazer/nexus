@@ -1067,13 +1067,44 @@ class VectorSensitivityExcludeIntegrationTest {
         });
     }
 
+    /**
+     * The routes plus the lexical form of search-per-collection (nexus-rfvyy.7.17). With every vector row cut by a
+     * threshold of 0.001, the rows the page serves are the lexical arm's extras alone, so the race drop of the
+     * lexical rows is the only thing standing between a flagged chunk and the response.
+     */
+    static Stream<Route> racedRoutes() {
+        String c = coll(384);
+        return Stream.concat(routes(), Stream.of(
+            new Route("/v1/vectors/search-per-collection",
+                      body("query", GATE, "collections", List.of(c), "per_collection_k", K, "limit", K,
+                           "lexical", true, "thresholds", Map.of(c, 0.001)), true)));
+    }
+
+    private static boolean isLexical(Route route) { return route.body().containsKey("lexical"); }
+
     @ParameterizedTest(name = "{0}")
-    @MethodSource("routes")
+    @MethodSource("racedRoutes")
     void route_aDocumentFlaggedAfterTheSearchIsDroppedFromAnExcludedPage(Route route) throws Exception {
         List<String> plainKeys = List.of("n1", "n2", "n3", "n4", "n5", "n6");
+        if (isLexical(route)) {
+            // non-vacuity: with no race the excluded page is made of lexical extras, and the arm reports them
+            var calm = MAPPER.readTree(post(route, "exclude", true).body());
+            assertThat(calm.get("results")).as("the lexical arm's extras are the page").hasSize(K);
+            assertThat(calm.get("per_collection").get(0).get("lexical_ids")).hasSize(K);
+            assertThat(calm.get("per_collection").get(0).get("lexical_count").asInt()).isEqualTo(K);
+        }
         withFlagAppearingBetweenReadAndLookup(plainKeys, () -> {
             // every row the search admits is flagged by the lookup: an excluded page serves none of them
-            assertThat(rows(post(route, "exclude", true))).as("no row the lookup flags is served").isEmpty();
+            var response = post(route, "exclude", true);
+            assertThat(rows(response)).as("no row the lookup flags is served").isEmpty();
+            if (isLexical(route)) {
+                // and the lexical arm no longer reports ids the response does not hold (nexus-rfvyy.7.17); the
+                // same response, because the first lookup leaves the flags set and a second search would exclude
+                // the rows in its statement, with no race left to see
+                var raced = MAPPER.readTree(response.body()).get("per_collection").get(0);
+                assertThat(raced.get("lexical_ids")).as("lexical_ids lists only ids still in the response").isEmpty();
+                assertThat(raced.get("lexical_count").asInt()).as("lexical_count follows the ids").isZero();
+            }
             // the same window without the exclusion: the rows are served, flagged
             for (JsonNode row : rows(post(route, null, false))) {
                 if (plainKeys.stream().map(VectorSensitivityExcludeIntegrationTest::hex)
