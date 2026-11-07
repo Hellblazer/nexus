@@ -517,9 +517,13 @@ grant rule.
    covers it.
 4. Running. `nexus.lua_runtime.run_script(name, args, limits=None) -> JSON
    value` finds the name in the two library roots, refusing a repo name that
-   shadows a shipped one (RDR-240 Technical Design 1), and reads the file. It
-   refuses, naming the reason, when the name is in neither root or the static
-   check fails. Otherwise it builds the sandbox with only the header's grants
+   shadows a shipped one (RDR-240 Technical Design 1), and reads the file. A
+   name matches `[a-z][a-z0-9_]{0,63}`, the rule the withdrawn registry gave
+   names, so it carries no separator, no `..` and no absolute path; the file
+   is `<root>/<name>.lua`, and its resolved path (symbolic links followed)
+   must lie inside the resolved root. It refuses, naming the reason, when the
+   name breaks that rule, resolves outside its root, is in neither root, or
+   the static check fails. Otherwise it builds the sandbox with only the header's grants
    and the limits of item 11 (lowered by the caller's `limits`, never
    raised), and runs it in a worker process (item 6). Source is never a
    parameter of any run path.
@@ -545,7 +549,7 @@ grant rule.
      (inferred, not read: a fork of the threaded MCP server copies its
      state and its held locks). `-I` ignores `PYTHON*` variables and the
      user site. The environment is empty, with only `SYSTEMROOT` added on
-     native Windows (`nexus_rdr/242-research-32` for macOS, `-34` for
+     native Windows (`nexus_rdr/242-research-32` for macOS, `-33`, inferred, for
      Windows), so no tenant token or key reaches the worker. `close_fds=True`;
      stdin and stdout are the pipe, and stderr goes to a pipe of which the
      parent keeps the first 64 KB for the crash error. The working directory
@@ -554,8 +558,10 @@ grant rule.
      nothing and runs nothing until the parent's first frame, which the
      parent sends after any limit it sets from outside (the Windows job).
    - Frames. Each message is a length-prefixed JSON frame. The worker sends
-     at most 64 KB per frame (a verb name and plain arguments); the parent
-     sends at most 64 MB (a verb result; the same bound as `max_memory`,
+     at most 64 KB per verb-call frame (a verb name and plain arguments) and
+     at most 1 MB plus 64 KB for its one result, error or limit frame (the
+     result bound of item 11, plus room for the frame's own fields); the
+     parent sends at most 64 MB (a verb result; the same bound as `max_memory`,
      since a larger value cannot be held in Lua). A frame over its cap, a
      frame that is not valid JSON of the expected form, or a 10,001st verb
      call in one run ends the run with `ScriptWorkerError`. The parent checks
@@ -584,7 +590,7 @@ grant rule.
      on macOS). On native Windows the parent puts the worker in a Job Object
      with kill-on-close and holds the job's only handle, so the OS ends the
      worker when the parent dies (inferred, not read;
-     `nexus_rdr/242-research-34`).
+     `nexus_rdr/242-research-33`, inferred).
    - Concurrency. One client process (the `nx` CLI, or one MCP server) runs
      at most 4 workers at once. A fifth `run_script` fails at once with
      `ScriptBusyError` and does not wait. The memory a client process can
@@ -594,6 +600,7 @@ grant rule.
      | Worker end | How the parent knows | Error |
      | --- | --- | --- |
      | the script returned | a result frame, then exit 0 | none |
+     | the script was refused or raised | an error frame (a static-check refusal naming its rule and line, a Lua error with its message, or a result the walk of item 12 rejects), then exit 0 | `ScriptError(kind, detail)` |
      | an inner limit (instructions, `max_memory`, stack, result) | a limit frame naming it, then exit 0 | `ScriptLimitError(limit, value)` |
      | the kill timer | the timer thread recorded that it killed the worker | `ScriptLimitError("wall_time", limit)` |
      | the OS CPU limit | SIGXCPU on Linux and macOS, with the timer not fired; on Windows the job reports its time limit (inferred, not read) | `ScriptLimitError("cpu_time", limit)` |
@@ -998,8 +1005,10 @@ procedure, a reviewed file in a library root, runs through it.
   and over 255 constants). The calibration test fails on any change to the
   bytecode layout or opcode numbering. The check runs in the worker, never in
   the calling process.
-- Run path: a name in neither library root, a repo name that shadows a
-  shipped one, and a file that fails the static check are each refused by
+- Run path: a name that breaks the name rule (`../x`, `a/b`, an absolute
+  path, an upper-case name), a name whose file is a symbolic link resolving
+  outside its root, a name in neither library root, a repo name that shadows
+  a shipped one, and a file that fails the static check are each refused by
   `run_script`, naming the reason; no public run function takes source.
 - Grants at run time: with the static check bypassed through the test-only
   entry point, a call to an ungranted verb fails naming it, a namespace with no
@@ -1030,7 +1039,9 @@ procedure, a reviewed file in a library root, runs through it.
   verb argument of the wrong type, sent over the pipe are refused by the
   parent by name. The worker's environment is empty (on Windows it holds
   only `SYSTEMROOT`), it holds no descriptor but its three pipes, and its
-  working directory is the temp directory. A frame over each cap, a
+  working directory is the temp directory. A 900 KB result returns whole,
+  and a static-check refusal and a Lua error each arrive as `ScriptError`,
+  not `ScriptWorkerError`. A frame over each cap, a
   malformed frame and a 10,001st verb call each end the run with
   `ScriptWorkerError`. Each row of the worker-end table of Technical Design 6
   yields its error: a timer kill, SIGXCPU, a `MemoryError` exit, a SIGSEGV
