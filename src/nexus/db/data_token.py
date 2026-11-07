@@ -1943,7 +1943,8 @@ class DataTokenManager:
                     )
                     self._write_lease(base_url, tenant, fresh)
                     _log.info(
-                        "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
+                        "data_token_minted", tenant=tenant, minted_for=self._resolve_mint_tenant() or tenant,
+                        expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
                     )
                     return fresh
                 finally:
@@ -1985,7 +1986,8 @@ class DataTokenManager:
         )
         self._publish_lease_locked(base_url, tenant, fresh)
         _log.info(
-            "data_token_minted", tenant=tenant, expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
+            "data_token_minted", tenant=tenant, minted_for=self._resolve_mint_tenant() or tenant,
+                        expires_in=fresh.ttl_seconds, endpoint=_log_endpoint(base_url),
         )
         return fresh
 
