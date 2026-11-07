@@ -40,7 +40,8 @@ import sys as _sys  # noqa: E402
 # tests._ddl_counter (nexus-sz651): DDL statements per run, printed in the terminal summary.
 # tests._shard_collection_plugin (nexus-bo5lv): a CI shard records the collection it split, for pytest-gate.
 # tests._signal_fence (nexus-xzorj): every os.kill/os.killpg target is classified as this session's or not, Linux
-# only; a foreign signal fails the run (fail mode, the default), listed in the terminal summary.
+# only; listed in the terminal summary, and a foreign signal fails the run in fail mode (report is the default until
+# develop CI measures zero foreign with the two ownership rules).
 pytest_plugins = [
     "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
     "tests._shard_collection_plugin", "tests._signal_fence",

@@ -28,8 +28,8 @@ changes nothing here. Each foreign event names the test (or the session phase), 
 target and its program name (argv[0]'s basename up to its first space: never the separate arguments, though a
 process that rewrote its title can show a title word); the summary groups repeats.
 
-``fail`` mode (the default, Sam's choice 2026-11-07, halcyon/xzorj-alerting): a session that saw any foreign signal
-exits failed (a status already nonzero is kept) and its summary says why (grep ``signal fence (``). The first CI
+``fail`` mode (Sam's choice 2026-11-07, halcyon/xzorj-alerting; the default once develop CI with the two rules reads
+zero foreign across every shard, ``report`` until then): a session that saw any foreign signal exits failed (a status already nonzero is kept) and its summary says why (grep ``signal fence (``). The first CI
 measurement before the rules saw 18 foreign signals of 6162, all false positives: detached test runs and their
 children that left the process tree with a scrubbed environment, every one naming the test's box in its argv or
 environment (rule A claims all 18 on the diagnostic run; rule B covers a reparented member of a group we lead, which
@@ -60,6 +60,9 @@ import pytest
 TOKEN_ENV = "NX_TEST_SIGNAL_FENCE_TOKEN"
 ROOT_ENV = "NX_TEST_SIGNAL_FENCE_ROOT"
 MODE_ENV = "NX_TEST_SIGNAL_FENCE"
+#: Sam chose fail (2026-11-07, halcyon/xzorj-alerting); it becomes the default once develop CI, with rules A and B,
+#: shows zero foreign signals across every shard (nexus-xzorj). Until then fail is opt-in.
+DEFAULT_MODE = "report"
 _WORKEROUTPUT_KEY = "nx_signal_fence"
 _MAX_LISTED = 20
 
@@ -76,7 +79,7 @@ _basetemp_cache: str | None = None
 #: This process's mode, read once at configure (``fail`` / ``report`` / ``off``); a nested pytest session (one a test
 #: spawned, which inherits the root's marker) is downgraded to ``report`` so its own count cannot flip the exit code
 #: a parent test asserts.
-_mode = "fail"
+_mode = DEFAULT_MODE
 _installed = False
 #: Depth of :func:`sanctioned` scopes on this thread.
 _sanction = threading.local()
@@ -91,10 +94,11 @@ _counts = {"signals": 0, "own": 0, "foreign": 0, "unclassified": 0}
 
 
 def _env_mode() -> str:
-    """``NX_TEST_SIGNAL_FENCE``: ``fail`` (the default, and what any other value means), ``report`` or ``off``,
-    case-insensitive. The signal itself is sent unchanged in every mode."""
-    value = os.environ.get(MODE_ENV, "fail").strip().lower()
-    return value if value in ("fail", "report", "off") else "fail"
+    """``NX_TEST_SIGNAL_FENCE``: ``report`` (the default until the suite-wide CI measurement with rules A and B reads
+    zero foreign; then :data:`DEFAULT_MODE` flips to ``fail``), ``fail`` or ``off``, case-insensitive; any other value
+    means the default. The signal itself is sent unchanged in every mode."""
+    value = os.environ.get(MODE_ENV, DEFAULT_MODE).strip().lower()
+    return value if value in ("fail", "report", "off") else DEFAULT_MODE
 
 
 def mode() -> str:

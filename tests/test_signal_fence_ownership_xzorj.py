@@ -278,8 +278,8 @@ def _inner(pytester, source: str, mode: str | None, *args: str):
 
 
 @_linux_fence
-def test_negative_control_a_planted_foreign_signal_fails_the_session_by_default(pytester) -> None:
-    result = _inner(pytester, _PLANTED, None)
+def test_negative_control_a_planted_foreign_signal_fails_the_session_in_fail_mode(pytester) -> None:
+    result = _inner(pytester, _PLANTED, "fail")
     result.assert_outcomes(passed=1)
     assert result.ret == pytest.ExitCode.TESTS_FAILED, "the planted foreign signal must turn the run red"
     result.stdout.fnmatch_lines([
@@ -290,14 +290,14 @@ def test_negative_control_a_planted_foreign_signal_fails_the_session_by_default(
 
 @_linux_fence
 def test_negative_control_across_xdist_workers(pytester) -> None:
-    result = _inner(pytester, _PLANTED, None, "-n", "2")
+    result = _inner(pytester, _PLANTED, "fail", "-n", "2")
     result.assert_outcomes(passed=1)
     assert result.ret == pytest.ExitCode.TESTS_FAILED
 
 
 @_linux_fence
 def test_a_session_whose_signals_are_all_its_own_passes(pytester) -> None:
-    result = _inner(pytester, _OWN_ONLY, None)
+    result = _inner(pytester, _OWN_ONLY, "fail")
     result.assert_outcomes(passed=1)
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(["signal fence (fail mode, nexus-xzorj): signals=1 own=1 foreign=0 *"])
@@ -315,7 +315,7 @@ def test_a_session_that_already_failed_keeps_its_own_exit_status(pytester) -> No
     """A run that ends with its own nonzero status (here 3, set by pytest.exit) keeps it: fail mode only turns an OK
     into a failure, never rewrites another code to 1."""
     source = _PLANTED + "\ndef test_zz_exits():\n    import pytest\n    pytest.exit('stop', returncode=3)\n"
-    result = _inner(pytester, source, None)
+    result = _inner(pytester, source, "fail")
     assert result.ret == 3
 
 
@@ -325,9 +325,19 @@ def test_a_nested_session_reports_and_leaves_its_parents_verdict_alone(pytester)
     test asserts, so it runs in report mode."""
     pytester.makepyfile(test_inner=_PLANTED.replace("int(os.environ[fence.ROOT_ENV])", "os.getpid()"))
     with pytest.MonkeyPatch.context() as mp:
-        mp.delenv(fence.MODE_ENV, raising=False)
+        mp.setenv(fence.MODE_ENV, "fail")
         mp.setenv(fence.ROOT_ENV, str(os.getpid()))  # this session's root: the inner one is nested
         mp.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
         result = pytester.runpytest_subprocess("-p", "tests._signal_fence", "-p", "no:cacheprovider")
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): *"])
+
+
+@_linux_fence
+def test_the_default_is_report_until_the_ci_measurement_reads_zero(pytester) -> None:
+    """The flip to fail is one line (DEFAULT_MODE) and this test, after develop CI with rules A and B shows zero
+    foreign signals across every shard (nexus-xzorj)."""
+    assert fence.DEFAULT_MODE == "report"
+    result = _inner(pytester, _PLANTED, None)
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(["signal fence (report mode, nexus-xzorj): signals=1 own=0 foreign=1 *"])
