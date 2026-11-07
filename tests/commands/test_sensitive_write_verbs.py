@@ -148,7 +148,7 @@ def _dt_patches(monkeypatch: pytest.MonkeyPatch, records: list[tuple[str, str]])
     from nexus.commands import dt as dtmod
 
     monkeypatch.setattr(dtmod, "_gather_records", lambda **kw: records)
-    monkeypatch.setattr(dtmod, "_dt_record_facts", lambda uuid: {"name": f"dt-{uuid}", "page_count": 0, "url": "", "year": 0})
+    monkeypatch.setattr(dtmod, "_dt_record_facts", lambda uuid: {"name": f"dt-{uuid}", "page_count": 0, "url": ""})
     monkeypatch.setattr(dtmod, "_stamp_dt_uri_on_entry", lambda *a, **k: True)
     monkeypatch.setattr(dtmod, "_dt_uri_is_catalogued", lambda uuid: False)
     monkeypatch.setattr(dtmod, "_is_darwin", lambda: True)

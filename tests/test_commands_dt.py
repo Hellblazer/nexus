@@ -2254,7 +2254,7 @@ class TestStampDtUriOnEntry:
             lambda uuid: {
                 "name": "Self-Aware Vector Embeddings for Retrieval-Augmented "
                          "Generation: Encoding Relational Knowledge",
-                "url": "", "year": 0, "page_count": 0,
+                "url": "", "page_count": 0,
             },
         )
         monkeypatch.setattr(
@@ -2868,7 +2868,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-GAP", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2, 3])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code != 0, result.output
         assert "1 page-coverage failed" in result.output
@@ -2881,7 +2881,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-GAP", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2, 3])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection", "--allow-page-gap"])
         assert result.exit_code == 0, result.output
         assert "1 page gap allowed" in result.output
@@ -2893,7 +2893,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-OK", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2, 3, 4, 5])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert "page" not in result.output.lower().replace("pages", "")
@@ -2909,7 +2909,7 @@ class TestPageCoverage:
         def record(uuid, path, *, collection, corpus, dry_run, extractor="mineru", force=False, force_re_embed=False):
             return True, 3, None
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 5})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert "1 page coverage unverified" in result.output
@@ -2922,7 +2922,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U", "/a.pdf")]
         self._dispatch(monkeypatch, [1, 2])
-        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 0})
+        monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "page_count": 0})
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert "1 page coverage unverified" in result.output
@@ -2953,7 +2953,7 @@ class TestPageCoverage:
 
         def facts(uuid):
             calls.append(uuid)
-            return {"name": "x", "url": "", "year": 0, "page_count": 9}
+            return {"name": "x", "url": "", "page_count": 9}
         monkeypatch.setattr(dt_mod, "_dt_record_facts", facts)
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output

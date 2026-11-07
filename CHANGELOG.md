@@ -34,6 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `nx daemon service stop` keeps a heartbeating lease whose supervisor it cannot see, warns and exits 1.
   A lease now records its publisher's PID namespace, and only a holder from another namespace counts as invisible: a supervisor killed in your own namespace is still treated as dead. A legacy storage lease's endpoint pid is signalled only when its command line is this directory's service. The replace-quiesce step of an engine or PostgreSQL-bundle upgrade refuses while such a holder runs.
 - **A failed T2 read no longer restarts an upgrade-ladder rung's deferral streak** (nexus-4qygk). The deferral log read an unreachable T2 note as an empty one and saved the deferring rung at a count of 1, so a rung that kept deferring could escalate later than it should in `nx doctor`. It now skips that write when the read fails (content that does not parse is still read as no note and rewritten): the walk's deferral is not counted and the streak is kept. While the note stays unreadable, the doctor's Upgrade ladder row says so instead of reading as nothing deferred.
+- **`nx dt index` no longer stamps DEVONthink's `creationDate` as the catalog year** (nexus-55clh). It is the file's or the import's date, not the publication's: a 1986 scanned paper was stamped 2025. The year now stays the indexer's, and is 0 when neither the PDF nor the bibliographic lookup gives one. Rows stamped before this keep their year.
 
 ## [7.97.0] - 2026-11-06
 
