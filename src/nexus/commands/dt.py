@@ -1566,7 +1566,14 @@ def index_cmd(
         # nexus-i0cwh: page coverage against DEVONthink's pageCount, on a
         # fresh PDF index only (markdown has no pages; an unchanged document
         # was checked when it was indexed).
-        if ext == ".pdf" and chunks:
+        if ext == ".pdf" and chunks and rec_excluded:
+            # RDR-243 Q7: DEVONthink's MCP refuses an excluded record's UUID, so the pageCount read cannot
+            # succeed for it. Say so once, instead of counting it under "MCP unreachable".
+            click.echo(
+                f"  page coverage not checked: {uuid} is excluded from AI in DEVONthink, "
+                "so DEVONthink's MCP refuses to report its page count"
+            )
+        elif ext == ".pdf" and chunks:
             facts = _dt_record_facts(uuid) if pages_seen is not None else None
             if pages_seen is None or facts is None or facts["page_count"] <= 0:
                 # Unverified, never covered (code review [24938] finding 2:
