@@ -295,6 +295,25 @@ enumerates records with `_run_osascript` (devonthink.py:105), not through
 DEVONthink's MCP server, so DEVONthink's own exclusion does not stop nexus
 from indexing an excluded record.
 
+**Documented: `traverse` and `catalog_link_query` list tumblers and chunk hashes,
+not text.** The census (Gap 4, row 23) names `traverse` on the premise that it
+returns chunk text. It returns tumblers, chash values and collection names. A
+hash is not content, and hydrating one goes through `store_get_many`, which is
+withheld. They are out of the output withhold's scope (nexus-rfvyy.8, fix round
+r1, S7). The edge `meta` they carry is withheld for an edge that touches a
+withheld document; the spans stay.
+
+**Documented: DEVONthink group inheritance is unverified live.** The Q7 import
+treats a record as excluded when any ancestor group has the exclusion set, as an
+ancestor walk over the record's `parents`. A property DEVONthink cannot read
+fails closed on DEVONthink 4 or later (the record is treated as excluded and a
+warning names it), so a wrong property name over-excludes and never leaks. The
+walk's AppleScript has not run against a live DEVONthink 4: DEVONthink 4.4.2
+answered its version on 2026-11-07 but hung on every database query. Tests assert
+the script text and the fail-closed paths only. Verify it when DEVONthink
+answers: the property on a group and on the database root, the `parents` chain,
+and `osacompile` of the script.
+
 ### Critical Assumptions
 
 - **A1:** `nx catalog migrate-fallback` moves each document by rewriting
@@ -899,8 +918,10 @@ release that carries phases 1 and 2.
 ### Phase 3: Output side and external services
 
 The MCP output posture (Q1); the CLI badge, `--json` field and Claude Code
-posture (Q2); the reader instruction line; rerank exclusion (Q4);
-DEVONthink exclusion
+posture (Q2); the reader instruction line; rerank exclusion (Q4); the
+child file-read deny (a `claude -p` child that keeps Read, Grep or Glob gets
+`--disallowedTools` rules for the catalog's sensitive source files; see
+Consequences); DEVONthink exclusion
 import (Q7, A6; this RDR adds no write to DEVONthink, Sam 2026-11-04); taxonomy discover
 without sensitive members; the `sensitive_in_external_embedder` doctor row;
 complete `docs/sensitivity.md` (the Phase 1 stub grows).
@@ -1156,3 +1177,4 @@ the drafter's recommendations, the design having left them open.
 - 2026-11-06: Technical Design items 3 and 4 follow the reviewed phase 2 engine (nexus-rfvyy.7.3, .7.4 and their review fixes): `sensitives` on get envelopes, chunk-level `sensitive`, the post-lookup drop under `exclude`, the gated catalog by-address reads with a live owner required, the inline `NOT EXISTS` and one function per name, the exempt routes, and the probes' no-cached-failure rule from Sam's nexus-rfvyy.3 ruling. Wording only.
 - 2026-11-06: census rows 12 and 15 follow the reviewed phase 2 client (nexus-rfvyy.7.9, Python review r1 S3 and r2 M2): the skip record is a log line and an in-process step entry, not a persisted run-record line, and the `nx_tidy` withheld count measures the catalog check after the engine filter.
 - 2026-11-06: Consequences states the child file-read limit Sam accepted for phase 2 (nexus-rfvyy.7.19, ask child-file-reads, option 1).
+- 2026-11-07: Phase 3 list and Key Discoveries follow the reviewed phase 3 code (nexus-rfvyy.8, fix rounds r1 to r3): the child file-read deny is in the Phase 3 list, `traverse` and `catalog_link_query` are recorded as out of the withhold's scope, and DEVONthink group inheritance is recorded as unverified live. Wording only.
