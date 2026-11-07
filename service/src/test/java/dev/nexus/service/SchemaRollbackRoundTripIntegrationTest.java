@@ -786,9 +786,12 @@ class SchemaRollbackRoundTripIntegrationTest {
         List<String> names = sensitivityFunctionNames();
         assertThat(names).as("10 families x 3 dimensions + manifest_qualifying_hits").hasSize(31);
 
-        PostgreSQLContainer<?> rolledPg = PgContainerHelper.startEmptyDatabase();
-        PostgreSQLContainer<?> baselinePg = PgContainerHelper.startEmptyDatabase();
+        // Both containers are assigned inside the try, so a failure starting the second still stops the first.
+        PostgreSQLContainer<?> rolledPg = null;
+        PostgreSQLContainer<?> baselinePg = null;
         try {
+            rolledPg = PgContainerHelper.startEmptyDatabase();
+            baselinePg = PgContainerHelper.startEmptyDatabase();
             try (Connection su = rolledPg.createConnection("")) {
                 dbaBootstrap(su);
             }
@@ -829,7 +832,11 @@ class SchemaRollbackRoundTripIntegrationTest {
                     assertThat(executionTail(c, 1))
                         .as("the baseline stops at the changeset before vectors-055-1")
                         .containsExactly("vectors-054-2");
-                    baseline = PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus");
+                    assertThat(changelogRowCount(c))
+                        .as("the baseline applied exactly the rows that precede vectors-055-1 (the rolled-back "
+                            + "database's count), not merely a tail that ends at vectors-054-2")
+                        .isEqualTo(precedingRows);
+                    baseline =PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus");
                 }
             }
 
@@ -873,8 +880,11 @@ class SchemaRollbackRoundTripIntegrationTest {
                 .as("baseline: 28 of the 31 hold an explicit nexus_svc EXECUTE grant (hybrid_search_<dim> never had one)")
                 .isEqualTo(28);
         } finally {
-            baselinePg.stop();
-            rolledPg.stop();
+            try {
+                if (baselinePg != null) baselinePg.stop();
+            } finally {
+                if (rolledPg != null) rolledPg.stop();
+            }
         }
     }
 
