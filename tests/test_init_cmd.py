@@ -183,7 +183,7 @@ class TestServiceProvisioningFlag:
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
         # Defensive: cloud mode returns before the start step, but stub it so a
         # future local-mode flip can't reach the real service starter.
-        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda cd: None)
 
         result = CliRunner().invoke(init_cmd, ["--service"])
 
@@ -338,7 +338,7 @@ class TestAutostartPrompt:
         )
         monkeypatch.setattr(
             "nexus.commands.init._start_service_step",
-            lambda: calls.__setitem__("session", calls["session"] + 1) or _FakeLeaseEP(),
+            lambda cd: calls.__setitem__("session", calls["session"] + 1) or _FakeLeaseEP(),
         )
 
         from nexus.daemon import installer
@@ -814,7 +814,7 @@ class TestServiceLocalEmbedder:
         # RDR-157 P4.1: init --service now also starts the service. Stub it here
         # so the embedder-focused tests stay hermetic (start coverage is in
         # TestServiceStartStep below).
-        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda cd: None)
         # RDR-161 P1: init now gates start on a resolvable native binary. These
         # tests cover the embedder path, not binary acquisition (see
         # tests/test_init_service_binary.py), so report the binary as ready.
@@ -953,7 +953,7 @@ class TestServiceStartStep:
     through ensure_storage_supervisor (the PERSISTENT, heartbeated supervisor),
     not the transient start_storage_service — and fails loud on any error."""
 
-    def test_start_step_reports_running_endpoint(self, monkeypatch) -> None:
+    def test_start_step_reports_running_endpoint(self, tmp_path: Path, monkeypatch) -> None:
         import types
 
         import nexus.commands.init as init_mod
@@ -968,13 +968,46 @@ class TestServiceStartStep:
         runner_out: list[str] = []
         monkeypatch.setattr(init_mod.click, "echo", lambda *a, **k: runner_out.append(a[0] if a else ""))
 
-        init_mod._start_service_step()
+        init_mod._start_service_step(tmp_path)
 
         joined = "\n".join(runner_out)
         assert "127.0.0.1:18099" in joined
         assert "serving" in joined.lower()
 
-    def test_start_step_fails_loud_on_start_error(self, monkeypatch) -> None:
+    def test_start_step_uses_the_config_dir_it_is_given(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-5yn9c: _start_service_step takes config_dir (as its sibling
+        _ensure_service_binary_step does) and hands THAT dir to both the
+        supervisor and the stray-LaunchAgent cleanup, never the default dir."""
+        import types
+
+        import nexus.commands.init as init_mod
+
+        default_dir = tmp_path / "default"
+        given_dir = tmp_path / "given"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(default_dir))
+        lease = types.SimpleNamespace(
+            endpoint={"host": "127.0.0.1", "port": 18099, "pid": 4242},
+            generation=3,
+        )
+        supervisor_dirs: list[Path] = []
+        cleanup_dirs: list[Path] = []
+        monkeypatch.setattr(
+            "nexus.commands.daemon.ensure_storage_supervisor",
+            lambda cfg: supervisor_dirs.append(cfg) or lease,
+        )
+        monkeypatch.setattr(
+            init_mod, "_report_stray_t2_launchagent_cleanup",
+            lambda cfg: cleanup_dirs.append(cfg),
+        )
+
+        init_mod._start_service_step(given_dir)
+
+        assert supervisor_dirs == [given_dir]
+        assert cleanup_dirs == [given_dir]
+
+    def test_start_step_fails_loud_on_start_error(self, tmp_path: Path, monkeypatch) -> None:
         import nexus.commands.init as init_mod
         from nexus.daemon.storage_service_daemon import StorageServiceStartError
 
@@ -989,7 +1022,7 @@ class TestServiceStartStep:
         )
 
         with pytest.raises(SystemExit) as exc:
-            init_mod._start_service_step()
+            init_mod._start_service_step(tmp_path)
         assert exc.value.code == 1
 
     def test_init_service_local_wires_start_after_embedder(
@@ -1012,7 +1045,7 @@ class TestServiceStartStep:
         )
         monkeypatch.setattr(
             "nexus.commands.init._start_service_step",
-            lambda: order.append("start"),
+            lambda cd: order.append("start"),
         )
         result = CliRunner().invoke(init_cmd, ["--service"])
         assert result.exit_code == 0, result.output
@@ -1041,7 +1074,7 @@ class TestServiceStartStep:
             lambda cd: (order.append("binary"), True)[1],
         )
         monkeypatch.setattr(
-            "nexus.commands.init._start_service_step", lambda: order.append("start")
+            "nexus.commands.init._start_service_step", lambda cd: order.append("start")
         )
         result = CliRunner().invoke(init_cmd, [])
         assert result.exit_code == 0, result.output
@@ -1099,7 +1132,7 @@ class TestStrayT2LaunchagentCleanup:
         assert any("T2 LaunchAgent cleanup failed" in line for line in out)
 
     def test_start_service_step_runs_cleanup_after_confirming_serving(
-        self, monkeypatch,
+        self, tmp_path: Path, monkeypatch,
     ) -> None:
         import types
 
@@ -1118,7 +1151,7 @@ class TestStrayT2LaunchagentCleanup:
             lambda config_dir: calls.append(config_dir),
         )
 
-        init_mod._start_service_step()
+        init_mod._start_service_step(tmp_path)
 
         assert len(calls) == 1
 
@@ -1193,7 +1226,7 @@ class TestLocalDispatchP13:
         monkeypatch.setattr(
             "nexus.commands.init._ensure_service_binary_step", lambda cd: True
         )
-        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda: None)
+        monkeypatch.setattr("nexus.commands.init._start_service_step", lambda cd: None)
 
         # No stdin supplied: if a prompt existed, the runner would error/hang.
         result = CliRunner().invoke(init_cmd, [])
