@@ -886,6 +886,10 @@ def receipt_path(generation: Path) -> Path:
 _SPEC_EXTRAS_RE = re.compile(r"\[([^\[\]]*)\](?=$|[=<>!~@;])")
 
 
+#: ``name==version`` with optional spaces around ``==``: a registry base that carries its own pin.
+_PINNED_BASE_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*(\S+)$")
+
+
 def build_spec(base: str, extras: list[str] | None = None, version: str = "") -> str:
     """The one place a PEP 508 install spec is assembled.
 
@@ -900,7 +904,16 @@ def build_spec(base: str, extras: list[str] | None = None, version: str = "") ->
     *base* is the distribution name for a registry install (``conexus``) or
     the path for a directory install (``.``, or an absolute checkout path).
     *version* is omitted for directory installs, which pin nothing.
+
+    A *base* that already carries its pin (``conexus==7.86.1``) is split, so the extras still
+    precede it (nexus-0ib6r; nexus-jea5y fixed only one caller). A pinned base with *version*
+    as well is two pins and is refused with ``ValueError``.
     """
+    pinned = _PINNED_BASE_RE.match(base)
+    if pinned is not None:
+        if version:
+            raise ValueError(f"build_spec: two version pins: {base!r} and {version!r}")
+        base, version = pinned.group(1), pinned.group(2)
     spec = base
     if extras:
         spec += "[" + ",".join(sorted(set(extras))) + "]"
