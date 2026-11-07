@@ -178,7 +178,7 @@ def test_json_carries_the_relabelled_topics(verb) -> None:
 
     result = verb("1.1.5", "--json")
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["topics_relabelled"] == [1, 10]
+    assert json.loads(result.stdout)["topics_relabelled"] == [1, 10]
 
 
 # ── every path that flags an EXISTING document relabels its topics (fix r3, N1) ─────────────────────────────────

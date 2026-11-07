@@ -203,6 +203,9 @@ def test_a_catalog_error_leaves_get_working_in_both_surfaces(world, monkeypatch)
         raise ConnectionError("catalog down")
 
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", boom)
+    # RDR-243 Phase 3 (nexus-rfvyy.8 fix r1): an unreadable catalog withholds the MCP hit under the default output
+    # posture (pinned in test_a_missing_catalog_withholds_the_mcp_hit_by_default); ``flag`` reaches the display.
+    monkeypatch.setattr("nexus.mcp.core._mcp_output_posture", lambda: "flag")
     cli = _cli_get()
     assert cli.exit_code == 0 and "pdf chunk text" in cli.output
     mcp = _mcp_get()
@@ -214,9 +217,19 @@ def test_a_catalog_error_leaves_get_working_in_both_surfaces(world, monkeypatch)
 
 def test_a_missing_catalog_leaves_get_working(world, monkeypatch) -> None:
     monkeypatch.setattr(catalog_factory, "make_catalog_reader", lambda: None)
+    # RDR-243 Phase 3 (nexus-rfvyy.8 fix r1): an unreadable catalog withholds the MCP hit under the default output
+    # posture (pinned in test_a_missing_catalog_withholds_the_mcp_hit_by_default); ``flag`` reaches the display.
+    monkeypatch.setattr("nexus.mcp.core._mcp_output_posture", lambda: "flag")
     world.holders = {CHASH: [("1.1.1", "Some Paper")]}
     assert "pdf chunk text" in _cli_get().output
     assert "pdf chunk text" in _mcp_get()
+
+
+def test_a_missing_catalog_withholds_the_mcp_hit_by_default(world, monkeypatch) -> None:
+    monkeypatch.setattr(catalog_factory, "make_catalog_reader", lambda: None)
+    world.holders = {CHASH: [("1.1.1", "Some Paper")]}
+    mcp = _mcp_get()
+    assert "pdf chunk text" not in mcp and "content withheld" in mcp, "fail closed: no catalog, no text"
 
 
 def test_a_malformed_map_reads_as_clean(world) -> None:
