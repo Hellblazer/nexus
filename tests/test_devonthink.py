@@ -226,8 +226,14 @@ class TestDtUuidRecord:
             "nexus.aspect_readers._devonthink_resolver_default",
             fake_default,
         )
+        # RDR-243 Q7: the exclusion flag is a second read (nexus-rfvyy.8.5); faked so no osascript spawns here.
+        excl_seen: list[str] = []
+        monkeypatch.setattr(
+            "nexus.devonthink._dt_record_excluded", lambda u: excl_seen.append(u) or False,
+        )
         result = _dt_uuid_record("UUID-DEFAULT")
         assert seen == ["UUID-DEFAULT"]
+        assert excl_seen == ["UUID-DEFAULT"]
         assert result == [("UUID-DEFAULT", "/p.pdf")]
 
 

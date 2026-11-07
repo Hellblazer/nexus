@@ -29,7 +29,7 @@ import structlog
 
 import nexus.devonthink as dt_mod
 from nexus.config import DEFAULT_EXTRACTOR, EXTRACTOR_CHOICES, get_pdf_extractor, resolve_extractor
-from nexus.devonthink import DTNotAvailableError, _is_darwin
+from nexus.devonthink import DTNotAvailableError, DtRecord, _is_darwin
 from nexus.sensitive_write import ack_help, resolve_sensitive_collection, sensitive_help, sensitive_write_kwargs
 
 _log = structlog.get_logger(__name__)
@@ -1099,6 +1099,10 @@ def index_cmd(
 
     Exactly one selector flag must be provided: ``--selection``,
     ``--tag``, ``--group``, ``--smart-group``, or one or more ``--uuid``.
+
+    A record the operator excluded from AI in DEVONthink (the record's or its database's
+    "exclude from chat" property) is imported as sensitive, as if ``--sensitive`` were given for it
+    alone, and takes the same rules, including ``--ack-external-embedder``. Nothing is written to DEVONthink.
     """
     # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
     extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
@@ -1109,8 +1113,10 @@ def index_cmd(
             "re-embed."
         )
     # RDR-243: the engine refusal and the --enrich refusal, before DEVONthink is read or any record touched.
+    # The ack alone is allowed here: a record DEVONthink excludes from AI imports as sensitive and needs it too.
+    # Whether any record is excluded is known only after the read below, which settles the "means nothing" case.
     sens_kw = sensitive_write_kwargs(
-        sensitive, "nx dt index --sensitive", ack=ack_external_embedder, dry_run=dry_run, enrich=enrich)
+        sensitive, "nx dt index --sensitive", ack=ack_external_embedder and sensitive, dry_run=dry_run, enrich=enrich)
 
     selectors_used = sum([
         use_selection,
@@ -1142,20 +1148,26 @@ def index_cmd(
     except DTNotAvailableError as e:
         raise click.ClickException(str(e)) from e
 
+    if ack_external_embedder and not sensitive and not any(getattr(r, "excluded", False) for r in records):
+        raise click.UsageError(
+            "--ack-external-embedder only means something with --sensitive, or when DEVONthink excludes "
+            "a selected record from AI (it then imports as sensitive).")
+
     if not records:
         click.echo("No records found.")
         return
 
     if dry_run:
         click.echo(f"Would index {len(records)} record(s):")
-        for uuid, path in records:
-            click.echo(f"  {uuid}\t{path}")
+        for rec in records:
+            note = "\t(excluded from AI in DEVONthink: imports as sensitive)" if getattr(rec, "excluded", False) else ""
+            click.echo(f"  {rec[0]}\t{rec[1]}{note}")
         return
 
     # nexus-2k66t.4.2: a PDF record needs the PDF stack. Settled once, before
     # the first record is touched: installed (and this command re-run in the new
     # generation) or stopped with exit 69/75/70 and the command to run.
-    if any(Path(p).suffix.lower() == ".pdf" for _uuid, p in records):
+    if any(Path(r[1]).suffix.lower() == ".pdf" for r in records):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
         pdf_stack.refuse_bad_mineru_bounds(extractor)
@@ -1254,7 +1266,30 @@ def index_cmd(
 
         dt_content_active = _dt.available(transport="http")
 
-    for uuid, path in records:
+    # RDR-243 Q7 / A6: a record the operator excluded from AI in DEVONthink (on the record or its database)
+    # imports as sensitive, by the same path as an explicit --sensitive: the same cloud rule, engine
+    # refusal, Q3 routing and ack. Computed once, and only when a record needs it; a refusal here fails
+    # the excluded records (nothing written for them) and not the batch. --enrich is not refused for them:
+    # the enrichment pass skips a sensitive catalog row loudly.
+    excl_kw: dict[str, bool] | None = None
+    excl_refusal: str | None = None
+    if not sensitive and any(getattr(r, "excluded", False) for r in records):
+        try:
+            excl_kw = sensitive_write_kwargs(
+                True, "nx dt index (a record excluded from AI in DEVONthink)", ack=ack_external_embedder)
+        except click.ClickException as exc:
+            excl_refusal = exc.format_message()
+
+    for rec in records:
+        uuid, path = rec[0], rec[1]
+        # Whether THIS record is imported as sensitive, and the keywords that carry it to the indexer.
+        rec_excluded = getattr(rec, "excluded", False)
+        rec_sensitive = sensitive or rec_excluded
+        rec_kw = sens_kw if sensitive else ((excl_kw or {}) if rec_excluded else {})
+        if rec_excluded and not sensitive and excl_kw is None:
+            failed.append((uuid, path, excl_refusal or "refused: excluded from AI in DEVONthink; nothing was written"))
+            errored_failed += 1
+            continue
         ext = Path(path).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
             # RDR-139 Layer D: non-file-backed record. With --dt-content and a
@@ -1262,7 +1297,7 @@ def index_cmd(
             # exactly as before.
             if dt_content_active:
                 dt_collection = _resolve_dt_collection(collection, corpus, ext)
-                if sensitive:
+                if rec_sensitive:
                     try:
                         dt_collection = resolve_sensitive_collection(
                             dt_collection, ack=ack_external_embedder, what="nx dt index --sensitive")
@@ -1273,7 +1308,7 @@ def index_cmd(
                 try:
                     content_indexed = _index_dt_content_record(
                         uuid, collection=dt_collection, corpus=corpus, force=force,
-                        force_re_embed=re_embed, **sens_kw,
+                        force_re_embed=re_embed, **rec_kw,
                     )
                 except PER_RECORD_SURVIVABLE_EXCEPTIONS as exc:
                     # nexus-hb10j (substantive-critic, 2xu6t adjudication,
@@ -1377,7 +1412,7 @@ def index_cmd(
             not_attempted.append((uuid, path, f"not attempted (the run stopped at {mineru_stop.name})"))
             continue
         resolved_collection = _resolve_dt_collection(collection, corpus, ext)
-        if sensitive:
+        if rec_sensitive:
             try:
                 resolved_collection = resolve_sensitive_collection(
                     resolved_collection, ack=ack_external_embedder, what="nx dt index --sensitive")
@@ -1395,7 +1430,7 @@ def index_cmd(
                 extractor=extractor,
                 force=force,
                 force_re_embed=re_embed,
-                **sens_kw,
+                **rec_kw,
             )
             degraded_pages: dict[str, list[int]] = {}
             extraction_method = ""
@@ -1791,8 +1826,8 @@ def _gather_records(
     smart_group: str | None,
     uuids: tuple[str, ...],
     database: str | None,
-) -> list[tuple[str, str]]:
-    """Resolve the chosen selector to ``[(uuid, path), ...]``.
+) -> list[DtRecord]:
+    """Resolve the chosen selector to ``[(uuid, path), ...]`` (:class:`~nexus.devonthink.DtRecord`: each also says whether DEVONthink excludes it from AI).
 
     Mutual exclusion is enforced upstream — exactly one branch fires.
     Selectors are accessed via the :mod:`nexus.devonthink` module
@@ -1808,7 +1843,7 @@ def _gather_records(
     if smart_group is not None:
         return dt_mod._dt_smart_group_records(smart_group, database=database)
     # uuids — one resolver call per UUID, results merged.
-    out: list[tuple[str, str]] = []
+    out: list[DtRecord] = []
     for u in uuids:
         out.extend(dt_mod._dt_uuid_record(u))
     return out
