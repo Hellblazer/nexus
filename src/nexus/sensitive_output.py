@@ -16,6 +16,10 @@ The key is read from the GLOBAL ``config.yml`` only, never the per-repo ``.nexus
 be able to switch withholding off. Every value but ``flag`` (absent, misspelled, a config that does not parse) is
 ``withhold``: the posture fails closed.
 
+A catalog DOCUMENT row (nexus-rfvyy.1) is the same class of content: its title, path, URI, author and
+bibliographic fields are what the document says about itself. :func:`present_document_rows` renders a page of them
+the same way (the row keeps its tumbler and a few non-content columns and carries ``withheld``).
+
 The pieces are small and pure so the MCP read tools, the CLI (nexus-rfvyy.8.3) and the catalog surfaces
 (nexus-rfvyy.1) render a sensitive hit one way. Imports only the standard library at load; the config read is
 deferred.
@@ -23,11 +27,12 @@ deferred.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Final, Literal
+from dataclasses import dataclass
+from typing import Any, Final, Literal
 
 __all__ = [
-    "BADGE", "McpOutput", "first_sensitive_owner", "hit_is_sensitive", "mcp_output_posture", "stub_line",
-    "tumbler_order_key", "withheld_note",
+    "BADGE", "DocumentRows", "McpOutput", "first_sensitive_owner", "hit_is_sensitive", "mcp_output_posture",
+    "present_document_rows", "stub_line", "tumbler_order_key", "withheld_edges", "withheld_note",
 ]
 
 McpOutput = Literal["withhold", "flag"]
@@ -97,3 +102,95 @@ def stub_line(tumbler: str = "") -> str:
 def withheld_note(count: int) -> str:
     """The sentence that states how many hits a response withheld (``"1 sensitive hit withheld"``)."""
     return f"{count} sensitive hit{'' if count == 1 else 's'} withheld"
+
+
+# ── catalog document rows (nexus-rfvyy.1) ────────────────────────────────────
+
+#: The columns of a catalog document row that survive withholding: its address and the facts that say what kind of
+#: row it is and how big, none of which is text the document wrote. ``title``, ``author``, ``year``, ``file_path``,
+#: ``source_uri``, ``corpus``, ``meta``, ``bib_*``, ``head_hash`` and ``alias_of`` do not.
+DOCUMENT_KEEP_KEYS: Final = ("tumbler", "content_type", "physical_collection", "chunk_count", "indexed_at")
+
+#: The key a response carries for the withheld count, on a list page (one entry) or a dict result.
+WITHHELD_KEY: Final = "_withheld"
+#: The key that carries the reader clause when a sensitive row is shown with its content (``flag``).
+NOTICE_KEY: Final = "_sensitive_notice"
+
+
+@dataclass(frozen=True)
+class DocumentRows:
+    """A page of catalog document rows as the reader is to see them.
+
+    ``rows`` keeps the page's length and order (a stub takes its row's slot, so ``next_offset`` is unchanged);
+    ``withheld`` is how many rows became stubs and ``hidden`` their tumblers (what an edge touching one must not
+    describe); ``shown_sensitive`` is true when a sensitive row is shown with its content (``flag``)."""
+
+    rows: list[dict]
+    withheld: int = 0
+    hidden: frozenset[str] = frozenset()
+    shown_sensitive: bool = False
+
+    def trailer(self) -> list[dict]:
+        """The entries a list result appends after its rows (before any ``_pagination``): the withheld count
+        and, under ``flag``, the reader clause. Empty for a page with no sensitive row."""
+        out: list[dict] = []
+        if self.withheld:
+            out.append({WITHHELD_KEY: {"count": self.withheld, "note": withheld_note(self.withheld)}})
+        if self.shown_sensitive:
+            out.append({NOTICE_KEY: _reader_clause()})
+        return out
+
+    def keys(self) -> dict[str, Any]:
+        """The same facts as keys of a dict result (``show``, ``links``)."""
+        out: dict[str, Any] = {}
+        for entry in self.trailer():
+            out.update(entry)
+        return out
+
+
+def _reader_clause() -> str:
+    from nexus.context_annotations import SENSITIVE_READER_CLAUSE  # noqa: PLC0415 - deferred, keeps this module's load light
+
+    return SENSITIVE_READER_CLAUSE
+
+
+def stub_document_row(row: Mapping[str, object]) -> dict:
+    """The stand-in for a withheld catalog document row: the kept columns, ``sensitive: true`` and ``withheld``
+    (the stub line, which names the tumbler and no title)."""
+    stub: dict = {k: row[k] for k in DOCUMENT_KEEP_KEYS if k in row}
+    stub["sensitive"] = True
+    stub["withheld"] = stub_line(str(row.get("tumbler", "")))
+    return stub
+
+
+def present_document_rows(
+    rows: Sequence[Mapping[str, object]], *, extra_sensitive: Iterable[str] = (),
+) -> DocumentRows:
+    """Apply the output posture to a page of catalog document rows (``CatalogEntry.to_dict()`` shape).
+
+    A row is sensitive when its ``sensitive`` field is exactly ``True`` or its tumbler is in *extra_sensitive*
+    (the caller's fail-closed legs: an alias of a flagged canonical, a flag lookup that failed). The config is
+    read only when the page holds a sensitive row, so a clean page is returned as it came. Under ``withhold`` each
+    such row becomes :func:`stub_document_row`; under ``flag`` it is returned whole with ``sensitive: true`` and a
+    ``badge``, and the result says the reader clause applies."""
+    extra = {str(t) for t in extra_sensitive}
+    flags = [r.get("sensitive") is True or str(r.get("tumbler", "")) in extra for r in rows]
+    if not any(flags):
+        return DocumentRows([dict(r) for r in rows])
+    if mcp_output_posture() == "flag":
+        shown = [{**r, "sensitive": True, "badge": BADGE} if f else dict(r) for r, f in zip(rows, flags)]
+        return DocumentRows(shown, shown_sensitive=True)
+    shown = [stub_document_row(r) if f else dict(r) for r, f in zip(rows, flags)]
+    hidden = frozenset(str(r.get("tumbler", "")) for r, f in zip(rows, flags) if f)
+    return DocumentRows(shown, withheld=sum(flags), hidden=hidden)
+
+
+def withheld_edges(edges: Iterable[Mapping[str, object]], hidden: frozenset[str]) -> list[dict]:
+    """*edges* (link dicts) with ``meta`` emptied on every edge that touches a withheld document.
+
+    The edge, both tumblers, its type and its spans stay: that is graph structure. ``meta`` is free text a linker
+    may have written about the document, so it goes with the title."""
+    return [
+        {**e, "meta": {}} if hidden and (str(e.get("from")) in hidden or str(e.get("to")) in hidden) else dict(e)
+        for e in edges
+    ]

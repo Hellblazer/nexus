@@ -26,7 +26,7 @@
 #               it, and a `module:Class` entry the whole class (the lint reads
 #               it that way). Several functions share a row when the census
 #               row is one surface with several call sites (row 12 is ten
-#               operators, row 23 four MCP read tools). A target in the
+#               operators, row 23 nine MCP read tools). A target in the
 #               engine (Java) is named by the Python caller that drives it.
 #               A target may also be a source-read or probe that feeds the
 #               surface: the census has no row of its own for it.
@@ -492,6 +492,11 @@ targets = [
     "nexus.mcp.core:query",
     "nexus.mcp.core:store_get",
     "nexus.mcp.core:store_get_many",
+    "nexus.mcp.core:store_list",
+    "nexus.mcp.catalog:catalog_search",
+    "nexus.mcp.catalog:catalog_list",
+    "nexus.mcp.catalog:catalog_show",
+    "nexus.mcp.catalog:catalog_links",
   ]
 endpoints = ["session-model"]
 behaviour = "withhold"
