@@ -907,12 +907,12 @@ def build_spec(base: str, extras: list[str] | None = None, version: str = "") ->
 
     A *base* that already carries its pin (``conexus==7.86.1``) is split, so the extras still
     precede it (nexus-0ib6r; nexus-jea5y fixed only one caller). A pinned base with *version*
-    as well is two pins and is refused with ``ValueError``.
+    as well is two pins and is refused with :class:`LayoutError`, which ``main`` turns into its usage exit.
     """
     pinned = _PINNED_BASE_RE.match(base)
     if pinned is not None:
         if version:
-            raise ValueError(f"build_spec: two version pins: {base!r} and {version!r}")
+            raise LayoutError(f"build_spec: two version pins: {base!r} and {version!r}")
         base, version = pinned.group(1), pinned.group(2)
     spec = base
     if extras:

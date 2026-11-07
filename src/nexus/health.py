@@ -2996,14 +2996,18 @@ def opencv_pair_uninstall_remedy() -> str:
     )
 
 
-def _libgl_loadable() -> bool:
-    """Whether the dynamic loader finds ``libGL.so.1``, which the non-headless OpenCV build links
-    (nexus-0ib6r). A load, not a file search: it answers what ``import cv2`` will meet."""
-    import ctypes  # noqa: PLC0415 — deferred import (startup cost), only on the two-build path
-
+def _libgl_loadable(loader: Callable[[str], object] | None = None) -> bool:
+    """Whether the dynamic loader finds ``libGL.so.1``, the library whose absence the two-OpenCV row
+    exists for (nexus-0ib6r). Necessary for ``import cv2`` of the non-headless build, not sufficient:
+    it also links glib and a few X libraries, and a box without those still fails behind an amber
+    row. A probe that cannot load it, for any reason, answers False and keeps the row red."""
     try:
-        ctypes.CDLL("libGL.so.1")
-    except OSError:
+        if loader is None:
+            import ctypes  # noqa: PLC0415 — deferred import (startup cost), only on the two-build path
+
+            loader = ctypes.CDLL
+        loader("libGL.so.1")
+    except Exception:  # noqa: BLE001 — a doctor probe never raises; any failure reads as absent
         return False
     return True
 

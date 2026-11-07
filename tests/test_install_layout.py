@@ -769,7 +769,7 @@ def test_build_spec_splits_a_pinned_base_so_extras_still_precede_the_pin(
 
 
 def test_build_spec_refuses_two_pins() -> None:
-    with pytest.raises(ValueError, match="two version pins"):
+    with pytest.raises(InstallLayoutError, match="two version pins"):
         build_spec("conexus==7.86.1", ["pdf"], "7.86.2")
 
 

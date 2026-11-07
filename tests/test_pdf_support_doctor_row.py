@@ -336,6 +336,25 @@ def test_both_opencv_builds_make_the_row_red_on_linux_and_name_the_repair(monkey
     assert row.fix_suggestions and pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
 
 
+@pytest.mark.parametrize("raised", [OSError("libGL.so.1: cannot open shared object file"), RuntimeError("boom")])
+def test_the_libgl_probe_reads_any_load_failure_as_absent(raised) -> None:
+    """The real probe, with the loader made to fail: it answers False and never raises."""
+    def refuse(name):
+        raise raised
+
+    assert health._libgl_loadable(refuse) is False
+
+
+def test_the_libgl_probe_answers_true_when_the_library_loads() -> None:
+    seen: list[str] = []
+    assert health._libgl_loadable(seen.append) is True and seen == ["libGL.so.1"]
+
+
+def test_the_libgl_probe_with_the_real_loader_never_raises() -> None:
+    """The default loader, on whatever host runs this: a bool, never an exception."""
+    assert health._libgl_loadable() in (True, False)
+
+
 def test_both_opencv_builds_on_linux_with_libgl_are_a_warning_not_red(monkeypatch) -> None:
     """nexus-0ib6r (3): with libGL.so.1 present the non-headless build loads and cv2 imports, so the
     pair is the same warning it is on macOS and Windows, not a red row."""
