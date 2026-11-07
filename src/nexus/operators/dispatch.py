@@ -56,6 +56,7 @@ from nexus.operators.llm_types import (  # noqa: F401 - re-exports
     record_usage,
     warn_on_family_drift,
 )
+from nexus.operators import sensitive_paths
 from nexus.sensitivity import POSTURE_ENV, assert_llm_bound
 from nexus.util.nx_argv import argv_off_cwd
 
@@ -1252,6 +1253,23 @@ class CliBackend:
             or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
             or read_claude_session_id()
         )
+        # RDR-243 Phase 3 (fix r1, critic C1): sensitivity governs nexus reads, not the filesystem, so a child
+        # that keeps Read/Grep/Glob is told which source files it may not read. The catalog is listed only when
+        # the grant names a file tool. A catalog that cannot be listed takes the three tools away by name: an
+        # allow list never removes a built-in, and a Read inside the child's cwd needs no approval.
+        disallowed_tools: list[str] = []
+        if sensitive_paths.grants_file_tools(allowed_tools):
+            restriction = await asyncio.to_thread(sensitive_paths.file_tool_restriction)
+            if restriction.drop_file_tools:
+                _log.warning(
+                    "operator_dispatch_file_tools_dropped", operator=operator, reason=restriction.reason,
+                )
+                allowed_tools = [
+                    t for t in (allowed_tools or []) if t.split("(", 1)[0].strip() not in sensitive_paths.FILE_TOOLS
+                ]
+                disallowed_tools = list(sensitive_paths.FILE_TOOLS)
+            else:
+                disallowed_tools = list(restriction.deny_rules)
         from nexus.util.stable_cwd import current_project_root, cwd_was_healed, stable_daemon_cwd  # noqa: PLC0415 - deferred, stdlib-only
 
         # nexus-x6qc7 (shakeout F19): the child gets an explicit cwd. It is the
@@ -1396,6 +1414,9 @@ class CliBackend:
             # CLI's documented "disable all tools" form; --allowedTools is a
             # permission allowlist and never removes a tool from the set.
             argv += ["--tools", ""]
+        if disallowed_tools and allowed_tools:
+            # One argv element per rule: a rule may hold spaces. Deny wins over the allow list above.
+            argv += ["--disallowedTools", *disallowed_tools]
         # nexus-bjltu (round 2, code-reviewer + critic independently): the
         # minted-session close (below) must run regardless of how the dispatch
         # finishes -- successful subprocess completion, harness failure,
