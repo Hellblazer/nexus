@@ -657,3 +657,18 @@ def test_the_doctor_says_when_the_deferral_log_cannot_be_read(monkeypatch: pytes
     assert "deferral log could not be read" in row.detail
     monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: DeferralLog(_MemoryStore()))
     assert "could not be read" not in _row(monkeypatch, _Rung("slow")).detail  # control
+
+
+def test_a_probe_that_errors_reads_as_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The probe is guarded with a default of readable: a doctor bug must not invent an outage.
+    class _Broken:
+        def readable(self) -> bool:
+            raise RuntimeError("probe bug")
+
+        def escalated(self, *a, **kw):
+            return {}
+
+    _LEDGER.clear()
+    monkeypatch.setattr("nexus.upgrade_ladder.http_store.DeferredLadderLedger", _LedgerStandIn)
+    monkeypatch.setattr(deferral_log_mod, "t2_deferral_log", lambda: _Broken())
+    assert "could not be read" not in _row(monkeypatch, _Rung("slow")).detail

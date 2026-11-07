@@ -416,7 +416,7 @@ class TestT2NoteStore:
             _FakeMemoryStore.rows[("upgrade_ladder_state", PROGRESS_TITLE)] = {"content": content}
             assert store.load(strict=True) is None, str(content)[:20]
             assert store.load() is None
-        _FakeMemoryStore.rows[("upgrade_ladder_state", PROGRESS_TITLE)] = {}
+        _FakeMemoryStore.rows[("upgrade_ladder_state", PROGRESS_TITLE)] = {"title": PROGRESS_TITLE}
         assert store.load(strict=True) is None  # a row with no content key
 
     def test_it_is_one_t2_memory_note_with_a_ttl(self) -> None:
