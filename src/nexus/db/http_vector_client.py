@@ -3145,7 +3145,9 @@ class _ServiceCollectionStub:
                 out_ids.extend(page_ids)
                 out_docs.extend(page.get("documents", []) or [])
                 out_metas.extend(page.get("metadatas", []) or [])
-                for key in ("chashes", "source_uris", "spans"):
+                # RDR-243 Phase 3 (nexus-rfvyy.8.2): ``sensitives`` is the engine's per-row flag (parallel to
+                # ``ids``, sent on every call); carried through for the MCP output posture, never read from metadata.
+                for key in ("chashes", "source_uris", "spans", "sensitives"):
                     if key in page:
                         extra.setdefault(key, []).extend(page[key] or [])
             out: dict[str, Any] = {
@@ -3184,7 +3186,7 @@ class _ServiceCollectionStub:
                 "documents": result.get("documents", []),
                 "metadatas": result.get("metadatas", []),
             }
-            for key in ("chashes", "source_uris", "spans"):
+            for key in ("chashes", "source_uris", "spans", "sensitives"):
                 if key in result:
                     out[key] = result[key]
             return out
@@ -5089,10 +5091,15 @@ class HttpVectorClient:
         docs = result.get("documents") or []
         metas = result.get("metadatas") or []
         meta = metas[0] if metas else {}
+        flags = result.get("sensitives")
         return {
             "id": ids[0],
             "content": docs[0] if docs else "",
             **(meta if isinstance(meta, dict) else {}),
+            # RDR-243 Phase 3 (nexus-rfvyy.8.2): the engine's flag for this row, present only when the engine sent
+            # it (an older engine sends none, and the row then reads as it did). Set AFTER the metadata so a chunk
+            # row can never speak for it.
+            **({"sensitive": flags[0] is True} if isinstance(flags, list) and flags else {}),
         }
 
     def delete_by_id(self, collection: str, doc_id: str) -> bool:
