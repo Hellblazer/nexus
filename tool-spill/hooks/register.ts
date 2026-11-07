@@ -31,7 +31,9 @@ const SPILL_READ_FACTOR = 4
 // A plain one-file `cat FILE` or `sed -n A,Bp FILE` passes whole up to this many times the limit: the model chose
 // that slice itself, as with a sliced Read (Sam, ask tool-spill-defaults, 2026-11-07, option A).
 const PLAIN_READ_FACTOR = 3
-const ONE_FILE = String.raw`(?:[^\s|;&<>\`$()'"]+|"[^"$\`]*"|'[^']*')`
+// One file: an unquoted word with no shell metacharacter, glob or brace (`*.log`, `{a,b}` name several files), or
+// a quoted path (a double-quoted one with no expansion in it).
+const ONE_FILE = String.raw`(?:[^\s|;&<>\`$()'"*?[\]{}!]+|"[^"$\`*?[\]{}!]*"|'[^']*')`
 const PLAIN_READ = new RegExp(String.raw`^\s*(?:cat(?:\s+--)?|sed\s+-n\s+(?:\d+(?:,\d+)?p|'\d+(?:,\d+)?p'|"\d+(?:,\d+)?p"))` +
   String.raw`\s+${ONE_FILE}\s*$`)
 // Either separator, so a Windows path matches too.
@@ -40,12 +42,15 @@ const INSTRUCTIONS = /(^|[\\/])(SKILL|AGENTS|CLAUDE|CLAUDE\.local|REGISTER)\.md$
 // cut lines in the 2026-11-07 census, of which 40 were errors (T2 nexus/tool-spill-census-2026-11-07, proposal 3).
 const ERROR_SHAPES: readonly RegExp[] = [
   /^E\s/, // a pytest assertion line
-  /\bFAILED\b/,
+  /^\s*FAILED\b|\sFAILED\s*(\[|$)/, // pytest's summary line, or its -v result column; not FAILED quoted mid-text
+  /^--- FAIL:|^FAIL\b/, // go test
   /^\s*Traceback \(most recent call last\)/,
   /^(?!\s*except\b).*\b\w+(Error|Exception): \S/, // ValueError: bad, not `except KeyError:` source
-  /\bfatal:/i,
+  /^(\S+: )?fatal:/i, // git, and a tool prefixing its own name; not an echoed FATAL mid-line
   /No such file/,
-  /^\s*(ERROR|error)(\[[^\]]*\])?:/, // pip, cargo, git push
+  /: command not found$/,
+  /^\s*(ERROR|error|Error)(\[[^\]]*\])?:/, // pip, cargo, git push, node
+  /^\[ERROR\]|^npm ERR!|^make(\[\d+\])?: \*\*\* .*Error/, // maven, npm, make
   /:\d+(:\d+)?: error:/, // a compiler diagnostic
   /^panic:/,
 ]

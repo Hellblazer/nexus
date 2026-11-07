@@ -184,12 +184,21 @@ const REAL_ERRORS = [
   'Traceback (most recent call last):',
   'ValueError: bad input',
   'java.lang.IllegalStateException: boom',
+  'E       assert 3 == 4',
+  'FAILED tests/test_x.py::test_y',
   'fatal: not a git repository (or any of the parent directories): .git',
   "cat: /nope: No such file or directory",
   'ERROR: Could not find a version that satisfies the requirement',
   'error: failed to push some refs',
   'src/x.c:12:5: error: expected ;',
   'panic: runtime error: index out of range',
+  'Error: Cannot find module \'x\'',
+  '--- FAIL: TestParse (0.00s)',
+  'bash: frobnicate: command not found',
+  '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin',
+  'npm ERR! code ELIFECYCLE',
+  'make: *** [Makefile:12: all] Error 2',
+  'tests/test_a.py::test_b FAILED                                  [ 40%]',
 ]
 const NOT_ERRORS = [
   'def handle_error(self, exc):',
@@ -201,10 +210,16 @@ const NOT_ERRORS = [
   'raise ValueError(msg)',
   'except FileNotFoundError:',
   '    except (KeyError, ValueError):',
+  '    except KeyError: pass',
   'if not found: return cannot_happen',
   'Permission model: access denied paths are listed below',
   'timed out waiting is a normal outcome here',
   'the error budget is 5%',
+  // quoted error words in source, logs and JSON: the census's remaining false positives
+  '        raise RuntimeError(f"CHECK FAILED for {name}")',
+  'echo "[gate] FATAL: refusing to run"',
+  '  "last_result_line": "1 FAILED, 3 passed in 2.1s",',
+  'log.info("fatal: is what git prints here")',
 ]
 
 test('every real error shape in the cut middle is named', async ($, on) => {
@@ -263,7 +278,8 @@ test('a cut too big for one Read is pointed at in slices', async ($, on) => {
 
 test('a stderr cut names its lines as they sit in the spill file, after stdout', async ($, on) => {
   const writes = spy(on)
-  on('tool.call', () => ({ result: { stdout: lines(500), stderr: lines(700) } }))
+  // stdout ends in a newline, as real output does, so the separator line is not miscounted
+  on('tool.call', () => ({ result: { stdout: lines(500) + '\n', stderr: lines(700) } }))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'noisy' })
 
@@ -925,7 +941,8 @@ test('A: a plain one-file read over 3x the limit is cut', async ($, on) => {
 
 for (const command of ['cat /repo/a.txt | head -400', 'cat a.txt b.txt', 'cat /repo/a.txt; ls', 'cat $(ls *.txt)',
                        'sed -n 1,400p a.py && echo done', "sed -n '/foo/p' a.py", 'sed -i 1d a.py', 'cat < a.txt',
-                       'cat a.txt > b.txt', 'grep -n x a.py', 'cat `pick`', 'sed -n 1,400p a.py b.py']) {
+                       'cat a.txt > b.txt', 'grep -n x a.py', 'cat `pick`', 'sed -n 1,400p a.py b.py',
+                       'cat *.log', 'cat {a,b}.txt', 'sed -n 1,3p *', 'cat a?.txt', 'cat [ab].txt', 'cat "*.log"']) {
   test(`A: anything but a plain one-file cat or sed -n range is cut as before: ${command}`, async ($, on) => {
     const writes = spy(on)
     on('tool.call', () => BIG_BASH(exact(10_000)))
