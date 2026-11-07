@@ -18,19 +18,18 @@ import java.util.concurrent.Callable;
 /**
  * nexus-b1adx: the engine refuses to boot when the role it serves traffic as has {@code BYPASSRLS}.
  *
- * <p>{@code nexus.partition_copy_access} (vectors-039-1) skips every grantee of the parent whose {@code pg_roles}
- * row has {@code rolbypassrls}, so a leaf or model partition made after that changeset carries no grant for such a
- * grantee. That is right for {@code nexus_diag}. It assumes the service role is NOBYPASSRLS, as provisioning makes
- * it, and on a bring-your-own or managed Postgres nothing else says so: every tenant or model created afterwards
- * would get leaves with no DML for the service role, and the first write to one would fail with {@code permission
- * denied}. A BYPASSRLS service role also takes the row-level security that isolates tenants out of the picture
- * altogether. The fix is the role's, not the function's (no role-name carve-out in {@code partition_copy_access}).
+ * <p><b>Isolation is the reason.</b> Row-level security does not bind a BYPASSRLS role, FORCE ROW LEVEL SECURITY
+ * included, so a service role with it reads and writes every tenant's rows in each table it owns or holds a grant on:
+ * tenant isolation is not enforced. Measured on PostgreSQL 17.5 (nexus-2jfoj): with deny-all policies under FORCE RLS
+ * on a partitioned parent and its leaves, a BYPASSRLS role read and wrote every row both as the tables' owner and as a
+ * non-owner holding grants on the parent, and the owner read none once it was NOBYPASSRLS.
  *
- * <p><b>Isolation is the reason that always holds</b> (nexus-2jfoj, measured on PostgreSQL 17.5). A role that owns
- * the schema and its leaves needs no grant, and an insert routed through the parent reaches a leaf the role neither
- * owns nor holds a grant on, so the missing-grant failure does not reach every BYPASSRLS role. Row-level security
- * does: a schema-owning BYPASSRLS role read every row of a table under FORCE ROW LEVEL SECURITY with a deny-all
- * policy, and the same role read none once it was NOBYPASSRLS. The refusal therefore stands for an owner as well.
+ * <p><b>The grant gap is narrower.</b> {@code nexus.partition_copy_access} (vectors-039-1) skips every grantee of the
+ * parent whose {@code pg_roles} row has {@code rolbypassrls}, so a leaf or model partition made after that changeset
+ * carries no grant for such a grantee. That is right for {@code nexus_diag}. For a BYPASSRLS service role it bites
+ * only on a direct read or write of a leaf it does not own, which fails with {@code permission denied}; a statement
+ * through the parent needs privileges on the parent alone (the engine addresses {@code nexus.chunks}). The fix is the
+ * role's, not the function's (no role-name carve-out in {@code partition_copy_access}).
  *
  * <p><b>Why a class of its own.</b> {@link ChunksIsolationCheck#violations} passes a SUPERUSER or BYPASSRLS role on
  * purpose: its question is whether a POLICY widens what a role-bound role reads, and for a role RLS does not bind no
@@ -67,11 +66,11 @@ public final class ServiceRoleBypassRlsCheck {
         }
         String r = facts.role();
         return Optional.of("the role this service connects as, " + r + ", has BYPASSRLS, so row-level security"
-            + " does not bind it, FORCE ROW LEVEL SECURITY included, and tenant isolation is not enforced: every"
-            + " tenant's rows are visible to and writable by " + r + ", whether or not it owns the schema"
-            + " (nexus-b1adx, nexus-2jfoj). A role that does not own the leaves also loses DML on them:"
-            + " nexus.partition_copy_access (vectors-039-1) skips BYPASSRLS grantees, so a direct write to a tenant"
-            + " leaf or model partition created from now on fails with permission denied."
+            + " does not bind it, FORCE ROW LEVEL SECURITY included, and tenant isolation is not enforced: " + r
+            + " reads and writes every tenant's rows in each table it owns or holds a grant on (nexus-b1adx,"
+            + " nexus-2jfoj). Also, nexus.partition_copy_access (vectors-039-1) skips BYPASSRLS grantees, so a direct"
+            + " write to a tenant leaf or model partition created from now on that " + r + " does not own fails"
+            + " with permission denied."
             + " Fix: as a superuser run ALTER ROLE " + r + " NOBYPASSRLS, then restart the engine. A role that"
             + " needs BYPASSRLS for diagnostics is nexus_diag, not the service role. See "
             + "https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#storage-service-postgres-prerequisites");
