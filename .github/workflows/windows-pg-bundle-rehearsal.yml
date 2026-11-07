@@ -129,11 +129,6 @@ on:
       - src/nexus/util/win_console.py
       - src/nexus/util/win_job.py
       - src/nexus/util/process_group.py
-      # The MinerU server's Windows spawn and its CLI (nexus-dmhxw; tests/test_mineru_cmd.py had 8 reds
-      # on native Windows that nothing ran): tests/test_mineru_spawn_windows_flags.py proves the spawn
-      # outlives the Desktop extension's kill-on-close job, and must have PASSED (--require-passed).
-      - src/nexus/_mineru_spawn.py
-      - src/nexus/commands/mineru.py
       - src/nexus/_winsec.py
       - src/nexus/_install/winproc_core.py
       # The Windows generation installer (RDR-224, nexus-f9bgu.47): junction pointers,
@@ -474,7 +469,11 @@ jobs:
       # Ceiling the measured skips plus the margin of 13 (204); the floor is about 90% of the
       # passes (3730), under the 6% cap the workflow test holds (3730 * 6 // 100 = 223).
       # The three files are not on.push.paths (see tests/test_windows_release_legs_workflow.py,
-      # RIDES_ALONG): they run with the next change to something that is.
+      # RIDES_ALONG): they run with the next change to something that is. So do tests/test_mineru_cmd.py
+      # (8 reds on native Windows that nothing ran) and tests/test_mineru_spawn_windows_flags.py, whose
+      # real Job Object test must have PASSED (nexus-dmhxw): neither they nor the MinerU source they test
+      # trigger this workflow, which has no per-job filter and would rebuild the PG bundle and the engine
+      # for a client-only edit (the nexus-3fme8 rule), so an edit to them runs here with the next trigger.
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |

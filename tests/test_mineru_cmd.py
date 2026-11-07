@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import signal
 import sys
 from pathlib import Path
@@ -26,6 +28,18 @@ def pid_file(tmp_path, monkeypatch) -> Path:
     d = tmp_path / ".config" / "nexus"
     d.mkdir(parents=True, exist_ok=True)
     return d / "mineru.pid"
+
+
+@contextlib.contextmanager
+def _no_group_signal():
+    """POSIX: os.killpg is faked as well, so a regression that signals around stop_server_group fails
+    loudly instead of reaching a real process group. Windows has no os.killpg to fake."""
+    if not hasattr(os, "killpg"):
+        yield
+        return
+    with patch_in(("nexus.commands.mineru", "nexus.util.process_group"), "os.killpg") as killpg:
+        yield
+    killpg.assert_not_called()
 
 
 def _write_pid(pid_file: Path, pid: int = 12345, port: int = 8010) -> None:
@@ -181,13 +195,28 @@ class TestMineruStop:
         assert (12345, signal.SIGTERM) in killpg_calls
         assert (12345, signal.SIGKILL) not in killpg_calls
 
+    def test_stop_of_a_live_mineru_server_removes_the_pid_file(self, runner, pid_file):
+        """The clean stop on every platform: an alive mineru-api is handed to stop_server_group, and once
+        it reports the server gone the pid file is removed (the Windows twin of the process-group test)."""
+        _write_pid(pid_file, pid=12345)
+        alive = [True, False, False, False]
+        with _no_group_signal(), \
+             patch("nexus._mineru_spawn.stop_server_group", return_value="exited") as stop, \
+             patch("nexus.commands.mineru._is_process_alive", side_effect=lambda pid: alive.pop(0) if alive else False), \
+             patch("nexus.upgrade_finish.process_command", return_value="python3 mineru-api --host 127.0.0.1"), \
+             patch_time("nexus.commands.mineru", "sleep"):
+            result = runner.invoke(main, ["mineru", "stop"])
+        assert result.exit_code == 0, result.output
+        assert stop.call_args[0][0] == 12345
+        assert not pid_file.exists()
+
     def test_stop_refuses_recycled_pid(self, runner, pid_file):
         """nexus-5yrob: the pid file outlived its server and the OS reused
         the pid. The stop verb signals a whole process group, so an alive
         pid that is no longer a mineru-api gets no signal at all; the stale
         pid file is removed instead."""
         _write_pid(pid_file, pid=12345)
-        with patch("nexus._mineru_spawn.stop_server_group") as killpg, \
+        with _no_group_signal(), patch("nexus._mineru_spawn.stop_server_group") as killpg, \
              patch("nexus.commands.mineru._is_process_alive", return_value=True), \
              patch("nexus.upgrade_finish.process_command",
                    return_value="/usr/bin/vim unrelated.txt"):
@@ -201,7 +230,7 @@ class TestMineruStop:
         """An empty command read is inconclusive (ps timeout and vanished
         process look alike), so the verb neither signals nor deletes."""
         _write_pid(pid_file, pid=12345)
-        with patch("nexus._mineru_spawn.stop_server_group") as killpg, \
+        with _no_group_signal(), patch("nexus._mineru_spawn.stop_server_group") as killpg, \
              patch("nexus.commands.mineru._is_process_alive", return_value=True), \
              patch("nexus.upgrade_finish.process_command", return_value=""):
             result = runner.invoke(main, ["mineru", "stop"])
