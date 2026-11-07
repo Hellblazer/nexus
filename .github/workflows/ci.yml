@@ -856,15 +856,23 @@ jobs:
         # label tells them apart (labrun_559, 2026-11-07), so the host name decides: on qwent the tests must run,
         # on chas and hosted runners they keep skipping. Keyed on the host, never on unshare succeeding, so a qwent
         # runner that loses unshare fails loudly instead of skip-passing.
+        id: pidns
         if: runner.environment == 'self-hosted'
+        shell: bash
         run: |
           host="$(hostname)"
-          if [ "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" = "qwentescence" ]; then
-            echo "NX_REQUIRE_PIDNS=1" >> "$GITHUB_ENV"
-            echo "host $host: NX_REQUIRE_PIDNS=1 (the real-PID-namespace tests must run here)"
-          else
-            echo "host $host: not qwent, NX_REQUIRE_PIDNS left unset"
-          fi
+          case "${host,,}" in
+            qwentescence)
+              echo "NX_REQUIRE_PIDNS=1" >> "$GITHUB_ENV"
+              echo "on_qwent=true" >> "$GITHUB_OUTPUT"
+              echo "host $host: NX_REQUIRE_PIDNS=1 (the real-PID-namespace tests must run here)" ;;
+            chas)
+              echo "host $host: not qwent, NX_REQUIRE_PIDNS left unset" ;;
+            *)
+              # A renamed or new pool host would silently put the tests back to skip-passing on qwent.
+              echo "::error::unknown lab pool host '$host': name it in this step (nexus-odkc0) so the real-PID-namespace tests stay armed"
+              exit 1 ;;
+          esac
 
       - name: Run tests (shard ${{ matrix.shard }}/6)
         # nexus-n0ful: pytest-split partitions the SAME collection every leg
@@ -985,6 +993,32 @@ jobs:
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' shard-output.txt | tail -1)" || summary=""
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 1500 ] \
             || { echo "::error::test shard ${{ matrix.shard }} passed fewer than 1500 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
+
+      - name: Real PID namespace on this qwent shard (nexus-odkc0)
+        # The two tests sit in one shard each, and a shard lands on chas or qwent per run, so the split alone
+        # proves them only some runs and records nothing (the shard runs -q). Every shard that lands on qwent
+        # therefore runs both by node id with NX_REQUIRE_PIDNS=1 (set by the step above) and requires
+        # "2 passed" and no skip: any run with at least one qwent shard proves them. A run whose six shards all
+        # land on chas proves nothing here; that is the stated limit, not a pass.
+        if: steps.pidns.outputs.on_qwent == 'true'
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
+          UV_NO_SYNC: ${{ steps.sharedvenv.outputs.used == 'true' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          export TMPDIR="$RUNNER_TEMP/tmp"
+          mkdir -p "$TMPDIR"
+          out="$(uv run pytest -q -rs -p no:cacheprovider \
+            tests/test_tmp_root.py::TestOwnerLock::test_a_run_in_another_pid_namespace_is_not_swept \
+            tests/test_engine_substrate_owner_lock.py::TestSidecarClusterOwnerLock::test_a_cluster_in_another_pid_namespace_is_not_swept \
+            2>&1)" || { printf '%s\n' "$out"; echo "::error::the real-PID-namespace tests failed on qwent"; exit 1; }
+          printf '%s\n' "$out" | tail -n 3
+          if [[ "$out" =~ (^|[^0-9])2\ passed ]] && ! [[ "$out" =~ skipped ]]; then
+            echo "real PID namespace: 2 passed on $(hostname)"
+          else
+            echo "::error::the real-PID-namespace tests did not both pass unskipped on qwent"
+            exit 1
+          fi
 
       # nexus-ekp7w / nexus-2rhif: the DDL and bytes-written ratchet. THE GATE IS NOT HERE.
       # One shard's bytes per test and DDL per test move with which tests the split gave it
