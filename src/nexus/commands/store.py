@@ -84,7 +84,7 @@ def store() -> None:
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
 @click.option("--session-id", default="", hidden=True,
-              help="Deprecated: accepted and ignored. No stored chunk carries a session id.")
+              help="Deprecated: accepted and ignored. A write stores no session id.")
 @click.option("--agent", default="", hidden=True, help="Source agent name")
 def put_cmd(
     source: str,

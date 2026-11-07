@@ -5917,7 +5917,7 @@ def store_put(
         ),
     )] = "",
     session: Annotated[str, Field(
-        description="Deprecated: accepted and ignored. No stored chunk carries a session id.",
+        description="Deprecated: accepted and ignored. A write stores no session id.",
     )] = "",
     entity_key: Annotated[str, Field(
         description=(

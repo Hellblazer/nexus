@@ -53,5 +53,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   nexus-l8o33: the manifest-span-fill rung (7e205178e, 8a830a04d).
 - `conexus/hooks/scripts/mailbox_drain.py`
   nexus-2egi7: the peer-data end line carries a per-block code named in the frame line. nexus-wc4jj.15: ask-branch follow-ups (non-ASCII peer bodies print on a legacy code page, 0.4 s ack headroom before the record GET, a choice outside the record's options never matches, a bad saved matched entry is logged once).
+- `conexus/skills/nexus/reference.md`
+  nexus-jlq15: the store_put `session` row says accepted and ignored (deprecated).
 
 ## Deferred to the next client release
