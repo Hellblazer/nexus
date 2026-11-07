@@ -153,33 +153,44 @@ class OperatorOutputError(OperatorError):
 
 
 
-_ERROR_TYPE_SHAPE = re.compile(r"[a-z_]{1,40}")
+_ERROR_TYPE_SHAPE = re.compile(r"[A-Za-z_]{1,40}")
+_REQUEST_ID_SHAPE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
-def safe_error_type(raw: object) -> str | None:
+def safe_error_type(raw: object, scrub: Callable[[str], str] | None = None) -> str | None:
     """*raw* when it has the shape of a provider error-type token
-    (``rate_limit_error``, ``overloaded_error``), else ``None``.
+    (``rate_limit_error``, ``overloaded_error``, and the CamelCase names some
+    vLLM and LiteLLM servers send), else ``None``.
 
     The type is chosen by the server, or by a proxy in front of it, and rides
-    into exception messages and log lines; only a short lowercase token
-    passes, so it cannot carry a key, a newline or an instruction
-    (nexus-1wqz1)."""
+    into exception messages and log lines. Only 1 to 40 letters and
+    underscores pass, and a token the backend's *scrub* would change (an
+    echoed key) is dropped too. The accepted residual: a token that short,
+    with no spaces, newlines or punctuation, can carry a word but not a
+    sentence or a key-shaped string (nexus-1wqz1)."""
     if isinstance(raw, str) and _ERROR_TYPE_SHAPE.fullmatch(raw):
-        return raw
+        if scrub is None or scrub(raw) == raw:
+            return raw
     return None
 
 
-def request_id_tag(raw: object) -> str | None:
-    """A fixed-length tag for a provider request id, ``None`` when there is no
-    id. The id is server-chosen text, so only ``rid-`` plus twelve hex digits
-    of its SHA-256 is kept: stable, so one id always logs as one tag, and
-    quoting the original id to the provider still lets support match it
+def request_id_tag(raw: object, scrub: Callable[[str], str] | None = None) -> str | None:
+    """The request id to log and quote, ``None`` when there is none.
+
+    A provider id (Anthropic ``req_011C...``, OpenAI ``req_<32 hex>``) is kept
+    as is when it is 1 to 64 of ``A-Za-z0-9_-`` and the backend's *scrub* leaves
+    it unchanged, so a person can paste it to the provider's support. Any other
+    id is server-chosen free text (spaces, newlines, an echoed key), and is
+    replaced by ``rid-`` plus twelve hex digits of its SHA-256: a stable tag,
+    so one id always logs as one tag, but not a value the provider can look up
     (nexus-1wqz1)."""
     if raw is None:
         return None
     text = str(raw).strip()
     if not text:
         return None
+    if _REQUEST_ID_SHAPE.fullmatch(text) and (scrub is None or scrub(text) == text):
+        return text
     return "rid-" + hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
@@ -190,7 +201,8 @@ class OperatorAPIError(OperatorError):
     ``status`` is the HTTP status, ``None`` for a connection failure.
     ``error_type`` is the provider's ``error.type`` when the body had one and
     it passed :func:`safe_error_type`. ``request_id`` is the provider's request
-    id as :func:`request_id_tag` (a hash, never the server's text). The message
+    id when it is a plain token, else a ``rid-`` hash tag (:func:`request_id_tag`):
+    never free text chosen by the server. The message
     is built from these and the provider's own error message (scrubbed), never
     from request headers, so it cannot carry the API key.
 

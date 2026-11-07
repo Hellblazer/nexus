@@ -28,7 +28,6 @@ from nexus.operators.llm_types import (
     OperatorOutputError,
     OperatorTimeoutError,
     ambient_usage_sink,
-    request_id_tag,
 )
 from tests._llm_fake_server import FakeLLMServer, Step, anthropic_error, anthropic_stream
 
@@ -354,7 +353,7 @@ class TestTransport:
         server.add(anthropic_error(401, "authentication_error", "invalid x-api-key"))
         with pytest.raises(OperatorAPIError, match=r"nx config set anthropic_api_key") as ei:
             Harness(server).run(model="haiku")
-        assert request_id_tag("req_test") in str(ei.value)  # the id is hashed (nexus-1wqz1)
+        assert "req_test" in str(ei.value)
 
     def test_retry_after_longer_than_the_deadline_raises_without_sleeping(self, server) -> None:
         import time

@@ -69,8 +69,8 @@ def resolved_model_id(requested: str | None) -> str:
 
 
 class _AnthropicStream(StreamState):
-    def __init__(self, scrub: Any) -> None:
-        self._scrub = scrub
+    def __init__(self, clean: Any) -> None:
+        self._clean = clean
         self.reset()
 
     def reset(self) -> None:
@@ -101,7 +101,7 @@ class _AnthropicStream(StreamState):
         kind = data.get("type")
         if kind == "message_start":
             message = data.get("message") or {}
-            self.model = message.get("model") or self.model
+            self.model = self._clean(str(message["model"]))[:100] if message.get("model") else self.model
             self._merge_usage(message.get("usage"))
         elif kind == "content_block_start":
             block = dict(data.get("content_block") or {})
@@ -142,15 +142,16 @@ class _AnthropicStream(StreamState):
             self.finished = True
         elif kind == "error":
             err = data.get("error") or {}
-            etype = str(err.get("type") or "error")
-            message = self._scrub(str(err.get("message") or ""))[:300]
-            # The type is server-chosen: the status lookup uses it raw, the
-            # message and the attribute only a token-shaped one.
-            safe = safe_error_type(etype) or "error"
+            raw_type = str(err.get("type") or "")
+            message = self._clean(str(err.get("message") or ""))[:300]
+            # The type is server-chosen: the status lookup uses it raw (a
+            # dict key, never printed), the message and the attribute only a
+            # token-shaped one.
+            etype = safe_error_type(raw_type, self._clean)
             raise OperatorAPIError(
-                f"anthropic: the stream carried an {safe} event: {message}",
-                status=_ERROR_EVENT_STATUS.get(etype, 400),
-                error_type=safe,
+                f"anthropic: the stream carried an {etype or 'error'} event: {message}",
+                status=_ERROR_EVENT_STATUS.get(raw_type, 400),
+                error_type=etype,
                 request_id=self.request_id,
             )
 
@@ -313,7 +314,7 @@ class AnthropicBackend(ApiBackend):
         return repaired
 
     def _new_stream(self) -> StreamState:
-        return _AnthropicStream(self._scrub)
+        return _AnthropicStream(self._clean)
 
     def _http_error(self, status: int, headers: httpx.Headers, body: bytes) -> OperatorAPIError:
         etype: str | None = None
@@ -326,10 +327,10 @@ class AnthropicBackend(ApiBackend):
         if isinstance(parsed, dict):
             err = parsed.get("error")
             if isinstance(err, dict):
-                etype = safe_error_type(err.get("type"))
-                message = self._scrub(str(err.get("message") or ""))[:300]
+                etype = safe_error_type(err.get("type"), self._scrub)
+                message = self._clean(str(err.get("message") or ""))[:300]
             raw_request_id = raw_request_id or parsed.get("request_id")
-        request_id = request_id_tag(raw_request_id)
+        request_id = request_id_tag(raw_request_id, self._scrub)
         text = f"anthropic API error {status}"
         if etype:
             text += f" ({etype})"
