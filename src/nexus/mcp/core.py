@@ -7619,7 +7619,10 @@ def store_list(
                 for o in ((owner_map or {}).get(e.get("id", ""), ()))
                 if getattr(o, "sensitive", False) is True
             )
-            _page_facts.append((_hit_is_sensitive(e.get("sensitive"), _owners), _owners, str(e.get("id", ""))))
+            # An unreadable catalog (owner_map None) is "could not look", not "no owner": every row is withheld, as
+            # the document view treats it (nexus-rfvyy.8 fix r1, review B1).
+            _flag = True if owner_map is None else e.get("sensitive")
+            _page_facts.append((_hit_is_sensitive(_flag, _owners), _owners, str(e.get("id", ""))))
         posture = _OutputPosture.for_facts(_page_facts)
         for _idx, e in enumerate(page):
             if posture.withheld(_idx):
