@@ -4525,6 +4525,56 @@ and its definition current).
 | `--autostart` | Required. Install the OS autostart unit. |
 | `--force` | Overwrite an existing unit file even when its content differs. |
 
+### nx daemon service pg-upgrade
+
+```
+nx daemon service pg-upgrade --old-bin <bin dir>                 # dry run: prints the plan
+nx daemon service pg-upgrade --old-bin <bin dir> --check-only
+nx daemon service pg-upgrade --old-bin <bin dir> --apply
+```
+
+Upgrades a local cluster made by PostgreSQL below 17 (for example one made by a
+Homebrew PostgreSQL 16, before nx shipped its own) to the bundle's PostgreSQL 17,
+with the bundle's `pg_upgrade`. The engine refuses a cluster below 17 and
+`nx daemon service start` stops before `pg_ctl` with a pointer to this command.
+It is the scripted form of "A local cluster older than PostgreSQL 17" in
+[the migration runbook](migration-runbook.md). Linux and macOS only.
+
+`--old-bin` is the `bin/` directory of the PostgreSQL that created the cluster;
+its `pg_ctl --version` must match the cluster's `PG_VERSION`. If that PostgreSQL
+is gone, install the same major version first. A cluster already at 17 or newer,
+a `--old-bin` of another major, and an existing `<data>.old` are refused before
+anything changes.
+
+Without a mode flag the command changes nothing: it validates the cluster and
+`--old-bin` and prints every step `--apply` would take. `--check-only` runs
+`initdb` into a temporary directory (never the real data directory) with the
+options nx creates its own clusters with, runs `pg_upgrade --check` against the
+real cluster, and removes the temporary directory; the old server must not be
+running. `--apply` stops the service, stops the old server with the old
+`pg_ctl` and checks it is down, moves the data directory to `<data>.old`, runs
+`initdb` (`--auth=trust` for the upgrade; the next service start converts it to
+`scram-sha-256`), `pg_upgrade --check` and `pg_upgrade`, starts the service, then
+runs `update_extensions.sql` (when `pg_upgrade` wrote one) and
+`vacuumdb --all --analyze-in-stages` over TCP.
+
+The superuser password from `pg_credentials` reaches `pg_upgrade`, `psql` and
+`vacuumdb` only as `PGPASSWORD` in that child's environment: never on a command
+line, in the output or in a log, and never in the service's environment. Any
+failure after the data directory has moved removes the new directory and moves
+the original back; `pg_upgrade`'s logs are kept in a work directory the message
+names. After a success the pre-upgrade cluster stays at `<data>.old`: remove it
+by hand once the service has run and your data reads back. Check the result with
+`nx doctor` ("Local PostgreSQL version" passes, "Local PostgreSQL authentication"
+shows `scram-sha-256`).
+
+| Flag | Description |
+|------|-------------|
+| `--old-bin PATH` | Required. The `bin/` of the PostgreSQL that created the cluster. |
+| `--check-only` | `initdb` into a temporary directory and `pg_upgrade --check` against it; changes nothing. |
+| `--apply` | Do the upgrade; rolls back on any failure after the move. |
+| `--config-dir PATH` | Config directory override. |
+
 ### nx daemon service install-binary
 
 ```

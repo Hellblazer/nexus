@@ -733,9 +733,13 @@ def _run(
     check: bool = True,
     capture: bool = True,
     env: dict | None = None,
+    cwd: str | os.PathLike[str] | None = None,
     timeout: float,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess, raising on non-zero exit when *check* is True.
+
+    *cwd* is for the pg_upgrade command (``nx daemon service pg-upgrade``),
+    which writes its follow-up scripts into the directory it runs from.
 
     THE CHOKE POINT for the root refusal. Every PostgreSQL subprocess this
     module spawns -- initdb, pg_ctl, psql, createdb -- routes through here,
@@ -787,6 +791,7 @@ def _run(
             cmd,
             timeout=timeout,
             check=check,
+            cwd=cwd,
             env=_bundle_lib_env(cmd, env),
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
@@ -1304,6 +1309,33 @@ def reassign_diag_view_owner_before_restart(
 # ── Core provisioning steps ────────────────────────────────────────────────────
 
 
+def _initdb_argv(
+    bins: PgBinaries,
+    pgdata: Path,
+    os_user: str,
+    *,
+    auth: str,
+    pwfile: str | None = None,
+) -> list[str]:
+    """The ``initdb`` command line for a cluster nx creates: the one place its options live.
+
+    :func:`_init_cluster` builds its command here, and so does the pg_upgrade
+    command (``nx daemon service pg-upgrade``), which needs the same encoding,
+    locale and superuser name with ``--auth=trust`` and no password file, so the
+    cluster it creates is the one ``pg_upgrade`` can fill (nexus-j738q).
+    """
+    argv = [
+        str(bins.initdb),
+        "-D", str(pgdata),
+        "--no-locale", "-E", "UTF8",
+        f"--auth={auth}",
+    ]
+    if pwfile is not None:
+        argv.append(f"--pwfile={pwfile}")
+    argv += ["--username", os_user]
+    return argv
+
+
 def _init_cluster(
     bins: PgBinaries,
     pgdata: Path,
@@ -1345,14 +1377,10 @@ def _init_cluster(
             with contextlib.suppress(OSError):
                 os.close(fd)
             raise
-        _run([
-            str(bins.initdb),
-            "-D", str(pgdata),
-            "--no-locale", "-E", "UTF8",
-            f"--auth={SCRAM}",
-            f"--pwfile={pwfile}",
-            "--username", os_user,
-        ], timeout=_INITDB_TIMEOUT_S)
+        _run(
+            _initdb_argv(bins, pgdata, os_user, auth=SCRAM, pwfile=pwfile),
+            timeout=_INITDB_TIMEOUT_S,
+        )
     finally:
         with contextlib.suppress(OSError):
             os.unlink(pwfile)
@@ -1562,7 +1590,8 @@ def refuse_cluster_below_floor(pgdata: Path) -> None:
     # The remedy comes before the path: the supervisor's last-error line is cut at 600 characters.
     raise PgClusterBelowFloorError(
         f"the local PostgreSQL cluster was created by PostgreSQL {text} and nexus needs {PG_VERSION_FLOOR} or "
-        f"newer, so it was not started. Upgrade it with pg_upgrade, or move it aside and re-run nx init if you "
+        f"newer, so it was not started. Upgrade it with 'nx daemon service pg-upgrade --old-bin <bin dir>' "
+        "(pg_upgrade), or move it aside and re-run nx init if you "
         "do not need its data: see 'A local cluster older than PostgreSQL 17' in "
         "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md . "
         f"Data directory: {pgdata}"

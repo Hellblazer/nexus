@@ -459,6 +459,11 @@ def service_group() -> None:
     """Storage-service daemon: managed native service binary + local Postgres."""
 
 
+from nexus.commands.service_pg_upgrade import pg_upgrade_cmd as _pg_upgrade_cmd  # noqa: E402 — needs service_group above
+
+service_group.add_command(_pg_upgrade_cmd, "pg-upgrade")
+
+
 @service_group.command("install")
 @click.option(
     "--autostart",
