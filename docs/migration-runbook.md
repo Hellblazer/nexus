@@ -344,6 +344,13 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   unused (shared chunk, deleted co-owner, unattributable chunk, contradicted column) stays in the count, and it
   reaches 0 when none remains. An engine older than the change counts every present key, so there the count does not
   reach zero for lineless chunks and the residue is accepted by name.
+  **The sweep may drop values the count ignores.** A key that is present but is not a recorded span (a string
+  such as `"7"`, a float such as `9.0`, a boolean, a null, a 0 line, or a 0 start beside an unrecorded end) is
+  not counted and does not hold the sweep back, and `nx t3 retire-keys --apply` deletes it with the other
+  keys. Those are the values `manifest_span` also declines to write (the manifest columns are integers), so
+  nothing the manifest could have held is lost, but a string or float span that older indexing left on a chunk
+  row is gone after the sweep; the dry run's `null_span_rows` cannot tell you it was there. The one table both
+  halves are held to is `service/src/test/resources/manifest-span-cases.json`.
 - **Labels are untouched.** The only write route (`append_manifest_many`) rewrites a row's labels from the request,
   so the rung sends the labels and `labels_written` it read just before the write, unchanged. A label written in
   the window between the scan and the write is carried, not reverted. A span column another writer filled in that
@@ -361,14 +368,21 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   write or a span write that landed after the re-read makes it refuse that one row, and the rung counts it as
   "changed before the write" and goes on (the next `nx upgrade` takes it up again). The same guard protects
   `manifest-section-labels`. Not guarded: a row that gains a co-owner in that window (the engine does not see
-  it), so still prefer a quiet tenant. An engine without the guard ignores `expected`; the client then raises
-  instead of treating the rows as guarded.
+  it), so still prefer a quiet tenant. **New client, engine without the guard:** such an engine ignores
+  `expected`, writes the first request's rows unguarded (the rung's own fill of what it had just re-read, the
+  behaviour before the guard) and restamps the documents' `indexed_at`; the client sees no
+  `expected_refused_count` in the answer and raises `EngineOlderThanClientError`, so nothing is counted as
+  guarded and the walk stops. Both rungs write the stamps of that request's documents back before the error
+  leaves them (the labels rung as well as this one). Deploy the engine that carries the guard before running
+  `nx upgrade` with this client; until then these two rungs end on that error, one request in.
 - **The managed path is interactive, and slow.** Against a managed service `--auto` reads nothing; the interactive
   `nx upgrade` makes three walks of the whole catalog (the detect dry run, the fill, the verify dry run). Completion
   is recorded once: a manifest row that gains a NULL span later (an orphan backfill, say) is not refilled, and shows
   only in the retire-keys count.
-- **Reading the result.** "Engine-comparable" is the count of rows with a NULL column and the chunk key present, the
-  same predicate `null_span_rows` uses, over the documents this scan walks. The scan skips `alias_of` documents and the
+- **Reading the result.** "Engine-comparable" is the count of rows with a NULL column and a chunk key that records a
+  value (by value, not by presence), the same predicate `null_span_rows` uses, over the documents this scan walks.
+  Against an engine older than nexus-qmrfi the engine's count is by key presence, so it is higher than this one
+  and the rung's "engine count once written" line is a floor that engine will not reach. The scan skips `alias_of` documents and the
   engine does not, so compare the number with the retire-keys dry run's `null_span_rows` yourself: a difference is
   rows on alias documents, which the rung does not touch. The rung itself checks only its own bookkeeping, that the
   count equals the fillable rows plus the left
