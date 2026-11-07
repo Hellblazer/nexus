@@ -648,10 +648,75 @@ _NAMING_SAM = [
 #: that also holds a promise lets the promise through. v1 behaves the same; flipping this row is a decision.
 _KNOWN_FALSE_ALLOWS = ["I'll look at the logs, you can approve the plan."]
 
+#: A principal word that heads a noun phrase is code, not the person (review r2, finding 1): the run wait stands.
+_PRINCIPAL_WITH_A_NOUN = [
+    "I'll proceed once the user migration finishes.",
+    "I'll merge once the user cache is rebuilt.",
+    "I'll verify when the owner index has finished.",
+    "I'll proceed once the user login tests pass.",
+    "I'll check once the operator image build finishes.",
+    "I'll look at it when the operator reconcile loop completes.",
+    "I'll check once the user events backfill completes.",
+    "I'll check the user profile job once it finishes.",
+    "I'll check the user permissions sync once it finishes.",
+    "I'll verify the owner migration after the job is done.",
+    "I'll re-run the user-facing tests when the build finishes.",
+    "I'll check the maintainer scripts once the shards finish.",
+    "I'll check the user directory once the shards finish.",
+    "I'll look at the user service logs once the deploy finishes.",
+    "I'll check on the maintainer bot once its job finishes.",
+    "I'll check the owner service once the deploy is complete.",
+    "I'll check the human review stage once the pipeline is done.",
+    "I'll check the owner field once the migration finishes.",
+    "I'll push when the user tests pass.",
+    "I'll check the user session once the cache is rebuilt.",
+    "I'll check once the user stories are indexed and the build finishes.",
+    "Once you see the deploy finished, the build is done. I'll check the logs after the publish completes.",
+]
+
+#: Habitual, ownership and notification statements about Sam pass no turn (review r2, finding 2): the promise stands.
+_NOT_A_HANDOVER = [
+    "Sam will get an email when it is done. After the shards finish, I'll verify the deploy.",
+    "Sam will get an email. After the shards finish I'll verify.",
+    "Sam will see the PR comment. Once CI finishes I'll check the result.",
+    "Sam is reading the board. After the build I'll check the results.",
+    "Sam has the board open. After CI finishes, I'll check the result.",
+    "Sam should get a notification. Then I'll check the shards once they finish.",
+    "Sam must have pushed already. After the CI run completes I'll read the log.",
+    "Sam runs the nightly at 2am. Then I'll check the output once it finishes.",
+    "Sam handles the releases. After the release job completes, I'll verify.",
+    "Sam owns the pipeline config. After the next run finishes, I'll check.",
+    "Sam holds the credentials. Once the deploy completes I'll verify.",
+]
+
+#: Turn-passing statements about Sam: allowed.
+_TURN_PASSING = [
+    "Sam runs the install. After that I'll verify.",
+    "Sam to review. I'll rebase afterwards.",
+    "Sam, your move. I'll continue after.",
+    "Sam's turn. I'll rebase once he merges.",
+    "It's his move. I'll continue after.",
+    "Sam will review the PR. I'll address comments then.",
+    "Sam must approve before I merge. I'll merge after.",
+]
+
+#: Neutral clauses (no gate, no class) that sit between a Sam gate and its follow-up.
+_NEUTRAL = ["The planner is idle.", "The branch is clean.", "Docs are updated."]
+_CHAIN_GAP_ROWS = [
+    ("Once you give it, I'll push the tag. " + " ".join(_NEUTRAL[:1]) + " After the shards finish, I'll check CI.", False),
+    ("Once you give it, I'll push the tag. " + " ".join(_NEUTRAL[:2]) + " After the shards finish, I'll check CI.", False),
+    ("Once you give it, I'll push the tag. " + " ".join(_NEUTRAL[:3]) + " After the shards finish, I'll check CI.", True),
+    ("Over to Sam. " + " ".join(_NEUTRAL[:3]) + " Then I'll check CI once the shards finish.", True),
+]
+
 _CORPUS: list[tuple[str, str, bool]] = (
     [("SAM-ACTOR", t, False) for t in _SAM_ACTOR_TEXTS + _N1_GATED + _ENDS_ON_SAM]
     + [("SAM-ACTOR", t, False) for t in _GATED_ON_THE_USER + _PRINCIPAL_GATES + _GATES_ON_YOU + _HANDOVERS + _HANDOVER_SHORT]
+    + [("SAM-ACTOR", t, False) for t in _TURN_PASSING]
     + [("PEER-WAKE", t, False) for t in _PEER_OR_APPROVAL_WAKE]
+    + [("NOT-A-PERSON", t, True) for t in _PRINCIPAL_WITH_A_NOUN]
+    + [("NOT-A-HANDOVER", t, True) for t in _NOT_A_HANDOVER]
+    + [("CHAIN-GAP", t, blocks) for t, blocks in _CHAIN_GAP_ROWS]
     + [("NOT-A-WAIT", t, True) for t in _OFFERS_AND_NOISE + _STATE_CHANGES + _WEAK_TERMS + _BACKTRACKING + _NAMING_SAM]
     + [("N2-test-subject", t, True) for t in _N2_TEST_SUBJECTS]
     + [("N3-courtesy", t, True) for t in _N3_COURTESY]
@@ -671,7 +736,7 @@ def test_corpus_sam_actor_group_stays_at_zero_blocked_and_is_not_vacuous() -> No
     assert len(sam) >= 150
     assert [t for t, v in sam if v.block] == []
     counts = Counter(g for g, _, _ in _CORPUS)
-    assert counts["N2-test-subject"] >= 9 and counts["N3-courtesy"] >= 6 and counts["N4-unchained"] >= 6 and counts["NOT-A-WAIT"] >= 55 and counts["TRUE"] >= 12
+    assert counts["N2-test-subject"] >= 9 and counts["N3-courtesy"] >= 6 and counts["N4-unchained"] >= 6 and counts["NOT-A-WAIT"] >= 55 and counts["NOT-A-PERSON"] >= 20 and counts["NOT-A-HANDOVER"] >= 10 and counts["CHAIN-GAP"] >= 4 and counts["TRUE"] >= 12
 
 
 @pytest.mark.parametrize("text", _KNOWN_FALSE_ALLOWS)

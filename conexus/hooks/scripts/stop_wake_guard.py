@@ -40,8 +40,11 @@ The gate is on a PRINCIPAL (Sam, you, the user, the operator, the owner, the mai
 ``_PRINCIPAL``). Approval terms come in two kinds: strong ones (approval, sign off, the nod, the word, okays,
 greenlit) gate under any gate word; weak ones (cleared, settled, granted, permitted, ok, decision, permission,
 told, confirmed) gate only when their subject is a pronoun or a principal, so "once it is cleared" waits on a
-person and "once the lock clears" waits on a run. A handover ("Over to Sam.", "Sam will cut the tag.", "Sam is
-away.") is a wait; merely naming Sam ("I'll ping Sam once the build finishes") and an offer ("Sam can review") are
+person and "once the lock clears" waits on a run. A role word ("the user", "the owner", "the operator") is the person only when a verb, an auxiliary or the end of the
+phrase follows it ("the user weighs in"); "the user migration" is code. A handover ("Over to Sam.", "Sam will cut
+the tag.", "Sam is away.") passes the turn: will, going to or needs to plus a turn-passing verb (cut, tag, run, push,
+approve, decide, review, merge, release), has the ball, it's his move. A habit or an ownership ("Sam runs the nightly
+at 2am", "Sam owns the pipeline config") passes nothing. Merely naming Sam ("I'll ping Sam once the build finishes") and an offer ("Sam can review") are
 not. A reviewer, critic, peer or named colleague who approves is a peer's wake, like one who reports. What hangs
 from a Sam clause survives at most ``_CHAIN_GAP`` clauses that are neither Sam's nor chained. A block follows when any surviving clause is (a) a CI or run wait, (b) a promise to check
 or do something later, or (c) a timed step (clock time, date, "in N minutes"). The block is
@@ -143,15 +146,30 @@ def clauses(text: str) -> list[str]:
 #: (``is_sam_gated``).
 _SAM_YOU = re.compile(r"\b(?:you|your|yours|you'd|you'll|you've|you're|yourself)\b(?!')", re.I)
 
-#: The principal: the person whose reply is the wake. One pattern for every rule below. A bare "the user table"
-#: or "the owner field" is a noun phrase about code, not the person.
-_PRINCIPAL = r"(?:sam|hal|you|the (?:user|human|maintainer|owner|operator)|operator|owner)"
-_PRINCIPAL_NAME = r"(?:sam|hal|the (?:user|human|maintainer|owner|operator)|operator|owner)"
-_NOT_A_PERSON = (
-    r"(?!\s+(?:tables?|records?|models?|ids?|sessions?|data|stor(?:y|ies)|inputs?|interfaces?|accounts?|agents?|objects?|"
-    r"services?|stores?|schemas?|flows?|names?|configs?|settings?|prefs?|preferences?|counts?))"
+#: The principal: the person whose reply is the wake. One pattern for every rule below. Sam, Hal and "you" are
+#: always the person. "the user", "the owner", "the operator" (a role word) count only when what follows is a
+#: verb, an auxiliary, a function word or the end of the phrase: "the user weighs in", "the user is back" name the
+#: person, "the user migration", "the owner index", "the operator reconcile loop" head a noun phrase about code.
+_ROLE = r"(?:the (?:user|human|maintainer|owner|operator)|operator|owner)"
+_FUNCTION_WORDS = (
+    r"is|are|was|were|be|been|being|has|have|had|will|would|can|could|may|might|should|must|shall|does|did|do|to|and|or|"
+    r"but|then|also|just|not|now|still|already|if|when|once|until|after|before|for|with|at|in|on|back|here|away|out|about|"
+    r"from|by|as|that|who|which|me|it|us|gave|said|saw|went|told|came|took|got|made|ran|read|wrote|chose|spoke|left|sent|"
+    r"met|knew|held|kept|let|put|set"
 )
-_P = r"\b" + _PRINCIPAL + r"\b(?!'s\b)" + _NOT_A_PERSON
+#: Plural nouns that end in -s and would pass for a third-person verb: a backstop, pinned by corpus rows.
+_NOUN_BACKSTOP = (
+    r"tests?|logs?|scripts?|events?|permissions?|settings?|records?|accounts?|sessions?|agents?|stor(?:y|ies)|stores?|models?|"
+    r"ids|names|configs?|preferences?|objects?|interfaces?|inputs?|tables?|schemas?|flows?|counts?|services?|jobs?|builds?|"
+    r"checks?|files?|users?|roles?|groups?|teams?|bots?"
+)
+_ROLE_FOLLOWED_BY_A_VERB = (
+    r"(?=$|[^\w\s-]|\s*$|'(?:ll|re|ve|d)\b|\s+(?:" + _FUNCTION_WORDS + r")\b|\s+\w+(?:ed|ly)\b"
+    r"|\s+(?!\w*(?:ss|us|is)\b)\w+s\b)(?!\s+(?:" + _NOUN_BACKSTOP + r")\b)"
+)
+_PRINCIPAL = r"(?:sam|hal|you|" + _ROLE + _ROLE_FOLLOWED_BY_A_VERB + r")"
+_PRINCIPAL_NAME = r"(?:sam|hal|the (?:user|human|maintainer|owner|operator)|operator|owner)"
+_P = r"\b" + _PRINCIPAL + r"\b(?!'s\b)"
 _P_RE = re.compile(_P, re.I)
 
 #: A gate word: the clause waits on whatever follows it ("once", "pending", "awaits", "needs", "hold for"). "unless" is
@@ -228,6 +246,11 @@ _SAM_VERB = re.compile(
     r"chooses|picks|nods?)\b",
     re.I,
 )
+#: Turn-passing actions only: what the user does next, not what he habitually does or owns.
+_TURN_VERBS = (
+    r"cut|tag|run|push|approve|decide|review|merge|release|look|sign|ship|deploy|pick|choose|confirm|answer|reply|respond"
+)
+_TURN_PROGRESSIVE = r"cutting|tagging|running|pushing|merging|reviewing|approving|deciding|releasing|signing|shipping|deploying"
 #: The turn is handed over: "Over to Sam.", "It's up to Sam.", "Handed to Sam.", "The diff is with Sam.", "The next
 #: step is Sam's.", "Sam will cut the tag.", "Sam needs to look at it.", "Sam is reviewing.", "Sam is away.", "Sam's
 #: back". A modal of permission ("Sam can review") is not a handover; will, must, should, needs to, going to and the
@@ -237,9 +260,12 @@ _HANDOVER = re.compile(
     + r"|\b(?:handed|handing|passed|passing|left|deferred)\s+(?:[\w']+\s+){0,5}?(?:to|with)\s+" + _P
     + r"|\b(?:is|are|was|now|goes|sits|lies)\s+(?:with|on|for|to)\s+" + _P
     + r"|\b(?:is|are|it's|that's|'s)\s+" + _PRINCIPAL_NAME + r"'s\s*[.!]?$"
-    r"|" + _P + r"\s+(?:will|'ll|shall|must|should|has to|have to|needs? to|is going to|is about to|are going to|going to)\b"
-    r"|" + _P + r"\s+(?:is|are)\s+\w+ing\b"
-    r"|" + _P + r"\s+(?:runs|cuts|handles|owns|holds|has the (?:ball|tag|release|next|move|call|diff|decision|hold))\b"
+    r"|" + _P + r"\s+(?:will|'ll|shall|must|should|has to|have to|needs? to|is going to|is about to|are going to|going to|to)\s+"
+    r"(?:\w+ly\s+)?(?:" + _TURN_VERBS + r")\b"
+    r"|" + _P + r"\s+(?:is|are)\s+(?:" + _TURN_PROGRESSIVE + r")\b"
+    r"|" + _P + r"\s+(?:runs|cuts|tags|pushes|merges|ships|releases)\s+(?:the |a )?(?:tag|release|cut|install|command|migration|it|this|that|push|merge|deploy)\b(?!\s+(?:at|every|each|daily|nightly))"
+    r"|" + _P + r"\s+has the (?:ball|tag|release|call|decision|move)\b"
+    r"|\b(?:it'?s|it is)\s+(?:his|her|their|your|" + _PRINCIPAL_NAME + r"'s)\s+(?:move|turn)\b|\b(?:your|" + _PRINCIPAL_NAME + r"'s)\s+(?:move|turn)\b"
     r"|\b" + _PRINCIPAL_NAME + r"(?:'s|\s+is|\s+are)\s+(?:back|away|out|gone|offline|unavailable|available|free|ready|happy|"
     r"satisfied|around|here|returns?|returned|returning)\b",
     re.I,
