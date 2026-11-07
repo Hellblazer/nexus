@@ -8747,33 +8747,76 @@ FROM scope s
      * <p>{@code distinctChunks} says what grain the page it is compared with has. A route (a) page
      * ({@code manifest_search_<dim>}) is one row per chunk, so the count is of distinct (collection, chash) and a chunk
      * with several qualifying owners counts once (nexus-zk7rw). A route (b) page is one row per owner, so its count stays
-     * a count of occurrences: a distinct count there could fall below the page and skip a re-run it needs. The function
-     * is streaming and cannot dedupe without reading every qualifying occurrence, so the distinct count is taken over at
-     * most twice the cap: if the function returns fewer rows than that it has run out, and the distinct count is exact;
-     * if it fills the bound, the chunks seen are a lower bound, and a lower bound under the cap is raised to the cap (an
-     * over-count, which only costs a re-run).
+     * a count of occurrences: a distinct count there could fall below the page and skip a re-run it needs. The distinct
+     * count is {@link #distinctQualifying}'s: a read of at most the cap, widened to twice the cap only when that read
+     * held repeats (nexus-h7kw2).
      */
     private static java.util.function.IntUnaryOperator manifestQualifying(DSLContext ctx, String[] colls,
                                                                          WherePlan wherePlan, String model,
                                                                          String tenant, boolean distinctChunks,
                                                                          String queryText) {
         ManifestPushdown.Plan m = wherePlan.manifest();
-        return cap -> {
-            // A cap of 1 (the empty-page probe) needs no distinct read: any row is at least one chunk, which is the cap.
-            int fetchCap = distinctChunks && cap > 1 && cap <= Integer.MAX_VALUE / 2 ? 2 * cap : cap;
-            Result<?> rows = ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
-                colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
-                fetchCap, model, tenant, queryText, wherePlan.excludeSensitive())).fetch();
-            if (!distinctChunks) {
-                return rows.size();
-            }
-            java.util.Set<String> chunks = new java.util.HashSet<>();
+        java.util.function.IntFunction<Result<?>> read = fetchCap -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
+            colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
+            fetchCap, model, tenant, queryText, wherePlan.excludeSensitive())).fetch();
+        if (!distinctChunks) {
+            return cap -> read.apply(cap).size();
+        }
+        return cap -> distinctQualifying(cap, fetchCap -> {
+            Result<?> rows = read.apply(fetchCap);
+            List<String> keys = new ArrayList<>(rows.size());
             for (Record r : rows) {
-                chunks.add(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_COLLECTION) + "/"
-                           + java.util.HexFormat.of().formatHex(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_CHASH)));
+                keys.add(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_COLLECTION) + "/"
+                         + java.util.HexFormat.of().formatHex(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_CHASH)));
             }
-            return rows.size() < fetchCap ? chunks.size() : Math.max(chunks.size(), cap);
-        };
+            return keys;
+        });
+    }
+
+    /**
+     * The count of distinct chunks a route (a) short page is compared with, counted up to {@code cap} (nexus-zk7rw,
+     * nexus-h7kw2).
+     * {@code readKeys} reads the first {@code n} qualifying (collection, chash) keys of the streaming
+     * {@code manifest_qualifying_hits}, one per qualifying owner, so a chunk with several owners repeats. The function
+     * cannot dedupe without reading every qualifying occurrence, so the count is made on the caller's side:
+     * <ol>
+     *   <li>Read {@code cap} keys. Fewer than {@code cap} means the function ran out, and the distinct count of what came
+     *       back is exact.</li>
+     *   <li>{@code cap} keys that are {@code cap} distinct chunks: the count is at least the cap, and that is the answer
+     *       (the caller compares it with a page one row shorter than the cap).</li>
+     *   <li>{@code cap} keys with repeats are fewer than {@code cap} chunks, which does not say whether more chunks
+     *       follow. Only then read {@code 2 * cap}: fewer keys than that and the function has run out, so the distinct
+     *       count is exact; a read that fills the bound saw a lower bound, and a lower bound under the cap is raised to
+     *       the cap (an over-count, which only costs a re-run, never a skipped one).</li>
+     * </ol>
+     * The common page (a label whose chunks have one owner each) is decided by the first read; reading {@code 2 * cap}
+     * eagerly cost +55% on a mid-sized label that re-runs anyway (nexus-zk7rw review r1). The price is on a page that
+     * does widen, which now reads {@code cap} and then {@code 2 * cap}. A {@code cap} above half of
+     * {@link Integer#MAX_VALUE} cannot be doubled and answers the cap.
+     */
+    static int distinctQualifying(int cap, java.util.function.IntFunction<List<String>> readKeys) {
+        List<String> keys = readKeys.apply(cap);
+        int distinct = new java.util.HashSet<>(keys).size();
+        if (keys.size() < cap) {
+            return distinct;
+        }
+        if (distinct >= cap || cap > Integer.MAX_VALUE / 2) {
+            return cap;
+        }
+        QUALIFYING_WIDENS.incrementAndGet();
+        int bound = 2 * cap;
+        keys = readKeys.apply(bound);
+        distinct = new java.util.HashSet<>(keys).size();
+        return keys.size() < bound ? distinct : Math.max(distinct, cap);
+    }
+
+    /** Count of distinct-chunk counts whose first read held repeats and was widened to twice the cap (nexus-h7kw2). */
+    private static final java.util.concurrent.atomic.AtomicLong QUALIFYING_WIDENS =
+        new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #shortPageRerunCount()}. */
+    public static long qualifyingWidenCount() {
+        return QUALIFYING_WIDENS.get();
     }
 
     /**

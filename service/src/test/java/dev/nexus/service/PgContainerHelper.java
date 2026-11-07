@@ -482,6 +482,9 @@ public final class PgContainerHelper {
      *       loads 40k to 70k rows of 1024 dimensions under two HNSW indexes and churns them without VACUUM, which
      *       outgrows the default {@link #TMPFS_SIZE} tmpfs; a sized container ({@link #startDedicated(String, long)}),
      *       owner-migrated by the test as {@link #startMigratedByOwner()} does on its dedicated branch.</li>
+     *   <li>{@code ShortPageCountMeasurementTest} -- a hand-run measurement (tag {@code measurement}) that loads
+     *       220,000 chunks of 384 dimensions under an HNSW, a trigram and a full-text index, which outgrows the
+     *       default {@link #TMPFS_SIZE} tmpfs; a sized container ({@link #startDedicated(String, long)}).</li>
      *   <li>{@code WalkLockPreflightIntegrationTest} -- starts a cluster with a lowered
      *       {@code max_locks_per_transaction} and {@code max_connections} ({@link #startDedicated(List)}), postmaster
      *       settings a running cluster cannot take, to walk the largest tenant count the lock preflight admits.</li>

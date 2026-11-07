@@ -349,14 +349,23 @@ class ManifestSearchShortPageIntegrationTest {
         return PgVectorRepository.shortPageSkipCount();
     }
 
+    /** nexus-h7kw2: how many distinct counts read twice the cap because the cap's first read held repeats. */
+    private static long widens() {
+        return PgVectorRepository.qualifyingWidenCount();
+    }
+
     @Test
     void aRareLabelPastTheScanCap_isRepairedByOneExactRerun() {
         PgSession.overrideScanBudgetForTests(1000, 100);
         long before = reruns();
         long skipsBefore = skips();
+        long widensBefore = widens();
 
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, rare());
 
+        // nexus-h7kw2: the page is one row, the cap 2, and the first read of 2 qualifying rows is two chunks with one
+        // owner each: the count is decided at the cap and nothing is read twice as wide.
+        assertThat(widens() - widensBefore).as("two distinct chunks in the cap's first read: no widening").isZero();
         // Without the re-run this page held ONE row, the rank-5 chunk (spike_measurements, rows=1). The filter admits
         // THREE chunks, fewer than the 40 the statement asks for, and the page is still starved: the discriminator
         // compares the manifest count with the page (1 row, 3 qualifying), not with the widened n.
@@ -372,12 +381,15 @@ class ManifestSearchShortPageIntegrationTest {
         // complete. Before the discriminator this page paid one O(collection) exact re-run for nothing.
         long before = reruns();
         long skipsBefore = skips();
+        long widensBefore = widens();
 
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, rare());
 
         assertThat(ids(rows)).containsExactlyElementsOf(rareChashes());
         assertThat(reruns() - before).isZero();
         assertThat(skips() - skipsBefore).isEqualTo(1);
+        // nexus-h7kw2: a page of 3, a cap of 4, a first read of 3 (the function ran out): exact, no second read.
+        assertThat(widens() - widensBefore).as("the function ran out under the cap: no widening").isZero();
     }
 
     @Test
@@ -487,6 +499,7 @@ class ManifestSearchShortPageIntegrationTest {
         // distinct (collection, chash) is 1 and it is skipped.
         long reruns = reruns();
         long skipsBefore = skips();
+        long widensBefore = widens();
 
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, label("twin-x"));
 
@@ -495,6 +508,9 @@ class ManifestSearchShortPageIntegrationTest {
         assertThat(distinctIds(rows)).containsExactly(chash(TWIN));
         assertThat(reruns() - reruns).isZero();
         assertThat(skips() - skipsBefore).isEqualTo(1);
+        // nexus-h7kw2: the page is one row, the cap 2, and the first read of 2 is the two owners of the one chunk: fewer
+        // distinct chunks than the cap, so the read is widened to 4 once, and the function runs out at 2.
+        assertThat(widens() - widensBefore).as("two owners of one chunk fill the cap: widened once").isEqualTo(1);
     }
 
     @Test
@@ -506,10 +522,13 @@ class ManifestSearchShortPageIntegrationTest {
         // need. Here the chunk really is the only one, so the re-run finds nothing new and the rows are the same.
         long before = reruns();
         long skipsBefore = skips();
+        long widensBefore = widens();
 
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, label("quad-x"));
 
         assertThat(distinctIds(rows)).containsExactly(chash(QUAD));
+        assertThat(widens() - widensBefore).as("the cap's first read is two owners of one chunk: widened once")
+            .isEqualTo(1);
         assertThat(reruns() - before).as("the bound filled, so the count reads as the cap and the page is re-run")
             .isEqualTo(1);
         assertThat(skips() - skipsBefore).isZero();
