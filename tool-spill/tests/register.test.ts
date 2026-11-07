@@ -158,7 +158,7 @@ test('error lines in the cut middle are named by their line numbers in the file'
 test('at most three error lines are named, and the rest are counted', async ($, on) => {
   spy(on)
   const all = lines(1_000).split('\n')
-  for (const i of [400, 410, 420, 430, 440]) all[i] = `FAILED tests/test_x.py::test_${i} - AssertionError: no`
+  for (const i of [400, 410, 420, 430, 440]) all[i] = `FAILED spec/x_spec.py::test_${i} - AssertionError: no`
   on('tool.call', () => BIG_BASH(all.join('\n')))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'pytest' })
@@ -180,12 +180,12 @@ test('a clean middle names no error lines', async ($, on) => {
 // each NOT line is prose, code or a passing log line that only uses an error word.
 const REAL_ERRORS = [
   'E       AssertionError: expected 3, got 4',
-  'FAILED tests/test_a.py::test_b - KeyError: x',
+  'FAILED spec/a_spec.py::test_b - KeyError: x',
   'Traceback (most recent call last):',
   'ValueError: bad input',
   'java.lang.IllegalStateException: boom',
   'E       assert 3 == 4',
-  'FAILED tests/test_x.py::test_y',
+  'FAILED spec/x_spec.py::test_y',
   'fatal: not a git repository (or any of the parent directories): .git',
   "cat: /nope: No such file or directory",
   'ERROR: Could not find a version that satisfies the requirement',
@@ -199,7 +199,7 @@ const REAL_ERRORS = [
   '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin',
   'npm ERR! code ELIFECYCLE',
   'make: *** [Makefile:12: all] Error 2',
-  'tests/test_a.py::test_b FAILED                                  [ 40%]',
+  'spec/a_spec.py::test_b FAILED                                  [ 40%]',
 ]
 const NOT_ERRORS = [
   'def handle_error(self, exc):',

@@ -754,6 +754,25 @@ def test_build_spec_puts_extras_before_the_pin(
     assert build_spec(base, extras, version) == expected
 
 
+@pytest.mark.parametrize(("base", "extras", "expected"), [
+    ("conexus==7.86.1", ["pdf"], "conexus[pdf]==7.86.1"),
+    ("conexus == 7.86.1", ["pdf", "local"], "conexus[local,pdf]==7.86.1"),
+    ("conexus==7.86.1", [], "conexus==7.86.1"),
+])
+def test_build_spec_splits_a_pinned_base_so_extras_still_precede_the_pin(
+    base: str, extras: list[str], expected: str,
+) -> None:
+    """nexus-0ib6r (1): a base that already carries its pin used to come back as
+    ``conexus==7.86.1[pdf]``, which no installer reads. nexus-jea5y fixed one caller; the
+    builder now splits the pin itself."""
+    assert build_spec(base, extras) == expected
+
+
+def test_build_spec_refuses_two_pins() -> None:
+    with pytest.raises(InstallLayoutError, match="two version pins"):
+        build_spec("conexus==7.86.1", ["pdf"], "7.86.2")
+
+
 @pytest.mark.parametrize("extras", [[], ["local"], ["local", "dev"]])
 def test_a_receipt_built_from_build_spec_is_consistent_by_construction(
     extras: list[str],

@@ -2996,6 +2996,22 @@ def opencv_pair_uninstall_remedy() -> str:
     )
 
 
+def _libgl_loadable(loader: Callable[[str], object] | None = None) -> bool:
+    """Whether the dynamic loader finds ``libGL.so.1``, the library whose absence the two-OpenCV row
+    exists for (nexus-0ib6r). Necessary for ``import cv2`` of the non-headless build, not sufficient:
+    it also links glib and a few X libraries, and a box without those still fails behind an amber
+    row. A probe that cannot load it, for any reason, answers False and keeps the row red."""
+    try:
+        if loader is None:
+            import ctypes  # noqa: PLC0415 — deferred import (startup cost), only on the two-build path
+
+            loader = ctypes.CDLL
+        loader("libGL.so.1")
+    except Exception:  # noqa: BLE001 — a doctor probe never raises; any failure reads as absent
+        return False
+    return True
+
+
 def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
     """The healthy "PDF support" row, unless both OpenCV builds are installed.
 
@@ -3012,15 +3028,17 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
 
     if len(_installed_opencv_builds()) < 2:
         return HealthResult(label="PDF support", ok=True, detail=detail)
-    on_linux = sys.platform.startswith("linux")
+    # nexus-0ib6r (3): red only where `import cv2` can actually fail, a Linux box with no libGL.so.1.
+    # With libGL the non-headless build loads, so the pair is the same warning as elsewhere.
+    red = sys.platform.startswith("linux") and not _libgl_loadable()
     consequence = (
-        "On Linux the non-headless build needs libGL.so.1, so `import cv2` can fail "
-        "and PDF extraction with it"
-        if on_linux else
+        "On Linux the non-headless build needs libGL.so.1, which this box does not have, so `import cv2` "
+        "can fail and PDF extraction with it"
+        if red else
         "Both write site-packages/cv2/, so which one loads depends on install order"
     )
     return HealthResult(
-        label="PDF support", ok=False, warn=not on_linux,
+        label="PDF support", ok=False, warn=not red,
         detail=(
             f"{detail}; but both opencv-python and opencv-python-headless are installed. "
             f"{consequence}. The release's uv overrides keep only the headless build; "
