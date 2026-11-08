@@ -134,6 +134,17 @@ things to avoid carefully; they are impossible.
    runs is the fallback. Never arm a Monitor or loop that polls check runs
    per push (Sam, 2026-11-08, ask qo36-conflicts).
 
+   To be woken once when a develop sha's CI has finished, subscribe to
+   `board/ci/nexus-develop--done`
+   (`mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop--done")`;
+   another branch is `board/ci/<repo>-<branch>--done`). The adapter posts one
+   `kind=sha` row there per sha, after the last push run for that sha
+   completes, with body `{state: concluded, sha, runs, url}`; `runs` lists the
+   `[run, attempt]` pairs it waited on. The row carries no conclusion: it is a
+   wake, so read the `kind=run` rows or the check runs for the verdict. A
+   redelivered webhook refreshes the same row; a rerun (a new attempt) posts a
+   new one (conexus-5wjs, nexus-1d6pz.2).
+
    Treat the develop run as part of the push. Before stacking more work on a
    develop sha, or cutting a release branch on it, read that sha's check-run
    conclusions. A red there is a finding to diagnose before the next push, not
