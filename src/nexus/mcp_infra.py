@@ -3193,8 +3193,9 @@ def manifest_write_batch_hook(
     leave orphan rows at higher positions; the per-document hook
     (fired once at the tail of every indexing call) is responsible for
     final cleanup and can call ``write_manifest`` to replace.
-    Best-effort: any failure is logged at debug level and never
-    propagates to the caller.
+    Best-effort: any failure is logged (a position list that does not line up
+    with the rows at warning, and counted as an identity drop; the rest at debug
+    level) and never propagates to the caller.
 
     Reads ``metadatas`` for the chash (``chunk_text_hash``) and *positions* for
     the labels and spans (``line_start``, ``line_end``, ``chunk_start_char``,
@@ -3241,7 +3242,20 @@ def manifest_write_batch_hook(
 
     from nexus.metadata_schema import aligned_positions  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
-    positions = aligned_positions(metadatas, positions)
+    try:
+        positions = aligned_positions(metadatas, positions)
+    except ValueError:  # the documented contract: the hook never propagates
+        # A caller handed a position list that is not index-aligned with its rows. The chunks are in T3
+        # and no manifest row can be built for them: the same outcome, and the same run-summary entry,
+        # as a batch with no document identity.
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        _record_manifest_identity_drop(collection, len(metadatas))
+        structlog.get_logger().warning(
+            "manifest_write_hook_positions_misaligned",
+            collection=collection, batch_size=len(metadatas), positions=len(positions or []),
+            exc_info=True,
+        )
+        return
     by_doc: dict[str, list[tuple[int, dict, dict]]] = defaultdict(list)
     for i, meta in enumerate(metadatas):
         doc_id = catalog_doc_id or meta.get("doc_id", "")
@@ -3360,17 +3374,6 @@ def _manifest_chunk_rows(indexed) -> list[dict]:
         }
         for i, m, p in indexed
     ]
-
-
-def rows_as_positioned(pairs) -> "list[tuple[int, dict, dict]]":
-    """``(index, row)`` pairs as the triples :func:`_manifest_chunk_rows` takes, positions read off the row.
-
-    For callers whose chunk metadata is a stored T3 row (the manifest heal). STEP1-DELETE for any caller
-    that is not reading a stored legacy row: a row written after Step 1 carries no position key.
-    """
-    from nexus.metadata_schema import positions_of_row  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
-
-    return [(i, m, positions_of_row(m)) for i, m in pairs]
 
 
 def _apply_combined_write_response(

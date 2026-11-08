@@ -16,8 +16,9 @@ they can is by reading the chunker's own position dict. That half fails with the
 
 Routes: ``oversize`` (the file goes through the multi-batch combined writer), ``flush`` (the ChunkBatcher
 stages it and the flush builds the owner rows), ``legacy`` (the old per-file upsert, where the batch
-manifest hook builds the rows), ``doc`` (``nx index md|pdf``'s ``_index_document``) and ``stream`` (the
-streaming PDF pipeline's buffer and uploader).
+manifest hook builds the rows), ``doc`` (``nx index md|pdf``'s ``_index_document``), ``stream`` (the
+streaming PDF pipeline's buffer and uploader), and ``index_pdf`` / ``incremental`` (``doc_indexer.index_pdf``
+with the streaming pipeline off: one request, and ``_index_pdf_incremental``'s batches).
 
 To refresh the goldens (only when a chunker's output is meant to change): ``NX_PIN_CAPTURE=1 uv run pytest
 tests/test_6pfgb65_positions_split.py -k capture -s`` prints them.
@@ -57,16 +58,19 @@ class _RecordingCat:
     def __init__(self) -> None:
         self.rows: list[dict] = []
         self.chunks: list[dict] = []
+        self.requests = 0
 
     def begin_index_run(self, doc_id, content_hash, run_id, collection, **kw):
         return {"prior_chashes": [], "prior_count": 0}
 
     def write_manifest_many(self, docs, *, complete=None, sweep=True, chunks=None, **kw):
+        self.requests += 1
         self.rows.extend(docs[0][1])
         self.chunks.extend(chunks or [])
         return {"chunks_written": len(chunks or [])}
 
     def append_manifest_chunks(self, doc_id, rows, *, chunk_payload=None, sweep_chashes=None, **kw):
+        self.requests += 1
         self.rows.extend(rows)
         self.chunks.extend(chunk_payload or [])
         return {"chunks_written": len(chunk_payload or []), "chunks_unreferenced": 0}
@@ -324,8 +328,59 @@ def _drive_doc_route(path: str, tmp_path: Path, monkeypatch, rec: _RecordingCat)
     return [c["metadata"] for c in rec.chunks]
 
 
-def _drive_stream_route(tmp_path: Path, monkeypatch, rec: _RecordingCat) -> list[dict]:
-    """The streaming PDF pipeline: ``chunker_loop`` buffers the chunks, ``uploader_loop`` sends them."""
+def _drive_index_pdf_route(route: str, tmp_path: Path, monkeypatch, rec: _RecordingCat) -> list[dict]:
+    """`nx index pdf`'s library entry, ``index_pdf``, with the streaming pipeline off: ``index_pdf`` (a
+    document of up to ``_INCREMENTAL_THRESHOLD`` chunks goes as one request) and ``incremental`` (a
+    document over it goes through ``_index_pdf_incremental``, in batches). The fixture is small, so the
+    incremental case lowers the threshold and the batch size; the writer is the real one."""
+    import nexus.doc_indexer as di
+
+    if route == "incremental":
+        monkeypatch.setattr(di, "_INCREMENTAL_THRESHOLD", 2)
+        monkeypatch.setattr(di, "_INCREMENTAL_BATCH_SIZE", 3)
+    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", tmp_path / "ckpt")
+    monkeypatch.setattr("nexus.pdf_stack.require", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.pdf_stack.mineru_bounds_problem", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.sensitive_write.external_legs_gate", lambda *a, **k: False)
+    # The catalog enrichment after the write (title, author, chunk count) is no part of what is pinned.
+    monkeypatch.setattr("nexus.pipeline_stages._catalog_pdf_hook", lambda *a, **k: None)
+
+    class _Col:
+        def get(self, **kw):
+            return {"ids": [], "metadatas": []}
+
+    class _T3:
+        def get_or_create_collection(self, name):
+            return _Col()
+
+    f = tmp_path / "pin.pdf"
+    f.write_bytes(b"%PDF-1.4 pin65\n")
+    with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value=_DOC), \
+            patch("nexus.doc_indexer._doc_id_for_path", return_value=""), \
+            patch("nexus.doc_indexer._resolve_write_db", side_effect=lambda t3: t3), \
+            patch("nexus.doc_indexer._register_before_read"), \
+            patch("nexus.doc_indexer._lookup_existing_doc_id", return_value=_DOC), \
+            patch("nexus.catalog.factory.make_catalog_reader", return_value=_Reader()), \
+            patch("nexus.doc_indexer._target_model", return_value=(_MODEL, True)), \
+            patch("nexus.doc_indexer.PDFExtractor") as ext_cls, \
+            patch("nexus.catalog.factory.make_catalog_writer", return_value=rec):
+        ext_cls.return_value.extract.return_value = _pdf_extraction_result()
+        di.index_pdf(
+            f, "pin65", _T3(), collection_name=_CCE,
+            embed_fn=lambda texts, model: ([[] for _ in texts], model),
+            hooks=HookRegistry(), force=True, streaming="never")
+    # Non-vacuity of the route: one request for the single-request path, several for the batched one.
+    assert (rec.requests > 1) == (route == "incremental"), rec.requests
+    return [c["metadata"] for c in rec.chunks]
+
+
+def _drive_stream_route(
+    tmp_path: Path, monkeypatch, rec: _RecordingCat, *, rewrite_buffer: Callable[[dict], None] | None = None,
+) -> list[dict]:
+    """The streaming PDF pipeline: ``chunker_loop`` buffers the chunks, ``uploader_loop`` sends them.
+
+    *rewrite_buffer*, when given, is handed the buffer's chunk rows (``(pipeline, index) -> row``) between
+    the two, to turn them into a buffer an older client wrote."""
     from nexus.pipeline_stages import chunker_loop, uploader_loop
     from tests._owner_write_double import install_streaming_writer
     from tests.pipeline_fake_engine import make_fake_engine_db
@@ -345,6 +400,9 @@ def _drive_stream_route(tmp_path: Path, monkeypatch, rec: _RecordingCat) -> list
         h, db, threading.Event(), embed_fn=lambda texts, model: ([[0.1] * 4 for _ in texts], model),
         extraction_done=extraction_done, chunking_done=chunking_done, pdf_path="/pin.pdf",
         corpus=_CCE, target_model=_MODEL)
+    if rewrite_buffer is not None:
+        db.flush(h)  # the client batches chunk writes; the engine's rows are the buffer
+        rewrite_buffer(_engine.chunks)
     uploader_loop(
         h, db, MagicMock(), _CCE, threading.Event(), chunking_done, catalog_doc_id=_DOC,
         hooks=HookRegistry())
@@ -357,11 +415,14 @@ def _drive_stream_route(tmp_path: Path, monkeypatch, rec: _RecordingCat) -> list
 
 _CASES = (
     [(p, r) for p in sorted(_RUNNERS) for r in ("oversize", "flush", "legacy")]
-    + [("markdown", "doc"), ("pdf", "doc"), ("pdf", "stream")]
+    + [("markdown", "doc"), ("pdf", "doc"), ("pdf", "stream"), ("pdf", "index_pdf"), ("pdf", "incremental")]
 )
 
 
-def _observe(path: str, route: str, tmp_path: Path, monkeypatch, *, strip: bool) -> dict:
+def _observe(
+    path: str, route: str, tmp_path: Path, monkeypatch, *, strip: bool,
+    rewrite_buffer: Callable[[dict], None] | None = None,
+) -> dict:
     """What the owner-row writer is handed for *path* indexed by *route*."""
     rec = _install(monkeypatch)
     if strip:
@@ -369,7 +430,9 @@ def _observe(path: str, route: str, tmp_path: Path, monkeypatch, *, strip: bool)
     if route == "doc":
         metas = _drive_doc_route(path, tmp_path, monkeypatch, rec)
     elif route == "stream":
-        metas = _drive_stream_route(tmp_path, monkeypatch, rec)
+        metas = _drive_stream_route(tmp_path, monkeypatch, rec, rewrite_buffer=rewrite_buffer)
+    elif route in ("index_pdf", "incremental"):
+        metas = _drive_index_pdf_route(route, tmp_path, monkeypatch, rec)
     else:
         metas = _drive_repo_route(path, route, tmp_path, monkeypatch, rec)
     # Two routes stamp indexed_at from the wall clock; it is no part of what is pinned.
@@ -428,3 +491,98 @@ def test_the_position_dicts_the_chunkers_return_equal_what_the_row_carries(tmp_p
     assert len(prepared) > 1 and all(len(p) == 4 for p in prepared)
     for _cid, _text, meta, positions in prepared:
         assert positions_of_row(meta) == positions
+
+
+def _carries_positions(golden: dict) -> bool:
+    """True when the golden's rows hold at least one label (a section title or type, or a page) and at
+    least one span (a line or character bound): a golden regenerated from a tree whose positions were
+    lost holds neither, and would pin the loss."""
+    rows = golden["rows"]
+    labelled = any(r["section_title"] or r["section_type"] or r["page_number"] is not None for r in rows)
+    spanned = any(
+        r[k] is not None for r in rows for k in ("line_start", "line_end", "char_start", "char_end"))
+    return labelled and spanned
+
+
+@pytest.mark.parametrize("key", sorted(_goldens()))
+def test_every_golden_carries_labels_and_spans(key) -> None:
+    """The pin proves a route unchanged only against goldens that hold positions. Regenerating one with
+    ``NX_PIN_CAPTURE`` on a tree that dropped the position keys yields all-null rows, which every route
+    then "matches"; this refuses such a golden."""
+    assert _carries_positions(_goldens()[key])
+
+
+def test_an_all_null_golden_is_refused() -> None:
+    nulled = {"rows": [
+        {"section_title": "", "section_type": "", "page_number": None,
+         "line_start": None, "line_end": None, "char_start": None, "char_end": None}] * 3}
+    assert not _carries_positions(nulled)
+
+
+def _drop_buffered_positions(every: int) -> Callable[[dict], None]:
+    """A buffer as a client from before the split wrote it: the position fields live in the chunk row's
+    own metadata and there is no ``_positions`` key. Rewrites every *every*-th buffered row so."""
+    def rewrite(chunks: dict) -> None:
+        dropped = 0
+        for (_pid, idx), row in sorted(chunks.items()):
+            if idx % every:
+                continue
+            meta = json.loads(row["metadata_json"])
+            assert "_positions" in meta and "chunk_end_char" in meta, "non-vacuity: the buffer row is new-shaped"
+            del meta["_positions"]
+            row["metadata_json"] = json.dumps(meta)
+            dropped += 1
+        assert dropped, "non-vacuity: no buffered row was rewritten"
+    return rewrite
+
+
+@pytest.mark.parametrize("every", [1, 2], ids=["old-buffer", "mixed-buffer"])
+def test_a_buffer_written_before_the_split_resumes_to_the_same_manifest_rows(every, tmp_path, monkeypatch) -> None:
+    """A streaming-PDF run that was interrupted by an upgrade resumes from a buffer whose rows carry no
+    ``_positions`` key (all of them, or some). The uploader reads their positions off the row metadata,
+    so the manifest rows are the stream golden's (RDR-236 Phase 4 Step 0). Without that fallback the rows
+    would carry empty labels and null spans."""
+    gold = _goldens()["pdf/stream"]
+    got = _observe("pdf", "stream", tmp_path, monkeypatch, strip=False,
+                   rewrite_buffer=_drop_buffered_positions(every))
+    assert len(gold["rows"]) > 1
+    assert got["rows"] == gold["rows"]
+    assert got["chunks"] == gold["chunks"]
+
+
+def test_the_flush_payload_refuses_position_dicts_that_do_not_line_up_with_the_rows(monkeypatch) -> None:
+    """The flush pairs each aggregated chunk row with its aggregated position dict. A short list would,
+    paired by a bare ``zip``, drop the last chunks from the manifest without a word: the pairing is
+    strict, so the mismatch raises."""
+    import nexus.indexer as ix
+
+    ids = ["a" * 64, "b" * 64, "c" * 64]
+    metas = [{"chunk_text_hash": i} for i in ids]
+    fctx = [("a.py", {
+        "ids": ids, "documents": ["x", "y", "z"], "metadatas": metas,
+        "positions": [{"line_start": 1}, {"line_start": 2}, {"line_start": 3}], "catalog_doc_id": "1.1"})]
+    ix._build_combined_write_payload(ids, ["x", "y", "z"], metas, fctx)  # aligned: builds
+    real = ix._aggregate_flush_positions
+    monkeypatch.setattr(ix, "_aggregate_flush_positions", lambda fc: real(fc)[:-1])
+    with pytest.raises(ValueError):
+        ix._build_combined_write_payload(ids, ["x", "y", "z"], metas, fctx)
+
+
+def test_the_manifest_hook_never_propagates_a_position_list_that_does_not_line_up(monkeypatch) -> None:
+    """``manifest_write_batch_hook`` is documented never to raise. A position list of the wrong length
+    cannot be paired with the rows; the hook writes nothing, records the batch as a manifest drop for the
+    run summary, and returns."""
+    import nexus.mcp_infra as mi
+
+    class _MustNotWrite:
+        def __getattr__(self, name):
+            raise AssertionError(f"the hook reached the catalog writer ({name}) with misaligned positions")
+
+    drops: list[tuple] = []
+    monkeypatch.setattr(mi, "get_catalog_writer", lambda *a, **k: _MustNotWrite())
+    monkeypatch.setattr(mi, "_record_manifest_identity_drop", lambda *a, **k: drops.append(a))
+    metas = [{"chunk_text_hash": "a" * 64}, {"chunk_text_hash": "b" * 64}]
+    mi.manifest_write_batch_hook(
+        ["a" * 64, "b" * 64], _CCE, ["x", "y"], None, metas,
+        catalog_doc_id=_DOC, positions=[{"line_start": 1}])
+    assert drops == [(_CCE, 2)]

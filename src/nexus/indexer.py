@@ -5449,7 +5449,7 @@ def _build_combined_write_payload(
     agg_metas = _aggregate_flush_metas(file_contexts)
     agg_positions = _aggregate_flush_positions(file_contexts)
     by_doc: dict[str, list[tuple[int, dict, dict]]] = defaultdict(list)
-    for _i, (_meta, _pos) in enumerate(zip(agg_metas, agg_positions)):
+    for _i, (_meta, _pos) in enumerate(zip(agg_metas, agg_positions, strict=True)):
         _doc_id = _meta.get("doc_id", "")
         if _doc_id:
             by_doc[_doc_id].append((_i, _meta, _pos))

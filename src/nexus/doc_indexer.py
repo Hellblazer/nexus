@@ -37,8 +37,8 @@ from nexus.pdf_extractor import PDFExtractor
 
 # Type alias for the chunking callback used by _index_document.
 # Receives (file_path, content_hash, target_model, now_iso, corpus) and returns
-# a list of (chunk_id, document_text, metadata_dict) tuples, or an empty list.
-ChunkFn = Callable[[Path, str, str, str, str], list[tuple[str, str, dict]]]
+# a list of (chunk_id, document_text, metadata_dict, positions_dict) tuples, or an empty list.
+ChunkFn = Callable[[Path, str, str, str, str], list[tuple[str, str, dict, dict]]]
 
 # Type alias for a local (dry-run) embedding function override.
 # Receives (texts, model) and returns (embeddings, actual_model).
@@ -2321,7 +2321,7 @@ def _index_document(
 def _index_pdf_incremental(
     file_path: Path,
     corpus: str,
-    prepared: list[tuple[str, str, dict]],
+    prepared: list[tuple[str, str, dict, dict]],
     content_hash: str,
     collection_name: str,
     t3: Any,
