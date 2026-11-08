@@ -93,14 +93,8 @@ def _parse_decision(output: str) -> str | None:
 # purpose: the record pins both, and answers the cost of the prompts by telling the
 # model, in the answer and the description, how long to wait before asking again.
 # Auto-approving it is a change to the record, and Sam's.
-#
-# nexus-qo7ie.31: ``procedure_run`` (RDR-240) runs a sandboxed, read-only procedure. It
-# prompts until Sam decides whether to auto-approve it: an auto-approval is a permission
-# grant (threads/marlowe ask procedure-run-autoapprove). Moving it to ``_ALLOWED_TOOLS`` is
-# one line there and the removal of this entry and its test.
 _MANUAL_APPROVAL_REQUIRED = {
     "mcp__plugin_conexus_nexus__daemon_uninstall",
-    "mcp__plugin_conexus_nexus__procedure_run",
     "mcp__plugin_conexus_nexus__setup",
     "mcp__plugin_conexus_nexus__setup_status",
 }
@@ -264,17 +258,20 @@ class TestDestructiveToolsRequireManualApproval:
         assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == ""
         assert _run_nx_hook(tool_name, hook_event_name="PermissionRequest") == ""
 
-    def test_procedure_run_requires_manual_approval_until_sam_decides(self) -> None:
-        """nexus-qo7ie.31: held to the prompt on both events until Sam's answer."""
+    def test_procedure_run_is_auto_approved_on_both_events(self) -> None:
+        """nexus-qo7ie.31: Sam chose auto-approval (threads/marlowe ask procedure-run-autoapprove,
+        2026-11-08): the sandboxed, read-only procedure runner skips the prompt."""
+        import json as _json
+
         from nexus.hooks import auto_approve
 
         tool_name = "mcp__plugin_conexus_nexus__procedure_run"
-        assert tool_name in _MANUAL_APPROVAL_REQUIRED
-        assert tool_name not in auto_approve._ALLOWED_TOOLS
-        assert tool_name not in auto_approve._ALLOWED_HOOK_TOOLS
-        assert _run_nx_hook(tool_name) == ""
-        assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == ""
-        assert _run_nx_hook(tool_name, hook_event_name="PermissionRequest") == ""
+        assert tool_name not in _MANUAL_APPROVAL_REQUIRED
+        assert tool_name in auto_approve._ALLOWED_TOOLS
+        assert _parse_decision(_run_nx_hook(tool_name)) == "allow"
+        assert _parse_decision(_run_nx_hook(tool_name, hook_event_name="PermissionRequest")) == "allow"
+        pre = _json.loads(_run_nx_hook(tool_name, hook_event_name="PreToolUse"))["hookSpecificOutput"]
+        assert pre["permissionDecision"] == "allow"
 
     def test_exempted_tools_are_still_actually_registered(self) -> None:
         """A name in _MANUAL_APPROVAL_REQUIRED that no longer exists on any

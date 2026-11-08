@@ -87,6 +87,7 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
         "mcp__plugin_conexus_nexus__plan_save",
         "mcp__plugin_conexus_nexus__plan_search",
         "mcp__plugin_conexus_nexus__plan_delete",
+        "mcp__plugin_conexus_nexus__procedure_run",  # Sam 2026-11-08, nexus-qo7ie.31
         "mcp__plugin_conexus_nexus__traverse",
         "mcp__plugin_conexus_nexus__nx_answer",
         "mcp__plugin_conexus_nexus__nx_answer_report",
