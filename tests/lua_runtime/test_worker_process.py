@@ -629,10 +629,18 @@ def test_a_limit_frame_is_a_script_limit_error_naming_the_limit_with_stats(
     assert err.value.stats == {"peak_lua_bytes": 11, "instructions": 22}
 
 
+# A runaway that only the outer limits can stop: one pattern match is one Lua
+# instruction (A2, T2 nexus_rdr/242-research-29), so the runtime's count hook
+# never fires during it, and with 2**30 backtracking paths it runs for minutes.
+# A plain Lua loop is ended by the 50M-instruction limit in well under a
+# second, before the kill timer, the CPU limit or a parent's death can.
+_RUNAWAY = 'return ("a"):rep(30):find(("a?"):rep(30) .. ("a"):rep(30) .. "c")'
+
+
 def test_the_kill_timer_ends_a_runaway_worker_at_the_wall_limit() -> None:
     t0 = time.monotonic()
     with pytest.raises(ScriptLimitError) as err:
-        _run("while true do end", wall=1)
+        _run(_RUNAWAY, wall=1)
     assert err.value.limit == "wall_time" and err.value.value == 1
     assert 0.9 <= time.monotonic() - t0 < 6
 
@@ -740,7 +748,7 @@ def test_sigxcpu_from_the_cpu_limit_is_a_cpu_time_limit_when_the_timer_has_not_f
     cfg = WorkerConfig(cpu_margins=(-4, -3))
     t0 = time.monotonic()
     with pytest.raises(ScriptLimitError) as err:
-        _run("while true do end", wall=6, config=cfg)
+        _run(_RUNAWAY, wall=6, config=cfg)
     assert err.value.limit == "cpu_time" and err.value.value == 2, err.value
     assert time.monotonic() - t0 < 6
 
@@ -751,7 +759,7 @@ def test_windows_job_time_limit_is_reported_as_cpu_time() -> None:
     # (test_win_job_limits). So the limit is 3 s here and the wall limit 20 s, well past the lag.
     cfg = WorkerConfig(cpu_margins=(-17, -16))
     with pytest.raises(ScriptLimitError) as err:
-        _run("while true do end", wall=20, config=cfg)
+        _run(_RUNAWAY, wall=20, config=cfg)
     assert err.value.limit == "cpu_time" and err.value.value == 3, err.value
 
 
@@ -932,7 +940,7 @@ _PARENT = textwrap.dedent(
     def hang(deadline, ctx):
         time.sleep(600)
     table = {"fixture.hang": VerbSpec("fixture.hang", (), hang)}
-    src = "while true do end" if mode == "spin" else "return fixture.hang()"
+    src = sys.argv[2] if mode == "spin" else "return fixture.hang()"  # _RUNAWAY, passed in argv
     cfg = WorkerConfig(cpu_margins=(-27, -26), on_spawn=lambda p: (print(p.pid, flush=True)))
     grants = ["fixture.hang"] if mode != "spin" else []  # the static check refuses a grant the script does not use
     supervise({"name": "n", "source": src, "grants": grants},
@@ -962,7 +970,9 @@ def _pid_gone(pid: int) -> bool:
 
 def _kill_parent_and_wait_for_worker(mode: str, within: float) -> float:
     parent = subprocess.Popen(
-        [sys.executable, "-c", _PARENT, mode], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-c", _PARENT, mode, _RUNAWAY],
+        stdout=subprocess.PIPE,
+        text=True,
     )
     try:
         worker_pid = int(parent.stdout.readline())
