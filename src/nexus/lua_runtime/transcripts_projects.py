@@ -35,6 +35,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
+from nexus.bounded_subprocess import run_bounded
 from nexus.lua_runtime.verb_types import VerbTimeout
 
 # How many transcripts of a directory are read, and how many lines of each,
@@ -53,17 +54,15 @@ def _left(deadline: float) -> float:
 
 
 def _git(args: list[str], cwd: Path, deadline: float) -> str | None:
-    """git's stdout, or None when git refuses; the caller's GIT_* settings never reach it."""
+    """git's stdout, or None when git refuses; the caller's GIT_* settings never reach it.
+
+    run_bounded resolves git off the working directory and bounds the call;
+    output is read as bytes and decoded with replacement, as the git verbs do.
+    """
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_left(deadline),
-            check=False,
+        proc = run_bounded(
+            ["git", *args], timeout=_left(deadline), cwd=cwd, env=env, text=False
         )
     except subprocess.TimeoutExpired:
         raise VerbTimeout(
@@ -71,7 +70,9 @@ def _git(args: list[str], cwd: Path, deadline: float) -> str | None:
         ) from None
     except OSError:
         return None
-    return proc.stdout.strip() if proc.returncode == 0 else None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", "replace").strip()
 
 
 def _common_dir(path: Path, deadline: float) -> Path | None:
