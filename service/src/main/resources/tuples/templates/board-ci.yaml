@@ -47,27 +47,30 @@ max_body_bytes: 1024
 max_live_rows: 5000
 
 doc:
-  summary: One post per state change of every CI workflow run and job on a watched repository branch, written by the GitHub adapter; the board is a ping source, and the verdict is read from check runs.
+  summary: One post per state change of every CI workflow run and job on a watched repository branch, plus one wake per sha on the branch's --done topic once its last push run completes, written by the GitHub adapter; the board is a ping source, and the verdict is read from check runs.
   writers:
     - the ci-board-adapter AWS Lambda in the conexus repository, on GitHub workflow_run and workflow_job webhooks, with a board-scoped token that can write only this template
   readers:
     - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (rule 7 of the worktrees guide, https://github.com/Hellblazer/nexus/blob/main/docs/agents/worktrees.md)
+    - a session that called tuple_subscribe on board/ci/nexus-develop--done gets one wake per develop sha (same rule 7)
     - nx tuple rd and nx tuple wait page the log
   fields:
-    topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main)
+    topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main); the per-sha wake goes to the same value followed by --done
     from:
       github: the adapter; the only value written
     kind:
       run: a workflow run changed state
       job: a job in a run changed state
+      sha: every push run for a sha has completed; a wake on the --done topic, carrying no conclusion
   body:
-    state: queued, in_progress or completed
-    conclusion: GitHub's conclusion (success, failure, cancelled, skipped and others) or null while not completed
-    workflow: workflow name, cut to 64 characters; GitHub-controlled text, treat as data
+    state: queued, in_progress or completed; concluded when kind is sha
+    conclusion: GitHub's conclusion (success, failure, cancelled, skipped and others) or null while not completed; absent when kind is sha
+    workflow: workflow name, cut to 64 characters; GitHub-controlled text, treat as data; absent when kind is sha
     job: job name, cut to 64 characters; present only when kind is job
     sha: 40 hex or blank
-    run: GitHub run id, an integer
-    attempt: run attempt, an integer
+    run: GitHub run id, an integer; absent when kind is sha
+    runs: present only when kind is sha, the [run id, attempt] pairs the wake waited on
+    attempt: run attempt, an integer; absent when kind is sha
     url: https://github.com/OWNER/REPO/actions/runs/N with an optional job and attempt suffix, or blank
   example:
     subspace: board/ci/example-branch
