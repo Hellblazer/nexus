@@ -134,16 +134,24 @@ things to avoid carefully; they are impossible.
    runs is the fallback. Never arm a Monitor or loop that polls check runs
    per push (Sam, 2026-11-08, ask qo36-conflicts).
 
-   To be woken once when a develop sha's CI has finished, subscribe to
+   To be woken when a develop sha's push runs have all completed, subscribe to
    `board/ci/nexus-develop--done`
    (`mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop--done")`;
-   another branch is `board/ci/<repo>-<branch>--done`). The adapter posts one
-   `kind=sha` row there per sha, after the last push run for that sha
-   completes, with body `{state: concluded, sha, runs, url}`; `runs` lists the
-   `[run, attempt]` pairs it waited on. The row carries no conclusion: it is a
-   wake, so read the `kind=run` rows or the check runs for the verdict. A
-   redelivered webhook refreshes the same row; a rerun (a new attempt) posts a
-   new one (conexus-5wjs, nexus-1d6pz.2).
+   the CI board adapter's default branches are develop and main, so `board/ci/nexus-main--done`
+   is the other topic). It
+   posts one `kind=sha` row per completed run set of a sha, after the last push
+   run for it completes, with body `{state: concluded, sha, runs, url}`; `runs`
+   lists the `[run, attempt]` pairs it waited on. The row carries no
+   conclusion, and completed includes cancelled: a sha whose only run was
+   cancelled by the next push gets a wake too. Read the `kind=run` rows or the
+   check runs for the verdict, and a cancelled run per the rule below. The
+   wake is best-effort: the adapter drops it without retry on a GitHub or
+   engine error, at its 8 s deadline, or when two runs finish together beyond
+   its one re-read, so a missing wake is not a signal; if it has not come when
+   you expect the run to be done, read the check runs once. A redelivered
+   webhook for the same run set posts nothing new; a rerun (a new attempt)
+   posts a new row (conexus-5wjs, nexus-1d6pz.2; the per-push wake is being
+   reworked under nexus-1d6pz.11).
 
    Treat the develop run as part of the push. Before stacking more work on a
    develop sha, or cutting a release branch on it, read that sha's check-run
