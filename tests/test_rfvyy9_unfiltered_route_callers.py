@@ -39,8 +39,9 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("commands/t3.py", "gc_cmd"): _REAP + " (the gc listing prints titles)",
     ("commands/catalog_cmds/doctor.py", "_run_name_vs_embed_dim._probe"): _VEC + " (the dimension of one vector)",
     ("doctor_embeddings.py", "probe_collection"): (
-        "compares stored vectors with a re-embed of the same chunk text through the collection's own embedder, the "
-        "one that embedded it (llm-surfaces voyage row); no title or text goes to a model"
+        "compares stored vectors with a re-embed of the same chunk text through the collection's own embedder: the "
+        "local model, or Voyage for a collection Voyage already embedded (llm-surfaces voyage row), so the text goes "
+        "nowhere it has not gone; no title or text goes to a model"
     ),
     ("doctor_assignments.py", "probe_collection"): _VEC + " (topic assignment distances)",
     ("commands/taxonomy_cmd.py", "_fetch_service_vectors"): (
