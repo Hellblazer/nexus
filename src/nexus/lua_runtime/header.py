@@ -42,7 +42,6 @@ NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 ARG_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
 VERB_RE = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*")
 MAX_SUMMARY: int = 100
-)
 #: The largest integer a Lua 5.4 integer holds; a JSON integer outside it is refused.
 LUA_INT_MAX: int = 2**63 - 1
 LUA_INT_MIN: int = -(2**63)
