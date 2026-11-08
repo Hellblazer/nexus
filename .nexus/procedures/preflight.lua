@@ -59,6 +59,8 @@ local function any(files, pattern)
   return false
 end
 
+local RUFF = "ruff@0.15.18"
+
 local function step(check, command, heavy)
   return {check = check, command = command, heavy = heavy}
 end
@@ -69,10 +71,11 @@ local CLASSES = {
     patterns = {"%.py$", "^pyproject%.toml$", "^uv%.lock$"},
     checks = function(files)
       local out = {}
-      -- ruff's rules hold across src/ only (repo practice is `ruff check src`).
+      -- ruff's rules hold across src/ only, and CI pins its version
+      -- (.github/workflows/ci.yml, the ruff lint job: uvx ruff@<v> check src/).
       if any(files, "^src/.*%.py$") then
         table.insert(out, step("ruff check on the changed src/ files",
-          live({":(glob)src/**/*.py"}) .. " | xargs -0 -r uv run ruff check --force-exclude --", false))
+          live({":(glob)src/**/*.py"}) .. " | xargs -0 -r uvx " .. RUFF .. " check --force-exclude --", false))
       end
       if any(files, "^tests/.*test_[^/]*%.py$") then
         table.insert(out, step("the changed test files",
