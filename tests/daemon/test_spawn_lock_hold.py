@@ -121,7 +121,7 @@ def test_a_holder_that_dies_frees_the_lock(tmp_path: Path) -> None:
         "print('held', flush=True)\n"
         "time.sleep(600)\n"
     )
-    child = subprocess.Popen([sys.executable, "-I", "-c", code, str(tmp_path)], stdout=subprocess.PIPE, text=True)
+    child = subprocess.Popen([sys.executable, "-I", "-c", code, str(tmp_path)], stdout=subprocess.PIPE, text=True, encoding="utf-8")
     try:
         assert child.stdout.readline().strip() == "held"
         with pytest.raises(SpawnLockBusyError):
