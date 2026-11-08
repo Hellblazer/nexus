@@ -18,8 +18,11 @@ from pathlib import Path
 
 import pytest
 
+import nexus.bounded_subprocess as bs
 from nexus.lua_runtime import header as hd
 from nexus.lua_runtime.errors import ScriptError
+
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is a hard dependency of nx")
 
 GOOD = (
     b"-- procedure: research_add\n"
@@ -109,6 +112,7 @@ def test_the_summary_may_be_exactly_100_characters() -> None:
     pytest.param(_lines(P, S, "-- args: Rdr:integer", G), 3, 'breaks [a-z]', id="argument-name-upper-case"),
     pytest.param(_lines(P, S, "-- args: 1rdr:integer", G), 3, 'breaks [a-z]', id="argument-name-digit-first"),
     pytest.param(_lines(P, S, "-- args: " + "a" * 33 + ":integer", G), 3, 'breaks [a-z]', id="argument-name-over-32"),
+    pytest.param(_lines(P, S, "-- args: end:string", G), 3, 'Lua keyword', id="argument-name-lua-keyword"),
     pytest.param(_lines(P, S, "-- args: rdr", G), 3, "has no ':type'", id="argument-without-type"),
     pytest.param(_lines(P, S, "-- args: rdr:integer,, x:string", G), 3, 'an empty args item', id="empty-argument-item"),
     pytest.param(_lines(P, S, "-- args: none, rdr:integer", G), 3, "'none' must stand alone", id="none-with-others"),
@@ -175,9 +179,38 @@ def test_null_for_a_required_argument_is_missing() -> None:
     assert "a" in _args_refusal("a:integer", {"a": None})
 
 
-@pytest.mark.parametrize("value", [1.5, "1", True, False, [], {}, math.nan, math.inf, 2**63, -(2**63) - 1])
+@pytest.mark.parametrize("value", [1.5, "1", True, False, [], {}, math.nan, math.inf, 2**63, -(2**63) - 1, 1e300])
 def test_a_non_integer_for_an_integer_is_refused(value: object) -> None:
     assert "a" in _args_refusal("a:integer", {"a": value})
+
+
+@pytest.mark.parametrize("value", [2**63 - 1, -(2**63), float(-(2**63)), 0])
+def test_the_64_bit_integer_bounds_are_accepted(value: object) -> None:
+    assert _prep("a:integer", {"a": value}) == {"a": int(value)}
+
+
+@pytest.mark.parametrize("value", [2**63, -(2**63) - 1, 10**400])
+def test_a_number_outside_what_lua_holds_is_refused(value: int) -> None:
+    assert "a" in _args_refusal("a:number", {"a": value})
+
+
+def test_negative_zero_keeps_its_sign_as_a_number() -> None:
+    assert math.copysign(1.0, _prep("a:number", {"a": -0.0})["a"]) == -1.0
+
+
+def test_a_string_that_is_not_utf8_is_refused() -> None:
+    assert "a" in _args_refusal("a:string", {"a": "\ud800"})
+
+
+def test_argument_names_must_be_strings() -> None:
+    assert "names" in _args_refusal("a:integer", {1: 2, "a": 3})  # type: ignore[dict-item]
+
+
+def test_unknown_names_are_refused_before_missing_ones_and_missing_before_types() -> None:
+    # Whole passes, so header order cannot change which error the caller sees.
+    assert "'nope'" in _args_refusal("a:integer, b:string", {"a": "x", "nope": 1})
+    assert "'b' is required" in _args_refusal("a:integer, b:string", {"a": "x"})
+    assert "'b' is required" in _args_refusal("b:string, a:integer", {"a": "x"})
 
 
 def test_an_integer_may_arrive_as_a_whole_float() -> None:
@@ -214,6 +247,9 @@ def test_arguments_must_be_a_mapping_of_names() -> None:
     with pytest.raises(ScriptError) as e:
         hd.prepare_args(_hdr("a:integer"), [1], cwd=Path.cwd(), clock=lambda: FIXED)  # type: ignore[arg-type]
     assert e.value.kind == "args"
+    with pytest.raises(ScriptError) as e:
+        hd.prepare_args(_hdr("a:integer"), ["a"], cwd=Path.cwd(), clock=lambda: FIXED)  # type: ignore[arg-type]
+    assert (e.value.kind, "object of name to value" in str(e.value)) == ("args", True)
 
 
 # ---- the reserved arguments now and repo ----
@@ -223,7 +259,8 @@ def test_a_caller_passing_a_reserved_name_is_refused_first(reserved: str) -> Non
     # Refused before anything else, even with another error present and even when declared.
     msg = _args_refusal(f"{reserved}:string, a:integer", {reserved: "x", "nope": 1})
     assert reserved in msg and "reserved" in msg
-    assert reserved in _args_refusal("a:integer", {reserved: "x", "a": 1})
+    msg = _args_refusal("a:integer", {reserved: "x", "a": 1})
+    assert f"'{reserved}' is reserved" in msg
 
 
 def test_now_is_the_host_utc_time_when_declared() -> None:
@@ -237,6 +274,7 @@ def test_now_converts_an_aware_clock_to_utc_and_refuses_a_naive_one() -> None:
         hd.prepare_args(_hdr("now:string"), {}, cwd=Path.cwd(), clock=lambda: datetime(2026, 1, 1))
 
 
+@needs_git
 def test_neither_reserved_value_is_added_when_not_declared(tmp_path: Path) -> None:
     repo = _git_repo(tmp_path / "main")
     assert _prep("a:integer", {"a": 1}, cwd=repo) == {"a": 1}
@@ -271,9 +309,7 @@ def ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is a hard dependency of nx")
-
-
+@needs_git
 def test_repo_is_the_checkout_name_when_declared(ceiling: Path) -> None:
     repo = _git_repo(ceiling / "myrepo")
     assert _prep("repo:string", {}, cwd=repo) == {"repo": "myrepo"}
@@ -281,6 +317,7 @@ def test_repo_is_the_checkout_name_when_declared(ceiling: Path) -> None:
     assert _prep("repo:string", {}, cwd=repo / "sub") == {"repo": "myrepo"}
 
 
+@needs_git
 def test_repo_from_a_linked_worktree_is_the_main_checkouts_name(ceiling: Path) -> None:
     main = _git_repo(ceiling / "mainrepo")
     _git(main, "worktree", "add", "-q", str(ceiling / "wt-agent-1"), "-b", "side")
@@ -288,6 +325,7 @@ def test_repo_from_a_linked_worktree_is_the_main_checkouts_name(ceiling: Path) -
     assert _prep("repo:string", {}, cwd=ceiling / "wt-agent-1") == {"repo": "mainrepo"}
 
 
+@needs_git
 def test_outside_a_repo_repo_is_absent_never_the_directory_name(ceiling: Path) -> None:
     plain = ceiling / "Downloads"
     plain.mkdir()
@@ -300,3 +338,55 @@ def test_outside_a_repo_repo_is_absent_never_the_directory_name(ceiling: Path) -
 def test_a_reserved_name_with_a_non_string_type_is_refused_in_the_header() -> None:
     kind, msg = _refusal(_lines("-- procedure: p", S, "-- args: now:integer", "-- grants: none"), name="p")
     assert (kind, msg.startswith("header: line 3: ")) == ("header", True)
+
+
+@needs_git
+def test_a_callers_git_dir_does_not_change_the_repo(ceiling: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mine = _git_repo(ceiling / "mine")
+    other = _git_repo(ceiling / "other")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    probe = hd.probe_repo(mine)
+    assert probe is not None and probe.name == "mine" and probe.root.resolve() == mine.resolve()
+
+
+@needs_git
+def test_inside_a_git_directory_or_a_bare_repo_there_is_no_repo(ceiling: Path) -> None:
+    repo = _git_repo(ceiling / "r")
+    assert hd.probe_repo(repo / ".git") is None
+    bare = ceiling / "bare.git"
+    bare.mkdir()
+    _git(bare, "init", "-q", "--bare")
+    assert hd.probe_repo(bare) is None
+
+
+def test_a_probe_git_cannot_answer_is_refused_even_for_an_optional_repo(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_git(*a: object, **k: object) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(bs, "run_bounded", no_git)
+    with pytest.raises(hd.RepoProbeError):
+        hd.probe_repo(Path.cwd())
+    for decl in ("repo:string", "repo:string?"):
+        assert "could not be determined" in _args_refusal(decl, {})
+
+
+def test_a_git_refusal_other_than_not_a_repo_is_a_probe_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def dubious(*a: object, **k: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(a, 128, "", "fatal: detected dubious ownership in repository")
+
+    monkeypatch.setattr(bs, "run_bounded", dubious)
+    with pytest.raises(hd.RepoProbeError):
+        hd.probe_repo(Path.cwd())
+
+
+def test_run_script_can_probe_once_and_reuse_it() -> None:
+    calls: list[Path] = []
+    probe = hd.RepoProbe(Path("/x/top"), "top")
+
+    def once(cwd: Path) -> hd.RepoProbe | None:
+        calls.append(cwd)
+        return probe
+
+    got = hd.prepare_args(_hdr("repo:string"), {}, cwd=Path("/x/top/sub"), clock=lambda: FIXED, repo_probe=once)
+    assert got == {"repo": "top"} and calls == [Path("/x/top/sub")]
