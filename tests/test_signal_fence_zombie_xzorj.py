@@ -136,6 +136,40 @@ def test_a_group_of_zombies_only_is_not_counted() -> None:
         leader.wait()
 
 
+
+@_linux_fence
+def test_a_group_whose_leader_and_members_are_between_programs_is_not_counted() -> None:
+    """The group path of the rule (review r1 of b4fc45368): killpg of the session's own group whose leader and only
+    member both read as between programs is unclassified. With either the leader check or the member filter left on
+    the zombie test alone, the session's own leader or child would be judged and read own."""
+    leader = subprocess.Popen(
+        [sys.executable, "-c", "import subprocess, time; subprocess.Popen(['sleep', '60']); time.sleep(60)"],
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (members := [m for m in fence._group_members(leader.pid) if m != leader.pid]):
+            assert time.monotonic() < deadline, "the leader never started its member"
+            time.sleep(0.02)
+        between = {leader.pid, *members}
+        real = fence._imageless
+        fence._imageless = lambda target: target in between or real(target)
+        try:
+            root, token = _ids()
+            assert fence.classify("killpg", leader.pid, signal.SIGKILL, root=root, token=token,
+                                  basetemp=fence._basetemp())[0] == "unclassified"
+        finally:
+            fence._imageless = real
+        root, token = _ids()
+        assert fence.classify("killpg", leader.pid, signal.SIGKILL, root=root, token=token,
+                              basetemp=fence._basetemp())[0] == "own", "the control: read as programs, it is ours"
+    finally:
+        try:
+            fence._real_killpg(leader.pid, signal.SIGKILL)
+        except (ProcessLookupError, AttributeError):
+            leader.kill()
+        leader.wait()
+
 def _fake_proc(monkeypatch, tmp_path: Path, pid: int, *, flags: int, cmdline: bytes, environ: bytes | None) -> None:
     """Point the fence's /proc reads for *pid* at files under *tmp_path* (a real task cannot be held mid-exit)."""
     d = tmp_path / "proc" / str(pid)
