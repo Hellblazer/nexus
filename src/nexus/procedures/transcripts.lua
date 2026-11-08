@@ -30,9 +30,13 @@
 -- fit (the page is full, or the day's rows alone pass PAGE_BYTES, or its calls alone pass
 -- MAX_TOOL_CALLS_PER_RUN) is divided by the hour each record starts in, from the records
 -- already read: the page takes hours while they fit and ends at the first that does not, and
--- the next page reads that hour to midnight once (every query asks for start for this). Hour
--- reads remain for a day the verb refuses as too large, and for a day holding a start this
--- script cannot place in an hour (the verb takes any ISO offset, this reader UTC only). An hour
+-- the next page reads that hour to midnight once (every query asks for start for this). The
+-- agents query is not divided this way: it pairs a subagent with its parent's call within one
+-- unit, so it keeps whole days and the page ends at the day's start, as before. Hour
+-- reads remain for a day the verb refuses as too large. A day holding a start this script
+-- cannot place in an hour (the verb takes any ISO offset, this reader UTC only) is never divided
+-- in hand: it is read by the hour when it is too large for a page on its own, and otherwise the
+-- page ends at its start, as before. An hour
 -- is taken whole, so a page always advances; an hour that still does not fit PAGE_BYTES or
 -- the verb fails with result-window: naming the hour. A transcript
 -- over 1 MB after the verb's cuts fails with the verb's record-too-large: error, unchanged.
@@ -1145,7 +1149,9 @@ local function by_hour(recs, from)
     if t == nil or t < from then
       return nil
     end
-    local h = math.floor(t) // HOUR * HOUR
+    -- The hour from the whole seconds: a long fraction added as a float can round 05:59:59.9999999
+    -- up into 06:00, an hour the verb (which windows on microseconds) does not put it in.
+    local h = ts_value((tostring(rec.start):gsub("%.%d*", ""))) // HOUR * HOUR
     local g = at[h]
     if g == nil then
       g = {hour = h, recs = {}}
@@ -1184,7 +1190,10 @@ local function window(q, lo, hi)
       verdict = admit(q, page, recs, stop - pos > HOUR)
     end
     local groups = nil
-    if verdict ~= "ok" and recs ~= nil and stop - pos > HOUR then
+    -- Not for a query that pairs records within one unit (agents matches a subagent to its
+    -- parent's call inside one reduce): dividing a day the page merely has no room for would
+    -- make its attribution depend on where the page fills. It keeps whole days.
+    if verdict ~= "ok" and recs ~= nil and stop - pos > HOUR and q.begin == nil then
       groups = by_hour(recs, pos)
     end
     if groups ~= nil then
