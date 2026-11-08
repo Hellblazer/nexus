@@ -46,9 +46,9 @@ was added and removed again, by Sam's decision of 2026-10-25):
 
 | Plugin | Routing rules | Other PreToolUse:Bash | Subtotal |
 |--------|----|----|----|
-| nx | 2 (`subagent_git_write`, `credential_print_guard`) | 0 | 2 |
+| nx | 3 (`subagent_git_write`, `credential_print_guard`, `destructive_action_advice`) | 0 | 3 |
 | sn | 0 | 0 | 0 |
-| **Aggregate** | | | **2** |
+| **Aggregate** | | | **3** |
 
 **The subagent git-write guard is frozen** (Sam, 2026-10-25, nexus-i93tz). The
 integrity check that used to back it is gone, so the guard is the only line,
@@ -57,6 +57,16 @@ and accepted, and are not to be patched with more spellings: raw writes into
 `.git/config` and `.git/hooks`; index, ref and HEAD writers reached through
 plumbing; verbs held in `$VAR`; decode-then-exec; and writing a script and
 then running it. The guard's own KNOWN LIMITS docstring carries the same list.
+
+**`destructive_action_advice` is one hook, not eight** (nexus-qo7ie.36). It is a
+table: each `Row` in the script's `ROWS` names a rule (and where that rule comes
+from), the tools it watches, a predicate over the call, and the advice text.
+It runs in ADVISE mode: it never denies, it returns the rule and the safe
+alternative as `additionalContext`. The flip to deny is the script's `MODE`
+constant (or a row's own `mode=`). A call that matches no row costs a JSON parse
+and a few substring tests (no `_lib` import); only a matched call pays for the
+framework and the `routing_events` write. New destructive-action shapes get a row,
+not a hook, so the Bash hook count stays put.
 
 The cap is 4. Adding a fifth routing rule in any plugin requires either
 consolidation or a budget revision in a successor RDR. The
