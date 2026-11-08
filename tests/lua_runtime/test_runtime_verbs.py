@@ -12,6 +12,9 @@ table built through the protected build.
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -65,7 +68,7 @@ def test_the_dispatcher_refuses_an_ungranted_verb_by_name() -> None:
         grants=frozenset({"memory.get"}),
         call_verb=lambda n, a: called.append(n),
         build=lambda v: v,
-        sample=lambda: None,
+        sample=lambda: None, room=lambda: 1 << 40,
     )
     reply = d.dispatch("memory.put", 2, "p", "t")
     assert isinstance(reply, str) and "memory.put" in reply
@@ -79,14 +82,14 @@ def test_the_dispatcher_never_raises_into_lua() -> None:
         raise KeyError("x")
 
     d = runtime._Dispatcher(
-        grants=frozenset({"a.b"}), call_verb=boom, build=lambda v: v, sample=lambda: None
+        grants=frozenset({"a.b"}), call_verb=boom, build=lambda v: v, sample=lambda: None, room=lambda: 1 << 40
     )
     assert d.dispatch("a.b", 0) == "a.b: worker error (KeyError)"
     ok = runtime._Dispatcher(
         grants=frozenset({"a.b"}),
         call_verb=lambda n, a: (_ for _ in ()).throw(VerbReplyError("refused: bad_args")),
         build=lambda v: v,
-        sample=lambda: None,
+        sample=lambda: None, room=lambda: 1 << 40,
     )
     assert ok.dispatch("a.b", 0) == "refused: bad_args"
 
@@ -98,7 +101,7 @@ def test_the_dispatcher_never_raises_into_lua() -> None:
 )
 def test_the_dispatcher_checks_its_arguments_too(bad: Any) -> None:
     d = runtime._Dispatcher(
-        grants=frozenset({"a.b"}), call_verb=lambda n, a: 1, build=lambda v: v, sample=lambda: None
+        grants=frozenset({"a.b"}), call_verb=lambda n, a: 1, build=lambda v: v, sample=lambda: None, room=lambda: 1 << 40
     )
     reply = d.dispatch("a.b", 1, bad)
     assert isinstance(reply, str) and "a.b" in reply
@@ -107,7 +110,7 @@ def test_the_dispatcher_checks_its_arguments_too(bad: Any) -> None:
 @pytest.mark.parametrize("value", [object(), {1, 2}, b"x", lambda: 1, 1j])
 def test_the_dispatcher_refuses_a_verb_result_that_is_not_json(value: Any) -> None:
     d = runtime._Dispatcher(
-        grants=frozenset({"a.b"}), call_verb=lambda n, a: value, build=lambda v: v, sample=lambda: None
+        grants=frozenset({"a.b"}), call_verb=lambda n, a: value, build=lambda v: v, sample=lambda: None, room=lambda: 1 << 40
     )
     reply = d.dispatch("a.b", 0)
     assert isinstance(reply, str) and "JSON" in reply
@@ -308,7 +311,7 @@ def test_the_dispatcher_returns_only_text_that_encodes() -> None:
         grants=frozenset({"a.b"}),
         call_verb=lambda n, a: (_ for _ in ()).throw(VerbReplyError("x \ud800 y")),
         build=lambda v: v,
-        sample=lambda: None,
+        sample=lambda: None, room=lambda: 1 << 40,
     )
     reply = d.dispatch("a.b", 0)
     assert isinstance(reply, str)
@@ -403,3 +406,75 @@ def test_a_verb_result_with_a_hole_cannot_be_returned_unchanged() -> None:
     with pytest.raises(ScriptError) as exc:
         run_lua("return memory.get()", "memory.get", verbs={"memory.get": lambda *a: [1, None, 3]})
     assert exc.value.kind == "result" and "holes" in exc.value.detail
+
+
+_BIG_STRING_CHILD = r"""
+import dataclasses, json, sys
+from nexus.lua_runtime import runtime
+from nexus.lua_runtime.errors import ScriptError, ScriptLimitError
+
+@dataclasses.dataclass(frozen=True)
+class L:
+    instructions: int = 50_000_000
+    memory: int = int(sys.argv[2])
+    wall_time: float = 60.0
+    result: int = 1_000_000
+    depth: int = 32
+
+size = int(sys.argv[1])
+try:
+    value, _ = runtime.run(b'local v = fixture.big() return #v', frozenset({"fixture.big"}), {}, L(),
+                           lambda name, args: "x" * size)
+    print(json.dumps({"ended": "ok", "value": value}))
+except ScriptLimitError as exc:
+    print(json.dumps({"ended": "limit", "limit": exc.limit}))
+except ScriptError as exc:
+    print(json.dumps({"ended": "error", "kind": exc.kind}))
+"""
+
+
+@pytest.mark.parametrize(
+    ("size", "memory"), [(5 * 1024 * 1024, 4 * 1024 * 1024), (1_200_000, 1024 * 1024)]
+)
+def test_a_string_verb_result_larger_than_the_free_memory_is_the_memory_limit_not_a_dead_worker(
+    size: int, memory: int
+) -> None:
+    """Review r2 (nexus-mdbds.5): lupa pushes a scalar string unprotected, so a string verb result
+    over the free memory aborted the process ("Fatal Python error") instead of tripping the memory
+    limit. It runs in a child so an abort fails this test rather than the suite."""
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", _BIG_STRING_CHILD, str(size), str(memory)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, (
+        f"the process died ({done.returncode}): {done.stderr[-1500:]}"
+    )
+    assert json.loads(done.stdout.strip().splitlines()[-1]) == {
+        "ended": "limit",
+        "limit": "memory",
+    }
+
+
+def test_a_string_verb_result_that_fits_still_arrives_whole() -> None:
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            _BIG_STRING_CHILD,
+            str(2 * 1024 * 1024),
+            str(16 * 1024 * 1024),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-1500:]
+    assert json.loads(done.stdout.strip().splitlines()[-1]) == {
+        "ended": "ok",
+        "value": 2 * 1024 * 1024,
+    }
