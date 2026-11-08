@@ -193,11 +193,14 @@ def test_registered_bash_hooks_within_cap() -> None:
 
 
 #: The real cross-plugin per-Bash-call hook count right now:
-#: `subagent_git_write_requires_orchestrator` + `credential_print_guard`.
+#: `subagent_git_write_requires_orchestrator` + `credential_print_guard`
+#: + `destructive_action_advice`.
 #: The bd-close gate and the phase-review close gate left at cleanup steps
 #: A2/A3 (nexus-0r1uz), taking the count from the cap (4) to 2; nexus-i93tz
 #: took it back to 4 and Sam's decision of 2026-10-25 removed that hook again.
-CURRENT_BASH_HOOK_COUNT = 2
+#: nexus-qo7ie.36 added `destructive_action_advice` (one table-driven advise-mode
+#: hook for eight destructive-action shapes, instead of eight hooks): 2 -> 3.
+CURRENT_BASH_HOOK_COUNT = 3
 
 
 def test_registered_bash_hooks_is_currently_pinned() -> None:

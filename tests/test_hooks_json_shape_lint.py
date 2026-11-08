@@ -124,7 +124,10 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: 19 -> 20 at nexus-mtheb.3: the SubagentStop `subagent-stop-t1-nudge` entry.
 #: 20 -> 21 at nexus-4cgop: the Stop wake guard, `stop_wake_guard.py` (the first Stop
 #: entry since cleanup steps A2 and A3 deleted the old `stop_verification_hook.sh` one).
-EXPECTED_CONEXUS_ENTRIES = 21
+#: 21 -> 22 at nexus-qo7ie.36: `destructive_action_advice.py`, the advise-mode table-driven
+#: guard for the destructive-action bright lines; one PreToolUse entry on
+#: `Bash|Edit|Write|MultiEdit`.
+EXPECTED_CONEXUS_ENTRIES = 22
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -183,6 +186,7 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/destructive_action_advice.py",
     }
 )
 
