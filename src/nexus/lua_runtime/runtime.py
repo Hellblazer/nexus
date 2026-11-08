@@ -73,7 +73,7 @@ import lupa.lua54 as lua
 
 from nexus.lua_runtime.errors import ScriptError, ScriptLimitError, Stats
 from nexus.lua_runtime.frames import VerbReplyError
-from nexus.lua_runtime.luatable import LuaTableBuilder
+from nexus.lua_runtime.luatable import RESERVE_BYTES, LuaTableBuilder
 from nexus.lua_runtime.static_check import BASE_FUNCTIONS, LIB_MEMBERS
 from nexus.lua_runtime.verb_types import JSONValue
 
@@ -478,11 +478,13 @@ class _Dispatcher:
         call_verb: Callable[[str, list[Any]], JSONValue],
         build: Callable[[Any], Any],
         sample: Callable[[], None],
+        room: Callable[[], int],
     ) -> None:
         self._grants = grants
         self._call_verb = call_verb
         self._build = build
         self._sample = sample
+        self._room = room
         self._pending: Any = None
         #: set when the process itself ran out of memory inside a verb call; ``run`` re-raises it
         #: after the script has been stopped, so the worker exits 3 (the OS memory limit's end).
@@ -514,8 +516,14 @@ class _Dispatcher:
                 return str(exc)
             if not isinstance(result, _JSON_RESULT):
                 return f"{name}: the verb returned a value that is not JSON"
-            if isinstance(result, str) and _argument_problem(result):
-                return f"{name}: the verb returned a string that is not valid UTF-8"
+            if isinstance(result, str):
+                if _argument_problem(result):
+                    return f"{name}: the verb returned a string that is not valid UTF-8"
+                # lupa pushes a scalar string with no protected call around it: one that cannot fit
+                # aborts the process, so it is the memory limit here (review r2).
+                if len(result.encode("utf-8")) > self._room():
+                    self._pending = None
+                    return True
             try:
                 self._pending = self._build(result)
             except lua.LuaMemoryError:
@@ -582,7 +590,12 @@ def run(
         assert builder is not None
         return builder.build(value)
 
-    dispatcher = _Dispatcher(frozenset(names), call_verb, build, sample)
+    def room() -> int:
+        if rt is None:
+            return 0
+        return max(0, int(limits.memory) - (rt.get_memory_used() or 0) - RESERVE_BYTES)
+
+    dispatcher = _Dispatcher(frozenset(names), call_verb, build, sample, room)
     every = max(1, min(HOOK_EVERY, int(limits.instructions)))
     limit_values = {
         "instructions": limits.instructions,
