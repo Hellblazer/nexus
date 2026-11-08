@@ -278,6 +278,7 @@ def test_one_record_per_main_session_with_its_fields(root: Path) -> None:
         {"name": "conexus:rdr-gate", "time": "2026-11-03T10:00:06.500Z"}
     ]
     assert rec["deferred_tools"] == ["WebFetch", "mcp__x__y"]
+    assert rec["deferred_tools_dropped"] == 0
     assert rec["bytes"] == path.stat().st_size
     assert rec["records"] == 13
     assert rec["truncated"] is False
@@ -831,3 +832,149 @@ def test_the_verb_is_registered_with_its_four_parameters() -> None:
 
 def test_the_verb_table_loads_it() -> None:
     assert VERB_TABLE["transcripts.sessions"].fn is vt.sessions
+
+
+# ---- review r2 ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        f"hi <command-name>{SENT}-pasted</command-name> bye",
+        f"<command-name>/a {SENT} b</command-name>",
+        [
+            {"type": "text", "text": "first block"},
+            {"type": "text", "text": f"<command-name>{SENT}-second</command-name>"},
+        ],
+    ],
+)
+def test_a_command_tag_inside_prompt_text_is_not_a_slash_command(
+    root: Path, prompt
+) -> None:
+    recs = _main_session()
+    recs.append(_user("2026-11-03T10:00:09.500Z", SID, prompt))
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    [rec] = _sessions()
+    assert [c["name"] for c in rec["slash_commands"]] == ["conexus:rdr-gate"]
+    assert SENT not in json.dumps(rec)
+
+
+def test_a_harness_command_prompt_gives_one_name(root: Path) -> None:
+    recs = _main_session()
+    recs.append(
+        _user(
+            "2026-11-03T10:00:09.500Z",
+            SID,
+            "<command-message>clear</command-message>\n<command-name>/clear</command-name>"
+            f"\n<command-args>{PROMPT} <command-name>/other</command-name></command-args>",
+        )
+    )
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    [rec] = _sessions()
+    assert [c["name"] for c in rec["slash_commands"]] == ["conexus:rdr-gate", "clear"]
+
+
+def test_integers_outside_64_bits_are_dropped(root: Path) -> None:
+    recs = _main_session()
+    recs.append(
+        _assistant(
+            "2026-11-03T10:00:10.000Z",
+            SID,
+            [_tool_use("i1", "N", {"v": 10**30, "w": -(10**30), "ok": 7})],
+            msg_id="i1",
+            usage={"input_tokens": 10**30, "output_tokens": 1},
+        )
+    )
+    _write(root / PROJECT / f"{SID}.jsonl", recs)
+    [rec] = _sessions()
+    assert rec["tool_calls"][-1]["input"] == {"v": None, "w": None, "ok": 7}
+    assert rec["tokens"]["input"] == 11
+    encode_result([rec])
+
+
+def test_a_linked_subagent_directory_is_not_followed(
+    root: Path, tmp_path: Path
+) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    outside = tmp_path / "outside-subagents"
+    _write(
+        outside / "agent-x.jsonl",
+        [_assistant("2026-11-03T10:05:00.000Z", SID, [], msg_id="x")],
+    )
+    (root / PROJECT / SID).mkdir()
+    try:
+        (root / PROJECT / SID / "subagents").symlink_to(
+            outside, target_is_directory=True
+        )
+    except OSError:
+        pytest.skip("cannot make a symbolic link here")
+    assert [r["main"] for r in _sessions()] == [True]
+
+
+def test_a_linked_projects_root_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "moved-projects"
+    _write(real / PROJECT / f"{SID}.jsonl", _main_session())
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    try:
+        (cfg / "projects").symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("cannot make a symbolic link here")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    assert [r["session_id"] for r in _sessions()] == [SID]
+
+
+def test_a_line_over_the_line_cap_is_skipped(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(vt, "LINE_CHUNK", 64)
+    monkeypatch.setattr(vt, "MAX_LINE_BYTES", 4096)
+    long = json.dumps(
+        _assistant(
+            "2026-11-03T10:00:10.000Z",
+            SID,
+            [_tool_use("L1", "Long", {"x": "y" * 10_000})],
+            msg_id="L1",
+        )
+    )
+    after = json.dumps(
+        _assistant(
+            "2026-11-03T10:00:11.000Z", SID, [_tool_use("L2", "After", {})], msg_id="L2"
+        )
+    )
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session(), raw=[long, after])
+    [rec] = _sessions()
+    names = [c["name"] for c in rec["tool_calls"]]
+    assert "Long" not in names
+    assert names[-1] == "After"  # the line after it is read whole
+
+
+def test_the_deadline_is_checked_while_listing_projects(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for i in range(10):
+        (root / f"-p{i}").mkdir(parents=True)
+    _ticking(monkeypatch)
+    with pytest.raises(VerbTimeout):
+        vt.sessions("2026-11-03", "2026-11-04", None, None, deadline=4.0, ctx=CTX)
+
+
+def test_a_record_that_cannot_fit_has_its_own_prefix(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    monkeypatch.setattr(vt, "RECORD_CAP_BYTES", 50)
+    with pytest.raises(VerbError, match=r"^record-too-large: "):
+        _sessions()
+
+
+def test_deferred_tools_past_the_cap_are_counted(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(vt, "_MAX_DEFERRED", 1)
+    _write(root / PROJECT / f"{SID}.jsonl", _main_session())
+    [rec] = _sessions()
+    assert rec["deferred_tools"] == ["WebFetch"]
+    assert rec["deferred_tools_dropped"] == 1

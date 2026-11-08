@@ -354,6 +354,13 @@ schema.
      count in its result.
    - `since` and `until` are UTC dates or timestamps, so a query can ask
      for one day or one hour.
+   - for the rows of Technical Design 5, each instruction load carries its
+     type and its size in bytes (never its content), and the record carries
+     its assistant turns (distinct API messages), the first turn's context
+     tokens, and the names of the slash commands the user ran, read only
+     from the prompts the harness writes for them, never from prompt text.
+     A record that still does not fit once its strings are cut loses the
+     tails of its lists, each counted.
 5. **`transcripts`.** Queries, each a function in the script with a fixture
    test, called with the argument object `{query, since, until, project}`
    (`since` and `until` UTC dates or timestamps, `until` defaulting to the reserved `now`
@@ -861,3 +868,4 @@ keep a caller write until a write verb exists, rather than adding one here.
 | 2026-11-07 | Fix-check repairs (fix check `nexus_rdr/240-fix-check-5aea31c79` failed on one row): reserved `repo` is the worktree-stable repo name, and `run_script` fills `now` and `repo` only when the header declares them; `next_since` may be a timestamp and the result echoes `until`; rows are sized by a stated estimate under 768 KB; `result-window:` is a Lua error message, not a kind; join rules for every query; the research vocabulary's plan step. |
 | 2026-11-07 | Gate round 2 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `6bc7c1ed1`; critique `nexus_rdr/240-gate-critique-2026-11-07-r2`. |
 | 2026-11-07 | Accepted (Sam). Round-2 Significants S1 to S6 dispositioned to nexus-qo7ie (bead comment, with their Implementation Plan steps). |
+| 2026-11-08 | Technical Design 4 amended to match the reviewed record of `transcripts.sessions` (nexus-mdbds.8, reviews `nexus/review-nexus-mdbds.8-038adb33b` and `nexus/nexus-mdbds.8-critique-038adb33b`): instruction-load type and size, assistant turns, first-turn context tokens, slash-command names, and list tails dropped and counted past 1 MB. |
