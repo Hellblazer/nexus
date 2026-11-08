@@ -82,7 +82,7 @@ class NoteUriRepairTest {
         aspectRepo = new AspectRepository(tenantScope);
         service = new NexusService(0, "note-uri-repair-root-token", svcDs);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
     }
 
     @AfterAll
