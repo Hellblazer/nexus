@@ -13,13 +13,19 @@ Size rule. Every tracked source file is counted in physical lines:
     test    tests/**/*.py, service/src/test/**/*.java        fail over 1000
 
 A file over its fail cap passes only when ``scripts/file-size-exceptions.txt`` lists it as
-``<path> <ceiling>`` and its size is at or below that ceiling. A ceiling above the file's size is
-slack and is reported so the commit that shrank the file can lower it (``update-exceptions``); an
-entry for a file now under its cap, or gone, is reported for removal.
+``<path> <ceiling>`` and its size is at or below that ceiling. A ceiling may keep a little slack
+above its file (``max(100 lines, 5%)``), so an ordinary edit never touches the exceptions file; more
+slack than that fails, so the commit that splits a file lowers its ceiling (``update-exceptions``)
+and the ceiling really falls. An entry for a file now under its cap, or gone, is reported.
 
-Shape rule, ``src/nexus`` only. A directory may hold at most 40 Python modules directly, and a
-module ``x.py`` may not sit beside a ``x_*.py`` family (make it a package ``x/``). Exceptions live
-in ``scripts/folder-shape-exceptions.txt`` as ``dir <path> <ceiling>`` and ``family <path/x>``.
+Shape rule, ``src/nexus`` only (``__init__.py`` counts as a module). A directory may hold at most 40
+Python modules directly, and a module ``x.py`` may not sit beside a ``x_*.py`` family (make it a
+package ``x/``). Exceptions live in ``scripts/folder-shape-exceptions.txt`` as
+``dir <path> <ceiling>`` and ``family <path/x>``. A new directory over the cap, or a new family,
+fails; a listed directory that grows past its ceiling only warns, because the repo's own recipes
+(``.claude/rules/adding-a-cli-command.md``) still add modules to ``commands/``.
+
+Out of scope by decision: ``scripts/`` and ``conexus/`` are not counted.
 
 Before adding to a file over its cap, move the area you touch into its own module first.
 """
@@ -36,6 +42,9 @@ SOURCE_SOFT_CAP: int = 800
 SOURCE_HARD_CAP: int = 1500
 TEST_CAP: int = 1000
 DIR_MODULE_CAP: int = 40
+#: Slack a ceiling may keep above its file before check fails: max(SLACK_MIN, SLACK_FRACTION * size).
+SLACK_MIN: int = 100
+SLACK_FRACTION: float = 0.05
 
 SOURCE_GLOBS: tuple[str, ...] = ("src/nexus/**.py", "service/src/main/**.java")
 TEST_GLOBS: tuple[str, ...] = ("tests/**.py", "service/src/test/**.java")
@@ -122,6 +131,8 @@ def _read_pairs(path: Path) -> dict[str, int]:
         parts = line.split()
         if len(parts) != 2 or not parts[1].isdigit():
             raise SystemExit(f"{path}:{n}: expected '<path> <ceiling>', got {raw!r}")
+        if parts[0] in out:
+            raise SystemExit(f"{path}:{n}: {parts[0]} is listed twice")
         out[parts[0]] = int(parts[1])
     return out
 
@@ -136,13 +147,18 @@ def _read_shape(path: Path) -> tuple[dict[str, int], set[str]]:
         if not line:
             continue
         parts = line.split()
-        if parts[0] == "dir" and len(parts) == 3 and parts[2].isdigit():
+        if (
+            parts[0] == "dir"
+            and len(parts) == 3
+            and parts[2].isdigit()
+            and parts[1] not in dirs
+        ):
             dirs[parts[1]] = int(parts[2])
-        elif parts[0] == "family" and len(parts) == 2:
+        elif parts[0] == "family" and len(parts) == 2 and parts[1] not in fams:
             fams.add(parts[1])
         else:
             raise SystemExit(
-                f"{path}:{n}: expected 'dir <path> <ceiling>' or 'family <path/x>', got {raw!r}"
+                f"{path}:{n}: expected one 'dir <path> <ceiling>' or 'family <path/x>' per entry, got {raw!r}"
             )
     return dirs, fams
 
@@ -151,11 +167,23 @@ def _cap_for(is_test: bool) -> int:
     return TEST_CAP if is_test else SOURCE_HARD_CAP
 
 
+def slack_allowed(size: int) -> int:
+    return max(SLACK_MIN, int(SLACK_FRACTION * size))
+
+
+_RAISE_HINT = "(a legitimate raise: update-exceptions --allow-raise, with the reason in the commit message)"
+
+
 def check(root: Path) -> Findings:
     errors: list[str] = []
     warnings: list[str] = []
     notes: list[str] = []
     source, tests = measure_sizes(root)
+    if not source or not tests:
+        # Non-vacuity: a pathspec or checkout problem that counts nothing must not read as a pass.
+        errors.append(
+            f"counted {len(source)} source and {len(tests)} test files; expected both trees"
+        )
     ceilings = _read_pairs(root / SIZE_EXCEPTIONS)
     sizes = {
         **{p: (n, False) for p, n in source.items()},
@@ -169,12 +197,18 @@ def check(root: Path) -> Findings:
             if ceiling is None:
                 errors.append(
                     f"{p}: {n} lines, over the {'test' if is_test else 'source'} cap of {cap}; "
-                    "move the area you touched into its own module"
+                    f"move the area you touched into its own module first {_RAISE_HINT}"
                 )
             elif n > ceiling:
                 errors.append(
                     f"{p}: {n} lines, over its ceiling of {ceiling}; ceilings only fall, "
-                    "so move the area you touched into its own module"
+                    f"so move the area you touched into its own module first {_RAISE_HINT}"
+                )
+            elif ceiling - n > slack_allowed(n):
+                errors.append(
+                    f"{p}: {n} lines, {ceiling - n} below its ceiling of {ceiling} (more than "
+                    f"{slack_allowed(n)} of slack); lower it in this commit: "
+                    "python3 scripts/file_size_ratchet.py update-exceptions"
                 )
             elif n < ceiling:
                 notes.append(
@@ -197,11 +231,14 @@ def check(root: Path) -> Findings:
         if n > DIR_MODULE_CAP:
             if ceiling is None:
                 errors.append(
-                    f"{d}/: {n} modules, over the cap of {DIR_MODULE_CAP}; add the module to a subpackage"
+                    f"{d}/: {n} modules, over the cap of {DIR_MODULE_CAP}; put new modules in a "
+                    f"subpackage of {d}/ {_RAISE_HINT}"
                 )
             elif n > ceiling:
-                errors.append(
-                    f"{d}/: {n} modules, over its ceiling of {ceiling}; add the module to a subpackage"
+                # A listed directory is already too broad and its recipes (adding-a-cli-command)
+                # still add modules to it: growth warns rather than turning develop red.
+                warnings.append(
+                    f"{d}/: {n} modules, over its ceiling of {ceiling}; prefer a subpackage of {d}/"
                 )
             elif n < ceiling:
                 notes.append(
@@ -213,7 +250,7 @@ def check(root: Path) -> Findings:
     for f in families:
         if f not in fam_allowed:
             errors.append(
-                f"{f}.py sits beside {f}_*.py; make {f.rsplit('/', 1)[1]} a package"
+                f"{f}.py sits beside {f}_*.py; make {f.rsplit('/', 1)[1]} a package {_RAISE_HINT}"
             )
     for f in sorted(fam_allowed - set(families)):
         notes.append(f"family {f}: no longer a family: remove its exception")

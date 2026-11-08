@@ -40,8 +40,10 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(fsr, "SOURCE_HARD_CAP", 15)
     monkeypatch.setattr(fsr, "TEST_CAP", 10)
     monkeypatch.setattr(fsr, "DIR_MODULE_CAP", 3)
+    monkeypatch.setattr(fsr, "SLACK_MIN", 3)
     _git(tmp_path, "init", "-q")
     (tmp_path / "scripts").mkdir()
+    _write(tmp_path, "tests/test_seed.py", 1)  # check refuses a repo with no test tree
     return tmp_path
 
 
@@ -175,11 +177,114 @@ def test_main_exit_codes(repo: Path) -> None:
     assert fsr.main(["--root", str(repo), "check"]) == fsr.EXIT_OVER
 
 
+def test_exactly_at_each_cap_passes(repo: Path) -> None:
+    _write(repo, "src/nexus/hard.py", 15)
+    _write(repo, "src/nexus/soft.py", 8)
+    _write(repo, "tests/test_cap.py", 10)
+    for m in ("a", "b"):
+        _write(repo, f"src/nexus/pkg/{m}.py", 1)
+    _track(repo)
+    f = fsr.check(repo)
+    assert f.errors == []
+    assert not any("soft.py" in w for w in f.warnings)
+    assert any("hard.py: 15 lines, over the soft cap" in w for w in f.warnings)
+
+
+def test_line_count_handles_no_final_newline_and_empty(tmp_path: Path) -> None:
+    (tmp_path / "a").write_bytes(b"x\ny")
+    (tmp_path / "b").write_bytes(b"")
+    (tmp_path / "c").write_bytes(b"x\n")
+    assert [fsr._count_lines(tmp_path / n) for n in "abc"] == [2, 0, 1]
+
+
+def test_tracked_but_deleted_file_is_skipped(repo: Path) -> None:
+    _write(repo, "src/nexus/a.py", 1)
+    _write(repo, "src/nexus/gone.py", 99)
+    _track(repo)
+    (repo / "src/nexus/gone.py").unlink()
+    assert fsr.check(repo).errors == []
+
+
+def test_slack_past_tolerance_fails(repo: Path) -> None:
+    _write(repo, "src/nexus/big.py", 16)
+    _track(repo)
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 19\n")
+    assert fsr.check(repo).errors == [], "3 lines of slack is within SLACK_MIN"
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/big.py 20\n")
+    assert any("lower it in this commit" in e for e in fsr.check(repo).errors)
+
+
+def test_listed_directory_growth_warns_and_unlisted_fails(repo: Path) -> None:
+    for m in ("a", "b", "c", "d", "e"):
+        _write(repo, f"src/nexus/pkg/{m}.py", 1)
+    _track(repo)
+    (repo / fsr.SHAPE_EXCEPTIONS).write_text("dir src/nexus/pkg 4\n")
+    f = fsr.check(repo)
+    assert f.errors == []
+    assert any(
+        "src/nexus/pkg/: 5 modules, over its ceiling of 4" in w for w in f.warnings
+    )
+    (repo / fsr.SHAPE_EXCEPTIONS).write_text("dir src/nexus/pkg 6\n")
+    assert any("below its ceiling of 6" in n for n in fsr.check(repo).notes)
+
+
+def test_dissolved_family_and_dir_are_noted(repo: Path) -> None:
+    _write(repo, "src/nexus/a.py", 1)
+    _track(repo)
+    (repo / fsr.SHAPE_EXCEPTIONS).write_text(
+        "dir src/nexus 9\nfamily src/nexus/session\n"
+    )
+    notes = "\n".join(fsr.check(repo).notes)
+    assert "src/nexus/: within the module cap" in notes
+    assert "family src/nexus/session: no longer a family" in notes
+
+
+def test_update_refuses_family_and_dir_raise_and_writes_no_shape_file(
+    repo: Path,
+) -> None:
+    for m in ("a", "b", "c", "d", "e"):
+        _write(repo, f"src/nexus/pkg/{m}.py", 1)
+    _write(repo, "src/nexus/session.py", 1)
+    _write(repo, "src/nexus/session_store.py", 1)
+    _track(repo)
+    shape_before = "dir src/nexus/pkg 4\n"
+    (repo / fsr.SHAPE_EXCEPTIONS).write_text(shape_before)
+    refusals = "\n".join(fsr.update_exceptions(repo, allow_raise=False))
+    assert "src/nexus/pkg/: raise 4 -> 5" in refusals
+    assert "family src/nexus/session: new family exception" in refusals
+    assert (repo / fsr.SHAPE_EXCEPTIONS).read_text() == shape_before
+    assert not (repo / fsr.SIZE_EXCEPTIONS).exists()
+
+
+def test_update_seeds_at_the_hard_cap_not_the_soft_cap(repo: Path) -> None:
+    _write(repo, "src/nexus/mid.py", 12)
+    _track(repo)
+    assert fsr.update_exceptions(repo, allow_raise=False) == []
+    assert fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS) == {}
+
+
+def test_duplicate_entries_are_refused(repo: Path) -> None:
+    (repo / fsr.SIZE_EXCEPTIONS).write_text("src/nexus/a.py 20\nsrc/nexus/a.py 30\n")
+    with pytest.raises(SystemExit, match="listed twice"):
+        fsr._read_pairs(repo / fsr.SIZE_EXCEPTIONS)
+    (repo / fsr.SHAPE_EXCEPTIONS).write_text("family src/nexus/x\nfamily src/nexus/x\n")
+    with pytest.raises(SystemExit, match="expected one"):
+        fsr._read_shape(repo / fsr.SHAPE_EXCEPTIONS)
+
+
+def test_counting_nothing_is_an_error(repo: Path) -> None:
+    (repo / "tests/test_seed.py").unlink()
+    _write(repo, "src/nexus/a.py", 1)
+    _track(repo)
+    assert any("counted 1 source and 0 test files" in e for e in fsr.check(repo).errors)
+
+
 @pytest.mark.lint
 def test_repo_is_within_its_caps_and_ceilings() -> None:
     source, tests = fsr.measure_sizes(_REPO)
     # Non-vacuity: the globs must reach the real trees, or "no errors" means nothing was counted.
     assert len(source) > 500 and len(tests) > 500, (len(source), len(tests))
     assert any(p.startswith("service/src/main/") for p in source)
+    assert any(p.startswith("service/src/test/") for p in tests)
     f = fsr.check(_REPO)
     assert f.errors == [], "\n".join(f.errors)
