@@ -1102,7 +1102,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     quoted = f"'{entry.title}' ({t})"
     if not yes:
         click.confirm(
-            f"Delete {lines.label(t, flagged, quoted)}? Links will be preserved.",
+            f"Delete {CliDocumentLines().label(t, flagged, quoted)}? Links will be preserved.",
             abort=True,
         )
 
@@ -1121,6 +1121,8 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
             "until the window passes; after that, recovery means "
             "re-indexing."
         )
+        for line in lines.notes():
+            click.echo(line)
     else:
         click.echo(f"Not found: {t}")
 

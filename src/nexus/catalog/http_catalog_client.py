@@ -2011,8 +2011,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         :meth:`restore_document`: lets a caller see what is restorable
         before calling it. Each entry carries ``tumbler``, ``title``,
         ``physical_collection``, ``corpus``, ``content_type``, ``file_path``
-        (an empty string when the document has none) and ``deleted_at``, returned
-        verbatim from the engine (this method does not reshape it).
+        (an empty string when the document has none) and ``deleted_at``, and, from
+        an engine that carries nexus-rfvyy.9, ``sensitive`` (the tombstone's own
+        flag) and ``alias_of`` (its canonical, or None), returned verbatim from the
+        engine (this method does not reshape it).
 
         A pre-nexus-dkymw engine has no matching route and answers 404 —
         propagated raw, same discipline as :meth:`restore_document`.
