@@ -52,7 +52,7 @@ final class ChunkOwnerLabel {
     }
 
     private static Field<String> unlessWithheld(Field<String> f) {
-        return DSL.when(withheld(), DSL.inline((String) null)).otherwise(f);
+        return DSL.when(withheld(), DSL.castNull(org.jooq.impl.SQLDataType.CLOB)).otherwise(f);
     }
 
     /** The owner's tumbler, or null (no live owner, or the label is withheld). */
