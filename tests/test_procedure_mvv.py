@@ -59,9 +59,9 @@ def test_both_front_doors_return_identical_json_and_no_body(transcripts: str, qu
     via_mcp = core.procedure_run(name="transcripts", args=args)
     cli = CliRunner().invoke(main, ["run", "transcripts", "--args-file", "-"], input=json.dumps(args))
     assert cli.exit_code == 0, cli.output
-    assert json.loads(str(via_mcp)) == json.loads(cli.output)
+    assert json.loads(str(via_mcp)) == json.loads(cli.stdout)
     assert SECRET not in str(via_mcp) and SECRET not in cli.output
-    assert json.loads(cli.output)["until"] == "2026-11-04"
+    assert json.loads(cli.stdout)["until"] == "2026-11-04"
 
 
 def test_the_tools_rows_carry_what_the_fixture_holds(transcripts: str) -> None:
