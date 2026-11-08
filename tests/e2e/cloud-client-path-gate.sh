@@ -1015,7 +1015,8 @@ try:
     if not colls:
         raise RuntimeError("list_collections returned no collections")
     name = colls[0]["name"]
-    t3.search("smoke test query", [name], n_results=1)
+    # sensitivity is required since RDR-243 Phase 2; "exclude" also proves the edge passes the field through.
+    t3.search("smoke test query", [name], n_results=1, sensitivity="exclude")
     print(f"  ok [D]: {len(colls)} collection(s); search round-trip on "
           f"{name!r} returned without error")
 except Exception as exc:
@@ -1598,7 +1599,7 @@ from nexus.db import make_t3
 
 name = os.environ["M_COLLECTION"]
 t3 = make_t3()
-env = t3.search_per_collection("ccpg include_embeddings probe", [name], per_collection_k=2, limit=2, include_embeddings=True)
+env = t3.search_per_collection("ccpg include_embeddings probe", [name], per_collection_k=2, limit=2, include_embeddings=True, sensitivity="include")
 if not env:
     print(json.dumps({"collection": name, "rows": 0, "embedding_dim": None, "vector_lens": []}))
 else:
