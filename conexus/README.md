@@ -53,7 +53,7 @@ story.
 - **40 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
-- **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
+- **Permission auto-approval** — safe commands and the nexus MCP tools skip the confirmation prompt, except `daemon_uninstall`, `setup`, `setup_status` and `procedure_run`
 - **Two bundled MCP servers** — `nexus` (45 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point

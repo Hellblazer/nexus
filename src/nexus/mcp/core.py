@@ -8754,6 +8754,11 @@ def plan_delete(
 # procedure is listed by ``nx run --list`` instead. Flip that here if the listing should
 # follow the repo root (``procedures(cwd=Path.cwd())``).
 
+#: The cap on a ``procedure_run`` result, in characters. RDR-240 TD5 pages a result at 768 KB
+#: under RDR-242's 1 MB result cap, and JSON text of that is longer than 768 K characters; the
+#: default 250,000-character cap of ``_cap_text_result`` would cut every full page.
+_PROCEDURE_RESULT_CAP_CHARS = 1_100_000
+
 
 def _procedure_run_description() -> str:
     head = (
@@ -8762,7 +8767,7 @@ def _procedure_run_description() -> str:
         "there is one, stays with the caller (`memory_put` and the other tools).\n\n"
         "Use it when a procedure below covers the task, instead of improvising the steps.\n\n"
         "Returns the procedure's JSON result as text, or an error as `<kind>: <detail>` "
-        "(kinds: args, header, static_check, lua, result, limit, worker, busy, library, "
+        "(kinds: args, header, name, static_check, lua, result, limit, worker, busy, "
         "unavailable, repo).\n\n"
         "Constraints: `args` holds exactly the arguments the procedure's header declares; "
         "`now` and `repo` are filled by the host and are refused if passed. A checkout's own "
@@ -8789,7 +8794,7 @@ def procedure_run(
 ) -> str:
     try:
         result = _run_procedure(name, args)
-        return _cap_text_result(json.dumps(result, ensure_ascii=False), "procedure_run")
+        return _cap_text_result(json.dumps(result, ensure_ascii=False), "procedure_run", _PROCEDURE_RESULT_CAP_CHARS)
     except _PROCEDURE_ERRORS as e:
         return _fail(_describe_procedure_error(e))
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
